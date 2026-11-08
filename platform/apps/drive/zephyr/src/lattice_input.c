@@ -1017,7 +1017,9 @@ static void state_step(void){
       xenova_drive_ClockProbe *p=&outgoing.payload.probe;strcpy(p->vm,boot.identity.vm_id);
       strcpy(p->execution,boot.identity.execution_id);strcpy(p->app_instance,role_app);
       p->sequence=++slot->sequence;p->guest_send_us=sent_at;slot->sent=sent_at;slot->sent_generation=control_generation;
-      if(!role){p->has_supported_state_features=true;p->supported_state_features=DW_STATE_KNOWN_FEATURES;}
+      /* Codec knowledge does not install the route status/State/apply consumer. */
+      if(!role){p->has_supported_state_features=true;
+       p->supported_state_features=DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION;}
       if(!role&&atomic_get(&preflight_active)){
        bool live=context_available&&clock_available&&current_clock.acknowledged&&
         sent_at<preflight_expires_guest&&sent_at>=auto_preflight.checked_guest_us&&

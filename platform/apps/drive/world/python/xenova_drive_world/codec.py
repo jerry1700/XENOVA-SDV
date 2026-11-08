@@ -3,6 +3,7 @@ import math
 from uuid import UUID
 from google.protobuf.message import DecodeError
 from . import world_pb2 as schema
+from .route import ROUTE_CAPS,ROUTE_BYTE_FIELDS,ROUTE_UUID_FIELDS,ROUTE_REPEATED_CAPS,ROUTE_MESSAGES,validate_one as validate_route,validate_parent as validate_route_parent
 
 MAX_BYTES=32768
 MAX_CELLS=4096
@@ -10,12 +11,14 @@ ROAD_PRIORITY=1
 LANE_MODEL=2
 PARKING_MODEL=4
 LOCALIZATION_BOUNDS=8
-WORLD_FEATURES=15
+WORLD_FEATURES=31
+WORLD_ROUTE=16
 STATE_FEATURES=7
 STATE_TASK_REFERENCE=8
 STATE_EPISODE=16
 STATE_OPERATION=32
-STATE_KNOWN_FEATURES=STATE_FEATURES|STATE_TASK_REFERENCE|STATE_EPISODE|STATE_OPERATION
+STATE_ROUTE=64
+STATE_KNOWN_FEATURES=STATE_FEATURES|STATE_TASK_REFERENCE|STATE_EPISODE|STATE_OPERATION|STATE_ROUTE
 CELL_ROAD=8
 MAX_U63=(1<<63)-1
 NIL_UUID=bytes(16)
@@ -39,11 +42,15 @@ _MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneM
     'EpisodeSourceContext':768,'EpisodeRequest':2048,'EpisodeReceipt':1536,'EpisodeStatus':2048,
     'PiAbsoluteMeter':128,'StopFacts':768,'DriveControlFacts':1024,
     'OperationBinding':128,'OperationStatus':256,'AutoInputPreflight':768,'PiOperationGate':96}
+_MESSAGE_CAPS.update(ROUTE_CAPS)
+_REPEATED_CAPS.update(ROUTE_REPEATED_CAPS)
 _OPERATION_MESSAGES=frozenset(('OperationBinding','OperationStatus','AutoInputPreflight','PiOperationGate',
     'ClockProbe','ClockReply','MapperClockProbe','MapperClockReply','MissionGrant'))
 
 
 def _bytes_bound(field):
+    key=field.containing_type.name+'.'+field.name
+    if key in ROUTE_BYTE_FIELDS:return ROUTE_BYTE_FIELDS[key],True
     name=field.name
     if name in _UUID_BYTES:return 16,True
     if name.endswith('_sha256') or name=='primitive':return 32,True
@@ -192,7 +199,7 @@ def _parking_set(value):
 
 
 def _mission(value,grant=False):
-    if value.kind not in (0,1,2) or value.strategy not in (0,1,2) or value.correction_attempts_used>2:
+    if value.kind not in (0,1,2,3) or value.strategy not in (0,1,2) or value.correction_attempts_used>2:
         raise ValueError('mission kind/strategy/correction')
     _scene_pair(value,'scene_revision' if grant else 'scene_admission_revision')
     _nonnegative(value,'execution_travel_m','search_travel_m')
@@ -217,9 +224,9 @@ def _mission(value,grant=False):
         if grant and (value.HasField('locked_goal_sha256')!=bool(value.execution_deadline_pi_us)):
             raise ValueError('locked goal/execution deadline')
     if grant:return
-    if value.result>3 or value.phase not in ((0,) if value.kind==0 else (0,10) if value.kind==1 else range(10)):
+    if value.result>3 or value.phase not in ((0,) if value.kind==0 else (0,10) if value.kind==1 else range(1,7) if value.kind==3 else range(10)):
         raise ValueError('mission phase/result')
-    if value.result==1 and (value.kind!=2 or value.phase!=0):raise ValueError('PARKED must be parking HOLD')
+    if value.result==1 and not (value.kind==2 and value.phase==0 or value.kind==3 and value.phase==5):raise ValueError('successful terminal mission phase')
     names=('slot_id','slot_revision','goal','goal_revision','goal_position_bound_m','goal_heading_bound_rad')
     present=[value.HasField(name) for name in names]
     locked=value.kind==2 and value.phase in (3,4,5,6,7)
@@ -281,6 +288,8 @@ def _validate_tree(message):
 
 def _validate_one(message):
     name=message.DESCRIPTOR.name
+    if name in ROUTE_MESSAGES:validate_route(message)
+    if name in ('WorldSnapshot','DriveState','MissionExecution','MissionGrant','ClockReply'):validate_route_parent(message)
     if name in _OPERATION_MESSAGES:
         from .operations import validate_one as validate_operation
         validate_operation(message)
@@ -290,14 +299,14 @@ def _validate_one(message):
         n=message.width*message.height
         if not 2<=message.width<=64 or not 2<=message.height<=64 or n>MAX_CELLS:raise ValueError('grid dimensions')
         if (len(message.occupancy),len(message.cell_flags),len(message.age_le32))!=(n,n,n*4):raise ValueError('grid arrays incomplete')
-        if not message.complete or message.truncated or message.required_features not in (0,1,11,15) or message.inflation_policy:raise ValueError('unsupported map features')
+        if not message.complete or message.truncated or message.required_features not in (0,1,11,15,27,31) or message.inflation_policy:raise ValueError('unsupported map features')
         if not 2<=len(message.reference)<=64 or len(message.left_boundary)!=len(message.reference) or len(message.right_boundary)!=len(message.reference):raise ValueError('road arrays')
         if message.resolution_m<.001 or message.resolution_m>10:raise ValueError('resolution')
         if message.observed_us>message.completed_us or message.completed_us>message.published_us:raise ValueError('source time ordering')
         allowed=15 if message.required_features&ROAD_PRIORITY else 7
         if any(v>100 and v!=255 for v in message.occupancy) or any(v&~allowed for v in message.cell_flags):raise ValueError('cell encoding')
         if message.required_features&ROAD_PRIORITY and not any(v&CELL_ROAD for v in message.cell_flags):raise ValueError('missing preferred road')
-        new=message.required_features in (11,15)
+        new=message.required_features in (11,15,27,31)
         if not new and any(flags&2 for flags in message.cell_flags):
             raise ValueError('legacy world supports live-only cells')
         if new and message.minor!=2:raise ValueError('world minor2 required')
@@ -306,7 +315,8 @@ def _validate_one(message):
             _simple([_xy(p) for p in message.left_boundary]+[_xy(p) for p in reversed(message.right_boundary)],True)
         for field,required in (('lane_model',bool(message.required_features&LANE_MODEL)),
                 ('localization',bool(message.required_features&LOCALIZATION_BOUNDS)),
-                ('parking_set',bool(message.required_features&PARKING_MODEL)),('drivable_permission',new)):
+                ('parking_set',bool(message.required_features&PARKING_MODEL)),('drivable_permission',new),
+                ('route_view',bool(message.required_features&WORLD_ROUTE))):
             if message.HasField(field)!=required:raise ValueError('feature presence '+field)
         if message.parking_slots and not message.required_features&PARKING_MODEL:raise ValueError('parking feature missing')
         if new:
@@ -325,7 +335,7 @@ def _validate_one(message):
             if retained and not message.HasField('scene'):raise ValueError('retained clearance requires scene reference')
         elif message.HasField('scene'):raise ValueError('scene requires new world profile')
     elif isinstance(message,schema.DriveState):
-        if message.world_features not in (0,1,11,15):raise ValueError('unsupported state world features')
+        if message.world_features not in (0,1,11,15,27,31):raise ValueError('unsupported state world features')
         features=message.state_features
         if (not message.HasField('state_features') or features&STATE_FEATURES!=STATE_FEATURES
                 or features&~STATE_KNOWN_FEATURES or not message.HasField('mission')):
@@ -647,9 +657,13 @@ def _audit(data,descriptor,depth=0):
         tag=varint();fieldno=tag>>3;kind=tag&7
         if not 0<fieldno<=0x1fffffff:raise ValueError('field number')
         field=descriptor.fields_by_number.get(fieldno)
+        # These explicitly declared repeated float arrays have one packed
+        # canonical body. Count actual elements, not the number of chunks.
+        packed_float=bool(field is not None and _repeated(field)
+            and field.type==field.TYPE_FLOAT and field.GetOptions().packed)
         if field is not None and _repeated(field):
             limit=_REPEATED_CAPS.get(descriptor.name+'.'+field.name,64)
-            counts[fieldno]=counts.get(fieldno,0)+1
+            counts[fieldno]=counts.get(fieldno,0)+(0 if packed_float else 1)
             if counts[fieldno]>limit:raise ValueError('repeated field cap '+field.name)
         if field is not None and not _repeated(field):
             if fieldno in seen:raise ValueError('duplicate singular field')
@@ -659,7 +673,7 @@ def _audit(data,descriptor,depth=0):
                 if name in unions:raise ValueError('multiple oneof fields')
                 unions.add(name)
         if field is not None:
-            expected=2 if field.type in (field.TYPE_STRING,field.TYPE_BYTES,field.TYPE_MESSAGE) else 1 if field.type in (field.TYPE_DOUBLE,field.TYPE_FIXED64,field.TYPE_SFIXED64) else 5 if field.type in (field.TYPE_FLOAT,field.TYPE_FIXED32,field.TYPE_SFIXED32) else 0
+            expected=2 if packed_float or field.type in (field.TYPE_STRING,field.TYPE_BYTES,field.TYPE_MESSAGE) else 1 if field.type in (field.TYPE_DOUBLE,field.TYPE_FIXED64,field.TYPE_SFIXED64) else 5 if field.type in (field.TYPE_FLOAT,field.TYPE_FIXED32,field.TYPE_SFIXED32) else 0
             if kind!=expected:raise ValueError('field wire type '+field.name)
         if kind==0:
             value=varint()
@@ -675,6 +689,10 @@ def _audit(data,descriptor,depth=0):
         elif kind==5:size=4
         else:raise ValueError('wire type')
         if size>len(data)-at:raise ValueError('partial field')
+        if packed_float:
+            if size%4:raise ValueError('partial packed float '+field.name)
+            counts[fieldno]+=size//4
+            if counts[fieldno]>limit:raise ValueError('repeated field cap '+field.name)
         if field is not None and field.type==field.TYPE_STRING:
             limit=64 if field.name in _STR64 else 36
             if kind!=2 or size>limit:raise ValueError('string cap '+field.name)
@@ -688,3 +706,12 @@ def _audit(data,descriptor,depth=0):
         if descriptor.name=='DriveState' and fieldno>=29:
             metadata+=at-start
             if metadata>4096:raise ValueError('state metadata cap')
+
+    if descriptor.name in ROUTE_MESSAGES:
+        # New management hashes commit to exact canonical known bytes. Preserve
+        # legacy optional-field handling outside these explicitly new subtrees.
+        value=getattr(schema,descriptor.name)()
+        try:value.ParseFromString(data)
+        except DecodeError as error:raise ValueError('invalid route protobuf') from error
+        value.DiscardUnknownFields()
+        if value.SerializeToString(deterministic=True)!=data:raise ValueError('noncanonical route bytes')

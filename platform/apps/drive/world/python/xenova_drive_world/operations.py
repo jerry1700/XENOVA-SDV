@@ -55,7 +55,7 @@ def validate_one(value):
         if (value.gateway_instance==NIL or value.mode>2 or value.wait_confirmed and not value.stop_command_sequence
                 or value.manual_local_admitted and value.mode!=2):raise ValueError('Pi operation gate origin')
     elif name=='ClockProbe':
-        if value.HasField('supported_state_features') and value.supported_state_features&~63:
+        if value.HasField('supported_state_features') and value.supported_state_features&~127:
             raise ValueError('unsupported declared state capabilities')
         if value.HasField('auto_input_preflight'):
             report=value.auto_input_preflight
@@ -79,7 +79,7 @@ def validate_one(value):
     elif name=='MapperClockProbe' and value.HasField('operation_gate'):
         if value.operation_gate.valid_until_pi_us<=value.pi_send_us:raise ValueError('mapper operation original expiry')
     elif name=='MapperClockReply':
-        if value.HasField('supported_mapper_features') and value.supported_mapper_features&~MAPPER_OPERATION:
+        if value.HasField('supported_mapper_features') and value.supported_mapper_features&~(MAPPER_OPERATION|2):
             raise ValueError('unsupported mapper operation capabilities')
     elif name=='MissionGrant' and value.HasField('operation_binding'):
         if value.operation_binding.service_epoch!=value.gateway_instance:
