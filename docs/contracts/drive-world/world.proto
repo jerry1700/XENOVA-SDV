@@ -152,6 +152,8 @@ message ClockProbe {
   // Capability only, not the presence mask of a particular DriveState.
   // Absence is legacy; authenticated peer and approved profile are also required.
   optional uint32 supported_state_features = 7;
+  // Non-authoritative current input check. Absence/expiry never blocks clock bootstrap.
+  optional AutoInputPreflight auto_input_preflight = 8;
 }
 // Receipt of one exact original stamped Reply; arrival does not renew its lease.
 message GuestClockReceipt {
@@ -192,6 +194,50 @@ message ClockReply {
   optional uint64 guest_clock_valid_until_pi_us = 11;
   optional EpisodeStatus episode_status = 12;
   optional DriveControlFacts control_facts = 13;
+  optional OperationStatus operation_status = 14;
+}
+// Setting/explicit-departure binding, separate from output permission and path geometry.
+message OperationBinding {
+  required bytes service_epoch = 1; // Existing Gateway instance UUID.
+  required uint64 operation_revision = 2;
+  required bytes departure_nonce = 3; // NIL only while no departure is active.
+  required uint64 permission_revision = 4;
+  required bool parking_enabled = 5;
+}
+message OperationStatus {
+  required uint32 major = 1;
+  required OperationBinding binding = 2;
+  required uint32 vehicle_phase = 3; // 1STOPPING,2WAIT,3COUNTDOWN,4APPLYING,5ACTIVE.
+  required uint64 ready_revision = 4;
+  required bool auto_ready = 5; // Input preflight for accepting a request, not DRIVE readiness.
+  required uint32 blocked_reason = 6; // 0ready,1..31 registered blocked reasons.
+  required uint64 valid_until_pi_us = 7;
+  required bytes active_request_nonce = 8;
+  required uint64 countdown_until_pi_us = 9;
+  required uint32 desired_mode = 10; // 0none,1AUTO,2MANUAL.
+}
+// Historical source-context shape reused without episode/authority semantics.
+message AutoInputPreflight {
+  required uint32 major = 1;
+  required EpisodeSourceContext source = 2;
+  required uint64 vehicle_sequence = 3;
+  required uint32 control_generation = 4;
+  required uint64 checked_guest_us = 5;
+  required uint64 valid_until_pi_us = 6;
+  required uint64 clock_probe_sequence = 7; // A prior actually confirmed P4 clock.
+  required bytes clock_reply_sha256 = 8;
+}
+// Pi's current restriction on an explicit Jetson STANDBY request, never movement permission.
+message PiOperationGate {
+  required bytes gateway_instance = 1;
+  required uint32 control_generation = 2;
+  required uint64 operation_revision = 3;
+  required uint32 mode = 4; // 0SAFE_STOP,1AUTO,2MANUAL.
+  required bool wait_confirmed = 5;
+  required bool manual_local_admitted = 6;
+  required uint64 vehicle_sequence = 7; // Exact original Vehicle carries device/session/source.
+  required uint64 stop_command_sequence = 8; // Positive for a confirmed WAIT.
+  required uint64 valid_until_pi_us = 9;
 }
 message AcceptedState {
   required string host_boot = 1;
@@ -535,6 +581,8 @@ message MissionExecution {
   required uint64 grant_revision = 23;
   required float search_travel_m = 24;
   required uint64 search_deadline_pi_us = 25;
+  // State feature32 exactly matches this presence; legacy fields keep their meaning.
+  optional OperationBinding operation_binding = 26;
 }
 message GearSegment {
   required uint32 first_index = 1;
@@ -602,6 +650,7 @@ message MissionGrant {
   required float search_travel_m = 29;
   required float max_search_travel_m = 30;
   optional bytes locked_goal_sha256 = 31;
+  optional OperationBinding operation_binding = 32;
 }
 message MissionBudgetRequest {
   required uint32 major = 1;
@@ -646,6 +695,7 @@ message MapperClockProbe {
   // Pi clock owner returns a previously accepted immutable J/Pi lease.
   // This is absent during initial probes; it does not report the current P4.
   optional WorldTrust mapper_trust = 13;
+  optional PiOperationGate operation_gate = 14;
 }
 message MapperClockReply {
   required uint32 major = 1;
@@ -667,6 +717,7 @@ message MapperClockReply {
   required uint64 j2 = 17;
   required uint64 j3 = 18;
   optional SurveySummary survey_summary = 19;
+  optional uint32 supported_mapper_features = 20; // bit1 operation gate; absent is legacy.
 }
 message SceneGrant {
   required uint32 major = 1;

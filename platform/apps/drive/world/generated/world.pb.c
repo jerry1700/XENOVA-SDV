@@ -27,7 +27,7 @@ PB_BIND(xenova_drive_DriveState, xenova_drive_DriveState, 4)
 PB_BIND(xenova_drive_TaskReferenceState, xenova_drive_TaskReferenceState, 2)
 
 
-PB_BIND(xenova_drive_ClockProbe, xenova_drive_ClockProbe, AUTO)
+PB_BIND(xenova_drive_ClockProbe, xenova_drive_ClockProbe, 2)
 
 
 PB_BIND(xenova_drive_GuestClockReceipt, xenova_drive_GuestClockReceipt, AUTO)
@@ -37,6 +37,18 @@ PB_BIND(xenova_drive_WorldTrust, xenova_drive_WorldTrust, 2)
 
 
 PB_BIND(xenova_drive_ClockReply, xenova_drive_ClockReply, 2)
+
+
+PB_BIND(xenova_drive_OperationBinding, xenova_drive_OperationBinding, AUTO)
+
+
+PB_BIND(xenova_drive_OperationStatus, xenova_drive_OperationStatus, AUTO)
+
+
+PB_BIND(xenova_drive_AutoInputPreflight, xenova_drive_AutoInputPreflight, 2)
+
+
+PB_BIND(xenova_drive_PiOperationGate, xenova_drive_PiOperationGate, AUTO)
 
 
 PB_BIND(xenova_drive_AcceptedState, xenova_drive_AcceptedState, 4)
