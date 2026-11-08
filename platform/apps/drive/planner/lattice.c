@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "lattice.h"
 #include "parking.h"
+#include "route_exit.h"
 #include <math.h>
 #include <string.h>
 #include <float.h>
@@ -47,6 +48,7 @@ static bool blocked(const dw_world *w,size_t i,const struct lp_config *c) {
  return denied||!(flags&1)||(flags&4)||(!(flags&2)&&(double)age+c->live_age_us/1000>c->cell_age_ms)||w->occupancy.bytes[i]>=70;
 }
 void lp_state_import(struct lp_path *path,const dw_state *state){
+ memset(&path->space,0,sizeof(path->space));
  path->execution=(struct lp_execution){.present=true,.features=state->state_features,.mission=state->mission,
   .segments_count=state->segments_count,.has_direction_gate=state->has_direction_gate,.direction_gate=state->direction_gate};
  path->has_episode=state->has_episode;if(state->has_episode)path->episode=state->episode;
@@ -74,7 +76,9 @@ void lp_state_import(struct lp_path *path,const dw_state *state){
  }
 }
 bool lp_state_export(const struct lp_path *path,dw_state *state){
- if(!path||!state||path->task.active!=path->basis.bound)return false;
+ /* EXIT preparation is not legacy road Task33/NONE. Its geometry commitment
+  * has a separate API; registered route export is an integration boundary. */
+ if(!path||!state||path->space.exiting||path->task.active!=path->basis.bound)return false;
  state->major=2;state->has_state_features=true;state->state_features=DW_STATE_FEATURES;state->has_mission=true;
  state->has_task_reference=path->task.active;
  if(path->task.active){
@@ -165,7 +169,8 @@ static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const
  if(!obstacle_evidence&&task&&task->active){struct tr_view view;
   extra+=task->vehicle_pad;
   if(!isfinite(extra)||!tr_open(w,task,&view))return LP_COLLISION;
-  bool contained=space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):tr_contains(&view,pose,extra,c);
+  bool contained=space&&space->exiting?dre_contains(&view,space,pose,extra,c):
+   space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):tr_contains(&view,pose,extra,c);
   if(!contained)return LP_COLLISION;
  }
  float half=(c->front+c->rear)*.5f+c->margin+extra,width=c->half_width+c->margin+extra;
@@ -476,12 +481,19 @@ static enum lp_result build_heuristic(struct lp_search *s) {
  s->heuristic_open_high_water=s->metrics.open_high_water;s->metrics.open_high_water=0;
  memset(&s->nodes[0],0,sizeof(s->nodes[0]));return LP_SEARCHING;
 }
+static bool space_terminal(const dw_world *w,const struct lp_space *space,const struct tr_intent *task,
+ dw_pose pose,float pad,const struct lp_config *c){
+ if(!space->parking)return true;
+ if(!space->exiting)return dp_goal_contains(space,pose,pad,c);
+ struct tr_view road;
+ return tr_open(w,task,&road)&&tr_contains(&road,pose,pad+space->uncertainty,c);
+}
 static bool reached(struct lp_search *s,const struct lp_node *n) {
  if(s->signed_search){
   if(n->gear!=s->goal_gear||fabsf(n->steer)>s->config->max_steer/(LP_STEERS/2))return false;
   for(unsigned k=0;k<s->goals.count;k++)if(distance(n->pose,s->goals.poses[k])<=s->goals.distance&&
       fabsf(dw_angle(n->pose.yaw-s->goals.poses[k].yaw))<=s->goals.heading&&
-      (!s->space.parking||dp_goal_contains(&s->space,n->pose,s->config->tracking_guard+s->task.vehicle_pad,s->config))){
+      space_terminal(s->world,&s->space,&s->task,n->pose,s->config->tracking_guard+s->task.vehicle_pad,s->config)){
        s->goal=s->goals.poses[k];s->selected_goal=k;return true;}
   return false;
  }
@@ -633,12 +645,36 @@ enum lp_result lp_start_task_goal(struct lp_search *s,const dw_world *w,dw_pose 
 enum lp_result lp_start_parking(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,
  const struct lp_goal_set *goals,int initial,unsigned cusps,const struct lp_space *space,
  const struct tr_intent *task,const struct tr_basis *basis,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
- if(!goals||!goals->count||goals->count>LP_GOALS||!space||!space->parking||!space->slot_id||!space->slot_revision||
+ if(!goals||!goals->count||goals->count>LP_GOALS||!space||!space->parking||space->exiting||!space->slot_id||!space->slot_revision||
     !c||!isfinite(goals->distance)||goals->distance<=0||goals->distance>c->goal_distance||
     !isfinite(goals->heading)||goals->heading<=0||goals->heading>c->goal_heading||
     (initial!=1&&initial!=-1)||(goals->final_gear!=1&&goals->final_gear!=-1)||cusps>2)return LP_INPUT;
  for(unsigned k=0;k<goals->count;k++)if(!dw_pose_finite(goals->poses[k]))return LP_INPUT;
  return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,goals->final_gear,cusps,goals,space);
+}
+enum lp_result lp_start_exit(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,
+ const struct lp_goal_set *goals,int initial,unsigned cusps,const struct dre_input *source,
+ const struct tr_intent *task,const struct tr_basis *basis,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
+ struct lp_space space;struct tr_view road;
+ if(!source||source->records.world!=w||pose.x!=source->current_map_pose.x||pose.y!=source->current_map_pose.y||
+    pose.yaw!=source->current_map_pose.yaw||!task||!c||!goals||!goals->count||goals->count>LP_GOALS||
+    (initial!=1&&initial!=-1)||goals->final_gear!=1||cusps>2||
+    !isfinite(goals->distance)||goals->distance<=0||goals->distance>c->goal_distance||
+    !isfinite(goals->heading)||goals->heading<=0||goals->heading>c->goal_heading||
+    dre_prepare(source,c,&space)!=DRP_OK||task->changing||task->from_lane_id!=source->records.space->aisle_lane_id||
+    task->selected_lane_id!=task->from_lane_id||task->home_lane_id!=task->selected_lane_id||!tr_open(w,task,&road))return LP_INPUT;
+ float measured=source->vehicle->has_measured_steering_rad?source->vehicle->measured_steering_rad:
+  source->vehicle->has_estimated_steering_rad?source->vehicle->estimated_steering_rad:NAN;
+ if(!isfinite(measured)||measured!=steer||!source->vehicle->has_steering_error_rad||
+    !isfinite(source->vehicle->steering_error_rad)||source->vehicle->steering_error_rad<0||
+    fabsf(measured)+source->vehicle->steering_error_rad>c->max_steer)return LP_INPUT;
+ for(unsigned k=0;k<goals->count;k++){
+  struct lp_road_state projection;
+  if(!dw_pose_finite(goals->poses[k])||!tr_contains(&road,goals->poses[k],c->tracking_guard+space.uncertainty+task->vehicle_pad,c)||
+     lp_task_project(w,task,goals->poses[k],&projection)!=LP_PATH_FOUND||
+     fabsf(dw_angle(goals->poses[k].yaw-projection.pose.yaw))>goals->heading)return LP_INPUT;
+ }
+ return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,1,cusps,goals,&space);
 }
 /* All ordinary edges use the generated control set. A measured root steering
  * between levels is connected by the same continuous ramp integration; it is
@@ -1020,6 +1056,8 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
     vehicle->steering_error_rad>c->max_steering_error||vehicle->quality!=3||path->world_features!=w->required_features||
     strcmp(path->frame,w->frame_epoch)||strcmp(path->odom,w->odom_epoch)||strcmp(path->configuration,w->configuration)||strcmp(path->reference,w->reference_id))return LP_INPUT;
  if((w->required_features&DW_LANE_MODEL)&&(!path->task.active||!tr_basis_compatible(&path->basis,w)))return LP_INPUT;
+ if(path->space.exiting&&(!path->execution.present||path->execution.mission.kind!=3||
+    !path->execution.mission.has_route_binding))return LP_INPUT;
  float steering=vehicle->has_measured_steering_rad?vehicle->measured_steering_rad:vehicle->has_estimated_steering_rad?vehicle->estimated_steering_rad:NAN;
  if(!isfinite(steering)||fabsf(steering)+vehicle->steering_error_rad>c->max_steer+.0001f)return LP_INPUT;
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
@@ -1046,14 +1084,15 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  enum lp_result stopped_result=project(w,pose,vehicle->velocity_mps,steering,0,steering,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,&stopped,&final_pad,&path->space);
  /* 종점에 가까운 입력도 같은 원 progress window를 통과해야 한다. 현재 pose만으로
   * 아직 도달할 수 없는 남은 arc를 지워 segment/cusp 완료를 만들지 않는다. */
+ bool exit_cusp=path->space.exiting&&tracker->segment+1<path_segments(path);
  bool captured=terminal_in_window&&stopped_result==LP_PATH_FOUND&&distance(pose,goal)+vehicle->position_error_m<=goal_distance&&
   distance(stopped,goal)+final_pad<=goal_distance&&fabsf(dw_angle(pose.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
   fabsf(dw_angle(stopped.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
-  (!path->space.parking||dp_goal_contains(&path->space,stopped,final_pad,c));
+  (exit_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
  /* Only the last selected parking segment has a region terminal. Its actual
   * correspondence must be in the same movement window; a clipped projection
   * cannot turn a teleport or an earlier cusp into completed progress. */
- bool parking_final=path->space.parking&&tracker->segment+1==path_segments(path);
+ bool parking_final=path->space.parking&&!path->space.exiting&&tracker->segment+1==path_segments(path);
  bool intended_gear=!path->execution.present||path->execution.mission.kind!=2||
   (path->execution.mission.strategy==1&&gear==-1)||(path->execution.mission.strategy==2&&gear==1);
  if(parking_final)captured=pose_in_window&&intended_gear&&stopped_result==LP_PATH_FOUND&&
