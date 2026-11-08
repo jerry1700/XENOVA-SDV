@@ -19,7 +19,7 @@ from uuid import uuid4
 from . import keyboard_contract as contract
 from .authority_journal import canonical
 
-REQUESTS = frozenset(('HELLO', 'ATTACH', 'FRAME', 'ARM', 'FENCE', 'DETACH'))
+REQUESTS = frozenset(('HELLO', 'ATTACH', 'FRAME', 'ARM', 'FENCE', 'DETACH','HELLO_AUTO','OBSERVE','AUTO_ENTER'))
 
 
 @dataclass(frozen=True, slots=True)
