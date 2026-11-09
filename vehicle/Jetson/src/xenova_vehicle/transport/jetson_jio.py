@@ -15,6 +15,7 @@ import time
 from uuid import UUID, uuid4
 
 from .jio_profile import JetsonJioProfile
+from .world_egress_fault import WorldEgressFault
 
 
 PREFIX = 'xenova/v1'
@@ -132,6 +133,15 @@ class _Runtime:
     token: object
 
 
+@dataclass(frozen=True)
+class _FaultPublication:
+    """Controller의 불변 응답1개와 최초 로컬 송신 기한이다. 결과 이력은 controller가 소유한다."""
+    topic: str
+    raw: bytes
+    expires_us: int
+    token: object
+
+
 def _new_paho(profile, oversize):
     """고정2.1 parser의 body 첫 recv 앞에서 remaining-length를 제한한다."""
     from importlib.metadata import version
@@ -162,11 +172,14 @@ def _new_paho(profile, oversize):
 class JetsonJio:
     """S-main은 불변 참조만 교환한다. paho client/socket은 S-jio만 소유한다."""
 
-    def __init__(self, profile, *, clock=j_us, client_factory=None, mapper_operation_installed=False):
+    def __init__(self, profile, *, clock=j_us, client_factory=None, mapper_operation_installed=False,
+                 service_instance=None):
         if type(profile) is not JetsonJioProfile:
             raise ValueError('exact optional JIO profile required')
         if type(mapper_operation_installed) is not bool:
             raise ValueError('exact installed mapper consumer flag required')
+        if service_instance is not None:
+            _uuid(service_instance)
         self._mapper_operation_installed = mapper_operation_installed
         self.profile, self.clock = profile, clock
         self._factory = _new_paho if client_factory is None else client_factory
@@ -180,9 +193,51 @@ class JetsonJio:
         self._connected = False; self._failure = self._last_rejection = None
         self._inflight = False; self._world_head = None; self._pi_revision = 0
         self._world_dispatch_enabled = True; self._world_dispatch_generation = 0
+        self._world_fault = WorldEgressFault()
+        self._fault_service = service_instance
+        self._fault_control = self._fault_boot = self._fault_pending = None
+        self._fault_turn_used = False
         self._runtime = self._runtime_head = self._runtime_identity = None
         self._runtime_since = 0; self._runtime_last_send_us = None; self._runtime_sequence = 0
         self._runtime_error = None
+
+    def _fault_source_key_locked(self):
+        source = self._source
+        if source is None:
+            return None
+        return sha256(_canonical(dict(source=source.fields, pi_host_boot=source.pi_host_boot,
+            gateway_instance=source.gateway_instance, device_session=source.device_session,
+            pi_session=source.pi_session))).hexdigest()
+
+    def _queue_fault_locked(self, publication, now_us):
+        if publication is not None:
+            # 응답의 재송신/교체가 제어 window나 장애 기간을 재발급하지 않는다.
+            if (self._fault_pending is not None and now_us < self._fault_pending.expires_us
+                    and self._fault_pending.token is self._token
+                    and (self._fault_pending.topic, self._fault_pending.raw)
+                        == (publication.topic, publication.raw)):
+                return
+            self._fault_pending = _FaultPublication(publication.topic, publication.raw,
+                min((1 << 63) - 1, now_us + RUNTIME_INTERVAL_US), self._token)
+
+    def bind_world_fault_control(self, boot_id):
+        """S-log가 확인한 실제 kernel boot를 한 번 연결한다. UUID 발급이나 파일 관측은 하지 않는다."""
+        _uuid(boot_id)
+        with self._lock:
+            if self._fault_service is None:
+                raise ValueError('original S service instance required for fault control')
+            if self._fault_boot is not None:
+                if self._fault_boot != boot_id:
+                    raise ValueError('fault control kernel boot identity cannot change')
+                return False
+            from .world_fault_control import WorldFaultController
+            control = WorldFaultController(self.profile.device, self._fault_service,
+                self._set_world_fault_locked, boot_id=boot_id)
+            now = self.clock()
+            publication = control.set_source(self._fault_source_key_locked(), now_us=now)
+            self._fault_control, self._fault_boot = control, boot_id
+            self._queue_fault_locked(publication, now)
+            return True
 
     def _count(self, key):
         with self._lock:
@@ -208,6 +263,7 @@ class JetsonJio:
         with self._lock:
             if source == self._source:
                 return False
+            self._discard_worlds_locked()
             self._source = source; self._token = object(); self._world = self._probe = self._lease = None
             self._runtime = self._runtime_head = None; self._runtime_since = self.clock()
             self._publication = self._clock_window = self._scene_window = None
@@ -216,6 +272,11 @@ class JetsonJio:
             self._reply_input = None
             self._world_head = None; self._pi_revision = 0
             self._counts['source_replaced'] += 1
+            self._fault_pending = None
+            if self._fault_control is not None:
+                now = self.clock()
+                self._queue_fault_locked(self._fault_control.set_source(
+                    self._fault_source_key_locked(), now_us=now), now)
         return True
 
     def replace_publication(self, binding):
@@ -239,8 +300,7 @@ class JetsonJio:
             if self._token is not token:return False
             if self._publication is not None and self._publication.raw==raw:return False
             self._publication=publication
-            if self._world is not None:self._counts['world_fenced']+=1
-            self._world=None
+            self._discard_worlds_locked()
         return True
 
     def _world_current_locked(self, item, now):
@@ -274,18 +334,55 @@ class JetsonJio:
                 raise ValueError('world dispatch generation exhausted')
             self._world_dispatch_generation += 1
             self._world_dispatch_enabled = enabled
-            if self._world is not None:
-                self._counts['world_fenced'] += 1
-            self._world = None
+            self._discard_worlds_locked()
             return True
+
+    def _discard_worlds_locked(self):
+        held = self._world_fault.snapshot()
+        self._counts['world_fenced'] += int(self._world is not None) + int(held['held']) + int(held['pending'])
+        self._world = None
+        self._world_fault.discard()
+
+    def _set_world_fault_locked(self, mode, *, delay_us, now_us):
+        """실제 JIO 설정 채택 경계다. 이미 claim한 송신의 회수나 Pi 정지를 뜻하지 않는다."""
+        if self._world_dispatch_generation == (1 << 64) - 1:
+            raise ValueError('world dispatch generation exhausted')
+        # configure가 거절한 입력은 기존 보류본/세대/운영 상태를 바꾸지 않는다.
+        held = self._world_fault.snapshot()
+        self._world_fault.configure(mode, delay_us=delay_us, now_us=now_us)
+        self._world_dispatch_generation += 1
+        self._counts['world_fenced'] += int(self._world is not None) + int(held['held']) + int(held['pending'])
+        self._world = None
+
+    def set_world_egress_fault(self, mode, *, delay_us=0):
+        """신뢰된 로컬 호출용 연결점. MQTT 요청 검증·기간·적용 응답은 별도 controller의 책임이다."""
+        with self._lock:
+            self._set_world_fault_locked(mode, delay_us=delay_us, now_us=self.clock())
+
+    def _take_world_locked(self):
+        if self._world_fault.mode == 'PASS':
+            selected, self._world = self._world, None
+            return selected
+        return self._world_fault.take_due(now_us=self.clock())
+
+    def _claim_fault_publication(self, item):
+        with self._lock:
+            return (not self._stop.is_set() and item.token is self._token
+                and self.clock() < item.expires_us)
 
     def _claim_world(self, item):
         """이 짧은 lock이 새 dispatch의 시작점이다. 이후 fence는 이미 시작한 송신을 회수하지 못한다."""
         with self._lock:
             now=self.clock()
+            if self._fault_control is not None:
+                # loop/선택 뒤에도 원 장애 기한을 넘을 수 있다. 송신 claim과 같은 시각/lock에서 닫는다.
+                self._queue_fault_locked(self._fault_control.tick(now_us=now), now)
+                if not self._fault_control.snapshot()['applied_known']:
+                    self._counts['world_fenced'] += 1
+                    return False
             if now>=item.expires_us:
                 self._counts['expired']+=1;return False
-            if not self._world_current_locked(item,now):
+            if self._world_fault.mode == 'BLOCK' or not self._world_current_locked(item,now):
                 self._counts['world_fenced']+=1;return False
             self._counts['world_dispatch_started']+=1
             return True
@@ -315,6 +412,10 @@ class JetsonJio:
         item = _World(raw, expires_j_us, token, publication, scene_ref,
             None if scene_ref is None or scene is None else scene.grant_sha256, generation)
         with self._lock:
+            now = self.clock()
+            if now >= expires_j_us:
+                self._counts['expired'] += 1
+                return False
             if not self._world_current_locked(item,now):
                 self._counts['world_fenced']+=1
                 return False
@@ -325,9 +426,13 @@ class JetsonJio:
                 if value.sequence == sequence:
                     self._counts['duplicate'] += 1; return False
             self._world_head = value.sequence, raw
-            if self._world is not None:
-                self._counts['replaced'] += 1
-            self._world = item
+            if self._world_fault.mode == 'PASS':
+                if self._world is not None:
+                    self._counts['replaced'] += 1
+                self._world = item
+            else:
+                # BLOCK도 적법한 원 seq를 소비한다. 해제 뒤 같은 결과를 재주입하지 않는다.
+                self._world_fault.offer(item, now_us=now)
         return True
 
     @property
@@ -437,6 +542,7 @@ class JetsonJio:
     def fence_source(self):
         """실제 source 철회 사건. 원 pending publish를 새 source의 결과로 재사용하지 않는다."""
         with self._lock:
+            self._discard_worlds_locked()
             self._source=None;self._token=object();self._world=self._probe=self._lease=None
             self._runtime=self._runtime_head=None;self._runtime_since=self.clock()
             self._publication=self._clock_window=self._scene_window=None
@@ -444,6 +550,10 @@ class JetsonJio:
             self._vehicle=self._scene=self._probe_input=None;self._tof={0:(),1:()};self._heads={}
             self._reply_input=None
             self._world_head=None;self._pi_revision=0
+            self._fault_pending = None
+            if self._fault_control is not None:
+                now = self.clock()
+                self._queue_fault_locked(self._fault_control.set_source(None, now_us=now), now)
 
     def take_inputs(self):
         """Vehicle1+ToF각2+scene1+probe1+생성 Reply1이다. 시각을 재발급하지 않는다."""
@@ -457,7 +567,11 @@ class JetsonJio:
         with self._lock:
             thread = self._thread
             return dict(connected=self._connected, alive=thread is not None and thread.is_alive(),
-                stopped=self._stop.is_set(), source_bound=self._source is not None, world_pending=self._world is not None,
+                stopped=self._stop.is_set(), source_bound=self._source is not None,
+                world_pending=self._world is not None or self._world_fault.pending,
+                world_fault=self._world_fault.snapshot(),
+                fault_control=None if self._fault_control is None else self._fault_control.snapshot(),
+                fault_reply_pending=self._fault_pending is not None,
                 publication_sha256=None if self._publication is None else self._publication.sha256,
                 probe_pending=self._probe is not None, publish_inflight=self._inflight,
                 runtime_pending=self._runtime is not None, runtime_error=self._runtime_error,
@@ -475,7 +589,10 @@ class JetsonJio:
 
     def stop(self):
         self._stop.set()
-        with self._lock:self._runtime=self._runtime_head=None
+        with self._lock:
+            self._discard_worlds_locked()
+            self._fault_pending = None
+            self._runtime=self._runtime_head=None
 
     def join(self, timeout=1.):
         if type(timeout) not in (int, float) or not 0 <= timeout <= 5:
@@ -504,6 +621,17 @@ class JetsonJio:
         known_negative = False;clock_window=scene_window=None
         if message.retain or len(message.payload) > 1024:
             self._reject('RETAINED_OR_SIZE'); return
+        fault_prefix = f'{PREFIX}/mapper/{self.profile.device}/fault/'
+        if message.topic in (fault_prefix + 'command.json', fault_prefix + 'query.json'):
+            with self._lock:
+                if self._fault_control is None or self._stop.is_set():
+                    self._counts['rejected'] += 1
+                    self._last_rejection = 'FAULT_CONTROL_UNAVAILABLE'
+                    return
+                now = self.clock()
+                self._queue_fault_locked(self._fault_control.handle(message.topic,
+                    bytes(message.payload), qos=message.qos, retained=message.retain, now_us=now), now)
+            return
         raw = bytes(message.payload); p = self.profile.source_policy
         try:
             topic = message.topic
@@ -687,6 +815,9 @@ class JetsonJio:
             while not self._stop.is_set():
                 now = self.clock()
                 with self._lock:
+                    if self._fault_control is not None:
+                        tick_now = self.clock()
+                        self._queue_fault_locked(self._fault_control.tick(now_us=tick_now), tick_now)
                     token = self._token
                 if observed_token is not token:
                     self._close_client(client); client = None; inflight = None; connected = False; observed_token = token
@@ -702,6 +833,10 @@ class JetsonJio:
                                     (f'{PREFIX}/sensors/tof/0/observation.pb', 0),
                                     (f'{PREFIX}/sensors/tof/1/observation.pb', 0)):
                                 c.subscribe(topic, qos=qos)
+                            if self._fault_service is not None:
+                                fault_prefix = f'{PREFIX}/mapper/{self.profile.device}/fault/'
+                                c.subscribe(fault_prefix + 'command.json', qos=1)
+                                c.subscribe(fault_prefix + 'query.json', qos=1)
                     client.on_connect = on_connect
                     client.on_message = lambda c, u, message: self._receive(message)
                     try:
@@ -728,18 +863,29 @@ class JetsonJio:
                             with self._lock:
                                 if self._probe is not None:
                                     selected = self._probe; self._probe = None; kind = 'reply'
-                                elif self._world is not None:
-                                    selected = self._world; self._world = None; kind = 'world'
-                                elif (self._runtime is not None and (self._runtime_last_send_us is None
-                                        or now >= self._runtime_last_send_us + RUNTIME_INTERVAL_US)):
-                                    selected = self._runtime; self._runtime = None; kind = 'runtime'
+                                elif self._fault_pending is not None and not self._fault_turn_used:
+                                    selected = self._fault_pending; self._fault_pending = None; kind = 'fault'
+                                    self._fault_turn_used = True
                                 else:
-                                    selected = None
+                                    selected = self._take_world_locked(); kind = 'world'
+                                    if (selected is None and self._runtime is not None
+                                            and (self._runtime_last_send_us is None
+                                                or self.clock() >= self._runtime_last_send_us + RUNTIME_INTERVAL_US)):
+                                        selected = self._runtime; self._runtime = None; kind = 'runtime'
+                                    if selected is not None:
+                                        self._fault_turn_used = False
+                                    elif self._fault_pending is not None:
+                                        # 연속 STATUS 조회도 due World/runtime을 무한히 밀어내지 않는다.
+                                        selected = self._fault_pending; self._fault_pending = None; kind = 'fault'
+                                        self._fault_turn_used = True
                             if selected is not None:
                                 expires = selected.expires_us
                                 if kind=='world':
                                     raw=selected.raw;topic=WORLD_TOPIC
                                     dispatch=self._claim_world(selected)
+                                elif kind=='fault':
+                                    topic, raw = selected.topic, selected.raw
+                                    dispatch = self._claim_fault_publication(selected)
                                 elif kind=='runtime':
                                     try:
                                         topic,raw,sequence=self._runtime_packet(selected)
@@ -772,6 +918,9 @@ class JetsonJio:
                         self._count('reply_failed')
                     except (OSError, RuntimeError):
                         self._count('network_failed'); self._close_client(client)
+                        with self._lock:
+                            # 연결 단절이 장애 설정/원 due를 재발급하거나 보류본을 flush하지 않는다.
+                            self._discard_worlds_locked()
                         client = None; connected = False; inflight = None; retry_after = now + 100_000
                 with self._lock:
                     self._connected = connected; self._inflight = inflight is not None
@@ -786,4 +935,5 @@ class JetsonJio:
                 with self._lock:
                     self._failure = type(error).__name__
             with self._lock:
+                self._discard_worlds_locked()
                 self._connected = self._inflight = False

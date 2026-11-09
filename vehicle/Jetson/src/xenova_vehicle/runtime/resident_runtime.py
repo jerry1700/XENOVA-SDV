@@ -291,6 +291,8 @@ class _Runtime:
             self._request('BOOTSTRAP', 'BOOTSTRAP', request_id=self.bootstrap_request)
         elif purpose == 'BOOTSTRAP':
             self.admission = completion.value
+            if self.jio is not None:
+                self.jio.bind_world_fault_control(self.manifest.runtime.boot_id)
             self.phase = 'ALLOCATING'
             from .operation_management import OperationServer
             self.operation_server=OperationServer(self.state_directory,self.service,
@@ -1269,7 +1271,8 @@ class _Runtime:
                 self.http.start()
             if self.jio_profile is not None:
                 from ..transport.jetson_jio import JetsonJio
-                self.jio=JetsonJio(self.jio_profile,mapper_operation_installed=self.mapper_profile_bytes is not None)
+                self.jio=JetsonJio(self.jio_profile,mapper_operation_installed=self.mapper_profile_bytes is not None,
+                    service_instance=self.service)
                 self.jio.start()
             self.log.start()
             self._request('PREPARE', 'PREPARE')

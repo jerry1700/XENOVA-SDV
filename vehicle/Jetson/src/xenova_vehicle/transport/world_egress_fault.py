@@ -75,6 +75,18 @@ class WorldEgressFault:
         """보류분을 버리고 PASS로 복귀한다. 옛 결과 flush나 AUTO 재출발을 수행하지 않는다."""
         self.configure('PASS', now_us=now_us)
 
+    @property
+    def mode(self):
+        return self._mode
+
+    @property
+    def pending(self):
+        return self._held is not None or self._pending is not None
+
+    def discard(self):
+        """source/운영 수명 철회 때 보류본만 버린다. 장애 설정이나 원 due를 갱신하지 않는다."""
+        self._discard()
+
     def offer(self, original: WorldPublication, *, now_us):
         """이미 검산된 원 publication을 보관한다. raw/기한/그 밖의 원 필드는 바꾸지 않는다."""
         raw = getattr(original, 'raw', None)
