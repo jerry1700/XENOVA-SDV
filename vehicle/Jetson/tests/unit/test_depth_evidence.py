@@ -8,7 +8,7 @@ from xenova_vehicle.perception.calibration import CameraModel, CalibrationProfil
 from xenova_vehicle.perception.depth import DepthConfig, analyze_depth
 from xenova_vehicle.perception.free_space import RayBundle, TargetClass, certify_cell
 from xenova_vehicle.perception.inputs import FrameStamp
-from xenova_vehicle.perception.geometry import axial_ray_bounds
+from xenova_vehicle.perception.geometry import TimingDiagnostics, axial_ray_bounds
 
 
 def profile(size=100):
@@ -95,6 +95,27 @@ class DepthEvidenceTests(unittest.TestCase):
         unknown = analyze_depth(depth, p.right, p.plane, stamp=missing_time, profile=p, input_kind='SYNTHETIC')
         self.assertFalse(unknown.metric_qualified)
         self.assertTrue(all(not ray.qualified for ray in unknown.patches))
+
+    def test_invalid_depth_across_blocks_preserves_unknown_without_clearance(self):
+        import numpy as np
+        p = profile(100)
+        stamp = FrameStamp('synthetic', 'right', 9, 'simulation-clock', (100, 110), 115)
+        depth = np.resize(np.array((0., -1., math.nan, math.inf, 65536.)), (100, 100))
+        diagnostics = TimingDiagnostics()
+        evidence = analyze_depth(depth, p.right, p.plane, stamp=stamp, profile=p,
+                                 input_kind='SYNTHETIC', diagnostics=diagnostics)
+        self.assertIs(evidence.stamp, stamp)
+        self.assertEqual((evidence.valid_count, evidence.floor_count), (0, 0))
+        self.assertEqual((evidence.invalid_count, evidence.unknown_count), (10000, 10000))
+        self.assertEqual((len(evidence.hit_boxes), len(evidence.patches)), (0, 0))
+        self.assertEqual((evidence.omitted_hit_count, evidence.omitted_patch_count), (0, 0))
+        certificate = certify_cell((-.01, -.01, .01, .01), evidence.patches,
+                                   (TargetClass(.5, .5, .5, qualified=True),), p)
+        self.assertEqual(certificate.status, 'UNKNOWN')
+        self.assertFalse(certificate.complete)
+        timing = diagnostics.snapshot()
+        self.assertEqual(timing['incomplete_calls'], 0)
+        self.assertEqual(timing['started_calls'], timing['completed_calls'])
 
     def test_depth_caps_report_omissions_and_synthetic_cannot_be_live(self):
         import numpy as np
