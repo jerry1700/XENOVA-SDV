@@ -124,6 +124,9 @@ class _Runtime:
         self.storage_profile, self.output, self.duration_s = storage_profile, Path(output).expanduser().absolute(), duration_s
         self.context = multiprocessing.get_context('spawn')
         self.service, self.epoch, self.bootstrap_request = _identifier(), _identifier(), _identifier()
+        from .mapper_operation import SupervisorOperation
+        self.operation_owner=SupervisorOperation(self.service,clock=j_us)
+        self.operation_server=None
         self.clock_epoch = _identifier()
         if output_root:
             self.output = self.output / self.service
@@ -289,6 +292,11 @@ class _Runtime:
         elif purpose == 'BOOTSTRAP':
             self.admission = completion.value
             self.phase = 'ALLOCATING'
+            from .operation_management import OperationServer
+            self.operation_server=OperationServer(self.state_directory,self.service,
+                status=self.operation_owner.status,submit=self.operation_owner.submit,
+                query=self.operation_owner.query,clock=j_us)
+            self.operation_server.start()
         elif purpose == 'INTENT':
             self._request('CREATE', 'CREATE', intent_ack=self.latest_ack, cap_us=self.allocation_deadline)
         elif purpose == 'CREATE':
@@ -343,7 +351,7 @@ class _Runtime:
         peer = LifecyclePeer(self.service, epoch, worker_id, role, self.artifacts['release_sha256'])
         parent=child=data_parent=data_child=data_peer=jpeg_parent=jpeg_child=None
         mapper_instance=process=host=None
-        tracked=False
+        handed=False
         try:
             parent,child=control_pair()
             if role=='A' and self.raw_profile.jpeg_enabled:
@@ -384,12 +392,40 @@ class _Runtime:
                 from .source_runtime import SupervisorSource
                 source_owner=SupervisorSource(DataLink(data_parent,data_peer,'S'),self.binding,self.jio,
                     mapper_instance=mapper_instance,mapper_boot=self.manifest.runtime.boot_id,
-                    clock_epoch=self.clock_epoch,revision_floor=self.source_revision,clock=j_us)
-            process=self.context.Process(name='xenova-'+role,target=_worker_entry,args=(child,boot),daemon=False)
+                    clock_epoch=self.clock_epoch,revision_floor=self.source_revision,clock=j_us,
+                    operation_owner=self.operation_owner)
+            handed = True
+            self._start_worker(role, peer, parent, child, boot, deadline_us=deadline_us,
+                source_owner=source_owner, source_endpoint=data_parent,
+                extra_child_endpoints=(data_child, jpeg_child), jpeg_endpoint=jpeg_parent)
+        except BaseException:
+            if not handed:
+                for endpoint in (parent, data_parent, jpeg_parent):
+                    if endpoint is not None:
+                        try: endpoint.close()
+                        except OSError: self.failure = self.failure or 'pre-spawn endpoint close failed'
+            raise
+        finally:
+            if not handed:
+                for endpoint in (child, data_child, jpeg_child):
+                    if endpoint is not None:
+                        try: endpoint.close()
+                        except OSError: self.failure = self.failure or 'child-side endpoint close failed'
+
+    def _start_worker(self, role, peer, parent, child, boot, *, deadline_us,
+                      entry=None, source_owner=None, source_endpoint=None,
+                      extra_child_endpoints=(), extra_parent_endpoints=(), jpeg_endpoint=None):
+        """공통 실제 spawn/birth/sentinel과 parent의 child-FD 사본 수명을 소유한다."""
+        data_parent, jpeg_parent = source_endpoint, jpeg_endpoint
+        process = host = None
+        tracked = False
+        try:
+            process=self.context.Process(name='xenova-'+role,target=_worker_entry if entry is None else entry,
+                args=(child,boot),daemon=False)
             link=ResidentLink(parent,peer,'S',track_sent=True)
             spawned=j_us()
             host=_Worker(peer,process,link,LifecycleReceiver(peer,'S'),spawned,
-                LocalSetupWatch(role,worker_id,spawned,now_us=j_us()) if role!='A' else None,
+                LocalSetupWatch(role,peer.worker_instance,spawned,now_us=j_us()) if role!='A' else None,
                 held=deque(maxlen=8),startup_deadline_us=deadline_us,source=source_owner)
             # 사용자 공간 구성 실패는 실제 child를 만들기 전에 모두 드러낸다.
             process.start()
@@ -406,13 +442,14 @@ class _Runtime:
             self.event('SPAWN',role=role,pid=host.pid,
                 send_buffer=parent.getsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF),
                 receive_buffer=parent.getsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF))
+            return host
         except BaseException:
             # start 예외라도 실제 Popen/PID가 있으면 원 owner를 버리거나 종료를 발명하지 않는다.
             if not tracked and host is not None and process.pid is not None:
                 host.pid=process.pid;self.workers[role]=host;tracked=True
                 self.birth_pending.add(role)
             if not tracked:
-                for endpoint in (parent,data_parent,jpeg_parent):
+                for endpoint in (parent,data_parent,jpeg_parent,*extra_parent_endpoints):
                     if endpoint is not None:
                         try:endpoint.close()
                         except OSError:self.failure=self.failure or 'pre-spawn endpoint close failed'
@@ -422,10 +459,11 @@ class _Runtime:
             raise
         finally:
             # 실제 spawn 뒤에도 부모의 child-side 사본만 닫는다. parent는 tracked host가 소유한다.
-            for endpoint in (child,data_child,jpeg_child):
+            for endpoint in (child,*extra_child_endpoints):
                 if endpoint is not None:
                     try:endpoint.close()
                     except OSError:self.failure=self.failure or 'child-side endpoint close failed'
+
 
     def _replace_video_channel(self, host, endpoint):
         """새 A의 영상 FD만 넘긴다. 영상 제공 실패로 장치/모델 owner를 철회하지 않는다."""
@@ -1199,6 +1237,10 @@ class _Runtime:
             active_d=role=='D' and db_deadline is not None and now<db_deadline
             if idle_watch and not active_d and heartbeat_lower is not None and now-heartbeat_lower>=1_000_000:
                 self.recovery.fail(role, role + ' current control progress stalled')
+        self._readiness_timers(now)
+
+    def _readiness_timers(self, now):
+        """기본 physical capture/NN 기한이다. 명시 입력 변형은 이 경계만 대체한다."""
         if self.a_phase in self.a_phase_deadlines and now >= self.a_phase_deadlines[self.a_phase]:
             self.recovery.fail('A', 'original A ' + self.a_phase + ' budget elapsed')
         if self.capture_ready_us is not None and self.last_capture_us is not None and now - self.last_capture_us >= 500_000:
@@ -1218,6 +1260,7 @@ class _Runtime:
                     and now - self.resident_started_us >= int(self.duration_s * 1_000_000)):
                 self.stop('duration_elapsed')
 
+
     def run(self, signal_value):
         try:
             if self.http_address is not None:
@@ -1226,7 +1269,7 @@ class _Runtime:
                 self.http.start()
             if self.jio_profile is not None:
                 from ..transport.jetson_jio import JetsonJio
-                self.jio=JetsonJio(self.jio_profile)
+                self.jio=JetsonJio(self.jio_profile,mapper_operation_installed=self.mapper_profile_bytes is not None)
                 self.jio.start()
             self.log.start()
             self._request('PREPARE', 'PREPARE')
@@ -1235,6 +1278,7 @@ class _Runtime:
                     self._complete_log()
                     if signal_value():
                         self.stop('operator_stop')
+                    if not self.stopping and self.operation_server is not None:self.operation_server.poll()
                     self._drive_workers()
                     self._timers()
                     if self.stopping:
@@ -1267,6 +1311,9 @@ class _Runtime:
                         break
                     self.stop('runtime_failed', error)
         finally:
+            if self.operation_server is not None:
+                try:self.operation_server.close()
+                except Exception as error:self.failure=self.failure or 'operation endpoint close: '+type(error).__name__
             for host in self.workers.values():
                 try:self._close_source(host)
                 except Exception as error:self.failure=self.failure or 'source close: '+type(error).__name__
@@ -1326,6 +1373,7 @@ class _Runtime:
             runtime_status=None if self.latest_runtime_status is None else self.latest_runtime_status.fields,
             runtime_status_error=self.runtime_status_error,
             runtime_publication_error=self.runtime_publication_error,
+            operation=self.operation_owner.status(),
             workers={role: dict(pid=host.pid, worker_instance=host.peer.worker_instance,
                 channel_epoch=host.peer.channel_epoch, reaped=host.reaped, exitcode=host.exitcode,
                 stopped=None if host.stopped is None else host.stopped.payload,

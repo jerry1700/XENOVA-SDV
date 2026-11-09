@@ -21,6 +21,7 @@ class JioPort:
         self.inputs=deque();self.bound=None;self.fenced=False;self.worlds=[]
         self.current_scene=self.current_lease=None;self.summaries=[]
         self.publication=None
+        self.world_enabled=True
 
     def take_inputs(self):
         result=tuple(self.inputs);self.inputs.clear();return result
@@ -28,7 +29,10 @@ class JioPort:
     def replace_source(self,source,**origin):self.bound=(source,origin)
     def replace_publication(self,binding):self.publication=canonical(binding)
     def fence_source(self):self.fenced=True
-    def offer_world(self,raw,*,expires_j_us,publication_sha256):self.worlds.append((raw,expires_j_us))
+    def set_world_dispatch_enabled(self,enabled):
+        changed=self.world_enabled!=enabled;self.world_enabled=enabled;return changed
+    def offer_world(self,raw,*,expires_j_us,publication_sha256):
+        if self.world_enabled:self.worlds.append((raw,expires_j_us))
     def offer_survey_summary(self,raw,*,grant_sha256,expires_j_us):
         self.summaries.append((raw,grant_sha256,expires_j_us));return True
 
@@ -41,6 +45,13 @@ class SourceRuntimeTests(unittest.TestCase):
         left,right=data_pair()
         self.mapper=MapperSource(DataLink(left,self.peer,'M',clock=lambda:self.now),self.raw,self.policy,
             mapper_instance=self.incarnation,device=self.jio.profile.device,clock=lambda:self.now)
+        # 이 shared fixture는 software source 통로만 검산하며 실제 compute STANDBY를 승인하지 않는다.
+        from xenova_vehicle.runtime.mapper_operation import MapperOperationController
+        def apply_run_only(action,expires,gate):
+            if action!='RUN':raise ValueError('source fixture has no STANDBY compute consumer')
+            if self.now>=expires:raise ValueError('expired source fixture CONFIG')
+            return self.now
+        self.mapper.install_operation(MapperOperationController(self.peer,apply=apply_run_only,clock=lambda:self.now))
         self.supervisor=SupervisorSource(DataLink(right,self.peer,'S',clock=lambda:self.now),self.raw,self.jio,
             mapper_instance=self.incarnation,mapper_boot=uid(),clock_epoch=self.raw.fields['clock_epoch'],clock=lambda:self.now)
         self.material=({'service_instance':self.peer.service_instance,'storage_worker':uid(),
@@ -52,7 +63,7 @@ class SourceRuntimeTests(unittest.TestCase):
     def cycle(self,*,ready=True,count=8):
         for _ in range(count):
             self.supervisor.pump(self.material,bind_ready=ready,on_publication=lambda binding,context:self.publications.append((binding,context)))
-            self.mapper.pump()
+            self.mapper.pump(before_outputs=lambda:self.mapper.operation_step())
 
     def vehicle(self):
         wire=encode(self.sample);self.jio.inputs.append(JioInput('VEHICLE',wire,self.now));return wire
@@ -82,6 +93,22 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertIsNone(self.mapper.publication)
         self.assertIsNone(self.mapper._proposal_packet)
         self.assertEqual(self.publications,[])
+
+    def test_expired_malformed_ready_does_not_claim_current_peer_bootstrap_failure(self):
+        from xenova_vehicle.runtime.operation_request import CONSUMER_READY_PROFILE
+        # 등록된 transport라도 다른 service/추가 필드인 body는 원 설치 사실이 아니다.
+        for index,body in enumerate((dict(profile=CONSUMER_READY_PROFILE,service_instance=uid()),
+                                    dict(profile=CONSUMER_READY_PROFILE,service_instance=self.peer.service_instance,extra=True))):
+            self.now=1000+10*index
+            packet=self.mapper.link.send('OPERATION_RESULT',{},canonical(body),issued_us=self.now,expires_us=self.now+1)
+            self.assertIsNotNone(packet);self.assertIsNotNone(self.mapper.link.flush())
+            self.now+=1
+            self.supervisor.pump(self.material,bind_ready=True,on_publication=lambda *_:None)
+            self.assertIsNone(self.supervisor.operation_owner._consumer_ready)
+            self.assertFalse(self.supervisor.operation_owner.status()['mapper_synchronized'])
+        self.assertEqual(self.supervisor.counts['operation_rejected'],2)
+        self.cycle()
+        self.assertTrue(self.supervisor.operation_owner.status()['mapper_synchronized'])
 
     def test_actual_supervisor_publication_callback_passes_original_context_and_origin_to_d_broker(self):
         from xenova_vehicle.runtime.resident_runtime import _Runtime

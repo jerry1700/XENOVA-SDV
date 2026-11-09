@@ -51,6 +51,7 @@ class JioInput:
     received_j_us: int
     sensor_id: int | None = None
     lease: object = None
+    reply_trace: object = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ class _World:
     publication: _Publication
     scene_ref: bytes | None
     grant_sha256: str | None
+    dispatch_generation: int
 
 
 @dataclass(frozen=True)
@@ -160,19 +162,24 @@ def _new_paho(profile, oversize):
 class JetsonJio:
     """S-main은 불변 참조만 교환한다. paho client/socket은 S-jio만 소유한다."""
 
-    def __init__(self, profile, *, clock=j_us, client_factory=None):
+    def __init__(self, profile, *, clock=j_us, client_factory=None, mapper_operation_installed=False):
         if type(profile) is not JetsonJioProfile:
             raise ValueError('exact optional JIO profile required')
+        if type(mapper_operation_installed) is not bool:
+            raise ValueError('exact installed mapper consumer flag required')
+        self._mapper_operation_installed = mapper_operation_installed
         self.profile, self.clock = profile, clock
         self._factory = _new_paho if client_factory is None else client_factory
         self._lock = threading.Lock(); self._stop = threading.Event(); self._thread = None
         self._source = None; self._token = object(); self._world = self._probe = None
         self._vehicle = self._scene = self._probe_input = None; self._tof = {0: (), 1: ()}
+        self._reply_input = None
         self._lease = None; self._current_scene = self._summary = None
         self._publication = self._clock_window = self._scene_window = None
         self._heads = {}; self._counts = Counter({key: 0 for key in COUNTERS})
         self._connected = False; self._failure = self._last_rejection = None
         self._inflight = False; self._world_head = None; self._pi_revision = 0
+        self._world_dispatch_enabled = True; self._world_dispatch_generation = 0
         self._runtime = self._runtime_head = self._runtime_identity = None
         self._runtime_since = 0; self._runtime_last_send_us = None; self._runtime_sequence = 0
         self._runtime_error = None
@@ -206,6 +213,7 @@ class JetsonJio:
             self._publication = self._clock_window = self._scene_window = None
             self._current_scene = self._summary = None
             self._vehicle = self._scene = self._probe_input = None; self._tof = {0: (), 1: ()}; self._heads = {}
+            self._reply_input = None
             self._world_head = None; self._pi_revision = 0
             self._counts['source_replaced'] += 1
         return True
@@ -237,7 +245,8 @@ class JetsonJio:
 
     def _world_current_locked(self, item, now):
         clock=self._clock_window
-        if (self._stop.is_set() or item.token is not self._token or self._source is None
+        if (not self._world_dispatch_enabled or item.dispatch_generation != self._world_dispatch_generation
+                or self._stop.is_set() or item.token is not self._token or self._source is None
                 or item.publication is not self._publication or clock is None
                 or not clock.lower_j_us<=now<clock.expires_j_us):return False
         if item.scene_ref is not None:
@@ -248,6 +257,27 @@ class JetsonJio:
                     or scene.issued_pi_us>now+clock.lower_offset_us
                     or now+clock.upper_offset_us>=scene.expires_pi_us):return False
         return True
+
+    def set_world_dispatch_enabled(self, enabled):
+        """S-main의 World 전용 gate다. 원 clock/센서/순번과 이미 시작한 송신은 유지한다.
+
+        전이와 final claim은 같은 짧은 lock에서 직렬화한다. False 뒤 True로 돌아와도
+        이전 generation의 selected World는 재사용하지 않는다. 접수/로컬 설정 변경은
+        이미 claim한 paho 송신이나 Pi에 보관된 World의 회수·만료 증명이 아니다.
+        """
+        if type(enabled) is not bool:
+            raise ValueError('exact world dispatch enable boolean required')
+        with self._lock:
+            if enabled == self._world_dispatch_enabled:
+                return False
+            if self._world_dispatch_generation == (1 << 64) - 1:
+                raise ValueError('world dispatch generation exhausted')
+            self._world_dispatch_generation += 1
+            self._world_dispatch_enabled = enabled
+            if self._world is not None:
+                self._counts['world_fenced'] += 1
+            self._world = None
+            return True
 
     def _claim_world(self, item):
         """이 짧은 lock이 새 dispatch의 시작점이다. 이후 fence는 이미 시작한 송신을 회수하지 못한다."""
@@ -267,6 +297,10 @@ class JetsonJio:
             raise ValueError('bounded original world bytes/absolute expiry required')
         with self._lock:
             source, token, publication, scene = self._source, self._token, self._publication, self._scene_window
+            generation = self._world_dispatch_generation
+            if not self._world_dispatch_enabled:
+                self._counts['world_fenced'] += 1
+                return False
         if source is None or publication is None or publication.sha256!=publication_sha256:
             self._count('world_fenced')
             return False
@@ -279,7 +313,7 @@ class JetsonJio:
         from xenova_drive_world import encode
         scene_ref=encode(value.scene) if value.HasField('scene') else None
         item = _World(raw, expires_j_us, token, publication, scene_ref,
-            None if scene_ref is None or scene is None else scene.grant_sha256)
+            None if scene_ref is None or scene is None else scene.grant_sha256, generation)
         with self._lock:
             if not self._world_current_locked(item,now):
                 self._counts['world_fenced']+=1
@@ -408,13 +442,15 @@ class JetsonJio:
             self._publication=self._clock_window=self._scene_window=None
             self._current_scene=self._summary=None
             self._vehicle=self._scene=self._probe_input=None;self._tof={0:(),1:()};self._heads={}
+            self._reply_input=None
             self._world_head=None;self._pi_revision=0
 
     def take_inputs(self):
-        """Vehicle1+ToF각2+scene1+probe1 이하의 원 사본이다. 시각을 재발급하지 않는다."""
+        """Vehicle1+ToF각2+scene1+probe1+생성 Reply1이다. 시각을 재발급하지 않는다."""
         with self._lock:
-            result = tuple(x for x in (self._vehicle, *self._tof[0], *self._tof[1], self._scene, self._probe_input) if x is not None)
+            result = tuple(x for x in (self._vehicle, *self._tof[0], *self._tof[1], self._scene, self._probe_input, self._reply_input) if x is not None)
             self._vehicle = self._scene = self._probe_input = None; self._tof = {0: (), 1: ()}
+            self._reply_input = None
         return tuple(sorted(result, key=lambda item: item.received_j_us))
 
     def snapshot(self):
@@ -425,7 +461,7 @@ class JetsonJio:
                 publication_sha256=None if self._publication is None else self._publication.sha256,
                 probe_pending=self._probe is not None, publish_inflight=self._inflight,
                 runtime_pending=self._runtime is not None, runtime_error=self._runtime_error,
-                inputs=(self._vehicle is not None) + len(self._tof[0]) + len(self._tof[1]) + (self._scene is not None) + (self._probe_input is not None),
+                inputs=(self._vehicle is not None) + len(self._tof[0]) + len(self._tof[1]) + (self._scene is not None) + (self._probe_input is not None) + (self._reply_input is not None),
                 counts=dict(self._counts), failure=self._failure, last_rejection=self._last_rejection)
 
     def start(self):
@@ -600,6 +636,10 @@ class JetsonJio:
             pi_client_instance=value.pi_client_instance, probe_seq=value.probe_seq, nonce=value.nonce,
             pi_send_us=value.pi_send_us, j2=pending.item.received_j_us, j3=0,
             **{key: data for key, data in source.fields.items() if key != 'vehicle'})
+        if self._mapper_operation_installed:
+            from ..runtime.mapper_operation import mapper_operation_supported
+            if mapper_operation_supported():
+                reply.supported_mapper_features = 1
         with self._lock:
             summary, grant, lease, token = self._summary,self._current_scene,self._lease,self._token
         if (summary is not None and grant is not None and summary.token is token is pending.token
@@ -616,7 +656,19 @@ class JetsonJio:
         reply.j3 = self.clock()
         if reply.HasField('survey_summary') and reply.j3 >= summary.expires_us:
             reply.ClearField('survey_summary')
-        return encode(reply)
+        raw=encode(reply)
+        if len(raw)>1024:raise ValueError('original MapperClockReply exceeds1024 bytes')
+        if reply.j3<pending.expires_us:
+            from ..runtime.mapper_reply_trace import MapperReplyTrace
+            origin=dict(pi_host_boot=source.pi_host_boot,gateway_instance=source.gateway_instance,
+                device_session=source.device_session,pi_session=source.pi_session)
+            trace=MapperReplyTrace.from_original(pending.item.raw,raw,source=source.fields,origin=origin,
+                probe_received_j_us=pending.item.received_j_us,expires_j_us=pending.expires_us)
+            with self._lock:
+                if pending.token is self._token and source is self._source:
+                    # 생성 사실만 전달한다. 이후 publish 실패/미송신도 Pi P4로 바꾸지 않는다.
+                    self._reply_input=JioInput('CLOCK_REPLY',raw,reply.j3,reply_trace=trace)
+        return raw
 
     @staticmethod
     def _close_client(client):

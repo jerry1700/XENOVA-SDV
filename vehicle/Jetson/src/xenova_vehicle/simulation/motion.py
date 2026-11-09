@@ -3,6 +3,7 @@
 Device↔Pi clock install/ACK나 Pi↔J trust를 만들지 않는다. caller가 준 실제 원 Vehicle
 bytes/Probe snapshot을 기존 MapperSensorState에 소비시키며 GT pose·목표·속도 적분은 없다.
 원 calibration/source/시각을 바꾸는 adapter나 Resident 운영 fallback으로 사용하지 않는다.
+for_pc_source/frame_snapshot_pc만 원 PC→J proof를 별도로 받으며 same-host wall로 바꾸지 않는다.
 """
 
 from dataclasses import replace
@@ -23,9 +24,20 @@ class DevelopmentMotion:
         self._profile=profile
         self._context=sensor_context
         self._raw=raw_binding
+        self._pc_binding=None
         self._thread=threading.get_ident()
         self.sensor_state=MapperSensorState.for_development(profile,raw_binding,clock_policy,
             sensor_context=sensor_context,mapper_worker=mapper_worker,mapper_instance=mapper_instance)
+
+    @classmethod
+    def for_pc_source(cls,profile,pc_binding,clock_policy,*,sensor_context,mapper_worker,mapper_instance,pc_owner_token):
+        """별도 PC source와 실제 owner token만 받는다. same-host wall 경로로 fallback하지 않는다."""
+        state=MapperSensorState.for_pc_source(profile,pc_binding,clock_policy,sensor_context=sensor_context,
+            mapper_worker=mapper_worker,mapper_instance=mapper_instance,pc_owner_token=pc_owner_token)
+        result=object.__new__(cls)
+        result._profile=profile;result._context=sensor_context;result._raw=pc_binding
+        result._pc_binding=pc_binding;result._thread=threading.get_ident();result.sensor_state=state
+        return result
 
     @property
     def profile(self):return self._profile
@@ -47,6 +59,8 @@ class DevelopmentMotion:
 
     def _capture_stamp(self,observation,*,now_us,expires_j_us):
         self._owned()
+        if self._pc_binding is not None:
+            raise ValueError('PC source requires frame_snapshot_pc and original mapping proof')
         if (type(observation) is not PerceptionInput or observation.kind!='SYNTHETIC'
                 or observation.calibration_id!=self.profile.bound_calibration.sha256
                 or observation.rgb.stamp.clock_id!=self.context.pose_clock_id
@@ -71,6 +85,15 @@ class DevelopmentMotion:
             raise ValueError('original development RAW generation and RGB source key required')
         return self.sensor_state.frame_snapshot(stamp,now_us=now_us,expires_us=expires_j_us,
             job_id=job_id,source_generation=source_generation,source_key=source_key)
+
+    def frame_snapshot_pc(self,pc_frame,*,current_pc_view,now_us,expires_j_us,job_id,source_generation,
+                          source_key,clock_replies=()):
+        """원 PC/J endpoint proof를 admitted Vehicle의 full-hull query에 결박한다."""
+        self._owned()
+        if self._pc_binding is None:raise ValueError('explicit PC motion owner required')
+        return self.sensor_state.frame_snapshot_pc(pc_frame,current_pc_view=current_pc_view,now_us=now_us,
+            expires_us=expires_j_us,job_id=job_id,source_generation=source_generation,
+            source_key=source_key,clock_replies=clock_replies)
 
     def read(self,source_snapshot,observation,*,now_us,expires_j_us):
         """software fixture용 legacy ingest+query다. 실제 main은 ingest/frame_snapshot을 분리한다."""

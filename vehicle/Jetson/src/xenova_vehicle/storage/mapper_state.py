@@ -43,6 +43,9 @@ def mapper_state_reference(scene):
 def encode_mapper_state(state):
     """canonical 상태를 최대48개의 실제 ContextRecord로 만든다. cap 초과는 명시 실패다."""
     from .records import ContextRecord
+    if type(state) is dict and 'route_records' in state:
+        from .mapper_route_state import validate_route_state
+        state=dict(state,route_records=validate_route_state(state['route_records']))
     raw=canonical(state)
     if not 0<len(raw)<=STATE_CAP:raise PersistenceError('mapper state exceeds bounded metadata capacity')
     if type(state) is dict and ('atlas' in state or 'hazard' in state):
@@ -96,6 +99,9 @@ def decode_mapper_state(scene,contexts):
     state=json_bytes(raw,STATE_CAP)
     _validate_atlas_state(state)
     if type(state) is dict and 'hazard' in state:validate_hazard_state(state['hazard'],state=state)
+    if type(state) is dict and 'route_records' in state:
+        from .mapper_route_state import validate_route_state
+        validate_route_state(state['route_records'])
     return state,tuple(selected)
 
 
@@ -265,4 +271,7 @@ def mapper_state_roots(state):
         alignment=state.get('alignment_provenance')
         if alignment is not None:roots.append(uint(alignment,positive=True))
     if 'road_basis' in state:roots.extend(_road_basis_roots(state['road_basis']))
+    if 'route_records' in state:
+        from .mapper_route_state import route_state_roots
+        roots.extend(route_state_roots(state['route_records']))
     return tuple(sorted(set(roots)))

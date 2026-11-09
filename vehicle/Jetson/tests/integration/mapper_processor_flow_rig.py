@@ -40,7 +40,9 @@ from xenova_vehicle.runtime.raw_leases import Endpoint
 from xenova_vehicle.runtime.resident_db import DbCompletion
 from xenova_vehicle.runtime.resident_samples import CaptureSample
 from xenova_vehicle.runtime.resident_storage import _Database, StorageProfile
-from xenova_vehicle.runtime.resident_workers import relay_publications, mapper_sensor_owner, attach_sensor_snapshot
+from xenova_vehicle.runtime.resident_workers import (relay_publications, mapper_sensor_owner,
+    attach_sensor_snapshot, apply_compute_operation)
+from xenova_vehicle.runtime.mapper_operation import MapperOperationController, SupervisorOperation
 from xenova_vehicle.runtime.source_identity import SourcePolicy
 from xenova_vehicle.runtime.source_runtime import MapperSource, SupervisorSource
 from xenova_vehicle.runtime.storage_copy import CopyLease, OwnedCopy, encode_load
@@ -59,6 +61,12 @@ def uid():
 # 명시 software bench 간격이다. 실물 회복 시간이나 카메라 FPS 수락값이 아니다.
 _SAMPLE_CADENCE_US = 20_000
 _M_RESTART_GAP_US = 200_000
+
+
+class _SoftwareSupervisorClock:
+    """M 교체에도 같은 S clock port를 유지한다. 원 기록의 시각을 다시 찍지 않는다."""
+    def __init__(self, current): self.current=current
+    def __call__(self): return self.current.now
 
 
 class _SoftwarePublishInfo:
@@ -117,6 +125,7 @@ class SoftwareJioIngress:
         with self._lock: return tuple(self._io_threads)
     def take_inputs(self): return self.transport.take_inputs()
     def snapshot(self): return self.transport.snapshot()
+    def set_world_dispatch_enabled(self, enabled): return self.transport.set_world_dispatch_enabled(enabled)
 
     def _deliver(self, topic, raw, *, qos=0):
         if type(raw) is not bytes: raise AssertionError('original immutable software ingress bytes required')
@@ -201,9 +210,13 @@ class ProcessorFlowRig:
         self._bench_started_wall = time.monotonic() if predecessor is None else predecessor._bench_started_wall
         self._restore_deadline_wall = self._restore_validation_progress = None
         self.now = 2_000_000 if predecessor is None else predecessor.now + _M_RESTART_GAP_US
+        self._operation_clock=(_SoftwareSupervisorClock(self) if predecessor is None else predecessor._operation_clock)
+        self._operation_clock.current=self
         self.sequence = (0 if predecessor is None else
             predecessor.sequence + _M_RESTART_GAP_US // _SAMPLE_CADENCE_US)
         self.vehicle_sequence = 0 if predecessor is None else predecessor.vehicle_sequence
+        self.operation_probe_mode=None if predecessor is None else predecessor.operation_probe_mode
+        self._operation_probe_revision=0 if predecessor is None else predecessor._operation_probe_revision
         self.temporary = tempfile.TemporaryDirectory() if database is None else None
         self.db = database or _Database(StorageProfile(str(Path(self.temporary.name) / 'processor.sqlite3'),
             'CREATE_IF_ABSENT'), time.monotonic_ns() // 1000 + 5_000_000)
@@ -213,8 +226,12 @@ class ProcessorFlowRig:
             expires_us=self.now + 60_000_000, clock_us=lambda: self.now)
         self.calibration = (software_live_calibration('a' * 64) if predecessor is None else predecessor.calibration)
         self.raw = (self._raw_binding() if predecessor is None else predecessor.raw)
-        self.mapper_worker, self.mapper_instance, self.mapper_boot = uid(), uid(), uid()
+        self.mapper_worker, self.mapper_instance = uid(), uid()
+        self.mapper_boot = uid() if predecessor is None else predecessor.mapper_boot
         self.peer = DataPeer(self.raw.fields['service_instance'], self.mapper_worker, uid())
+        self.operation_owner=(SupervisorOperation(self.peer.service_instance,clock=self._operation_clock)
+            if predecessor is None else predecessor.operation_owner)
+        self.operation_pump=None
         self.origin = (dict(pi_host_boot=uid(), gateway_instance=uid(), device_session=uid(), pi_session=uid())
             if predecessor is None else dict(predecessor.origin))
         self.odom_epoch = uid() if predecessor is None else predecessor.odom_epoch
@@ -248,12 +265,14 @@ class ProcessorFlowRig:
             self.policy, mapper_instance=self.mapper_instance, device='oak-bench', clock=lambda: self.now)
         self.supervisor = SupervisorSource(DataLink(right, self.peer, 'S', clock=lambda: self.now), self.raw,
             self.jio, mapper_instance=self.mapper_instance, mapper_boot=self.mapper_boot,
-            clock_epoch=self.raw.fields['clock_epoch'], clock=lambda: self.now)
+            clock_epoch=self.raw.fields['clock_epoch'], clock=lambda: self.now,operation_owner=self.operation_owner)
         self.bootstrap = MapperBootstrap(self.mailbox, mapper_worker=self.mapper_worker,
             mapper_instance=self.mapper_instance, cap_us=self.now + 15_000_000, clock_us=lambda: self.now)
         self.processor = None
         self.compute = MapperCompute(self._processor_factory, source_generation=self.raw.sha256,
             clock=lambda: self.now, maintenance=self._maintenance, adoption_lock=self.port.adoption_lock)
+        self.mapper.install_operation(MapperOperationController(self.peer,apply=self._apply_operation_state,
+            clock=lambda:self.now))
         self.sql_requests = []
         self.commits = []
         self.loads = []
@@ -274,6 +293,8 @@ class ProcessorFlowRig:
         # 신원 bootstrap은 시계 수락 전 실제 Vehicle wire 하나로 시작한다.
         self._offer_vehicle(self.now - 190_000, lease=None)
         self.wait(lambda: self.mapper.publication is not None, 'actual source identity/bootstrap ACK')
+        self.wait(lambda:self.mapper.operation_ready and self.operation_owner.status()['mapper_synchronized'],
+            'actual original S operation CONFIG/ACK')
         self.renew_clock()
         for at in range(self.now - 180_000, self.now, 10_000):
             self._offer_vehicle(at)
@@ -324,6 +345,11 @@ class ProcessorFlowRig:
         self.processor = processor
         return processor
 
+    def _apply_operation_state(self, action, expires_us, gate_expires_us):
+        return apply_compute_operation(self.compute,self.mapper,action=action,expires_us=expires_us,
+            gate_expires_us=gate_expires_us,publication_port=self.publications,mapping_port=self.port,
+            clock=lambda:self.now)
+
     def _maintenance(self):
         self.bootstrap.compute_step()
         if self.bootstrap.failure is not None:
@@ -369,6 +395,7 @@ class ProcessorFlowRig:
     def tick(self):
         # 기능 시험의 원 J clock도 진행한다. 관측/job/lease의 원 기한은 그대로라 더 오래될 뿐이다.
         self.now += 1
+        if self.operation_pump is not None:self.operation_pump()
         self.supervisor.pump(self.material, bind_ready=True, on_publication=self._published,
             on_bootstrap_load=self._allow_bootstrap, bootstrap_completion=lambda: self._physical_completion)
         self.mapper.pump(before_outputs=self._ingest)
@@ -396,13 +423,14 @@ class ProcessorFlowRig:
             self.port.publish_scene(None if self.mapper.scene is None else canonical(self.mapper.scene))
             self.publications.discard_pending();self.mapper.discard_outputs()
             self._mapping_scene=self.mapper.scene
-        self.sensor_owner.ingest(self.mapper.context_bytes() if context is None else context,now_us=self.now)
+        inputs=self.sensor_owner.ingest(self.mapper.context_bytes() if context is None else context,now_us=self.now)
         revision=self.sensor_owner.fence_revision
         if revision!=self._sensor_fence:
             self.compute.fence_admission(revision)
             self.publications.fence_admission(revision)
             self.mapper.discard_outputs()
             self._sensor_fence=revision
+        self.mapper.operation_step(inputs=inputs,sensor_state=self.sensor_owner,origin=self.mapper.origin)
 
     def wait(self, predicate, label, *, timeout=45.):
         deadline = time.monotonic() + timeout
@@ -608,6 +636,18 @@ class ProcessorFlowRig:
             admission_revision=1, expected_mapper_boot=source['mapper_boot'],
             expected_mapper_instance=source['mapper_instance'], expected_clock_epoch=source['clock_epoch'])
         probe.mapper_trust.CopyFrom(trust)
+        if self.operation_probe_mode is not None:
+            if self.operation_probe_mode not in ('WAIT','MANUAL','AUTO') or self.vehicle_sequence==0:
+                raise ValueError('explicit software operation mode and original Vehicle required')
+            self._operation_probe_revision+=1
+            probe.operation_gate.CopyFrom(schema.PiOperationGate(
+                gateway_instance=UUID(self.origin['gateway_instance']).bytes,control_generation=1,
+                operation_revision=self._operation_probe_revision,
+                mode={'WAIT':0,'AUTO':1,'MANUAL':2}[self.operation_probe_mode],
+                wait_confirmed=self.operation_probe_mode=='WAIT',
+                manual_local_admitted=self.operation_probe_mode=='MANUAL',vehicle_sequence=self.vehicle_sequence,
+                stop_command_sequence=1 if self.operation_probe_mode=='WAIT' else 0,
+                valid_until_pi_us=self.now+200_000))
         self.last_probe_raw = encode(probe)
         self.jio.deliver_probe(self.last_probe_raw)
         self.lease = self.jio.current_lease

@@ -316,7 +316,8 @@ class MapCheckpointCollector:
         self._alignment_clock=None
         self._durable_tiles={};self._durable_catalog=();self._tile_revision_head=0;self._pending=None;self._retained=None
         self._draft_snapshot=None;self._generation=0
-        self._durable_highwaters=(1,1);self._subsystem_state={}
+        self._durable_highwaters=(1,1);self._subsystem_state={};self._route_roots=()
+        self._route_membership=None;self._route_membership_issue='ABSENT'
         self._atlas_proof=None;self._atlas_owner=None;self._atlas_checkpoint_snapshot=None
 
     def reframe_atlas_proof(self,proof):
@@ -359,6 +360,7 @@ class MapCheckpointCollector:
                 if identity:pending.append(identity)
         pending.extend(self._vehicle_refs.values())
         pending.extend(mapper_state_roots(self._subsystem_state))
+        pending.extend(self._route_roots)
         pending.extend(self._reference_geometry.values())
         for tile in self._durable_tiles.values():
             if type(tile) is not TileVersion:
@@ -375,6 +377,23 @@ class MapCheckpointCollector:
             if record is None:raise MapCheckpointNotReady('live map parent closure missing')
             records[identity]=record;pending.extend(record.parents)
         self._records=records;self._contexts={record.context_sha256:self._contexts[record.context_sha256] for record in records.values()}
+
+    def retain_route_roots(self,roots):
+        """채택 후보의 최대3개 원 root를 CP 전까지 보존한다. 저장 성공을 만들지는 않는다."""
+        if type(roots) is not tuple or len(roots)>3:
+            raise MapCheckpointNotReady('bounded distinct original route roots required')
+        for identity in roots:
+            uint(identity,positive=True)
+            if identity not in self._records:
+                raise MapCheckpointNotReady('prepared route root is absent from this original collector')
+        if len(set(roots))!=len(roots):
+            raise MapCheckpointNotReady('bounded distinct original route roots required')
+        self._route_roots=roots
+
+    @property
+    def route_checkpoint_membership(self):
+        """마지막 원 COMMITTED의 작은 자료 사실이다. 현재 source/주행 사용권이 아니다."""
+        return self._route_membership
 
     def _record(self,frame,parents,mask,kind,raw_keys=(),pi_interval=None):
         context=self.scope.context_record('METRIC');self._contexts[context.sha256]=context
@@ -572,7 +591,7 @@ class MapCheckpointCollector:
         self._retained=complete;self._grid=pipeline.grid;self._durable_tiles={(tile.tile_x,tile.tile_y):tile for tile in complete.tiles}
         self._durable_catalog=complete.evidence.catalog;self._records={p.provenance_id:p for p in complete.evidence.provenance}
         self._durable_highwaters=complete.evidence.catalog_highwaters
-        self._subsystem_state={key:state[key] for key in ('lane_catalog','parking_catalog','road_basis') if key in state}
+        self._subsystem_state={key:state[key] for key in ('lane_catalog','parking_catalog','road_basis','route_records') if key in state}
         used={p.context_sha256 for p in self._records.values()}
         self._contexts={c.sha256:c for c in complete.evidence.contexts if c.sha256 in used}
         self._reference_geometry=dict(state['reference_provenance']);self._rgb_refs={};self._vehicle_refs={};self._alignment_record=None
@@ -598,7 +617,18 @@ class MapCheckpointCollector:
         self._durable_catalog=request.payload.evidence.catalog;self._pending=None
         self._durable_highwaters=request.payload.evidence.catalog_highwaters
         state,_=decode_mapper_state(json_bytes(request.payload.manifest,16384)['scene'],request.payload.evidence.contexts)
-        self._subsystem_state={key:state[key] for key in ('lane_catalog','parking_catalog','road_basis') if key in state}
+        self._subsystem_state={key:state[key] for key in ('lane_catalog','parking_catalog','road_basis','route_records') if key in state}
+        if 'route_records' in state:
+            from .mapper_route_checkpoint import RouteCheckpointNotReady,from_committed
+            try:
+                membership=from_committed(request,receipt,scope=self.scope,observed_us=now_us,
+                    current_context_sha256=self.scope.context.sha256,now_us=now_us)
+            except RouteCheckpointNotReady:
+                # CP의 실제 저장 결과와 선택형 route membership 수락을 별도로 보존한다.
+                self._route_membership_issue='ROUTE_MEMBERSHIP_NOT_READY'
+            else:
+                self._route_membership=membership;self._route_membership_issue=None
+        else:self._route_membership_issue='ABSENT'
         self._draft_snapshot=None
         return True
 
@@ -810,11 +840,12 @@ class MapCheckpointCollector:
             state['alignment_clock']=self._alignment_clock
         state.update(self._subsystem_state)
         if subsystem_state is not None:
-            if type(subsystem_state) is not dict or set(subsystem_state)-{'lane_catalog','parking_catalog','road_basis','hazard'}:
+            if type(subsystem_state) is not dict or set(subsystem_state)-{'lane_catalog','parking_catalog','road_basis','hazard','route_records'}:
                 raise MapCheckpointNotReady('unknown mapper subsystem state')
             for key,value in subsystem_state.items():
                 if type(value) is not dict or value.get('profile')!={'lane_catalog':'lane-catalog-state-1',
-                        'parking_catalog':'parking-catalog-state-1','road_basis':'road-basis-1','hazard':'mapper-hazard-state-1'}[key]:
+                        'parking_catalog':'parking-catalog-state-1','road_basis':'road-basis-1','hazard':'mapper-hazard-state-1',
+                        'route_records':'mapper-route-records-1'}[key]:
                     raise MapCheckpointNotReady('unsupported original subsystem profile')
                 state[key]=value
         metadata,pages=encode_mapper_state(state)
@@ -1076,7 +1107,7 @@ def restore_pipeline(pipeline,complete,current_scope):
         'reference_provenance','alignment_provenance'}
     fields.add('map_from_odom_identity')
     fields.add('tile_revision_highwater')
-    if type(state) is not dict or set(state)-{'lane_catalog','parking_catalog','road_basis','alignment_clock','atlas','hazard'}!=fields:raise MapCheckpointNotReady('unsupported exact mapper pipeline state')
+    if type(state) is not dict or set(state)-{'lane_catalog','parking_catalog','road_basis','alignment_clock','atlas','hazard','route_records'}!=fields:raise MapCheckpointNotReady('unsupported exact mapper pipeline state')
     context=StorageContext.from_fields(state['storage_context'])
     if (state['profile']!='mapper-pipeline-state-1' or context!=complete.original_job.context
             or any(getattr(context,name)!=getattr(current,name) for name in ('database_uuid','map_epoch','frame_epoch','odom_epoch','pi_host_boot','configuration','calibration','primitive_sha256'))

@@ -123,7 +123,7 @@ def _basis_roots(state):
 
 @dataclass(frozen=True)
 class CatalogDraft:
-    original_job: MapperInput
+    original_job: object  # physical MapperInput 또는 별도 factory의 PcFrameProofDraft 원본
     context: StorageContext
     accepted_revision: int
     state: MappingState
@@ -224,15 +224,40 @@ class MapperCatalogs:
 
     def prepare(self, original_job, result, *, context, stamp, capture_prior, registration_revision,
             prior_qualified, metric_evidence, lane_provenance_ids, base_evidence, now_us, roi_bounds):
+        self._owner();uint(now_us)
+        if type(original_job) is not MapperInput:
+            raise ValueError('original physical MapperInput required')
+        return self._prepare(original_job,result,context=context,stamp=stamp,capture_prior=capture_prior,
+            registration_revision=registration_revision,prior_qualified=prior_qualified,metric_evidence=metric_evidence,
+            lane_provenance_ids=lane_provenance_ids,base_evidence=base_evidence,now_us=now_us,roi_bounds=roi_bounds,
+            original_rgb_sequence=original_job.sample.rgb.sequence,original_context_bytes=original_job.context_bytes)
+
+    def prepare_pc(self,proof,result,*,capture_prior,registration_revision,prior_qualified,now_us,roi_bounds):
+        """원 PC/D-range proof만 별도 입구로 받는다. CAMERA FrameEvidence를 가장하지 않는다."""
+        from .pc_mapper_storage import PcFrameProofDraft
+        self._owner();uint(now_us)
+        if type(proof) is not PcFrameProofDraft or self._accepted.parking._kind!='SYNTHETIC':
+            raise ValueError('exact PC proof and SYNTHETIC catalog required')
+        proof.validate_for_catalog(self.context,now_us=now_us)
+        identity=proof.record.provenance_id
+        return self._prepare(proof,result,context=proof.storage_context,stamp=proof.frame.observation.rgb.stamp,
+            capture_prior=capture_prior,registration_revision=registration_revision,prior_qualified=prior_qualified,
+            metric_evidence=proof.metric_evidence,lane_provenance_ids=(identity,identity),base_evidence=proof.evidence,
+            now_us=now_us,roi_bounds=roi_bounds,original_rgb_sequence=proof.rgb_sequence,
+            original_context_bytes=proof.context_bytes)
+
+    def _prepare(self,original_job,result,*,context,stamp,capture_prior,registration_revision,
+                 prior_qualified,metric_evidence,lane_provenance_ids,base_evidence,now_us,roi_bounds,
+                 original_rgb_sequence,original_context_bytes):
         self._owner(); uint(now_us)
         if self._staged is not None or self._transition is not None:
             raise CatalogNotReady('original draft/publication transition is unresolved')
-        if (type(original_job) is not MapperInput or type(result) is not PerceptionResult
+        if (type(result) is not PerceptionResult
                 or type(stamp) is not FrameStamp or type(context) is not StorageContext
                 or context != self.context or now_us >= original_job.expires_us
-                or original_job.sample.rgb.sequence != stamp.sequence):
+                or original_rgb_sequence != stamp.sequence):
             raise ValueError('original current mapper job/source/context required')
-        raw_context = json_bytes(original_job.context_bytes, 65536)
+        raw_context = json_bytes(original_context_bytes, 65536)
         if raw_context.get('context_sha256') != context.sha256 or raw_context.get('storage_context') != context.fields:
             raise ValueError('catalog context differs from original mapper job bytes')
         summary, snapshot = result.summary, result.map_snapshot

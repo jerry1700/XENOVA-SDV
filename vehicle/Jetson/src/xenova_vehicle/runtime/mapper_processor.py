@@ -14,12 +14,21 @@ from .resident_transport import j_us
 
 
 @dataclass(frozen=True)
+class _RouteCandidate:
+    """채택할 원 META와 root만 고정한다. 영상·CP request·저장 성공은 보유하지 않는다."""
+    state_bytes: bytes
+    scope: object
+    roots: tuple
+
+
+@dataclass(frozen=True)
 class _FrameCandidate:
     """같은 관측 경계에서 채택할 원 sequence/scene/hazard 참조. 외부 요청은 없다."""
     sequence: int
     scene: object=None
     hazard: object=None
     scene_row: bytes | None=None
+    route: _RouteCandidate | None=None
 
 
 class ResidentMapperProcessor:
@@ -77,6 +86,8 @@ class ResidentMapperProcessor:
         self._staged=None
         self._bootstrap_source=self._durable_source=None
         self._restore_attempt=None
+        self._route_candidate=self._route_membership=self._route_restore_key=None
+        self._route_status='ABSENT'
 
     def admission_fenced(self,revision,reason):
         """같은 compute owner에서만 원 admission 철회를 소비한다. map/parser는 유지한다.
@@ -128,6 +139,7 @@ class ResidentMapperProcessor:
         self._maintain_scene()
         status=(self._mapping_status if self._storage_schedule is None else
             self._storage_schedule.step(self._mapping_status,now_us=self.clock()))
+        self._maintain_route_membership()
         # step이 실제 원 terminal을 소비한 뒤 동일 compute owner에 전달한다.
         if self._scene is not None:
             from .scene import SceneError
@@ -199,8 +211,8 @@ class ResidentMapperProcessor:
     def _scene_checkpoint_arguments(self):
         """증분 CP에 원 동결 base 계보를 보존한다. 새 scene/셀 시각을 발급하지 않는다."""
         arguments={}
-        hazard=self._hazard_checkpoint_state()
-        if hazard:arguments['subsystem_state']=hazard
+        subsystem=self._checkpoint_subsystems()
+        if subsystem:arguments['subsystem_state']=subsystem
         if self._scene is None:return arguments
         frozen=self._scene.scene._frozen
         if frozen is None or frozen.receipt is None:return arguments
@@ -228,6 +240,46 @@ class ResidentMapperProcessor:
         if (self._hazard is None or self._hazard.snapshot is None or self._mapping is None
                 or self._mapping._pipeline is None or self._mapping._context is None):return {}
         return self._hazard.state_fields(self._mapping._pipeline,self._mapping._context,self._config.sha256)
+
+    def _route_checkpoint_state(self):
+        """현재 geometry 소유와 호환되는 채택 META만 복사한다. 새 관측/영수증을 만들지 않는다."""
+        candidate=self._route_candidate
+        if candidate is None or self._mapping is None or self._mapping.evidence_scope is None:return {}
+        from ..storage.contracts import json_bytes
+        from ..storage.geometry_scope import same_catalog_geometry
+        scope=self._mapping.evidence_scope
+        if (not same_catalog_geometry(candidate.scope.context,scope.context,'LANE')
+                or candidate.scope.calibration.sha256!=scope.calibration.sha256
+                or candidate.scope.method_manifest_sha256!=scope.method_manifest_sha256):return {}
+        return {'route_records':json_bytes(candidate.state_bytes,16384)}
+
+    def _checkpoint_subsystems(self):
+        return dict(self._hazard_checkpoint_state(),**self._route_checkpoint_state())
+
+    @property
+    def route_checkpoint_membership(self):
+        """원 COMMITTED/완전 LOAD의 자료 사실이다. Pi 수락이나 현재 route 사용권이 아니다."""
+        return self._route_membership
+
+    def _maintain_route_membership(self):
+        owner=self._mapping
+        if owner is None or owner.collector is None:return
+        membership=owner.collector.route_checkpoint_membership
+        if membership is not None:self._route_membership=membership
+        source=self._durable_source
+        if source is None or owner.evidence_scope is None:return
+        # 같은 CP의 새 실제 LOAD/head 또는 새 승인 scope는 별도 원 사실로 검산한다.
+        key=(source.checkpoint_ref,source.page_receipts[-1][0].job.job_id,owner.evidence_scope.context.sha256)
+        if self._route_restore_key==key:return
+        from ..storage.contracts import json_bytes
+        self._route_restore_key=key
+        if source.state is None or 'route_records' not in json_bytes(source.state,512*1024):return
+        from .mapper_route_checkpoint import RouteCheckpointNotReady,from_complete
+        try:loaded=from_complete(source,scope=owner.evidence_scope,now_us=self.clock())
+        except RouteCheckpointNotReady:self._route_status='LOAD_MEMBERSHIP_NOT_READY'
+        else:
+            # 최초 LOAD 사실만 선택한다. 이후 새 실제 COMMITTED를 옛 bootstrap으로 덮지 않는다.
+            if self._route_membership is None:self._route_membership=loaded
 
     def _queue_scene_freeze(self,now):
         """원 Pi commit nonce의 CP 하나만 준비한다. 큰 사본/검산은 maintenance 밖으로 새지 않는다."""
@@ -274,13 +326,13 @@ class ResidentMapperProcessor:
                 self._scene_status='SCENE_FREEZE_EXPIRED';return
         snapshot=request=None;described=False
         try:
-            hazard_state=self._hazard_checkpoint_state()
+            subsystem_state=self._checkpoint_subsystems()
             snapshot=owner.collector.snapshot(owner._pipeline,job,now_us=now,
-                subsystem_state=dict(owner.catalogs.state_fields(),**hazard_state),include_unchanged=True)
+                subsystem_state=dict(owner.catalogs.state_fields(),**subsystem_state),include_unchanged=True)
             refs=owner.collector.current_tile_references(owner._pipeline,snapshot)
             descriptor=coordinator.freeze_scene(job,current_tile_references=refs,current_hazard_revision=hazard,now_j_us=now)
             described=True
-            request=owner.queue_checkpoint(job,now_us=now,scene=descriptor,subsystem_state=hazard_state)
+            request=owner.queue_checkpoint(job,now_us=now,scene=descriptor,subsystem_state=subsystem_state)
             # 이 원 request의 수락 뒤부터 기존 pending/terminal owner가 회수한다.
             self._scene_freeze_attempt=attempt;self._scene_freeze_prequeue=None
             archive=(None if snapshot.atlas_owner is None else
@@ -335,8 +387,17 @@ class ResidentMapperProcessor:
     def queue_mapping_checkpoint(self,job,*,now_us=None,scene=None,subsystem_state=None,scene_at_snapshot=None):
         """명시 원 job을 compute 유지 단계에서 고정한다. 호출 자체는 외부 D offer가 아니다."""
         if self._mapping is None:raise RuntimeError('actual mapping controller is not initialized')
+        from ..storage.contracts import canonical
+        from .map_checkpoint import MapCheckpointNotReady
+        expected=self._route_checkpoint_state()
+        if subsystem_state is not None:
+            if type(subsystem_state) is not dict:raise ValueError('explicit independent subsystem object required')
+            if ('route_records' in subsystem_state and ('route_records' not in expected
+                    or canonical(subsystem_state['route_records'])!=canonical(expected['route_records']))):
+                raise MapCheckpointNotReady('route META must be the original adopted frame candidate')
+            expected=dict(subsystem_state,**expected)
         return self._mapping.queue_checkpoint(job,now_us=self.clock() if now_us is None else now_us,
-            scene=scene,subsystem_state=subsystem_state,scene_at_snapshot=scene_at_snapshot)
+            scene=scene,subsystem_state=expected or None,scene_at_snapshot=scene_at_snapshot)
 
     def queue_mapping_head_load(self,job):
         if self._mapping is None:raise RuntimeError('actual mapping controller is not initialized')
@@ -573,6 +634,39 @@ class ResidentMapperProcessor:
             self._scene.revoke('ALIGNMENT',now_j_us=now);self._scene_status='SCENE_FRAME_NOT_READY'
         return _FrameCandidate(sequence,self._scene_draft,hazard,self._scene_row)
 
+    def _prepare_route_candidate(self,sensors):
+        """같은 frozen frame/R2의 원 body를 채택 전에 준비한다. 실패는 route만 보류한다."""
+        from ..storage.contracts import canonical
+        from ..storage.geometry_scope import same_catalog_geometry
+        from .map_checkpoint import MapCheckpointNotReady
+        draft=self._mapping_draft;previous=self._route_candidate
+        if draft is None or not draft.ready or draft.frame is None or draft.catalog_draft is None:return previous
+        if previous is not None and (not same_catalog_geometry(previous.scope.context,draft.context,'LANE')
+                or previous.scope.calibration.sha256!=draft.frame.scope.calibration.sha256
+                or previous.scope.method_manifest_sha256!=draft.frame.scope.method_manifest_sha256):previous=None
+        try:draft.collector.retain_route_roots(() if previous is None else previous.roots)
+        except MapCheckpointNotReady:
+            previous=None;draft.collector.retain_route_roots(())
+        if sensors is None or sensors.mapper_reply_bytes is None:
+            self._route_status='WAIT_FROZEN_REPLY';return previous
+        try:
+            from .mapper_route_records import RoadRecordNotReady,prepare_observed_road_records
+            from .mapper_route_checkpoint import RouteCheckpointNotReady,from_prepared
+        except ImportError:
+            self._route_status='CONTRACT_UNAVAILABLE';return previous
+        try:
+            state=draft.catalog_draft.state
+            prepared=prepare_observed_road_records(draft,state,state.view.road_basis,sensors,
+                mapper_profile=self._config,original_mapper_reply=sensors.mapper_reply_bytes,completed_j_us=self.clock())
+            fields=from_prepared(prepared,sensors,state.evidence,scope=draft.frame.scope)['route_records']
+            raw=canonical(fields)
+            roots=tuple(sorted({row['provenance_id'] for row in fields['roots'].values()}))
+            draft.collector.retain_route_roots(roots)
+        except (RoadRecordNotReady,RouteCheckpointNotReady,MapCheckpointNotReady):
+            self._route_status='RECORDS_NOT_READY';return previous
+        self._route_status='PREPARED_NOT_DURABLE'
+        return _RouteCandidate(raw,draft.frame.scope,roots)
+
     def parse(self, item, checkpoint):
         from ..perception.yolop import decode_yolop
         from ..perception.decoders import decode_depth, decode_rgb
@@ -603,6 +697,7 @@ class ResidentMapperProcessor:
             else:
                 summary,sensors,diagnostic,restore_attempt,adopt_metric=self._metric(item,parsed,candidate,checkpoint)
             frame_state=self._prepare_frame_state(sensors)
+            frame_state=replace(frame_state,route=self._prepare_route_candidate(sensors))
             report=None
             if self._publication_port is not None:
                 report,world_reason=self._world_report(sensors,frame_state)
@@ -623,7 +718,7 @@ class ResidentMapperProcessor:
                 None if self._mapping is None else self._mapping.collector,
                 None if self._mapping is None or self._mapping.catalogs is None else self._mapping.catalogs._accepted,
                 None if self._scene is None else self._scene.scene,
-                None if self._hazard is None else self._hazard.snapshot)
+                None if self._hazard is None else self._hazard.snapshot,self._route_candidate)
             self._staged=(item.job_id,candidate,sensors,diagnostic,restore_attempt,self._mapping_draft,adopt_metric,retiring,report,frame_state)
             return payload
         except BaseException:
@@ -663,6 +758,7 @@ class ResidentMapperProcessor:
         if state.hazard is not None:self._hazard.accept(state.hazard)
         if state.scene is not None:self._scene.accept(state.scene,now_j_us=checked_j_us)
         self._frame_sequence=state.sequence
+        self._route_candidate=state.route
         if staged[8] is not None and self._publication_port.offer(staged[8],admission_revision=self._admission_revision,
                 scene_row=state.scene_row):self._world_sequence=state.sequence
         self._retired=staged

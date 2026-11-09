@@ -340,6 +340,8 @@ class MapperCompute:
         self._serial = 1
         self._admission_fence = 0
         self._admission_fence_reason = 'INITIAL_ADMISSION'
+        self._operation_serial = 0
+        self._operation_standby = False
         self._owner = threading.current_thread()
         self._condition = threading.Condition(adoption_lock)
         self._pending = {'RAW': None, 'NN': None}
@@ -365,6 +367,12 @@ class MapperCompute:
         return self._thread.is_alive()
 
     @property
+    def operation_lock(self):
+        """원 M-main의 설정 적용은 기존 채택 condition을 공유한다. 새 lock을 만들지 않는다."""
+        self._main()
+        return self._condition
+
+    @property
     def terminal_error(self):
         with self._condition:
             return self._terminal_error
@@ -377,11 +385,18 @@ class MapperCompute:
             self._started = True
             self._thread.start()
 
+    def _validate_input(self,item):
+        if type(item) is not MapperInput:
+            raise MapperComputeError('expected validated MapperInput')
+
+    def _check_current_input(self,active,now):
+        """기본 physical 경로는 추가 admission을 발급하거나 검사하지 않는다."""
+        pass
+
     def submit(self, item):
         """채택은 queue 예약뿐이다. lease 반환이나 parser/geometry 성공이 아니다."""
         self._main()
-        if type(item) is not MapperInput:
-            raise MapperComputeError('expected validated MapperInput')
+        self._validate_input(item)
         now = self._now()
         with self._condition:
             if not self._started or self._stopping:
@@ -399,6 +414,9 @@ class MapperCompute:
                     self._counts['duplicate_no_effect'] += 1
                     return False
             kind = 'NN' if item.nn_sequence is not None else 'RAW'
+            if kind == 'RAW' and self._operation_standby:
+                self._counts['operation_standby_rejected'] += 1
+                return False
             previous = self._pending[kind]
             # 원 seq가 큰 최신 후보를 보존한다. 같은 capture의 RAW와 NN은 다른 칸이다.
             if previous is not None and item.source_key[1:] <= previous[0].source_key[1:]:
@@ -451,6 +469,26 @@ class MapperCompute:
             self._events = deque(replace(event, accepted=False, reason='ADMISSION_FENCE')
                 if event.kind == 'GEOMETRY_COMPLETED' else event for event in self._events)
             self._counts['admission_fenced'] += 1
+            self._condition.notify_all()
+            return True
+
+    def set_operation_standby(self, standby):
+        """운영 gate 전이만 geometry를 취소한다. 센서·NN·factory·채택 map은 유지한다."""
+        self._main()
+        if type(standby) is not bool:
+            raise MapperComputeError('exact operation standby boolean required')
+        with self._condition:
+            if standby == self._operation_standby:
+                return False
+            if self._operation_serial == U64_MAX:
+                raise MapperComputeError('operation serial exhausted')
+            self._operation_serial += 1
+            self._operation_standby = standby
+            self._pending['RAW'] = None
+            self._result = None
+            self._events = deque(replace(event, accepted=False, reason='OPERATION_FENCE')
+                if event.kind == 'GEOMETRY_COMPLETED' else event for event in self._events)
+            self._counts['operation_fenced'] += 1
             self._condition.notify_all()
             return True
 
@@ -553,6 +591,7 @@ class MapperCompute:
         with self._condition:
             active = self._active
             return dict(source_generation=self._generation, generation_serial=self._serial,
+                operation_serial=self._operation_serial, operation_standby=self._operation_standby,
                 active=None if active is None else active['item'].job_id,
                 active_expires_us=None if active is None else active['item'].expires_us,
                 active_started_us=None if active is None else active['started'],
@@ -606,10 +645,16 @@ class MapperCompute:
         with self._condition:
             if self._stopping or active['serial'] != self._serial:
                 raise _Cancelled('STOP_OR_SOURCE_FENCE')
+            if active.get('metric_phase'):
+                if active['operation_serial'] != self._operation_serial:
+                    raise _Cancelled('OPERATION_FENCE')
+                if self._operation_standby:
+                    raise _Cancelled('OPERATION_STANDBY')
             snapshot = active['item'].sensor_snapshot
             if (active.get('metric_phase') and snapshot is not None
                     and snapshot.fence_revision != self._admission_fence):
                 raise _Cancelled('ADMISSION_FENCE')
+            self._check_current_input(active,now)
         if not active['item'].fresh(now):
             raise _Cancelled('SOURCE_EXPIRED')
         if active.get('parsing') and now >= active['parser_deadline']:
@@ -664,7 +709,8 @@ class MapperCompute:
                 kind = desired if self._pending[desired] is not None else ('NN' if desired == 'RAW' else 'RAW')
                 item, serial = self._pending[kind]
                 self._pending[kind] = None
-                active = dict(item=item, serial=serial, started=0)
+                # 선택과 같은 lock에서 고정한다. parse 중 STANDBY→RUN도 기존 기하를 되살리지 않는다.
+                active = dict(item=item, serial=serial, started=0, operation_serial=self._operation_serial)
                 self._active = active
                 self._last_kind = kind
             try:

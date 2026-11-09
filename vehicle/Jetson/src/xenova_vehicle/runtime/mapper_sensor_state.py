@@ -83,7 +83,8 @@ class SensorFrameSnapshot:
     """한 원 frame의 admitted proof다. mutable owner·PoseBuffer·SensorSamples는 보유하지 않는다.
 
     CalibrationProfile의 provenance는 bytes, SensorContext source도 bytes이며 property는
-    독립 사본이다. returned Probe/trust만 보존하며 Jetson에 없는 Pi P4를 생성하지 않는다.
+    독립 사본이다. returned Probe/trust와 선택 JIO Reply 생성 사실을 보존하며
+    Jetson에 없는 Pi P4를 생성하지 않는다. Reply 부재는 기존 metric 입력을 바꾸지 않는다.
     byte_length는 중복 bytes를 한 번 센 유한 proof closure 크기이며 RSS 측정값이 아니다.
     """
     calibration: object
@@ -99,6 +100,9 @@ class SensorFrameSnapshot:
     byte_length: int
     source_context_bytes: bytes
     clock_proofs: tuple
+    mapper_reply: object
+    pc_frame_proof: bytes | None
+    pc_binding_bytes: bytes | None
     _inputs: tuple
     _bracket: object
     _pose_args: tuple
@@ -117,6 +121,11 @@ class SensorFrameSnapshot:
 
     @property
     def p4_evidence(self):return None
+
+    @property
+    def mapper_reply_bytes(self):
+        """frame query 때 고정한 R2 생성 trace다. Pi P4나 R2 clock 승인이 아니다."""
+        return None if self.mapper_reply is None else self.mapper_reply.raw_reply_bytes
 
     def original_pose_bracket(self,pose):
         if self._bracket is None or self._bracket.pose is not pose:
@@ -185,6 +194,8 @@ class MapperSensorState:
         PoseBuffer(**self.pose_args)
         self._thread=threading.get_ident();self._identity=None
         self._development_context=None
+        self._pc_binding=None
+        self._pc_owner_token=None
         self.sensors=self.poses=None;self._seen_vehicle=OrderedDict();self._seen_tof=OrderedDict()
         self._pose_quarantined=False;self._vehicles={};self._vehicle_admissions=OrderedDict();self._last_bracket=None
         self._context=None;self._source=None;self._active=None;self._source_context_bytes=b''
@@ -230,6 +241,28 @@ class MapperSensorState:
             max_gap_us=pose['max_gap_us'],capacity=pose['capacity'],
             mapper_worker=mapper_worker,mapper_instance=mapper_instance)
         result._development_context=sensor_context
+        return result
+
+    @classmethod
+    def for_pc_source(cls,profile,pc_binding,clock_policy,*,sensor_context,mapper_worker,mapper_instance,pc_owner_token):
+        """원 PC descriptor를 명시 선택한다. physical RAW나 same-host SDK binding이 아니다."""
+        from ..simulation.pc_input import PcSourceBinding
+        from ..simulation.motion_profile import DevelopmentMotionProfile
+        if (type(profile) is not DevelopmentMotionProfile or type(pc_binding) is not PcSourceBinding
+                or type(sensor_context) is not SensorContext or sensor_context.domain!='DEVELOPMENT_SYNTHETIC'
+                or sensor_context.calibration is not profile.bound_calibration or pc_owner_token is None):
+            raise ValueError('exact PC development profile/context/owner token required')
+        pc_binding.check_profile(profile)
+        source=sensor_context.source
+        if (pc_binding.clock_id!=sensor_context.pose_clock_id
+                or clock_policy!=profile.clock_policy(device=source['device'],primitive=source['primitive'])):
+            raise ValueError('PC destination J clock or original policy differs')
+        arguments=profile.sensor_arguments;pose=profile.pose_arguments
+        result=cls(profile.bound_calibration,pc_binding,clock_policy,**arguments,
+            max_gap_us=pose['max_gap_us'],capacity=pose['capacity'],
+            mapper_worker=mapper_worker,mapper_instance=mapper_instance)
+        result._development_context=sensor_context
+        result._pc_binding=pc_binding;result._pc_owner_token=pc_owner_token
         return result
 
     def original_pose_bracket(self,pose):
@@ -290,7 +323,8 @@ class MapperSensorState:
         if (context.sha256!=value['context_sha256'] or context.source_binding!=canonical(binding)
                 or binding['raw_binding_sha256']!=self.raw.sha256
                 or binding['service_instance']!=self.raw.fields['service_instance']
-                or self.raw.fields['calibration_bundle']!=self.calibration.sha256
+                or self.raw.fields['calibration_profile_sha256' if self._pc_binding is not None
+                    else 'calibration_bundle']!=self.calibration.sha256
                 or (context.mapper_worker,binding['mapper_worker'])!=(self.mapper_worker,self.mapper_worker)
                 or (context.origin_mapper_instance,binding['mapper_instance'])!=(self.mapper_instance,self.mapper_instance)
                 or any(getattr(context,key)!=binding[key] for key in ('map_epoch','frame_epoch','odom_epoch','configuration','calibration'))
@@ -302,7 +336,7 @@ class MapperSensorState:
             calibration=self.policy.calibration,primitive=self.policy.primitive)
         if (type(source) is not dict or set(source)!=set(expected)|{'mapper_boot','mapper_instance','clock_epoch','map_epoch','frame_epoch','odom_epoch'}
                 or any(source[key]!=item for key,item in expected.items())
-                or source['clock_epoch']!=self.raw.fields['clock_epoch']
+                or source['clock_epoch']!=self.raw.fields['destination_clock_epoch' if self._pc_binding is not None else 'clock_epoch']
                 or any(source[key]!=binding[key] for key in ('mapper_instance','map_epoch','frame_epoch','odom_epoch','configuration','calibration','primitive'))
                 or origin!={key:geometry[key] for key in ('pi_host_boot','gateway_instance','device_session','pi_session')}
                 or geometry['vehicle']!=source['vehicle'] or self.calibration.vehicle_bundle_sha256!=source['calibration']):
@@ -403,14 +437,31 @@ class MapperSensorState:
     def read(self,context_bytes,capture_stamp,*,now_us):
         """legacy 편의 입구다. 생산 main은 ingest, compute는 frame snapshot만 사용한다."""
         self._owned()
+        if self._pc_binding is not None:
+            raise ValueError('PC source requires independent ingest and frame_snapshot_pc')
         if type(capture_stamp) is not FrameStamp or type(now_us) is not int or now_us<capture_stamp.available_us:
             raise ValueError('original full-capture stamp and actual compute time required')
         self.ingest(context_bytes,now_us=now_us)
         return self._query(capture_stamp,now_us)
 
-    def frame_snapshot(self,capture_stamp,*,now_us,expires_us,job_id,source_generation,source_key):
+    def frame_snapshot(self,capture_stamp,*,now_us,expires_us,job_id,source_generation,source_key,clock_replies=()):
         """원 frame에 대한 유한 query 결과만 고정한다. ingest나 새 clock/admission은 수행하지 않는다."""
         self._owned()
+        if self._pc_binding is not None:
+            raise ValueError('PC owner requires frame_snapshot_pc and original mapped proof')
+        return self._frame_snapshot(capture_stamp,now_us=now_us,expires_us=expires_us,job_id=job_id,
+            source_generation=source_generation,source_key=source_key,clock_replies=clock_replies)
+
+    def _frame_snapshot(self,capture_stamp,*,now_us,expires_us,job_id,source_generation,source_key,
+                        clock_replies=(),pc_frame_proof=None,pc_binding_bytes=None):
+        self._owned()
+        if pc_frame_proof is not None and (type(pc_frame_proof) is not bytes
+                or canonical(json_bytes(pc_frame_proof,16384))!=pc_frame_proof):
+            raise SensorSnapshotUnavailable('bounded canonical original PC frame proof required')
+        if ((pc_frame_proof is None)!=(pc_binding_bytes is None)
+                or pc_binding_bytes is not None and (type(pc_binding_bytes) is not bytes
+                    or canonical(json_bytes(pc_binding_bytes,2048))!=pc_binding_bytes)):
+            raise SensorSnapshotUnavailable('whole original PC descriptor/proof pair required')
         from ..storage.contracts import uuid
         uuid(job_id);_frame_key(source_key)
         if (type(source_generation) is not str or not 1<=len(source_generation)<=256
@@ -421,6 +472,22 @@ class MapperSensorState:
                 or self._last_ingest_us is not None and now_us<self._last_ingest_us):
             raise SensorSnapshotUnavailable('original frame unavailable, expired, or query time regressed')
         inputs=self._query(capture_stamp,now_us)
+        from .mapper_reply_trace import MapperReplyTrace,MAX_REPLY_TRACES
+        if type(clock_replies) is not tuple or len(clock_replies)>MAX_REPLY_TRACES:
+            raise SensorSnapshotUnavailable('bounded immutable original Reply trace tuple required')
+        mapper_reply=None
+        if inputs.clock_lease is not None and inputs.source is not None:
+            origin=self._context.geometry_origin_fields
+            origin={key:origin[key] for key in ('pi_host_boot','gateway_instance','device_session','pi_session')}
+            probe_key=sha256(inputs.clock_lease.raw_probe_bytes).hexdigest()
+            row=json_bytes(self._source_context_bytes,65536)['probes'].get(probe_key)
+            original_probe=None if row is None else _row(row)
+            matches=tuple(trace for trace in clock_replies if type(trace) is MapperReplyTrace
+                and trace.raw_probe_bytes==inputs.clock_lease.raw_probe_bytes
+                and trace.source==inputs.source and trace.origin==origin
+                and original_probe is not None and original_probe[:2]==(trace.raw_probe_bytes,trace.probe_received_j_us)
+                and trace.probe_received_j_us<=trace.generated_j_us<=now_us)
+            if matches and all(trace==matches[0] for trace in matches):mapper_reply=matches[0]
         records=self.vehicle_admissions
         frozen=None if self.sensors is None else self.sensors.freeze()
         leases=tuple(row.evidence.clock_lease for row in records)
@@ -437,8 +504,13 @@ class MapperSensorState:
         values=(inputs.storage_context,source,inputs.clock_lease,inputs.pose,inputs.vehicle,inputs.tof,
             inputs.sensor_resets,inputs.delivery_metadata,inputs.reasons)
         raw_bytes={self._source_context_bytes,semantics,canonical(self.calibration.to_dict())}
+        if pc_frame_proof is not None:raw_bytes.add(pc_frame_proof)
+        if pc_binding_bytes is not None:raw_bytes.add(pc_binding_bytes)
         if source is not None:raw_bytes.add(source)
         raw_bytes.update(part for proof in clock_proofs for part in (proof[1],proof[3]))
+        if mapper_reply is not None:
+            raw_bytes.update((mapper_reply.raw_probe_bytes,mapper_reply.raw_reply_bytes,
+                mapper_reply.source_bytes,mapper_reply.origin_bytes))
         raw_bytes.update(row.evidence.wire for row in records)
         if frozen is not None:
             raw_bytes.add(frozen.context._source)
@@ -448,6 +520,10 @@ class MapperSensorState:
             expires_us=expires_us,snapshot_j_us=now_us,fence_revision=self.fence_revision,
             capture_stamp=asdict(capture_stamp),pose_args=self.pose_args,
             clock_proofs=[(proof[0],proof[2]) for proof in clock_proofs],
+            mapper_reply=None if mapper_reply is None else dict(probe_sha256=mapper_reply.probe_sha256,
+                reply_sha256=sha256(mapper_reply.raw_reply_bytes).hexdigest(),
+                generated_j_us=mapper_reply.generated_j_us,expires_j_us=mapper_reply.expires_j_us,
+                probe_received_j_us=mapper_reply.probe_received_j_us),
             pose=None if inputs.pose is None else asdict(inputs.pose),
             metadata=inputs.delivery_metadata,reasons=inputs.reasons,resets=[asdict(value) for value in inputs.sensor_resets],
             admissions=[dict(wire_sha256=row.evidence.wire_sha256,admitted_j_us=row.admitted_j_us,received_j_us=row.received_j_us,
@@ -460,8 +536,37 @@ class MapperSensorState:
         fields=dict(calibration=self.calibration,sensors=frozen,vehicle_admissions=records,capture_stamp=capture_stamp,
             job_id=job_id,source_generation=source_generation,source_key=source_key,expires_us=expires_us,
             snapshot_j_us=now_us,fence_revision=self.fence_revision,byte_length=byte_length,
-            source_context_bytes=self._source_context_bytes,clock_proofs=clock_proofs,_inputs=values,
+            source_context_bytes=self._source_context_bytes,clock_proofs=clock_proofs,mapper_reply=mapper_reply,_inputs=values,
+            pc_frame_proof=pc_frame_proof,
+            pc_binding_bytes=pc_binding_bytes,
             _bracket=self._last_bracket,_pose_args=tuple(self.pose_args.items()),
             _context_semantics=semantics)
         for name,value in fields.items():object.__setattr__(result,name,value)
         return result
+
+    def frame_snapshot_pc(self,pc_frame,*,current_pc_view,now_us,expires_us,job_id,source_generation,
+                          source_key,clock_replies=()):
+        """원 mapped PC frame/proof만 query한다. PC/J clock 또는 source admission을 발급하지 않는다."""
+        self._owned()
+        from dataclasses import replace
+        from ..simulation.pc_input import PcFrameInput
+        from ..simulation.wall_sensor import MAX_CAPTURE_LIFETIME_US
+        from ..perception.inputs import PerceptionInput
+        if self._pc_binding is None or type(pc_frame) is not PcFrameInput:
+            raise ValueError('explicit PC owner and original PcFrameInput required')
+        pc_frame.validate_original()
+        pc_frame.validate_current(current_pc_view,now_us,binding=self._pc_binding,owner_token=self._pc_owner_token)
+        observation=pc_frame.observation;full=observation.capture_interval
+        if (type(observation) is not PerceptionInput or observation.kind!='SYNTHETIC'
+                or observation.calibration_id!=self.calibration.sha256
+                or observation.rgb.stamp.source_id!=self._pc_binding.source_id
+                or observation.rgb.stamp.clock_id!=self._pc_binding.clock_id
+                or expires_us!=pc_frame.expires_j_us or source_generation!=self._pc_binding.sha256
+                or source_key!=observation.rgb.stamp.key or full is None or full[0]>=full[1]
+                or not full[1]<expires_us<=full[0]+MAX_CAPTURE_LIFETIME_US):
+            raise ValueError('original PC frame hull/generation/key/expiry differs')
+        stamp=replace(observation.rgb.stamp,captured_us=full,available_us=max(observation.rgb.stamp.available_us,
+            0 if observation.depth is None else observation.depth.stamp.available_us))
+        return self._frame_snapshot(stamp,now_us=now_us,expires_us=expires_us,job_id=job_id,
+            source_generation=source_generation,source_key=source_key,clock_replies=clock_replies,
+            pc_frame_proof=pc_frame.proof_bytes,pc_binding_bytes=self._pc_binding.canonical_bytes)
