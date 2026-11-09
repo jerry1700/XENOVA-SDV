@@ -37,5 +37,6 @@ if(CONFIG_XENOVA_DRIVE_LATTICE)
     ${DRIVE_WORLD}/world.c ${DRIVE_WORLD}/generated/world.pb.c
     ${DRIVE_WORLD}/nanopb/pb_common.c ${DRIVE_WORLD}/nanopb/pb_decode.c ${DRIVE_WORLD}/nanopb/pb_encode.c
     ${DRIVE_PLANNER}/task_reference.c ${DRIVE_PLANNER}/behavior.c ${DRIVE_PLANNER}/parking.c
-    ${DRIVE_PLANNER}/lattice.c ${DRIVE_PLANNER}/engine.c ${DRIVE_PRIMITIVES})
+    ${DRIVE_PLANNER}/lattice.c ${DRIVE_PLANNER}/route_plan.c ${DRIVE_PLANNER}/route_reference.c
+    ${DRIVE_PLANNER}/route_exit.c ${DRIVE_PLANNER}/route_progress.c ${DRIVE_PLANNER}/engine.c ${DRIVE_PRIMITIVES})
 endif()

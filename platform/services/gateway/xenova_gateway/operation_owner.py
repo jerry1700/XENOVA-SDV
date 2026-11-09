@@ -180,7 +180,8 @@ class OperationOwner:
         if mode=='MANUAL':return True,None,now+100000,peer
         attempt=value['parking_attempt']
         if attempt is not None and (attempt['result']=='PARKED' or attempt['result']=='CANCELLED' and attempt['execution_deadline']):
-            return False,'ROUTE_NOT_READY',now,peer
+            routes=getattr(self.o,'routes',None)
+            return (False,'ROUTE_NOT_READY',now,peer) if routes is None else routes.exit_inputs()
         report=self.reports.get(peer)
         if not self.supported(peer) or report is None:return False,'PREFLIGHT_UNAVAILABLE',now,None
         body=report['body']
@@ -211,6 +212,8 @@ class OperationOwner:
             None if source is None else tuple(getattr(source,k) for k in
                 ('mapper_boot','mapper_instance','map_epoch','frame_epoch','odom_epoch','clock_epoch','configuration','calibration','reference_id')),
             None if scene is None else (bytes(scene.scene.admission_id),scene.scene.admission_revision))
+        routes=getattr(self.o,'routes',None)
+        if routes is not None:context+=(routes.readiness_context(),)
         if self.semantic is not None and context!=self.semantic:self.ready_revision=advance(self.ready_revision)
         self.semantic=context
         return ok,reason,end,peer

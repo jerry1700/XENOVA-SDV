@@ -15,12 +15,13 @@
 #define DW_LANE_MODEL 2u
 #define DW_PARKING_MODEL 4u
 #define DW_LOCALIZATION_BOUNDS 8u
-#define DW_WORLD_FEATURES 15u
+#define DW_WORLD_FEATURES 31u
 #define DW_STATE_FEATURES 7u
 #define DW_TASK_REFERENCE 8u
 #define DW_EPISODE 16u
 #define DW_OPERATION 32u
-#define DW_STATE_KNOWN_FEATURES (DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION)
+#define DW_ROUTE 64u
+#define DW_STATE_KNOWN_FEATURES (DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION|DW_ROUTE)
 #define DW_CELL_ROAD 8u
 typedef xenova_drive_Pose dw_pose;
 typedef xenova_drive_Point dw_point;
@@ -135,4 +136,5 @@ float dw_angle(float);
 dw_pose dw_compose(dw_pose,dw_pose);
 dw_pose dw_inverse(dw_pose);
 const char *dw_reason(enum dw_result);
+#include "route.h"
 #endif

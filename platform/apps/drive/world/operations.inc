@@ -64,7 +64,7 @@ enum dw_result dw_mapper_operation_probe_validate(const xenova_drive_MapperClock
 }
 enum dw_result dw_mapper_operation_reply_validate(const xenova_drive_MapperClockReply *r){
  if(!r||!typed_valid(r,xenova_drive_MapperClockReply_fields,0))return DW_ARRAY;
- return r->has_supported_mapper_features&&(r->supported_mapper_features&~1u)?DW_VERSION:DW_OK;
+ return r->has_supported_mapper_features&&(r->supported_mapper_features&~3u)?DW_VERSION:DW_OK;
 }
 bool dw_preflight_source_matches(const xenova_drive_EpisodeSourceContext *s,const dw_world *w){
  static const char hex[]="0123456789abcdef";

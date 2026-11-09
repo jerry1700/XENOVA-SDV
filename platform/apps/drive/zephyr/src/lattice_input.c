@@ -271,6 +271,9 @@ struct guest_clock_slot {
  bool pending_valid,confirmed_valid,sent_has_receipt,gate_available;
 };
 static struct guest_clock_slot guest_clocks[2];
+#if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+static void route_context_change(bool hard,bool auto_target);
+#endif
 static struct dw_trust latest_trust;
 /* One real phase event, not a history supplied by callers. Newer P4 clocks
  * cannot map an earlier event before their G0 support. Keep the original
@@ -414,6 +417,9 @@ void dl_context(const struct xd_inputs *inputs){
  if(k_mutex_lock(&input_context_lock,K_NO_WAIT))return;
  uint32_t previous_generation=control_generation;
  bool valid=inputs->connected&&!inputs->control.error&&!strcmp(inputs->control.sender,"dom0-gateway")&&inputs->control.instance[0];
+#if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+ bool route_hard=!valid||strcmp(gateway,inputs->control.instance),route_auto_target=false;
+#endif
  if(!valid||strcmp(gateway,inputs->control.instance)){
   episode_event_clear();
   preflight_withdraw();preflight_floor_guest=0;preflight_last_probe=0;operation_available=false;
@@ -427,12 +433,18 @@ void dl_context(const struct xd_inputs *inputs){
  struct xm_vehicle_control control;control_generation=0;active_vm[0]=0;
  if(valid&&!xm_vehicle_control_parse((struct xm_span){inputs->control.payload,inputs->control.length},&control)){
   control_generation=control.generation;strcpy(active_vm,control.active_vm_id);
+#if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+  route_auto_target=!strcmp(control.mode,"AUTO")&&!strcmp(control.active_app,"autonomous")&&!strcmp(control.active_vm_id,inputs->vm_id);
+#endif
  }else episode_event_clear();
  if(previous_generation!=control_generation){
   episode_event_clear();
   preflight_withdraw();preflight_floor_guest=0;operation_available=false;
   episode_available=facts_available=false;episode_pending_clear();
  }
+ #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+ if(route_hard||previous_generation!=control_generation)route_context_change(route_hard,route_auto_target);
+ #endif
  k_mutex_unlock(&input_context_lock);
 }
 static bool same_receipt(const xenova_drive_GuestClockReceipt *a,const xenova_drive_GuestClockReceipt *b){
@@ -760,6 +772,7 @@ int dl_episode_take(xenova_drive_EpisodeRequest *request,xenova_drive_EpisodeRec
  if(!rc){*request=episode_request;*reply=episode_reply;episode_pending_clear();}
  k_mutex_unlock(&input_context_lock);return rc;
 }
+#include "lattice_route_input.inc"
 static int vehicle_received(void *unused,const uint8_t *bytes,size_t count,int64_t received){
  ARG_UNUSED(unused);ARG_UNUSED(received);
  dw_vehicle sample;enum dw_result decoded=dw_vehicle_decode(bytes,count,&sample);
@@ -801,6 +814,9 @@ static int vehicle_received(void *unused,const uint8_t *bytes,size_t count,int64
  }
  if(rc)VEHICLE_REJECT(14,rc,-EAGAIN,&sample,true,now);
  VEHICLE_DIAG(17,0,0,&sample,true,now,source_error);
+ #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+ route_vehicle_observe(bytes,count,&sample);
+ #endif
  received_vehicle=sample.pi_sample_us;return 0;
 #undef VEHICLE_REJECT
 }
@@ -814,6 +830,9 @@ static int map_received(void *unused,const uint8_t *bytes,size_t count,int64_t r
  if(source){rejected_maps++;MAP_DIAG(2,source,-EBUSY,count);return -EBUSY;}
  enum de_result rc=de_world(engine,bytes,count,now);
  if(rc){rejected_maps++;atomic_set(&reason,rc);MAP_DIAG(3,rc,-EPROTO,count);return -EPROTO;}
+ #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+ route_world_observe(bytes,count);
+ #endif
  accepted_maps++;MAP_DIAG(4,0,0,count);return 0;
 }
 static bool same_identity(const struct xt_bootstrap *a,const struct xt_bootstrap *b){
@@ -886,6 +905,9 @@ static int link_received(void *unused,const uint8_t *bytes,size_t count,int64_t 
      same_receipt(&slot->receipt,&slot->sent_receipt)&&same_receipt(&slot->sent_receipt,&probe->receipt)&&
      same_receipt(&slot->sent_receipt,&reply->accepted_receipt)&&now<slot->pending.expires_guest){
    slot->confirmed=slot->pending;slot->confirmed.acknowledged=true;slot->confirmed.confirmed_guest_us=now;slot->confirmed_valid=true;
+   #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+   if(!role)route_confirm_pending(slot);
+   #endif
   }
   if(!reply->has_guest_clock_valid_until_pi_us&&now<=(uint64_t)INT64_MAX-lp_selected_config.clock_lease_us){
    /* 구형 reply는 기존 legacy profile에만 사용한다. command3 ACK로 승격하지 않는다. */
@@ -907,6 +929,9 @@ static int link_received(void *unused,const uint8_t *bytes,size_t count,int64_t 
   slot->gate_available=reply->has_direction_gate;
   if(slot->gate_available){slot->gate=reply->direction_gate;slot->gate_received_guest=now;}
   slot->vehicle=reply->vehicle;slot->sent=0;
+  #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+  if(!role)route_observe_numeric(slot,reply);
+  #endif
   if(!role){
    if(!reply->has_operation_status||slot->sent_generation!=control_generation)operation_available=false;
    else{
@@ -966,6 +991,15 @@ static int link_received(void *unused,const uint8_t *bytes,size_t count,int64_t 
   }
   CLOCK_DIAG(5,0,reply,received_us,clock_rc);return 0;
  }
+ #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+ if(incoming.which_payload==xenova_drive_DriveLink_road_data_tag||incoming.which_payload==xenova_drive_DriveLink_route_exchange_tag){
+  if(!dl_route_installed())return -ENOTSUP;
+  const uint8_t *body;size_t n;unsigned tag=incoming.which_payload;
+  if(!dw_route_body(bytes,count,tag,&body,&n))return -EPROTO;
+  return tag==xenova_drive_DriveLink_road_data_tag?route_record_receive(&incoming.payload.road_data,body,n):
+   route_exchange_receive(&incoming.payload.route_exchange,body,n,&boot);
+ }
+ #endif
  if(incoming.which_payload==xenova_drive_DriveLink_scene_grant_tag){
   if(k_mutex_lock(&input_context_lock,K_NO_WAIT))return -EBUSY;
   int rc=cache_scene(&incoming.payload.scene_grant,&boot);
@@ -1154,7 +1188,13 @@ static void state_step(void){
       xenova_drive_ClockProbe *p=&outgoing.payload.probe;strcpy(p->vm,boot.identity.vm_id);
       strcpy(p->execution,boot.identity.execution_id);strcpy(p->app_instance,role_app);
       p->sequence=++slot->sequence;p->guest_send_us=sent_at;slot->sent=sent_at;slot->sent_generation=control_generation;
-      if(!role){p->has_supported_state_features=true;p->supported_state_features=DW_STATE_KNOWN_FEATURES;}
+      /* Codec knowledge does not install the route status/State/apply consumer. */
+      if(!role){p->has_supported_state_features=true;
+       p->supported_state_features=DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION;
+       #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+       if(dl_route_installed())p->supported_state_features|=DW_ROUTE_STATE;
+       #endif
+      }
       if(!role&&atomic_get(&preflight_active)){
        bool live=context_available&&clock_available&&current_clock.acknowledged&&
         sent_at<preflight_expires_guest&&
@@ -1219,6 +1259,9 @@ static void state_step(void){
      }
     }
    }
+   #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
+   route_publish_step();
+   #endif
    if(link_client.connected&&!k_mutex_lock(&input_context_lock,K_NO_WAIT)){
     bool send=budget_pending&&budget_send_pending&&!budget_reply_available;
     if(send){memset(&outgoing,0,sizeof(outgoing));outgoing.major=2;outgoing.which_payload=xenova_drive_DriveLink_budget_request_tag;

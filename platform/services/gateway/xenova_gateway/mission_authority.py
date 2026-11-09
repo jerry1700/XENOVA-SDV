@@ -20,8 +20,137 @@ class MissionAuthority:
         self.runner=runner;self.previous=None;self.distance=0.;self.distance_valid=False
         self.stop_reason=None;self.last_published=None;self.execution=None
         self.execution_hwm={};self.terminal_pending=None
+        self.route_overlay=None;self.route_seed=None;self.route_blocked=False;self.route_journal=None
 
-    def current(self):return self.runner.authority.value.get('current_mission')
+    def _route_valid(self):
+        if self.route_overlay is None:return not self.route_blocked
+        from .authority_journal import canonical
+        r=self.runner;value=r.authority.value;record=self.route_overlay;operator=r.operator
+        durable=canonical(value.get('current_mission'))
+        allowed={self.route_seed}
+        if self.route_journal is not None and not self.route_journal['explicit']:
+            allowed.add(self.route_journal['after'])
+        binding=operator.operations.binding()
+        from .operation_owner import binding_record
+        valid=(not self.route_blocked and not r.authority.error and operator.unknown is None
+            and durable in allowed and value['generation']==record['generation']==r.machine.generation
+            and value['owner']==record['owner']==r.machine.active_vm and value['mode']=='AUTO'
+            and binding is not None and binding_record(binding)==record.get('operation_binding')
+            and record['admitted'] and int(r._clock()*1e6)<record['deadline'])
+        if not valid:self.route_blocked=True
+        return valid
+
+    def current(self):
+        durable=self.runner.authority.value.get('current_mission')
+        if self.route_overlay is None:return durable
+        if self._route_valid():return self.route_overlay
+        # 무효 RAM 등록을 과거 durable kind3 seed로 fallback하지 않는다.
+        stopped=deepcopy(self.route_overlay);stopped.update(admitted=False,phase='HOLD',result='FAILED')
+        return stopped
+
+    def augment(self,changes):
+        """다른 async 기록에도 현재 논리 등록을 고정한다. worker가 현재 RAM을 다시 읽지 않는다."""
+        changes=dict(changes)
+        if self.route_overlay is not None and 'current_mission' not in changes:
+            changes['current_mission']=deepcopy(self.current())
+        return changes
+
+    def journal_started(self,changes,*,explicit,operation):
+        from .authority_journal import canonical
+        before=self.current();after=changes.get('current_mission')
+        if self.route_overlay is None and not any(value is not None and value['kind']==3 for value in (before,after)):return
+        if self.route_journal is not None:raise OperatorError('BUSY_NOT_ACCEPTED')
+        self.route_journal=dict(explicit=explicit,after=canonical(after),before=canonical(self.runner.authority.value.get('current_mission')),
+            before_record=deepcopy(before),operation=operation)
+
+    def journal_completed(self,ok,unknown):
+        pending=self.route_journal;self.route_journal=None
+        if unknown:
+            self.route_blocked=True
+            return
+        if pending is None or not ok:return
+        from .authority_journal import canonical
+        actual=canonical(self.runner.authority.value.get('current_mission'))
+        if actual!=pending['after']:
+            self.route_blocked=True
+        elif pending['explicit']:
+            # 새 control/owner/mission은 실제 durable ACK가 맡는다. 이전 RAM 권한은 종료한다.
+            self.route_overlay=None;self.route_seed=None;self.route_blocked=False
+        else:self.route_seed=actual
+
+    def revoke_route(self):
+        """issuer 채택 뒤 다른 owner 채택이 실패해도 예전 grant로 rollback하지 않는다."""
+        if self.route_overlay is not None:self.route_blocked=True
+
+    def route_rebind_source(self):
+        """현재 출력 권한이 아닌 원 후보다. 같은 서비스의 실제 durable rebind issuer만 소비한다."""
+        from .authority_journal import canonical
+        from .operation_owner import binding_record
+        r=self.runner;o=r.operator;route=getattr(getattr(o,'routes',None),'route',None)
+        journal=self.route_journal
+        binding_job=journal is not None and journal['explicit'] and journal['operation']=='mission_binding'
+        record=(self.route_overlay if self.route_overlay is not None else journal['before_record'] if binding_job
+            else r.authority.value.get('current_mission'))
+        m=r.machine;value=r.authority.value
+        if (record is None or record['kind']!=3 or not record['admitted'] or route is None or route.failed
+                or route.registry is None or route.registry['snapshot'].state!=2 or route.registry['state'] is None
+                or r.authority.error or o.unknown is not None
+                or value['mode']!='AUTO' or m.mode.value!='AUTO' or value['generation']!=m.generation
+                or value['owner']!=m.active_vm or (record['generation'],record['owner'])==(m.generation,m.active_vm)
+                or m.generation<=record['generation']):return None
+        actual=canonical(value.get('current_mission'))
+        allowed={self.route_seed} if self.route_overlay is not None else {canonical(record)}
+        if binding_job:allowed.add(journal['after'])
+        if actual not in allowed:return None
+        binding=o.operations.binding();peer=o.operations.active_peer()
+        if (binding is None or binding_record(binding)!=record.get('operation_binding') or peer is None
+                or not route.supported(peer) or int(r._clock()*1e6)>=record['deadline'] or route.exhausted() is not None):return None
+        original=decode(route.registry['grant'],schema.MissionGrant)
+        if (original.mission_id!=UUID(record['id']).bytes or original.control_generation!=record['generation']
+                or original.grant_revision!=record['grant_revision'] or original.cancel_fence_revision!=record['cancel_fence']
+                or encode(original.route_binding)!=base64.b64decode(record['route_binding'],validate=True)):
+            return None
+        return deepcopy(record)
+
+    def commit_route_registration(self,registration):
+        """같은 권한의 UPDATE/FINISH 한 건만 RAM에서 발급한다. BEGIN/새 control은 async 전용이다."""
+        from .authority_journal import canonical
+        r=self.runner;o=r.operator;route=o.routes.route
+        if (route is None or o.job is not None or o.worker.busy or not o.worker._results.empty()
+                or o.unknown is not None or self.route_journal is not None):raise OperatorError('BUSY_NOT_ACCEPTED')
+        if route.registration()!=registration or route.registry is None or route.failed:
+            raise OperatorError('CONTEXT_CHANGED')
+        candidate=decode(registration.candidate_raw,schema.RouteCandidate)
+        if candidate.action not in (2,3):raise OperatorError('CONTEXT_CHANGED')
+        old=self.current();grant=self.grant()
+        if old is None or grant is None or old['kind']!=3 or not old['admitted']:
+            raise OperatorError('CONTEXT_CHANGED')
+        if encode(grant)!=route.registry['grant']:raise OperatorError('CONTEXT_CHANGED')
+        before=route.registry['snapshot'];after=decode(registration.snapshot_raw,schema.RouteSnapshot)
+        immutable=('route_id','purpose','goal_sha256','topology_sha256','global_plan_sha256','geometry_scope_sha256',
+            'started_pi_us','deadline_pi_us','meter_epoch','meter_baseline_total_ticks','max_travel_m',
+            'parking_attempt_id','parking_goal_sha256','predecessor_episode_sha256','budget_profile_sha256',
+            'max_laps','meter_gap_revision','metres_per_tick_upper')
+        if (before.state!=2 or after.core.revision!=before.core.revision+1
+                or any(getattr(before.core,k)!=getattr(after.core,k) for k in immutable)
+                or after.core.deadline_pi_us!=old['deadline'] or route.exhausted() is not None):
+            raise OperatorError('CONTEXT_CHANGED')
+        if after.core.phase_revision==before.core.phase_revision:
+            if (after.core.phase_started_pi_us,after.core.phase_expires_pi_us)!=(
+                    before.core.phase_started_pi_us,before.core.phase_expires_pi_us):raise OperatorError('CONTEXT_CHANGED')
+        elif (candidate.action!=2 or after.core.phase_revision!=before.core.phase_revision+1
+                or after.core.phase_started_pi_us<before.core.phase_started_pi_us
+                or after.core.phase_expires_pi_us>min(after.core.deadline_pi_us,
+                    after.core.phase_started_pi_us+route.policy.phase_cap(after.core.phase))):
+            raise OperatorError('CONTEXT_CHANGED')
+        record=self.route_record(None,registration,old['generation'],old['owner'])
+        if (set(record)!=set(old) or record['grant_revision']!=old['grant_revision']+1
+                or any(record[k]!=old[k] for k in old if k not in ('route_binding','grant_revision'))
+                or len(canonical(record))>4096):raise OperatorError('CONTEXT_CHANGED')
+        if self.route_overlay is None:self.route_seed=canonical(r.authority.value.get('current_mission'))
+        self.route_overlay=deepcopy(record)
+        if not self._route_valid():raise OperatorError('CONTEXT_CHANGED')
+        return encode(self.grant())
 
     def _context(self):
         r=self.runner;m=r.machine;provider=r.drive_link
@@ -62,6 +191,32 @@ class MissionAuthority:
         return dict(epoch=meter.meter_epoch,total_ticks=meter.total_ticks,metres_per_tick=meter.metres_per_tick,
             gap_revision=meter.gap_revision,vehicle_sequence=meter.vehicle_sequence)
 
+    def route_record(self,call,registration,generation,owner):
+        """검산된 원 Candidate의 kind3 변경안만 만든다. 실제 grant 공개는 원 async ACK 뒤다."""
+        candidate=decode(registration.candidate_raw,schema.RouteCandidate)
+        snapshot=decode(registration.snapshot_raw,schema.RouteSnapshot)
+        binding=decode(registration.route_binding_raw,schema.RouteBinding)
+        if (binding.route_id!=snapshot.core.route_id or binding.revision!=snapshot.core.revision
+                or binding.core_sha256!=snapshot.acceptance.accepted_core_sha256):raise OperatorError('CONTEXT_CHANGED')
+        if candidate.action==1:
+            record=self.start(call,1,admitted=True)
+            record.update(kind=3,strategy=0,phase='FOLLOW',deadline=snapshot.core.deadline_pi_us,
+                search_deadline=0,execution_deadline=0)
+        else:
+            current=self.current()
+            if current is None or current['kind']!=3 or 'route_binding' not in current:raise OperatorError('CONTEXT_CHANGED')
+            old=decode(base64.b64decode(current['route_binding'],validate=True),schema.RouteBinding)
+            if old.route_id!=binding.route_id:raise OperatorError('CONTEXT_CHANGED')
+            record=deepcopy(current)
+        record['route_binding']=base64.b64encode(registration.route_binding_raw).decode('ascii')
+        from .operation_owner import binding_record
+        operation=self.runner.operator.operations.binding()
+        if operation is None:raise OperatorError('NOT_READY')
+        record['operation_binding']=binding_record(operation)
+        record=self.rebind(record,generation,owner)
+        validate_record(record)
+        return record
+
     def _meter_distance(self,current):
         anchor=current.get('execution_meter') if current['execution_deadline'] else current.get('search_meter')
         meter=self._meter_anchor()
@@ -84,6 +239,10 @@ class MissionAuthority:
         return record
 
     def grant(self,record=None):
+        if record is None and self.route_journal is not None and self.route_journal['explicit']:
+            # worker가 쓴 새 grant는 actor가 그 원 ACK를 소비하기 전에는 공개하지 않는다.
+            return None
+        if record is None and self.route_overlay is not None and not self._route_valid():return None
         record=self.current() if record is None else record
         if record is None:return None
         if ('operation_binding' in record
@@ -107,6 +266,8 @@ class MissionAuthority:
         if 'operation_binding' in record:
             from .operation_owner import binding_message
             grant.operation_binding.CopyFrom(binding_message(record['operation_binding']))
+        if 'route_binding' in record:
+            grant.route_binding.CopyFrom(decode(base64.b64decode(record['route_binding'],validate=True),schema.RouteBinding))
         encode(grant);return grant
 
     def publish(self):
@@ -271,6 +432,7 @@ class MissionAuthority:
 
     def output_deadline(self):
         current=self.current()
+        if current is not None and current['kind']==3:return current['deadline']
         if current is None or current['kind']!=2:return None
         return min(current['deadline'],current['execution_deadline'] or current['search_deadline'])
 
@@ -293,11 +455,11 @@ def validate_record(value):
         'execution_deadline','corrections','execution_distance','search_distance','cancel_fence','phase','result','admitted',
         'scene_id','scene_revision','configuration','calibration','primitive','vehicle','reservations','goal','owner',
         'execution','app','generation'}
-    optional={'search_meter','execution_meter','operation_binding'}
+    optional={'search_meter','execution_meter','operation_binding','route_binding'}
     if type(value) is not dict or not fields<=set(value)<=fields|optional:raise ValueError('exact current Mission record')
     for key in ('id','nonce','owner','execution','app'):UUID(value[key])
     if value['scene_id'] is not None:UUID(value['scene_id'])
-    if (value['kind'] not in (1,2) or type(value['admitted']) is not bool
+    if (value['kind'] not in (1,2,3) or type(value['admitted']) is not bool
             or value['phase'] not in ('HOLD','FOLLOW','SEARCH','EXECUTE','FINAL_VERIFY')
             or type(value['reservations']) is not list or len(value['reservations'])>3):raise ValueError('Mission state')
     for key in ('revision','grant_revision','issued','deadline','search_deadline','execution_deadline','corrections',
@@ -318,6 +480,12 @@ def validate_record(value):
     if 'operation_binding' in value:
         from .operation_owner import binding_message
         encode(binding_message(value['operation_binding']))
+    if ('route_binding' in value)!=(value['kind']==3):raise ValueError('kind3 route binding record')
+    if 'route_binding' in value:
+        raw=base64.b64decode(value['route_binding'],validate=True)
+        if not 0<len(raw)<=512 or 'operation_binding' not in value or value['strategy']!=0 or value['deadline']<=value['issued']:
+            raise ValueError('bounded route binding and original deadline')
+        decode(raw,schema.RouteBinding)
     for name in ('search_meter','execution_meter'):
         anchor=value.get(name)
         if anchor is not None:

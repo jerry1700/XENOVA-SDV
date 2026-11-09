@@ -150,6 +150,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runner.manual_profile=profile.manual;runner.guest_clock_policy=profile.guest_clock
                 runner.episode_support=profile.episode_support
                 runner.operation_support=profile.operation_support
+                runner.route_profile=None
+                if settings.route_profile:
+                    if not profile.operation_support or not profile.episode_support:
+                        raise ValueError('route requires explicitly installed operation and episode policies')
+                    from .route_profile import load_route
+                    runner.route_profile=load_route(settings.route_profile)
                 runner.operation_parking_strategy=profile.operation_parking_strategy
                 runner.planner_parameters=profile.planner_parameters
                 runner.keyboard_profile_directory=profile.keyboard_profile_directory

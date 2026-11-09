@@ -53,13 +53,19 @@ class OwnedPreparedClock(PreparedClock):
         object.__setattr__(obj,'replay',replay)
         status=message.clock.operation_status if message.clock.HasField('operation_status') else None
         object.__setattr__(obj,'operation_ready_end',status.valid_until_pi_us if status is not None and status.auto_ready else 0)
+        route=message.clock.route_status if message.clock.HasField('route_status') else None
+        object.__setattr__(obj,'route_status_end',route.valid_until_pi_us if route is not None else 0)
         return obj
 
     def stamp(self,send_us):
         if self.replay is not None:return self.replay
-        if self.operation_ready_end and send_us>=self.operation_ready_end:
+        stale_operation=bool(self.operation_ready_end and send_us>=self.operation_ready_end)
+        stale_route=bool(self.route_status_end and send_us>=self.route_status_end)
+        if stale_operation or stale_route:
             # 큐 대기 중 끝난 READY만 철회한다. numeric clock/Probe/P4의 원 E는 그대로다.
-            value=decode(bytes(self),schema.DriveLink);value.clock.ClearField('operation_status')
+            value=decode(bytes(self),schema.DriveLink)
+            if stale_operation:value.clock.ClearField('operation_status')
+            if stale_route:value.clock.ClearField('route_status')
             return PreparedClock(value).stamp(send_us)
         return super().stamp(send_us)
 
