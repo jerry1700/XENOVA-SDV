@@ -143,6 +143,10 @@ class DriveLinkProvider:
         raw=self.missions.current_grant(vm)
         if raw is None:return None
         grant=decode(raw,schema.MissionGrant)
+        modern=getattr(self.runner,'operator',None)
+        if modern is not None and modern.operations.enabled and grant.admitted:
+            current=modern.missions.grant()
+            if current is None or encode(current)!=raw:return None
         return grant if self._grant_context_matches(grant) else None
 
     def clear_scene(self):
@@ -212,6 +216,9 @@ class DriveLinkProvider:
     def _state_mission_matches(state,grant):
         mission=state.mission
         return bool(grant.admitted and state.source_generation==grant.control_generation
+            and mission.HasField('operation_binding')==grant.HasField('operation_binding')
+            and (not grant.HasField('operation_binding') or
+                mission.operation_binding==grant.operation_binding)
             and all(getattr(mission,name)==getattr(grant,name) for name in
                 ('mission_id','mission_revision','kind','operator_request_nonce','strategy','grant_revision',
                  'mission_deadline_pi_us','execution_deadline_pi_us','correction_attempts_used',
@@ -277,6 +284,7 @@ class DriveLinkProvider:
                 modern.episodes.declare(peer,body.supported_state_features if body.HasField('supported_state_features') else 0)
                 try:receipt,replay=modern.clocks.accept_probe(body,peer,m.generation,int(now*1e6))
                 except ValueError:return self.reject('LINK_CLOCK_RECEIPT')
+                if role=='autonomous':modern.operations.observe_probe(peer,body)
                 if receipt is not None:reply.clock.accepted_receipt.CopyFrom(receipt)
                 if modern.clocks.policy is not None:
                     reply.clock.guest_clock_valid_until_pi_us=int(received*1e6)+modern.clocks.policy.lease_us
@@ -297,6 +305,9 @@ class DriveLinkProvider:
                 if role=='autonomous':
                     status=modern.episodes.status(peer)
                     if status is not None:reply.clock.episode_status.CopyFrom(status)
+                    operation=modern.operations.clock_status(peer,body,
+                        reply.clock.guest_clock_valid_until_pi_us) if reply.clock.HasField('guest_clock_valid_until_pi_us') else None
+                    if operation is not None:reply.clock.operation_status.CopyFrom(operation)
             # An unavailable/expired mapper clock blocks AUTO world adoption,
             # not the independent Pi vehicle clock or MANUAL input path.
             if modern is not None:
@@ -307,6 +318,7 @@ class DriveLinkProvider:
         elif kind=='snapshot':
             if self.trust is None:return self.reject('WORLD_PROFILE_UNAVAILABLE')
             peer=(vm,binding['execution_id'],app_instance(binding,'autonomous'))
+            if modern is not None and not modern.operations.state_allowed(body):return self.reject('STATE_OPERATION_CONTEXT')
             preparing=bool(modern is not None and modern.episodes.supported(peer) and m.phase=='PENDING')
             if (m.active_vm!=vm or m.active_app!='autonomous' or not (m.output_permitted or preparing) or
                     m.authority.protected(vm) or body.source_generation!=m.generation):return self.reject('STATE_SOURCE_AUTHORITY')
@@ -349,6 +361,7 @@ class DriveLinkProvider:
                 state_context(body),dict(reference_id=body.reference_id))
             if parking_prepared is not None:modern.missions.commit_execution(parking_prepared)
             if modern is not None:modern.episodes.commit_state(episode_prepared)
+            if modern is not None:modern.operations.observe_state(body,accepted_wire)
             if removable is not None:del self.copies[removable];self.evicted+=1
             for target in m.vm_ids:
                 if target!=vm:self._send_copy(target)

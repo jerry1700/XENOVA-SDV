@@ -214,3 +214,8 @@ xenova.drive.StopFacts.source_execution max_size:16
 xenova.drive.StopFacts.source_app_instance max_size:16
 xenova.drive.StopFacts.mission_id max_size:16
 xenova.drive.StopFacts.driver_session max_size:16
+xenova.drive.OperationBinding.service_epoch max_size:16
+xenova.drive.OperationBinding.departure_nonce max_size:16
+xenova.drive.OperationStatus.active_request_nonce max_size:16
+xenova.drive.AutoInputPreflight.clock_reply_sha256 max_size:32
+xenova.drive.PiOperationGate.gateway_instance max_size:16

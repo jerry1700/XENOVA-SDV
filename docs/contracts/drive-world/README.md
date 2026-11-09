@@ -1,5 +1,8 @@
 # 주행 입력과 실제 path 인계 — drive-world-1
 
+A1 공통 운영 확장은 [운영 진술·AUTO 입력 preflight](operation-and-input-preflight.md)를 따른다.
+이는 공통 계약 구현이며 operator/C producer/Jetson 운영·실차 수락의 완료 보고가 아니다.
+
 이 디렉터리의 `world.proto`가 Python/Gateway와 C/Zephyr의 공통 원본이다.
 운영 차량 값은 이 schema에 넣지 않는다. `lattice-lab-1`은 합성 Ackermann 차량과
 시험 지도를 위한 프로필이며 실제 차량의 보정·성능·안전 수락을 대신하지 않는다.

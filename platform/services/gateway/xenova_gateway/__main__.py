@@ -149,6 +149,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 profile=OperatorProfile.load(settings.operator_profile)
                 runner.manual_profile=profile.manual;runner.guest_clock_policy=profile.guest_clock
                 runner.episode_support=profile.episode_support
+                runner.operation_support=profile.operation_support
+                runner.operation_parking_strategy=profile.operation_parking_strategy
                 runner.planner_parameters=profile.planner_parameters
                 runner.keyboard_profile_directory=profile.keyboard_profile_directory
                 runner.configure_operator()

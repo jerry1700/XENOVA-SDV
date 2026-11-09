@@ -14,7 +14,8 @@ WORLD_FEATURES=15
 STATE_FEATURES=7
 STATE_TASK_REFERENCE=8
 STATE_EPISODE=16
-STATE_KNOWN_FEATURES=STATE_FEATURES|STATE_TASK_REFERENCE|STATE_EPISODE
+STATE_OPERATION=32
+STATE_KNOWN_FEATURES=STATE_FEATURES|STATE_TASK_REFERENCE|STATE_EPISODE|STATE_OPERATION
 CELL_ROAD=8
 MAX_U63=(1<<63)-1
 NIL_UUID=bytes(16)
@@ -24,7 +25,7 @@ _UUID_BYTES={'admission_id','survey_id','mission_id','scene_admission_id','opera
              'driver_session','episode_id','birth_snapshot_id','meter_epoch','registry_epoch',
              'origin_vm','origin_execution','origin_app_instance','expected_registry_epoch',
              'expected_episode_id','phase_state_message_id','state_message_id',
-             'source_vm','source_execution','source_app_instance'}
+             'source_vm','source_execution','source_app_instance','service_epoch','departure_nonce','active_request_nonce'}
 _REPEATED_CAPS={'DriveState.path':512,'DriveState.segments':3,'LaneModel.lanes':2,
     'LaneGeometry.centerline':32,'LaneModel.divider':32,'WorldSnapshot.parking_slots':8,
     'ParkingSlot.corners':4,'MissionExecution.selected_slot_polygon':4,
@@ -36,7 +37,10 @@ _MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneM
     'TofObservation':1024,'TaskReferenceState':1024,'GuestClockReceipt':64,'DirectionGateWitness':512,
     'EpisodeCore':768,'EpisodeProgress':128,'EpisodeAcceptanceRef':256,'EpisodeSnapshot':1024,
     'EpisodeSourceContext':768,'EpisodeRequest':2048,'EpisodeReceipt':1536,'EpisodeStatus':2048,
-    'PiAbsoluteMeter':128,'StopFacts':768,'DriveControlFacts':1024}
+    'PiAbsoluteMeter':128,'StopFacts':768,'DriveControlFacts':1024,
+    'OperationBinding':128,'OperationStatus':256,'AutoInputPreflight':768,'PiOperationGate':96}
+_OPERATION_MESSAGES=frozenset(('OperationBinding','OperationStatus','AutoInputPreflight','PiOperationGate',
+    'ClockProbe','ClockReply','MapperClockProbe','MapperClockReply','MissionGrant'))
 
 
 def _bytes_bound(field):
@@ -277,6 +281,9 @@ def _validate_tree(message):
 
 def _validate_one(message):
     name=message.DESCRIPTOR.name
+    if name in _OPERATION_MESSAGES:
+        from .operations import validate_one as validate_operation
+        validate_operation(message)
     major=2 if name in ('DriveState','DriveLink') else 1
     if getattr(message,'major',major)!=major:raise ValueError('unsupported schema major')
     if isinstance(message,schema.WorldSnapshot):
@@ -324,6 +331,8 @@ def _validate_one(message):
                 or features&~STATE_KNOWN_FEATURES or not message.HasField('mission')):
             raise ValueError('state features/mission required')
         task=message.HasField('task_reference')
+        if bool(features&STATE_OPERATION)!=message.mission.HasField('operation_binding'):
+            raise ValueError('operation feature/presence')
         if bool(features&STATE_EPISODE)!=message.HasField('episode'):raise ValueError('episode feature/presence')
         from .episodes import validate_state
         validate_state(message)

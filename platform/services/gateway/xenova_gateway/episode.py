@@ -10,6 +10,7 @@ import struct
 from uuid import UUID,uuid4
 
 from xenova_drive_world import schema,encode,decode
+from xenova_drive_world.codec import STATE_KNOWN_FEATURES
 from xenova_mqtt.drive_binding import app_instance
 from .absolute_meter import upper_distance
 
@@ -46,7 +47,6 @@ class EpisodeOwner:
         self.startup_key=None if initial is None else (initial['id'],initial['revision'])
         self.mission_key=None;self.registry=None;self.last_reply=None;self.terminal=None
         self.peers={};self.activated=set();self.failed=False;self.request_hwm={};self.last_key=self.last_sha=None
-        self.r.machine.episode_prepare_allowed=self.prepare_allowed
 
     def declare(self,peer,features):
         # Binding/transport origin has already been checked by DriveLinkProvider.
@@ -80,7 +80,7 @@ class EpisodeOwner:
     def supported(self,peer):
         features=self.peers.get(peer,0)
         return bool(getattr(self.r,'episode_support',False) and features&EPISODE
-            and not features&~31)
+            and not features&~STATE_KNOWN_FEATURES)
 
     def prepare_allowed(self,vm):
         if not getattr(self.r.machine,'episode_output_evidence_required',False):return True

@@ -92,6 +92,27 @@ def connect(path):
     return stream
 
 
+@pytest.mark.parametrize('kind',('HELLO_AUTO','OBSERVE','AUTO_ENTER'))
+def test_opt_in_v2_packets_reach_same_seqpacket_actor_without_rewriting(server,kind):
+    _,actor,path=server;original=call();now=int(original['issued_pi_us'])
+    original.update(version=2,kind=kind)
+    frame=dict(device_instance=str(uuid4()),link_epoch=str(uuid4()),source_sample_seq='2',key_event_seq='1',
+        t1_pi_us=str(now),t2_pi_us=str(now),key_mask=64,last_event_pi_us=str(now))
+    if kind=='HELLO_AUTO':original['payload'].update(device_instance=frame['device_instance'],link_epoch=frame['link_epoch'])
+    else:
+        original['payload']=frame;original['expires_pi_us']=str(now+150000)
+        if kind=='AUTO_ENTER':
+            original['payload'].update(enter_event_seq='1',operation_revision='1',permission_revision='1',
+                ready_revision='1',generation=1,expected_owner=SID,
+                operator_request_id=f'g1:{HOST}:{now//1000}:{uuid4()}')
+    with connect(path) as stream:
+        raw=canonical(original);stream.send(raw)
+        observed,peer,future=actor.calls.get(timeout=2)
+        assert canonical(observed)==raw and peer.pid==os.getpid()
+        answer=actor.answer(observed);future.put_nowait(answer)
+        assert contract.decode(stream.recv(2048))==answer
+
+
 def test_real_peer_and_original_queue_result_are_forwarded_without_rewriting(server):
     service,actor,path=server
     with connect(path) as stream:
