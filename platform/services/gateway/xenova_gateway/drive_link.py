@@ -333,7 +333,13 @@ class DriveLinkProvider:
                 if (mission.scene_admission_id!=bytes(16) and
                         (runtime is None or not runtime.mission_allowed(mission,int(now*1e6)))):
                     return self.reject('STATE_SCENE_AUTHORITY')
-            episode_prepared=True if modern is None else modern.episodes.prepare_state(body,peer,encode(body))
+            episode_prepared=True
+            if modern is not None:
+                # validate(link) above checked this unchanged subtree. Keep the
+                # same deterministic bytes/cap without repeating that traversal.
+                state_wire=body.SerializeToString(deterministic=True)
+                if len(state_wire)>MAX_BYTES:raise ValueError('wire size cap')
+                episode_prepared=modern.episodes.prepare_state(body,peer,state_wire)
             if episode_prepared is None:return self.reject('STATE_EPISODE_CONTEXT')
             parking_prepared=None
             if modern is not None and body.mission.kind==2:

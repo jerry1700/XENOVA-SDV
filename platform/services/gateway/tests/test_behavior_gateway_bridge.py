@@ -2,8 +2,9 @@
 
 RTOS scheduling, authenticated pipe transport, placed World and stationary plant
 are explicit leaves. No READY/clock confirmation/registration receipt is injected.
-The pre-existing operator-world lifecycle is only the initial control premise;
-actual shared C lifecycle output is retained as evidence, not replaced by it.
+The typed operator-world producer is only the initial control premise. A fresh
+manager-observed app identity belongs to the native producer from its bootstrap;
+only its original C lifecycle can qualify that source at Gateway ingress.
 """
 from hashlib import sha256
 import json
@@ -21,12 +22,126 @@ from xenova_gateway.drive_link import inbound
 from xenova_gateway.guest_clock import OwnedPreparedClock,SentClock
 from xenova_gateway.frame import DriveFrame
 from xenova_gateway.output_owner import OutputOwner
+from xenova_mqtt import Identity,topics
+from xenova_mqtt.client import Message
+from xenova_mqtt.envelope import build
 from test_behavior_app_bridge import app_bridge_binary
 from test_command3_gateway_flow import SnapshotDevice,receive_original,ingress_diagnostics
 from test_engine import modern_world
 from test_lattice import obstacle
 from test_operator_runtime import world
 from b08_fixture import activate,journal
+
+
+class AdmissionTrace:
+    """First three actual ACTIVE admissions only; preserve every original call.
+
+    No copied policy/extra validation or input updates. Actual clock reads and
+    the actual device_view returned to _meter are observed, then scalars are
+    recorded after the original meter call has returned. Restore at teardown.
+    """
+    def __init__(self,w):
+        import xenova_drive_world as fingerprints
+        self.w=w;self.module=fingerprints;self.records=[];self.current=None;self.meter_current=None;self.pipeline=None
+        self.original_clock=w.r._clock;self.original_view=w.r.device_view
+        self.original_prepare=w.o.episodes.prepare_state;self.original_meter=w.o.episodes._meter
+        self.original_core=fingerprints.episode_core_sha256;self.original_plan=fingerprints.plan_sha256
+        w.r._clock=self.clock;w.r.device_view=self.view
+        w.o.episodes.prepare_state=self.prepare;w.o.episodes._meter=self.meter
+        fingerprints.episode_core_sha256=self.core;fingerprints.plan_sha256=self.plan
+
+    def clock(self):
+        value=self.original_clock()
+        if self.pipeline is not None and len(self.pipeline['actual_actor_clock_reads'])<16:
+            self.pipeline['actual_actor_clock_reads'].append(int(value*1e6))
+        if self.meter_current is not None:
+            reads=self.meter_current['actual_pi_now_reads']
+            if len(reads)<16:reads.append(int(value*1e6))
+            else:self.meter_current['clock_reads_lost']+=1
+        return value
+
+    def view(self):
+        value=self.original_view()
+        if self.meter_current is not None:self.meter_current['_actual_view']=value
+        return value
+
+    @staticmethod
+    def anchor(value):
+        if value is None:return None
+        return {key:getattr(value,key,None) for key in ('meter_epoch','gap_revision','valid','total_ticks',
+            'metres_per_tick','host_boot','pi_session','device_session','odom_epoch','calibration',
+            'vehicle_sequence','source_sample','source_us','pi_sample_us','clock_error_us')}
+
+    def meter(self,sequence=None,*,historical=False):
+        if self.current is None or len(self.current['meters'])>=3:
+            return self.original_meter(sequence,historical=historical)
+        record=dict(sequence=sequence,historical=historical,actual_pi_now_reads=[],clock_reads_lost=0)
+        self.meter_current=record
+        try:
+            value=self.original_meter(sequence,historical=historical)
+        finally:self.meter_current=None
+        actual=record.pop('_actual_view',{})
+        current,history=actual.get('absolute_meter') or (None,())
+        anchor=current if sequence is None else next((x for x in history if x.vehicle_sequence==sequence),None)
+        record.update(current=self.anchor(current),selected=self.anchor(anchor),returned=self.anchor(value),
+            vehicle_sample={k:(actual.get('vehicle_sample') or {}).get(k) for k in
+                ('host_boot','pi_session','device_session','odom_epoch','calibration','sequence','pi_sample_us','clock_error_us')})
+        self.current['meters'].append(record)
+        return value
+
+    def core(self,value):return self.hash_call('core',self.original_core,value)
+    def plan(self,value):return self.hash_call('plan',self.original_plan,value)
+    def hash_call(self,name,original,value):
+        if self.current is None:return original(value)
+        began=self.original_clock();result=original(value);ended=self.original_clock()
+        if len(self.current['hash_calls'])<4:
+            self.current['hash_calls'].append(dict(kind=name,sha256=result.hex(),
+                begin_pi_us=int(began*1e6),end_pi_us=int(ended*1e6)))
+        return result
+
+    @staticmethod
+    def progress(value):
+        return {key:getattr(value,key) for key in ('used_travel_ticks','last_progress_pi_us',
+            'vehicle_sequence','station_lower_m','remaining_upper_m','revision')}
+
+    def prepare(self,state,peer,raw):
+        if not state.HasField('episode') or state.episode.core.state!=2 or len(self.records)>=3:
+            return self.original_prepare(state,peer,raw)
+        owner=self.w.o.episodes;registry=owner.registry;expected=None if registry is None else registry['snapshot']
+        request=None if registry is None else registry['request']
+        record=dict(begin_pi_us=int(self.original_clock()*1e6),peer=peer,state_id=state.message_id,
+            vehicle=state.vehicle_sequence,calculation=state.calculation_sequence,plan=state.path_revision,
+            phase=state.maneuver_revision,progress=self.progress(state.episode.progress),
+            core_phase=state.episode.core.phase,core_meter_epoch=state.episode.core.meter_epoch.hex(),
+            core_meter_baseline=state.episode.core.meter_baseline_total_ticks,
+            peer_features=owner.peers.get(peer),installed_episode_support=getattr(self.w.r,'episode_support',None),
+            failed_before=owner.failed,registry_present=registry is not None,
+            expected_core_phase=None if expected is None else expected.core.phase,
+            direction=state.direction,maneuver_phase=state.maneuver_phase,
+            task_changing=state.task_reference.changing if state.HasField('task_reference') else None,
+            expected_core_sha256=None if expected is None else expected.acceptance.accepted_core_sha256.hex(),
+            acceptance_equal=None if expected is None else state.episode.acceptance==expected.acceptance,
+            previous_progress=None if expected is None else self.progress(expected.progress),
+            progress_anchor=None if registry is None else registry['progress_anchor'],
+            admitted_state_present=registry is not None and registry['state'] is not None,
+            request=None if request is None else dict(peer=(request.vm,request.execution,request.app_instance),
+                reserved_id=str(UUID(bytes=request.phase_state_message_id)),calculation=request.calculation_sequence,
+                plan=request.plan_revision,phase=request.phase_revision,plan_sha256=request.plan_sha256.hex()),
+            minimum_progress=(getattr(self.w.r,'planner_parameters',{}) or {}).get('avoid_progress_m'),
+            meters=[],hash_calls=[])
+        self.current=record
+        try:
+            result=self.original_prepare(state,peer,raw)
+            record['accepted']=result is not None
+            return result
+        finally:
+            record['end_pi_us']=int(self.original_clock()*1e6);record['failed_after']=owner.failed
+            self.current=None;self.records.append(record)
+
+    def close(self):
+        self.w.r._clock=self.original_clock;self.w.r.device_view=self.original_view
+        self.w.o.episodes.prepare_state=self.original_prepare;self.w.o.episodes._meter=self.original_meter
+        self.module.episode_core_sha256=self.original_core;self.module.plan_sha256=self.original_plan
 
 
 class App:
@@ -36,12 +151,12 @@ class App:
         self.process=subprocess.Popen([str(binary)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
             stderr=stderr,bufsize=0)
         self.buffer=b'';self.transcript=[];self.buffer_received=None
-        self.wire_received={};self.transport_sequence=0;self.last_transport={}
+        self.wire_received={};self.lifecycle_received={};self.transport_sequence=0;self.last_transport={}
 
     def ask(self,line):
         # A private late factory prepares only the text envelope immediately
         # before writing; callers keep the original (rc, guest, output) tuple.
-        self.transport_sequence+=1;self.wire_received={}
+        self.transport_sequence+=1;self.wire_received={};self.lifecycle_received={}
         if callable(line):line=line()
         write_begin=time.monotonic()
         self.process.stdin.write(line.encode()+b'\n');self.process.stdin.flush()
@@ -63,6 +178,9 @@ class App:
             if text.startswith('WIRE '):
                 assert len(self.wire_received)<self.WIRE_CAP,'bounded native WIRE observation queue exhausted'
                 self.wire_received[len(output)-1]=self.buffer_received
+            if text.startswith('LIFECYCLE '):
+                assert len(self.lifecycle_received)<self.WIRE_CAP,'bounded native lifecycle observation queue exhausted'
+                self.lifecycle_received[len(output)-1]=self.buffer_received
             if text.startswith('END '):
                 _,result,guest=text.split();self.transcript.append((line,output))
                 self.last_transport=dict(sequence=self.transport_sequence,command=line.split(' ',1)[0],
@@ -97,10 +215,19 @@ def test_phase_publication_keeps_registered_identity_while_an_unrelated_candidat
             (tmp_path/'publication-policy.transcript.json').write_text(json.dumps(app.transcript,indent=2))
 
 
-@pytest.mark.parametrize('steering_available,event_boundary',[(True,None),(False,None),(True,'expiry'),(True,'context')],
-    ids=['servo-estimate','steering-unavailable','event-clock-expiry','event-clock-context'])
-def test_actual_c_initial_none_then_registered_episode_full_state(world,app_bridge_binary,tmp_path,steering_available,event_boundary):
+@pytest.mark.parametrize('steering_available,event_boundary,scenario',
+    [(True,None,'avoidance'),(False,None,'avoidance'),(True,'expiry','avoidance'),(True,'context','avoidance'),
+     (True,None,'clear-lane-follow')],
+    ids=['servo-estimate','steering-unavailable','event-clock-expiry','event-clock-context','clear-lane-follow'])
+def test_actual_c_initial_none_then_registered_episode_full_state(world,app_bridge_binary,tmp_path,steering_available,event_boundary,scenario):
     w=activate(world);provider=w.r.drive_link
+    admission_trace=None
+    # activate's typed operator producer and this new process are distinct
+    # owners. Observe its real app instance before issuing its mission/boot;
+    # actual ingress accept_session, never a fixture counter reset, adopts it.
+    previous_peer=w.peer
+    w.w.ids[w.peer[0]]['autonomous']=str(uuid4());w.w.bind()
+    w.peer=(w.peer[0],w.peer[1],w.w.ids[w.peer[0]]['autonomous'])
     # 관측 유무는 새 plant 표본 생산에만 적용한다. 이미 만든 원 Vehicle을 고치지 않는다.
     w.sink.steering_available=steering_available
     # The software bench installs the actual generated asset identity, not the
@@ -118,8 +245,10 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
     # During real C/actor I/O, CPU work and OutputOwner waiting also consume E;
     # the pre-existing fixture clock must not freeze between pipe turns.
     w.r._clock=current_pi_clock;w.w.m.clock=current_pi_clock;w.io.clock=current_pi_clock
-    calculation=0;seen=[];confirmed=[];first_state=None;first_request=None;admitted_phase=None;selected_drive=None
-    negative_observation=None;snapshot_identities={}
+    calculation=0;seen=[];confirmed=[];first_state=None;first_request=None;admitted_state=None;selected_drive=None
+    initial_value=None;admitted_value=None;request_value=None;admitted_order=None;actual_applications=[]
+    negative_observation=None;snapshot_identities={};admission_pipeline=[]
+    event_sequence=0;lifecycle_leaf=[];lifecycle_total=0;last_lifecycle=None
     with (tmp_path/'actual-c.stderr').open('wb') as errors:
         app=App(app_bridge_binary,errors)
         queue=[];clock_leaf=[];clock_leaf_total=0
@@ -137,7 +266,7 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
         def clock():
             w.w.t=pi_origin+time.monotonic()-host_origin;w.w.bind()
         def command(line):
-            nonlocal selected_drive
+            nonlocal selected_drive,event_sequence,lifecycle_total,last_lifecycle
             clock()
             rc,guest,output=app.ask(line)
             clock()
@@ -151,9 +280,31 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                         dict(app.last_transport)))
                 elif value.startswith('COMMAND '):
                     original=value.split(' ',2)[2];body=json.loads(original);seen.append(('command',body))
-                    if admitted_phase is not None and selected_drive is None and body['command_kind']=='DRIVE':
+                    applied=admitted_value is not None and any(row['order']>admitted_order and
+                        row['plan']==admitted_value.path_revision and row['phase']==admitted_value.maneuver_revision
+                        for row in actual_applications)
+                    if admitted_state is not None and applied and selected_drive is None and body['command_kind']=='DRIVE':
                         selected_drive=(body,original)
-                elif value.startswith('LIFECYCLE '):seen.append(('lifecycle',json.loads(value.split(' ',1)[1])))
+                elif value.startswith('LIFECYCLE '):
+                    original=value.split(' ',1)[1];body=json.loads(original);seen.append(('lifecycle',body))
+                    received_host=app.lifecycle_received[index];assert received_host is not None
+                    received=pi_from_host(received_host)
+                    event_sequence+=1
+                    envelope=build(native_identity,'app.lifecycle',body,event_sequence)
+                    message=Message(topics.vm_app_events(w.peer[0],'autonomous'),envelope,received,False)
+                    old_session=w.w.m.sessions.get((w.peer[0],'autonomous'))
+                    w.r._enqueue(message);w.r._drain()
+                    key=w.peer[0],'autonomous';check=w.w.m.checks.get(key);prepared=w.w.m.prepared[key]
+                    accepted=bool(check and check[0]==int(body['check_seq']) and check[1]==received
+                        and prepared.generation==body['applied_generation']
+                        and prepared.progress==int(body['progress_seq']))
+                    last_lifecycle=dict(original=original,sha256=sha256(original.encode()).hexdigest(),
+                        payload=body,envelope=envelope,original_read_pi_us=int(received*1e6),
+                        original_read_host_s=received_host,actor_finished_pi_us=int(current_pi_clock()*1e6),
+                        accepted=accepted,old_session=old_session,current_session=w.w.m.sessions.get(key),
+                        actor_check=check,actor_state=prepared.state,actor_reason=prepared.reason)
+                    lifecycle_total+=1
+                    if len(lifecycle_leaf)<64:lifecycle_leaf.append(last_lifecycle)
                 elif value.startswith('META '):seen.append(('meta',json.loads(value.split(' ',1)[1])))
                 elif value.startswith('EVENT_CLOCK '):seen.append(('event-clock',json.loads(value.split(' ',1)[1])))
             return rc,guest
@@ -187,7 +338,7 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                 value.reference_odom_seq=sample.sequence
                 value.observed_us=capture_pi_us-mapper_offset_us
                 value.localization.observed_mapper_us=value.observed_us
-                obstacle(value,14,17,10,14)
+                if scenario=='avoidance':obstacle(value,14,17,10,14)
                 completed_host=time.monotonic()
                 value.completed_us=int(pi_from_host(completed_host)*1e6)-mapper_offset_us
                 published=[]
@@ -211,12 +362,19 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                         gap_reaches_live_age=gap_us is not None and gap_us>=manifest['profile']['live_age_us'],
                         link_rc=rc,guest_end_us=guest,transport=dict(app.last_transport)))
         def exchange():
-            nonlocal first_state,first_request,admitted_phase
+            nonlocal first_state,first_request,admitted_state,initial_value,admitted_value,request_value,admitted_order
             while queue:
                 clock()
                 topic,raw,received,received_host,transport=queue.pop(0)
+                decode_begin_pi_us=int(current_pi_clock()*1e6)
                 body=decode(raw,schema.DriveLink);kind=body.WhichOneof('payload')
+                stage=None
                 if kind=='snapshot':
+                    if len(admission_pipeline)<4:
+                        stage=dict(state_id=body.snapshot.message_id,vehicle=body.snapshot.vehicle_sequence,
+                            calculation=body.snapshot.calculation_sequence,core_state=body.snapshot.episode.core.state,
+                            original_wire_read_pi_us=int(received*1e6),decode_begin_pi_us=decode_begin_pi_us,
+                            decode_end_pi_us=int(current_pi_clock()*1e6),actual_actor_clock_reads=[])
                     if body.snapshot.episode.core.state==2:
                         # The original receipt's progress sample is not the new
                         # actual calculation sample. No raw field is rewritten.
@@ -229,8 +387,21 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                         snapshot_identities[identity]=raw
                 prepared=(w.io.prepare_snapshot(body) if kind=='snapshot' else
                     episode_request_body(raw) if kind=='episode_request' else budget_request_body(raw) if kind=='budget_request' else None)
-                accepted=provider.receive(w.peer[0],body,received,prepared)
+                if stage is not None:
+                    stage['prepared_encode_end_pi_us']=int(current_pi_clock()*1e6)
+                    admission_trace.pipeline=stage
+                try:accepted=provider.receive(w.peer[0],body,received,prepared)
+                finally:
+                    admission_trace.pipeline=None
+                    if stage is not None:
+                        stage['provider_return_pi_us']=int(current_pi_clock()*1e6);admission_pipeline.append(stage)
                 seen.append(('actor',kind,accepted,dict(provider.reasons)))
+                if accepted and kind=='applied' and body.applied.applied:
+                    if len(actual_applications)==64:actual_applications.pop(0)
+                    actual_applications.append(dict(order=len(seen)-1,plan=body.applied.path_revision,
+                        phase=body.applied.maneuver_revision,vehicle=body.applied.vehicle_sequence,
+                        application_sequence=body.applied.application_sequence,
+                        preparation_sequence=body.applied.calculation_sequence,rebuilt=body.applied.rebuilt))
                 if kind=='probe':
                     note_clock(dict(direction='guest-probe',sequence=body.probe.sequence,
                         guest_send_us=body.probe.guest_send_us,read_host_s=received_host,
@@ -245,10 +416,14 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                     confirmed.append((receipt.probe_sequence,receipt.reply_sha256.hex()))
                     seen.append(('clock-confirmed',*confirmed[-1]))
                 if kind=='snapshot' and accepted:
-                    if body.snapshot.episode.core.phase==0 and first_state is None:first_state=raw
-                    elif body.snapshot.episode.core.state==2 and admitted_phase is None:admitted_phase=raw
+                    if body.snapshot.episode.core.phase==0 and first_state is None:
+                        first_state=raw;initial_value=body.snapshot
+                        if scenario=='clear-lane-follow':
+                            admitted_state=raw;admitted_value=body.snapshot;admitted_order=len(seen)-1
+                    elif body.snapshot.episode.core.state==2 and admitted_state is None:
+                        admitted_state=raw;admitted_value=body.snapshot;admitted_order=len(seen)-1
                 if kind=='episode_request' and first_request is None:
-                    first_request=raw;request=body.episode_request
+                    first_request=raw;request=body.episode_request;request_value=request
                     proof=w.o.clocks.lease(w.peer,request.clock_probe_sequence,w.o.now,w.w.m.generation)
                     birth=w.o.episodes._meter(request.candidate.origin_vehicle_sequence,historical=True)
                     # Preserve the original emitted request and the issuer's
@@ -297,12 +472,16 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                     # Actor work between P2 and the pipe inflated clock width.
                     clock();w.io.clock_completions.put_nowait(sent_clock);provider.tick()
         try:
+            admission_trace=AdmissionTrace(w)
             binding=w.r.bindings.current(w.peer[0],w.w.t)
+            native_identity=Identity(vm_id=w.peer[0],app_id='autonomous',boot_id=binding['boot_id'],
+                agent_instance_id=w.peer[2])
             # The envelope below uses the exact C bootstrap/binding identity.
             # A different boot/app source must not be re-labelled as this producer.
             assert command('boot '+' '.join((*w.peer,w.r.authority.host,binding['boot_id'],provider.instance)))[0]==0
             control=json.dumps(w.w.m.control_payload('b08-software-bench'),separators=(',',':')).encode()
             assert command('control '+control.hex())[0]==0
+            command('life')
             end=time.monotonic()+12
             while time.monotonic()<end and selected_drive is None:
                 # One real wall clock drives both processes. No source time/E is
@@ -338,7 +517,12 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                         scope='actual C/P4 pin; declared transport loss or real original expiry; no DRIVE/HIL acceptance',
                         boundary=event_boundary,original=original,rejected=rejected,current=meta,guest_end_us=at),indent=2))
                     return
-                calculation+=1;command('calc '+str(calculation));command('io');exchange()
+                calculation+=1;command('calc '+str(calculation))
+                # Production warm_report classifies completed work separately
+                # from command transport. Preserve its actual C report/receipt.
+                command('life')
+                if selected_drive is not None:break  # original command goes to ingress before optional logging/next I/O
+                command('io');exchange()
                 if not steering_available and calculation%4==0:
                     command('meta')
                     observed=next(row[1] for row in reversed(seen) if row[0]=='meta')
@@ -352,9 +536,7 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                         negative_observation=dict(observed)
                         break
                 time.sleep(.003)
-            command('meta');command('life')
-            (tmp_path/'actual-c.transcript.json').write_text(json.dumps(app.transcript,indent=2))
-            (tmp_path/'actor-observations.json').write_text(json.dumps(seen,indent=2))
+            if selected_drive is None:command('meta');command('life')
             assert confirmed and all(sequence>0 for sequence,_ in confirmed),seen[-12:]
             if not steering_available:
                 assert negative_observation is not None,seen[-12:]
@@ -364,39 +546,42 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                 assert meta['maps_published']>0 and meta['map_current']>=0 and meta['has_grant'] and meta['facts_current']
                 assert meta['search_reason_name']=='INPUT_INVALID',meta
                 assert not meta['prepared'] and meta['path_current']<0
-                assert first_state is first_request is admitted_phase is None
+                assert first_state is first_request is admitted_state is None
                 assert w.o.episodes.status(w.peer).commit_state==1
                 commands=[row[1] for row in seen if row[0]=='command']
                 assert commands and all(row['command_kind']=='STOP' and row['v_mps']==row['steer_rad']==0 for row in commands)
                 return
             assert first_state is not None,seen[-12:]
-            assert first_request is not None,seen[-12:]
-            assert admitted_phase is not None,seen[-12:]
-            initial=decode(first_state,schema.DriveLink).snapshot
-            request=decode(first_request,schema.DriveLink).episode_request
-            active=decode(admitted_phase,schema.DriveLink).snapshot
-            reserved=str(UUID(bytes=request.phase_state_message_id))
-            first_reserved=decode(snapshot_identities[reserved],schema.DriveLink).snapshot
-            assert first_reserved==active,'old completion must not consume the new phase State ID'
-            assert first_reserved.episode.core.state==2
+            assert admitted_state is not None,seen[-12:]
+            # Already decoded and admitted by the real provider; preserve its
+            # original observer objects/bytes instead of re-decoding under a
+            # selected command's short output lease. No actor validation skips.
+            initial=initial_value;active=admitted_value
             assert not initial.direction and not initial.task_reference.changing
-            assert request.action==1 and w.o.episodes.registry['state'] is not None
-            assert request.candidate.episode_id==active.episode.core.episode_id
-            assert active.episode.acceptance.request_sha256==sha256(episode_request_body(first_request)).digest()
-            assert active.calculation_sequence>request.calculation_sequence
+            if scenario=='clear-lane-follow':
+                assert first_request is None and active==initial
+                assert active.episode.core.state==1 and active.episode.core.phase==0
+                assert not active.direction and not active.task_reference.changing
+            else:
+                assert first_request is not None,seen[-12:]
+                request=request_value
+                reserved=str(UUID(bytes=request.phase_state_message_id))
+                assert snapshot_identities[reserved]==admitted_state,'old completion must not consume the new phase State ID'
+                assert active.episode.core.state==2
+                assert request.action==1 and w.o.episodes.registry['state'] is not None
+                assert request.candidate.episode_id==active.episode.core.episode_id
+                assert active.episode.acceptance.request_sha256==sha256(episode_request_body(first_request)).digest()
+                assert active.calculation_sequence>request.calculation_sequence
             assert w.o.episodes.status(w.peer).commit_state==2
             # The actual C produced these bytes; neither app READY nor command
             # count is used to fabricate the registry/fullState condition.
             assert any(row[0]=='command' for row in seen)
             assert any(row[0]=='command' and int(row[1]['clock_probe_sequence'])>0 for row in seen)
             assert selected_drive is not None,seen[-12:]
+            applications=[row for row in actual_applications if row['order']>admitted_order and
+                row['plan']==active.path_revision and row['phase']==active.maneuver_revision]
+            assert applications,'actual C APPLIED for the admitted path/phase must precede the selected fresh command'
             body,original=selected_drive
-            (tmp_path/'selected-drive-command3.json').write_text(original)
-            (tmp_path/'actual-drive-candidate.json').write_text(json.dumps(dict(command=body,
-                bootstrap=dict(vm=w.peer[0],execution=w.peer[1],app_instance=w.peer[2],boot=binding['boot_id']),
-                first_accepted_state_calculation=active.calculation_sequence,
-                observed_pi_us=w.o.now,generation=w.w.m.generation,mode=w.w.m.mode.value,
-                ready=w.w.m._ready(w.peer[0],'autonomous',w.w.t)),indent=2))
             assert int(body['calculation_sequence'])>active.calculation_sequence
             assert body['mission_id']==w.o.missions.current()['id']
             assert int(body['mission_revision'])==active.mission.mission_revision
@@ -404,6 +589,10 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
             assert int(body['plan_revision'])==active.path_revision and int(body['phase_revision'])==active.maneuver_revision
             assert int(body['clock_probe_sequence'])>0 and int(body['valid_until_pi_us'])>w.o.now
             assert body['profile']=='drive-command-3' and body['producer_role']=='AUTO' and body['v_mps']>0
+            assert last_lifecycle is not None and last_lifecycle['accepted']
+            assert last_lifecycle['payload']['readiness']=='READY'
+            assert last_lifecycle['payload']['applied_generation']==body['generation']
+            selected_lifecycle=last_lifecycle
             # Same actual command ingress and one OutputOwner as the earlier
             # software boundary. This stationary plant records submissions;
             # no serial receipt or physical APPLIED is invented here.
@@ -412,9 +601,22 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
             before=len(w.sink.frames)
             try:
                 clock();before_ready=w.w.m._ready(w.peer[0],'autonomous',w.w.t)
-                message=receive_original(w,w.peer[0],body,1,emit=True)
+                event_sequence+=1
+                message=receive_original(w,w.peer[0],body,event_sequence,emit=True)
                 diagnostic=ingress_diagnostics(w,w.peer[0],owner)
-                diagnostic.update(before_ready=before_ready,actual_c_boot=binding['boot_id'],
+                # Submission has consumed the untouched command. Evidence I/O
+                # and lifecycle observation must not be its artificial delay.
+                if scenario=='clear-lane-follow':(tmp_path/'actual-clear-follow-state.bin').write_bytes(admitted_state)
+                (tmp_path/'selected-drive-command3.json').write_text(original)
+                (tmp_path/'actual-drive-candidate.json').write_text(json.dumps(dict(command=body,scenario=scenario,
+                    bootstrap=dict(vm=w.peer[0],execution=w.peer[1],app_instance=w.peer[2],boot=binding['boot_id']),
+                    first_accepted_state_calculation=active.calculation_sequence,
+                    observed_pi_us=w.o.now,generation=w.w.m.generation,mode=w.w.m.mode.value,
+                    ready=w.w.m._ready(w.peer[0],'autonomous',w.w.t)),indent=2))
+                command('meta');command('life')
+                diagnostic.update(before_ready=before_ready,actual_c_boot=binding['boot_id'],scenario=scenario,
+                    actual_c_lifecycle=selected_lifecycle,
+                    actual_post_state_applications=applications,
                     original_calculation_sequence=body['calculation_sequence'],original_valid_until_pi_us=body['valid_until_pi_us'],
                     first_accepted_state_calculation=active.calculation_sequence,
                     source_scope='actual C bytes; typed stationary device submission only; no physical APPLIED')
@@ -432,8 +634,13 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                 assert all(row.get('device_applied') is not True for row in w.r.submissions)
             finally:owner.close();w.r._sink=previous
         finally:
+            if admission_trace is not None:admission_trace.close()
             try:app.close()
             finally:
+                (tmp_path/'actual-state-admission.json').write_text(json.dumps(dict(
+                    scope='bounded read-only wrappers; original prepare/meter/hash calls and returns unchanged',
+                    attempt_cap=3,meter_cap_per_attempt=3,clock_read_cap=16,scenario=scenario,pipeline=admission_pipeline,
+                    records=[] if admission_trace is None else admission_trace.records),indent=2))
                 (tmp_path/'actual-c.transcript.json').write_text(json.dumps(app.transcript,indent=2))
                 (tmp_path/'actor-observations.json').write_text(json.dumps(seen,indent=2))
                 (tmp_path/'actual-c-clock-leaf.json').write_text(json.dumps(dict(
@@ -443,4 +650,8 @@ def test_actual_c_initial_none_then_registered_episode_full_state(world,app_brid
                     scope='new observations of a stationary software scene/encoder; no Jetson/physical/HIL claim',
                     period_us=world_period_us,cap=64,total=world_sources_total,dropped=world_sources_total-len(world_sources),
                     live_age_us=manifest['profile']['live_age_us'],observations=world_sources),indent=2))
+                (tmp_path/'actual-c-lifecycle-leaf.json').write_text(json.dumps(dict(
+                    scope='Original C lifecycle through real enqueue/drain; manager binding and text pipe are declared leaves',
+                    typed_setup_peer=previous_peer,native_peer=w.peer,cap=64,total=lifecycle_total,
+                    dropped=lifecycle_total-len(lifecycle_leaf),events=lifecycle_leaf),indent=2))
                 w.io.pending.clear()
