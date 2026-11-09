@@ -42,6 +42,9 @@ class AuthorityStore:
             raise AuthorityError('private owned authority directory required')
         self.path=self.directory/'control.json';self.marker=self.directory/'initialized'
         self.value=None
+        # 검증 결과 한 개만 보관한다. 파일/marker는 매회 다시 읽고, 현재 RAM과
+        # 독립된 사본을 비교하므로 이 cache가 새 권한이나 유효기간을 만들지 않는다.
+        self._verified_record=None
 
     @staticmethod
     def check_storage(directory,mountpoint):
@@ -92,18 +95,26 @@ class AuthorityStore:
         self.value=value
         return self.value
 
-    def read_current(self):
+    def _read_current_bytes(self):
         """A corrupt path must not turn a FIFO/device open into an unbounded wait."""
         fd=os.open(self.path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-        with os.fdopen(fd) as stream:
+        with os.fdopen(fd,'rb') as stream:
             info=os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_uid!=self.uid or info.st_mode&0o077 or info.st_size>65536:
                 raise AuthorityError('private bounded authority record required')
             raw=stream.read(65537)
-            if len(raw.encode())>65536:raise AuthorityError('authority record too large')
-            value=json.loads(raw)
-            if not isinstance(value,dict):raise AuthorityError('authority record object required')
-            return value
+            if len(raw)>65536:raise AuthorityError('authority record too large')
+            return raw
+
+    @staticmethod
+    def _decode_current(raw):
+        value=json.loads(raw.decode('utf-8'))
+        if not isinstance(value,dict):raise AuthorityError('authority record object required')
+        return value
+
+    def read_current(self):
+        """공개 단건 읽기는 항상 새 독립 사본이다. 검증 cache를 호출자에게 주지 않는다."""
+        return self._decode_current(self._read_current_bytes())
 
     @staticmethod
     def validate(value):
@@ -225,9 +236,20 @@ class AuthorityStore:
         """Background read: loss or uncoordinated replacement blocks output."""
         with self._lock:
             try:
-                current=self.read_current();self.validate(current)
+                raw=None;validator=self.validate
+                if getattr(self.read_current,'__func__',None) is AuthorityStore.read_current:
+                    raw=self._read_current_bytes();cached=self._verified_record
+                    if cached is not None and cached[0]==raw and cached[2] is validator:
+                        current=cached[1]
+                    else:
+                        current=self._decode_current(raw);validator(current)
+                else:
+                    # 기존 subclass/시험의 custom reader는 여전히 매회 그 경로를
+                    # 호출한다. custom 반환값의 소유권을 cache로 가정하지 않는다.
+                    current=self.read_current();validator(current)
                 self.check_marker()
                 if current!=self.value:raise ValueError('authority replaced/lost')
+                if raw is not None:self._verified_record=(raw,current,validator)
             except (OSError,ValueError,KeyError,TypeError,AuthorityError):self.error='AUTHORITY_STORAGE_UNCERTAIN'
         return self.error is None
 
