@@ -105,6 +105,22 @@ def relay_publications(port, source, *, clock=j_us):
     return accepted_count
 
 
+def apply_compute_operation(compute, source, *, action, expires_us, gate_expires_us=None,
+                            publication_port=None, mapping_port=None, clock=j_us):
+    """원 M 채택 lock에서 설정/fence를 적용하고 미송신 World만 철회한다. active quiescence ACK는 아니다."""
+    from .operation_request import OperationRequestError
+    if action not in ('RUN','STANDBY'):raise ValueError('exact M operation action required')
+    # 이 condition은 원 mapping adoption lock으로 생성됐다. 없는 경우에도 같은 경계를 쓴다.
+    with compute.operation_lock:
+        checked=clock()
+        if type(checked) is not int or not 0<=checked<2**64 or checked>=expires_us:raise OperationRequestError('REQUEST_EXPIRED')
+        if gate_expires_us is not None and checked>=gate_expires_us:raise OperationRequestError('OPERATION_GATE_EXPIRED')
+        compute.set_operation_standby(action=='STANDBY')
+        if publication_port is not None:publication_port.discard_pending('WORLD_CANDIDATE')
+    if source is not None:source.discard_world()
+    return checked
+
+
 def mapper_sensor_owner(boot, binding):
     """M-main에서 보정·센서 메타만 검산한다. CV core·DB·Device는 만들지 않는다."""
     from .mapper_profile import MapperProfile
@@ -128,7 +144,7 @@ def mapper_sensor_owner(boot, binding):
     return config,owner
 
 
-def attach_sensor_snapshot(item, owner, timing, *, now_us):
+def attach_sensor_snapshot(item, owner, timing, *, now_us,clock_replies=()):
     """원 RGB·depth capture hull만 계산해 결합한다. pixel/NN decode나 지연 수락은 없다."""
     from dataclasses import replace
     from ..perception.adapters import from_capture_sample
@@ -140,7 +156,7 @@ def attach_sensor_snapshot(item, owner, timing, *, now_us):
     hull=replace(observation.rgb.stamp,captured_us=observation.capture_interval,available_us=available)
     try:
         snapshot=owner.frame_snapshot(hull,now_us=now_us,expires_us=item.expires_us,job_id=item.job_id,
-            source_generation=item.source_generation,source_key=item.source_key)
+            source_generation=item.source_generation,source_key=item.source_key,clock_replies=clock_replies)
     except SensorSnapshotUnavailable:
         # proof cap/원E 실패는 metric 미준비다. parser 입력과 원 capture를 다시 찍지 않는다.
         return item
@@ -367,14 +383,18 @@ class _Actor:
         return self.send_required('SLOT', payload, domain='RAW', revision=self.bind.binding_revision,
                                   request_id=request_id, issued_us=issued, expires_us=expires)
 
-    def await_sent(self, packet, *, cap_us=None):
+    def await_sent(self, packet, *, cap_us=None, allow_stop=False):
         """원 packet의 실제 full-send를 기다린다. queue 수락이나 빈 pending을 완료로 보지 않는다.
 
         STOP/EOF는 CPU 진입을 막고, 다른 수신은 기존 유한 FIFO에 보존한다.
         cleanup과 active parser의 원 기한은 재시도/heartbeat로 갱신하지 않는다.
+        allow_stop=True는 view 반환 뒤 원 RELEASE cleanup에만 쓴다. 실제 STOP cap도
+        더 짧은 상한으로 적용하며 새 작업/기한을 만들지 않는다.
         """
         if type(packet) is not StructuralPacket:
             raise ValueError('actual send wait requires the original structural packet')
+        if type(allow_stop) is not bool or (allow_stop and (packet.kind != 'SLOT' or packet.payload.get('op') != 'RELEASE')):
+            raise ValueError('STOP exception is reserved for original slot RELEASE cleanup')
         deadline = int(packet.fields['expires_j_us'])
         if cap_us is not None:
             if type(cap_us) is not int or not 0 <= cap_us < 2**64:
@@ -386,8 +406,10 @@ class _Actor:
             if len(self.deferred) + len(packets) > 8:
                 raise RuntimeError('bounded worker control backlog is full during actual send wait')
             self.deferred.extend(packets)
-            if self.stop is not None:
+            if self.stop is not None and not allow_stop:
                 raise _StopWork()
+            if self.stop is not None:
+                deadline = min(deadline, self.stop.expires_us)
             self.service_idle()
             actual = self.last_actual_sent
             if actual is not None and actual.packet is packet:
@@ -700,6 +722,7 @@ def mapper_main(endpoint, boot):
         context = ReaderSlotContext(WriterSlotContext(boot.writer_bind, boot.raw_scope), bind)
         from .native_resources import RawArenaReader
         from .mapper_compute import MapperCompute, MapperInput
+        from .mapper_operation import MapperOperationController
         from .mapper_control import MapperControl
         from .mapper_processor import ResidentMapperProcessor
 
@@ -754,6 +777,11 @@ def mapper_main(endpoint, boot):
         compute.start()
         control=MapperControl(actor,compute,parser_deadline,
             nn_stall_us=int(boot.profile.nn_stall_timeout_s*1_000_000))
+        def apply_operation_state(action,expires_us,gate_expires_us):
+            return apply_compute_operation(compute,source,action=action,expires_us=expires_us,
+                gate_expires_us=gate_expires_us,publication_port=publication_port,mapping_port=mapping_port,clock=j_us)
+        if source is not None:
+            source.install_operation(MapperOperationController(source.link.peer,apply=apply_operation_state,clock=j_us))
         def publish_inputs():
             nonlocal mapping_material,mapping_context,mapping_scene
             if mapping_port is None:return
@@ -783,9 +811,12 @@ def mapper_main(endpoint, boot):
         def ingest_inputs():
             # busy-idle도 새 publication을 즉시 게시해 old-context 최종 채택을 fence한다.
             publish_inputs()
-            if sensor_owner is None or actor.stop is not None:return
-            sensor_owner.ingest(source.context_bytes(),now_us=j_us())
-            apply_sensor_fence()
+            if actor.stop is not None:return
+            inputs=None
+            if sensor_owner is not None:
+                inputs=sensor_owner.ingest(source.context_bytes(),now_us=j_us())
+                apply_sensor_fence()
+            if source is not None:source.operation_step(inputs=inputs,sensor_state=sensor_owner,origin=source.origin)
         def pump_inputs():
             if source is not None and actor.stop is None:source.pump(before_outputs=ingest_inputs)
         actor.idle_hook=pump_inputs
@@ -860,7 +891,8 @@ def mapper_main(endpoint, boot):
                         parser_cap_us=None if control.ready else parser_deadline.expires_us,
                         context_bytes=b'' if source is None else source.context_bytes())
                     if sensor_owner is not None:
-                        item=attach_sensor_snapshot(item,sensor_owner,sensor_config.capture_timing,now_us=j_us())
+                        item=attach_sensor_snapshot(item,sensor_owner,sensor_config.capture_timing,now_us=j_us(),
+                            clock_replies=() if source is None else source.clock_replies)
                         # query 도중 현재 clock/Vehicle이 만료돼도 같은 main revision으로 제출한다.
                         apply_sensor_fence()
                     # 실제 native 반환과 RELEASE 송신이 끝난 owned bytes만 넘긴다.

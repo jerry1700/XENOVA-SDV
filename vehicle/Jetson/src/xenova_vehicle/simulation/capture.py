@@ -236,10 +236,15 @@ class SyntheticCamera:
         valid = np.isfinite(right_z) & (right_z >= self.calibration.right.near_m) & (right_z <= self.calibration.right.far_m)
         valid &= roi(self.calibration.right)
         safe_z = np.where(valid, right_z, 0)
-        seed = hashlib.sha256(canonical([snapshot.epoch, snapshot.sequence, self.effects.seed])).digest()
-        rng = np.random.Generator(np.random.PCG64(int.from_bytes(seed[:16], 'little')))
-        sigma = self.effects.noise_std_mm + self.effects.noise_mm_per_m2 * safe_z**2
-        measured = np.rint(safe_z * 1000 + rng.normal(0, sigma, size=right_z.shape))
+        if not (self.effects.noise_std_mm or self.effects.noise_mm_per_m2 or self.effects.dropout_fraction):
+            # 효과가 전부 꺼졌을 때만 RNG와 쓰이지 않는 전체 noise 배열을 생략한다.
+            measured = np.rint(safe_z * 1000)
+        else:
+            seed = hashlib.sha256(canonical([snapshot.epoch, snapshot.sequence, self.effects.seed])).digest()
+            rng = np.random.Generator(np.random.PCG64(int.from_bytes(seed[:16], 'little')))
+            sigma = self.effects.noise_std_mm + self.effects.noise_mm_per_m2 * safe_z**2
+            # dropout만 켜져도 normal 호출 순서를 유지해야 원 seeded hole이 같다.
+            measured = np.rint(safe_z * 1000 + rng.normal(0, sigma, size=right_z.shape))
         valid &= (measured >= max(1, self.calibration.right.near_m * 1000))
         valid &= (measured <= min(65535, self.calibration.right.far_m * 1000))
         if self.effects.dropout_fraction:

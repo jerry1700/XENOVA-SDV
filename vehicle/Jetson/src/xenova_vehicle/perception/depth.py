@@ -241,6 +241,11 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
             # invalid 원 행의 분모는 보존하되 기하 계산은 실제 valid index에만 한다.
             locations = np.flatnonzero(valid)
             timing_finish(diagnostics,timing)
+            if not len(locations):
+                # invalid 전체 분모를 유지하고 빈 block의 기하 연산만 생략한다.
+                # 바닥/hit 증거가 생기거나 누락 pixel이 FREE가 되지는 않는다.
+                return (np.empty((0, 3), dtype=np.float64), np.empty(0, dtype=np.float64), valid,
+                        np.zeros(len(indices), dtype=bool), np.zeros(len(indices), dtype=bool))
             timing=timing_start(diagnostics,'depth.projection')
             z = z[locations]
             qy = row_qy[yy[locations]]

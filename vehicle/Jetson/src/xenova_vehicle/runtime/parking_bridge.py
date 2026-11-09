@@ -9,6 +9,9 @@ from hashlib import sha256
 import math
 import struct
 from uuid import UUID
+from time import perf_counter_ns
+
+from .parking_geometry_schedule import ParkingGeometrySchedule, ParkingGeometryWork, current_geometry_frame
 
 from ..mapping.parking_catalog import AssociationProfile, SlotCatalog
 from ..mapping.registration import PoseBox
@@ -291,7 +294,8 @@ class ParkingBridge:
     """M incarnation당 한 owner. range는 이 객체 전용 예약이며 다른 allocator와 공유하지 않는다."""
 
     def __init__(self, context, *, clock_id, map_frame_id, body, method_manifest_sha256, input_kind,
-                 profile=ParkingProfile(), association_profile=AssociationProfile(), calibration_profile=None):
+                 profile=ParkingProfile(), association_profile=AssociationProfile(), calibration_profile=None,
+                 geometry_interval_us=0):
         if type(context) is not StorageContext or type(body) is not BodyModel or type(profile) is not ParkingProfile or type(association_profile) is not AssociationProfile:
             raise ValueError('exact context/body/profiles required')
         digest(method_manifest_sha256)
@@ -326,6 +330,13 @@ class ParkingBridge:
         self._links = {}; self._kind = input_kind; self._volatile = {}
         self._applied_rgb = None; self._applied_geometry = None; self._applied_prior = None; self._applied_aisles = None
         self.context_transition_wait_reason = None
+        self._geometry_schedule = ParkingGeometrySchedule(geometry_interval_us)
+        self._geometry_work = ParkingGeometryWork()
+
+    @property
+    def geometry_work(self):
+        """취소된 draft도 포함한 실제 작업 진단이다. accepted geometry/current 사용권은 아니다."""
+        return self._geometry_work.snapshot()
 
     def replace_publication_context(self, new_context, *, now_us):
         """동일 M의 scene-only full context를 바꾼다. 미해결 D 원문은 실제 정리 뒤에만 넘긴다.
@@ -592,6 +603,27 @@ class ParkingBridge:
             summary.get('geometric_model_qualified') is True and prior_qualified
             and (self.calibration_profile is None or self.calibration_profile.metric_qualified), input_kind=self._kind)
         cached_geometry = self._applied_rgb == stamp.key
+        input_new_rgb = self._geometry_work.observe_rgb(stamp.key)
+        if not cached_geometry:
+            current = (current_geometry_frame(self, result, stamp, capture_prior, aisles,
+                       registration_revision, metric_evidence, now_us) if self._geometry_schedule.interval_us and source.qualified else None)
+            resolved = (self.last is not None and self.last.association is not None
+                and self.last.association.complete and self.last.association.status in ('NEW', 'UNIQUE')
+                and not self.last.allocation_wait and not self.last.provenance_wait
+                and self.catalog.publication_transition is None)
+            reuse, reason = self._geometry_schedule.decide(current, now_us=now_us, profile=self.profile, resolved=resolved)
+            self._geometry_work.reason(reason)
+            if reuse:
+                # 원 geometry/association source는 그대로다. 새 RGB는 occupancy 근거에만 사용한다.
+                previous = self.last
+                changed, waiting = self.refresh_occupancy(snapshot, snapshot_us=summary['now_us'], now_us=now_us,
+                    metric_evidence=metric_evidence, source_kinds=source_kinds)
+                self.last = ParkingUpdate(previous.geometry, previous.association, False, changed,
+                    previous.allocation_wait, waiting, ('STATIC_GEOMETRY_REUSED',) +
+                    (('WAIT_ORIGINAL_METRIC_PROVENANCE',) if waiting else ()), snapshot['revision'])
+                self._geometry_work.add('reused_new_rgb' if input_new_rgb else 'reused_duplicate_rgb')
+                self._prune()
+                return self.last
         if cached_geometry:
             if capture_prior != self._applied_prior or aisles != self._applied_aisles:
                 raise ValueError('same capture cannot acquire a new pose/role interpretation')
@@ -604,8 +636,11 @@ class ParkingBridge:
                 remaining = self.profile.hypothesis_cap - checked
                 if remaining <= 0:
                     complete = False; reasons.append('DECLARED_AISLE_WORK_CAP'); break
-                value = extract_slots(result.tape, aisle, source=source, body=self.body,
-                    profile=replace(self.profile, hypothesis_cap=remaining))
+                began = perf_counter_ns(); self._geometry_work.add('extract_calls')
+                try:
+                    value = extract_slots(result.tape, aisle, source=source, body=self.body,
+                        profile=replace(self.profile, hypothesis_cap=remaining))
+                finally:self._geometry_work.add('extract_us', max(0, (perf_counter_ns()-began)//1000))
                 base = len(rows)
                 rows.extend(replace(c, local_id=base + i) for i, c in enumerate(value.candidates))
                 checked += value.hypotheses_checked; pairs += value.pair_count
@@ -619,7 +654,10 @@ class ParkingBridge:
                 rows[i] = replace(rows[i], geometry_state=AMBIGUOUS, reasons=rows[i].reasons + ('DECLARED_ROLE_AMBIGUITY',))
             state = 'UNKNOWN' if not complete else 'AMBIGUOUS' if conflicting else 'PARTIAL' if any(c.geometry_state != VALID for c in rows) else 'VALID' if rows else 'EMPTY'
             geometry = SlotGeometryResult(tuple(rows), source, complete, state, tuple(reasons), checked, pairs)
-        association = self.catalog.associate(geometry, capture_prior, prior_qualified=prior_qualified, profile=self.association_profile)
+        began = perf_counter_ns(); self._geometry_work.add('association_calls')
+        try:
+            association = self.catalog.associate(geometry, capture_prior, prior_qualified=prior_qualified, profile=self.association_profile)
+        finally:self._geometry_work.add('association_us', max(0, (perf_counter_ns()-began)//1000))
         allocation_wait = len(association.births) > self.catalog.available_ids
         new_geometry = False; new_occupancy = False; provenance_wait = False
         self._last_batch = geometry
@@ -665,10 +703,24 @@ class ParkingBridge:
             reasons.append('WAIT_ORIGINAL_METRIC_PROVENANCE')
         self.last = ParkingUpdate(geometry, association, new_geometry, new_occupancy, allocation_wait, provenance_wait,
             tuple(reasons), snapshot['revision'])
+        if not cached_geometry:
+            accepted = (current_geometry_frame(self, result, stamp, capture_prior, aisles,
+                        registration_revision, metric_evidence, now_us) if new_geometry and
+                        not allocation_wait and not provenance_wait and source.qualified and self._geometry_schedule.interval_us else None)
+            self._geometry_schedule = (self._geometry_schedule.completed(accepted) if accepted is not None
+                                       else self._geometry_schedule.failed())
         self._prune()
         return self.last
 
     def refresh_occupancy(self, snapshot, *, snapshot_us, now_us, metric_evidence=None, source_kinds=1):
+        """geometry cadence와 독립인 실제 현재 occupancy 작업을 센다."""
+        began = perf_counter_ns(); self._geometry_work.add('occupancy_refresh_calls')
+        try:
+            return self._refresh_occupancy(snapshot, snapshot_us=snapshot_us, now_us=now_us,
+                                           metric_evidence=metric_evidence, source_kinds=source_kinds)
+        finally:self._geometry_work.add('occupancy_refresh_us', max(0, (perf_counter_ns()-began)//1000))
+
+    def _refresh_occupancy(self, snapshot, *, snapshot_us, now_us, metric_evidence=None, source_kinds=1):
         """depth/map만 바뀐 경우다. 보수 hazard는 allocation/fsync를 기다리지 않는다."""
         if type(snapshot) is not dict or snapshot.get('kind') != self._kind:
             raise ValueError('original map input kind required')
@@ -932,6 +984,7 @@ class ParkingBridge:
         tracks = tuple(t for t in self.catalog.tracks if _in_roi(t.candidate, roi_bounds))
         unresolved = (self.last is None or self.last.association is None or not self.last.association.complete
             or self.last.association.status not in ('NEW', 'UNIQUE') or self.last.allocation_wait or self.last.provenance_wait)
+        # cadence reuse의 association은 원 geometry의 proof다. 원 capture age는 아래에서 계속 증가한다.
         limited = len(tracks) > 8
         complete = not limited and not unresolved
         slots = []

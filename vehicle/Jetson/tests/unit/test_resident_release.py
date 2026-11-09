@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from slot_message_fixtures import limits, make, reader_context
 from xenova_vehicle.runtime import resident_workers as workers
+from xenova_vehicle.runtime.local_envelope import encode_structure
 from xenova_vehicle.runtime.resident_transport import ResidentLink, j_us
 from xenova_vehicle.runtime.slot_cleanup import CleanupTimeLimits, ReleaseMessage
 
@@ -158,6 +159,38 @@ class ResidentReleaseTests(unittest.TestCase):
         self.assertIs(self.actor.link.abort(), packet)
         self.assertEqual(packet.raw_bytes, original)
         self.assertEqual(int(packet.fields['expires_j_us']), message.expires_us)
+
+    def test_cleanup_can_confirm_actual_release_after_stop_without_renewing_its_header(self):
+        packet, message = self.release()
+        now = j_us()
+        stop = self.server.send('STOP', dict(stop_revision='1', reason='test_cleanup_stop',
+            drain_deadline_j_us=str(now + 100_000)), issued_us=now, expires_us=now + 200_000)
+        actual = self.actor.await_sent(packet, allow_stop=True)
+        self.assertIs(actual.packet, packet)
+        self.assertEqual(self.actor.stop.packet.raw_bytes, stop.raw_bytes)
+        self.assertEqual(int(packet.fields['expires_j_us']), message.expires_us)
+        self.assertLess(actual.completed_us, int(stop.fields['expires_j_us']))
+
+    def test_cleanup_wait_uses_shorter_original_stop_cap_and_never_opens_parser_on_stop(self):
+        self.saturate()
+        packet, message = self.release()
+        now = j_us(); expires = now + 200_000
+        self.server.send('STOP', dict(stop_revision='1', reason='test_cleanup_cap',
+            drain_deadline_j_us=str(now + 100_000)), issued_us=now, expires_us=expires)
+        self.assertEqual(self.actor._receive(), [])
+        with patch.object(workers, 'j_us', return_value=expires), self.assertRaises(TimeoutError):
+            self.actor.await_sent(packet, allow_stop=True)
+        self.assertIs(self.actor.link.abort(), packet)
+        self.assertEqual(int(packet.fields['expires_j_us']), message.expires_us)
+        # cleanup 예외를 parser-start 대기나 새 CPU 작업에 적용할 수 없다.
+        started = j_us()
+        fields = packet.fields
+        fields.update(kind='PROGRESS', binding_domain='LIFECYCLE', binding_revision='0',
+            issued_j_us=str(started), expires_j_us=str(started + 500_000),
+            payload=dict(stage='PARSER_STARTED', source_sequence='7', completed_j_us=str(started),
+                state='WAIT_CLOCK', reason=None))
+        original = encode_structure(fields)
+        with self.assertRaises(ValueError): self.actor.await_sent(original, allow_stop=True)
 
     def test_peer_close_while_unsent_prevents_cpu(self):
         self.saturate()

@@ -3,6 +3,8 @@
 기존4KiB 제어 통로와 분리한다. header≤4096B/body≤32768B/packet≤40960B,
 송신 pending 하나, 회차 수신 최대4개이며 역할별 typed consumer가 의미를 검사한다.
 SOURCE_IDENTITY는 body 없는 제안이고 SOURCE_IDENTITY_ACK도 준비/주행 승인이 아니다.
+SOURCE_CLOCK_REPLY는 원 Probe SHA/source/origin/callback에 묶인 JIO 생성 사실만
+운반한다. body≤1024B이며 송신 완료·Pi P4·clock 승인을 대신하지 않는다.
 """
 
 from collections import Counter
@@ -25,8 +27,8 @@ PACKET_CAP=40960
 FIELDS=frozenset(('version','service_instance','channel_epoch','mapper_worker','sender',
     'message_sequence','kind','request_id','issued_j_us','expires_j_us','payload_length',
     'payload_crc32','metadata'))
-OUTBOUND={'M':frozenset(('SOURCE_IDENTITY','WORLD_CANDIDATE','SURVEY_SUMMARY','SOURCE_BOOTSTRAP_LOAD','SOURCE_BOOTSTRAP_COMPLETE')),
-          'S':frozenset(('SOURCE_IDENTITY_ACK','SOURCE_PUBLICATION','SOURCE_VEHICLE','SOURCE_TOF','SOURCE_CLOCK','SOURCE_SCENE','SOURCE_STORAGE','SOURCE_STORAGE_ABORT'))}
+OUTBOUND={'M':frozenset(('SOURCE_IDENTITY','WORLD_CANDIDATE','SURVEY_SUMMARY','SOURCE_BOOTSTRAP_LOAD','SOURCE_BOOTSTRAP_COMPLETE','OPERATION_RESULT')),
+          'S':frozenset(('SOURCE_IDENTITY_ACK','SOURCE_PUBLICATION','SOURCE_VEHICLE','SOURCE_TOF','SOURCE_CLOCK','SOURCE_CLOCK_REPLY','SOURCE_SCENE','SOURCE_STORAGE','SOURCE_STORAGE_ABORT','SOURCE_OPERATION'))}
 
 
 def _uuid(value):
@@ -91,13 +93,19 @@ class DataPacket:
             raise ValueError('identity proposal must have no body')
         if header['kind']=='SURVEY_SUMMARY' and len(body)>512:
             raise ValueError('original survey bytes exceed512 bytes')
+        if header['kind']=='SOURCE_CLOCK_REPLY' and (not body or len(body)>1024):
+            raise ValueError('original MapperClockReply body must fit1024 bytes')
+        if header['kind']=='SOURCE_CLOCK_REPLY' and set(header['metadata'])!={'probe_sha256','source','origin','probe_received_j_us'}:
+            raise ValueError('exact original clock reply metadata required')
         if header['kind']=='SOURCE_PUBLICATION' and set(header['metadata'])!={'source','origin','geometry_origin','context_sha256'}:
             raise ValueError('exact original publication metadata required')
         if header['kind']=='SOURCE_STORAGE_ABORT' and len(body)>8192:
             raise ValueError('original storage abort history exceeds8192 bytes')
         if header['kind']=='SOURCE_BOOTSTRAP_COMPLETE' and len(body)>8192:
             raise ValueError('original bootstrap completion exceeds8192 bytes')
-        if header['kind'] not in ('WORLD_CANDIDATE','SOURCE_STORAGE_ABORT','SOURCE_BOOTSTRAP_COMPLETE') and len(body)>2048:
+        if header['kind'] in ('SOURCE_OPERATION','OPERATION_RESULT') and len(body)>4096:
+            raise ValueError('original operation body exceeds4096 bytes')
+        if header['kind'] not in ('WORLD_CANDIDATE','SOURCE_STORAGE_ABORT','SOURCE_BOOTSTRAP_COMPLETE','SOURCE_OPERATION','OPERATION_RESULT') and len(body)>2048:
             raise ValueError('small source/identity body exceeds2048 bytes')
         object.__setattr__(self,'_header',header)
         object.__setattr__(self,'body',body)
@@ -178,6 +186,27 @@ class DataLink:
         if self._send_unknown:raise RuntimeError('partial or unknown binary send cannot be discarded')
         self._pending=None
         self.counts['discarded_output']+=1
+        return True
+
+    def discard_operation(self, original):
+        """만료된 미송신 원 운영 transaction만 버린다. 설정·순번·송신 불명을 바꾸지 않는다."""
+        self._check_owner()
+        if (type(original) is not DataPacket or original.kind != ('SOURCE_OPERATION' if self.role=='S' else 'OPERATION_RESULT')):
+            raise ValueError('original operation pending handle required')
+        if self._pending is not original:return False
+        if self._send_unknown:raise RuntimeError('unknown operation send cannot be discarded')
+        self._pending=None;self.counts['discarded_operation']+=1
+        return True
+
+    def discard_clock_reply(self, original):
+        """만료된 미송신 생성 trace만 철회한다. clock/source와 원 순번은 보존한다."""
+        self._check_owner()
+        if self.role!='S' or type(original) is not DataPacket or original.kind!='SOURCE_CLOCK_REPLY':
+            raise ValueError('original S clock reply pending handle required')
+        if self._pending is not original:return False
+        if self._send_unknown:raise RuntimeError('unknown clock reply send cannot be discarded')
+        if self.clock()<original.expires_us:raise ValueError('clock reply relay has not expired')
+        self._pending=None;self.counts['discarded_clock_reply']+=1
         return True
 
     def send(self,kind,metadata,body=b'',*,request_id=None,issued_us=None,expires_us=None):

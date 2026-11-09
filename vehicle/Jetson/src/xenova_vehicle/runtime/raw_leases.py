@@ -659,10 +659,14 @@ class RawLeaseLedger:
         request.request.check(now_us)
         if request.purpose == 'METRIC_MAP':
             raise UnsupportedPurpose('METRIC_MAP requires a future exact pre-read metadata/full-job contract')
+        return self._acquire(request,read_token,now_us=now_us,publication_sha256=self._publication)
+
+    def _acquire(self,request,read_token,*,now_us,publication_sha256):
+        """원장 공통 예약 본문. 호출자는 원 purpose/metadata gate를 먼저 닫는다."""
         slot = self._write_key(request.offer.content.key)
         if request.reader != self._reader:
             _fail('read request is not for the registered current M')
-        if request.publication_sha256 is not None and request.publication_sha256 != self._publication:
+        if request.publication_sha256 is not None and request.publication_sha256 != publication_sha256:
             _fail('parser publication reference differs from the registered context')
         self._open()
         for existing in self._slots:

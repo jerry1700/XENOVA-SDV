@@ -76,11 +76,53 @@ class FdMotionObservation:
         return json.loads(raw)
 
 
+@dataclass(frozen=True, slots=True)
+class FdActiveMotionObservation:
+    """원 moving SENSOR/installed-clock 자료다. window 한 표본은 정지 증거가 아니다."""
+
+    observed_pi_us: int
+    motion_profile_sha256: str
+    pi_session: str
+    device_session: str
+    odom_epoch: str
+    clock_epoch: str
+    clock_sequence: int
+    clock_valid_until_pi_us: int
+    device_lease_cutoff_us: int
+    install_payload: bytes
+    peer_produced_ack_wire: bytes
+    clock_ack_verified_by_gateway: bool
+    vehicle_bytes: bytes
+    vehicle_window: tuple
+    sensor_wire: bytes
+    steering_provenance: bytes
+    omitted_prepared_evidence: int
+
+    @property
+    def fields(self):
+        """진단 투영만 만든다. STOP window/명령 수락/폐루프 권위를 발급하지 않는다."""
+        encode=lambda raw:dict(base64=b64encode(raw).decode('ascii'),bytes=len(raw),sha256=sha256(raw).hexdigest())
+        return dict(profile='sim-fd-active-motion-observation-1',scope='ACTUAL_SENSOR3_SOFTWARE_PLANT_DIAGNOSTIC',
+            observed_pi_us=str(self.observed_pi_us),motion_profile_sha256=self.motion_profile_sha256,
+            pi_session=self.pi_session,device_session=self.device_session,odom_epoch=self.odom_epoch,
+            clock_epoch=self.clock_epoch,clock_sequence=str(self.clock_sequence),
+            clock_valid_until_pi_us=str(self.clock_valid_until_pi_us),
+            device_lease_cutoff_us=str(self.device_lease_cutoff_us),install_payload=encode(self.install_payload),
+            peer_produced_ack_wire=encode(self.peer_produced_ack_wire),
+            clock_ack_verified_by_gateway=self.clock_ack_verified_by_gateway,
+            vehicle=encode(self.vehicle_bytes),vehicle_window=[encode(raw) for raw in self.vehicle_window],
+            sensor_wire=encode(self.sensor_wire),steering_provenance=encode(self.steering_provenance),
+            omitted_prepared_evidence=self.omitted_prepared_evidence,
+            stationary_witness=False,physical_acceptance=False,authority=False,metric_ready=False,
+            free_positive=False,closed_loop=False)
+
+
 class SimFdMotionRig:
     """caller의 실제 monotonic 시간으로만 진행한다. start/wait_ready/close를 유한하게 사용한다.
 
-    current_vehicle()/poll()은 실제 feedback_events를 최대8개씩 소비한다. 긴 후속
-    계산에서도 caller actor가 이를 주기적으로 호출해야 하며 별도 수신 thread는 없다.
+    초기 current_vehicle()/poll()은 실제 feedback_events를 최대8개씩 소비한다.
+    attach_feedback_runner 뒤에는 해당 runner만 이벤트를 소비하며 poll은 view만 읽는다.
+    긴 계산에서도 caller actor가 두 owner를 진행해야 하며 별도 수신 thread는 없다.
     source/lease/seq를 조립하거나 odometry.observe_mapped를 직접 부르지 않는다.
     """
 
@@ -125,6 +167,8 @@ class SimFdMotionRig:
         self.plant=self.peer=self.sink=self.owner=None
         self._caller_sockets=()
         self._stop_submission=None
+        self._motion_source=None
+        self._feedback_runner=None
         self._events=0
         self._started=False;self._closed=False
         self.last_reason='NOT_STARTED'
@@ -157,11 +201,28 @@ class SimFdMotionRig:
             raise
 
     def poll(self):
-        """원 owner가 만든 feedback event만 소비한다. wire parser나 clock FSM을 직접 돌리지 않는다."""
+        """handoff 전 진단 이벤트만 소비한다. 이후 원 runner의 APPLIED 소비를 침범하지 않는다."""
         if self.owner is None:return None
-        events=self.owner.feedback_events()
-        self._events+=len(events)
+        if self._feedback_runner is None:
+            events=self.owner.feedback_events()
+            self._events+=len(events)
         return self.owner.device_view()
+
+    def attach_feedback_runner(self,runner):
+        """초기 설치 후 같은 OutputOwner의 실제 runner에 이벤트 소비권을 한 번 넘긴다.
+
+        caller가 이후 runner.run_once(0)를 진행한다. 이벤트 복사·대체·재전송이나
+        원 APPLIED/기한 변경을 하지 않으며 runner의 종료 책임도 가져오지 않는다.
+        """
+        from xenova_gateway.verified_runner import VerifiedGatewayRunner
+        if type(runner) is not VerifiedGatewayRunner:
+            raise ValueError('exact coherent VerifiedGatewayRunner required')
+        if (not self._started or self._closed or self.owner is None or self._motion_source is None
+                or self._feedback_runner is not None):
+            raise RuntimeError('one feedback handoff after original stationary installation required')
+        if runner._sink is not self.owner:
+            raise ValueError('feedback runner must own this exact original OutputOwner')
+        self._feedback_runner=runner
 
     def current_vehicle(self):
         """실제 MatchedStop의 원 codec bytes와 동일 SENSOR/installed lease일 때만 반환한다."""
@@ -195,6 +256,18 @@ class SimFdMotionRig:
             self.last_reason='WAIT_CHECKED_STATIONARY_WINDOW';return None
         if (vehicle.sequence,vehicle.source_sample,vehicle.source_us)!=(sample['sequence'],sample['source_sample'],sample['source_us']):
             self.last_reason='WAIT_CURRENT_MATCHED_REPORT';return None
+        evidence=self._current_sensor_evidence(view,vehicle)
+        if evidence is None:return None
+        final_now,install,clock_evidence,sensor_record,omitted=evidence
+        self.last_reason='ACTUAL_CLOCK_AND_STATIONARY_VEHICLE'
+        return FdMotionObservation(final_now,self.profile.sha256,vehicle.pi_session,vehicle.device_session,
+            vehicle.odom_epoch,str(UUID(bytes=install[2])),install[3],install[8],install[9],clock_evidence.install_payload,
+            clock_evidence.peer_produced_ack_wire,True,
+            matched.vehicle_window[-1],matched.vehicle_window,sensor_record.wire,sensor_record.steering_provenance,
+            matched.command_payload,matched.feedback_payload,omitted)
+
+    def _current_sensor_evidence(self,view,vehicle):
+        """원 SENSOR/측정/ACK와 현재 게시 clock·age를 두 조회 경로에서 동일하게 검사한다."""
         records,omitted=self.peer.evidence_snapshot()
         sensor_record=None;fields=None
         for record in reversed(records):
@@ -251,12 +324,41 @@ class SimFdMotionRig:
         if (self.owner.first_failure is not None or self.peer.failure is not None
                 or self.owner.closing or self.peer.snapshot()['closed']):
             self.last_reason='SOURCE_FAILED_DURING_DIAGNOSTIC';return None
-        self.last_reason='ACTUAL_CLOCK_AND_STATIONARY_VEHICLE'
-        return FdMotionObservation(final_now,self.profile.sha256,vehicle.pi_session,vehicle.device_session,
-            vehicle.odom_epoch,epoch,sequence,install[8],install[9],clock_evidence.install_payload,
-            clock_evidence.peer_produced_ack_wire,True,
-            matched.vehicle_window[-1],matched.vehicle_window,sensor_record.wire,sensor_record.steering_provenance,
-            matched.command_payload,matched.feedback_payload,omitted)
+        return final_now,install,clock_evidence,sensor_record,omitted
+
+    def current_motion_vehicle(self):
+        """초기 wait_ready 후 동일 source의 원 moving Vehicle만 읽는다. 새 정지창은 요구하지 않는다."""
+        if self._closed or self.owner is None:return None
+        if self._motion_source is None:
+            self.last_reason='WAIT_INITIAL_STATIONARY_INSTALLATION';return None
+        view=self.poll();peer_state=self.peer.snapshot()
+        if (self.owner.closing or not self.owner.thread.is_alive() or peer_state['closed']
+                or peer_state['simulation_stopped'] or not peer_state['thread_alive']):
+            self.last_reason='SOURCE_OWNER_NOT_ALIVE';return None
+        if self.owner.first_failure is not None or self.peer.failure is not None:
+            self.last_reason='ACTUAL_OWNER_OR_PEER_FAILURE';return None
+        if not view.get('clock_ready') or not view.get('ready'):
+            self.last_reason='WAIT_ACTUAL_CLOCK_ACK';return None
+        sample=view.get('vehicle_sample')
+        if sample is None:
+            self.last_reason='WAIT_ACTUAL_FRESH_VEHICLE';return None
+        from xenova_drive_world import encode
+        # feedback3의 기존 window producer와 같은 공용 투영이다. odometry 원 값은 바꾸지 않는다.
+        wire=encode(self._schema.VehicleSample(major=1,**{**sample,'gateway_instance':self.gateway}))
+        vehicle=self._decode(wire,self._schema.VehicleSample)
+        source=(vehicle.host_boot,vehicle.gateway_instance,vehicle.pi_session,vehicle.device_session,
+            vehicle.odom_epoch,vehicle.calibration)
+        if source!=self._motion_source or (view.get('pi_session'),peer_state['pi_session'],peer_state['device_session'])!=(
+                vehicle.pi_session,vehicle.pi_session,vehicle.device_session):
+            self.last_reason='ACTIVE_SOURCE_CHANGED';return None
+        evidence=self._current_sensor_evidence(view,vehicle)
+        if evidence is None:return None
+        final_now,install,clock_evidence,sensor_record,omitted=evidence
+        self.last_reason='ACTUAL_CLOCK_AND_MOTION_VEHICLE'
+        return FdActiveMotionObservation(final_now,self.profile.sha256,vehicle.pi_session,vehicle.device_session,
+            vehicle.odom_epoch,str(UUID(bytes=install[2])),install[3],install[8],install[9],
+            clock_evidence.install_payload,clock_evidence.peer_produced_ack_wire,True,
+            wire,(wire,),sensor_record.wire,sensor_record.steering_provenance,omitted)
 
     def wait_ready(self):
         if not self._started:self.start()
@@ -268,7 +370,11 @@ class SimFdMotionRig:
             if (self._stop_submission is None and view.get('clock_ready') and view.get('vehicle_sample') is not None):
                 self._stop_submission=self.owner.submit_stop(self.stop_frame,self.clock())
             observation=self.current_vehicle()
-            if observation is not None:return observation
+            if observation is not None:
+                vehicle=self._decode(observation.vehicle_bytes,self._schema.VehicleSample)
+                self._motion_source=(vehicle.host_boot,vehicle.gateway_instance,vehicle.pi_session,
+                    vehicle.device_session,vehicle.odom_epoch,vehicle.calibration)
+                return observation
             time.sleep(self.poll_interval_s)
         raise TimeoutError('original FD motion startup deadline: '+json.dumps(self.diagnostics(),sort_keys=True))
 

@@ -30,6 +30,13 @@ def _http_host(value: str) -> str:
     return value
 
 
+def _operation_timeout(value: str) -> float:
+    seconds=_timeout(value)
+    if seconds>5:
+        raise argparse.ArgumentTypeError('operation timeout must be between 0.1 and 5 seconds')
+    return seconds
+
+
 def _http_port(value: str) -> int:
     if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 65535:
         raise argparse.ArgumentTypeError('HTTP port must be in1..65535')
@@ -182,6 +189,20 @@ def _perception_bench_command(args: argparse.Namespace) -> int:
     return report['exit_code']
 
 
+def _operation_command(args: argparse.Namespace) -> int:
+    """현재 S에만 유한 운영 요청을 보낸다. RUN 결과는 pose/World 준비 승인이 아니다."""
+    from .runtime.operation_management import operation_command
+
+    try:
+        result=operation_command(args.state_dir,args.action,
+            request_id=args.request_id,timeout_s=args.timeout)
+    except (OSError,ValueError,RuntimeError,TimeoutError) as exc:
+        print(f"operation: {exc}",file=sys.stderr)
+        return 2
+    print(json.dumps(result,ensure_ascii=True,allow_nan=False,indent=None if args.json else 2))
+    return 0 if result.get('status') not in ('REJECTED','UNKNOWN','EXPIRED','FAILED') else 2
+
+
 def _runtime_command(args: argparse.Namespace) -> int:
     from .yolop_profile import load_yolop_profile
     from .runtime.resident_runtime import run_runtime
@@ -290,6 +311,12 @@ def main(argv: list[str] | None = None) -> int:
     runtime.add_argument('--mapper-profile',type=Path,help='optional explicit local mapper schema1 for capture timing, sensors, geometry and stopping bounds')
     runtime.add_argument('--http-host',type=_http_host,help='opt-in numeric IPv4 listen address for read-only OAK JPEG; default off')
     runtime.add_argument('--http-port',type=_http_port,default=None,help='HTTP port1..65535; requires --http-host, default8080')
+    operation=commands.add_parser('operation',help='query or explicitly set the current local Jetson RUN/STANDBY state')
+    operation.add_argument('action',choices=('status','run','standby','query'))
+    operation.add_argument('--state-dir',type=Path,required=True,help='protected state directory of the current resident service')
+    operation.add_argument('--request-id',help='original request UUID; required for query, never automatically retried with a new key')
+    operation.add_argument('--timeout',type=_operation_timeout,default=2.0,help='local transaction timeout0.1..5 seconds; default2')
+    operation.add_argument('--json',action='store_true',help='print one compact management result')
     perception=commands.add_parser('perception-bench',help='offline sensor-to-local-map diagnostics; no control authority')
     perception.add_argument('--source',choices=('synthetic','yolop-replay'),default='synthetic',help='explicit sensor provenance')
     perception.add_argument('--dataset',type=Path,help='existing paired synthetic or validated YOLOP diagnostic recording')
@@ -315,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         return _runtime_init_command(args)
     if args.command == "runtime":
         return _runtime_command(args)
+    if args.command == 'operation':
+        return _operation_command(args)
     if args.command == 'perception-bench':
         return _perception_bench_command(args)
     parser.error("unsupported command")

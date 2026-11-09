@@ -13,6 +13,7 @@ from uuid import UUID
 from .mapper_compute import MapperInput
 from .mapper_storage import MapperStorageMailbox, StorageAbort
 from .parking_bridge import ParkingBridge, ParkingNotReady, MetricEvidence, WireProvenanceGrant
+from .parking_geometry_schedule import ParkingGeometrySchedule
 from ..mapping.lane_catalog import LaneCatalog, LaneSource
 from ..mapping.local_map import GridSpec
 from ..mapping.odometry import PoseEstimate
@@ -78,14 +79,17 @@ class CatalogView:
     parking: object
     reasons: tuple = ()
     road_basis: object = None
+    parking_geometry_work: object = None
 
     def summary(self):
-        return dict(lane_status=self.lane_status, lane_ids=[] if self.lane is None else list(self.lane.lane_ids),
+        result = dict(lane_status=self.lane_status, lane_ids=[] if self.lane is None else list(self.lane.lane_ids),
             parking_candidates=0 if self.parking is None else self.parking.total_tracks_in_roi,
             reasons=list(self.reasons[:8]),road_basis_status='NOT_READY' if self.road_basis is None else self.road_basis.status,
             road_reference_id=None if self.road_basis is None else self.road_basis.reference_id,
             road_reference_revision=None if self.road_basis is None else self.road_basis.reference_revision,
             metric_ready=False, live_authority=False)
+        if self.parking_geometry_work is not None:result['parking_geometry_work'] = self.parking_geometry_work
+        return result
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,7 @@ class MappingState:
     road_basis_material: bytes | None = None
 
     def fork(self):
+        # scheduler anchor는 frozen 값이라 draft에서 교체된다. work counter만 진단용으로 공유한다.
         parking = _fork(self.parking); parking.catalog = _fork(self.parking.catalog)
         basis=copy(self.road_basis);basis._events=list(self.road_basis._events)
         return replace(self,lane=_fork(self.lane),parking=parking,road_basis=basis)
@@ -118,7 +123,7 @@ def _basis_roots(state):
 
 @dataclass(frozen=True)
 class CatalogDraft:
-    original_job: MapperInput
+    original_job: object  # physical MapperInput 또는 별도 factory의 PcFrameProofDraft 원본
     context: StorageContext
     accepted_revision: int
     state: MappingState
@@ -148,11 +153,14 @@ class MapperCatalogs:
     crossing은 명시 bytes 또는 (road,stamp)->bytes 정책이다. None이면 UNCONFIGURED.
     D job/nonce는 caller가 원 기한과 함께 제공하며 이 객체는 ID/시각을 생성하지 않는다.
     선택 clock_us는 encode 완료의 원 compute clock이며 None은 실제 monotonic이다.
+    parking_geometry_interval_us=None은 LIVE만 profile 기반 cadence, 다른 kind는 full이다.
+    명시0은 baseline full, 양수는 같은 SYNTHETIC/REPLAY kind의 비교에도 사용할 수 있다.
     """
     def __init__(self, context, *, mailbox, clock_id, map_frame_id, body,
             method_manifest_sha256, input_kind, calibration_profile=None, parking_aisles=(),
             aisle_lane_indices=None, crossing=None, lane_profile=RegistrationProfile(),
-            parking_profile=ParkingProfile(), association_profile=AssociationProfile(), clock_us=None):
+            parking_profile=ParkingProfile(), association_profile=AssociationProfile(), clock_us=None,
+            parking_geometry_interval_us=None):
         if type(context) is not StorageContext or type(mailbox) is not MapperStorageMailbox or mailbox.context_sha256 != context.sha256:
             raise ValueError('same original context/mailbox required')
         if clock_us is not None and not callable(clock_us):
@@ -171,7 +179,9 @@ class MapperCatalogs:
             raise ValueError('explicit crossing bytes/policy required')
         bridge = ParkingBridge(context, clock_id=clock_id, map_frame_id=map_frame_id,
             body=body, method_manifest_sha256=method_manifest_sha256, input_kind=input_kind,
-            calibration_profile=calibration_profile, profile=parking_profile, association_profile=association_profile)
+            calibration_profile=calibration_profile, profile=parking_profile, association_profile=association_profile,
+            geometry_interval_us=((ParkingGeometrySchedule.live_interval(parking_profile) if input_kind=='LIVE' else 0)
+                if parking_geometry_interval_us is None else parking_geometry_interval_us))
         lane = LaneCatalog(context, clock_id=clock_id, calibration_id=bridge.local_calibration_id, frame_id=map_frame_id)
         self.mailbox = mailbox; self._thread = threading.get_ident(); self._revision = 0
         basis=RoadBasis()
@@ -214,15 +224,40 @@ class MapperCatalogs:
 
     def prepare(self, original_job, result, *, context, stamp, capture_prior, registration_revision,
             prior_qualified, metric_evidence, lane_provenance_ids, base_evidence, now_us, roi_bounds):
+        self._owner();uint(now_us)
+        if type(original_job) is not MapperInput:
+            raise ValueError('original physical MapperInput required')
+        return self._prepare(original_job,result,context=context,stamp=stamp,capture_prior=capture_prior,
+            registration_revision=registration_revision,prior_qualified=prior_qualified,metric_evidence=metric_evidence,
+            lane_provenance_ids=lane_provenance_ids,base_evidence=base_evidence,now_us=now_us,roi_bounds=roi_bounds,
+            original_rgb_sequence=original_job.sample.rgb.sequence,original_context_bytes=original_job.context_bytes)
+
+    def prepare_pc(self,proof,result,*,capture_prior,registration_revision,prior_qualified,now_us,roi_bounds):
+        """원 PC/D-range proof만 별도 입구로 받는다. CAMERA FrameEvidence를 가장하지 않는다."""
+        from .pc_mapper_storage import PcFrameProofDraft
+        self._owner();uint(now_us)
+        if type(proof) is not PcFrameProofDraft or self._accepted.parking._kind!='SYNTHETIC':
+            raise ValueError('exact PC proof and SYNTHETIC catalog required')
+        proof.validate_for_catalog(self.context,now_us=now_us)
+        identity=proof.record.provenance_id
+        return self._prepare(proof,result,context=proof.storage_context,stamp=proof.frame.observation.rgb.stamp,
+            capture_prior=capture_prior,registration_revision=registration_revision,prior_qualified=prior_qualified,
+            metric_evidence=proof.metric_evidence,lane_provenance_ids=(identity,identity),base_evidence=proof.evidence,
+            now_us=now_us,roi_bounds=roi_bounds,original_rgb_sequence=proof.rgb_sequence,
+            original_context_bytes=proof.context_bytes)
+
+    def _prepare(self,original_job,result,*,context,stamp,capture_prior,registration_revision,
+                 prior_qualified,metric_evidence,lane_provenance_ids,base_evidence,now_us,roi_bounds,
+                 original_rgb_sequence,original_context_bytes):
         self._owner(); uint(now_us)
         if self._staged is not None or self._transition is not None:
             raise CatalogNotReady('original draft/publication transition is unresolved')
-        if (type(original_job) is not MapperInput or type(result) is not PerceptionResult
+        if (type(result) is not PerceptionResult
                 or type(stamp) is not FrameStamp or type(context) is not StorageContext
                 or context != self.context or now_us >= original_job.expires_us
-                or original_job.sample.rgb.sequence != stamp.sequence):
+                or original_rgb_sequence != stamp.sequence):
             raise ValueError('original current mapper job/source/context required')
-        raw_context = json_bytes(original_job.context_bytes, 65536)
+        raw_context = json_bytes(original_context_bytes, 65536)
         if raw_context.get('context_sha256') != context.sha256 or raw_context.get('storage_context') != context.fields:
             raise ValueError('catalog context differs from original mapper job bytes')
         summary, snapshot = result.summary, result.map_snapshot
@@ -313,7 +348,8 @@ class MapperCatalogs:
         combined = _merge_evidence(merged, EvidenceTable(tuple(state.parking._records.values()),
             tuple(state.parking._contexts.values())))
         retained = _closure(combined, roots, context)
-        view = CatalogView(lane_status, lane_model, parking_publication, tuple(dict.fromkeys(reasons)),basis_snapshot)
+        view = CatalogView(lane_status, lane_model, parking_publication, tuple(dict.fromkeys(reasons)),basis_snapshot,
+                           state.parking.geometry_work)
         state = replace(state,evidence=retained,view=view)
         self._staged = CatalogDraft(original_job, context, self._revision, state)
         return self._staged

@@ -200,9 +200,8 @@ static int vehicle_received(void *unused,const uint8_t *bytes,size_t count,int64
 static int map_received(void *unused,const uint8_t *bytes,size_t count,int64_t received){
  ARG_UNUSED(unused);ARG_UNUSED(received);struct dl_clock mapping;uint64_t now;
  if(dl_clock_get(&mapping,&now)){rejected_maps++;return -EAGAIN;}
- if(memcmp(&engine->maps.trust,&mapping.trust,sizeof(mapping.trust))){
-  if(dw_pool_source(&engine->maps,&mapping.trust)){rejected_maps++;return -EBUSY;}
- }
+ /* 같은 source의 주기적 clock lease는 진행 중인 reader/writer를 fence하지 않는다. */
+ if(dw_pool_refresh(&engine->maps,&mapping.trust)){rejected_maps++;return -EBUSY;}
  enum de_result rc=de_world(engine,bytes,count,now);
  if(rc){rejected_maps++;atomic_set(&reason,rc);return -EPROTO;}
  accepted_maps++;return 0;
