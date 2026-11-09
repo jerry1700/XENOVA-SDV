@@ -127,7 +127,15 @@ class RejoinCoordinator:
     def _record(self,vm,value):
         with self._lock:
             records={**self.records,vm:value}
-            atomic_json(self.path,{'schema_version':'1.0-drive-rejoin','vms':records})
+            payload={'schema_version':'1.0-drive-rejoin','vms':records}
+            if vm in self.records and self.records[vm]==value:
+                # 같은 실패/대기 행의 반복 관측은 새 내구 전이가 아니다. 원 파일을
+                # 매회 확인하고, 없거나 달라졌으면 기존 atomic write/retry를 유지한다.
+                # timestamp를 제외한 비교나 binding lease 갱신은 하지 않는다.
+                try:unchanged=private_json(self.path,self.uid)==payload
+                except (OSError,ValueError):unchanged=False
+                if unchanged:return
+            atomic_json(self.path,payload)
             self.records=records
 
     def _work(self,vm,*,initial_row=None):
