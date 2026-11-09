@@ -171,6 +171,25 @@ def _runtime_init_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runtime_rearm_command(args: argparse.Namespace) -> int:
+    from .runtime.recovery_rearm import RearmRequest, apply_rearm, check_rearm, query_rearm
+
+    try:
+        if args.rearm_action == 'check':
+            report = check_rearm(args.state_dir)
+        elif args.rearm_action == 'query':
+            report = query_rearm(args.state_dir, args.request_id)
+        else:
+            request = RearmRequest(args.request_id, args.expected_manifest_sha256,
+                                   args.expected_episode_id, args.reason)
+            report = apply_rearm(args.state_dir, request)
+    except (OSError, ValueError, RuntimeError) as exc:
+        report = dict(contract='runtime-rearm-1', status='REJECTED', reason=str(exc)[:256],
+                      motion_authorized=False)
+    print(json.dumps(report, ensure_ascii=True, allow_nan=False))
+    return 0 if report['status'] in ('ELIGIBLE', 'DURABLE_ACK') else 3 if report['status'] == 'UNKNOWN' else 2
+
+
 def _perception_bench_command(args: argparse.Namespace) -> int:
     from .perception.bench import run_perception_bench
 
@@ -294,6 +313,17 @@ def main(argv: list[str] | None = None) -> int:
     runtime_init = commands.add_parser("runtime-init", help="explicitly initialize a new protected runtime state directory")
     runtime_init.add_argument("--state-dir", type=Path, required=True, help="new directory; existing state is never overwritten")
     runtime_init.add_argument("--json", action="store_true", help="print the installation record")
+    rearm = commands.add_parser('runtime-rearm', help='offline explicit recovery-budget approval; never starts/stops resources')
+    rearm_actions = rearm.add_subparsers(dest='rearm_action', required=True)
+    for action in ('check', 'apply', 'query'):
+        command = rearm_actions.add_parser(action)
+        command.add_argument('--state-dir', type=Path, required=True)
+        if action in ('apply', 'query'):
+            command.add_argument('--request-id', required=True, help='original explicit canonical request UUID')
+        if action == 'apply':
+            command.add_argument('--expected-manifest-sha256', required=True, help='exact current original manifest SHA256')
+            command.add_argument('--expected-episode-id', required=True, help='original recovery episode UUID from check')
+            command.add_argument('--reason', required=True, help='explicit operator recovery reason, at most 512 UTF-8 bytes')
     runtime = commands.add_parser("runtime", help="run resident OAK acquisition, parser and storage; metric/world wait for external inputs")
     runtime.add_argument("--profile", type=Path, required=True, help="explicit REQUIRED YOLOP graph/asset profile")
     runtime.add_argument("--state-dir", type=Path, required=True, help="protected state created by runtime-init")
@@ -340,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
         return _yolop_replay_command(args)
     if args.command == "runtime-init":
         return _runtime_init_command(args)
+    if args.command == 'runtime-rearm':
+        return _runtime_rearm_command(args)
     if args.command == "runtime":
         return _runtime_command(args)
     if args.command == 'operation':

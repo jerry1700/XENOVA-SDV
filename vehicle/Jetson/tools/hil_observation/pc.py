@@ -182,6 +182,8 @@ def main(argv=None):
         for number in (signal.SIGINT, signal.SIGTERM):
             previous[number] = signal.signal(number, stop_requested)
         connection = socket.create_connection((host, args.observation_port), args.observation_connect_timeout_s)
+        # 분리 송신하는 작은 clock prefix/header를 Nagle 대기로 붙잡지 않는다.
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         connection.setblocking(False)
         print(json.dumps(dict(kind='pc-observation-connected-1', bootstrap_pending=True, authority=False)), flush=True)
         wait_bootstrap(args.bootstrap_receipt, args.bootstrap_timeout_s, stopped.is_set)
