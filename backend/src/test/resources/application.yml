@@ -41,7 +41,7 @@ xenova:
   template-catalog:
     templates:
       - template-id: debian-13-arm64
-        version: "1.0.2"
+        version: "1.0.6"
         display-name: Debian 13
         min-memory-mib: 128
       - template-id: ubuntu-24.04-arm64
