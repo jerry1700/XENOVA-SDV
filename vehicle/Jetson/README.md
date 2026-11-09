@@ -616,3 +616,48 @@ XENOVA_TEST_PAIRED_GATEWAY=1 PYTHONPATH="src:tests/unit:tests/integration:$B08_S
   test_sim_feedback_peer.SimFeedbackPeerTests \
   test_sim_fd_motion.SimFdMotionTests
 ```
+
+
+## 정지 후 명시 복구 예산 재승인
+
+`xenova-vehicle runtime-rearm check|apply|query`는 같은 OS boot/runtime의 완전한
+관리 inventory에 한정한 오프라인 운영 명령이다. 원 service와 자원을 먼저 정상 정지·정리한
+뒤 사용하며 이 CLI가 start/stop/kill, IPC unlink, 파일 삭제, bootstrap/DB 갱신을 대신하지
+않는다. 기존 UID1000/Cap0 및 보호 state directory 소유 조건을 유지한다. root 승격이나
+다른 namespace를 만들지 않는다.
+
+```sh
+xenova-vehicle runtime-rearm check --state-dir /실제/보호/state
+xenova-vehicle runtime-rearm apply --state-dir /실제/보호/state --request-id 원요청UUID --expected-manifest-sha256 check의원SHA --expected-episode-id check의원episodeUUID --reason '수습 내용과 명시 재승인 사유'
+xenova-vehicle runtime-rearm query --state-dir /실제/보호/state --request-id 원요청UUID
+```
+
+`apply`는 원 ResourceStore lock 아래 PUBLISHED execution anchor·원 S/A/M/D/TRACKER
+실제 종료·모든 KNOWN 이름 ABSENT·같은 runtime을 검산한다. 고정 systemd237의 unit은
+정확히 inactive/dead 또는 failed/failed, MainPID/ControlPID0, `Job=` 빈 값이어야 한다.
+FAILED 표시는 reset-failed로 지우지 않는다. 현재 root 소유 unit/slice 설정·manager birth·
+원 전용 slice incarnation과 양끝의 안정된 빈 tree를 함께 검사한다. Restart는 원 값을
+감사에 남기며 on-failure 자체를 금지하지 않는다. 전용 unit의 시작/정지 조작을 동시에
+실행하지 않는 협력 UID·PID1 직렬 실행 전제이며 빈 PID를 두 번 읽은 일반 COMPLETE가 아니다.
+수습한 코드/ExecStart 경로의 변경은 원 anchor를 덮지 않고 old/current 설정을 함께 남긴다.
+
+원 SHA/episode CAS가 맞으면 새 episode UUID와 exact CLEAN/revision+1/counts0 target을
+한 번 고정한다. `runtime-rearm-UUID.intent.json`은 PREPARED가 아닌 그 target의 최종
+AUTHORIZED 운영 승인이다. 원 manifest bytes·이전 횟수·anchor SHA·수습 사유·정리 관측을
+O_EXCL/0600 및 file+parent fsync로 먼저 보존한다. 이어 실제 관측을 다시 수행해 원 source·
+anchor·manager/cgroup·현재 설정이 그대로인지 확인하고, fresh receipt의 첫 StoreProposal을
+원 CAS/fsync로 출판한다. audit 파일은 각 64KiB 이하이며 기존 이력의 덮기·삭제·자동 회전은 없다.
+기존 owner/resource inventory·runtime/epoch·anchor·bootstrap·DB는 바꾸지 않는다.
+
+`UNKNOWN`은 효과/내구 결과가 불명이라는 뜻이며 승인 취소나 새 key의 자동 재시도 허가가
+아니다. query의 `SOURCE_UNCHANGED`는 원 5회 등의 source가 남은 경우, `TARGET_VISIBLE`은
+고정 승인 target이 현재 보이는 경우다. `DURABLE_ACK`는 원 출판의 성공 ACK를 기록한 원문이
+보이는지와 구분하며, query가 새 fsync/출판으로 불명을 승격하지는 않는다. 같은 key apply는
+원 intent 조회만 하고 새 target/episode를 발급하지 않는다. target이 보이는 UNKNOWN에서도
+그 명시 승인 자체는 철회되지 않는다. 다음 별도 명시 start는 기존 admission에서 다시 실제
+관측·DURABLE DIRTY 출판을 거치고 `_next_episode`로 0→1을 소비한다. 자동 5회·건강 5분
+초기화·원 기한·READY/Source/주행 권한은 변경하지 않는다.
+
+검증은 `test_recovery_rearm.py`의 실제 Linux ResourceStore/CAS/procfs/name 관측과
+`test_stopped_service_scope.py`의 선언된 systemd leaf를 구분한다. 모델·카메라·실제 service
+시작/종료·현장 재승인 성공을 이 단위 시험만으로 주장하지 않는다.
