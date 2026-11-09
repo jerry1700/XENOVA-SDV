@@ -22,6 +22,7 @@ from .transport import (SessionScope, ObservationFrame, ClockPacket, PacketSende
 
 
 IO_TIMEOUT_US = 200_000
+_JETSON_READ_STEPS = 4
 U63_MAX = (1 << 63) - 1
 _COUNTERS = ('probes_sent', 'replies_sent', 'replies_accepted', 'leases_issued', 'clock_rejected',
     'frames_received', 'frames_sent', 'frames_mapped', 'frames_offered', 'frames_dropped')
@@ -181,6 +182,12 @@ class _Session:
         if self.control is not None:
             probe, p2, local_end = self.control
             _need(now < local_end, 'ORIGINAL_CLOCK_REPLY_SEND_TIMEOUT')
+            pending = self.sender.pending
+            if self.sender.active is None and type(pending) is ObservationFrame:
+                # 첫 byte 전 FRAME만 버린다. 이미 기록한 sequence/E는 환급하지 않는다.
+                if self.sender.discard_pending(pending):
+                    self.count('frames_dropped')
+                    idle = True
             if idle:
                 p3 = self.now()  # 최초 송신 준비에서 한 번 고정한다. partial/reoffer 때 갱신하지 않는다.
                 _need(p3 < local_end, 'ORIGINAL_CLOCK_REPLY_SEND_TIMEOUT')
@@ -236,10 +243,24 @@ class _Session:
         # 대기 중 도착한 종료 요청을 peer close에 따른 다음 수신보다 먼저 반영한다.
         if self.stopped(): return 'CANCELLED'
         if readable:
-            if self.receiver.deadline_us is None:
-                self.receiver.begin(expires_us=min(now + IO_TIMEOUT_US, self.expires), now_us=now)
-            item = self.receiver.step(now)
-            if item is not None: self.received(item)
+            # A main으로 반드시 돌아간다. partial E와 완전수신 tick은 각 원 receiver가 지킨다.
+            for read_step in range(_JETSON_READ_STEPS if self.role == 'JETSON' else 1):
+                if self.stopped(): return 'CANCELLED'
+                if read_step:
+                    try:
+                        if not select.select([self.endpoint], [], [], 0)[0]: break
+                    except InterruptedError:
+                        break
+                now = self.now()
+                if now >= self.expires: return 'DURATION'
+                if self.receiver.deadline_us is None:
+                    self.receiver.begin(expires_us=min(now + IO_TIMEOUT_US, self.expires), now_us=now)
+                received_before = self.receiver.stats['received_bytes']
+                item = self.receiver.step(now)
+                if item is not None: self.received(item)
+                item = None  # 다음 partial 수신 전에 callback의 완성 packet 참조를 놓는다.
+                if self.receiver.stats['received_bytes'] == received_before:
+                    break  # EAGAIN/중단 syscall에서는 다시 읽으려고 회전하지 않는다.
         elif self.receiver.deadline_us is not None and now >= self.receiver.deadline_us:
             self.receiver.step(now)  # 원 partial E를 갱신하지 않고 실제 timeout으로 닫는다.
         if self.stopped(): return 'CANCELLED'

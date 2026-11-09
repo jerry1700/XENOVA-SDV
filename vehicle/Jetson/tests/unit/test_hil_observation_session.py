@@ -6,6 +6,7 @@ thread를 만들지 않으며 아래 thread의 stop/join은 시험 caller가 직
 """
 
 from dataclasses import replace
+import gc
 import math
 import select
 import socket
@@ -15,9 +16,9 @@ from unittest.mock import patch
 
 from tools.hil_observation.clock import ClockSource, ClockPolicy, ClockProbe, ClockReply
 from tools.hil_observation.session import (run_jetson_session, run_pc_session, monotonic_us,
-    ObservationSessionError, IO_TIMEOUT_US, JetsonObservationPump)
+    ObservationSessionError, IO_TIMEOUT_US, JetsonObservationPump, _Session)
 from tools.hil_observation.transport import (SessionScope, ClockPacket, ObservationFrame,
-    PacketSender, PacketReceiver)
+    PacketSender, PacketReceiver, TransportTimeout, MAX_IO, PREFIX, KINDS)
 from xenova_vehicle.simulation.pc_input import PcSourceBinding
 
 
@@ -49,6 +50,22 @@ def observation(scope, sequence):
     return ObservationFrame(scope, sequence, rgb_pc_interval=(now - 200_000, now - 199_000),
         depth_pc_interval=(now - 199_900, now - 198_900), render_completed_pc_us=now - 100_000,
         expires_pc_us=now + 300_000, rgb=RGB, depth=DEPTH)
+
+
+class MeasuredSocket(socket.socket):
+    """실제 nonblocking FD의 recv 호출 수/크기만 관측하는 시험 owner다."""
+    def __init__(self, endpoint):
+        super().__init__(endpoint.family, endpoint.type, endpoint.proto, fileno=endpoint.detach())
+        self.setblocking(False)
+        self.read_limits = []
+        self.before_recv = self.after_recv = None
+
+    def recv(self, size, flags=0):
+        self.read_limits.append(size)
+        if self.before_recv is not None: self.before_recv()
+        raw = super().recv(size, flags)
+        if self.after_recv is not None: self.after_recv()
+        return raw
 
 
 class HilObservationSessionTests(unittest.TestCase):
@@ -88,6 +105,152 @@ class HilObservationSessionTests(unittest.TestCase):
                 packets.append(received)
                 if received.packet.kind == expected_kind: return packets
         self.fail('actual original peer packet did not complete inside its fixed200ms operation')
+
+    def body_session(self):
+        """원 frame header만 실제 수신한 Jetson session과 유한 software clock이다."""
+        binding, scope, policy = fixtures()
+        left, peer = self.pair()
+        endpoint = MeasuredSocket(left)
+        self.addCleanup(endpoint.close)
+        peer.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
+        ticks, stopped = [monotonic_us()], [False]
+        session = _Session(endpoint, scope, 2, lambda: ticks[0], lambda: stopped[0], role='JETSON',
+            binding=binding, clock_policy=policy, destination_clock_id=binding.clock_id,
+            probe_interval_us=20_000, on_frame=lambda *_: False)
+        self.addCleanup(lambda: session.complete('CANCELLED', None))
+        packet = observation(scope, 1)
+        for part in packet.wire_parts[:2]: self.assertEqual(peer.send(part), len(part))
+        session.receiver.begin(expires_us=ticks[0] + IO_TIMEOUT_US, now_us=ticks[0])
+        session.receiver.step(ticks[0])
+        session.receiver.step(ticks[0])
+        endpoint.read_limits.clear()
+        return session, endpoint, peer, ticks, stopped, packet
+
+    def leave_last_frame_byte(self, session, peer, ticks, frame):
+        body = frame.rgb + frame.depth
+        for start in range(0, len(body) - 1, MAX_IO):
+            chunk = body[start:min(start + MAX_IO, len(body) - 1)]
+            self.assertEqual(peer.send(chunk), len(chunk))
+            self.assertIsNone(session.receiver.step(ticks[0]))
+        self.assertEqual(session.receiver.partial_bytes, len(body) - 1)
+        return body[-1:]
+
+    def test_pending_unstarted_frame_yields_to_original_clock_without_refunding_head(self):
+        _, scope, _ = fixtures()
+        pc, peer = self.pair()
+        now = monotonic_us()
+        frame = observation(scope, 1)
+        frames = [frame]
+        session = _Session(pc, scope, 2, lambda: now, lambda: False, role='PC',
+            next_frame=lambda: frames.pop() if frames else None)
+        self.addCleanup(lambda: session.complete('CANCELLED', None))
+        fields = scope.fields
+        probe = ClockProbe(ClockSource(fields['source_id'], fields['pc_clock_epoch'], fields['session_id']),
+            1, b'\x02' * 16, now - 10, now - 10 + IO_TIMEOUT_US)
+        packet = ClockPacket(scope, 'CLOCK_PROBE', probe.raw_bytes)
+        for part in packet.wire_parts: self.assertEqual(peer.send(part), len(part))
+        # prefix만 먼저 받은 상태에서 다음 step이 FRAME을 pending에 올리고 PROBE를 완성한다.
+        session.receiver.begin(expires_us=now + IO_TIMEOUT_US, now_us=now)
+        self.assertIsNone(session.receiver.step(now))
+        self.assertIsNone(session.step(wait_cap_us=0))
+        prefix = peer.recv(PREFIX.size)
+        self.assertEqual(len(prefix), PREFIX.size)
+        self.assertEqual(PREFIX.unpack(prefix)[2], KINDS['CLOCK_REPLY'])
+        self.assertEqual(session.counts['frames_dropped'], 1)
+        self.assertEqual(session.counts['frames_sent'], 0)
+        self.assertEqual(session.sender.active.kind, 'CLOCK_REPLY')
+        reply = ClockReply.from_raw(session.sender.active.clock_raw_bytes)
+        self.assertEqual((reply.probe.raw_bytes, reply.p2_us, reply.p3_us), (probe.raw_bytes, now, now))
+        # 철회한 FRAME도 offer 시 소비된 순번/E를 재발급하지 않는다.
+        self.assertFalse(session.sender.offer(frame, expires_us=frame.expires_pc_us, now_us=now))
+        self.assertIsNone(session.sender.pending)
+        self.assertIsNone(session.step(wait_cap_us=0))
+        self.assertEqual(session.counts['replies_sent'], 1)
+        self.assertEqual(session.counts['frames_dropped'], 1)
+
+    def test_jetson_drain_returns_after_four_original_io_quanta(self):
+        session, endpoint, peer, ticks, _, frame = self.body_session()
+        end = session.receiver.deadline_us
+        payload = frame.rgb[:4 * MAX_IO + 1]
+        self.assertEqual(peer.send(payload), len(payload))
+        self.assertIsNone(session.step(wait_cap_us=0))
+        self.assertEqual(endpoint.read_limits, [MAX_IO] * 4)
+        self.assertEqual(session.receiver.partial_bytes, 4 * MAX_IO)
+        self.assertEqual(session.receiver.deadline_us, end)
+        self.assertEqual(session.counts['frames_received'], 0)
+
+    def test_jetson_drain_stops_when_partial_socket_is_empty_without_renewing_e(self):
+        session, endpoint, peer, ticks, _, _ = self.body_session()
+        end = session.receiver.deadline_us
+        self.assertEqual(peer.send(b'x'), 1)
+        self.assertIsNone(session.step(wait_cap_us=0))
+        self.assertEqual(len(endpoint.read_limits), 1)
+        self.assertEqual(session.receiver.partial_bytes, 1)
+        self.assertEqual(session.receiver.deadline_us, end)
+
+    def test_jetson_drain_checks_original_partial_deadline_before_each_recv(self):
+        session, endpoint, peer, ticks, _, frame = self.body_session()
+        end = session.receiver.deadline_us
+        self.assertEqual(peer.send(frame.rgb[:2 * MAX_IO]), 2 * MAX_IO)
+        endpoint.after_recv = lambda: ticks.__setitem__(0, end)
+        with self.assertRaisesRegex(TransportTimeout, 'original receive deadline expired'):
+            session.step(wait_cap_us=0)
+        self.assertEqual(len(endpoint.read_limits), 1)
+        self.assertTrue(session.receiver.closed)
+
+    def test_jetson_drain_stops_at_eagain_despite_stale_readability(self):
+        session, endpoint, peer, _, _, _ = self.body_session()
+        end = session.receiver.deadline_us
+        self.assertEqual(peer.send(b'x'), 1)
+        # readiness 뒤 read가 EAGAIN인 정상 경쟁을 선언한다. 원 recv 자체는 실제 FD다.
+        with patch('tools.hil_observation.session.select.select', return_value=([endpoint], [], [])):
+            self.assertIsNone(session.step(wait_cap_us=0))
+        self.assertEqual(len(endpoint.read_limits), 2)
+        self.assertEqual(session.receiver.partial_bytes, 1)
+        self.assertEqual(session.receiver.deadline_us, end)
+
+    def test_completed_frame_and_empty_socket_leave_no_phantom_receive_deadline(self):
+        session, endpoint, peer, ticks, _, frame = self.body_session()
+        last = self.leave_last_frame_byte(session, peer, ticks, frame)
+        endpoint.read_limits.clear()
+        self.assertEqual(peer.send(last), 1)
+        self.assertIsNone(session.step(wait_cap_us=0))
+        self.assertEqual(session.counts['frames_received'], 1)
+        self.assertEqual(len(endpoint.read_limits), 1)
+        self.assertIsNone(session.receiver.deadline_us)
+        self.assertEqual(session.receiver.partial_bytes, 0)
+
+    def test_completed_frame_reference_is_released_before_next_partial_read(self):
+        session, endpoint, peer, ticks, _, frame = self.body_session()
+        last = self.leave_last_frame_byte(session, peer, ticks, frame)
+        received_ids, stamps = [], []
+        original = session.received
+        def received(item):
+            self.assertTrue(gc.is_tracked(item.packet))
+            received_ids.append(id(item.packet))
+            stamps.append(item.received_local_us)
+            original(item)
+        session.received = received
+        def before_recv():
+            if received_ids:
+                self.assertFalse(any(id(value) == received_ids[-1] for value in gc.get_objects()),
+                                 'completed frame still retained before next partial read')
+        endpoint.before_recv = before_recv
+        completed = ticks[0] + 7
+        endpoint.after_recv = lambda: ticks.__setitem__(0, completed)
+        endpoint.read_limits.clear()
+        self.assertEqual(peer.send(last + b'X'), 2)
+        self.assertIsNone(session.step(wait_cap_us=0))
+        self.assertEqual(stamps, [completed])
+        self.assertEqual(len(endpoint.read_limits), 2)
+        self.assertEqual(session.receiver.partial_bytes, 1)
+
+    def test_jetson_drain_observes_cancellation_between_receives(self):
+        session, endpoint, peer, _, stopped, frame = self.body_session()
+        self.assertEqual(peer.send(frame.rgb[:2 * MAX_IO]), 2 * MAX_IO)
+        endpoint.after_recv = lambda: stopped.__setitem__(0, True)
+        self.assertEqual(session.step(wait_cap_us=0), 'CANCELLED')
+        self.assertEqual(len(endpoint.read_limits), 1)
 
     def test_two_original_clock_samples_map_frames_and_queue_drop_without_retiming(self):
         binding, scope, policy = fixtures(); jetson, pc = self.pair(); stop = threading.Event()
@@ -211,12 +374,14 @@ class HilObservationSessionTests(unittest.TestCase):
     def test_clock_control_waits_for_active_frame_and_keeps_original_p2_p3(self):
         _, scope, _ = fixtures(); peer, pc = self.pair(); stop = threading.Event()
         frame = observation(scope, 1); original_e = frame.expires_pc_us; pending = [frame]
+        thread, state = self.start(lambda: run_pc_session(pc, scope=scope, duration_s=1,
+            next_frame=lambda: pending.pop() if pending else None, cancelled=stop.is_set), stop)
+        # 원 시험은 이미 시작한 FRAME의 비선점이다. pending-only 우선순위와 구분한다.
+        self.assertTrue(select.select([peer], [], [], .2)[0], 'actual FRAME first byte was not written')
         fields = scope.fields
         j1 = monotonic_us()
         probe = ClockProbe(ClockSource(fields['source_id'], fields['pc_clock_epoch'], fields['session_id']),
             1, b'\x01' * 16, j1, j1 + IO_TIMEOUT_US)
-        thread, state = self.start(lambda: run_pc_session(pc, scope=scope, duration_s=1,
-            next_frame=lambda: pending.pop() if pending else None, cancelled=stop.is_set), stop)
         packets = self.peer_exchange(peer, scope, ClockPacket(scope, 'CLOCK_PROBE', probe.raw_bytes), expected_kind='CLOCK_REPLY')
         stop.set(); thread.join(2)
         self.assertNotIn('error', state)
