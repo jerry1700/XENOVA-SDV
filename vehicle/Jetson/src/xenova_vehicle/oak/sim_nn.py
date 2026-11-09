@@ -271,7 +271,7 @@ class SimNnSource:
             raise ValueError('dedicated SIM NN profile required; physical profile is unsupported')
         _sha(context_key)
         self.profile, self.context_key, self.clock = profile, context_key, clock
-        self._dai = self._device = self._lock = self._asset = self._blob = self._input_queue = None
+        self._dai = self._np = self._device = self._lock = self._asset = self._blob = self._input_queue = None
         self._queues = {}
         self._started = self._closed = False
         self._pending = self._input = self._output = self._last = self._send_failure = None
@@ -298,6 +298,9 @@ class SimNnSource:
         self._check(deadline)
         if sys.platform != 'linux' or sys.byteorder != 'little':
             raise RuntimeError('SIM OAK NN requires little-endian Linux')
+        # 첫 frame E 안에서 cold import를 지불하지 않고 A의 원 startup cap에 포함한다.
+        self._np = importlib.import_module('numpy')
+        self._check(deadline)
         self._dai = dai = importlib.import_module('depthai')
         if dai.__version__ != '2.29.0.0':
             raise RuntimeError('SIM NN requires DepthAI2.29.0.0')
@@ -355,7 +358,6 @@ class SimNnSource:
         current = observation.rgb.stamp.sequence, sample.sdk_us
         if self._last is not None and any(a <= b for a, b in zip(current, self._last)):
             raise ValueError('non-increasing original SIM sequence/SDK timestamp')
-        import numpy as np
         frame = self._dai.ImgFrame()
         frame.setWidth(640)
         frame.setHeight(360)
@@ -364,7 +366,7 @@ class SimNnSource:
         stamp = timedelta(microseconds=sample.sdk_us)
         frame.setTimestamp(stamp)
         frame.setTimestampDevice(stamp)
-        frame.setData(np.frombuffer(rgb.payload, dtype=np.uint8))
+        frame.setData(self._np.frombuffer(rgb.payload, dtype=self._np.uint8))
         self._check(expires_j_us)
         self._pending, self._last = submission, current
         try:
