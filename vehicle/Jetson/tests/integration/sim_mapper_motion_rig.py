@@ -299,7 +299,10 @@ class SimMapperMotionRig:
     def __init__(self, fd_rig, *, raw_binding, mapper_instance, mapper_boot,
                  source_policy, clock_policy, coherent_platform_root, broker_binary,
                  broker_workdir, startup_timeout_s, poll_interval_s, broker_startup_timeout_s,
-                 cleanup_timeout_s, observer=None):
+                 cleanup_timeout_s, observer=None, active_motion=False):
+        if type(active_motion) is not bool:
+            raise ValueError('explicit development active-motion selection required')
+        self._active_motion = active_motion
         if observer is not None:
             from sim_observation_bridge import SimObservationBridge
             if type(observer) is not SimObservationBridge:
@@ -369,6 +372,20 @@ class SimMapperMotionRig:
         self.last_frame_query = None
         self.cleanup = []
 
+    def bind_drive_provider(self,provider):
+        """동일 실제 Gateway provider로 uplink trust를 전달한다. 별도 clock/lease는 만들지 않는다."""
+        from xenova_gateway.drive_link import DriveLinkProvider
+        self._owned()
+        if (type(provider) is not DriveLinkProvider or provider.instance!=self.fd.gateway
+                or provider.runner._sink is not self.fd.owner or self._closed
+                or provider.runner.mapper_uplink is not self.uplink
+                or type(self._provider) is not SimpleNamespace):
+            raise ValueError('one actual Gateway provider on the same original FD output owner required')
+        self._provider=provider
+
+    def _current_fd_vehicle(self):
+        return self.fd.current_motion_vehicle() if self._active_motion else self.fd.current_vehicle()
+
     def _owned(self):
         if threading.get_ident() != self._thread:
             raise RuntimeError('mapper diagnostic belongs to the original source/compute/renderer owner')
@@ -379,7 +396,7 @@ class SimMapperMotionRig:
         self._publications = ((binding, context.sha256),)
 
     def _offer_vehicle(self):
-        observed = self.fd.current_vehicle()
+        observed = self._current_fd_vehicle()
         if observed is None:
             return
         raw = observed.vehicle_bytes
@@ -397,7 +414,8 @@ class SimMapperMotionRig:
         if self._closed:
             raise RuntimeError('diagnostic source owners have ended')
         self._offer_vehicle()
-        self.uplink.tick(self._provider)
+        if type(self._provider) is SimpleNamespace:self.uplink.tick(self._provider)
+        else:self._provider.runner.run_once(0)
         # caller가 명시한 개발 RAW 등록 경계다. A의 SDK/RAW ACK를 생산한 것으로 세지 않는다.
         self.supervisor.pump(self.material, bind_ready=True, on_publication=self._published)
         self.mapper.pump(before_outputs=self._ingest)
@@ -520,7 +538,7 @@ class SimMapperMotionRig:
                 raise ValueError('identity did not retain an actual lease-less Vehicle delivery')
             self._wait(self._returned, 'WAIT_TWO_ACCEPTS_AND_NEXT_RETURNED_PROBE13', deadline)
             # 이후 row는 이 실제 source HWM보다 커야 한다. 과거 None key를 소급 결박하지 않는다.
-            current = self._wait(self.fd.current_vehicle, 'WAIT_ORIGINAL_POST_RETURN_SOURCE_HWM', deadline)
+            current = self._wait(self._current_fd_vehicle, 'WAIT_ORIGINAL_POST_RETURN_SOURCE_HWM', deadline)
             self._first_returned_sequence = decode(current.vehicle_bytes, schema.VehicleSample).sequence
             if self.motion is None:
                 raise RuntimeError('identity ACK did not initialize the actual main admission owner')
@@ -623,7 +641,7 @@ class SimMapperMotionRig:
             raise ValueError('actual two-row non-oracle full capture bracket was not retained')
         if any(row.evidence.wire_sha256 not in self._offered_vehicles for row in bracket.originals):
             raise ValueError('pose consumed a Vehicle not delivered by this actual FD/uplink owner')
-        current = self.fd.current_vehicle()
+        current = self._current_fd_vehicle()
         now = _j_us()
         if current is None or now >= expires:
             raise TimeoutError('original FD/source/capture expired before diagnostic return')
