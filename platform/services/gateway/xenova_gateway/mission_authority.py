@@ -248,13 +248,14 @@ class MissionAuthority:
         if ('operation_binding' in record
                 and record['operation_binding']['service_epoch']!=UUID(self.runner.drive_link.instance).hex):return None
         r=self.runner;m=r.machine
+        # kind3의 원 E는 record/RouteCore가 소유하며 공용 주차 예산은 sentinel 0이다.
         grant=schema.MissionGrant(major=1,vehicle=record['vehicle'],pi_host_boot=UUID(r.authority.host).bytes,
             gateway_instance=UUID(r.drive_link.instance).bytes,owner_vm=UUID(record['owner']).bytes,
             owner_execution=UUID(record['execution']).bytes,app_instance=UUID(record['app']).bytes,
             control_generation=record['generation'],mission_id=UUID(record['id']).bytes,
             mission_revision=record['revision'],grant_revision=record['grant_revision'],kind=record['kind'],
             strategy=record['strategy'],operator_request_nonce=UUID(record['nonce']).bytes,issued_pi_us=record['issued'],
-            mission_deadline_pi_us=record['deadline'],cancel_fence_revision=record['cancel_fence'],
+            mission_deadline_pi_us=0 if record['kind']==3 else record['deadline'],cancel_fence_revision=record['cancel_fence'],
             scene_admission_id=bytes(16) if record['scene_id'] is None else UUID(record['scene_id']).bytes,
             scene_revision=record['scene_revision'],configuration=record['configuration'],calibration=record['calibration'],
             primitive=bytes.fromhex(record['primitive']),execution_deadline_pi_us=record['execution_deadline'],

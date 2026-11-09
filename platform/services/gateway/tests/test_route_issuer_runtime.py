@@ -12,6 +12,7 @@ from uuid import UUID,uuid4
 import pytest
 
 from xenova_drive_world import schema,encode,decode,validate
+from xenova_drive_world.route import RouteReason
 from xenova_gateway.authority import AuthorityStore
 from xenova_gateway.authority_journal import AuthorityJournalWorker
 from xenova_gateway.machine import Mode
@@ -45,7 +46,7 @@ def issuer(tmp_path):
         desired_mode='AUTO',phase='ACTIVE',countdown_until=0,parking_attempt=None,follow=None,result='NONE',search_birth=None)
     record=dict(id=str(UUID(bytes=g.mission_id)),revision=g.mission_revision,grant_revision=g.grant_revision,
         kind=3,strategy=0,nonce=str(UUID(bytes=g.operator_request_nonce)),origin=rig.row['key'],issued=g.issued_pi_us,
-        deadline=g.mission_deadline_pi_us,search_deadline=0,execution_deadline=0,corrections=0,
+        deadline=rig.route.registry['snapshot'].core.deadline_pi_us,search_deadline=0,execution_deadline=0,corrections=0,
         execution_distance=0.,search_distance=0.,cancel_fence=g.cancel_fence_revision,phase='FOLLOW',result='NONE',admitted=True,
         scene_id=None if g.scene_admission_id==bytes(16) else str(UUID(bytes=g.scene_admission_id)),
         scene_revision=g.scene_revision,configuration=g.configuration,calibration=g.calibration,primitive=g.primitive.hex(),
@@ -90,6 +91,28 @@ def admit_update(rig,candidate,reply):
     assert rig.admit() is not None;rig.apply_leaf()
 
 
+def test_kind3_grant_sentinel_preserves_original_record_core_and_output_deadline(issuer):
+    rig,facade,store=issuer;missions=rig.operator.missions
+    core=rig.route.registry['snapshot'].core;original_core=encode(core)
+    original_record=deepcopy(missions.current());original_journal=store.path.read_bytes()
+    grant=missions.grant()
+    assert grant.kind==3 and grant.mission_deadline_pi_us==0
+    assert decode(encode(grant),schema.MissionGrant)==grant
+    assert grant.route_binding.core_sha256==rig.route.registry['snapshot'].acceptance.accepted_core_sha256
+    assert rig.state.mission.mission_deadline_pi_us==0 and rig.state.route.core.deadline_pi_us==core.deadline_pi_us
+    assert original_record['deadline']==core.deadline_pi_us>rig.now
+    assert missions.output_deadline()==core.deadline_pi_us
+    assert rig.route.output_deadline()==min(core.deadline_pi_us,core.phase_expires_pi_us)
+    bad_grant=deepcopy(grant);bad_grant.mission_deadline_pi_us=core.deadline_pi_us
+    with pytest.raises(ValueError,match='nonparking budget sentinel'):encode(bad_grant)
+    bad_state=deepcopy(rig.state);bad_state.mission.mission_deadline_pi_us=core.deadline_pi_us
+    with pytest.raises(ValueError,match='nonparking budget sentinel'):encode(bad_state)
+    rig.now=core.deadline_pi_us;rig.operator.now=rig.now
+    assert rig.route.exhausted()==RouteReason.ROUTE_DEADLINE
+    assert missions.current()==original_record and store.path.read_bytes()==original_journal
+    assert encode(rig.route.registry['snapshot'].core)==original_core
+
+
 def test_same_authority_update_has_no_disk_write_and_next_actual_journal_keeps_latest_registration(issuer):
     rig,facade,store=issuer;o=rig.operator;before=store.path.read_bytes();core=deepcopy(rig.route.registry['snapshot'].core)
     candidate,registration=update(rig)
@@ -103,6 +126,7 @@ def test_same_authority_update_has_no_disk_write_and_next_actual_journal_keeps_l
     assert accepted.snapshot.core.deadline_pi_us==core.deadline_pi_us
     assert accepted.snapshot.core.meter_baseline_total_ticks==core.meter_baseline_total_ticks
     assert accepted.snapshot.core.phase_expires_pi_us==core.phase_expires_pi_us
+    assert grant.mission_deadline_pi_us==0 and o.missions.current()['deadline']==core.deadline_pi_us
     assert rig.route.registry['state'] is None and not rig.route.registry['applied']
     assert rig.route.candidate(encode(candidate),rig.peer)==reply
     done=[]

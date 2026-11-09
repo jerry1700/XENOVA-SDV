@@ -230,11 +230,14 @@ def test_parking_issuer_original_search_90s_survives_grant_and_owner_rebind(worl
     assert record['deadline']==issued+120_000_000
     assert record['search_deadline']==min(record['deadline'],issued+90_000_000)
     original=w.o.missions.grant(record)
+    assert original.kind==2 and original.mission_deadline_pi_us>original.issued_pi_us
+    assert decode(encode(original),schema.MissionGrant)==original
     assert original.mission_deadline_pi_us==record['deadline']
     assert original.search_deadline_pi_us==issued+90_000_000
     w.w.t+=.1;w.w.bind()
     rebound=w.o.missions.rebind(record,w.w.m.generation+1,B)
     grant=w.o.missions.grant(rebound)
+    assert grant.kind==2 and (grant.max_execution_travel_m,grant.max_search_travel_m)==(5.,10.)
     assert rebound['owner']==B and rebound['generation']==w.w.m.generation+1
     assert grant.owner_vm==UUID(B).bytes
     assert (rebound['issued'],grant.mission_deadline_pi_us,grant.search_deadline_pi_us)==(
