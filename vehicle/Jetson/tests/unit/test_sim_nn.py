@@ -7,11 +7,12 @@
 from dataclasses import replace
 from datetime import timedelta
 from contextlib import ExitStack
+import builtins
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from xenova_vehicle.oak import sim_nn
 from xenova_vehicle.oak.yolop_asset import BLOB_SHA256, BLOB_SIZE, ValidatedYolopAsset
@@ -47,7 +48,8 @@ class HostFrame:
 
 
 def fixture():
-    f = NS(clock=Clock())
+    import numpy as np
+    f = NS(clock=Clock(), numpy=np)
     f.oak = YolopBenchProfile('approved-sim-oak', Path('approved-assets'), Path('approved-manifest'))
     f.profile = sim_nn.SimNnProfile(f.oak, 'sim-source', 'simulation:original-clock', CALIBRATION)
     f.manifest = pinned_manifest()
@@ -117,10 +119,18 @@ def output_message(submission, *, passthrough=False, key=None):
 
 
 class SimNnTests(unittest.TestCase):
-    def start(self, f=None):
+    def start(self, f=None, *, numpy_import_us=0, startup_deadline_us=None):
         f = fixture() if f is None else f
+        def import_module(name):
+            if name == 'numpy':
+                f.clock.now += numpy_import_us
+                return f.numpy
+            if name == 'depthai':
+                return f.dai
+            raise AssertionError('unexpected SIM dependency: '+name)
+        f.importer = MagicMock(side_effect=import_module)
         patches = (patch.object(sim_nn, 'load_yolop_asset', return_value=f.asset),
-            patch.object(sim_nn.importlib, 'import_module', return_value=f.dai),
+            patch.object(sim_nn.importlib, 'import_module', new=f.importer),
             patch.object(sim_nn, '_DeviceLock', return_value=f.lock),
             patch.object(sim_nn.sys, 'platform', 'linux'), patch.object(sim_nn.sys, 'byteorder', 'little'))
         with ExitStack() as stack:
@@ -128,7 +138,8 @@ class SimNnTests(unittest.TestCase):
                 stack.enter_context(entry)
             f.source = sim_nn.SimNnSource(f.profile, context_key=CONTEXT, clock=f.clock)
             f.stages = []
-            f.receipt = f.source.start(f.stages.append, startup_deadline_us=f.clock.now + 90_000_000)
+            deadline = f.clock.now + 90_000_000 if startup_deadline_us is None else startup_deadline_us
+            f.receipt = f.source.start(f.stages.append, startup_deadline_us=deadline)
         return f
 
     def capture(self, f, value=None, **changes):
@@ -195,6 +206,50 @@ class SimNnTests(unittest.TestCase):
         self.assertEqual(len(frame.payload), sim_nn.INPUT_BYTES)
         with self.assertRaises(AttributeError):
             ticket.expires_j_us = 9_000_000
+
+    def test_cold_numpy_initialization_is_startup_work_before_first_capture(self):
+        f = fixture()
+        begun = f.clock.now
+        f = self.start(f, numpy_import_us=300_000)
+        self.assertEqual(f.clock.now, begun+300_000)
+        self.assertEqual(f.importer.call_args_list, [call('numpy'), call('depthai')])
+        self.assertEqual(f.frames, [])
+        self.assertEqual(f.receipt['startup_deadline_us'], str(begun+int(f.oak.startup_timeout_s*1_000_000)))
+        original = observation()
+        captured = (f.clock.now-100, f.clock.now-50)
+        expires = f.clock.now+100_000
+        actual_import = builtins.__import__
+        def no_cold_numpy(name, *args, **kwargs):
+            if name == 'numpy':
+                raise AssertionError('first capture must reuse startup NumPy')
+            return actual_import(name, *args, **kwargs)
+        with patch.object(builtins, '__import__', side_effect=no_cold_numpy), \
+                patch.object(sim_nn.importlib, 'import_module', side_effect=AssertionError('capture must not initialize modules')):
+            ticket = self.capture(f, original, captured_j_us=captured, expires_j_us=expires)
+        self.assertIs(ticket.observation, original)
+        self.assertEqual((ticket.captured_j_us, ticket.expires_j_us), (captured, expires))
+        self.assertEqual(ticket.clock_sample.j_before_us, begun+300_000)
+        self.assertEqual(f.clock.now, begun+300_000)
+        self.assertEqual(f.frames[0].payload, original.rgb.payload)
+        f.input_queue.send.assert_called_once_with(f.frames[0])
+
+    def test_numpy_initialization_must_finish_inside_original_caller_and_profile_startup_caps(self):
+        for cap in ('caller', 'profile'):
+            with self.subTest(cap=cap):
+                f = fixture()
+                begun = f.clock.now
+                profile_us = int(f.oak.startup_timeout_s*1_000_000)
+                delay = 100_000 if cap == 'caller' else profile_us
+                deadline = begun+delay if cap == 'caller' else begun+profile_us+1_000_000
+                with self.assertRaisesRegex(TimeoutError, '^original SIM operation deadline expired$'):
+                    self.start(f, numpy_import_us=delay, startup_deadline_us=deadline)
+                self.assertEqual(f.clock.now, begun+delay)
+                self.assertEqual(f.importer.call_args_list, [call('numpy')])
+                self.assertEqual(f.stages, ['ASSET_CHECK'])
+                f.dai.Device.assert_not_called()
+                f.dai.Pipeline.assert_not_called()
+                f.input_queue.send.assert_not_called()
+                self.assertEqual(f.frames, [])
 
     def test_exact_full_key_pairs_late_output_without_retiming_or_retaining_sdk_views(self):
         f = self.start()
