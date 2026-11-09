@@ -166,8 +166,9 @@ def attach_sensor_snapshot(item, owner, timing, *, now_us,clock_replies=()):
 def _exception_message(error, limit=1024):
     """원 args의 유한 텍스트만 남긴다. SDK payload repr/임의 __str__를 호출하지 않는다."""
     parts = []
-    truncated = len(error.args) > 4
-    for value in error.args[:4]:
+    args = BaseException.args.__get__(error, BaseException)
+    truncated = len(args) > 4
+    for value in args[:4]:
         if type(value) is str:
             text = value[:limit]
             truncated = truncated or len(value) > limit
@@ -176,11 +177,40 @@ def _exception_message(error, limit=1024):
         elif type(value) is int and value.bit_length() <= 128:
             text = str(value)
         else:
-            text = '<' + type(value).__name__[:64] + ' argument omitted>'
+            text = '<' + type.__getattribute__(type(value), '__name__')[:64] + ' argument omitted>'
             truncated = True
         parts.append(text)
     message = ' | '.join(parts)
     return message[:limit], truncated or len(message) > limit
+
+
+def _origin_label(value, limit):
+    if type(value) is not str:
+        return '<unknown>', True
+    selected = value[:limit]
+    safe = ''.join(char if char.isascii() and (char.isalnum() or char in '_.<>')
+                   else '_' for char in selected)
+    return safe, len(value) > limit or safe != selected
+
+
+def _exception_origin(error):
+    """최대 512개를 순회해 원 traceback 끝 12개만 남긴다. locals·소스·경로는 저장하지 않는다."""
+    frames = deque(maxlen=12)
+    truncated = False
+    visited = 0
+    traceback = BaseException.__traceback__.__get__(error, BaseException)
+    while traceback is not None:
+        if visited == 512:
+            # 끝에 도달하지 못한 앞부분을 실제 오류 원점으로 표시하지 않는다.
+            return [], True
+        frame = traceback.tb_frame
+        module, module_truncated = _origin_label(frame.f_globals.get('__name__'), 128)
+        function, function_truncated = _origin_label(frame.f_code.co_name, 96)
+        truncated = truncated or len(frames) == frames.maxlen or module_truncated or function_truncated
+        frames.append(dict(module=module, function=function, lineno=traceback.tb_lineno))
+        visited += 1
+        traceback = traceback.tb_next
+    return list(frames), truncated
 
 
 def _hold_device_lease(device_id):
@@ -433,19 +463,21 @@ class _Actor:
             target.write(raw)
 
     def fault(self, error):
-        configuration = (isinstance(error, ValueError) and self.state in
+        configuration = (issubclass(type(error), ValueError) and self.state in
                          ('STARTING', 'WAIT_INPUT', 'ASSET_CHECK', 'DEVICE_BOOT', 'PIPELINE_START'))
-        self.failure = type(error).__name__
-        message, truncated = _exception_message(error)
+        self.failure = type.__getattribute__(type(error), '__name__')
         try:
+            message, truncated = _exception_message(error)
+            origin, origin_truncated = _exception_origin(error)
             self.save('failure.json', dict(schema_version=1, role=self.boot.peer.role,
                 worker_instance=self.boot.peer.worker_instance, service_instance=self.boot.peer.service_instance,
                 raw_binding_sha256=self.boot.raw_scope.raw_binding_sha256, phase=self.state,
                 observed_j_us=str(j_us()), exception_type=self.failure[:96], message=message,
-                message_truncated=truncated, message_basis='bounded_exception_args_without_payload_repr'))
+                message_truncated=truncated, message_basis='bounded_exception_args_without_payload_repr',
+                origin_frames=origin, origin_truncated=origin_truncated))
         except Exception as diagnostic_error:
             # 진단 I/O 실패가 원 FAULT의 분류·전송을 대체하지 않게 한다.
-            self.failure_diagnostic_error = type(diagnostic_error).__name__[:96]
+            self.failure_diagnostic_error = type.__getattribute__(type(diagnostic_error), '__name__')[:96]
         self.state = 'FAILED'
         self.drain_sent()
         self.link.send('FAULT', dict(domain='RAW', code='CONFIG_INVALID' if configuration else 'RESIDENT_FAILED',
