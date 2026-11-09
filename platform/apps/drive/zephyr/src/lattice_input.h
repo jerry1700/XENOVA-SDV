@@ -44,4 +44,5 @@ int dl_join(int64_t deadline_ms);
 const char *dl_status(void);
 /* Call only after input owners joined; no periodic console sink. */
 void dl_report(void);
+#include "lattice_route_input.h"
 #endif

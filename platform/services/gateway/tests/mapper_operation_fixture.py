@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 from xenova_drive_world import schema,encode,decode
-from xenova_drive_world.mapper_clock import ClockPolicy,MapperClockError,candidate_body,plan_json
+from xenova_drive_world.mapper_clock import ClockPolicy,MapperClockError,candidate_body,plan_json,PERIOD_US
 from xenova_gateway.mapper_uplink import (GatewayMapperUplink,UplinkProfile,_Link,
     parse_operation_plan,build_operation_probe)
 
@@ -68,13 +68,17 @@ class InstalledMapperFixture:
     def now(self):return int(self.r._clock()*1000000)
 
     def state(self):
+        # 원 입력은 set_vehicle/accept 등 실제 owner에서 계속 strict 검산한다.
+        # 여기서는 이미 수락된 typed 값을 진단용으로 직렬화할 뿐이다. 매 note마다
+        # encode→strict decode를 반복해 host 비용을 source 시계에 섞지 않는다.
+        # 실제 수신 bytes는 개별 event의 raw/body/reply에 따로 보존한다.
         owner=self.u.owner;cap=self.u._operation_capability;source=self.r.drive_link.trust
         return dict(now=self.now(),host_elapsed_s=time.monotonic()-self.host_started,counts=dict(self.u.counts),
-            failure=self.u.failure,vehicle=None if owner.vehicle is None else encode(owner.vehicle).hex(),
+            failure=self.u.failure,vehicle=None if owner.vehicle is None else owner.vehicle.SerializeToString(deterministic=True).hex(),
             channel=[self.u.host_boot,self.u.gateway_instance,self.u.uplink_instance,self.u.channel_epoch],
             current_control=dict(generation=self.r.machine.generation,mode=self.r.machine.mode.value,
                 fence_revision=self.r.operator.fence_revision,hold=self.r.operator.hold),
-            current_provider_trust=None if source is None else encode(source).hex(),
+            current_provider_trust=None if source is None else source.SerializeToString(deterministic=True).hex(),
             last_plan_us=owner.last_plan_us,sequence=owner.sequence,streak=owner._streak,
             pending=None if owner.pending is None else plan_json(owner.pending).decode('ascii'),
             lease=None if owner._lease is None else owner._lease.trust_bytes.hex(),
@@ -142,21 +146,24 @@ def install_mapper_fixture(world):
     """WAIT 중 명시 설치/새 source bootstrap. 원 clock domain은 교체 뒤에도 같다."""
     previous=getattr(world,'mapper_fixture',None);offset=None if previous is None else previous.offset
     if previous is not None:previous.close()
-    if not hasattr(world,'_mapper_clock_anchor'):
-        world._mapper_clock_anchor=world.w.t,time.monotonic()
     world.mapper_fixture=InstalledMapperFixture(world.r,supports_operation=True,offset=offset)
-    anchor_pi,anchor_host=world._mapper_clock_anchor
-    world.mapper_fixture.clock_model=dict(pi_anchor_us=int(anchor_pi*1000000),host_anchor_s=anchor_host,
-        rule='next Pi = max(previous Pi + original 2ms step, anchored elapsed host monotonic); new sensor production follows')
+    world.mapper_fixture.clock_model=dict(pi='explicit virtual source clock',j='same Pi minus original fixed offset',
+        rule='original 2ms actor steps; bootstrap waits for actual owner next timer before NEW sensor production; host bounds test duration only')
     if not hasattr(world,'_mapper_original_tick'):
         world._mapper_original_tick=world.tick
         def tick():
-            # The existing actor turn can take much longer than 2ms on Nano.
-            # Advance this declared test clock before producing NEW plant
-            # samples. Never renew timestamps/E on already captured messages.
-            # Preserve explicit test-time advances and the original 2ms step.
-            pi,host=world._mapper_clock_anchor
-            world.w.t=max(world.w.t,pi+time.monotonic()-host-.002)
+            fixture=world.mapper_fixture;owner=fixture.u.owner
+            # This suite's Pi/J are explicit virtual source clocks. Host CPU
+            # cost must not age an intended8ms step into a stale70ms report.
+            # During bootstrap, model waiting for the ORIGINAL owner timer as
+            # a source event; the following original tick produces NEW samples.
+            # An unanswered original pending plan is never skipped/replaced.
+            if fixture.bootstrap_outcome=='PENDING' and owner.pending is None and owner.last_plan_us is not None:
+                next_plan=owner.last_plan_us+PERIOD_US
+                if fixture.now()<next_plan:
+                    before=fixture.now();world.w.t=max(world.w.t,next_plan/1000000)
+                    fixture.note(dict(kind='bootstrap-clock-wait',previous_pi_us=before,
+                        original_next_plan_us=next_plan,advanced_pi_us=fixture.now()))
             world._mapper_original_tick();world.mapper_fixture.step()
         world.tick=tick
     try:

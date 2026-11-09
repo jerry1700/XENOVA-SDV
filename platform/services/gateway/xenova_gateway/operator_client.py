@@ -87,6 +87,7 @@ def main(argv=None):
     parking.add_argument('permission',nargs='?',choices=('on','off'))
     parking.add_argument('--strategy',choices=('reverse','forward'),default='reverse')
     operation=commands.add_parser('operation');operation.add_argument('value',choices=('status',))
+    home=commands.add_parser('home');home.add_argument('value',choices=('set','status','return'))
     drive=commands.add_parser('drive');drive.add_argument('value',choices=('depart',));drive.add_argument('mode',choices=('auto','manual'))
     lookup=commands.add_parser('request');lookup.add_argument('value',choices=('get',));lookup.add_argument('key')
     manual=commands.add_parser('manual');manual.add_argument('value',choices=('nudge','neutral','keyboard'))
@@ -106,7 +107,8 @@ def main(argv=None):
         return keyboard(['--device',args.device,'--operator-socket',args.socket]+(['--auto-enter'] if args.auto_enter else []))
     client=OperatorClient(args.socket,args.wait_ms)
     try:
-        if args.command in ('status','operation'):body=dict(version=2,action='status' if args.command=='status' else 'operation.status')
+        if args.command in ('status','operation') or args.command=='home' and args.value=='status':
+            body=dict(version=2,action='home.status' if args.command=='home' else 'status' if args.command=='status' else 'operation.status')
         elif args.command=='request':body=dict(version=2,action='request.get',request_id=args.key)
         else:
             view=client.call(dict(version=2,action='status'))
@@ -115,7 +117,7 @@ def main(argv=None):
             if current['host_boot_id']!=host:raise ValueError('CLI must run on the current Pi host')
             key=new_request_id(host);issued=int(key.split(':')[2]);parameters={}
             operating=None
-            if args.command=='drive' or args.command=='parking' and args.value=='permission':
+            if args.command in ('drive','home') or args.command=='parking' and args.value=='permission':
                 response=client.call(dict(version=2,action='operation.status'))
                 if not response['ok'] or not response['data'].get('supported'):raise ValueError('operation-status-1 unavailable')
                 operating=response['data'];binding=operating['binding']
@@ -134,6 +136,17 @@ def main(argv=None):
             elif args.command=='drive':
                 action='drive.depart';parameters=dict(mode=args.mode.upper(),expected_operation_revision=binding['operation_revision'],
                     expected_permission_revision=binding['permission_revision'],ready_revision=operating['ready_revision'],trigger_sha256=None)
+            elif args.command=='home':
+                response=client.call(dict(version=2,action='home.status'))
+                if not response['ok'] or not response['data'].get('supported'):raise ValueError('home-status-1 unavailable')
+                goal=response['data'];action='home.'+args.value
+                parameters=dict(expected_goal_revision=goal['goal_revision'],expected_goal_sha256=goal['goal_sha256'],
+                    expected_operation_revision=binding['operation_revision'],expected_permission_revision=binding['permission_revision'])
+                if args.value=='return':
+                    revision=goal.get('return_ready_revision')
+                    if revision is None:raise ValueError(goal.get('blocked_reason') or 'current RETURN_START eligibility unavailable')
+                    from .operator_contract import decimal63
+                    decimal63(revision);parameters['ready_revision']=revision
             elif args.command=='manual':
                 action='manual.'+args.value;driver=current['driver']
                 if driver is None:raise ValueError('current driver unavailable')

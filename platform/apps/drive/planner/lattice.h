@@ -12,7 +12,9 @@
 #define LP_STEERS 9
 #define LP_PRIMITIVE_SAMPLES 17
 #define LP_GOALS 27
-struct lp_space {bool parking;uint32_t slot_id;uint64_t slot_revision;dw_point polygon[4];float uncertainty;};
+struct lp_space {bool parking;uint32_t slot_id;uint64_t slot_revision;dw_point polygon[4];float uncertainty;
+ /* Internal EXIT geometry only; current kind3 execution/apply is separate. */
+ bool exiting;unsigned connector_count;dw_point connector[8];uint8_t exit_space_sha256[32],geometry_scope_sha256[32];};
 struct lp_goal_set {unsigned count;dw_pose poses[LP_GOALS];float distance,heading;int final_gear;};
 enum lp_result { LP_SEARCHING,LP_PATH_FOUND,LP_STOP,LP_NOT_FOUND,LP_NODE_BUDGET,
  LP_WORK_BUDGET,LP_DEADLINE,LP_CANCELLED,LP_INPUT,LP_NUMERIC,LP_COLLISION,LP_PATH_LIMIT,LP_CLOCK };
@@ -52,6 +54,9 @@ struct lp_path { xenova_drive_PathPoint points[LP_PATH];size_t count;dw_pose goa
  struct lp_execution execution;struct tr_intent task;struct tr_basis basis;
  struct lp_space space;
  bool has_episode;xenova_drive_EpisodeSnapshot episode;
+ /* Registered route proof is immutable with this path. Fresh State progress
+  * is produced from the actual worker completion, never from this old E. */
+ bool has_route;xenova_drive_RouteSnapshot route;
  struct lp_origin origin;
  size_t initial_tracker_index;uint64_t initial_pi_us;};
 struct lp_search {
@@ -94,6 +99,11 @@ enum lp_result lp_start_signed(struct lp_search *,const dw_world *,dw_pose,float
 /* Modern selected-slot task; all seeds share one pool, deadline and work cap. */
 enum lp_result lp_start_parking(struct lp_search *,const dw_world *,dw_pose,float,
  const struct lp_goal_set *,int initial_gear,unsigned max_cusps,const struct lp_space *,
+ const struct tr_intent *,const struct tr_basis *,const struct lp_config *,const struct lp_assets *,struct lp_budget);
+struct dre_input;
+/* Original Query/current source/ExitSpace preparation. Still no output grant. */
+enum lp_result lp_start_exit(struct lp_search *,const dw_world *,dw_pose,float,
+ const struct lp_goal_set *,int initial_gear,unsigned max_cusps,const struct dre_input *,
  const struct tr_intent *,const struct tr_basis *,const struct lp_config *,const struct lp_assets *,struct lp_budget);
 enum lp_result lp_task_obstructed(const dw_world *,const struct tr_intent *,dw_pose,dw_pose,
  const struct lp_config *,struct lp_budget,struct lp_metrics *,bool *);

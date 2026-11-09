@@ -31,7 +31,7 @@ def app_bridge_binary(tmp_path_factory):
         mqtt/'include',mqtt/'third_party/jsmn',platform/'apps/common/xenova-drive-runtime/include',
         platform/'apps/autonomous/zephyr/src',platform/'apps/manual/zephyr/src',platform/'guests/zephyr/diagnostics/include')
     sources=[HOME/'tests/behavior_app_bridge.c',world/'tests/input_bridge.c',
-        *[planner/name for name in ('task_reference.c','behavior.c','parking.c','lattice.c','engine.c','generated/primitives.c')],
+        *[planner/name for name in ('task_reference.c','behavior.c','parking.c','route_exit.c','lattice.c','engine.c','generated/primitives.c')],
         HOME/'zephyr/src/adapter.c',HOME/'zephyr/src/controller.c',platform/'apps/autonomous/zephyr/src/autonomous.c',
         platform/'apps/manual/zephyr/src/manual.c',world/'world.c',world/'generated/world.pb.c',
         *[world/'nanopb'/name for name in ('pb_common.c','pb_decode.c','pb_encode.c')],
