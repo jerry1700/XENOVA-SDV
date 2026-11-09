@@ -79,13 +79,48 @@ def _current_guard(guard):
     return asdict(ProcessBirth(1, manager.start_ticks))
 
 
+def _configured_identity(values):
+    """정지 시 지워질 수 있는 ref_uid와 설정 계정의 NSS identity를 구분한다."""
+    import grp
+    import pwd
+
+    # v237 실제 정지 원문에서 확인한 표현만 추가한다. 숫자 UID 검산은 완화하지 않는다.
+    if values['UID'] not in ('1000', '[not set]') or values['DynamicUser'] != 'no':
+        raise ServiceScopeUnavailable('stopped UID or DynamicUser differs from the fixed execution profile')
+    user_name, group_name = values['User'], values['Group']
+    try:
+        if not user_name:
+            raise KeyError('configured User is absent')
+        user = (pwd.getpwuid(int(user_name)) if user_name.isascii() and user_name.isdecimal()
+                else pwd.getpwnam(user_name))
+        if user.pw_uid != 1000:
+            raise ServiceScopeUnavailable('configured User does not resolve to UID1000')
+        if group_name:
+            group = (grp.getgrgid(int(group_name)) if group_name.isascii() and group_name.isdecimal()
+                     else grp.getgrnam(group_name))
+            group_identity = dict(source='CONFIGURED_GROUP', name=group.gr_name, gid=group.gr_gid)
+        else:
+            # Group= 생략은 User의 primary gid다. 기존 정책에 없는 gid1000 gate는 만들지 않는다.
+            try:
+                group = grp.getgrgid(user.pw_gid)
+                name = group.gr_name
+            except KeyError:
+                name = None  # 숫자 primary gid에는 별도 group name이 없을 수도 있다.
+            group_identity = dict(source='USER_PRIMARY_GID', name=name, gid=user.pw_gid)
+    except (KeyError, ValueError, OverflowError, OSError) as error:
+        raise ServiceScopeUnavailable('configured execution identity could not be resolved through NSS') from error
+    return dict(uid_property=values['UID'], configured_user=user_name, configured_group=group_name,
+                dynamic_user=values['DynamicUser'],
+                user=dict(name=user.pw_name, uid=user.pw_uid, primary_gid=user.pw_gid), group=group_identity)
+
+
 def _stopped_manager(guard, original):
     manager_birth = _current_guard(guard)
     if manager_birth != original['manager_birth']:
         raise ServiceScopeUnavailable('system manager birth differs from the published execution')
-    values = _show(UNIT, _PROPERTIES + ('Restart', 'Job'))
+    values = _show(UNIT, _PROPERTIES + ('Restart', 'Job', 'User', 'Group', 'DynamicUser'))
     expected = dict(Id=UNIT, LoadState='loaded', Type='simple', MainPID='0', ControlPID='0', Slice=SLICE,
-                    KillMode='control-group', KillSignal='2', Delegate='no', UID='1000')
+                    KillMode='control-group', KillSignal='2', Delegate='no')
     if (any(values[key] != value for key, value in expected.items())
             or (values['ActiveState'], values['SubState']) not in (('inactive', 'dead'), ('failed', 'failed'))
             or values['InvocationID'] != '' and re.fullmatch('[0-9a-f]{32}', values['InvocationID']) is None
@@ -93,6 +128,7 @@ def _stopped_manager(guard, original):
         raise ServiceScopeUnavailable('actual unit is not the fixed fully stopped execution')
     if _ABSENT_JOB_VALUE is None or values['Job'] != _ABSENT_JOB_VALUE:
         raise ServiceScopeUnavailable('actual absent manager Job format is unconfirmed or a job is pending')
+    identity = _configured_identity(values)
     fragment = _root_file(values['FragmentPath'])
     drops = [_root_file(name) for name in values['DropInPaths'].split()]
     slice_values = _show(SLICE, ('Id', 'LoadState', 'ActiveState', 'ControlGroup',
@@ -102,7 +138,7 @@ def _stopped_manager(guard, original):
         raise ServiceScopeUnavailable('dedicated persistent slice is not active and fixed')
     slice_fragment = _root_file(slice_values['FragmentPath'])
     slice_drops = [_root_file(name) for name in slice_values['DropInPaths'].split()]
-    return dict(unit=UNIT, slice=SLICE, manager_birth=manager_birth, properties=values,
+    return dict(unit=UNIT, slice=SLICE, manager_birth=manager_birth, properties=values, configured_identity=identity,
                 slice_properties=slice_values, fragment=fragment, dropins=drops,
                 slice_fragment=slice_fragment, slice_dropins=slice_drops)
 

@@ -7,6 +7,7 @@ systemd/proc/cgroup leaf는 명시 fixture이며 실제 서비스 정지나 실�
 from copy import deepcopy
 from dataclasses import asdict, replace
 from types import SimpleNamespace
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -33,22 +34,75 @@ def fixture():
     unit = dict(Id=scope.UNIT, LoadState='loaded', ActiveState='inactive', SubState='dead', Type='simple',
         MainPID='0', ControlPID='0', InvocationID='', ControlGroup='', Slice=scope.SLICE,
         KillMode='control-group', KillSignal='2', Delegate='no', UID='1000',
-        FragmentPath=file['path'], DropInPaths='', Restart='on-failure', Job='')
+        FragmentPath=file['path'], DropInPaths='', Restart='on-failure', Job='',
+        User='ssafy', Group='ssafy', DynamicUser='no')
     slice_values = dict(Id=scope.SLICE, LoadState='loaded', ActiveState='active',
         ControlGroup=scope.SLICE_PATH, StopWhenUnneeded='no', FragmentPath=file['path'], DropInPaths='')
     return current, manifest, record, unit, slice_values
 
 
 class StoppedServiceScopeTests(unittest.TestCase):
-    def manager(self, current, original, unit, slice_values, *, birth=None, file=None):
+    @staticmethod
+    def nss(*, uid=1000, gid=1000):
+        user = SimpleNamespace(pw_name='ssafy', pw_uid=uid, pw_gid=gid)
+        group = SimpleNamespace(gr_name='ssafy', gr_gid=gid)
+        return {'pwd': SimpleNamespace(getpwnam=lambda name: user, getpwuid=lambda number: user),
+                'grp': SimpleNamespace(getgrnam=lambda name: group, getgrgid=lambda number: group)}
+
+    def manager(self, current, original, unit, slice_values, *, birth=None, file=None, nss=None):
         def show(name, properties):
             values = unit if name == scope.UNIT else slice_values
             self.assertEqual(set(values), set(properties))
             return values
         with patch.object(scope, '_current_guard', return_value=original['manager_birth'] if birth is None else birth), \
                 patch.object(scope, '_show', side_effect=show), \
-                patch.object(scope, '_root_file', return_value=original['fragment'] if file is None else file):
+                patch.object(scope, '_root_file', return_value=original['fragment'] if file is None else file), \
+                patch.dict(sys.modules, self.nss() if nss is None else nss):
             return scope._stopped_manager(current, original)
+
+    def test_actual_unset_stopped_uid_uses_configured_nss_and_keeps_numeric_path(self):
+        current, manifest, record, unit, slices = fixture()
+        # configured-identity.json 원문 SHA6a76aca0...: UID=[not set], User/Group=ssafy, DynamicUser=no.
+        actual = dict(line.split('=', 1) for line in
+                      'UID=[not set]\nUser=ssafy\nGroup=ssafy\nDynamicUser=no\n'.splitlines())
+        for uid_property in ('[not set]', '1000'):
+            with self.subTest(uid_property=uid_property):
+                result = self.manager(current, record['scope'], dict(unit, **dict(actual, UID=uid_property)), slices)
+                identity = result['configured_identity']
+                self.assertEqual(identity['uid_property'], uid_property)
+                self.assertEqual(identity['user'], dict(name='ssafy', uid=1000, primary_gid=1000))
+                self.assertEqual(identity['group'], dict(source='CONFIGURED_GROUP', name='ssafy', gid=1000))
+        # UID 미설정은 공개 stopped 사실의 empty-tree 검산을 생략하는 우회가 아니다.
+        manager = self.manager(current, record['scope'], dict(unit, **actual), slices)
+        with patch.object(scope, '_stopped_manager', return_value=manager), \
+                patch.object(scope, '_empty_tree', side_effect=scope.ServiceScopeUnavailable('nonempty tree')), \
+                self.assertRaisesRegex(scope.ServiceScopeUnavailable, 'nonempty tree'):
+            scope.observe_stopped(current, manifest, record)
+
+    def test_unset_uid_rejects_foreign_dynamic_or_unresolved_user(self):
+        current, _, record, unit, slices = fixture()
+        stopped = dict(unit, UID='[not set]')
+        for field, value in (('UID', '0'), ('UID', '1001'), ('UID', ''), ('UID', '4294967295'),
+                             ('DynamicUser', 'yes'), ('User', ''), ('Job', 'pending'), ('MainPID', '123')):
+            with self.subTest(field=field, value=value), self.assertRaises(scope.ServiceScopeUnavailable):
+                self.manager(current, record['scope'], dict(stopped, **{field: value}), slices)
+        with self.assertRaisesRegex(scope.ServiceScopeUnavailable, 'UID1000'):
+            self.manager(current, record['scope'], stopped, slices, nss=self.nss(uid=1001))
+        missing = self.nss()
+        def unavailable(_):
+            raise KeyError('declared missing configured account')
+        missing['pwd'] = SimpleNamespace(getpwnam=unavailable, getpwuid=unavailable)
+        with self.assertRaisesRegex(scope.ServiceScopeUnavailable, 'NSS'):
+            self.manager(current, record['scope'], stopped, slices, nss=missing)
+
+    def test_group_resolution_audits_explicit_or_user_primary_gid_without_new_gid_policy(self):
+        current, _, record, unit, slices = fixture()
+        for configured, source in (('video', 'CONFIGURED_GROUP'), ('', 'USER_PRIMARY_GID')):
+            with self.subTest(configured=configured):
+                result = self.manager(current, record['scope'], dict(unit, UID='[not set]', Group=configured),
+                                      slices, nss=self.nss(gid=44))
+                self.assertEqual(result['configured_identity']['group']['gid'], 44)
+                self.assertEqual(result['configured_identity']['group']['source'], source)
 
     def test_published_anchor_accepts_later_counter_revision_without_mirroring_it(self):
         current, manifest, record, _, _ = fixture()

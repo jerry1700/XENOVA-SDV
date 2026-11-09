@@ -635,8 +635,14 @@ xenova-vehicle runtime-rearm query --state-dir /실제/보호/state --request-id
 `apply`는 원 ResourceStore lock 아래 PUBLISHED execution anchor·원 S/A/M/D/TRACKER
 실제 종료·모든 KNOWN 이름 ABSENT·같은 runtime을 검산한다. 고정 systemd237의 unit은
 정확히 inactive/dead 또는 failed/failed, MainPID/ControlPID0, `Job=` 빈 값이어야 한다.
-FAILED 표시는 reset-failed로 지우지 않는다. 현재 root 소유 unit/slice 설정·manager birth·
-원 전용 slice incarnation과 양끝의 안정된 빈 tree를 함께 검사한다. Restart는 원 값을
+FAILED 표시는 reset-failed로 지우지 않는다. 정지 시 v237의 동적 `UID=[not set]`은
+설정 `User`의 NSS UID1000 및 `DynamicUser=no`를 별도로 확인한 경우에만 지원한다.
+숫자 UID1000 검산과 live observer의 UID1000/Cap0 경계는 유지한다. 다른 숫자 UID,
+다른 User UID·계정 해결 실패·DynamicUser=yes는 거절한다. 설정 User/Group과 NSS
+해결값은 함께 감사하며 Group 생략은 User의 primary gid를 사용한다. 기존에 없던
+GID1000 강제 정책은 추가하지 않는다. 이 분기도 PID0/Job 없음·전체 빈 tree를 요구한다.
+현재 root 소유 unit/slice 설정·manager birth·원 전용 slice incarnation과 양끝의 안정된
+빈 tree를 함께 검사한다. Restart는 원 값을
 감사에 남기며 on-failure 자체를 금지하지 않는다. 전용 unit의 시작/정지 조작을 동시에
 실행하지 않는 협력 UID·PID1 직렬 실행 전제이며 빈 PID를 두 번 읽은 일반 COMPLETE가 아니다.
 수습한 코드/ExecStart 경로의 변경은 원 anchor를 덮지 않고 old/current 설정을 함께 남긴다.
