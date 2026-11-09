@@ -375,6 +375,7 @@ class PcResidentRuntime(_Runtime):
             raise TimeoutError('PC actor message has no current original source owner/lifetime')
         packet = received.packet
         if packet.kind == 'PC_SOURCE_FENCE':
+            self.event('PC_SOURCE_FENCE', role=role, metadata=dict(packet.metadata))
             raise RuntimeError('PC_'+role+'_SOURCE_FENCE')
         if role == 'A' and packet.kind == 'PC_NN_START':
             owner.observe_nn_start(received, now_us=now)

@@ -304,6 +304,8 @@ def accept_once(host, port, timeout_s):
                     endpoint, _ = listener.accept()
                 except BlockingIOError:
                     continue
+                # 원 clock 200ms 창을 유지하고 이 관측 TCP 연결에서만 Nagle을 끈다.
+                endpoint.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 endpoint.setblocking(False)
                 _need(time.monotonic() < deadline, 'connection completed after original accept deadline')
                 return endpoint
