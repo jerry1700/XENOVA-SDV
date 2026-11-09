@@ -22,7 +22,9 @@ static char fault_command_topic[XM_TOPIC_MAX],fault_result_topic[XM_TOPIC_MAX];
 static bool fault_command_registered,fault_running;
 static int64_t fault_last_rx=-1,fault_started_ms,fault_deadline_ms;
 static struct xm_auto_delay_command fault_command;
-static char fault_last_status[12];
+/* 수락한 마지막 명령의 결과만 소유한다. 재전달은 원 payload를 바꾸지 않는다. */
+static char fault_last_payload[512];
+static bool fault_result_valid;
 #endif
 static bool dual_mode, perception_registered;
 static struct xm_zbinary binary;
@@ -266,8 +268,14 @@ static void send_report(void) {
 #if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
 static void fault_result(const struct xm_auto_delay_command *command,const char *status,const char *error,uint64_t duration)
 {
- char json[512];if(!command->command_id[0]||xm_auto_delay_result_json(json,sizeof(json),command,status,duration,error)<0)return;
- if(command==&fault_command)strcpy(fault_last_status,status);
+ char json[sizeof(fault_last_payload)];
+ if(command==&fault_command)fault_result_valid=false;
+ if(!command->command_id[0])return;
+ int length=xm_auto_delay_result_json(json,sizeof(json),command,status,duration,error);
+ if(length<0)return;
+ if(command==&fault_command){
+  memcpy(fault_last_payload,json,(size_t)length+1);fault_result_valid=true;
+ }
  (void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",json);
 }
 static bool same_fault_command(const struct xm_auto_delay_command *a,const struct xm_auto_delay_command *b)
@@ -282,21 +290,20 @@ static void receive_fault_command(void)
  int64_t rx=0;for(size_t i=0;i<ARRAY_SIZE(client->latest);i++)if(!strcmp(client->latest[i].topic,fault_command_topic)){rx=client->latest[i].rx_ms;break;}
  if(rx==fault_last_rx)return;fault_last_rx=rx;
  if(!xm_span_eq(env.type,"agent.command"))return;
- struct xm_auto_delay_command incoming;int rc=xm_auto_delay_command_parse(env.payload,&incoming);
+ struct xm_auto_delay_command incoming={0};int rc=xm_auto_delay_command_parse(env.payload,&incoming);
  if(xm_zclient_latest_retained(client,fault_command_topic)){fault_result(&incoming,"REJECTED","INVALID_COMMAND",0);return;}
  if(rc){fault_result(&incoming,"REJECTED",rc==-ERANGE?"INVALID_PARAMETERS":"INVALID_COMMAND",0);return;}
  if(strcmp(incoming.expected_boot_id,client->id.boot_id)){fault_result(&incoming,"REJECTED","BOOT_MISMATCH",0);return;}
  if(fault_command.command_id[0]&&!strcmp(incoming.command_id,fault_command.command_id)){
   if(!same_fault_command(&incoming,&fault_command))fault_result(&incoming,"REJECTED","IDEMPOTENCY_CONFLICT",0);
-  else fault_result(&fault_command,fault_last_status[0]?fault_last_status:(fault_running?"RUNNING":"FAILED"),NULL,
-                    fault_running?0:(uint64_t)MAX(k_uptime_get()-fault_started_ms,0));
+  else if(fault_result_valid)(void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",fault_last_payload);
   return;
  }
  struct drive_auto_delay_receipt receipt;
  rc=drive_auto_delay_start_with_receipt(incoming.delay_ms,incoming.duration_s,&receipt);
  if(rc){fault_result(&incoming,"REJECTED",rc==-EBUSY?"BUSY":"STRESS_FAILED",0);return;}
  /* owner가 다시 시각을 읽으면 정상 만료를 STRESS_FAILED로 판정할 수 있다. */
- fault_command=incoming;fault_running=true;fault_started_ms=receipt.started_ms;
+ fault_result_valid=false;fault_command=incoming;fault_running=true;fault_started_ms=receipt.started_ms;
  fault_deadline_ms=receipt.expires_at_ms;fault_result(&fault_command,"RUNNING",NULL,0);
 }
 static void observe_fault_command(void)

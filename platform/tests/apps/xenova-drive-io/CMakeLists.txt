@@ -36,7 +36,8 @@ else()
   if(XL_FAULT_BOUNDARY)
     # The real command owner/parser is tested; calculation and cached resource
     # evidence are external boundaries, not simulated application failures.
-    zephyr_link_libraries(-Wl,--wrap=xm_zclient_publish)
+    zephyr_link_libraries(-Wl,--wrap=xm_zclient_publish,--wrap=xm_auto_delay_result_json)
+    target_compile_definitions(app PRIVATE XL_FAULT_BOUNDARY=1)
   endif()
   target_sources(app PRIVATE src/main.c)
 endif()
