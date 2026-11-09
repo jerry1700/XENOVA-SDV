@@ -220,9 +220,14 @@ class MapperSourceAdmissionTests(unittest.TestCase):
         self.assertIsInstance(failures[0], RuntimeError)
         self.assertEqual(callbacks, [])
         # 예외 뒤에도 원 owner는 다시 사용할 수 있다. 이전 identity를 새 시각으로 재발급한 것이 아니다.
+        ready = f.mapper._operation_ready
+        self.assertIsNotNone(ready)
         f.mapper.pump(before_outputs=lambda: callbacks.append('OWNER'))
         self.assertEqual(callbacks, ['OWNER', 'OWNER'])
-        proposal, = f.supervisor.link.poll()
+        # 이 fixture의 실제 설치 marker도 callback 뒤 원 bytes/기한으로 보낸다.
+        marker, proposal = f.supervisor.link.poll()
+        self.assertEqual(marker.kind, 'OPERATION_RESULT')
+        self.assertEqual((marker.body, marker.header['request_id'], marker.issued_us, marker.expires_us), ready)
         self.assertEqual(proposal.kind, 'SOURCE_IDENTITY')
         self.assertEqual(proposal.header['metadata']['vehicle_sample_sha256'], sha256(encode(f.sample)).hexdigest())
         self.assertEqual((proposal.issued_us, proposal.expires_us), (1000, 5001000))
