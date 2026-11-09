@@ -288,7 +288,24 @@ def validate(message):
     return message
 
 
+# These exact generated subtrees have no _validate_one semantics. Required
+# presence, bytes/caps and every float still pass _finite on each validate().
+# Any schema extension disables all three shortcuts, including nested Pose.
+# A new semantic rule for these types must also remove/update this shortcut.
+_NUMERIC_TREE_TYPES=(schema.Point,schema.Pose,schema.PathPoint)
+_NUMERIC_TREE_FIELDS=(
+    ((1,'x',2,2,None),(2,'y',2,2,None)),
+    ((1,'x',2,2,None),(2,'y',2,2,None),(3,'yaw',2,2,None)),
+    ((1,'pose',11,2,schema.Pose.DESCRIPTOR),(2,'steering_rad',2,2,None),(3,'velocity_mps',2,2,None)))
+if any(kind.DESCRIPTOR.extension_ranges or
+       tuple((f.number,f.name,f.type,f.label,f.message_type) for f in kind.DESCRIPTOR.fields)!=expected or
+       any(f.containing_oneof is not None for f in kind.DESCRIPTOR.fields)
+       for kind,expected in zip(_NUMERIC_TREE_TYPES,_NUMERIC_TREE_FIELDS)):
+    _NUMERIC_TREE_TYPES=()
+
+
 def _validate_tree(message):
+    if type(message) in _NUMERIC_TREE_TYPES:return
     for field,value in message.ListFields():
         if field.type==field.TYPE_MESSAGE:
             for child in value if _repeated(field) else (value,):_validate_tree(child)
