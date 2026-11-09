@@ -1,5 +1,5 @@
-import { Card, StatusBadge } from '@xenova/ui';
-import { Fragment, lazy, Suspense, type CSSProperties } from 'react';
+import { Card } from '@xenova/ui';
+import { lazy, Suspense, type CSSProperties } from 'react';
 import { Link, useParams } from 'react-router';
 import { ApiError } from '../api/client';
 import { useEvents, useMetrics, useProcesses, useThreads, useVm } from '../api/queries';
@@ -11,7 +11,8 @@ import { observedControl, vmAppObservations } from '../domain/driveObservations'
 import { networkRxKiBPerSecond } from '../domain/networkRate';
 import { cpuPercentOf, metricValue, ZEPHYR_HEAP_USED_METRIC } from '../domain/vmMetrics';
 import { useDrive } from '../layout/DriveContext';
-import { PublisherStatus } from './PublisherStatus';
+import { AGENT_HEALTH } from './collectorStatus';
+import { PublisherStatus, StatusDot } from './PublisherStatus';
 import { StressTestPanel } from './StressTestPanel';
 import styles from './pages.module.css';
 
@@ -235,7 +236,8 @@ function ExecutionTable({ vm }: { vm: Vm }) {
   return vm.guest_kind === 'zephyr' ? <Threads vmId={vm.vm_id} /> : <Processes vmId={vm.vm_id} />;
 }
 
-function AppObservationRows({
+/** 운영 상태 타일 중 앱 상태. 라벨은 "앱 상태 · manual" (앱 ID는 작은 회색 글자), 앱이 여럿이면 앱마다 한 줄 */
+function AppStateTile({
   vmId,
   drive,
   socket,
@@ -245,30 +247,18 @@ function AppObservationRows({
   socket: Parameters<typeof vmAppObservations>[2];
 }) {
   const reports = vmAppObservations(vmId, drive, socket);
-  return reports.length > 0 ? (
-    reports.map(({ appId, state, heartbeat }) => (
-      <Fragment key={appId}>
-        <div>
-          <span>앱 상태 · {appId}</span>
-          <span>{state}</span>
-        </div>
-        <div>
-          <span>앱 heartbeat · {appId}</span>
-          <span>{heartbeat}</span>
-        </div>
-      </Fragment>
-    ))
-  ) : (
-    <>
-      <div>
-        <span>앱 상태</span>
-        <span>미확인</span>
-      </div>
-      <div>
-        <span>앱 heartbeat</span>
-        <span>미확인</span>
-      </div>
-    </>
+  return (
+    <div>
+      <span>
+        앱 상태
+        {reports.length > 0 && <small> · {reports.map((report) => report.appId).join(' · ')}</small>}
+      </span>
+      {reports.length > 0 ? (
+        reports.map(({ appId, state }) => <strong key={appId}>{state}</strong>)
+      ) : (
+        <strong>미확인</strong>
+      )}
+    </div>
   );
 }
 
@@ -292,30 +282,40 @@ export function VmDetailPage() {
         : control.active_app
           ? '미확인'
           : 'NONE';
+  // 머리말 배지: 주행 VM 은 제어권, 인터랙션 VM 은 INFOTAINMENT (Memory·Network 탭 카드와 같은 배지), 역할 미지정은 없음
+  const titleBadge = !role ? null : role.driving ? authority : 'INFOTAINMENT';
 
   return (
     <div className={styles.vmDetailPage} style={{ '--vm-accent': color } as CSSProperties}>
-      <section className={styles.vmDetailHero}>
-        <div>
-          <div className={styles.eyebrow}>
-            <Link to="/dashboard/overview">VM Dashboard</Link> / {vm.data?.name ?? vmId}
-          </div>
-          <h1>{vm.data?.name ?? 'VM Detail'}</h1>
-          <p>
-            {role?.title ?? '역할 미지정'} · {vm.data ? osLabel(vm.data) : 'Loading'}
-          </p>
-        </div>
-        <div className={styles.vmDetailBadges}>
-          {role?.driving && (
-            <span className={styles.authority} data-authority={authority.toLowerCase()}>
-              {authority}
+      <header className={styles.controlDetailHero}>
+        <div className={styles.controlDetailTop}>
+          <Link className={styles.controlBackLink} to="/dashboard/overview">
+            <span aria-hidden="true">←</span>
+            <strong>VM Dashboard</strong>
+          </Link>
+          {vm.data && (
+            <span className={styles.controlDetailStatus} data-health={STATE_HEALTH[vm.data.state]}>
+              <i aria-hidden="true" />
+              {STATE_LABEL[vm.data.state]}
             </span>
           )}
-          {vm.data && (
-            <StatusBadge health={STATE_HEALTH[vm.data.state]} label={STATE_LABEL[vm.data.state]} size="lg" />
-          )}
         </div>
-      </section>
+        <div className={styles.controlDetailTitle}>
+          <span className={styles.controlCardKicker}>VIRTUAL MACHINE MONITORING</span>
+          {/* 제목 줄: 이름 + 역할 배지 (좁으면 배지가 다음 줄로) */}
+          <div className={styles.detailTitleRow}>
+            <h1>{vm.data?.name ?? 'VM 상세'}</h1>
+            {titleBadge && (
+              <span className={styles.authority} data-authority={titleBadge.toLowerCase()}>
+                {titleBadge}
+              </span>
+            )}
+          </div>
+          <p>
+            {role?.title ?? '역할 미지정'} · {vm.data ? osLabel(vm.data) : 'VM 정보를 불러오는 중입니다.'}
+          </p>
+        </div>
+      </header>
 
       {vm.isPending && <div className={styles.statePanel}>VM 상세 정보를 불러오는 중입니다…</div>}
       {vm.error && (
@@ -327,74 +327,83 @@ export function VmDetailPage() {
       {vm.data && (
         <>
           <div className={styles.vmDetailGrid}>
-            <Card title="Identity & state" accent={color}>
-              <div className={styles.rows}>
+            <Card title="운영 상태" accent={color}>
+              {/* 공통 타일: 옅은 배경 + 작은 회색 라벨 + 큰 값. 기술 값만 data-mono 로 고정폭 */}
+              <div className={styles.detailTiles} data-cols="2">
                 <div>
-                  <span>VM ID</span>
-                  <span>{vm.data.vm_id}</span>
+                  <span>VM 상태</span>
+                  <strong>
+                    <StatusDot health={STATE_HEALTH[vm.data.state]}>{STATE_LABEL[vm.data.state]}</StatusDot>
+                  </strong>
+                </div>
+                {/* 주행 VM 이 아니면 제어권·주행 모드는 "해당 없음" (타일 배치는 VM 마다 같게) */}
+                <div>
+                  <span>제어권</span>
+                  <strong>{authority}</strong>
                 </div>
                 <div>
-                  <span>Role</span>
-                  <span>{role?.title ?? 'Unassigned'}</span>
+                  <span>주행 모드</span>
+                  <strong>
+                    {role?.driving ? (control?.mode ? MODE_LABEL[control.mode] : '미확인') : '해당 없음'}
+                  </strong>
                 </div>
-                <div>
-                  <span>VM state</span>
-                  <span>{STATE_LABEL[vm.data.state]}</span>
-                </div>
-                <AppObservationRows vmId={vm.data.vm_id} drive={drive} socket={socket} />
-                <div>
-                  <span>Control authority</span>
-                  <span>{authority}</span>
-                </div>
-                {role?.driving && (
-                  <div>
-                    <span>Drive mode</span>
-                    <span>{control?.mode ? MODE_LABEL[control.mode] : '미확인'}</span>
-                  </div>
-                )}
+                <AppStateTile vmId={vm.data.vm_id} drive={drive} socket={socket} />
               </div>
+              <PublisherStatus vmId={vm.data.vm_id} />
+              {vm.data.guest_kind === 'linux' && (
+                <div className={styles.collectorLine}>
+                  <div>
+                    <span className={styles.collectorTitle}>Linux Agent 생존 (v1)</span>
+                    <StatusDot health={AGENT_HEALTH[vm.data.agent_status ?? 'UNKNOWN']}>
+                      {AGENT_LABEL[vm.data.agent_status ?? 'UNKNOWN']}
+                    </StatusDot>
+                  </div>
+                </div>
+              )}
             </Card>
 
-            <Card title="Assigned resources">
-              <div className={styles.resourceFacts}>
+            <Card title="VM 구성">
+              <div className={styles.detailTiles} data-cols="3">
                 <div>
                   <span>vCPU</span>
-                  <strong>{vm.data.vcpus}</strong>
+                  <strong data-mono="true">{vm.data.vcpus}</strong>
                 </div>
                 <div>
-                  <span>Memory</span>
-                  <strong>
+                  <span>메모리</span>
+                  <strong data-mono="true">
                     {vm.data.memory_mib}
-                    <small> MiB</small>
+                    <small>MiB</small>
                   </strong>
                 </div>
                 <div>
                   <span>예약 IPv4</span>
-                  <strong>{vm.data.assigned_ipv4 ?? '—'}</strong>
+                  <strong data-mono="true">{vm.data.assigned_ipv4 ?? '—'}</strong>
                 </div>
               </div>
-              <div className={styles.rows}>
+              {/* 라벨 고정 폭 열 + 값 바로 옆, 얇은 구분선 */}
+              <div className={styles.detailFacts}>
                 <div>
-                  <span>Template</span>
-                  <span>{vm.data.template_id}</span>
+                  <span>역할</span>
+                  <span>{role?.title ?? '역할 미지정'}</span>
                 </div>
                 <div>
-                  <span>Version</span>
-                  <span>{vm.data.template_version}</span>
+                  <span>템플릿</span>
+                  <span data-mono="true">{vm.data.template_id}</span>
                 </div>
-                {vm.data.guest_kind === 'linux' && (
-                  <div>
-                    <span>Linux Agent 생존 (v1)</span>
-                    <span>{AGENT_LABEL[vm.data.agent_status ?? 'UNKNOWN']}</span>
-                  </div>
-                )}
+                <div>
+                  <span>버전</span>
+                  <span data-mono="true">{vm.data.template_version}</span>
+                </div>
+                <div>
+                  <span>VM ID</span>
+                  <span data-mono="true">{vm.data.vm_id}</span>
+                </div>
               </div>
-              <PublisherStatus vmId={vm.data.vm_id} />
             </Card>
           </div>
 
           <Card
-            title="CPU & Memory telemetry"
+            title="CPU·메모리 추이"
             actions={<span className={styles.dim}>최근 5분 · 실제 수신 데이터</span>}
           >
             <Charts vm={vm.data} />
@@ -406,7 +415,7 @@ export function VmDetailPage() {
             <ExecutionTable vm={vm.data} />
           </Card>
 
-          <Card title="Recent lifecycle & recovery events">
+          <Card title="최근 생명주기·복구 이벤트">
             <div className={styles.detailEvents}>
               {(events.data?.items ?? []).map((event) => {
                 const summary = describe(event, () => vm.data.name);
@@ -436,7 +445,7 @@ export function VmDetailPage() {
 
           <div className={styles.controlHandoff}>
             <div>
-              <strong>Lifecycle control</strong>
+              <strong>생명주기 제어</strong>
               <span>시작·정지·삭제 같은 작업은 관측 화면과 분리되어 있습니다.</span>
             </div>
             <Link to="/control">VM Control에서 관리 →</Link>

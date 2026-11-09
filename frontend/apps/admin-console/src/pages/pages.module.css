@@ -1391,12 +1391,6 @@ button.chip:hover:not(.chipOn) {
   justify-items: end;
   gap: 4px;
 }
-.publisherStatus {
-  margin-bottom: var(--x-space-3);
-}
-.publisherStatus strong {
-  font-weight: 600;
-}
 .memoryNotice {
   margin-bottom: var(--x-space-3);
   padding: 8px var(--x-space-3);
@@ -1683,78 +1677,169 @@ button.chip:hover:not(.chipOn) {
 /* ---- S15P31E110-299 관측 중심 VM 상세 ---- */
 .vmDetailPage {
   display: grid;
-  gap: var(--x-space-4);
+  /* 간격은 VM Control 상세(controlDetailPage)와 같게, 폭 제한은 유지 */
+  gap: var(--x-space-5);
   max-width: 1500px;
   margin: 0 auto;
 }
-.vmDetailHero {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--x-space-5);
-  padding: var(--x-space-5);
-  overflow: hidden;
-  border: 1px solid var(--x-border);
-  border-radius: 16px;
-  background: var(--x-surface);
-}
-.vmDetailHero::before {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 4px;
-  background: var(--vm-accent);
-  content: '';
-}
-.vmDetailHero h1 {
-  margin: 6px 0 0;
-  font-size: clamp(34px, 4vw, 52px);
-  letter-spacing: -0.04em;
-}
-.vmDetailHero p {
-  margin: 4px 0 0;
-  color: var(--x-text-muted);
-}
-.vmDetailBadges {
+/* 머리말은 VM Control 상세 클래스를 그대로 쓰고, 제목 옆 제어권 배지 줄만 따로 둔다 */
+.detailTitleRow {
+  /* 제목 크기는 VM Control 상세(controlDetailHero h1)와 같은 값. 배지 보정에도 쓴다 */
+  --detail-title-size: clamp(34px, 4vw, 52px);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--x-space-2);
+  gap: var(--x-space-1) var(--x-space-3);
+  max-width: 100%;
+  /* h1 의 위아래 여백을 줄로 옮겨, 줄 높이 = 제목 글자 높이 */
+  margin: var(--x-space-2) 0 var(--x-space-1);
+}
+.detailTitleRow h1 {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--detail-title-size);
+  line-height: 1;
+}
+/* 배지 가운데를 제목 소문자(x-height) 가운데에 맞추는 보정.
+   line-height 1 줄에서 x-height 가운데는 줄 가운데보다 제목 크기의 약 0.17배 아래 (헤드리스 Chrome 실측, 34·52px 모두 1px 이내) */
+.detailTitleRow > [data-authority] {
+  position: relative;
+  top: calc(var(--detail-title-size) * 0.17);
 }
 .vmDetailGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--x-space-4);
 }
-.resourceFacts {
+/* VM 상세 정보 목록: 라벨 고정 폭 열 + 값 왼쪽 정렬, 행 사이 얇은 구분선.
+   값은 일반 글꼴, 기술 값(ID·템플릿·버전·시각·숫자)만 data-mono 로 고정폭 */
+.detailFacts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--x-space-2);
-  margin-bottom: var(--x-space-4);
 }
-.resourceFacts > div {
+.detailFacts > div {
   display: grid;
-  gap: 4px;
+  grid-template-columns: calc(var(--x-space-6) * 4) minmax(0, 1fr);
+  gap: var(--x-space-3);
+  align-items: baseline;
+  padding: var(--x-space-2) 0;
+  border-bottom: 1px solid var(--x-border);
+  font-size: var(--x-text-sm);
+}
+.detailFacts > div:last-child {
+  border-bottom: 0;
+}
+.detailFacts > div > span:first-child {
+  color: var(--x-text-muted);
+}
+.detailFacts > div > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.detailFacts [data-mono] {
+  font-family: var(--x-font-mono);
+}
+/* VM 상세 타일 (운영 상태·구성 공통): 옅은 배경 + 작은 회색 라벨(위) + 큰 값(아래).
+   한글 문구는 일반 글꼴, 숫자·ID·버전만 data-mono 로 고정폭 */
+.detailTiles {
+  display: grid;
+  grid-template-columns: repeat(var(--tile-cols, 2), minmax(0, 1fr));
+  gap: var(--x-space-2);
+}
+.detailTiles[data-cols='3'] {
+  --tile-cols: 3;
+}
+.detailTiles > div {
+  display: grid;
+  align-content: start;
+  gap: var(--x-space-1);
   min-width: 0;
   padding: var(--x-space-3);
   border-radius: var(--x-radius-sm);
   background: var(--x-surface-2);
 }
-.resourceFacts span {
+/* 글꼴(고정폭·일반)에 따라 줄 높이가 달라지지 않게 라벨·값 줄 높이를 간격 토큰으로 고정 → 모든 타일 같은 높이 */
+.detailTiles > div > span {
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
+  line-height: var(--x-space-4);
 }
-.resourceFacts strong {
-  overflow: hidden;
+.detailTiles > div > span small {
+  font-size: var(--x-text-xs);
+}
+.detailTiles > div > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  /* 라벨(xs)보다 크고 카드 제목(md)보다 작게. 두 카드 타일 공통 */
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  line-height: var(--x-space-5);
+}
+.detailTiles .statusDot {
+  display: flex;
+}
+.detailTiles > div > strong[data-mono] {
   font-family: var(--x-font-mono);
-  font-size: var(--x-text-lg);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.resourceFacts small {
+/* 단위(MiB)가 줄 높이를 키우지 않게 */
+.detailTiles > div > strong small {
+  line-height: 0;
+  margin-left: var(--x-space-1);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+/* 타일 아래 정보 목록은 타일과 간격을 둔다 */
+.detailTiles + .detailFacts {
+  margin-top: var(--x-space-3);
+}
+/* 상태 색 점 + 문구: 점만 색이 바뀐다 */
+.statusDot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--x-space-2);
+}
+.statusDot > i {
+  width: var(--x-space-2);
+  height: var(--x-space-2);
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--x-text-muted);
+}
+.statusDot[data-tone='ok'] > i {
+  background: var(--x-ok);
+}
+.statusDot[data-tone='warning'] > i {
+  background: var(--x-recovering);
+}
+.statusDot[data-tone='fault'] > i {
+  background: var(--x-fault);
+}
+/* 수집기·Agent 한 줄 요약 */
+.collectorLine {
+  display: grid;
+  gap: var(--x-space-1);
+  margin-top: var(--x-space-3);
+  padding-top: var(--x-space-3);
+  border-top: 1px solid var(--x-border);
+  font-size: var(--x-text-sm);
+}
+.collectorLine + .collectorLine {
+  margin-top: 0;
+  padding-top: var(--x-space-2);
+  border-top: 0;
+}
+.collectorTitle {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+}
+.collectorLine > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--x-space-1) var(--x-space-3);
+}
+.collectorLine > small {
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
 }
@@ -1803,21 +1888,29 @@ button.chip:hover:not(.chipOn) {
   text-decoration: none;
 }
 @media (max-width: 800px) {
-  .vmDetailHero,
   .controlHandoff {
     align-items: flex-start;
     flex-direction: column;
   }
-  .vmDetailBadges {
-    justify-content: flex-start;
-  }
-  .vmDetailGrid,
-  .resourceFacts {
+  .vmDetailGrid {
     grid-template-columns: 1fr;
   }
   .detailEvents > div {
     grid-template-columns: 76px 74px minmax(0, 1fr);
     gap: var(--x-space-2);
+  }
+}
+/* 좁은 화면: 라벨 위·값 아래, 구성 타일 3칸은 2칸 (예약 IPv4 는 다음 줄 전체) */
+@media (max-width: 520px) {
+  .detailFacts > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--x-space-1);
+  }
+  .detailTiles[data-cols='3'] {
+    --tile-cols: 2;
+  }
+  .detailTiles[data-cols='3'] > div:last-child {
+    grid-column: 1 / -1;
   }
 }
 
