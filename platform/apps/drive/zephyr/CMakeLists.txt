@@ -27,7 +27,7 @@ if(CONFIG_XENOVA_DRIVE_LATTICE)
   set(DRIVE_WORLD ${CMAKE_CURRENT_SOURCE_DIR}/../world)
   set(DRIVE_PLANNER ${CMAKE_CURRENT_SOURCE_DIR}/../planner)
   # A separate generated control set; the existing LAB source is immutable.
-  set(DRIVE_PRIMITIVES ${DRIVE_PRIMITIVES})
+  set(DRIVE_PRIMITIVES ${DRIVE_PLANNER}/generated/primitives.c)
   if(XENOVA_DRIVE_DEVELOPMENT_PROFILE)
     set(DRIVE_PRIMITIVES ${CMAKE_CURRENT_SOURCE_DIR}/../profiles/course-development-1/primitives.c)
   endif()
