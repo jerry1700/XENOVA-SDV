@@ -19,6 +19,7 @@ static void parking_metadata(struct drive_engine *,struct lp_path *,const xenova
 static bool behavior_restore(struct drive_engine *,const struct lp_path *,bool);
 static void source_context(const dw_world *,xenova_drive_EpisodeSourceContext *);
 static void behavior_uuid(char text[37],const uint8_t bytes[16]);
+static enum de_result control_facts_current(struct drive_engine *,const xenova_drive_DriveControlFacts *,uint64_t,struct db_facts *);
 static bool readers(const struct de_path_slot *s){for(unsigned i=0;i<DE_READERS;i++)if(s->leases[i])return true;return false;}
 void de_init(struct drive_engine *e,const struct lp_config *c,const struct lp_assets *a){
  memset(e,0,sizeof(*e));atomic_flag_clear(&e->lock);dw_pool_init(&e->maps);dw_odom_init(&e->odometry);
@@ -709,10 +710,55 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
  if(!valid)e->discarded++;
  return e->last_reason=valid?DE_OK:e->search_reason==LP_CANCELLED?DE_CANCELLED:DE_PATH;
 }
+static bool completed_episode_progress(const struct lp_path *path,uint32_t generation,dw_pose pose,
+ const dw_vehicle *vehicle,uint64_t now,const struct db_facts *facts,const struct lp_config *config,
+ const struct de_episode_progress *previous,struct de_episode_progress *out){
+ memset(out,0,sizeof(*out));
+ if(!path->has_episode||path->episode.core.state!=2||path->episode.core.phase>=DB_FINISHED)return false;
+ const xenova_drive_EpisodeCore *core=&path->episode.core;
+ const xenova_drive_EpisodeAcceptanceRef *ref=&path->episode.acceptance;
+ /* This is the exact Pi-owned meter sample used for the actual calculation,
+  * never a newer Vehicle number painted onto the receipt's older progress. */
+ if(!facts->valid||!facts->meter_valid||now>=facts->expires_pi_us||facts->vehicle_sequence!=vehicle->sequence||
+    facts->sampled_pi_us!=vehicle->pi_sample_us||strcmp(facts->pi_session,vehicle->pi_session)||
+    strcmp(facts->device_session,vehicle->device_session)||strcmp(facts->odom_epoch,vehicle->odom_epoch)||
+    memcmp(facts->meter_epoch,core->meter_epoch.bytes,16)||facts->meter_ticks<core->meter_baseline_total_ticks||
+    facts->meter_ticks-core->meter_baseline_total_ticks>UINT64_C(9007199254740992)||
+    now<core->phase_started_pi_us||now>=core->phase_deadline_pi_us||now>=core->deadline_pi_us||
+    !isfinite(facts->metres_per_tick)||facts->metres_per_tick<=0||!dw_episode_core_hash(core,out->core_sha256))return false;
+ out->path_generation=generation;out->vehicle_sequence=vehicle->sequence;out->registry_revision=ref->registry_revision;
+ memcpy(out->registry_epoch,ref->registry_epoch.bytes,16);
+ out->progress=path->episode.progress;
+ if(previous->valid&&previous->registry_revision==out->registry_revision&&
+    !memcmp(previous->registry_epoch,out->registry_epoch,16)&&!memcmp(previous->core_sha256,out->core_sha256,32)&&
+    previous->progress.revision>=out->progress.revision)out->progress=previous->progress;
+ xenova_drive_EpisodeProgress *progress=&out->progress;
+ uint64_t used=facts->meter_ticks-core->meter_baseline_total_ticks;
+ if(vehicle->sequence<progress->vehicle_sequence||used<progress->used_travel_ticks||progress->revision>=INT64_MAX)return false;
+ float radius=hypotf(fmaxf(config->front,config->rear)+config->margin,config->half_width+config->margin);
+ float pad=vehicle->position_error_m+radius*vehicle->heading_error_rad,lo,hi;
+ if(!db_station_bounds(&path->basis,pose,pad,config,&lo,&hi))return false;
+ float remaining=hypotf(pose.x-core->phase_goal.x,pose.y-core->phase_goal.y)+pad;
+ if(!isfinite(remaining))return false;
+ bool fresh=vehicle->sequence>progress->vehicle_sequence;
+ bool advanced=core->progress_mode==1?lo>=progress->station_lower_m+config->avoid_progress_m:
+  core->progress_mode==2&&remaining+config->avoid_progress_m<=progress->remaining_upper_m;
+ if(fresh&&advanced&&vehicle->pi_sample_us>progress->last_progress_pi_us&&vehicle->pi_sample_us>=core->phase_started_pi_us){
+  /* Source sample time is an existing Pi event, not the later guest-now upper
+   * estimate. Heartbeat/re-export cannot create movement or renew a budget. */
+  progress->station_lower_m=fmaxf(progress->station_lower_m,lo);
+  progress->remaining_upper_m=fminf(progress->remaining_upper_m,remaining);
+  progress->last_progress_pi_us=vehicle->pi_sample_us;
+ }
+ progress->vehicle_sequence=vehicle->sequence;progress->used_travel_ticks=used;progress->revision++;
+ out->valid=true;(void)hi;return true;
+}
 static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,uint64_t now,float dt,struct lp_command *command,
  dw_vehicle *vehicle,struct lp_budget budget,struct de_reference *completed,struct de_witness *witness,
- const xenova_drive_MissionGrant *mission,bool enforce_mission_profile){
+ const xenova_drive_MissionGrant *mission,bool enforce_mission_profile,const xenova_drive_DriveControlFacts *current_facts){
  memset(command,0,sizeof(*command));command->emergency=true;command->result=LP_INPUT;
+ if(witness)memset(witness,0,sizeof(*witness));
+ struct de_episode_progress episode_progress={0};
  struct dw_handle mh;const struct dw_snapshot *map;
  if(dw_acquire(&e->maps,&mh,&map))return DE_MAP;
  dw_pose pose;uint64_t map_end=0;enum de_result rc=inputs(e,map,now,&pose,vehicle,&map_end);
@@ -720,8 +766,12 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
  struct de_reference ph;const struct lp_path *path=NULL;
  if(!rc)rc=de_path_acquire(e,&ph,&path);
  if(!rc){
-  struct db_facts facts={0};bool metadata_busy=false;
-  if(e->behavior_enabled){if(!take(e))metadata_busy=true;else{facts=e->facts;give(e);}}
+  struct db_facts facts={0};bool metadata_busy=false,facts_ready=e->facts_current;
+  if(e->behavior_enabled){
+   if(current_facts)facts_ready=control_facts_current(e,current_facts,now,&facts)==DE_OK;
+   else if(!take(e))metadata_busy=true;
+   else{facts=e->facts;give(e);}
+  }
   struct lp_metrics measured={0};
   enum lp_result tracked=LP_INPUT;bool calculated=false;
   uint64_t map_scene=0,scene_end=UINT64_MAX;
@@ -732,7 +782,7 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
   else if(map_gate||path_gate)rc=DE_CHANGED;
   else if(map_scene&&(e->paths[ph.slot].scene_generation!=map_scene||!scene_mission(&map->world,scene_grant)))rc=DE_STATE;
   else if(enforce_mission_profile&&(map->world.required_features&DW_LANE_MODEL)&&!lp_mission_matches(path,mission))rc=DE_STATE;
-  else if(e->behavior_enabled&&(e->episode_transition||e->behavior_failed||!e->facts_current))rc=DE_STATE;
+  else if(e->behavior_enabled&&(e->episode_transition||e->behavior_failed||!facts_ready))rc=DE_STATE;
   else if(path->has_episode&&path->episode.core.state==2&&path->episode.core.phase<DB_FINISHED&&
     (now>=path->episode.core.deadline_pi_us||now>=path->episode.core.phase_deadline_pi_us||
      !facts.valid||!facts.meter_valid||now>=facts.expires_pi_us||memcmp(facts.meter_epoch,path->episode.core.meter_epoch.bytes,16)||
@@ -765,7 +815,11 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
    if(final_scene)rc=final_scene==DW_BUSY?DE_BUSY:DE_CHANGED;
   }
   if(tracker==&e->tracker){e->tracking.cells+=measured.cells;e->tracking.footprints+=measured.footprints;}
-  if(!rc&&tracker==&e->tracker&&take(e)){e->progress_snapshot=*tracker;e->progress_generation=ph.generation;give(e);}
+  if(!rc&&tracker==&e->tracker&&take(e)){
+   e->progress_snapshot=*tracker;e->progress_generation=ph.generation;
+   (void)completed_episode_progress(path,ph.generation,pose,vehicle,now,&facts,e->config,&e->tracked_episode_progress,&episode_progress);
+   give(e);
+  }
   if(!rc&&completed)*completed=ph;
   if(!rc&&witness){witness->reference_revision=map->world.reference_revision;witness->observation_sequence=map->world.observation_seq;
    witness->valid_until_pi_us=command->valid_until_pi_us;strcpy(witness->map_epoch,map->world.map_epoch);}
@@ -773,19 +827,28 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
  }
  if(!rc&&dw_source_valid(&e->maps,mh))rc=DE_CHANGED;
  if(dw_release(&e->maps,mh))rc=DE_BUSY;
+ if(!rc&&episode_progress.valid&&take(e)){
+  e->tracked_episode_progress=episode_progress;
+  if(witness)witness->episode=episode_progress;
+  give(e);
+ }
  if(rc){memset(command,0,sizeof(*command));command->emergency=true;command->result=LP_INPUT;}
  return e->last_reason=rc;
 }
 enum de_result de_track(struct drive_engine *e,uint64_t now,float dt,struct lp_command *command,dw_vehicle *vehicle,struct lp_budget budget){
- enum de_result rc=track(e,&e->tracker,now,dt,command,vehicle,budget,&e->last_track_path,&e->last_track_world,NULL,true);
+ enum de_result rc=track(e,&e->tracker,now,dt,command,vehicle,budget,&e->last_track_path,&e->last_track_world,NULL,true,NULL);
  if(!rc)atomic_fetch_add(&e->completed,1);
  return rc;
 }
 enum de_result de_track_mission(struct drive_engine *e,const xenova_drive_MissionGrant *mission,uint64_t now,float dt,
  struct lp_command *command,dw_vehicle *vehicle,struct lp_budget budget){
+ return de_track_mission_facts(e,mission,NULL,now,dt,command,vehicle,budget);
+}
+enum de_result de_track_mission_facts(struct drive_engine *e,const xenova_drive_MissionGrant *mission,
+ const xenova_drive_DriveControlFacts *facts,uint64_t now,float dt,struct lp_command *command,dw_vehicle *vehicle,struct lp_budget budget){
  memset(command,0,sizeof(*command));command->emergency=true;command->result=LP_INPUT;
  if(!mission||dw_mission_grant_validate(mission))return DE_STATE;
- enum de_result rc=track(e,&e->tracker,now,dt,command,vehicle,budget,&e->last_track_path,&e->last_track_world,mission,true);
+ enum de_result rc=track(e,&e->tracker,now,dt,command,vehicle,budget,&e->last_track_path,&e->last_track_world,mission,true,facts);
  if(!rc)atomic_fetch_add(&e->completed,1);
  return rc;
 }
@@ -794,7 +857,7 @@ enum de_result de_prepare(struct drive_engine *e,uint64_t now,struct de_referenc
  if(!take(e))return DE_BUSY;
  if(e->progress_generation)temporary=e->progress_snapshot;
  give(e);
- return track(e,&temporary,now,.02f,&calculated,vehicle,budget,path,witness,NULL,false);
+ return track(e,&temporary,now,.02f,&calculated,vehicle,budget,path,witness,NULL,false,NULL);
 }
 enum de_result de_apply(struct drive_engine *e,const dw_state *state,uint64_t now,struct lp_budget budget){
  if(e->planning||e->apply_pending)return DE_BUSY;
@@ -929,6 +992,7 @@ enum de_result de_restart(struct drive_engine *e){
  }
  memset(&e->task,0,sizeof(e->task));memset(&e->basis,0,sizeof(e->basis));
  memset(&e->progress_snapshot,0,sizeof(e->progress_snapshot));e->progress_generation=0;
+ memset(&e->tracked_episode_progress,0,sizeof(e->tracked_episode_progress));
  give(e);return DE_OK;
 }
 const char *de_reason(enum de_result rc){
@@ -950,7 +1014,7 @@ void de_behavior_enable(struct drive_engine *e,const uint8_t incarnation[16]){
   c->parking_yaw_seed_rad,c->min_control_speed,c->parking_clearance_sufficient,c->parking_clearance_band,
   c->parking_stationary_speed,c->parking_yaw_rate,c->parking_final_window_us};
 }
-enum de_result de_control_facts(struct drive_engine *e,const xenova_drive_DriveControlFacts *f,uint64_t now){
+static enum de_result control_facts_current(struct drive_engine *e,const xenova_drive_DriveControlFacts *f,uint64_t now,struct db_facts *out){
  if(!e||!f||f->major!=1||now>=f->valid_until_pi_us||!f->meter.valid)return DE_STATE;
  dw_vehicle vehicle;if(dw_vehicle_sequence(&e->odometry,f->meter.vehicle_sequence,&vehicle))return DE_POSE;
  if(dw_control_facts_validate(f,&vehicle))return DE_STATE;
@@ -969,6 +1033,10 @@ enum de_result de_control_facts(struct drive_engine *e,const xenova_drive_DriveC
   facts.stop_calculation=s->calculation_sequence;facts.stop_serial=s->command_sequence;facts.control_generation=s->control_generation;
   facts.plan_revision=s->plan_revision;facts.phase_revision=s->phase_revision;
  }
+ *out=facts;return DE_OK;
+}
+enum de_result de_control_facts(struct drive_engine *e,const xenova_drive_DriveControlFacts *f,uint64_t now){
+ struct db_facts facts;enum de_result valid=control_facts_current(e,f,now,&facts);if(valid)return valid;
  if(!take(e))return DE_BUSY;
  bool changed=e->facts.vehicle_sequence!=facts.vehicle_sequence||e->facts.stop_serial!=facts.stop_serial||
   e->facts.stationary!=facts.stationary||e->facts.meter_valid!=facts.meter_valid;

@@ -108,6 +108,13 @@ static int publication_policy(const char *argument){
  phase_registration.snapshot=path.episode;phase_registration.plan_revision=path.revision;
  phase_registration.phase_revision=path.maneuver_revision;phase_registration.original_path_generation=2;
  memset(phase_registration.plan_sha256,0x5a,32);
+ struct de_episode_progress measured={.valid=true,.vehicle_sequence=342,.registry_revision=ref->registry_revision};
+ measured.progress.vehicle_sequence=342;memcpy(measured.registry_epoch,ref->registry_epoch.bytes,16);
+ assert(dw_episode_core_hash(&path.episode.core,measured.core_sha256));
+ bool measured_progress=completed_episode_same(&path,&measured,342);
+ measured.progress.vehicle_sequence=341;bool old_progress=completed_episode_same(&path,&measured,342);measured.progress.vehicle_sequence=342;
+ measured.registry_revision++;bool other_registry=completed_episode_same(&path,&measured,342);measured.registry_revision--;
+ measured.core_sha256[0]^=1;bool other_progress_core=completed_episode_same(&path,&measured,342);measured.core_sha256[0]^=1;
  bool baseline=phase_snapshot_registered(&path);
  engine.planning=engine.apply_pending=engine.episode_transition=engine.episode_request_ready=engine.episode_receipt_pending=true;
  bool unrelated=phase_snapshot_registered(&path);
@@ -135,8 +142,9 @@ static int publication_policy(const char *argument){
  phase_snapshot_valid=true;engine.stopping=true;
  char accepted_id[37];strcpy(accepted_id,engine.phase_state_message_id);
  int cache_rc=drive_lattice_snapshot(&ignored);
- printf("PUBLICATION_POLICY {\"baseline\":%d,\"unrelated_candidate\":%d,\"wrong_core\":%d,\"wrong_ref\":%d,\"wrong_id\":%d,\"wrong_receipt_ref\":%d,\"wrong_path\":%d,\"wrong_plan\":%d,\"future_ack\":%d,\"failed\":%d,\"cache_rc\":%d,\"old_cache_retained\":%d,\"new_id_preserved\":%d}\n",
-  baseline,unrelated,wrong_core,wrong_ref,wrong_id,wrong_receipt_ref,wrong_path,wrong_plan,future_ack,failed,cache_rc,phase_snapshot_valid,!strcmp(accepted_id,engine.phase_state_message_id));
+ printf("PUBLICATION_POLICY {\"baseline\":%d,\"unrelated_candidate\":%d,\"wrong_core\":%d,\"wrong_ref\":%d,\"wrong_id\":%d,\"wrong_receipt_ref\":%d,\"wrong_path\":%d,\"wrong_plan\":%d,\"future_ack\":%d,\"failed\":%d,\"cache_rc\":%d,\"old_cache_retained\":%d,\"new_id_preserved\":%d,\"measured_progress\":%d,\"old_progress\":%d,\"other_registry\":%d,\"other_progress_core\":%d}\n",
+  baseline,unrelated,wrong_core,wrong_ref,wrong_id,wrong_receipt_ref,wrong_path,wrong_plan,future_ack,failed,cache_rc,phase_snapshot_valid,!strcmp(accepted_id,engine.phase_state_message_id),
+  measured_progress,old_progress,other_registry,other_progress_core);
  engine.planning=engine.apply_pending=engine.episode_transition=engine.episode_request_ready=engine.episode_receipt_pending=false;
  return 0;
 }

@@ -266,6 +266,16 @@ int engine_track_grant(void *e,const uint8_t *bytes,size_t n,uint64_t now,float 
  if(rc==DE_OK)engine_calculated(e,&vehicle);
  out[0]=command.velocity;out[1]=command.steer;free(link);return rc;
 }
+int engine_track_grant_facts(void *e,const uint8_t *bytes,size_t n,const uint8_t *raw,size_t length,uint64_t now,float *out){
+ xenova_drive_DriveLink *link=calloc(1,sizeof(*link));if(!link)return -1;
+ xenova_drive_DriveControlFacts facts={0};pb_istream_t stream=pb_istream_from_buffer(raw,length);uint64_t clock;
+ if(dw_link_decode(bytes,n,link)||link->which_payload!=xenova_drive_DriveLink_mission_grant_tag||
+    !pb_decode(&stream,xenova_drive_DriveControlFacts_fields,&facts)||clock_us(NULL,&clock)){free(link);return DE_STATE;}
+ struct lp_command command;dw_vehicle vehicle;struct lp_budget budget={clock+1000000,clock_us,NULL,NULL,NULL};
+ enum de_result rc=de_track_mission_facts(e,&link->payload.mission_grant,&facts,now,.02f,&command,&vehicle,budget);
+ if(rc==DE_OK)engine_calculated(e,&vehicle);
+ out[0]=command.velocity;out[1]=command.steer;free(link);return rc;
+}
 int engine_state(void *pointer,uint8_t *out,size_t cap){
  struct engine_fixture *unit=pointer;struct drive_engine *e=&unit->core;struct de_reference h;const struct lp_path *p;
  if(de_path_acquire(e,&h,&p))return -1;
@@ -404,6 +414,15 @@ void engine_fixture_auto_owner(void *pointer){((struct drive_engine *)pointer)->
 int engine_fixture_phase_id(void *pointer,uint8_t out[37]){
  const struct drive_engine *e=pointer;memcpy(out,e->phase_state_message_id,37);return 0;
 }
+int engine_fixture_track_progress(void *pointer,uint8_t *out,size_t capacity,uint64_t view[4],uint8_t hash[32]){
+ const struct drive_engine *e=pointer;const struct de_episode_progress *p=&e->last_track_world.episode;
+ view[0]=p->valid;view[1]=p->path_generation;view[2]=p->vehicle_sequence;view[3]=p->registry_revision;
+ memcpy(hash,p->core_sha256,32);
+ if(!p->valid)return 0;
+ pb_ostream_t stream=pb_ostream_from_buffer(out,capacity);
+ return pb_encode(&stream,xenova_drive_EpisodeProgress_fields,&p->progress)?(int)stream.bytes_written:-1;
+}
+uint64_t engine_fixture_planner_facts_sequence(void *pointer){return ((struct drive_engine *)pointer)->facts.vehicle_sequence;}
 
 int engine_fixture_facts(void *pointer,const uint8_t *raw,size_t n,uint64_t now){
  struct drive_engine *e=pointer;xenova_drive_DriveControlFacts facts={0};pb_istream_t in=pb_istream_from_buffer(raw,n);

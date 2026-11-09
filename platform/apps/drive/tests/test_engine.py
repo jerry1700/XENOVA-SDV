@@ -784,6 +784,58 @@ def test_registered_unrun_path_recovers_after_first_facts_expiry_without_budget_
     finally:library.engine_free(e)
 
 
+def test_actual_tracking_progress_is_bound_to_completed_vehicle_and_original_meter(library):
+    from xenova_drive_world import episode_core_sha256
+    library.engine_fixture_track_progress.argtypes=[C.c_void_p,C.c_void_p,C.c_size_t,
+        C.POINTER(C.c_uint64),C.c_void_p]
+    e,world,grant,_,snapshot,_,_=_registered_bootstrap(library)
+    def observed():
+        raw=C.create_string_buffer(256);view=(C.c_uint64*4)();core=C.create_string_buffer(32)
+        n=library.engine_fixture_track_progress(e,raw,len(raw),view,core)
+        return n,list(view),core.raw,decode(raw.raw[:n],schema.EpisodeProgress) if n>0 else None
+    try:
+        assert library.engine_fixture_continue(e,1230000,8)==0
+        fresh,facts=_fresh_bootstrap_input(library,e,world)
+        assert library.engine_plan(e,1550000,4096)==0
+        wire=encode(grant);out=(C.c_float*2)()
+        assert library.engine_track_grant(e,wire,len(wire),1550000,out)==0
+        n,view,core,progress=observed()
+        assert n>0 and view[0] and view[2]==fresh.sequence==progress.vehicle_sequence
+        assert core==episode_core_sha256(snapshot.core)
+        assert progress.used_travel_ticks==facts.meter.total_ticks-snapshot.core.meter_baseline_total_ticks
+        assert progress.revision>snapshot.progress.revision
+        assert progress.last_progress_pi_us==snapshot.progress.last_progress_pi_us==0  # stationary is no progress
+        registered=encode(snapshot)
+        assert library.engine_track_grant(e,wire,len(wire),1550000,out)==0
+        assert observed()[3].last_progress_pi_us==0  # same sample/retry is no movement
+        # A newer actual Vehicle without that Vehicle's original meter sample
+        # may still be conservatively tracked, but cannot mint an export proof.
+        newer=_bootstrap_vehicle(fresh.sequence+1,1556000);send_vehicle(library,e,newer)
+        assert library.engine_track_grant(e,wire,len(wire),1560000,out)==0
+        assert observed()[0]==0 and not observed()[1][0]
+        # The actual input owner can receive a new facts sample between the
+        # planner turn and the calculation. Consume it read-only; do not make
+        # the tracker a second writer of the planner's facts/episode cache.
+        library.engine_track_grant_facts.argtypes=[C.c_void_p,C.c_char_p,C.c_size_t,
+            C.c_char_p,C.c_size_t,C.c_uint64,C.POINTER(C.c_float)]
+        library.engine_fixture_planner_facts_sequence.argtypes=[C.c_void_p]
+        library.engine_fixture_planner_facts_sequence.restype=C.c_uint64
+        latest=schema.DriveControlFacts();latest.CopyFrom(facts)
+        latest.meter.vehicle_sequence=newer.sequence
+        latest.valid_until_pi_us=newer.pi_sample_us+200000
+        source=encode(latest)
+        assert library.engine_fixture_planner_facts_sequence(e)==fresh.sequence
+        assert library.engine_track_grant_facts(e,wire,len(wire),source,len(source),1560000,out)==0
+        assert observed()[3].vehicle_sequence==newer.sequence and observed()[3].last_progress_pi_us==0
+        assert library.engine_fixture_planner_facts_sequence(e)==fresh.sequence
+        expired=schema.DriveControlFacts();expired.CopyFrom(latest);expired.valid_until_pi_us=1560000
+        stale=encode(expired)
+        assert library.engine_track_grant_facts(e,wire,len(wire),stale,len(stale),1560000,out)!=0
+        assert observed()[0]==0 and library.engine_fixture_planner_facts_sequence(e)==fresh.sequence
+        assert encode(snapshot)==registered  # Original Core/ref/birth/meter/budget remains unchanged.
+    finally:library.engine_free(e)
+
+
 def test_registered_unrun_geometry_reuse_adopts_new_local_slot_and_same_original_plan(library):
     e,world,grant,request,snapshot,_,_=_registered_bootstrap(library)
     try:

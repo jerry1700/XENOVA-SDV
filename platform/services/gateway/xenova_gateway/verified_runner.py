@@ -237,6 +237,7 @@ class VerifiedGatewayRunner(GatewayRunner):
             clock=self._clock,timing=self._timing)
         self.machine.durable_write_available=self._durable_available
         self.machine.manual_registry=None if self.operator is None else self.operator.sources
+        if self.operator is not None:self.machine.episode_prepare_allowed=self.operator.episodes.prepare_allowed
         self.machine.continuous_handoff=self.drive_link is not None
         retained=self._client.latest(topics.vehicle_control())
         if retained is not None:
@@ -556,6 +557,11 @@ class VerifiedGatewayRunner(GatewayRunner):
             raise ValueError('one operator owner requires warm profile')
         from .operator_service import OperatorService
         self.operator=OperatorService(self)
+        # __main__ configures owners before begin(); late configuration uses
+        # the same actual machine. Neither path creates readiness/authority.
+        if self.machine is not None:
+            self.machine.manual_registry=self.operator.sources
+            self.machine.episode_prepare_allowed=self.operator.episodes.prepare_allowed
 
     def submit_operator(self,call):
         if self.operator is None:raise ValueError('operator profile not configured')

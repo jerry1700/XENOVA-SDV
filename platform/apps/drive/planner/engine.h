@@ -13,7 +13,15 @@ enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
 #define DE_READERS 4
 struct de_path_slot {struct lp_path path;atomic_uint generation,leases[DE_READERS];bool writing;uint64_t scene_generation;};
 struct de_reference {unsigned slot;uint32_t generation,lease;};
-struct de_witness {uint64_t reference_revision,observation_sequence,valid_until_pi_us;char map_epoch[37];};
+/* Actual successful tracker sample, separate from immutable registered Core/ref.
+ * Missing/exact-meter mismatch withholds a progress export, not numeric clock
+ * bootstrap or a future State/apply prerequisite. */
+struct de_episode_progress {
+ bool valid;uint32_t path_generation;uint64_t vehicle_sequence,registry_revision;
+ uint8_t core_sha256[32],registry_epoch[16];xenova_drive_EpisodeProgress progress;
+};
+struct de_witness {uint64_t reference_revision,observation_sequence,valid_until_pi_us;char map_epoch[37];
+ struct de_episode_progress episode;};
 /* Current input/occupied-body check only. No mission, route, state apply or
  * output permission is created. Caller owns storage and original clock proof. */
 struct de_input_check {
@@ -42,6 +50,7 @@ struct drive_engine {
  struct de_reference apply_path;
  struct de_reference last_track_path;
  struct de_witness last_track_world;
+ struct de_episode_progress tracked_episode_progress;
  bool maneuver_active;dw_pose maneuver_goal;int maneuver_direction;uint64_t maneuver_revision;
  uint64_t merge_passed_reference_revision;
  bool has_grant,planning_has_grant; xenova_drive_MissionGrant grant,planning_grant;
@@ -105,6 +114,10 @@ enum de_result de_plan_slice(struct drive_engine *,unsigned,uint64_t now_pi_us);
 enum de_result de_track(struct drive_engine *,uint64_t,float,struct lp_command *,dw_vehicle *,struct lp_budget);
 enum de_result de_track_mission(struct drive_engine *,const xenova_drive_MissionGrant *,uint64_t,float,
  struct lp_command *,dw_vehicle *,struct lp_budget);
+/* Tracker-local current input; validation never mutates the planner-owned
+ * cached facts/episode or creates a State/apply/output permission. */
+enum de_result de_track_mission_facts(struct drive_engine *,const xenova_drive_MissionGrant *,
+ const xenova_drive_DriveControlFacts *,uint64_t,float,struct lp_command *,dw_vehicle *,struct lp_budget);
 /* Actual one-off Standby calculation, with a private tracker. It cannot
  * increment the selected runtime loop or mutate the Active tracker. */
 enum de_result de_prepare(struct drive_engine *,uint64_t,struct de_reference *,struct de_witness *,dw_vehicle *,struct lp_budget);

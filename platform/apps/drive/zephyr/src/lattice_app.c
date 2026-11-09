@@ -71,6 +71,10 @@ static xenova_drive_MissionBudgetReply budget_reply;
 static uint8_t budget_request_wire[512];
 static uint8_t behavior_boot_nonce[16];
 static xenova_drive_DriveControlFacts planner_facts;
+/* Independent AUTO calculation reader; the planner keeps sole mutation
+ * ownership of engine.control_facts/episode. ClockReply may arrive after its
+ * most recent planner turn and before this actual calculation. */
+static xenova_drive_DriveControlFacts tracking_facts;
 static xenova_drive_EpisodeStatus planner_status,snapshot_status;
 /* Planner-owned facts, never copied onto the control stack or treated as a
  * mission/apply/output grant. The input owner rechecks their original source. */
@@ -367,7 +371,8 @@ static int automatic(void *unused,struct xm_span control,struct xm_span input,in
   k_mutex_unlock(&app_metadata);
  }
  struct lp_budget budget={deadline,clock_us,tracker_cancelled,NULL,NULL};struct lp_command command;
- enum de_result rc=required?de_track_mission(&engine,&mission,now,.02f,&command,&vehicle,budget):de_track(&engine,now,.02f,&command,&vehicle,budget);
+ const xenova_drive_DriveControlFacts *facts=required&&!dl_control_facts(&tracking_facts,now)?&tracking_facts:NULL;
+ enum de_result rc=required?de_track_mission_facts(&engine,&mission,facts,now,.02f,&command,&vehicle,budget):de_track(&engine,now,.02f,&command,&vehicle,budget);
  if(rc){out->reason=rc==DE_PATH?lp_reason(command.result):de_reason(rc);return 0;}
  out->v_mps=command.velocity;out->steer_rad=command.velocity?command.steer:0;out->nearest_m=command.known_distance;
  out->clock_domain=DRIVE_SAMPLE_COUNTER_MS;out->valid_until_ms=valid_until(&clock,&vehicle);out->input_sequence=(int64_t)vehicle.sequence;
@@ -787,6 +792,11 @@ void drive_lattice_completed(const struct drive_completion *work){
    atomic_store(&engine.snapshot_requested_generation,0);dl_snapshot_request();
   }
   completion.world.reference_revision=work->sample.reference_revision;completion.world.observation_sequence=work->sample.observation_sequence;
+  /* The sole AUTO calculation owner completes before its next track call.
+   * Planner preparation uses a separate local witness and cannot replace it. */
+  if(engine.last_track_world.episode.valid&&engine.last_track_world.episode.path_generation==work->sample.path_generation&&
+     engine.last_track_world.episode.vehicle_sequence==(uint64_t)work->sample.input_sequence)
+   completion.world.episode=engine.last_track_world.episode;
   prepared.generation=work->sample.path_generation;prepared_valid=true;prepared_expiry=(uint64_t)work->sample.valid_until_ms*1000;
   prepared_mission_present=(path->world_features&DW_LANE_MODEL)!=0;if(prepared_mission_present)prepared_mission=path->execution.mission;
  }
@@ -924,6 +934,13 @@ static bool phase_plan_registered(const char *message_id,const uint8_t plan_sha2
  return phase_registration.valid&&!strcmp(message_id,phase_registration.message_id)&&
   !memcmp(plan_sha256,phase_registration.plan_sha256,32);
 }
+static bool completed_episode_same(const struct lp_path *path,const struct de_episode_progress *progress,uint64_t vehicle){
+ uint8_t hash[32];
+ return progress->valid&&progress->vehicle_sequence==vehicle&&progress->progress.vehicle_sequence==vehicle&&
+  progress->registry_revision==path->episode.acceptance.registry_revision&&
+  !memcmp(progress->registry_epoch,path->episode.acceptance.registry_epoch.bytes,16)&&
+  dw_episode_core_hash(&path->episode.core,hash)&&!memcmp(hash,progress->core_sha256,32);
+}
 /* app_metadata is held: an old cache/ACK must not clear a later receipt's ID. */
 static void phase_snapshot_discard(void){
  phase_snapshot_valid=false;
@@ -980,13 +997,17 @@ int drive_lattice_snapshot(dw_state *out){
   !strcmp(path->basis.frame,path->frame)&&!strcmp(path->basis.odom,path->odom)&&!strcmp(path->basis.configuration,path->configuration)&&
   !strcmp(path->basis.calibration,lp_selected_config.calibration)&&!strcmp(path->basis.primitive,lp_selected_assets.sha256));
  bool phase_ok=!phase_id[0]||phase_snapshot_registered(path);
- if(h.generation==work.path_generation&&mission_ok&&basis_ok&&phase_ok){
+ bool active_episode=path->has_episode&&path->episode.core.state==2&&path->episode.core.phase<DB_FINISHED;
+ bool progress_ok=!active_episode||(work.world.episode.path_generation==h.generation&&
+  completed_episode_same(path,&work.world.episode,work.vehicle_sequence));
+ if(h.generation==work.path_generation&&mission_ok&&basis_ok&&phase_ok&&progress_ok){
   memset(out,0,sizeof(*out));if(!lp_state_export(path,out)){(void)de_path_release(&engine,h);return -EINVAL;}strcpy(out->source_vm,boot.identity.vm_id);strcpy(out->source_execution,boot.identity.execution_id);
   strcpy(out->source_app_instance,boot.auto_instance_id);out->source_generation=generation;out->state_revision=revision;
   strcpy(out->frame_epoch,path->frame);strcpy(out->odom_epoch,path->odom);strcpy(out->configuration,path->configuration);
   strcpy(out->calibration,lp_selected_config.calibration);strcpy(out->primitive,lp_selected_assets.sha256);strcpy(out->reference_id,path->reference);
   out->reference_revision=work.world.reference_revision;out->path_revision=path->revision;out->maneuver_revision=path->maneuver_revision;
   out->direction=path->direction;out->maneuver_phase=work.maneuver_phase;out->merge_goal=path->merge_goal;out->vehicle_sequence=work.vehicle_sequence;
+  if(active_episode)out->episode.progress=work.world.episode.progress;
   out->has_world_features=true;out->world_features=path->world_features;
   if(path->merge_passed_reference_revision&&path->merge_passed_reference_revision==out->reference_revision){
    out->has_merge_passed_reference_revision=true;out->merge_passed_reference_revision=path->merge_passed_reference_revision;

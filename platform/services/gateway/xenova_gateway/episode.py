@@ -47,7 +47,6 @@ class EpisodeOwner:
         self.startup_key=None if initial is None else (initial['id'],initial['revision'])
         self.mission_key=None;self.registry=None;self.last_reply=None;self.terminal=None
         self.peers={};self.activated=set();self.failed=False;self.request_hwm={};self.last_key=self.last_sha=None
-        self.r.machine.episode_prepare_allowed=self.prepare_allowed
 
     def declare(self,peer,features):
         # Binding/transport origin has already been checked by DriveLinkProvider.

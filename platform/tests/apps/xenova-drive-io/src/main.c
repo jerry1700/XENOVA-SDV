@@ -34,6 +34,11 @@ static int64_t injected_until;
 int drive_auto_delay_start(uint32_t delay,uint32_t duration){
  assert(delay==2&&duration==1);fault_starts++;injected_until=k_uptime_get()+1000;return 0;
 }
+int drive_auto_delay_start_with_receipt(uint32_t delay,uint32_t duration,struct drive_auto_delay_receipt *out){
+ int rc=drive_auto_delay_start(delay,duration);
+ if(!rc&&out)*out=(struct drive_auto_delay_receipt){injected_until-1000,injected_until};
+ return rc;
+}
 void drive_auto_delay_stop(void){injected_until=0;}
 void drive_auto_delay_status_get(struct drive_auto_delay_status *out){
  *out=(struct drive_auto_delay_status){.active=k_uptime_get()<injected_until,
