@@ -351,11 +351,17 @@ class DriveLinkProvider:
                 if (mission.scene_admission_id!=bytes(16) and
                         (runtime is None or not runtime.mission_allowed(mission,int(now*1e6)))):
                     return self.reject('STATE_SCENE_AUTHORITY')
+            state_wire=None
+            if modern is not None:
+                # The full parent validated this unchanged subtree. Both owners
+                # receive the same deterministic bytes and original size cap.
+                state_wire=body.SerializeToString(deterministic=True)
+                if len(state_wire)>MAX_BYTES:raise ValueError('wire size cap')
             if routes is None and (body.HasField('route') or body.mission.kind==3):return self.reject('STATE_ROUTE_UNSUPPORTED')
-            route_prepared=True if routes is None else routes.prepare_state(body,peer,encode(body))
+            route_prepared=True if routes is None else routes.prepare_state(body,peer,state_wire)
             if route_prepared is None:return self.reject('STATE_ROUTE_CONTEXT')
             independent_exit=bool(routes is not None and route_prepared is not True and routes.independent_exit())
-            episode_prepared=True if modern is None or independent_exit else modern.episodes.prepare_state(body,peer,encode(body))
+            episode_prepared=True if modern is None or independent_exit else modern.episodes.prepare_state(body,peer,state_wire)
             if episode_prepared is None:return self.reject('STATE_EPISODE_CONTEXT')
             parking_prepared=None
             if modern is not None and body.mission.kind==2:

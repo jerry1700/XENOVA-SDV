@@ -1,5 +1,6 @@
 """유한 world/state 계약의 형식·기하 검증. 권위·시계·센서 수락을 발급하지 않는다."""
 import math
+from functools import lru_cache
 from uuid import UUID
 from google.protobuf.message import DecodeError
 from . import world_pb2 as schema
@@ -114,13 +115,28 @@ def _intersects(a,b,c,d):
         for value,p,q,r in ((values[0],a,b,c),(values[1],a,b,d),(values[2],c,d,a),(values[3],c,d,b)))
 
 
-def _simple(points,closed=False):
+def _simple_check(points,closed):
     edges=list(zip(points,points[1:]+points[:1] if closed else points[1:]))
     if any(math.hypot(a[0]-b[0],a[1]-b[1])<1e-6 for a,b in edges):raise ValueError('degenerate geometry edge')
     for i,(a,b) in enumerate(edges):
         for j in range(i+2,len(edges)):
             if closed and i==0 and j==len(edges)-1:continue
             if _intersects(a,b,*edges[j]):raise ValueError('self-intersecting geometry')
+
+
+@lru_cache(maxsize=8)
+def _simple_success(points,closed):
+    # 예외는 저장되지 않는다. 원 좌표의 단순성만 재사용하며 메시지 수락을 저장하지 않는다.
+    return _simple_check(points,closed)
+
+
+def _simple(points,closed=False):
+    # 새 관측에도 같은 불변 Task/road 기하가 반복된다. 원 cap 밖 입력은 원 검사를 유지한다.
+    if len(points)>128 or type(closed) is not bool:return _simple_check(points,closed)
+    coordinates=tuple((point[0],point[1]) for point in points)
+    if not all(type(value) is float and math.isfinite(value) for point in coordinates for value in point):
+        return _simple_check(points,closed)
+    return _simple_success(coordinates,closed)
 
 
 def _open_basis(points):
@@ -279,7 +295,24 @@ def validate(message):
     return message
 
 
+# These exact generated subtrees have no _validate_one semantics. Required
+# presence, bytes/caps and every float still pass _finite on each validate().
+# Any schema extension disables all three shortcuts, including nested Pose.
+# A new semantic rule for these types must also remove/update this shortcut.
+_NUMERIC_TREE_TYPES=(schema.Point,schema.Pose,schema.PathPoint)
+_NUMERIC_TREE_FIELDS=(
+    ((1,'x',2,2,None),(2,'y',2,2,None)),
+    ((1,'x',2,2,None),(2,'y',2,2,None),(3,'yaw',2,2,None)),
+    ((1,'pose',11,2,schema.Pose.DESCRIPTOR),(2,'steering_rad',2,2,None),(3,'velocity_mps',2,2,None)))
+if any(kind.DESCRIPTOR.extension_ranges or
+       tuple((f.number,f.name,f.type,f.label,f.message_type) for f in kind.DESCRIPTOR.fields)!=expected or
+       any(f.containing_oneof is not None for f in kind.DESCRIPTOR.fields)
+       for kind,expected in zip(_NUMERIC_TREE_TYPES,_NUMERIC_TREE_FIELDS)):
+    _NUMERIC_TREE_TYPES=()
+
+
 def _validate_tree(message):
+    if type(message) in _NUMERIC_TREE_TYPES:return
     for field,value in message.ListFields():
         if field.type==field.TYPE_MESSAGE:
             for child in value if _repeated(field) else (value,):_validate_tree(child)
