@@ -2,7 +2,11 @@
 
 별도 PC 프로세스에서 관측 파일을 읽는 진단 화면입니다. Jetson 제품 패키지를 import하지 않으며 제품의 requirements·pyproject와 별도 환경을 사용합니다. 조작은 기존 터미널에서 수행합니다. 이 화면에는 AUTO/MANUAL·주차·WASD 출력 기능이 없고, 화면을 닫아도 제품에 종료·STOP·재시작 신호를 보내지 않습니다.
 
-네 패널은 전체 코스의 GT/추정/불확실성/경로, 원 RGB/YOLOP/native depth/grid, 운영 보고값, 장치·식별자·원 clock/seq/처리율입니다. 없는 값은 UNKNOWN입니다. 파일 검사 통과는 현재 READY·권한·장치 적용 성공이라는 뜻이 아닙니다.
+상단은 모드·A/B·주차·차량 상태·READY의 현재 판정과 원 보고를 나누어 표시합니다. 큰 지도/인지 영역 아래에는 입력→수락→APPLIED→이동, 성능/관측 오류가 있습니다. 원 hash·epoch·JSON은 접힌 상세에서 확인합니다. 없는 값은 UNKNOWN이며 파일 검사 통과는 현재 READY·권한·장치 적용 성공이라는 뜻이 아닙니다.
+
+snapshot-1에는 차체 yaw/치수·단계별 키 입력·APPLIED/encoder 전용 관측이 없습니다. XY 한 점은 관측점으로만 표시하고 차체·방향을 추정하지 않습니다. WASD/브레이크는 UNKNOWN 표시이며, 강조되지 않았다고 실제 해제/정지된 것은 아닙니다. 기존 SYNTHETIC/HISTORICAL 기록을 LIVE나 실제 NN/장치 적용의 대체 자료로 사용하지 않습니다.
+
+**터미널 명령 복사**에는 설치 parser에서 확인한 `xenova-drive status`, `operation status`, `mode manual`, `manual neutral`, `drive depart auto`, `parking permission on/off`, `stop`만 실행 위치 RPi dom0·전제와 함께 제공합니다. 복사한 명령은 기존 인증/소켓 환경의 터미널에서 직접 실행합니다. 화면은 명령을 실행하거나 세션을 만들지 않습니다. 부하 제어는 인증 Spring API 지원이 확인되지 않아 비활성입니다. 주차/모드/출발 버튼·브라우저 MQTT·refresh 자동 발행은 없습니다.
 
 ## 별도 환경과 실행
 
@@ -105,7 +109,7 @@ P06의 `NOT_EXECUTED`는 실행하지 않은 장면입니다. 시각·순번·NN
 
 ## 테스트 명령
 
-codec/cache/순번/clock/media/화면과 제품 수명 분리/offline/표시 변환의 의미시험은 stdlib unittest로 실행합니다. 이 명령은 Streamlit 서버나 제품 주행 프로세스를 시작하지 않습니다.
+codec/cache/순번/clock/media/화면과 제품 수명 분리/offline/표시 변환의 의미시험은 unittest로 실행합니다. 서버 없는 Streamlit AppTest도 포함하며 별도 HTTP 서버나 제품 주행 프로세스를 시작하지 않습니다. 기존 전용 환경의 Streamlit을 사용합니다.
 
 ```powershell
 & ".\vehicle\Jetson\build\streamlit-viewer-env\Scripts\python.exe" -m unittest discover -s vehicle/Jetson/tools/streamlit_viewer/tests -v

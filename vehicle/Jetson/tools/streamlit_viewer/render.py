@@ -27,9 +27,29 @@ def map_svg(body,*,show_gt=False):
         dashed=' stroke-dasharray="7 5"' if kind=='GT' else ''
         svg.append(f'<{tag} points="{" ".join(coord(p) for p in layer["points"])}" stroke="{COLORS[kind]}" '
                    f'fill="{fill}" fill-opacity="{opacity}" stroke-width="{3 if kind=="PATH" else 2}"{dashed}/>')
+        if len(layer['points'])==1:
+            # 한 원 관측점도 보이게 한다. yaw/차체 치수 없는 점을 차량 도형으로 바꾸지 않는다.
+            x,y=coord(layer['points'][0]).split(',')
+            svg.append(f'<circle cx="{x}" cy="{y}" r="5" fill="{COLORS[kind]}"><title>'
+                       f'{kind} observation point</title></circle>')
     svg.append(f'<text x="20" y="25" fill="#cbd5e1" font-family="sans-serif" font-size="14">'
                f'{escape(next(iter(frames)))} · m · GT는 표시 전용</text></svg>')
     return ''.join(svg)
+
+
+def unknown_keys_svg():
+    """입력 원자료가 없을 때의 UNKNOWN 표시다. 해제 관측·키 이벤트·버튼을 만들지 않는다."""
+    keys=(('W / ↑',105,5),('A / ←',10,65),('S / ↓',105,65),('D / →',200,65),('BRAKE',105,125))
+    parts=['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200" role="img" '
+           'aria-label="WASD and brake input UNKNOWN; no input observation connected">']
+    for label,x,y in keys:
+        parts.append(f'<rect x="{x}" y="{y}" width="90" height="50" rx="8" '
+                     'fill="#1f2937" stroke="#64748b"/>')
+        parts.append(f'<text x="{x+45}" y="{y+30}" text-anchor="middle" fill="#94a3b8" '
+                     f'font-family="sans-serif" font-size="15">{label}</text>')
+    parts.append('<text x="150" y="195" text-anchor="middle" fill="#94a3b8" '
+                 'font-family="sans-serif" font-size="12">UNKNOWN · input not connected</text></svg>')
+    return ''.join(parts)
 
 
 def _png(width,height,rows):
