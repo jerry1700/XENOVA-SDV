@@ -292,10 +292,12 @@ static void receive_fault_command(void)
                     fault_running?0:(uint64_t)MAX(k_uptime_get()-fault_started_ms,0));
   return;
  }
- rc=drive_auto_delay_start(incoming.delay_ms,incoming.duration_s);
+ struct drive_auto_delay_receipt receipt;
+ rc=drive_auto_delay_start_with_receipt(incoming.delay_ms,incoming.duration_s,&receipt);
  if(rc){fault_result(&incoming,"REJECTED",rc==-EBUSY?"BUSY":"STRESS_FAILED",0);return;}
- fault_command=incoming;fault_running=true;fault_started_ms=k_uptime_get();
- fault_deadline_ms=fault_started_ms+(int64_t)incoming.duration_s*1000;fault_result(&fault_command,"RUNNING",NULL,0);
+ /* owner가 다시 시각을 읽으면 정상 만료를 STRESS_FAILED로 판정할 수 있다. */
+ fault_command=incoming;fault_running=true;fault_started_ms=receipt.started_ms;
+ fault_deadline_ms=receipt.expires_at_ms;fault_result(&fault_command,"RUNNING",NULL,0);
 }
 static void observe_fault_command(void)
 {

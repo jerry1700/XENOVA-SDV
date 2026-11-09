@@ -78,6 +78,45 @@ def install_sequential_plant(w):
         clock_valid_until_pi_us=physical.vehicle.pi_sample_us+200000)
 
 
+def save_operation_diagnostic(w,path,started):
+    """종료 시 한 번만 현재 사실을 복사한다. actor/clock/ACK를 진행하거나 수락하지 않는다."""
+    m=w.w.m;o=w.o;job=o.job;authority=w.r.authority.value
+    def proposal(value):
+        return None if value is None else {key:getattr(value,key,None) for key in
+            ('key','operation','issued_us','expires_us','domain')}
+    def request_state(row):
+        return {key:deepcopy(row.get(key)) for key in ('key','phase','terminal','result','original','request')}
+    values=dict(scope='final diagnostic only; no source event, clock advance, result consumption or output authority',
+        now_pi_us=o.now,host_elapsed_s=time.monotonic()-started,
+        auto_loop_ordinal=getattr(w,'operation_loop_ordinal',None),
+        machine=dict(generation=m.generation,mode=m.mode.value,owner=m.active_vm,app=m.active_app,
+            phase=m.phase,delivered=m.delivered,output_permitted=m.output_permitted,authorized=m._authorized,
+            transport_ok=m.transport_ok,failure=m.failure),
+        operator=dict(hold=o.hold,hold_reason=o.hold_reason,fence_revision=o.fence_revision,
+            ready=o.ready,job=proposal(job),unknown=proposal(o.unknown),
+            worker_busy=o.worker.busy,worker_result_empty=o.worker._results.empty(),
+            worker_jobs_empty=o.worker._jobs.empty(),worker_alive=o.worker.thread.is_alive(),
+            pending=[request_state(row) for row in tuple(o.pending.values())[:16]],
+            waiting=[request_state(row) for row,_ in tuple(o._waiting)[:4]],
+            effects={key:{field:deepcopy(effect[field]) for field in
+                ('stage','generation','fence','countdown','committed','failed','cancelled') if field in effect}
+                for key,effect in tuple(o._effects.items())[:16]}),
+        durable=dict(control={key:deepcopy(authority.get(key)) for key in
+            ('generation','mode','owner','phase','pending','rearm_required','manual_hold')},
+            operation=deepcopy(o.operations.current()),
+            ledger=[request_state(row) for row in o._rows()],store_error=w.r.authority.error),
+        source=dict(sid=o.sources.sid,kind=o.sources.kind,state=o.sources.state,valid=o.sources.valid,
+            blocked=o.sources.blocked,expires=o.sources.expires,keys=list(o.sources.keys)),
+        reports=[dict(peer=list(peer),generation=report['generation'],
+            checked_guest_us=report['body'].checked_guest_us,valid_until_pi_us=report['body'].valid_until_pi_us,
+            clock_probe_sequence=report['body'].clock_probe_sequence,vehicle_sequence=report['body'].vehicle_sequence)
+            for peer,report in o.operations.reports.items()],
+        mapper=None if not hasattr(w,'mapper_fixture') else w.mapper_fixture.state())
+    raw=json.dumps(values,sort_keys=True,indent=2).encode('utf-8')
+    assert len(raw)<=65536,'bounded final operation diagnostic exceeded64KiB'
+    path.write_bytes(raw)
+
+
 @pytest.fixture
 def operating(tmp_path):
     w=OperatorWorld(tmp_path/'authority',operation_support=True)
@@ -99,10 +138,15 @@ def operating(tmp_path):
             and not w.o.worker.busy and w.o.worker._results.empty())
         w.r.drive_link.tick()
         install_mapper_fixture(w)
+        diagnostic_started=time.monotonic()
         yield w
     finally:
-        if hasattr(w,'mapper_fixture'):w.mapper_fixture.close()
-        w.close()
+        try:
+            if 'diagnostic_started' in locals():
+                save_operation_diagnostic(w,tmp_path/'operation-runtime-final.json',diagnostic_started)
+        finally:
+            if hasattr(w,'mapper_fixture'):w.mapper_fixture.close()
+            w.close()
 
 
 def operation_call(w,action,**values):
@@ -300,7 +344,7 @@ def begin_auto_state(w):
         assert time.monotonic()<end,'countdown/control journal did not finish'
         w.w.t+=.02;w.w.bind();w.sink.measure();w.r.drive_link.tick()
         if ordinal%3==0:preflight(w)
-        ordinal+=1;w.o.tick();time.sleep(.001)
+        ordinal+=1;w.operation_loop_ordinal=ordinal;w.o.tick();time.sleep(.001)
     assert w.o.operations.current()['phase']=='APPLYING' and w.o.missions.grant().admitted
     assert w.o.operations.last_state is None and not w.o._known(call['request_id'])['terminal']
     w.tick();w.r.drive_link.tick();body=state(w)
