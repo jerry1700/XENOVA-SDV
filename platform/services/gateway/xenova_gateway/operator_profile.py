@@ -35,13 +35,19 @@ class OperatorProfile:
     planner_manifest: str
     planner_asset_sha256: str
     episode_support: bool = False
+    operation_support: bool = False
+    operation_parking_strategy: str = 'REVERSE'
     planner_parameters: object = field(default=None,init=False,repr=False,compare=False)
 
     @classmethod
     def load(cls,path,*,uid=0):
         fields={name for name,item in cls.__dataclass_fields__.items() if item.init}
-        value=private_profile(path,fields-{'episode_support'},uid=uid,optional=('episode_support',))
+        optional=('episode_support','operation_support','operation_parking_strategy')
+        value=private_profile(path,fields-set(optional),uid=uid,optional=optional)
         if type(value.get('episode_support',False)) is not bool:raise ValueError('explicit episode installation approval')
+        if type(value.get('operation_support',False)) is not bool:raise ValueError('explicit operation installation approval')
+        if value.get('operation_support',False) and not value.get('episode_support',False):raise ValueError('operation requires approved episode profile')
+        if value.get('operation_parking_strategy','REVERSE') not in ('REVERSE','FORWARD'):raise ValueError('installed parking strategy')
         if set(value['manual'])!=set(ManualProfile.__dataclass_fields__) or set(value['guest_clock'])!=set(GuestClockPolicy.__dataclass_fields__):
             raise ValueError('exact manual/guest policy')
         directory=Path(value['keyboard_profile_directory'])
@@ -58,7 +64,7 @@ class OperatorProfile:
         from xenova_drive_world.planner_profile import verify_manifest
         verify_manifest(raw,value['planner_asset_sha256'],asdict(guest))
         result=cls(ManualProfile(**value['manual']),guest,str(directory),str(manifest),value['planner_asset_sha256'],
-            value.get('episode_support',False))
+            value.get('episode_support',False),value.get('operation_support',False),value.get('operation_parking_strategy','REVERSE'))
         object.__setattr__(result,'planner_parameters',MappingProxyType(json.loads(raw)['profile']))
         return result
 

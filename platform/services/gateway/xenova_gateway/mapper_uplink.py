@@ -7,6 +7,7 @@ profile의 broker 계정/ACL은 배포 전제이며 MQTT payload가 publisher �
 
 from collections import Counter
 from dataclasses import dataclass, field
+from hashlib import sha256
 import ipaddress
 import multiprocessing
 import os
@@ -30,6 +31,54 @@ LENGTHS = struct.Struct('<II')
 HEADER_KEYS = frozenset(('host_boot', 'gateway_instance', 'uplink_instance', 'channel_epoch',
     'message_sequence', 'kind', 'issued_pi_us', 'expires_pi_us', 'request_id'))
 KINDS = frozenset(('SOURCE_VEHICLE', 'SOURCE_TOF', 'SCENE_GRANT', 'PROBE_PLAN', 'TRUST_CANDIDATE', 'STOP', 'STOPPED'))
+
+
+
+_MAPPER_OPERATION_SOURCE=('vehicle','mapper_boot','mapper_instance','clock_epoch','map_epoch','frame_epoch',
+    'odom_epoch','configuration','calibration','primitive')
+
+
+def _operation_source(value,device,vehicle=None):
+    values=[]
+    for key in _MAPPER_OPERATION_SOURCE:
+        item=vehicle if key=='vehicle' and vehicle is not None else getattr(value,key)
+        values.append(item.hex() if key=='primitive' and type(item) is bytes else item)
+    return (device,*values)
+
+
+@dataclass(frozen=True)
+class MapperOperationCapability:
+    """원 수락 Reply/clock lease의 지원 진술1개. 운영·출력 권위가 아니다."""
+    reply_bytes: bytes
+    reply_sha256: bytes
+    source: tuple
+    channel: tuple
+    vehicle_sessions: tuple
+    valid_until_pi_us: int
+
+
+def operation_plan(plan,gate=None):
+    """기존 plan과 actor의 원 gate를 local slot 하나로 인계한다. 실제 P1은 child가 관측한다."""
+    if gate is None:return plan_json(plan)
+    import json
+    return json.dumps({'plan':json.loads(plan_json(plan)), 'operation_gate':encode(gate).hex()},
+        sort_keys=True,separators=(',',':')).encode('ascii')
+
+
+def parse_operation_plan(raw,**context):
+    value=strict_json(raw,2048);gate=None
+    if set(value)=={'plan','operation_gate'}:
+        import json
+        gate=decode(bytes.fromhex(value['operation_gate']),schema.PiOperationGate)
+        raw=json.dumps(value['plan'],sort_keys=True,separators=(',',':')).encode('ascii')
+    return parse_plan(raw,**context),gate
+
+
+def build_operation_probe(plan,gate,p1):
+    raw=build_probe(plan,p1)
+    if gate is None or p1>=gate.valid_until_pi_us:return raw
+    probe=decode(raw,schema.MapperClockProbe);probe.operation_gate.CopyFrom(gate)
+    return encode(probe)
 
 
 def decimal(value):
@@ -322,13 +371,13 @@ def uplink_main(endpoint, profile, identities):
                             issued, expires = decimal(header['issued_pi_us']), decimal(header['expires_pi_us'])
                             qos = 0
                             if key == 'PROBE_PLAN':
-                                plan = parse_plan(body, request_id=header['request_id'], issued_us=issued, expires_us=expires)
+                                plan,gate = parse_operation_plan(body, request_id=header['request_id'], issued_us=issued, expires_us=expires)
                                 if (plan.pi_host_boot, plan.pi_client_instance, plan.vehicle, plan.device) != (
                                         identities[0], identities[2], profile.policy.vehicle, profile.policy.device):
                                     raise ValueError('J_PLAN_CONTEXT')
                                 p1 = p_us()
                                 try:
-                                    body = build_probe(plan, p1)
+                                    body = build_operation_probe(plan,gate,p1)
                                 except MapperClockError:
                                     # connect/송신 대기로 원 plan/prior lease가 끝났으면 새 P1로 살리지 않는다.
                                     outstanding = None
@@ -394,10 +443,12 @@ class GatewayMapperUplink:
         self._tof_lock = threading.Lock()
         self._tof_inputs = {}
         self.scene_reply = None
+        self._operation_capability = None
 
     def start(self):
         if not sys.platform.startswith('linux') or self.process is not None or self.closed:
             raise ValueError('J_UPLINK_REQUIRES_FRESH_LINUX_OWNER')
+        self._revoke_operation_capability()
         self.uplink_instance, self.channel_epoch = str(uuid4()), str(uuid4())
         identities = self.host_boot, self.gateway_instance, self.uplink_instance, self.channel_epoch
         parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -418,6 +469,51 @@ class GatewayMapperUplink:
         self.process, self.link = process, link
         return self
 
+    def _revoke_operation_capability(self):
+        self._operation_capability=None
+        # Preserve every numeric plan/nonce/clock field while removing an
+        # unsent optional gate. A sent probe keeps only its original short E.
+        queued=self.pending.get('probe')
+        if queued is not None:
+            kind,raw,issued,expires,request=queued
+            plan,gate=parse_operation_plan(raw,request_id=request,issued_us=issued,expires_us=expires)
+            if gate is not None:self.pending['probe']=(kind,plan_json(plan),issued,expires,request)
+        if self.link is not None and self.link.pending is not None and self.link.pending[1]=='PROBE_PLAN':
+            packet,kind,expires=self.link.pending;header,body=unframe(packet)
+            plan,gate=parse_operation_plan(body,request_id=header['request_id'],
+                issued_us=decimal(header['issued_pi_us']),expires_us=decimal(header['expires_pi_us']))
+            if gate is not None:self.link.pending=(frame(header,plan_json(plan)),kind,expires)
+
+    def operation_capability(self,now=None,source=None):
+        """현재 source/channel·원 E 안의 cap1만 반환한다. 갱신/권한 발급은 하지 않는다."""
+        now=self.clock() if now is None else now;cap=self._operation_capability
+        trust=self.owner.trust(now);vehicle=self.owner.vehicle
+        channel=(self.host_boot,self.gateway_instance,getattr(self,'uplink_instance',None),getattr(self,'channel_epoch',None))
+        sessions=None if vehicle is None else (vehicle.host_boot,vehicle.gateway_instance,vehicle.pi_session,
+            vehicle.device_session,vehicle.odom_epoch,vehicle.calibration)
+        valid=(cap is not None and not self.closed and self.failure is None and self.link is not None
+            and self.process is not None and self.process.exitcode is None and now<cap.valid_until_pi_us
+            and trust is not None and cap.channel==channel and cap.vehicle_sessions==sessions
+            and cap.source==_operation_source(trust,self.profile.policy.device)
+            and (source is None or cap.source==_operation_source(source,self.profile.policy.device)))
+        if not valid:
+            if cap is not None:self._revoke_operation_capability()
+            return None
+        return cap
+
+    def _observe_operation_capability(self,raw_reply,lease,now):
+        reply=decode(raw_reply,schema.MapperClockReply)
+        if lease is None or not reply.HasField('supported_mapper_features') or not reply.supported_mapper_features&1:
+            self._revoke_operation_capability();return
+        trust=decode(lease.trust_bytes,schema.WorldTrust);vehicle=self.owner.vehicle
+        if vehicle is None or _operation_source(reply,reply.device,self.profile.policy.vehicle)!=_operation_source(trust,self.profile.policy.device):
+            self._revoke_operation_capability();return
+        self._operation_capability=MapperOperationCapability(raw_reply,sha256(raw_reply).digest(),
+            _operation_source(reply,reply.device,self.profile.policy.vehicle),(self.host_boot,self.gateway_instance,self.uplink_instance,self.channel_epoch),
+            (vehicle.host_boot,vehicle.gateway_instance,vehicle.pi_session,vehicle.device_session,vehicle.odom_epoch,vehicle.calibration),
+            lease.expires_pi_us)
+        self.operation_capability(now)
+
     def _offer(self, key, kind, raw, expires, request=None):
         now = self.clock()
         if self.closed or now >= expires:
@@ -435,6 +531,7 @@ class GatewayMapperUplink:
             if not original.HasField('gateway_instance') or original.gateway_instance != self.gateway_instance:
                 raise ValueError('J_VEHICLE_GATEWAY')
             self.owner.set_vehicle(raw, now)
+            self.operation_capability(now)
             sample = self.owner.vehicle
             identity = sample.device_session, sample.odom_epoch, sample.sequence
             if identity == self.last_vehicle:
@@ -574,23 +671,33 @@ class GatewayMapperUplink:
                     continue
                 try:
                     from xenova_drive_world.mapper_clock import parse_candidate
-                    _, _, p4 = parse_candidate(body)
+                    _, reply_raw, p4 = parse_candidate(body)
                     if (decimal(header['issued_pi_us']) != p4 or decimal(header['expires_pi_us']) != plan.expires_us):
                         raise ValueError('J_CANDIDATE_ORIGINAL_TIME')
                     lease = self.owner.accept(plan, body, now)
                     self.counts['clock_accepted' if lease is not None else 'clock_warmup'] += 1
+                    if lease is not None:self.failure = None
+                    self._observe_operation_capability(reply_raw,lease,now)
                     if lease is not None:
-                        self.failure = None
                         provider.world_failure = None
                         if self.scene_reply is not None:
                             _, reply_raw, _ = parse_candidate(body)
                             try: self.scene_reply(reply_raw, lease, now)
                             except ValueError: self.counts['scene_reply_rejected'] += 1
                 except ValueError:
+                    self._revoke_operation_capability()
                     self.counts['clock_rejected'] += 1
+            self.operation_capability(now)
             plan = self.owner.plan(now, self.uplink_instance)
             if plan is not None:
-                self.pending['probe'] = 'PROBE_PLAN', plan_json(plan), plan.issued_us, plan.expires_us, plan.request_id
+                runner=getattr(provider,'runner',None)
+                operator=getattr(runner,'operator',None) if getattr(runner,'operation_support',False) else None
+                cap=self.operation_capability(now)
+                gate=None if operator is None or cap is None else operator.operations.mapper_gate()
+                if gate is not None:
+                    clipped=schema.PiOperationGate();clipped.CopyFrom(gate)
+                    clipped.valid_until_pi_us=min(clipped.valid_until_pi_us,cap.valid_until_pi_us);gate=clipped
+                self.pending['probe'] = 'PROBE_PLAN', operation_plan(plan,gate), plan.issued_us, plan.expires_us, plan.request_id
             if self.link.pending is None:
                 key = 'probe' if 'probe' in self.pending else next(iter(self.pending), None)
                 if key is not None:
@@ -599,6 +706,7 @@ class GatewayMapperUplink:
                         self.link.offer(kind, raw, issued, expires, request)
                         self.link.flush(now)
         except (OSError, EOFError, ValueError) as error:
+            self._revoke_operation_capability()
             self.failure = type(error).__name__
             self.counts['unavailable'] += 1
             provider.world_failure = error
@@ -606,6 +714,7 @@ class GatewayMapperUplink:
 
     def close(self):
         """출력 STOP/닫기 뒤 호출한다. STOPPED 진술과 실제 child exit/reap는 다르다."""
+        self._revoke_operation_capability()
         if self.closed:
             if self.process is not None and self.process.is_alive():
                 raise RuntimeError('J_UPLINK_EXIT_UNCONFIRMED')

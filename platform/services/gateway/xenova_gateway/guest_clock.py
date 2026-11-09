@@ -51,10 +51,17 @@ class OwnedPreparedClock(PreparedClock):
         obj=super().__new__(cls,message)
         object.__setattr__(obj,'peer',peer);object.__setattr__(obj,'generation',generation)
         object.__setattr__(obj,'replay',replay)
+        status=message.clock.operation_status if message.clock.HasField('operation_status') else None
+        object.__setattr__(obj,'operation_ready_end',status.valid_until_pi_us if status is not None and status.auto_ready else 0)
         return obj
 
     def stamp(self,send_us):
-        return self.replay if self.replay is not None else super().stamp(send_us)
+        if self.replay is not None:return self.replay
+        if self.operation_ready_end and send_us>=self.operation_ready_end:
+            # 큐 대기 중 끝난 READY만 철회한다. numeric clock/Probe/P4의 원 E는 그대로다.
+            value=decode(bytes(self),schema.DriveLink);value.clock.ClearField('operation_status')
+            return PreparedClock(value).stamp(send_us)
+        return super().stamp(send_us)
 
 
 class GuestClockOwner:

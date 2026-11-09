@@ -86,6 +86,8 @@ class MissionAuthority:
     def grant(self,record=None):
         record=self.current() if record is None else record
         if record is None:return None
+        if ('operation_binding' in record
+                and record['operation_binding']['service_epoch']!=UUID(self.runner.drive_link.instance).hex):return None
         r=self.runner;m=r.machine
         grant=schema.MissionGrant(major=1,vehicle=record['vehicle'],pi_host_boot=UUID(r.authority.host).bytes,
             gateway_instance=UUID(r.drive_link.instance).bytes,owner_vm=UUID(record['owner']).bytes,
@@ -102,6 +104,9 @@ class MissionAuthority:
             search_deadline_pi_us=record['search_deadline'],search_travel_m=record['search_distance'],
             max_search_travel_m=10. if record['kind']==2 else 0.)
         if record['goal'] is not None:grant.locked_goal_sha256=bytes.fromhex(record['goal'])
+        if 'operation_binding' in record:
+            from .operation_owner import binding_message
+            grant.operation_binding.CopyFrom(binding_message(record['operation_binding']))
         encode(grant);return grant
 
     def publish(self):
@@ -149,7 +154,11 @@ class MissionAuthority:
         def reply(result,reason):return schema.MissionBudgetReply(major=1,request_nonce=body.request_nonce,
             request_sha256=envelope.request_sha256,result=result,reason=reason)
         if current is None:return reply(5,1),None
-        for row in current['reservations']:
+        operation=self.runner.authority.value.get('current_operation')
+        attempt=None if operation is None else operation.get('parking_attempt')
+        original=(attempt if attempt is not None and body.mission_id==UUID(attempt['id']).bytes
+            and body.mission_revision==attempt['revision'] else current)
+        for row in original['reservations']:
             if row['nonce']==body.request_nonce.hex():
                 if row['sha']!=envelope.request_sha256.hex():return reply(5,8),None
                 if 'reply' in row:return decode(base64.b64decode(row['reply'],validate=True),schema.MissionBudgetReply),None
@@ -284,7 +293,7 @@ def validate_record(value):
         'execution_deadline','corrections','execution_distance','search_distance','cancel_fence','phase','result','admitted',
         'scene_id','scene_revision','configuration','calibration','primitive','vehicle','reservations','goal','owner',
         'execution','app','generation'}
-    optional={'search_meter','execution_meter'}
+    optional={'search_meter','execution_meter','operation_binding'}
     if type(value) is not dict or not fields<=set(value)<=fields|optional:raise ValueError('exact current Mission record')
     for key in ('id','nonce','owner','execution','app'):UUID(value[key])
     if value['scene_id'] is not None:UUID(value['scene_id'])
@@ -306,7 +315,10 @@ def validate_record(value):
             reply=decode(raw,schema.MissionBudgetReply)
             if reply.request_nonce.hex()!=row['nonce'] or reply.request_sha256.hex()!=row['sha']:
                 raise ValueError('original reservation reply mismatch')
-    for name in optional:
+    if 'operation_binding' in value:
+        from .operation_owner import binding_message
+        encode(binding_message(value['operation_binding']))
+    for name in ('search_meter','execution_meter'):
         anchor=value.get(name)
         if anchor is not None:
             if set(anchor)!={'epoch','total_ticks','metres_per_tick','gap_revision','vehicle_sequence'}:

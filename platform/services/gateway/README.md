@@ -659,3 +659,9 @@ report_seq/source_sample/time의 stationary 보고를 계속 생산해야 한다
 operator/journal과 원 ClockReply stamp/P4 확인은 실제 코드지만 lifecycle·Vehicle·장치
 관측은 명시 typed 시험 입력이다. 실물 READY·RF·serial feedback3·World planner·MANUAL
 주행의 통합 성공이나 성능 수치로 해석하지 않는다.
+
+## 운영 설정과 명시 출발
+
+승인 profile의 `operation_support`는 기본 false다. 새 profile의 주차 ON/OFF·명시 출발·
+SAFE_STOP 초기 조작·원 예산 보존은 [운영 계약](operation-contract.md)을 참고한다.
+기존 수동 키보드는 그대로이며 `xenova-drive manual keyboard --auto-enter`만 새 AUTO Enter를 선택한다.

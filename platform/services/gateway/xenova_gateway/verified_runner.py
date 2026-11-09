@@ -65,6 +65,11 @@ class VerifiedGatewayRunner(GatewayRunner):
         if callable(view):return view()
         return {'feedback_supported':False,'accepted':None,'applied':None,'physical_stop':None}
 
+    def mapper_operation_capability(self,now,source=None):
+        """설치된 운영 profile의 실제 J Reply 지원 진술. 숫자 clock/출력 권위와 별개다."""
+        if not getattr(self,'operation_support',False) or self.mapper_uplink is None:return None
+        return self.mapper_uplink.operation_capability(now,source)
+
     def _provider_once(self):
         if not self._durable_available():return
         import queue
@@ -192,6 +197,7 @@ class VerifiedGatewayRunner(GatewayRunner):
         elif (message.type in (RESUME_REQUESTED,RESUME_CANCEL_REQUESTED) and message.topic in (CONSOLE_RESUME,topics.app_events('interaction'))
               and not self._output_broken and self._control_message_id is not None
               and envelope.get('causation_id')==self._control_message_id):
+            if self.operator is not None and self.operator.operations.enabled:return
             if message.type==RESUME_REQUESTED and not self._durable_available():
                 if len(self._durable_events)==self._durable_events.maxlen:self.durable_event_dropped+=1
                 else:self._durable_events.append((t,message))

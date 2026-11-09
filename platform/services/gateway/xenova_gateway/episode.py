@@ -10,6 +10,7 @@ import struct
 from uuid import UUID,uuid4
 
 from xenova_drive_world import schema,encode,decode
+from xenova_drive_world.codec import STATE_KNOWN_FEATURES
 from xenova_mqtt.drive_binding import app_instance
 from .absolute_meter import upper_distance
 
@@ -79,7 +80,7 @@ class EpisodeOwner:
     def supported(self,peer):
         features=self.peers.get(peer,0)
         return bool(getattr(self.r,'episode_support',False) and features&EPISODE
-            and not features&~31)
+            and not features&~STATE_KNOWN_FEATURES)
 
     def prepare_allowed(self,vm):
         if not getattr(self.r.machine,'episode_output_evidence_required',False):return True
