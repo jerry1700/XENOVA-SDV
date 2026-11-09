@@ -133,6 +133,104 @@ class SimFeedbackPeerTests(unittest.TestCase):
         if os.name!='posix':self.skipTest('explicit POSIX socketpair peer')
         self.rig=PeerRig();self.addCleanup(self.rig.close)
 
+    def _clock_offer(self,r,probe_sequence,clock_sequence,lease_us=None):
+        """실제 byte probe의 원 네 시각으로 아직 보내지 않은 INSTALL을 만든다."""
+        p1=r.clock.now
+        probe=r.f3.PROBE3.pack(r.pi,r.device,probe_sequence,p1)
+        reply=next(raw for kind,raw in r.turn(r.f3.CLOCK_PROBE,probe) if kind==r.f3.CLOCK_REPLY)
+        pi,device,seq,p1,d2,latch,d3,*_=r.f3.CLOCK3.unpack(reply)
+        reference=r.clock.now
+        pad=2*r.policy.timestamp_error_us+r.f3.drift_pad(r.policy.drift_ppm,reference-p1)
+        lower,upper=p1-d2-pad,reference-d3+pad
+        expires=p1+(r.policy.lease_us if lease_us is None else lease_us)
+        cutoff=expires-upper-r.f3.drift_pad(r.policy.drift_ppm,expires-reference)-r.policy.j_cutoff_us
+        fields=(pi,device,r.epoch,clock_sequence,seq,reference,lower,upper,expires,cutoff)
+        return fields,r.f3.INSTALL3.pack(*fields)
+
+    def _until(self,r,stamp):
+        while r.clock.now<stamp:r.pump(steps=1,delta=min(5000,stamp-r.clock.now))
+
+    def test_expired_install_rejects_at_cutoff_replays_original_nack_and_fresh_probe_recovers(self):
+        r=self.rig;r.hello();fields,payload=self._clock_offer(r,1,1)
+        self._until(r,fields[-1]-100)
+        rows=r.turn(r.f3.CLOCK_INSTALL,payload)
+        original=next(raw for kind,raw in rows if kind==r.f3.CLOCK_ACK)
+        ack=r.f3.CLOCK_ACK3.unpack(original)
+        self.assertEqual(ack[:5],fields[:5]);self.assertEqual(ack[5:7],(3,7))
+        self.assertEqual(ack[7:],(fields[-1],fields[-1]))
+        self.assertEqual(r.peer.snapshot()['clock_hwm'],0);self.assertIsNone(r.peer._clock_epoch)
+        self.assertEqual(r.peer._leases,{})
+        self.assertEqual(r.peer.clock_evidence_snapshot(),())
+        self.assertIsNone(r.peer.failure);self.assertFalse(r.peer.snapshot()['link_lost'])
+        self.assertEqual(r.peer.snapshot()['applied'],0)
+        duplicate=r.turn(r.f3.CLOCK_INSTALL,payload)
+        self.assertEqual(next(raw for kind,raw in duplicate if kind==r.f3.CLOCK_ACK),original)
+        self.assertEqual(r.peer.snapshot()['duplicate_installs'],1)
+        self.assertEqual(r.peer.snapshot()['rejected'],1)
+        fresh,rows=r.renew_clock(2,2)
+        accepted=next(r.f3.CLOCK_ACK3.unpack(raw) for kind,raw in rows if kind==r.f3.CLOCK_ACK)
+        self.assertEqual(accepted[5:7],(1,0));self.assertEqual(r.peer.snapshot()['clock_hwm'],2)
+        self.assertEqual(tuple(row.install_payload for row in r.peer.clock_evidence_snapshot()),(fresh,))
+        self.assertEqual(r.peer.snapshot()['applied'],0)
+
+    def test_expired_renewal_preserves_prior_lease_stop_and_accepted_evidence(self):
+        r=self.rig;r.bind_clock();r.turn(r.f3.COMMAND,r.stop())
+        leases=tuple(r.peer._leases.items());accepted=r.peer.clock_evidence_snapshot()
+        active,stop=r.peer._active,r.peer._stop_pin
+        fields,payload=self._clock_offer(r,3,2,lease_us=100_000)
+        self._until(r,fields[-1])
+        rows=r.turn(r.f3.CLOCK_INSTALL,payload)
+        ack=next(r.f3.CLOCK_ACK3.unpack(raw) for kind,raw in rows if kind==r.f3.CLOCK_ACK)
+        self.assertEqual(ack[5:7],(3,7));self.assertLess(r.clock.now,r.install[-1])
+        self.assertEqual(tuple(r.peer._leases.items()),leases)
+        self.assertIs(r.peer.clock_evidence_snapshot(),accepted)
+        self.assertIs(r.peer._active,active);self.assertIs(r.peer._stop_pin,stop)
+        self.assertEqual(r.peer._clock_hwm,1);self.assertEqual(r.peer._clock_epoch,r.epoch)
+        self.assertEqual(r.peer.snapshot()['applied'],1)
+        self.assertEqual(r.plant.snapshot().target_velocity_mps,0.)
+        self.assertIsNone(r.peer.failure);self.assertFalse(r.peer.snapshot()['link_lost'])
+
+    def test_expired_install_still_faults_on_invalid_source_interval_or_deadline(self):
+        for change in ('session','probe','sequence','epoch','interval','expires','upper_bound','reply_bound'):
+            with self.subTest(change=change):
+                r=PeerRig();self.addCleanup(r.close);r.hello()
+                fields,payload=self._clock_offer(r,1,1)
+                self._until(r,fields[-1]+100)
+                values=list(fields)
+                if change=='session':values[0]=r.UUID(EPOCH).bytes
+                elif change=='probe':values[4]+=1
+                elif change=='sequence':values[3]=0
+                elif change=='epoch':values[2]=bytes(16)
+                elif change=='interval':values[6]-=1
+                elif change=='expires':values[8]+=1
+                elif change=='upper_bound':values[9]+=1
+                elif change=='reply_bound':values[9]=r.peer._probes[1]['d3']
+                with self.assertRaises(ValueError):r.turn(r.f3.CLOCK_INSTALL,r.f3.INSTALL3.pack(*values))
+                self.assertTrue(r.peer.snapshot()['link_lost'])
+                self.assertEqual(r.peer._clock_hwm,0);self.assertIsNone(r.peer._clock_epoch)
+                self.assertEqual(r.peer._leases,{});self.assertEqual(r.peer._rejected_installs,{})
+                self.assertEqual(r.peer.clock_evidence_snapshot(),())
+
+    def test_changed_bytes_on_rejected_install_key_remain_a_fault(self):
+        r=self.rig;r.hello();fields,payload=self._clock_offer(r,1,1)
+        self._until(r,fields[-1]);r.turn(r.f3.CLOCK_INSTALL,payload)
+        values=list(fields);values[-1]-=1
+        with self.assertRaisesRegex(ValueError,'same clock sequence changed rejected install'):
+            r.turn(r.f3.CLOCK_INSTALL,r.f3.INSTALL3.pack(*values))
+        self.assertTrue(r.peer.snapshot()['link_lost'])
+        self.assertEqual(r.peer._clock_hwm,0);self.assertEqual(r.peer.clock_evidence_snapshot(),())
+
+    def test_rejected_install_replay_cache_is_bounded_without_advancing_clock(self):
+        r=self.rig;r.hello()
+        for seq in (1,2,3):
+            fields,payload=self._clock_offer(r,seq,seq,lease_us=100_000)
+            self._until(r,fields[-1]);r.turn(r.f3.CLOCK_INSTALL,payload)
+        self.assertEqual(tuple(r.peer._rejected_installs),((r.epoch,2),(r.epoch,3)))
+        self.assertEqual(r.peer._clock_hwm,0);self.assertEqual(r.peer._leases,{})
+        self.assertEqual(r.peer.clock_evidence_snapshot(),())
+        self.assertEqual(r.peer.snapshot()['rejected'],3)
+        self.assertIsNone(r.peer.failure);self.assertFalse(r.peer.snapshot()['link_lost'])
+
     def test_hello_uses_exact_hashes_caps_width_and_duplicate_preserves_original_binding(self):
         r=self.rig
         first=r.hello();ack=next(raw for kind,raw in first if kind==r.fb.HELLO_ACK)

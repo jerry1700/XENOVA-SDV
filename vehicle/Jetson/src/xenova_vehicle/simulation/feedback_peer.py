@@ -89,7 +89,7 @@ class VirtualFeedbackPeer:
     """bounded non-daemon owner다. start 또는 단일 owner poll_once 중 하나만 사용한다.
 
     최소 수신4096B/회, decode16frames/회, TX32frames/8192B, command8+STOPpin1,
-    probe2/install2를 유지한다. partial write는 원 bytes/offset을 보존한다. EOF·fault·
+    probe2/install2/만료 INSTALL 거부2를 유지한다. partial write는 원 bytes/offset을 보존한다. EOF·fault·
     통신 손실 뒤에도 close 전까지 같은 owner가 실제 제동 물리를 진행한다. close는
     시뮬레이션 종료이며 실제 속도0을 뜻하지 않는다. clock gap은 별도 sticky invalid다.
     """
@@ -137,6 +137,7 @@ class VirtualFeedbackPeer:
         self._framer = feedback.Framer()
         self._out = deque(); self._out_bytes = self._offset = 0
         self._commands = OrderedDict(); self._probes = OrderedDict(); self._leases = OrderedDict()
+        self._rejected_installs = OrderedDict()
         self._command_hwm = self._probe_hwm = self._probe_p1 = self._clock_hwm = self._generation = 0
         self._report_seq = self._last_sensor_us = 0
         self._clock_epoch = None
@@ -302,6 +303,10 @@ class VirtualFeedbackPeer:
         if old is not None:
             if old['raw'] != raw:raise ValueError('same clock sequence changed original install')
             self._stats['duplicate_installs'] += 1; self._queue(old['wire']); return
+        rejected = self._rejected_installs.get((epoch, sequence))
+        if rejected is not None:
+            if rejected['raw'] != raw:raise ValueError('same clock sequence changed rejected install')
+            self._stats['duplicate_installs'] += 1; self._queue(rejected['wire']); return
         original = self._probes.get(probe)
         if (original is None or probe != self._probe_hwm or sequence <= self._clock_hwm
                 or self._clock_hwm and probe <= self._leases[self._clock_hwm]['fields'][4]
@@ -314,8 +319,19 @@ class VirtualFeedbackPeer:
         if (lower, upper) != (original['p1']-original['d2']-pad, reference-original['d3']+pad):
             raise ValueError('install does not preserve original four-timestamp interval')
         end_pad = self.f3.drift_pad(self.policy.drift_ppm, expires-reference)
-        if not now < cutoff <= expires-(upper+end_pad)-self.policy.j_cutoff_us:
-            raise ValueError('install original cutoff expired or exceeds conservative upper bound')
+        if cutoff <= original['d3']:
+            raise ValueError('install original cutoff does not follow original reply')
+        if cutoff > expires-(upper+end_pad)-self.policy.j_cutoff_us:
+            raise ValueError('install original cutoff exceeds conservative upper bound')
+        if now >= cutoff:
+            # 정합한 원 INSTALL의 만료는 계약상 거부다. lease·시계·출력 권한은 갱신하지 않는다.
+            wire = self.fb.packet(self.f3.CLOCK_ACK, self.f3.CLOCK_ACK3.pack(pi, device, epoch,
+                sequence, probe, 3, 7, now, cutoff))
+            self._rejected_installs[(epoch, sequence)] = dict(raw=raw, wire=wire)
+            while len(self._rejected_installs) > 2:self._rejected_installs.popitem(last=False)
+            self._stats['rejected'] += 1
+            self._queue(wire)
+            return
         if len(self._leases) >= 2:
             oldest = next(iter(self._leases))
             if self._active is not None and self._active['fields'][4] == oldest and now < self._active['fields'][7]:
