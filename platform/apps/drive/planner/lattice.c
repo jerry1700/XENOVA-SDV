@@ -52,6 +52,7 @@ void lp_state_import(struct lp_path *path,const dw_state *state){
  path->execution=(struct lp_execution){.present=true,.features=state->state_features,.mission=state->mission,
   .segments_count=state->segments_count,.has_direction_gate=state->has_direction_gate,.direction_gate=state->direction_gate};
  path->has_episode=state->has_episode;if(state->has_episode)path->episode=state->episode;
+ path->has_route=state->has_route;if(state->has_route)path->route=state->route;
  path->origin.retained=true;strcpy(path->origin.message_id,state->message_id);strcpy(path->origin.vm,state->source_vm);
  strcpy(path->origin.execution,state->source_execution);strcpy(path->origin.app_instance,state->source_app_instance);
  path->origin.generation=state->source_generation;path->origin.state_revision=state->state_revision;path->origin.mission=state->mission;
@@ -78,10 +79,28 @@ void lp_state_import(struct lp_path *path,const dw_state *state){
 bool lp_state_export(const struct lp_path *path,dw_state *state){
  /* EXIT preparation is not legacy road Task33/NONE. Its geometry commitment
   * has a separate API; registered route export is an integration boundary. */
- if(!path||!state||path->space.exiting||path->task.active!=path->basis.bound)return false;
+ if(!path||!state||path->task.active!=path->basis.bound)return false;
+ bool route=path->has_route,route_mission=route&&path->execution.present&&path->execution.mission.kind==3;
+ bool exit=route_mission&&path->route.task_space_kind==DW_ROUTE_EXIT_SPACE;
+ if(path->space.exiting&&!exit)return false;
+ if(route){
+  if(dw_route_validate(&path->route,xenova_drive_RouteSnapshot_fields))return false;
+  if(!route_mission&&path->route.state!=3)return false;
+  if(route_mission){
+   const xenova_drive_RouteBinding *binding=&path->execution.mission.route_binding;
+   const xenova_drive_RouteCore *core=&path->route.core;
+   if(!path->execution.mission.has_route_binding||dw_route_mission_validate(&path->execution.mission)||
+      path->execution.mission.phase!=core->phase||memcmp(binding->route_id.bytes,core->route_id.bytes,16)||
+      binding->revision!=core->revision||binding->purpose!=core->purpose||
+      memcmp(binding->core_sha256.bytes,path->route.acceptance.accepted_core_sha256.bytes,32)||
+      memcmp(binding->global_plan_sha256.bytes,core->global_plan_sha256.bytes,32)||
+      memcmp(binding->goal_sha256.bytes,core->goal_sha256.bytes,32))return false;
+  }
+  if(exit&&path->has_episode&&(path->episode.core.state!=1||path->episode.core.phase!=5))return false;
+ }
  state->major=2;state->has_state_features=true;state->state_features=DW_STATE_FEATURES;state->has_mission=true;
- state->has_task_reference=path->task.active;
- if(path->task.active){
+ state->has_task_reference=path->task.active&&!exit;
+ if(state->has_task_reference){
   const struct tr_basis *basis=&path->basis;xenova_drive_TaskReferenceState *out=&state->task_reference;
   if(basis->count<2||basis->count>64||strcmp(basis->id,path->reference)||strcmp(basis->frame,path->frame)||
      strcmp(basis->odom,path->odom)||strcmp(basis->configuration,path->configuration))return false;
@@ -94,7 +113,10 @@ bool lp_state_export(const struct lp_path *path,dw_state *state){
  }
  state->has_episode=path->has_episode;
  if(path->has_episode){state->episode=path->episode;state->state_features|=DW_EPISODE;}
+ state->has_route=route;
+ if(route){state->route=path->route;state->state_features|=DW_ROUTE_STATE;}
  if(path->execution.present){
+  if(path->execution.mission.has_operation_binding)state->state_features|=DW_OPERATION;
   if(path->execution.features!=state->state_features)return false;
   state->mission=path->execution.mission;
   state->segments_count=path->execution.segments_count;
@@ -112,11 +134,17 @@ bool lp_state_export(const struct lp_path *path,dw_state *state){
  }
  return true;
 }
-bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGrant *g){
- const struct lp_execution *e=&path->execution;const xenova_drive_MissionExecution *m=&e->mission;
- uint32_t expected=DW_STATE_FEATURES|(path->task.active?DW_TASK_REFERENCE:0)|(path->has_episode?DW_EPISODE:0);
- bool matches=e->present&&e->features==expected&&g&&g->admitted&&g->kind==m->kind&&
-  ((g->kind==1&&m->phase==10)||(g->kind==2&&m->phase<=9&&m->mission_deadline_pi_us==g->mission_deadline_pi_us&&
+static bool route_binding_equal(const xenova_drive_RouteBinding *a,const xenova_drive_RouteBinding *b){
+ return a->revision==b->revision&&a->purpose==b->purpose&&!memcmp(a->route_id.bytes,b->route_id.bytes,16)&&
+  !memcmp(a->core_sha256.bytes,b->core_sha256.bytes,32)&&!memcmp(a->global_plan_sha256.bytes,b->global_plan_sha256.bytes,32)&&
+  !memcmp(a->goal_sha256.bytes,b->goal_sha256.bytes,32);
+}
+bool lp_execution_matches(const xenova_drive_MissionExecution *m,const xenova_drive_MissionGrant *g){
+ bool matches=m&&g&&g->admitted&&g->kind==m->kind&&m->has_operation_binding==g->has_operation_binding&&
+  (!m->has_operation_binding||dw_operation_binding_equal(&m->operation_binding,&g->operation_binding))&&
+  m->has_route_binding==g->has_route_binding&&(!m->has_route_binding||route_binding_equal(&m->route_binding,&g->route_binding))&&
+  ((g->kind==1&&m->phase==10)||(g->kind==3&&m->phase>=1&&m->phase<=6&&m->has_route_binding)||
+   (g->kind==2&&m->phase<=9&&m->mission_deadline_pi_us==g->mission_deadline_pi_us&&
    m->execution_deadline_pi_us==g->execution_deadline_pi_us&&m->search_deadline_pi_us==g->search_deadline_pi_us&&
    m->strategy==g->strategy&&m->correction_attempts_used==g->correction_attempts_used&&
    m->execution_travel_m==g->execution_travel_m&&m->search_travel_m==g->search_travel_m))&&
@@ -128,16 +156,29 @@ bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGra
   matches=dw_selected_goal_hash(m,hash)&&!memcmp(hash,g->locked_goal_sha256.bytes,32);}
  return matches;
 }
+bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGrant *g){
+ if(!path)return false;
+ const struct lp_execution *e=&path->execution;
+ bool exit=path->has_route&&e->mission.kind==3&&path->route.task_space_kind==DW_ROUTE_EXIT_SPACE;
+ if(e->mission.kind==3&&(!path->has_route||e->mission.phase!=path->route.core.phase))return false;
+ uint32_t expected=DW_STATE_FEATURES|(path->task.active&&!exit?DW_TASK_REFERENCE:0)|(path->has_episode?DW_EPISODE:0)|
+  (path->has_route?DW_ROUTE_STATE:0)|
+  (e->mission.has_operation_binding?DW_OPERATION:0);
+ return e->present&&e->features==expected&&lp_execution_matches(&e->mission,g);
+}
 bool lp_grant_revalidates(const struct lp_path *p,const xenova_drive_MissionGrant *g){
- if(!p||!g||!g->admitted||!p->origin.retained||!p->execution.present)return false;
+ /* Both an owned current path and an exact imported copy are geometry only.
+  * Callers must validate and calculate a new candidate before publication. */
+ if(!p||!g||!g->admitted||!p->execution.present)return false;
  const xenova_drive_MissionExecution *m=&p->execution.mission;
- if(m->kind!=g->kind||(g->kind!=1&&g->kind!=2)||m->mission_revision!=g->mission_revision||m->grant_revision>g->grant_revision||
+ if(m->kind!=g->kind||(g->kind!=1&&g->kind!=2&&g->kind!=3)||m->mission_revision!=g->mission_revision||m->grant_revision>g->grant_revision||
     m->cancel_fence_revision!=g->cancel_fence_revision||m->scene_admission_revision!=g->scene_revision||
     memcmp(m->mission_id.bytes,g->mission_id.bytes,16)||memcmp(m->operator_request_nonce.bytes,g->operator_request_nonce.bytes,16)||
     memcmp(m->scene_admission_id.bytes,g->scene_admission_id.bytes,16)||m->strategy!=g->strategy||
     m->mission_deadline_pi_us!=g->mission_deadline_pi_us||m->execution_deadline_pi_us!=g->execution_deadline_pi_us||
     m->search_deadline_pi_us!=g->search_deadline_pi_us||m->correction_attempts_used>g->correction_attempts_used||
     m->execution_travel_m>g->execution_travel_m||m->search_travel_m>g->search_travel_m)return false;
+ if(g->kind==3&&(!p->has_route||!m->has_route_binding||!g->has_route_binding||!route_binding_equal(&m->route_binding,&g->route_binding)))return false;
  if(g->kind==2&&g->has_locked_goal_sha256){uint8_t goal[32];
   if(!dw_selected_goal_hash(m,goal)||memcmp(goal,g->locked_goal_sha256.bytes,32))return false;
  }
@@ -147,6 +188,11 @@ void lp_bind_current_grant(struct lp_path *p,const xenova_drive_MissionGrant *g)
  xenova_drive_MissionExecution *m=&p->execution.mission;
  m->grant_revision=g->grant_revision;m->execution_travel_m=g->execution_travel_m;m->search_travel_m=g->search_travel_m;
  m->correction_attempts_used=g->correction_attempts_used;
+ m->has_operation_binding=g->has_operation_binding;
+ if(g->has_operation_binding){m->operation_binding=g->operation_binding;p->execution.features|=DW_OPERATION;}
+ else{memset(&m->operation_binding,0,sizeof(m->operation_binding));p->execution.features&=~DW_OPERATION;}
+ m->has_route_binding=g->has_route_binding;if(g->has_route_binding)m->route_binding=g->route_binding;
+ else memset(&m->route_binding,0,sizeof(m->route_binding));
 }
 void lp_index_build(struct lp_collision_index *index,const dw_world *w,const struct lp_config *c) {
  memset(index,0,sizeof(*index));index->world=w;index->sequence=w->sequence;

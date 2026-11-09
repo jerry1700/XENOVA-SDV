@@ -14,6 +14,13 @@ enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
 struct de_path_slot {struct lp_path path;atomic_uint generation,leases[DE_READERS];bool writing;uint64_t scene_generation;};
 struct de_reference {unsigned slot;uint32_t generation,lease;};
 struct de_witness {uint64_t reference_revision,observation_sequence,valid_until_pi_us;char map_epoch[37];};
+/* Current input/occupied-body check only. No mission, route, state apply or
+ * output permission is created. Caller owns storage and original clock proof. */
+struct de_input_check {
+ xenova_drive_EpisodeSourceContext source;dw_vehicle vehicle;dw_pose pose;
+ uint64_t valid_until_pi_us,scene_generation;uint32_t map_generation;struct lp_metrics metrics;
+ float geometry_position_bound_m,geometry_heading_bound_rad;
+};
 struct drive_engine {
  atomic_ullong resource_contention;
  uint64_t path_peak,path_exhausted;
@@ -72,6 +79,12 @@ enum de_result de_receive_drain(struct drive_engine *);
  * exact odom anchor. One pending slot, original age; no second decode. */
 enum de_result de_receive_poll(struct drive_engine *,uint64_t now_pi_us);
 enum de_result de_vehicle(struct drive_engine *,const dw_vehicle *);
+/* Bounded pure preparation, including original World/Scene/Vehicle lifetimes,
+ * localization/steering uncertainty and current body coverage. Does not plan. */
+enum de_result de_input_preflight(struct drive_engine *,uint64_t now_pi_us,struct lp_budget,struct de_input_check *);
+/* Cheap current input/source/lifetime probe. A caller may reuse a prior body
+ * witness only for this exact immutable map/Scene/Vehicle key, never a new map. */
+enum de_result de_input_current(struct drive_engine *,uint64_t now_pi_us,struct de_input_check *);
 /* planner 단일 owner. Link가 확인한 원 receipt만 저장하며 권위 자체를 만들지 않는다. */
 enum de_result de_mission(struct drive_engine *,const xenova_drive_MissionGrant *,uint64_t now_pi_us);
 void de_behavior_enable(struct drive_engine *,const uint8_t incarnation[16]);

@@ -141,6 +141,19 @@ def test_request_arrival_does_not_refund_travel_after_original_birth_anchor():
     assert snapshot.core.started_pi_us<rig.now and snapshot.core.started_pi_us+120000000==snapshot.core.deadline_pi_us
 
 
+@pytest.mark.parametrize('loss',['moving','facts-missing'])
+def test_prepare_stop_loss_cannot_become_a_new_begin_or_refund_preparation_anchor(loss):
+    rig=RouteRig();rig.begin();anchor=rig.route.preparation['anchor'];original=rig.route.original_query()
+    if loss=='moving':rig.physical_stopped=False
+    else:rig.facts_available=False
+    rig.route.tick()
+    assert rig.route.failed and rig.route.reason==RouteReason.STOP_REQUIRED and rig.stop_calls
+    assert rig.route.preparation['anchor']==anchor and rig.route.original_query()==original
+    reply=decode(rig.route.candidate(encode(rig.case['candidate']),rig.peer),schema.RouteReceipt)
+    assert reply.result!=1 and not reply.HasField('snapshot')
+    assert rig.route.registry is None and rig.route.registration() is None
+
+
 @pytest.mark.parametrize('fault',['feature','mapper','gap','distance','no-progress'])
 def test_original_caps_and_capability_loss_fence_route_without_synthetic_finish_or_manual_revocation(fault):
     rig=RouteRig();rig.begin();reply=rig.register();assert rig.admit() is not None

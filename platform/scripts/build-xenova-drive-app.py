@@ -18,10 +18,68 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = ROOT / "platform/guests/zephyr"
+LATTICE_PROFILES = ('warm-lattice-lab', 'warm-lattice-development')
 
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def lattice_inputs(name):
+    """선택한 C/config/generated asset과 원 development 입력의 지문을 검산한다."""
+    home = ROOT / 'platform/apps/drive'
+    development = name == 'warm-lattice-development'
+    folder = home / ('profiles/course-development-1' if development else 'planner/generated')
+    profile_path = folder / 'profile.json' if development else home / 'profiles/lattice-lab-1.json'
+    profile = json.loads(profile_path.read_text())
+    generated = json.loads((folder / 'primitive-manifest.json').read_text())
+    canonical = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+    generator_sha = hashlib.sha256((home / 'tools/generate_primitives.py').read_text(encoding='utf-8').encode()).hexdigest()
+    if (generated['profile'] != profile or generated['profile_sha256'] != hashlib.sha256(canonical).hexdigest()
+            or generated['generator_sha256'] != generator_sha
+            or generated['asset_sha256'] != hashlib.sha256(canonical + b'\0' + generator_sha.encode()).hexdigest()
+            or generated['primitive_source_sha256'] != sha(folder / 'primitives.c')):
+        raise ValueError('selected vehicle profile/primitive generation differs; regenerate with the fixed tool')
+    provenance = None
+    if development:
+        provenance = json.loads((folder / 'source-receipt.json').read_text())
+        if (profile['kind'] != 'test' or provenance['scope'] != 'RPi_DEVELOPMENT_PRIMITIVE_INPUT_ONLY'
+                or provenance['physical_admission'] is not False):
+            raise ValueError('explicit development-only profile required')
+        if set(provenance['source_files']) != {'motion.canonical.json', 'development.canonical.json',
+                'calibration-bound.json', 'motion-metadata-receipt.json', 'grid.json', 'lattice-lab-policy.json'}:
+            raise ValueError('complete original development sources required')
+        for member, expected in provenance['source_files'].items():
+            if Path(member).name != member or member in ('.', '..'):
+                raise ValueError('bounded development source member required')
+            path = folder / 'sources' / member
+            if path.is_symlink() or expected != {'bytes': path.stat().st_size, 'sha256': sha(path)}:
+                raise ValueError('development source changed: ' + member)
+        spec = importlib.util.spec_from_file_location('development_profile_inputs', home / 'tools/prepare_development_profile.py')
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        if provenance['prepare_tool_sha256'] != hashlib.sha256((home / 'tools/prepare_development_profile.py').read_text(encoding='utf-8').encode()).hexdigest():
+            raise ValueError('development preparation tool changed; regenerate explicitly')
+        (_, _, _, _, grid, motion, development_model, motion_sha, calibration_sha) = tool.inputs(
+            folder / 'sources', folder / 'sources/grid.json', provenance['metadata_receipt_sha256'])
+        policy_raw, policy = tool.read(folder / 'sources/lattice-lab-policy.json')
+        expected, _ = tool.profile_values(motion, development_model, grid, policy, motion_sha)
+        if (expected != profile or provenance['motion_bundle_sha256'] != motion_sha
+                or provenance['local_calibration_sha256'] != calibration_sha
+                or provenance['grid'] != grid or provenance['policy_sha256'] != hashlib.sha256(policy_raw).hexdigest()
+                or policy != json.loads((home / 'profiles/lattice-lab-1.json').read_text())):
+            raise ValueError('selected development model/policy binding differs')
+    return profile, generated, provenance
+
+
+def selected_primitive_source(commands, home, profile):
+    """실제 ARM compile DB의 단 하나의 primitive TU가 선택한 profile과 일치해야 한다."""
+    expected = (home / ('../profiles/course-development-1/primitives.c'
+                       if profile == 'warm-lattice-development' else '../planner/generated/primitives.c')).resolve()
+    sources = [Path(row['file']).resolve() for row in commands if Path(row['file']).name == 'primitives.c']
+    if sources != [expected]:
+        raise ValueError('actual compiler primitive input differs from the selected profile')
+    return expected
 
 
 def fingerprint(app):
@@ -53,7 +111,7 @@ def fingerprint(app):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--app", choices=("manual", "autonomous", "drive"), required=True)
-    p.add_argument("--profile", choices=("operations", "experiment", "warm-operations", "warm-experiment", "warm-lattice-lab"), default="operations",
+    p.add_argument("--profile", choices=("operations", "experiment", "warm-operations", "warm-experiment", *LATTICE_PROFILES), default="operations",
                    help="operations excludes raw capture; experiment explicitly includes it")
     p.add_argument("--zephyr-source", type=Path, required=True)
     p.add_argument("--tools", type=Path, required=True)
@@ -61,12 +119,9 @@ def main():
     p.add_argument("--execute", action="store_true")
     args = p.parse_args()
     if args.profile.startswith('warm-') and args.app!='drive':p.error('warm profiles require the common drive firmware')
-    if args.profile=='warm-lattice-lab':
-        home=ROOT/'platform/apps/drive'
-        profile=json.loads((home/'profiles/lattice-lab-1.json').read_text())
-        generated=json.loads((home/'planner/generated/primitive-manifest.json').read_text())
-        if generated['profile']!=profile or generated['primitive_source_sha256']!=sha(home/'planner/generated/primitives.c'):
-            raise ValueError('selected vehicle profile/primitive generation differs; regenerate with the fixed tool')
+    is_lattice = args.profile in LATTICE_PROFILES
+    if is_lattice:
+        profile, generated, provenance = lattice_inputs(args.profile)
     for path in (args.zephyr_source, args.tools, args.output):
         if not path.is_absolute() or path.resolve() != path or path.is_symlink():
             raise ValueError("canonical absolute paths required")
@@ -120,7 +175,9 @@ def main():
                     "-DCONFIG_XENOVA_DIAGNOSTICS_THREADS=" + ("y" if args.profile == "experiment" else "n")]
     if args.app == "drive":
         profile_args = ["-DEXTRA_CONF_FILE=" + str(home / "profiles" / (args.profile + ".conf"))]
-    if args.profile=='warm-lattice-lab':
+    if args.profile=='warm-lattice-development':
+        profile_args+=['-DXENOVA_DRIVE_DEVELOPMENT_PROFILE=ON']
+    if is_lattice:
         # This frozen toolchain contains picolibc. Legacy cross-compile does not
         # advertise it without an explicit path/flag; do not change old profiles.
         header=args.tools/'aarch64-zephyr-elf/aarch64-zephyr-elf/include/picolibc.h'
@@ -136,6 +193,7 @@ def main():
     stack_dir = args.output / "stack-audit"
     stack_dir.mkdir()
     commands = json.loads((build / "compile_commands.json").read_text())
+    selected_primitive = selected_primitive_source(commands, home, args.profile) if is_lattice else None
     command = next(v for v in commands if v["file"].endswith("/xen-runtime/src/netfront.c"))
     audit_args = shlex.split(command["command"])
     if set(audit_args) & {"-MF", "-MD", "-MMD"}:
@@ -148,14 +206,14 @@ def main():
         raise ValueError("netfront send exceeds the direct 256-byte stack-frame budget")
     config = (build / "zephyr/.config").read_text()
     for name in ("XENOVA_DRIVE_RECORDER", "XENOVA_DIAGNOSTICS_THREADS"):
-        expected=args.profile.endswith("experiment") or (name=="XENOVA_DIAGNOSTICS_THREADS" and args.profile=="warm-lattice-lab")
+        expected=args.profile.endswith("experiment") or (name=="XENOVA_DIAGNOSTICS_THREADS" and is_lattice)
         if ("CONFIG_" + name + "=y\n" in config) != expected:
             raise ValueError("resolved configuration differs from selected profile: " + name)
     if ("CONFIG_XENOVA_DRIVE_WARM=y\n" in config)!=args.profile.startswith('warm-'):
         raise ValueError('resolved readiness profile differs from requested profile')
-    if args.profile=='warm-lattice-lab' and 'CONFIG_PICOLIBC=y\n' not in config:
+    if is_lattice and 'CONFIG_PICOLIBC=y\n' not in config:
         raise ValueError('actual target lacks the selected fixed math library')
-    if args.profile=='warm-lattice-lab' and 'CONFIG_THREAD_LOCAL_STORAGE=y\n' not in config:
+    if is_lattice and 'CONFIG_THREAD_LOCAL_STORAGE=y\n' not in config:
         raise ValueError('toolchain picolibc errno requires thread-local storage')
     if "CONFIG_STACK_SENTINEL=y\n" not in config:
         raise ValueError("drive target must retain stack boundary detection")
@@ -181,7 +239,7 @@ def main():
         frames = {}
         basenames=["workers.c", "adapter.c", "autonomous.c", "manual.c", "xm_payload.c", "xm_json.c"]
         if args.profile.startswith('warm-'):basenames += ['context.c','runtime.c','main.c','xen_bootstrap.c','xm_zclient.c']
-        if args.profile=='warm-lattice-lab':basenames += ['lattice_app.c','lattice_input.c','lattice_memory.c','engine.c','lattice.c','world.c','pb_decode.c','pb_encode.c']
+        if is_lattice:basenames += ['lattice_app.c','lattice_input.c','lattice_memory.c','engine.c','lattice.c','world.c','pb_decode.c','pb_encode.c']
         for basename in basenames:
             item = next(v for v in commands if v["file"].endswith("/" + basename))
             argv = shlex.split(item["command"])
@@ -205,7 +263,7 @@ def main():
     verifier.verify_event_irq(build / "zephyr/zephyr.dts")
     segments = verifier.verify_elf(build / "zephyr/zephyr.elf")
     license_file=args.zephyr_source/'LICENSE'
-    if args.profile=='warm-lattice-lab':
+    if is_lattice:
         license_file=args.output/'THIRD_PARTY_LICENSES.txt'
         nanopb=snapshot/'platform/apps/drive/world/nanopb/LICENSE.txt'
         license_file.write_text('Zephyr / Xenova application (Apache-2.0)\n\n'+
@@ -225,7 +283,7 @@ def main():
                "files": {p.name: {"sha256": sha(p), "bytes": p.stat().st_size}
                          for p in sorted((args.output / "firmware").iterdir()) if p.is_file()},
                "acceptance": {"M1_arm_build": True, "M2_board": False, "M3_performance": False}}
-    if args.profile=='warm-lattice-lab':
+    if is_lattice:
         receipt['drive_contract']={'kind':'test','world_profile':profile['id'],
             'schema_sha256':sha(snapshot/'docs/contracts/drive-world/world.proto'),
             'primitive_sha256':generated['asset_sha256'],
@@ -233,6 +291,11 @@ def main():
             'bootstrap_profile':'warm-drive-1','map_slots':3,'map_cells':4096,
             'odom_slots':128,'path_points':512,'node_limit':profile['node_limit'],
             'output_authority':'Gateway','operating_vehicle_limits_verified':False}
+        if provenance is not None:
+            receipt['drive_contract']['development_inputs']=provenance
+        receipt['drive_contract']['compiled_primitive_source']={
+            'path':str(selected_primitive.relative_to(snapshot)).replace('\\','/'),
+            'sha256':sha(selected_primitive)}
     (args.output / "BUILD_RECEIPT.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"candidate": str(args.output / "firmware"), "firmware_sha256": receipt["files"]["zephyr.bin"]["sha256"]}))
 

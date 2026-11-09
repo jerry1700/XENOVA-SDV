@@ -1,9 +1,10 @@
 # 출차·시작점 복귀 Gateway owner
 
-이 문서는 B10 신규 모듈과 아직 연결하지 않은 경계를 구분한다. 공통 wire는
+이 문서는 B10 owner와 실제 실행 전인 연결 코드를 구분한다. 공통 wire는
 [route-and-return.md](../../../docs/contracts/drive-world/route-and-return.md)를 따른다.
-B09 A1 Gateway/C의 정상 병합 전에는 기존 actor·CLI·transport를 수정하지 않았다.
-따라서 신규 모듈이 존재한다는 사실은 `home.return` 또는 실제 차량 출차 성공을 뜻하지 않는다.
+기존 actor·CLI·DriveLink에는 개발용으로 동결한 B09 A1 원본을 적용한 후속 연결 코드가 있다.
+M/D 원 사실을 전달하는 실제 관리 owner는 아직 부착되지 않아 profile만으로 출발하지 않는다.
+아래 연결 코드는 정적 검산 단계이며 `home.return` 또는 차량 출차 성공을 뜻하지 않는다.
 
 ## 구현된 유한 owner
 
@@ -12,9 +13,11 @@ B09 A1 Gateway/C의 정상 병합 전에는 기존 actor·CLI·transport를 수�
 | `route_policy.py` | 승인된 설치 profile의 명시 시간·거리·phase·gap·작업량·hash 검사. 물리 기본값 없음 | 변경 불가 `RouteBudgetPolicy` |
 | `route_data.py` | 원 RoadData/record bytes·현재 M 또는 Guest 출처·D membership. 실제 발행 World 원문과 sidecar의 SHA/출처 결박 | bounded record pool, witness8, lookup1, registration1 |
 | `route_owner.py` | 원 출발 원장 key/CAS→Query1→Candidate1→실제 kind3 grant ACK→receipt→fullState→실제 대상 apply→새 계산 순서 | registry1, last exact reply1, terminal1, eligibility2, source별 HWM4 |
-| `route_goal.py` | 실제 WAIT/STOP의 원 Vehicle·facts로 home.set 요청, M 검증과 원 D COMMITTED 뒤 목표 채택 | goal1, pending1, last result1, 정확한 home.status 8필드 |
+| `route_goal.py` | 실제 WAIT/STOP의 원 Vehicle·facts로 home.set 요청, M 검증과 원 D COMMITTED 뒤 목표 채택 | goal1, pending1, last result1, home.status9필드·현재 RETURN 준비 revision/null |
 | `route_transition.py` | 원 suffix/prefix F32 seam, source binding CAS, M transition generation, 실제 새 World/route_view | transition1, last reply1, terminal1, receipt 대기1 |
 | `route_episode.py` | 같은 서비스의 실제 inactive episode registry+accepted source/주차 원장 이력 | 원 State/accepted wrapper bytes. 없으면 UNKNOWN, wrapper 재포장 없음 |
+| `route_operator.py` | 기존 public actor/CLI·원장·Query/관리 union·kind3 issuer·firstState/apply/fresh output의 순서 연결 | 효과1, 전송 대기1; 실제 관리 owner 부착 전 NOT_READY |
+| `mission_authority.py`의 route 경로 | BEGIN/새 권한은 원 async journal ACK, 같은 권한 UPDATE/FINISH는 실제 issuer의 유한 RAM 등록 | 논리 route1+durable seed1+현재 journal snapshot1; restart UNKNOWN/disarm |
 
 record pool은 목표1·topology1·section2·connection2·window3·ExitSpace1·GlobalPlan1·scope1이다.
 현재 route와 home goal의 pin은 별도 소유한다. 활성 원본은 압력 때문에 버리지 않고 BUSY를
@@ -29,7 +32,7 @@ terminal은 유한 RAM 이력으로 보존한다. 새 thread·daemon·DB·동기
 2. `candidate(raw, authenticated_peer)`는 원 raw SHA와 nonce/sequence/CAS, current owner·confirmed
    P4·Vehicle·World·meter·scope·Scene·extent를 검산한다. 원 retry는 같은 bytes의 원 결과만 돌려준다.
    같은 nonce의 다른 bytes는 거절한다. pending은 아직 성공 receipt가 아니다.
-3. `registration()`의 원 body/snapshot/binding으로 기존 async Authority worker가 실제 kind3 grant를
+3. BEGIN은 `registration()`의 원 body/snapshot/binding으로 기존 async Authority worker가 실제 kind3 grant를
    발급해야 한다. `commit_grant()`는 실제 현재 grant bytes와 원 witness E까지 확인한 뒤에만 receipt를 만든다.
    grant 실패/원 E 만료 뒤에는 actor가 STOP을 유지하고 원 요청을 실패로 종결해야 한다.
 4. Candidate가 예약한 첫 State ID·새 actual completion·원 core/ref/localPath와 current grant를 검산한
@@ -45,13 +48,28 @@ Query의 10s E는 새 BEGIN admission 기한이다. 등록 뒤 UPDATE/FINISH/A-B
 조회는 Query E 연장·새 nonce·이전 owner 부활·예산 환불이 아니다. 같은 Query로 두 번째 BEGIN은 없다.
 
 BEGIN의 Pi start는 원 Guest birth의 confirmed interval lower다. 그 lower 이전에 수신한 같은
-연속 meter epoch의 실제 encoder anchor를 pin한다. 도착 표본으로 baseline을 늦춰 이동을 환불하지 않는다.
+연속 meter epoch의 실제 encoder anchor를 pin한다. WAIT에서 phase0 기하 준비를 시작할 때부터 실제 STOP과
+연속 meter를 관찰하고 원 anchor를 보존한다. 준비가 끝난 뒤 현재 World/body/Vehicle와 같은 원 P4 Reply의
+fresh STOP 사실로 별도 BEGIN 사건을 만든다. 미리 시작한 BEGIN 시각을 검색 종료 시각으로 고치지 않는다.
+도착 표본으로 baseline을 늦춰 준비 중 이동도 환불하지 않는다.
 매 accepted encoder의 wrap-aware `max(abs(ΔL),abs(ΔR))` 정수 누적을 사용한다. gap/scale 변경은 원 경로를
 이어가지 못한다. 실제 phase 변경만 새 phase cap을 만들고, same-phase/window/local replan과 A/B는 원 수치를 보존한다.
 
 실제 progress가 확인된 때만 watchdog anchor를 전진한다. `confirmed_stop_wait_us`는 route 전체 누적이며
 Pi RAM의 `wait_baseline`을 실제 progress/phase anchor 때 pin해 그 이후 차분만 공제한다. 원 command/session과
 APPLIED·양 wheel/yaw stationary window를 대조하며 heartbeat/ACK/속도 목표0은 정지가 아니다. hard E는 멈추지 않는다.
+
+같은 mission/gen/owner/operation/cancel의 UPDATE/FINISH는 현재 core revision+1과 grant revision+1만
+RAM issuer가 발급한다. 원 birth/hard E/meter·samephase E는 불변이다. worker busy 또는 미소비 ACK 중에는
+새 등록을 기다린다. issuer와 RouteOwner 양측 채택이 끝난 뒤에만 publish하며, 중간 실패/원 E 만료는
+과거 grant로 rollback하지 않고 즉시 철회한다. 무효 RAM 기록에서 과거 durable kind3 seed로 fallback하지 않는다.
+다른 durable 변경에는 같은 actor가 현재 유효 논리 record를 원 변경안에 동결한다. 새 control/gen/owner/mission/
+operation 재결합은 계속 기존 durable Authority가 담당한다. restart는 예전 RAM 등록을 복원하지 않는다.
+
+완료는 terminal receipt만으로 WAIT가 되지 않는다. 원 terminal fullState/현재 target apply와 실제 정지가
+확인된 뒤 기존 STOP→STOPPING→WAIT를 사용하여 현재 owner를 보존한다. G1 보호의 SAFE_STOP과 구분한다.
+첫 바퀴 자동 종료는 별도 후속 기능이다. HOME에 가깝다는 이유만으로 출발 직후 완료 처리하지 않으며,
+실제 출발 영역 이탈·진전·진행 방향의 한 바퀴 occurrence를 확인한 뒤 이 정상 종료 경로를 재사용해야 한다.
 
 ## 필수 내부 포트와 미연결 경계
 
@@ -71,11 +89,11 @@ APPLIED·양 wheel/yaw stationary window를 대조하며 heartbeat/ACK/속도 �
 
 통합 시 남은 작업은 다음과 같다.
 
-- B09 정상 병합 뒤 current_operation/Authority 기존 async worker·kind3 mission issuer·미션 원 parking
-  attempt 보존과 연결한다. callback 실패/expired grant ACK를 현재 권한으로 재포장하지 않는다.
-- 실제 public `home.set/status/return`, 출차 departure mode, 기존 CLI/parser/원장 성공·거절 응답을
-  공통 계약의 exact args로 연결한다. 현재 신규 파일만으로 public 명령이 열린 것은 아니다.
-- DriveLink12/13의 원 nested bytes를 실제 인증 dispatch/유한 관리 transport로 연결한다. M의 실제
+- current_operation/Authority 기존 async worker·kind3 issuer와 원 parking attempt를 연결한 후속 코드는
+  실제 통합 실행이 남아 있다. callback 실패/expired grant ACK를 현재 권한으로 재포장하지 않는다.
+- public `home.set/status/return` exact parser/CLI와 원장 성공·거절 경로가 작성됐다. `home.return`은 status가
+  노출한 원 purpose2 revision만 사용하며, EXIT `drive.depart`는 원 AUTO ready revision을 내부 handle에 별도 보존한다.
+- DriveLink12/13 원 nested bytes의 인증 dispatch/별도 queue1과 관리 전송 포트가 작성됐다. M의 실제
   RoadData/D receipt/World sidecar와 C Query/Candidate/receipt/transition 흐름을 왕복 시험한다.
 - first fullState 수락 전 계산 자체는 허용해 snapshot 생산 순환을 피하되, DRIVE는 보류한다.
   StateCopies 실제 copy/raw/application 이후에만 현재 대상의 새 계산을 출력한다.
@@ -95,10 +113,19 @@ APPLIED·양 wheel/yaw stationary window를 대조하며 heartbeat/ACK/속도 �
 
 ## 검증 범위
 
+미배포 `home-status-1`은 원8필드에 nullable decimal `return_ready_revision`을 추가하는 후속 계약이다.
+원 목적2 EligibilityRef를 실제 WAIT/STOP·parking OFF·현재 목표/범위/witness/E로 검산할 때만 노출한다.
+CLI는 이 원값을 `home.return`의 기존5args에 넣고 actor가 재검산한다. AUTO input-ready와 섞거나 내부 revision을
+사용자가 수동 입력하게 하지 않는다. 과거 component8필드 실행은 원 archive에 보존하며 현재9필드 후속은 아직 미실행이다.
+
 `test_route_data_runtime.py`, `test_route_owner_runtime.py`, `test_route_history_runtime.py`는 원 codec/cache,
 실제 GuestClockOwner P4와 AbsoluteWheelMeter/route registry를 사용한다. A1 내구 원장 ACK·M/D publication·
 application·geometry tracker는 명시 typed leaf다. C planner/MCU/물리 장치 적용 증거로 세지 않는다.
 
-정적 AST 3.11·schema constructor 필드 대조와 diff 검사를 수행한다. host import/pytest/collect/native/SSH는
-실행하지 않았다. 실제 Nano에서 공통15+C helper+Gateway 의미시험을 한 묶음으로 실행하고, 정상 A1 병합 뒤
+관측 Origin의 mapper_clock_reply_sha256는 frame에 동결한 JIO Reply R2 원문 trace다. capture의 returned trust R1이나
+Pi P4 승인으로 해석하지 않는다. 실제 current MapperRouteWitness와 D의 body+참조 원 reply/provenance 완전 LOAD
+membership을 별도로 검산해야 하며 원 reply가 없으면 latest/World ACK로 대체하지 않는다.
+
+후속 코드에는 AST의 Python3.11 문법 검사와 diff 검사를 수행한다. host 제품 import/pytest/collect/native/SSH는
+실행하지 않았다. 원 component 시험 결과와 현재 연결 코드의 수락을 구분하며, 후속 통합 소스를 동결한 뒤
 실제 actor/C/M 왕복으로 위 미연결 경계를 이어 검증해야 한다. pyserial/실물/Xen/MCU 수락은 별도 미실행 항목이다.

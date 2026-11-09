@@ -51,6 +51,17 @@ static int receive_file(const char *path,uint64_t received){
 int main(int argc,char **argv){
  assert(argc==6);engine=&fixture_engine;dw_pool_init(&engine->maps);dw_odom_init(&engine->odometry);
  strcpy(gateway,gateway_id);context_available=true;control_generation=1;
+ if(!strcmp(argv[1],"schedule")){
+  assert(probe_send_due(false,true,false,false,false,1010,1000,500000,1000));
+  assert(probe_send_due(false,true,false,false,true,1010,1000,500000,1000));
+  assert(!probe_send_due(false,false,true,false,true,1010,1000,500000,1000));
+  assert(!probe_send_due(false,false,true,false,true,1010,0,500000,1000));
+  assert(probe_send_due(false,false,true,false,true,41000,0,500000,1000));
+  assert(probe_send_due(true,false,false,false,false,1010,0,500000,1000));
+  assert(probe_send_due(true,false,false,true,true,1010,0,500000,1000));
+  assert(!probe_send_due(true,false,false,false,true,1010,0,500000,1000));
+  FILE *out=fopen(argv[5],"w");assert(out);fprintf(out,"{\"actual_scheduler_cases\":8}\n");assert(!fclose(out));return 0;
+ }
  bool late=!strcmp(argv[1],"expired"),lowres=!strcmp(argv[1],"lowres");unsigned role=!strcmp(argv[1],"manual")?1:0;struct dl_clock clock={0};uint64_t at=0;
  offered(role,1,1000000);int first_rc=receive_file(argv[2],!strcmp(argv[1],"reject-width")?1100000:lowres?1000000:1010000);
  if(!strncmp(argv[1],"reject",6)){
@@ -103,6 +114,14 @@ def exchange(sequence,sent,received,*,role='auto',receipt=None,ack=True,expiry=6
         r.probe.receipt.reply_sha256=hashlib.sha256(raw).digest()
         if ack:r.accepted_receipt.CopyFrom(r.probe.receipt)
     return encode(value)
+
+
+def test_actual_scheduler_keeps_episode_urgency_separate_from_preflight_reports(clock_probe):
+    binary,build=clock_probe;output=build/'schedule.json'
+    result=subprocess.run([str(binary),'schedule','unused','unused','unused',str(output)],
+                          capture_output=True,text=True,timeout=10)
+    assert result.returncode==0,result.stderr
+    assert json.loads(output.read_text())=={'actual_scheduler_cases':8}
 
 
 @pytest.mark.parametrize('role',['auto','manual'])

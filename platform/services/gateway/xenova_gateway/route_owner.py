@@ -36,6 +36,17 @@ class RouteRegistration:
     route_binding_raw: bytes
 
 
+@dataclass(frozen=True)
+class PreparedDeparture:
+    """원 public READY/CAS와 현재 목적별 eligibility를 구분하는 actor 내부 handle."""
+    key: str
+    fingerprint: str
+    purpose: int
+    public_ready_revision: int
+    owner_raw: bytes
+    goal_sha256: bytes
+
+
 class RouteOwner:
     def __init__(self,operator,policy,data,*,current_owner,installed,mapper_support,stop_auto,terminal_check,progress_check):
         require(type(policy) is RouteBudgetPolicy,RouteReason.UNSUPPORTED_PROFILE)
@@ -45,6 +56,7 @@ class RouteOwner:
         self.epoch=NIL;self.revision=0;self.query=None;self.pending=None;self.registry=None
         self.last_reply=None;self.terminal=None;self.eligibility={};self.ready_revision={1:1,2:1}
         self.semantic={};self.request_hwm=OrderedDict();self.reason=RouteReason.READY;self.failed=False
+        self.prepared=None;self.preparation=None
 
     @property
     def now(self):return self.o.now
@@ -161,7 +173,51 @@ class RouteOwner:
             ready_revision=self.ready_revision[purpose],valid_until_pi_us=value.witness.valid_until_pi_us,
             reason=value.reason,task_space_kind=value.task_space_kind,eligible=value.eligible)
 
-    def begin_query(self,raw,operator_row):
+    def prepare_departure(self,row,purpose,public_ready_revision):
+        """출발 admission의 원 READY를 pin한다. public revision을 다른 namespace로 바꾸지 않는다."""
+        require(self.prepared is None and purpose in (1,2),RouteReason.POOL_BUSY)
+        call=row['request'];ref=self.eligibility_ref(purpose)
+        require(ref is not None and ref.eligible and self.now<ref.valid_until_pi_us,RouteReason.SPACE_UNKNOWN)
+        require(int(call['args']['ready_revision'])==public_ready_revision,RouteReason.REQUEST_CONTEXT_CHANGED)
+        if call['action']=='home.return':require(public_ready_revision==ref.ready_revision,RouteReason.REQUEST_CONTEXT_CHANGED)
+        else:
+            require(call['action']=='drive.depart' and call['args']['mode']=='AUTO'
+                and public_ready_revision==self.o.operations.ready_revision,RouteReason.REQUEST_CONTEXT_CHANGED)
+        report=decode(self.eligibility[purpose][0],schema.RouteEligibility)
+        self._witness(report.owner,report.witness,peer_key(report.owner))
+        self.prepared=PreparedDeparture(row['key'],row['fingerprint'],purpose,public_ready_revision,
+            encode(report.owner),bytes(report.goal_sha256))
+        self.preparation=self._capture_preparation()
+        return self.prepared
+
+    def _capture_preparation(self):
+        facts=self.r.control_facts()
+        require(self.o.stationary() and facts is not None and facts.HasField('stop') and facts.stop.state==3
+            and self.now<min(facts.valid_until_pi_us,facts.stop.valid_until_pi_us),RouteReason.STOP_REQUIRED)
+        meter=self.o.episodes._meter(facts.meter.vehicle_sequence)
+        require(meter is not None and meter.valid and facts.meter.valid
+            and UUID(meter.meter_epoch).bytes==facts.meter.meter_epoch
+            and meter.total_ticks==facts.meter.total_ticks,RouteReason.METER_GAP)
+        return dict(anchor=meter,last=meter,stationary_until=facts.stop.stationary_observed_pi_us,
+            source=(meter.host_boot,meter.pi_session,meter.device_session,meter.odom_epoch,meter.calibration))
+
+    def _observe_preparation(self):
+        proof=self.preparation;require(proof is not None,RouteReason.STOP_REQUIRED)
+        current=self._capture_preparation();meter=current['last'];previous=proof['last'];anchor=proof['anchor']
+        require(current['source']==proof['source'] and meter.meter_epoch==anchor.meter_epoch
+            and meter.gap_revision==anchor.gap_revision and meter.metres_per_tick==anchor.metres_per_tick
+            and meter.total_ticks>=previous.total_ticks and meter.vehicle_sequence>=previous.vehicle_sequence,
+            RouteReason.METER_GAP)
+        require(meter.pi_sample_us+meter.clock_error_us-(previous.pi_sample_us-previous.clock_error_us)
+            <=self.policy.max_unobserved_gap_us,RouteReason.METER_GAP)
+        facts=self.r.control_facts()
+        require(facts is not None and facts.stop.stationary_started_pi_us<=proof['stationary_until']+self.policy.max_unobserved_gap_us,
+            RouteReason.STOP_REQUIRED)
+        # 누계 maxabs 이동은 원 anchor부터 남긴다. STOP 오차 안의 tick도 새 baseline으로 환불하지 않는다.
+        proof['last']=meter;proof['stationary_until']=max(proof['stationary_until'],current['stationary_until'])
+        return proof
+
+    def begin_query(self,raw,operator_row,*,prepared=None):
         """기존 actor의 durable 출발 수락 뒤만 호출한다. Query로 mode/grant를 발급하지 않는다."""
         query=decode(raw,schema.RouteQuery);call=operator_row['request'];key=operator_row['key']
         require(self.pending is None and (self.query is None or self.failed or self.registry is not None and self.registry['snapshot'].state==3)
@@ -189,7 +245,16 @@ class RouteOwner:
         require(report is not None,RouteReason.SPACE_UNKNOWN)
         eligible=decode(report[0],schema.RouteEligibility)
         require(eligible.eligible and eligible.goal_sha256==query.goal_sha256 and self.now<eligible.witness.valid_until_pi_us
-            and int(call['args']['ready_revision'])==self.ready_revision[query.purpose],RouteReason.SPACE_UNKNOWN)
+            and (prepared is not None or int(call['args']['ready_revision'])==self.ready_revision[query.purpose]),RouteReason.SPACE_UNKNOWN)
+        if prepared is not None:
+            require(prepared is self.prepared and prepared.key==key and prepared.fingerprint==operator_row['fingerprint']
+                and prepared.purpose==query.purpose and prepared.public_ready_revision==int(call['args']['ready_revision'])
+                and prepared.goal_sha256==query.goal_sha256,RouteReason.REQUEST_CONTEXT_CHANGED)
+            original=decode(prepared.owner_raw,schema.RouteOwnerContext)
+            original.operation_binding.CopyFrom(query.owner.operation_binding)
+            require(route_owner_sha256(original)==route_owner_sha256(query.owner),RouteReason.REQUEST_CONTEXT_CHANGED)
+            self._observe_preparation()
+        else:self.preparation=self._capture_preparation()
         before=copied(eligible.owner);before.operation_binding.CopyFrom(query.owner.operation_binding)
         require(route_owner_sha256(before)==route_owner_sha256(query.owner)
             and eligible.owner.operation_binding.operation_revision==int(call['args']['expected_operation_revision'])
@@ -201,6 +266,7 @@ class RouteOwner:
             self.terminal=deepcopy(self.registry);self.registry=None;self.epoch=NIL;self.revision=0
             self.data.pin((),owner='route')
         self.query=dict(raw=bytes(raw),body=copied(query),sha=route_query_sha256(raw),key=key)
+        self.prepared=None
         self.failed=False;self.reason=RouteReason.READY
         return bytes(raw)
 
@@ -281,6 +347,8 @@ class RouteOwner:
             require(value.expected_route_revision==0 and core.revision==1 and core.route_id!=NIL
                 and core.phase_revision==1 and core.phase==(1 if value.task_space_kind==2 else 3)
                 and value.began_guest_us>0 and value.phase_started_guest_us>0,RouteReason.REQUEST_CONTEXT_CHANGED)
+            self._original_facts(value,peer)
+            self._observe_preparation()
             begin=self.o.clocks.interval(peer,value.witness.clock_probe_sequence,value.began_guest_us,self.now,value.owner.control_generation)
             phase=self.o.clocks.interval(peer,value.witness.clock_probe_sequence,value.phase_started_guest_us,self.now,value.owner.control_generation)
             require(begin is not None and phase is not None and begin[0]<=phase[0]<=interval[1],RouteReason.CLOCK_OR_EXPIRY)
@@ -361,6 +429,11 @@ class RouteOwner:
 
     def _birth_meter(self,interval,current):
         """보수 birth lower 이전 실제 누적 표본을 pin한다. 도착 시점 이동으로 환불하지 않는다."""
+        if self.preparation is not None:
+            proof=self._observe_preparation();anchor=proof['anchor']
+            require(anchor.pi_sample_us+anchor.clock_error_us<=interval[0]
+                and proof['last'].total_ticks<=current.total_ticks,RouteReason.METER_GAP)
+            return anchor
         value=self.r.device_view().get('absolute_meter')
         require(value is not None,RouteReason.METER_GAP)
         history=value[1]
@@ -483,6 +556,11 @@ class RouteOwner:
             RouteReason.REQUEST_CONTEXT_CHANGED)
         self.registry['grant']=bytes(raw_grant);self.registry['state']=None;self.registry['applied'].clear()
         self.registry['target']=copied(owner)
+        if self.pending is not None:
+            # 이전 owner의 미수락 phase 후보를 새 grant로 재포장하지 않는다.
+            pending=self.pending
+            reply=self._reply(pending['body'],pending['digest'],3,RouteReason.REQUEST_CONTEXT_CHANGED)
+            self.last_reply=dict(key=pending['key'],digest=pending['digest'],reply=reply);self.pending=None
 
     def prepare_state(self,state,peer,raw):
         """기존 StateCopies 수락 전에 검산한다. 계산/completion 자체를 gate하지 않는다."""
@@ -648,7 +726,8 @@ class RouteOwner:
         # still needs the complete current route/source/clock checks below.
         if command.get('command_kind')=='STOP' and not command.get('next_direction',0):return True
         grant=self.o.missions.grant()
-        if grant is None or grant.kind!=3:return True  # MANUAL/legacy FOLLOW keep their own guards.
+        if grant is None:return False
+        if grant.kind!=3:return True  # Existing FOLLOW retains its own guards; missing route authority is not FOLLOW.
         if self.registry is None or self.failed or self.registry['snapshot'].state!=2:return False
         saved=self.registry;state=saved['state'];application=saved['applied'].get(tuple(peer))
         if state is None or application is None:return False
@@ -694,6 +773,9 @@ class RouteOwner:
 
     def tick(self):
         self.data.tick(self.now)
+        if not self.failed and self.preparation is not None and self.registry is None:
+            try:self._observe_preparation()
+            except RouteError as exc:self.cancel(exc.reason)
         for purpose,(raw,_) in tuple(self.eligibility.items()):
             value=decode(raw,schema.RouteEligibility)
             try:self._witness(value.owner,value.witness,peer_key(value.owner))
@@ -713,12 +795,13 @@ class RouteOwner:
             self.data.pin((),owner='route')
             self.stop_auto(reason)
 
-    def cancel(self,reason=RouteReason.CANCELLED):
+    def cancel(self,reason=RouteReason.CANCELLED,*,stop=True):
         """안전 actor가 RAM 철회를 먼저 처리한다. 미수락 후보를 성공 receipt로 바꾸지 않는다."""
         self.failed=True;self.reason=RouteReason(reason)
+        self.prepared=None
         if self.registry is not None:self.terminal=deepcopy(self.registry)
         self.data.pin((),owner='route')
-        self.stop_auto(self.reason)
+        if stop:self.stop_auto(self.reason)
         if self.pending is None:return None
         pending=self.pending;reply=self._reply(pending['body'],pending['digest'],2,self.reason)
         self.last_reply=dict(key=pending['key'],digest=pending['digest'],reply=reply);self.pending=None
@@ -729,9 +812,10 @@ class RouteOwner:
         saved=self.registry;snapshot=None if saved is None else saved['snapshot'];state=None if saved is None else saved['state']
         known=snapshot is not None and not self.failed
         if not known:state=None
+        grant=self.o.missions.grant()
+        if grant is None:state=None  # 원 registry는 보존하되 ACK 전 현재 fullState 권위는 진술하지 않는다.
         end=clock_end if not known or snapshot.state==3 else min(clock_end,self.output_deadline())
         if self.now>=end:return None
-        grant=self.o.missions.grant()
         result=schema.RouteStatus(major=1,registry_epoch=NIL if not known else self.epoch,registry_revision=0 if not known else self.revision,
             route_id=NIL if not known else snapshot.core.route_id,accepted_core_sha256=ZERO if not known else snapshot.acceptance.accepted_core_sha256,
             global_plan_sha256=ZERO if not known else snapshot.core.global_plan_sha256,local_path_sha256=ZERO if not known else snapshot.core.local_path_sha256,

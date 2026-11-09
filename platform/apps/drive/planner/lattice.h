@@ -54,6 +54,9 @@ struct lp_path { xenova_drive_PathPoint points[LP_PATH];size_t count;dw_pose goa
  struct lp_execution execution;struct tr_intent task;struct tr_basis basis;
  struct lp_space space;
  bool has_episode;xenova_drive_EpisodeSnapshot episode;
+ /* Registered route proof is immutable with this path. Fresh State progress
+  * is produced from the actual worker completion, never from this old E. */
+ bool has_route;xenova_drive_RouteSnapshot route;
  struct lp_origin origin;
  size_t initial_tracker_index;uint64_t initial_pi_us;};
 struct lp_search {
@@ -130,6 +133,8 @@ float lp_path_remaining(const struct lp_path *,dw_pose,size_t *nearest);
 void lp_state_import(struct lp_path *,const dw_state *);
 bool lp_state_export(const struct lp_path *,dw_state *);
 bool lp_mission_matches(const struct lp_path *,const xenova_drive_MissionGrant *);
+/* Exact metadata/current-grant stamp only; geometry/output admission is separate. */
+bool lp_execution_matches(const xenova_drive_MissionExecution *,const xenova_drive_MissionGrant *);
 /* Accepted geometry adoption only. Current output continues to use exact match. */
 bool lp_grant_revalidates(const struct lp_path *,const xenova_drive_MissionGrant *);
 void lp_bind_current_grant(struct lp_path *,const xenova_drive_MissionGrant *);

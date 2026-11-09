@@ -69,6 +69,9 @@ RouteReceipt.snapshot(6), initial_target_context(10)은 optional이며 ACCEPTED�
 3. Candidate는 CandidateCore/Progress와 원 QuerySHA·current witness·원 P4/Guest 시작 시각을 낸다.
    아직 없는 acceptance를 candidate에 넣지 않는다. BEGIN의 Pi birth/meter 필드는 zero sentinel이며
    Pi가 원 clock 하한·every-accepted-encoder meter로 확정한다.
+   WAIT의 phase0 PREPARE_CANDIDATE_ONLY는 원 Query E/작업 상한 안에서 기하를 먼저 준비한다.
+   준비 중 실제 STOP·원 누적 meter anchor를 보존하고, 완료 뒤 현재 경로/body/Vehicle와 같은 원 Reply의
+   fresh STOP 사실을 다시 검사한 다음 별도 BEGIN 사건을 만든다. 이미 생성한 birth를 새 clock에 재매핑하지 않는다.
 4. Pi가 RAM/durable 정책과 원 registry CAS를 검사하고 새 grant 결박을 commit한 뒤 exact Receipt를 낸다.
    receipt 도착만으로 DRIVE하지 않는다. 실제 새 완전 State 수락·현재 grant·target APPLIED·새 계산이
    같은 route/core/owner/window/cursor/HWM에 연결되어야 출력 gate가 열린다.
@@ -80,6 +83,12 @@ RouteReceipt.snapshot(6), initial_target_context(10)은 optional이며 ACCEPTED�
 Route kind3의 EXIT_SPACE 예외는 준비/State/출력/복사 모두 설치 profile+현재 active peer cap64에서만
 사용한다. 공통 형식은 EXIT에 Task33가 없음을 허용하지만 current known episode/route·실제 coverage와
 완전한 원 증거 검산은 runtime owner 책임이다. 지원되지 않은 active S19를 가짜 NONE으로 감추지 않는다.
+
+등록된 EXIT_SPACE에서는 새 kind3 mission이라는 이유로 EP NONE를 발급하지 않는다. 이전 inactive
+EP/accepted source는 원 provenance로 보존하며 새 mission의 현재 NONE로 재해석하지 않는다.
+실제 ROAD_ROUTE 등록과 현재 grant ACK 뒤, 그 새 mission의 미초기화 EP genesis만 기존 규칙으로 한 번 만든다.
+원 inactive admission 근거가 필요하며 first fullState/apply를 genesis 선행조건으로 넣지 않는다.
+같은 mission의 ACTIVE/UNKNOWN·phase/window/replan/A-B 및 startup key는 이 경로로 초기화하지 않는다.
 
 ## 4. 관측 연결과 two-slot window
 
@@ -139,6 +148,29 @@ Python 공개 함수는 `xenova_drive_world`의 `route_*_sha256`, `route_record_
 `road_data_body`, `route_exchange_body`, `route_candidate_body`, `road_record_body`는
 엄격히 검사한 envelope의 원 nested bytes를 그대로 반환한다. C `dw_route_body`는 caller가
 먼저 bounded decode/audit한 원문에서 span만 추출한다.
+
+### 관측 Origin과 현재 승인의 분리
+
+`RoadObservationOrigin.mapper_clock_reply_sha256`는 frozen Probe R2에 대해 JIO가 생성한 원 Reply R2 bytes의
+출처 trace다. 같은 peer/source의 frame snapshot을 만들 때 함께 고정하며 뒤늦은 latest Reply로 바꾸지 않는다.
+이 hash는 Pi P4/승인이나 capture 매핑 승인 원문이 아니다. capture에는 기존 FRAME/REGISTRATION의 returned
+trust R1과 원 proof를 보존하고, RoadData의 현재 사용 가능성은 Gateway가 실제 승인한 현재 MapperRouteWitness로
+따로 검사한다. D는 RoadRecord body와 참조한 원 reply/provenance도 실제 저장·완전 LOAD membership으로 증명해야 한다.
+hash 일치·현재 World ACK나 역산한 P4로 없는 D/승인 근거를 대신하지 않는다. public tag 추가는 없다.
+
+### 공개 home 상태의 후속 보완
+
+`home.status`는 기존 operator.v2의 readonly `{version:2,action:"home.status"}`이며 `home-status-1`을 반환한다.
+미배포 초기8필드에 `return_ready_revision`을 추가해 정확9필드로 보완했다:
+supported, goal_id, goal_revision, goal_sha256, geometry_scope_sha256, registered, current_compatible,
+blocked_reason, return_ready_revision. 새 필드는 nullable decimal-u63 string이다.
+
+현재 목적2 RouteEligibilityRef의 원 revision만 사용한다. 실제 WAIT/정지·parking OFF·목표/범위 exact·현재
+witness/P4/source/원 E 검사를 `return_ready()`로 통과한 경우에만 값을 노출하고, 그 외에는 null과 실제
+blocked_reason을 반환한다. 상태 조회가 새 준비·Query·nonce·기한을 만들지 않는다. AUTO input-ready revision으로
+대신하지 않는다. CLI `home return`은 이 값을 읽어 기존 exact5args에 넣고 실제 actor가 다시 검산한다.
+준비 전 요청을 보관하지 않으며 읽기와 출발 사이 준비 상실도 거절한다. 과거8필드 source/archive는 원 자료로 보존한다.
+이 계약 보완은 wire/proto/tag·기존 StatusView2·기존 fingerprint를 바꾸지 않는다.
 
 ## 6. 상한과 검증 구분
 

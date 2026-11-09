@@ -3,6 +3,7 @@
 #include "lattice.h"
 #include "engine.h"
 #include "pb_encode.h"
+#include "pb_decode.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -160,12 +161,48 @@ int probe_valid(void *pointer) {
  struct lp_budget b={now+1000000,clock_us,NULL,NULL,&p->collision_index};
  return lp_validate_path(&p->path,&p->snapshot.world,&p->config,&m,&b);
 }
+/* One bounded test owner records only the Vehicle actually used by a successful
+ * product calculation. Prepared geometry inspection has no completed calc. */
+struct engine_fixture {
+ struct drive_engine core;dw_vehicle calculated_vehicle;uint32_t calculated_path;bool calculated;
+};
 void *engine_new(void){
- struct drive_engine *e=calloc(1,sizeof(*e));if(!e)return NULL;
+ struct engine_fixture *unit=calloc(1,sizeof(*unit));if(!unit)return NULL;
+ struct drive_engine *e=&unit->core;
  de_init(e,&lp_selected_config,&lp_selected_assets);dw_pool_source(&e->maps,&trust);return e;
+}
+static void engine_calculated(void *pointer,const dw_vehicle *vehicle){
+ struct engine_fixture *unit=pointer;unit->calculated_vehicle=*vehicle;
+ unit->calculated_path=unit->core.last_track_path.generation;unit->calculated=true;
 }
 void engine_free(void *e){free(e);}
 int engine_world(void *e,const uint8_t *bytes,size_t n,uint64_t now){return de_world(e,bytes,n,now);}
+int engine_fixture_world_result(void *e){return ((struct drive_engine *)e)->last_world_result;}
+/* Actual input-only helper; the typed source is serialized unchanged. The
+ * transport/P4 report submission is covered by the persistent app bridge. */
+int engine_preflight(void *pointer,uint64_t now,uint8_t *out,size_t capacity,uint64_t facts[8]){
+ struct drive_engine *e=pointer;uint64_t guest;
+ (void)de_receive_poll(e,now);
+ if(clock_us(NULL,&guest))return -1;
+ struct de_input_check checked;struct lp_budget budget={guest+100000,clock_us,NULL,NULL,NULL};
+ enum de_result rc=de_input_preflight(e,now,budget,&checked);
+ facts[0]=checked.vehicle.sequence;facts[1]=checked.valid_until_pi_us;
+ facts[2]=checked.metrics.footprints;facts[3]=checked.metrics.cells;
+ facts[4]=(uint64_t)(e->current+1);facts[5]=e->has_grant;facts[6]=e->planning;facts[7]=e->completed;
+ if(rc)return rc;
+ pb_ostream_t stream=pb_ostream_from_buffer(out,capacity);
+ if(!pb_encode(&stream,xenova_drive_EpisodeSourceContext_fields,&checked.source))return -2;
+ return -(int)stream.bytes_written;
+}
+int engine_preflight_current(void *pointer,uint64_t now,uint8_t *out,size_t capacity,uint64_t facts[8]){
+ struct drive_engine *e=pointer;(void)de_receive_poll(e,now);struct de_input_check checked;
+ enum de_result rc=de_input_current(e,now,&checked);
+ facts[0]=checked.vehicle.sequence;facts[1]=checked.valid_until_pi_us;facts[2]=checked.metrics.footprints;facts[3]=checked.metrics.cells;
+ facts[4]=(uint64_t)(e->current+1);facts[5]=e->has_grant;facts[6]=e->planning;facts[7]=e->completed;
+ if(rc)return rc;
+ pb_ostream_t stream=pb_ostream_from_buffer(out,capacity);
+ return pb_encode(&stream,xenova_drive_EpisodeSourceContext_fields,&checked.source)?-(int)stream.bytes_written:-2;
+}
 int engine_vehicle(void *e,const uint8_t *bytes,size_t n){
  dw_vehicle vehicle;enum dw_result rc=dw_vehicle_decode(bytes,n,&vehicle);
  return rc?100+(int)rc:(int)de_vehicle(e,&vehicle);
@@ -185,6 +222,7 @@ int engine_track(void *e,uint64_t now,float *out){
  uint64_t clock;if(clock_us(NULL,&clock))return DE_CLOCK;
  struct lp_command command;dw_vehicle vehicle;struct lp_budget b={clock+1000000,clock_us,NULL,NULL,NULL};
  enum de_result rc=de_track(e,now,.02f,&command,&vehicle,b);
+ if(rc==DE_OK)engine_calculated(e,&vehicle);
  out[0]=command.velocity;out[1]=command.steer;out[2]=command.emergency;out[3]=(float)command.result;
  return rc;
 }
@@ -203,33 +241,58 @@ int engine_grant(void *e,const uint8_t *bytes,size_t n,uint64_t now){
   (int)de_mission(e,&link->payload.mission_grant,now);
  free(link);return result;
 }
+int engine_finish_apply(void *e,uint64_t now){return de_apply_finish(e,now);}
+int engine_origin_mission(void *pointer,uint8_t *out,size_t capacity){
+ struct drive_engine *e=pointer;struct de_reference h;const struct lp_path *path;
+ if(de_path_acquire(e,&h,&path))return -1;
+ pb_ostream_t stream=pb_ostream_from_buffer(out,capacity);
+ bool ok=path->origin.retained&&pb_encode(&stream,xenova_drive_MissionExecution_fields,&path->origin.mission);
+ (void)de_path_release(e,h);return ok?(int)stream.bytes_written:-1;
+}
+void engine_behavior_enable_for_budget(void *pointer){
+ const uint8_t incarnation[16]={1};de_behavior_enable(pointer,incarnation);
+}
+void engine_parking_original_budget(void *pointer,uint64_t out[8]){
+ struct drive_engine *e=pointer;const xenova_drive_MissionGrant *g=&e->parking.original_grant;
+ out[0]=e->parking.active;out[1]=g->mission_deadline_pi_us;out[2]=g->search_deadline_pi_us;out[3]=g->execution_deadline_pi_us;
+ out[4]=g->correction_attempts_used;out[5]=g->mission_revision;out[6]=e->parking.phase;out[7]=g->grant_revision;
+}
 int engine_track_grant(void *e,const uint8_t *bytes,size_t n,uint64_t now,float *out){
  xenova_drive_DriveLink *link=calloc(1,sizeof(*link));if(!link)return -1;
  enum dw_result decoded=dw_link_decode(bytes,n,link);uint64_t clock;
  if(decoded||link->which_payload!=xenova_drive_DriveLink_mission_grant_tag||clock_us(NULL,&clock)){free(link);return DE_STATE;}
  struct lp_command command;dw_vehicle vehicle;struct lp_budget budget={clock+1000000,clock_us,NULL,NULL,NULL};
  enum de_result rc=de_track_mission(e,&link->payload.mission_grant,now,.02f,&command,&vehicle,budget);
+ if(rc==DE_OK)engine_calculated(e,&vehicle);
  out[0]=command.velocity;out[1]=command.steer;free(link);return rc;
 }
 int engine_state(void *pointer,uint8_t *out,size_t cap){
- struct drive_engine *e=pointer;struct de_reference h;const struct lp_path *p;
+ struct engine_fixture *unit=pointer;struct drive_engine *e=&unit->core;struct de_reference h;const struct lp_path *p;
  if(de_path_acquire(e,&h,&p))return -1;
+ bool completed=unit->calculated&&unit->calculated_path==h.generation;
+ dw_vehicle source=unit->calculated_vehicle;struct de_witness witness=e->last_track_world;
+ if(!completed){
+  struct dw_handle mh;const struct dw_snapshot *map;
+  if(dw_vehicle_latest(&e->odometry,&source)||dw_acquire(&e->maps,&mh,&map)){de_path_release(e,h);return -1;}
+  witness.reference_revision=map->world.reference_revision;witness.observation_sequence=map->world.observation_seq;
+  strcpy(witness.map_epoch,map->world.map_epoch);(void)dw_release(&e->maps,mh);
+ }
  dw_state *s=calloc(1,sizeof(*s));if(!s){de_path_release(e,h);return -1;}
  if(!lp_state_export(p,s)){free(s);(void)de_path_release(e,h);return -1;}strcpy(s->source_vm,"77777777-7777-4777-8777-777777777777");
  strcpy(s->source_execution,"88888888-8888-4888-8888-888888888888");strcpy(s->source_app_instance,"99999999-9999-4999-8999-999999999999");
  s->source_generation=1;s->state_revision=1;strcpy(s->frame_epoch,p->frame);strcpy(s->odom_epoch,p->odom);
  strcpy(s->configuration,p->configuration);strcpy(s->primitive,e->assets->sha256);strcpy(s->reference_id,p->reference);
- s->reference_revision=e->last_track_world.reference_revision?e->last_track_world.reference_revision:1;
+ s->reference_revision=witness.reference_revision;
  s->path_revision=p->revision;s->maneuver_revision=p->maneuver_revision;
  s->has_world_features=true;s->world_features=p->world_features;
  s->direction=p->direction;s->maneuver_phase=p->phase;s->merge_goal=p->merge_goal;
  if(p->merge_passed_reference_revision&&p->merge_passed_reference_revision==s->reference_revision){
   s->has_merge_passed_reference_revision=true;s->merge_passed_reference_revision=p->merge_passed_reference_revision;
  }
- s->vehicle_sequence=2;s->calculation_sequence=e->completed;s->tracker_index=e->tracker.index;s->complete=true;
+ s->vehicle_sequence=source.sequence;s->calculation_sequence=completed?e->completed:0;s->tracker_index=e->tracker.index;s->complete=true;
  if(s->has_mission)s->mission.active_segment=e->tracker.segment;
  strcpy(s->message_id,"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");strcpy(s->calibration,"encoder-lab-1");
- strcpy(s->map_epoch,"33333333-3333-4333-8333-333333333333");s->observation_seq=1;
+ strcpy(s->map_epoch,witness.map_epoch);s->observation_seq=witness.observation_sequence;
  s->path_count=p->count;memcpy(s->path,p->points,p->count*sizeof(*p->points));de_path_release(e,h);
  pb_ostream_t stream=pb_ostream_from_buffer(out,cap);bool ok=pb_encode(&stream,xenova_drive_DriveState_fields,s);
  free(s);return ok?(int)stream.bytes_written:-1;
@@ -332,4 +395,85 @@ int probe_gate(void *pointer,unsigned variant){
  else if(variant==4)fact.direction=-fact.direction;else if(variant==5)fact.steering_settled=false;else if(variant==6)fact.expires_pi_us=1000000;
  else if(variant==7)fact.maneuver_revision++;else if(variant==8)fact.current=false;
  return lp_tracker_next_segment(&p->tracker,&p->path,1000000,41,&fact);
+}
+
+/* Unit-only registration/clock issuer leaf. Search, receipt hash comparison,
+ * current inputs, re-adoption and tracker execute the product engine. This is
+ * not a Gateway/P4/STOP/APPLIED or physical-device acceptance claim. */
+void engine_fixture_auto_owner(void *pointer){((struct drive_engine *)pointer)->local_owner=true;}
+int engine_fixture_phase_id(void *pointer,uint8_t out[37]){
+ const struct drive_engine *e=pointer;memcpy(out,e->phase_state_message_id,37);return 0;
+}
+
+int engine_fixture_facts(void *pointer,const uint8_t *raw,size_t n,uint64_t now){
+ struct drive_engine *e=pointer;xenova_drive_DriveControlFacts facts={0};pb_istream_t in=pb_istream_from_buffer(raw,n);
+ if(!pb_decode(&in,xenova_drive_DriveControlFacts_fields,&facts))return -1;
+ enum de_result rc=de_control_facts(e,&facts,now);atomic_store(&e->facts_current,rc==DE_OK);return rc;
+}
+int engine_fixture_status(void *pointer,const uint8_t *raw,size_t n,uint64_t now){
+ xenova_drive_EpisodeStatus *status=calloc(1,sizeof(*status));if(!status)return -1;
+ pb_istream_t in=pb_istream_from_buffer(raw,n);int rc=!pb_decode(&in,xenova_drive_EpisodeStatus_fields,status)?-1:
+  (int)de_episode_status(pointer,status,now);free(status);return rc;
+}
+static void fixture_uuid(char out[37],const uint8_t raw[16]){
+ static const char hex[]="0123456789abcdef";unsigned at=0;
+ for(unsigned i=0;i<16;i++){if(i==4||i==6||i==8||i==10)out[at++]='-';out[at++]=hex[raw[i]>>4];out[at++]=hex[raw[i]&15];}out[at]=0;
+}
+int engine_fixture_registration(void *pointer,uint64_t now,uint8_t *raw,size_t capacity){
+ struct drive_engine *e=pointer;xenova_drive_EpisodeRequest *r=calloc(1,sizeof(*r));dw_state *state=calloc(1,sizeof(*state));
+ if(!r||!state){free(r);free(state);return -1;}
+ /* The prior actual C tracker ran; model only its existing app-owner completion
+  * callback, never a timer or fabricated successful calculation. */
+ if(!e->completed||!de_episode_request(e,r)||!de_registration_state(e,state)){free(r);free(state);return -1;}
+ e->last_actual_calculation=e->completed;r->calculation_sequence=e->completed;
+ fixture_uuid(r->vm,e->grant.owner_vm.bytes);fixture_uuid(r->execution,e->grant.owner_execution.bytes);fixture_uuid(r->app_instance,e->grant.app_instance.bytes);
+ if(clock_us(NULL,&r->completed_guest_us)){free(r);free(state);return -1;}
+ r->valid_until_pi_us=now+250000;r->clock_probe_sequence=1;memset(r->clock_reply_sha256.bytes,9,32);
+ if(!dw_plan_hash(state,r->plan_sha256.bytes)){free(r);free(state);return -1;}
+ pb_ostream_t out=pb_ostream_from_buffer(raw,capacity);bool encoded=pb_encode(&out,xenova_drive_EpisodeRequest_fields,r);
+ if(encoded)de_episode_submitted(e,r);
+ free(r);free(state);return encoded?(int)out.bytes_written:-1;
+}
+int engine_fixture_receipt(void *pointer,const uint8_t *raw,size_t n){
+ xenova_drive_EpisodeReceipt *receipt=calloc(1,sizeof(*receipt));if(!receipt)return -1;
+ pb_istream_t in=pb_istream_from_buffer(raw,n);int rc=!pb_decode(&in,xenova_drive_EpisodeReceipt_fields,receipt)?-1:
+  (int)de_episode_receipt(pointer,receipt);free(receipt);return rc;
+}
+int engine_fixture_begin(void *pointer,uint64_t now){
+ struct drive_engine *e=pointer;uint64_t guest;if(clock_us(NULL,&guest))return DE_CLOCK;
+ (void)de_receive_poll(e,now);
+ struct lp_budget budget={guest+lp_selected_config.planner_budget_us,clock_us,NULL,NULL,NULL};
+ return de_plan_start(e,now,budget);
+}
+int engine_fixture_continue(void *pointer,uint64_t now,unsigned slices){
+ struct drive_engine *e=pointer;(void)de_receive_poll(e,now);enum de_result rc=DE_WAITING;
+ for(unsigned k=0;k<slices&&e->planning;k++)rc=de_plan_slice(e,8,now);
+ return rc;
+}
+int engine_fixture_adoption_view(void *pointer,uint64_t out[16],uint8_t hashes[64]){
+ struct drive_engine *e=pointer;struct de_reference h;const struct lp_path *p;
+ if(de_path_acquire(e,&h,&p))return -1;
+ out[0]=h.generation;out[1]=p->initial_pi_us;out[2]=p->initial_tracker_index;out[3]=e->tracker.path_token;
+ out[4]=e->tracker.initialized;out[5]=e->tracker.last_pi_us;out[6]=p->revision;out[7]=p->maneuver_revision;
+ out[8]=p->has_episode?p->episode.core.started_pi_us:0;out[9]=p->has_episode?p->episode.core.deadline_pi_us:0;
+ out[10]=p->has_episode?p->episode.core.phase_deadline_pi_us:0;out[11]=p->has_episode?p->episode.core.meter_baseline_total_ticks:0;
+ out[12]=e->episode.meter_used_ticks;out[13]=e->episode.waited_us;out[14]=e->planning;out[15]=e->completed;
+ dw_state *state=calloc(1,sizeof(*state));if(!state){de_path_release(e,h);return -1;}
+ /* Inspect this acquired current path, never a different pending candidate. */
+ struct dw_handle mh;const struct dw_snapshot *map;bool ok=false;
+ if(!dw_acquire(&e->maps,&mh,&map)){
+  ok=lp_state_export(p,state);
+  if(ok){
+   strcpy(state->map_epoch,map->world.map_epoch);strcpy(state->frame_epoch,p->frame);strcpy(state->odom_epoch,p->odom);
+   strcpy(state->configuration,p->configuration);strcpy(state->calibration,map->world.calibration);
+   strcpy(state->primitive,map->world.primitive);strcpy(state->reference_id,p->reference);
+   state->reference_revision=map->world.reference_revision;state->path_revision=p->revision;state->maneuver_revision=p->maneuver_revision;
+   state->has_world_features=true;state->world_features=p->world_features;
+   state->path_count=p->count;memcpy(state->path,p->points,p->count*sizeof(p->points[0]));
+   ok=dw_plan_hash(state,hashes);
+  }
+  (void)dw_release(&e->maps,mh);
+ }
+ memset(hashes+32,0,32);if(ok&&p->has_episode)ok=dw_episode_core_hash(&p->episode.core,hashes+32);
+ free(state);de_path_release(e,h);return ok?0:-1;
 }

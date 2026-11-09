@@ -15,6 +15,7 @@ from xenova_gateway.episode import EpisodeOwner
 from xenova_gateway.guest_clock import GuestClockOwner,GuestClockPolicy,OwnedPreparedClock,SentClock
 from xenova_gateway.route_owner import RouteOwner,peer_key
 from xenova_gateway.route_policy import NIL,ZERO
+from xenova_drive_world.route import route_stop_facts_sha256
 from route_fixtures import route_case,accepted_route
 from test_route_data_runtime import data_owner,delivery,records,mapper,policy,HASH,IDS
 
@@ -32,9 +33,12 @@ class RouteRig:
             metres_per_tick=.001,metres_per_tick_upper=.001,maximum_sample_age_us=200000),self.vehicle.host_boot)
         old=deepcopy(self.vehicle);old.sequence-=1;old.source_sample-=1;old.source_us-=20000;old.pi_sample_us-=20000
         old.left_ticks-=1;old.right_ticks-=1;self.record_meter(old);self.record_meter(self.vehicle)
+        self.physical_stopped=True;self.facts_available=True
+        self.stop_generation=self.owner_context.control_generation
+        self.stop_started=self.vehicle.pi_sample_us-20000;self.stop_first=self.vehicle.sequence-1
         self.operator=SimpleNamespace(now=self.now,instance=self.vehicle.gateway_instance,hold=False,
             runner=SimpleNamespace(authority=self.authority,drive_link=self.provider,machine=self.machine,
-                device_view=self.device_view,scene_runtime=None,control_facts=lambda:None),
+                device_view=self.device_view,scene_runtime=None,control_facts=self.control_facts),
             missions=SimpleNamespace(grant=lambda:self.grant),clocks=GuestClockOwner(
                 GuestClockPolicy(5,10,10000,20000,1000000),self.vehicle.host_boot,self.vehicle.gateway_instance))
         self.operator.episodes=SimpleNamespace(o=self.operator,r=self.operator.runner,
@@ -43,6 +47,7 @@ class RouteRig:
             self.operator.episodes,sequence,**kwargs)
         self.operator._known=lambda key:self.row if getattr(self,'row',{}).get('key')==key else None
         self.operator._rows=lambda:[self.row] if hasattr(self,'row') else []
+        self.operator.stationary=lambda:self.physical_stopped
         self.clock_sequence=0;self.operator.clocks.register_peers((self.peer,));self.confirm_clock()
         self.data=data_owner();self.published_worlds={}
         self.data.world_current=lambda value,peer,now:self.published_worlds.get(value.world_raw_sha256)
@@ -66,6 +71,26 @@ class RouteRig:
             'odom_epoch','calibration','sequence','source_sample','source_us','pi_sample_us','clock_error_us')}
         return dict(vehicle_sample=value,absolute_meter=self.meter.snapshot)
 
+    def control_facts(self):
+        """선언된 정지 plant의 원 Pi STOP/APPLIED leaf. 실제 장치/serial 증거로 세지 않는다."""
+        if not self.facts_available:return None
+        v=self.vehicle;m=self.meter.snapshot[0];end=v.pi_sample_us+200000
+        facts=schema.DriveControlFacts(major=1,valid_until_pi_us=end,
+            meter=schema.PiAbsoluteMeter(meter_epoch=UUID(m.meter_epoch).bytes,total_ticks=m.total_ticks,
+                metres_per_tick=m.metres_per_tick,gap_revision=m.gap_revision,valid=m.valid,vehicle_sequence=v.sequence))
+        if self.physical_stopped:
+            facts.stop.CopyFrom(schema.StopFacts(state=3,pi_session=v.pi_session,device_session=v.device_session,
+                command_sequence=1,control_generation=self.stop_generation,producer_role=0,
+                source_vm=NIL,source_execution=NIL,source_app_instance=NIL,calculation_sequence=0,counter=0,
+                applied_report_sequence=1,applied_source_sample=self.stop_first,
+                applied_pi_lower_us=self.stop_started-1000,applied_pi_upper_us=self.stop_started,
+                stationary_first_sequence=self.stop_first,stationary_last_sequence=v.sequence,
+                stationary_started_pi_us=self.stop_started,stationary_observed_pi_us=v.pi_sample_us,
+                valid_until_pi_us=end,left_speed_bound_mps=.001,right_speed_bound_mps=.001,yaw_rate_bound_rps=.001,
+                plan_revision=0,phase_revision=0,mission_id=NIL,mission_revision=0,grant_revision=0,
+                driver_session=NIL,driver_action_seq=0,driver_state_seq=0))
+        return facts
+
     def confirm_clock(self):
         """실제 4시각 교환과 원 Reply SHA. offset/confirmed/E를 직접 주입하지 않는다."""
         clocks=self.operator.clocks;self.clock_sequence+=2;sequence=self.clock_sequence-1
@@ -76,6 +101,8 @@ class RouteRig:
         reply.host_boot=self.vehicle.host_boot;reply.gateway_instance=self.vehicle.gateway_instance
         reply.pi_receive_us=reply.pi_send_us=self.now-4000;reply.vehicle.CopyFrom(self.vehicle)
         reply.guest_clock_valid_until_pi_us=self.now-4000+1000000
+        facts=self.control_facts()
+        if facts is not None:reply.control_facts.CopyFrom(facts)
         prepared=OwnedPreparedClock(link,self.peer,self.owner_context.control_generation)
         self.clock_raw=prepared.stamp(self.now-3000)
         clocks.sent_reply(SentClock(prepared.peer,prepared.generation,self.clock_raw))
@@ -99,7 +126,10 @@ class RouteRig:
             world_raw_sha256=sha256(encode(world)).digest(),vehicle_raw_sha256=sha256(encode(self.vehicle)).digest())
         self.provider.trust=SimpleNamespace(**{key:getattr(source,key) for key in ('vehicle','mapper_boot','mapper_instance',
             'map_epoch','frame_epoch','clock_epoch','configuration','calibration')},primitive=source.primitive.hex(),expires_pi_us=self.now+1000000)
-        return route_case(owner=self.owner_context,witness=witness,world=world,vehicle=self.vehicle,records=self.base['records'])
+        case=route_case(owner=self.owner_context,witness=witness,world=world,vehicle=self.vehicle,records=self.base['records'])
+        reply=decode(self.clock_raw,schema.DriveLink).clock
+        case['candidate'].control_facts_sha256=route_stop_facts_sha256(reply.control_facts)
+        return case
 
     def publish_world(self,case):
         """M publication/currentWorld is a declared typed leaf; original paired bytes remain exact."""
@@ -136,12 +166,14 @@ class RouteRig:
             started_pi_us=snapshot.core.started_pi_us,meter_epoch=snapshot.core.meter_epoch,
             meter_baseline_total_ticks=snapshot.core.meter_baseline_total_ticks,metres_per_tick_upper=snapshot.core.metres_per_tick_upper)
         grant=accepted['grant'];grant.route_binding.CopyFrom(decode(registration.route_binding_raw,schema.RouteBinding))
+        grant.mission_deadline_pi_us=snapshot.core.deadline_pi_us
         self.owner_context=deepcopy(accepted['target']);self.grant=grant
         # This leaf is the acknowledged Authority result. It is not a journal/fsync assertion.
         reply=self.route.commit_grant(value.request_nonce,encode(grant))
         accepted['state'].route.CopyFrom(snapshot)
         accepted['state'].route.progress.calculation_sequence=accepted['state'].calculation_sequence
         accepted['state'].mission.route_binding.CopyFrom(grant.route_binding)
+        accepted['state'].mission.mission_deadline_pi_us=grant.mission_deadline_pi_us
         self.state=accepted['state'];return decode(reply,schema.RouteReceipt)
 
     def admit(self,state=None):

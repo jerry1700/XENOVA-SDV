@@ -89,12 +89,23 @@ class RouteGoalOwner:
     def status(self):
         current=self.route.current_owner();goal=None if self.goal is None else self.goal.message()
         compatible=goal is not None and current is not None and goal.geometry_scope_sha256==current.geometry_scope_sha256
-        return dict(supported=bool(self.route.installed() and self.route.mapper_support()&2),
+        installed=bool(self.route.installed());supported=bool(installed and self.route.mapper_support()&2)
+        revision=None
+        reason=RouteReason.UNSUPPORTED_PROFILE if not installed else RouteReason.CAPABILITY_LOST if not supported else RouteReason.TARGET_UNAVAILABLE
+        if supported and compatible:
+            ref=self.route.eligibility_ref(2)
+            if ref is None:reason=RouteReason.SPACE_UNKNOWN
+            else:
+                try:self.return_ready(expected_goal_revision=goal.revision,expected_goal_sha256=self.goal.digest,
+                    ready_revision=ref.ready_revision)
+                except RouteError as exc:reason=exc.reason
+                else:revision=str(ref.ready_revision);reason=None
+        return dict(supported=supported,
             goal_id=None if goal is None else str(UUID(bytes=goal.goal_id)),goal_revision='0' if goal is None else str(goal.revision),
             goal_sha256=ZERO.hex() if goal is None else self.goal.digest.hex(),
             geometry_scope_sha256=ZERO.hex() if goal is None else goal.geometry_scope_sha256.hex(),
             registered=goal is not None,current_compatible=compatible,
-            blocked_reason=None if compatible else RouteReason.TARGET_UNAVAILABLE.name)
+            blocked_reason=None if reason is None else reason.name,return_ready_revision=revision)
 
     def return_ready(self,*,expected_goal_revision,expected_goal_sha256,ready_revision):
         """현재 준비 조회만 한다. parking OFF·READY만으로 출발/Query를 만들지 않는다."""
@@ -104,8 +115,8 @@ class RouteGoalOwner:
         require(self.goal is not None and self.goal.message().revision==expected_goal_revision
             and self.goal.digest==expected_goal_sha256,RouteReason.TARGET_UNAVAILABLE)
         ref=self.route.eligibility_ref(2)
-        require(ref is not None and ref.eligible and self.o.now<ref.valid_until_pi_us
-            and ref.ready_revision==ready_revision,RouteReason.SPACE_UNKNOWN)
+        require(ref is not None and ref.eligible and ref.ready_revision==ready_revision,RouteReason.SPACE_UNKNOWN)
+        require(self.o.now<ref.valid_until_pi_us,RouteReason.CLOCK_OR_EXPIRY)
         report=decode(self.route.eligibility[2][0],schema.RouteEligibility)
         require(report.goal_sha256==self.goal.digest,RouteReason.TARGET_UNAVAILABLE)
         self.route._witness(report.owner,report.witness,tuple(str(UUID(bytes=getattr(report.owner,k)))

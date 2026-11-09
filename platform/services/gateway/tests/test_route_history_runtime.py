@@ -73,10 +73,36 @@ def test_transition_does_not_create_none_or_change_world_hwm_from_registry_absen
     assert rig.operator.episodes.registry is None and rig.data.world_hwm==before and transition.current is None
 
 
-def test_home_status_has_exact_eight_fields_and_no_implicit_goal_or_departure():
+def test_home_status_has_exact_nine_fields_and_no_implicit_goal_or_departure():
     rig=RouteRig();goal=RouteGoalOwner(rig.route);before=rig.route.original_query()
     view=goal.status()
     assert set(view)=={'supported','goal_id','goal_revision','goal_sha256','geometry_scope_sha256',
-        'registered','current_compatible','blocked_reason'}
+        'registered','current_compatible','blocked_reason','return_ready_revision'}
     assert not view['registered'] and view['goal_id'] is None and view['goal_revision']=='0'
+    assert view['return_ready_revision'] is None
     assert rig.route.original_query()==before and rig.route.registry is None and not rig.stop_calls
+
+
+@pytest.mark.parametrize('fault',[None,'expired','moving','parking-on','goal-absent','mapper-loss','profile-loss'])
+def test_return_revision_is_exposed_only_after_current_return_ready_recheck(fault):
+    rig=RouteRig();goal=RouteGoalOwner(rig.route)
+    goal.goal=rig.data.get(1,rig.case['query'].goal_sha256)
+    rig.authority.value['current_operation']=dict(phase='WAIT',parking_enabled=False)
+    rig.operator.stationary=lambda:fault!='moving'  # 명시한 physical STOP leaf; 실장치 증거가 아니다.
+    body=schema.RouteEligibility(major=1,eligibility_id=rig.case['query'].query_id,purpose=2,
+        owner=rig.owner_context,witness=rig.case['witness'],task_space_kind=1,eligible=True,reason=0,
+        goal_sha256=goal.goal.digest,exit_space_sha256=ZERO,
+        topology_sha256=rig.case['candidate'].core.topology_sha256,
+        window_sha256=rig.case['candidate'].current_window_sha256,global_plan_sha256=ZERO,extent=rig.case['extent'])
+    ref=rig.route.observe_eligibility(encode(body),rig.peer)
+    if fault=='expired':rig.operator.now=ref.valid_until_pi_us
+    elif fault=='parking-on':rig.authority.value['current_operation']['parking_enabled']=True
+    elif fault=='goal-absent':goal.goal=None
+    elif fault=='mapper-loss':rig.route.mapper_support=lambda:0
+    elif fault=='profile-loss':rig.route.installed=lambda:False
+    before=rig.route.original_query();revision=rig.route.ready_revision[2]
+    view=goal.status()
+    assert view['return_ready_revision']==(str(ref.ready_revision) if fault is None else None)
+    assert (view['blocked_reason'] is None)==(fault is None)
+    assert rig.route.ready_revision[2]==revision and rig.route.original_query()==before
+    assert rig.route.registry is None and not rig.stop_calls

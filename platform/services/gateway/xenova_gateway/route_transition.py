@@ -115,4 +115,4 @@ class RouteTransitionOwner:
         raw,peer=self.pending_receipt;value=decode(raw,schema.WindowTransitionReceipt)
         if self.route.now>=value.valid_until_pi_us:
             self.pending_receipt=None;self.route.cancel(RouteReason.ACTIVATION_NOT_READY);return
-        self.receive_receipt(raw,peer)
+        return self.receive_receipt(raw,peer)

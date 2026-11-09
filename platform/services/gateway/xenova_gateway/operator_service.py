@@ -28,6 +28,10 @@ class OperatorService:
         self.keyboard=KeyboardActor(self)
         from .episode import EpisodeOwner
         self.episodes=EpisodeOwner(self)
+        from .operation_owner import OperationOwner
+        self.operations=OperationOwner(self)
+        from .route_operator import RouteOperator
+        self.routes=RouteOperator(self)
         if runner.drive_link is not None:runner.drive_link.missions.enable_budget_input()
 
     @property
@@ -39,7 +43,8 @@ class OperatorService:
         return provider.instance if provider is not None else self.runner._client.identity.agent_instance_id
 
     def submit(self,call):
-        request(call);lane=2 if call['action'] in ('status','request.get') else 0 if call['action'] in SAFETY else 1
+        request(call);lane=2 if call['action'] in ('status','operation.status','home.status','request.get') else 0 if (
+            call['action'] in SAFETY or self.operations.safety_off(call)) else 1
         result=queue.Queue(maxsize=1);self.queues[lane].put_nowait((deepcopy(call),result));return result
 
     def _stop(self,reason):
@@ -48,6 +53,7 @@ class OperatorService:
         m=self.runner.machine;m.output_permitted=False;m._authorized=False;m._countdown=None
         m._resume_requested.clear();self.runner._deferred_drive=None
         if self.sources is not None:self.sources.fence(reason)
+        if self.routes is not None:self.routes.cancel(reason,stop=False)
         self.runner._submit(ForwardStop(m.generation),wait_for_stop=False)
 
     def _stop_driver(self):
@@ -62,6 +68,24 @@ class OperatorService:
             expected_owner=m.active_vm,deadline_pi_ms=issued+10000,args={})
         result=queue.Queue(maxsize=1)
         self._accept(call,result)
+
+    def operation_status(self):return self.operations.view()
+
+    def submit_auto_depart(self,call,*,trigger_sha256,valid_until_pi_us,current):
+        """KeyboardActor가 같은 actor 회차에서 검산한 원 Enter 한 개. 일반 socket은 이 포트를 호출하지 않는다."""
+        request(call);result=queue.Queue(maxsize=1)
+        if (call['action']!='drive.depart' or call['args']['mode']!='AUTO'
+                or call['args']['trigger_sha256']!=trigger_sha256 or not callable(current)
+                or not self.now<valid_until_pi_us<=self.now+150000):
+            result.put(error('INVALID_INPUT',call.get('request_id')));return result
+        trigger=self.operations.trigger
+        if trigger is not None and trigger['key']!=call['request_id']:
+            result.put(error('BUSY_NOT_ACCEPTED',call['request_id']));return result
+        self.operations.trigger=dict(key=call['request_id'],sha=trigger_sha256,end=valid_until_pi_us,current=current)
+        try:self._accept(call,result)
+        except (OperatorError,ValueError,KeyError,TypeError) as exc:
+            result.put(error(getattr(exc,'code','INVALID_INPUT'),call.get('request_id'),getattr(exc,'outcome','NOT_ACCEPTED')))
+        return result
 
     def bind_driver(self,call,expires,completion,current=lambda:True):
         m=self.runner.machine;generation=m.generation;fence=self.fence_revision
@@ -117,11 +141,16 @@ class OperatorService:
 
     def _proposal(self,key,changes,operation,expires,continuation):
         if self.job is not None or self.worker.busy or not self.worker._results.empty():return False
+        changes=self.operations.augment(changes)
+        explicit='current_mission' in changes
+        changes=self.missions.augment(changes)
         value={**self.runner.authority.value,**changes}
         if not capacity(value):raise OperatorError('HISTORY_FULL')
         self.job=AuthorityProposal(key,canonical(self.runner.authority.value),canonical(changes),self.now,
             expires,operation)
-        self.continuation=continuation;self.worker.submit(self.job);return True
+        self.continuation=continuation
+        self.missions.journal_started(changes,explicit=explicit,operation=operation)
+        self.worker.submit(self.job);return True
 
     def _record(self,call):
         host,issued=request_key(call['request_id']);now=self.now//1000;m=self.runner.machine
@@ -144,7 +173,8 @@ class OperatorService:
                     or decode(runtime.owner._grant,schema.SceneGrant).scene.admission_id!=UUID(call['args']['scene_id']).bytes):
                 raise OperatorError('CONTEXT_CHANGED')
         if call['action']=='parking.start' and m.mode is not Mode.AUTO:raise OperatorError('WRONG_MODE')
-        if call['action'] not in SAFETY|{'auto.cancel','manual.neutral'} and any(not row['terminal'] for row in self.pending.values()):
+        if (call['action'] not in SAFETY|{'auto.cancel','manual.neutral'} and not self.operations.safety_off(call)
+                and any(not row['terminal'] for row in self.pending.values())):
             raise OperatorError('BUSY_NOT_ACCEPTED')
         if call['action'] not in VOLATILE and len(self._waiting)>=2:raise OperatorError('BUSY_NOT_ACCEPTED')
         saved={row['key'] for row in self._rows()}
@@ -182,19 +212,44 @@ class OperatorService:
     def _accept(self,call,result):
         key=call.get('request_id');action=call['action']
         if action=='status':result.put(dict(version=2,ok=True,data=self.status()));return
+        if action=='operation.status':result.put(dict(version=2,ok=True,data=self.operation_status()));return
+        if action=='home.status':result.put(dict(version=2,ok=True,data=self.routes.status()));return
         known=self._known(key)
         if action=='request.get':
             result.put(error('NOT_FOUND_OR_NOT_RETAINED',key) if known is None else
                 dict(version=2,ok=True,data=self._view(known)));return
         if known is not None:
+            if (known['fingerprint']==fingerprint(call) and action=='drive.depart'
+                    and known['terminal'] and known['phase']=='FAILED'):
+                result.put(error(known['result'],key));return
             result.put(error('IDEMPOTENCY_CONFLICT',key) if known['fingerprint']!=fingerprint(call) else
                 error('OUTCOME_UNKNOWN',key,'UNKNOWN') if self.unknown is not None or action not in VOLATILE and
                     not any(saved['key']==key for saved in self._rows()) else
                 dict(version=2,ok=True,data=self._view(known,'VOLATILE' if action in VOLATILE else 'DURABLE')));return
         try:row=self._record(call)
         except OperatorError as exc:
-            if action in SAFETY and exc.code=='HISTORY_FULL':self._stop(action)
+            if (action in SAFETY or self.operations.safety_off(call)) and exc.code=='HISTORY_FULL':self._stop(action)
             raise
+        if self.operations.enabled and action in ('auto.resume','parking.start','parking.cancel'):
+            raise OperatorError('OPERATION_ACTION_REQUIRED')
+        if action in ('home.set','home.return'):
+            if not self.ready or self.unknown is not None:raise OperatorError('OUTCOME_UNKNOWN','UNKNOWN')
+            candidate=self.routes.prepare(row)
+            if candidate is not None:self._effects[key]=dict(operation_candidate=candidate,generation=self.runner.machine.generation,
+                fence=self.fence_revision,stage='ROUTE',countdown=candidate['countdown_until'])
+        if action in ('parking.permission.set','drive.depart'):
+            if not self.ready or self.unknown is not None:
+                if self.operations.safety_off(call):self._stop('PARKING_PERMISSION_OFF')
+                raise OperatorError('OUTCOME_UNKNOWN','UNKNOWN')
+            try:
+                candidate=self.routes.prepare_exit(row) if action=='drive.depart' and call['args']['mode']=='AUTO' and self.routes.exit_required() else self.operations.prepare(row)
+            except OperatorError as exc:
+                if action!='drive.depart':raise
+                row=self._terminal(row,exc.code,failed=True)
+            else:
+                if candidate is None:row=self._terminal(row,'NO_CHANGE')
+                else:self._effects[key]=dict(operation_candidate=candidate,generation=self.runner.machine.generation,
+                    fence=self.fence_revision,stage='OPERATION',countdown=candidate['countdown_until'])
         if action in VOLATILE:
             if self.sources is None:raise OperatorError('NOT_READY')
             self.sources.operator(call);row=self._terminal(row,'APPLIED')
@@ -208,7 +263,10 @@ class OperatorService:
 
     def _continue(self,row):
         call=row['request'];action=call['action'];m=self.runner.machine
+        if action in ('home.set','home.return') or self.routes.owns(row['key']):return self.routes.continue_request(row)
+        if action in ('parking.permission.set','drive.depart'):return self.operations.continue_request(row)
         if self.now>=call['deadline_pi_ms']*1000:
+            if self.operations.enabled and action=='mode.manual':return self.operations._cancel_departure(row,'DEADLINE_EXCEEDED')
             terminal=self._terminal(row,'FAILED',failed=True);return terminal,self._ledger(terminal)
         if action in ('stop','parking.cancel'):
             current=self.missions.current()
@@ -263,11 +321,16 @@ class OperatorService:
                 terminal=self._terminal(row,'FAILED',failed=True);return terminal,self._ledger(terminal)
             if effect['stage']=='APPLYING':
                 if m.generation!=effect['committed'] or m.failure:
+                    if self.operations.enabled and action=='mode.manual':return self.operations._cancel_departure(row,'CONTEXT_CHANGED')
                     terminal=self._terminal(row,'FAILED',failed=True);return terminal,self._ledger(terminal)
                 if m.phase=='APPLIED' and m.output_permitted:
                     self.hold=False;self.hold_reason=None
                     terminal=self._terminal(row,'APPLIED');terminal['original']['app_applied']=True
-                    return terminal,self._ledger(terminal)
+                    changes=self._ledger(terminal)
+                    if self.operations.enabled and action=='mode.manual':
+                        operation=deepcopy(self.operations.current());operation.update(phase='ACTIVE',countdown_until=0)
+                        changes['current_operation']=operation
+                    return terminal,changes
                 return None
             if effect['stage']=='COMMITTING':return None
             if effect['stage']=='PREPARING_MISSION':return None
@@ -299,6 +362,7 @@ class OperatorService:
             manual=dict(manual_session=self.sources.sid,manual_policy='NEUTRAL_THEN_ACTION') if mode is Mode.MANUAL else None
             fields=self.runner.authority.issue_fields(mode,m.active_vm,'operator_'+action,self.runner._clock(),timeout,
                 arm=True,manual=manual)
+            if self.operations.enabled and action=='mode.manual':fields['current_operation']=self.operations.manual_operation(call)
             if mission is not None:
                 mission=self.missions.rebind(mission,fields['generation'],m.active_vm)
                 fields['current_mission']=mission
@@ -327,6 +391,7 @@ class OperatorService:
         if outcome is not None:
             if outcome.proposal is not self.job:raise RuntimeError('OPERATOR_ORIGINAL_JOB_MISMATCH')
             job,continuation=self.job,self.continuation;self.job=self.continuation=None
+            self.missions.journal_completed(outcome.ack is not None,outcome.unknown)
             if outcome.ack is None:
                 if outcome.unknown:self.unknown=job;self._stop('STORAGE_UNCERTAIN')
                 if continuation is not None:continuation(False,outcome.unknown)
@@ -345,6 +410,7 @@ class OperatorService:
             changes=dict(operator_ledger=rows,operator_host_boot_id=self.runner.authority.host,
                 operator_floor_ms=self.runner.authority.value.get('operator_floor_ms',0) if same_boot else 0,
                 operator_startup_ms=self.now//1000,rearm_required=True,current_mission=current,manual_input_profile='manual-input-2')
+            if self.operations.enabled:changes['current_operation']=self.operations.startup()
             def started(ok,unknown):
                 self.ready=ok
                 if not ok and not unknown:self.started=False
@@ -368,6 +434,8 @@ class OperatorService:
             getattr(config,'metres_per_tick',None),self.now)
         self._mission_tick()
         self.episodes.tick()
+        self.operations.tick()
+        self.routes.tick()
         for lane in (0,2,1):
             try:call,result=self.queues[lane].get_nowait()
             except queue.Empty:continue
@@ -381,19 +449,35 @@ class OperatorService:
             def accepted(ok,unknown):
                 if not ok and not unknown:
                     self.pending[row['key']]=self._terminal(row,'FAILED',failed=True)
+                if ok and row['request']['action']=='drive.depart' and not row['terminal']:
+                    self.sources.neutral_candidate()
+                rejected=row['request']['action']=='drive.depart' and row['terminal'] and row['phase']=='FAILED'
                 result.put(error('STORAGE_UNCERTAIN' if unknown else 'NOT_ACCEPTED',row['key'],'UNKNOWN' if unknown else 'NOT_ACCEPTED') if not ok else
-                    dict(version=2,ok=True,data=self._view(row)))
-            try:changes=self._ledger(row)
+                    error(row['result'],row['key']) if rejected else dict(version=2,ok=True,data=self._view(row)))
+            try:
+                changes=self._ledger(row)
+                effect=self._effects.get(row['key'],{})
+                if 'operation_candidate' in effect:changes['current_operation']=effect['operation_candidate']
             except OperatorError as exc:
                 self._waiting.pop(0)
-                if row['request']['action'] in SAFETY:
+                if row['request']['action'] in SAFETY or self.operations.safety_off(row['request']):
                     self.pending[row['key']]=self._terminal(row,'STOP_UNCONFIRMED',failed=True)
                     result.put(error(exc.code,row['key'],'UNKNOWN'))
                 else:
                     self.pending.pop(row['key'],None);self.runner.authority.operator_reservations.pop(row['key'],None)
                     result.put(error(exc.code,row['key']))
             else:
-                if self._proposal(row['key'],changes,'admission',row['request']['deadline_pi_ms']*1000,accepted):
+                try:submitted=self._proposal(row['key'],changes,'admission',row['request']['deadline_pi_ms']*1000,accepted)
+                except OperatorError as exc:
+                    safety=row['request']['action'] in SAFETY or self.operations.safety_off(row['request'])
+                    self._waiting.pop(0);self._effects.pop(row['key'],None)
+                    if safety:self.pending[row['key']]=self._terminal(row,'STOP_UNCONFIRMED',failed=True)
+                    else:
+                        self.pending.pop(row['key'],None)
+                        self.runner.authority.operator_reservations.pop(row['key'],None)
+                    result.put(error(exc.code,row['key'],'UNKNOWN' if safety else 'NOT_ACCEPTED'))
+                    submitted=False
+                if submitted:
                     self._waiting.pop(0)
         if self.job is None and self.unknown is None:
             for row in tuple(self.pending.values()):
@@ -430,8 +514,8 @@ class OperatorService:
                             self.missions.publish()
                         self.runner.drive_link.complete_budget_request(envelope,result);self.budget_pending=None
                     try:self._proposal(envelope.request_nonce.hex(),{'current_mission':mission},'budget',envelope.valid_until_pi_us,reserved)
-                    except OperatorError as error:
-                        if error.code!='HISTORY_FULL':raise
+                    except OperatorError as exc:
+                        if exc.code!='HISTORY_FULL':raise
                         result=schema.MissionBudgetReply(major=1,request_nonce=envelope.request_nonce,
                             request_sha256=envelope.request_sha256,result=5,reason=10)
                         self.runner.drive_link.complete_budget_request(envelope,result);self.budget_pending=None
@@ -468,7 +552,8 @@ class OperatorService:
             return source
         if command['profile']!='drive-command-3' or not self.command_allowed(command):return None
         peer=(vm,reference['execution_id'],reference['agent_instance_id'])
-        if app=='autonomous' and (not self.episodes.command_allowed(peer,command)
+        if app=='autonomous' and ((not self.routes.independent_exit() and not self.episodes.command_allowed(peer,command))
+                or not self.routes.command_allowed(peer,command)
                 or not self.missions.motion_allowed(command)):return None
         interval=self.clocks.interval(peer,int(command['clock_probe_sequence']),int(command['completed_guest_us']),now,m.generation)
         if interval is None:return None
@@ -510,10 +595,12 @@ class OperatorService:
         self.command_hwm[key]=sequence
         source.update(issued_pi_us=lower,valid_until_pi_us=end)
         if app=='autonomous':
-            phase=[value for value in (self.missions.output_deadline(),) if value]
-            episode_end=self.episodes.output_deadline()
+            phase=[value for value in (self.missions.output_deadline(),self.routes.output_deadline()) if value]
+            episode_end=None if self.routes.independent_exit() else self.episodes.output_deadline()
             if episode_end is not None:phase.append(episode_end)
             if phase:source['phase_expires_pi_us']=min(phase)
+            if not self.operations.command_allowed(source):return None
+            self.operations.observe_command(source)
         return source
 
     def command_allowed(self,payload):
@@ -534,11 +621,20 @@ class OperatorService:
         if not self.command_allowed(command):return False
         if command.get('producer_role')!='AUTO':return True
         peer=(source.get('vm_id'),source.get('execution_id'),source.get('agent_instance_id'))
-        return self.episodes.command_allowed(peer,command) and self.missions.motion_allowed(command)
+        return ((self.routes.independent_exit() or self.episodes.command_allowed(peer,command))
+            and self.routes.command_allowed(peer,command) and self.missions.motion_allowed(command)
+            and self.operations.command_allowed(source))
 
     def _mission_tick(self):
         current=self.missions.current();m=self.runner.machine
         if current is None:return
+        route_source=self.missions.route_rebind_source()
+        if route_source is not None:
+            if self.job is None and not self.worker.busy and self.unknown is None:
+                rebound=self.missions.rebind(route_source,m.generation,m.active_vm)
+                self._proposal('mission-binding:'+route_source['id'],{'current_mission':rebound},'mission_binding',
+                    min(self.now+10_000_000,route_source['deadline']),lambda ok,unknown:self.missions.publish() if ok else None)
+            return
         if self.missions.terminal_pending is not None:
             if self.job is None and not self.worker.busy and self.unknown is None:
                 original=self.missions.terminal_pending

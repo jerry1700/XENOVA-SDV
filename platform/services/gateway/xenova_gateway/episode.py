@@ -10,6 +10,7 @@ import struct
 from uuid import UUID,uuid4
 
 from xenova_drive_world import schema,encode,decode
+from xenova_drive_world.codec import STATE_KNOWN_FEATURES
 from xenova_mqtt.drive_binding import app_instance
 from .absolute_meter import upper_distance
 
@@ -80,7 +81,7 @@ class EpisodeOwner:
     def supported(self,peer):
         features=self.peers.get(peer,0)
         return bool(getattr(self.r,'episode_support',False) and features&EPISODE
-            and not features&~31)
+            and not features&~STATE_KNOWN_FEATURES)
 
     def prepare_allowed(self,vm):
         if not getattr(self.r.machine,'episode_output_evidence_required',False):return True
@@ -100,6 +101,9 @@ class EpisodeOwner:
         key=(current['id'],current['revision'])
         if key==self.mission_key:return  # A/B/grant/clock does not initialize NONE.
         if key==self.startup_key:return  # Restart cannot prove the old mission had no episode.
+        if current['kind']==3:
+            routes=getattr(self.o,'routes',None)
+            if routes is None or not routes.episode_genesis_allowed(current):return
         self.epoch=uuid4().bytes;self.revision=1;self.mission_key=key;self.failed=False
         self.registry=dict(snapshot=none_snapshot(self.epoch,self.revision),source=None,request=None,
             request_key=None,request_sha=None,reply=None,state=None,applied={},admissions={},progress_anchor=(0.,0.))
