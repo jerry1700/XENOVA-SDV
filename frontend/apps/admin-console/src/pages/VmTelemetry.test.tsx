@@ -61,6 +61,7 @@ function fixture(stackSupported = true) {
         status,
         publisher_state: status === 'UNKNOWN' ? null : 'running',
         last_collection_success_uptime_ms: status === 'UNKNOWN' ? null : '12000',
+        last_collection_success_age_ms: status === 'UNKNOWN' ? null : 1200,
         collection_failures_total: status === 'UNKNOWN' ? null : 2,
         received_at: status === 'UNKNOWN' ? null : received,
       });
@@ -454,8 +455,8 @@ describe('VM telemetry dashboard', () => {
       renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
       const diagnostics = within(await screen.findByRole('region', { name: '텔레메트리 수집기 상태' }));
       expect(await diagnostics.findByText(label)).toBeInTheDocument();
-      expect(diagnostics.getByText('7')).toBeInTheDocument();
-      expect(screen.getByText('앱 heartbeat · drive')).toBeInTheDocument();
+      expect(diagnostics.getByText(/실패 7회/)).toBeInTheDocument();
+      expect(screen.queryByText(/앱 heartbeat/)).not.toBeInTheDocument();
     },
   );
 
@@ -513,6 +514,79 @@ describe('VM telemetry dashboard', () => {
     expect(link.queryByText('연결됨')).not.toBeInTheDocument();
   });
 
+  it('shows the detail header like VM Control with the authority badge beside a driving VM title', async () => {
+    fixture();
+    useDrive.mockReturnValue({
+      drive: {
+        ...drive,
+        control: {
+          mode: 'AUTO',
+          generation: 1,
+          active_app: 'autonomous',
+          active_vm_id: VM_IDS.autonomous,
+          reason: null,
+          received_ago_ms: 100,
+          source: { status: 'fresh', age_ms: 100 },
+        },
+      },
+      socket: 'open',
+    });
+    const name = vms.find((vm) => vm.vm_id === VM_IDS.autonomous)!.name;
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const title = await screen.findByRole('heading', { level: 1, name });
+    expect(screen.getByRole('link', { name: /VM Dashboard/ })).toHaveAttribute('href', '/dashboard/overview');
+    expect(screen.getByText('VIRTUAL MACHINE MONITORING')).toBeInTheDocument();
+    expect(screen.getByText('주 구동 VM · Zephyr')).toBeInTheDocument();
+    // 제어권 배지는 제목 줄 오른쪽 (같은 줄 묶음 안)
+    expect(within(title.parentElement!).getByText('ACTIVE')).toBeInTheDocument();
+    // 왼쪽 "운영 상태" 타일 2×2, 오른쪽 "구성" 타일 3개 + 짧은 목록
+    const ops = within(screen.getByRole('heading', { name: '운영 상태' }).closest('section')!);
+    for (const label of ['VM 상태', '제어권', '주행 모드']) expect(ops.getByText(label)).toBeInTheDocument();
+    expect(ops.getByText('앱 상태').querySelector('small')).toHaveTextContent(/^· drive$/);
+    expect(ops.getByText('자율주행')).toBeInTheDocument();
+    const config = within(screen.getByRole('heading', { name: 'VM 구성' }).closest('section')!);
+    for (const label of ['vCPU', '메모리', '예약 IPv4', '역할', '템플릿', '버전', 'VM ID'])
+      expect(config.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText('VM 기본 정보')).not.toBeInTheDocument();
+    expect(screen.queryByText('할당 자원')).not.toBeInTheDocument();
+    expect(screen.queryByText('Identity & state')).not.toBeInTheDocument();
+    expect(screen.queryByText(/앱 heartbeat/)).not.toBeInTheDocument();
+  });
+
+  it('shows the INFOTAINMENT badge beside the title of the Linux interaction VM', async () => {
+    fixture();
+    const name = vms.find((vm) => vm.vm_id === VM_IDS.interaction)!.name;
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const title = await screen.findByRole('heading', { level: 1, name });
+    // Memory·Network 탭 카드와 같은 배지·색 규칙 (data-authority)
+    const badge = within(title.parentElement!).getByText('INFOTAINMENT');
+    expect(badge).toHaveAttribute('data-authority', 'infotainment');
+    // 주행 VM 이 아니면 제어권·주행 모드 타일은 "해당 없음"
+    const ops = within(screen.getByRole('heading', { name: '운영 상태' }).closest('section')!);
+    expect(ops.getByText('제어권').nextElementSibling).toHaveTextContent('해당 없음');
+    expect(ops.getByText('주행 모드').nextElementSibling).toHaveTextContent('해당 없음');
+    expect(ops.getByText('앱 상태').nextElementSibling).toHaveTextContent('미확인');
+  });
+
+  it('shows no badge beside the title of a VM without a role', async () => {
+    fixture();
+    const unassigned = {
+      ...vms[0]!,
+      vm_id: '44444444-4444-4444-8444-444444444444',
+      name: 'spare',
+      role: null,
+    };
+    vms.push(unassigned);
+    try {
+      renderPage(`/dashboard/vms/${unassigned.vm_id}`);
+      const title = await screen.findByRole('heading', { level: 1, name: 'spare' });
+      expect(title.parentElement!.children).toHaveLength(1);
+      expect(screen.getByText('역할 미지정 · Zephyr')).toBeInTheDocument();
+    } finally {
+      vms.pop();
+    }
+  });
+
   it('shows Zephyr thread pages, heap, RX rate, reserved IP and only its own app reports', async () => {
     const fetch = fixture();
     renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
@@ -529,8 +603,26 @@ describe('VM telemetry dashboard', () => {
     expect(await screen.findByText('KiB/s')).toBeInTheDocument();
     expect(screen.getByText('2.0')).toBeInTheDocument();
     expect(screen.getByText('0.5')).toBeInTheDocument();
-    expect(await screen.findByText('수집 중')).toBeInTheDocument();
-    expect(screen.getByText('12000 ms')).toBeInTheDocument();
+    // 수집기는 운영 상태 카드 아래 한 줄 요약. 시각은 모두 상대 시간
+    const ops = screen.getByRole('heading', { name: '운영 상태' }).closest('section')!;
+    const collector = within(within(ops).getByRole('region', { name: '텔레메트리 수집기 상태' }));
+    expect(collector.getByText('수집기')).toBeInTheDocument();
+    expect(await collector.findByText('수집 중')).toBeInTheDocument();
+    expect(collector.getByText('수집 중')).toHaveAttribute('data-tone', 'ok');
+    // 둘째 줄: 정수 초·분 또는 "방금" (소수점 없음)
+    const when = String.raw`(방금|\d+초 전|\d+분 전|\d+시간 \d+분 전)`;
+    expect(
+      collector.getByText(new RegExp(`^heartbeat ${when} · 마지막 성공 ${when} · 실패 2회$`)),
+    ).toBeInTheDocument();
+    expect(collector.queryByText(/\d\.\d초/)).not.toBeInTheDocument();
+    expect(collector.queryByText(/오후|오전|12000 ms|참고/)).not.toBeInTheDocument();
+    // 숫자·ID·버전은 고정폭, 한글 문구 값은 일반 글꼴
+    expect(screen.getByText(VM_IDS.autonomous)).toHaveAttribute('data-mono', 'true');
+    expect(screen.getByText('주 구동 VM', { selector: 'span' })).not.toHaveAttribute('data-mono');
+    expect(screen.getByText('192.168.77.2')).toHaveAttribute('data-mono', 'true');
+    expect(within(ops).getByText('실행 중').closest('strong')).not.toHaveAttribute('data-mono');
+    const config = screen.getByRole('heading', { name: 'VM 구성' }).closest('section')!;
+    expect(within(config).queryByRole('region', { name: '텔레메트리 수집기 상태' })).not.toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url.endsWith('/processes'))).toBe(false);
   });
 
@@ -551,7 +643,7 @@ describe('VM telemetry dashboard', () => {
     const status = within(screen.getByRole('region', { name: '텔레메트리 수집기 상태' }));
     expect(await status.findByText('관측 만료')).toBeInTheDocument();
     expect(status.queryByText('수집 중')).not.toBeInTheDocument();
-    expect(status.getByText('2')).toBeInTheDocument();
+    expect(status.getByText(/실패 2회/)).toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url.endsWith('/threads'))).toBe(false);
   });
 
