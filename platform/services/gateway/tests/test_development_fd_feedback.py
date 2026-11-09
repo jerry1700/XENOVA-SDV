@@ -28,6 +28,7 @@ from xenova_gateway.odometry import OdometryConfig, VehicleOdometry
 from xenova_gateway.output_owner import OutputOwner
 from xenova_gateway.scene_authority import StationaryPolicy
 from xenova_gateway.sink import SerialSink, SinkError
+from xenova_gateway.tof_feedback3 import TOF_CAPABILITY, TofSelection
 
 pytestmark = pytest.mark.skipif(os.name != 'posix', reason='explicit development POSIX FD scope')
 
@@ -93,6 +94,57 @@ def test_explicit_fd_uses_one_owned_duplicate_and_never_imports_pyserial(pair, m
     with pytest.raises(OSError) as closed:
         sink._write_bytes(b'after-close')
     assert closed.value.errno == errno.EBADF
+
+
+@pytest.mark.parametrize('valid_clock_reads,expected_end,expected_ready',
+    ((3, 2_000_000, True), (2, 0, True), (0, 0, False)),
+    ids=('expires-between-old-direction-reads', 'expired-before-direction', 'exact-expiry'))
+def test_feedback3_view_uses_one_original_direction_lease_at_expiry(pair, monkeypatch,
+        valid_clock_reads, expected_end, expected_ready):
+    """원 clock은 읽기 사이 만료된다. view는 원 E만 표시하고 STOP/권한을 재발급하지 않는다."""
+    caller, _ = pair
+    forbid_serial(monkeypatch)
+    host, device, gateway = (str(uuid4()) for _ in range(3))
+    odometry = VehicleOdometry(OdometryConfig('rc-test-1', 'encoder-lab-1', .001, .2, .25, 2.,
+        20000, 200000, 20, 32, .005, .01, .02, .02), host)
+    policy = StationaryPolicy(30000, 100000, 200000, .001, .05, .1, 0., 0.)
+    profile = Feedback3Profile('a'*64, 'b'*64, 100, 100, 100000, 1000000,
+        200000, 100, 100, policy, 10000000, .02, 20000)
+    sink = Feedback3SerialSink('development-fd', development_fd=caller.fileno(), timeout_ms=500,
+        clock=lambda: 1., odometry=odometry, profile=profile)
+    try:
+        sink.ready, sink.device_session = True, device
+        sink.capabilities |= TOF_CAPABILITY
+        sink.configure_tof(TofSelection(((0, 'c'*64, 4),), 500000, 20000, 'rc-test-1', host, gateway))
+        sink.stop_pin = dict(applied=False, command=b'original-unapplied-stop')
+        original_pin = dict(sink.stop_pin)
+        lease = dict(ack=True, expires=2_000_000, reference=1_000_000, lower=0, upper=1)
+        sink.leases[1] = lease
+        sink.clock_sequence, sink.probe_sequence, sink.report_hwm, sink.sequence = 1, 5, 7, 9
+        original_lease, original_epoch = dict(lease), sink.clock_epoch
+        reads = 0
+        def crossing_clock():
+            nonlocal reads
+            reads += 1
+            return (1_999_999 if reads <= valid_clock_reads else 2_000_000)/1_000_000
+        sink.clock = crossing_clock
+        view = sink._view()
+        assert view['clock_ready'] is expected_ready
+        assert view['clock_valid_until_pi_us'] == view['stop_facts_source']['clock_end'] == expected_end
+        assert sink._tof_context_snapshot[-1] is bool(expected_end)
+        assert view['accepted'] is view['applied'] is view['physical_stop'] is None
+        assert sink.matched_stop is None and sink.stop_pin == original_pin
+        assert list(sink.leases) == [1] and sink.leases[1] is lease and lease == original_lease
+        assert (sink.clock_sequence, sink.probe_sequence, sink.report_hwm, sink.sequence) == (1, 5, 7, 9)
+        assert sink.clock_epoch == original_epoch and sink.fault is None
+        assert sink._lease(2_000_000) is None  # 원 half-open E에서는 거절하며 갱신하지 않는다.
+        sink.clock = lambda: 2.
+        expired = sink._view()
+        assert expired['clock_valid_until_pi_us'] == expired['stop_facts_source']['clock_end'] == 0
+        assert expired['clock_ready'] is False and sink._tof_context_snapshot[-1] is False
+        assert sink.stop_pin == original_pin and lease == original_lease
+    finally:
+        sink.close()
 
 
 @pytest.mark.parametrize('port,fd', (('development-fd', None), ('/dev/ttyUSB0', 0),
