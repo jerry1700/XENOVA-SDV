@@ -61,6 +61,108 @@ class PcAcquisitionLoop:
         run_acquisition(actor, self)
 
 
+class _AcquisitionDiagnostic:
+    """A owner의 고정8단계와 pump 간격만 집계한다. 추가 j_us 호출·계수 비용이 있다."""
+
+    _STAGES = ('actor_poll', 'metadata_flush', 'metadata_poll', 'raw_publish',
+               'raw_await_sent', 'sdk_enqueue', 'sdk_poll', 'pump_step')
+
+    def __init__(self):
+        self.stages = {name: dict(calls=0, errors=0, max_duration_us=0) for name in self._STAGES}
+        self.pump_last_us = None
+        self.pump_max_gap_us = 0
+        self.positions_before_last_pump = self.copy_request = self.final = None
+        self.dropped = 0
+        self.save_attempted = False
+
+    def _tick(self):
+        try:
+            value = j_us()
+            if type(value) is int and 0 <= value < 2**63:
+                return value
+        except BaseException:
+            pass
+        self.dropped = min(2**63-1, self.dropped+1)
+        return None
+
+    def call(self, stage, function, *args, **kwargs):
+        began = self._tick()
+        row = self.stages[stage]
+        row['calls'] = min(2**63-1, row['calls']+1)
+        if stage == 'pump_step' and began is not None:
+            if self.pump_last_us is not None and began >= self.pump_last_us:
+                self.pump_max_gap_us = max(self.pump_max_gap_us, began-self.pump_last_us)
+            self.pump_last_us = began
+        try:
+            return function(*args, **kwargs)
+        except BaseException:
+            row['errors'] = min(2**63-1, row['errors']+1)
+            raise
+        finally:
+            ended = self._tick()
+            if began is not None and ended is not None and ended >= began:
+                row['max_duration_us'] = max(row['max_duration_us'], ended-began)
+
+    @staticmethod
+    def _positions(pump):
+        session = pump._session
+        sender, receiver = session.sender, session.receiver
+        return dict(sender_active_E=None if sender._active is None else sender._active[1],
+            sender_pending_E=None if sender._pending is None else sender._pending[1],
+            sender_part=sender._part, sender_offset=sender._offset,
+            receiver_partial_bytes=receiver.partial_bytes, receiver_E=receiver.deadline_us,
+            session_send_E=session.send_end,
+            clock_probe_E=None if session.waiting is None else session.waiting.expires_j_us)
+
+    def step(self, pump):
+        try:
+            # 원 fail/close는 partial/E를 지운다. 직전 scalar만 보존하며 packet은 참조하지 않는다.
+            self.positions_before_last_pump = self._positions(pump)
+        except BaseException:
+            self.dropped = min(2**63-1, self.dropped+1)
+        return self.call('pump_step', pump.step)
+
+    def pending_copy(self, issued, expires, phase, frame_E, *, selected):
+        self.copy_request = dict(issued_us=issued, expires_us=expires, phase=phase,
+            frame_expires_us=frame_E, selected=selected)
+
+    def capture_exit(self, actor, pump, driver, *, source_fenced, request_draft, metadata_draft, start_draft):
+        try:
+            result = None if pump is None else pump.result
+            terminal = None if result is None else dict(reason=result.reason, failure=result.failure,
+                counters=result.counts)
+            transport = None if pump is None else dict(positions=self._positions(pump),
+                sender_stats=pump._session.sender.stats, receiver_stats=pump._session.receiver.stats)
+            self.final = dict(source_fenced=source_fenced, actor_state=actor.state,
+                driver_phase=None if driver is None else driver.phase, leases_released=actor.leases_released,
+                active_frame_expires_us=None if driver is None or driver.active is None else driver.active.expires_us,
+                copy_request=self.copy_request, request_draft_pending=request_draft is not None,
+                metadata_draft_pending=metadata_draft is not None, start_draft_pending=start_draft is not None,
+                pump_result_before_cleanup=terminal, transport_at_loop_exit=transport)
+        except BaseException:
+            self.dropped = min(2**63-1, self.dropped+1)
+
+    def save_once(self, actor):
+        if self.save_attempted:
+            return
+        self.save_attempted = True
+        try:
+            value = dict(schema_version=1, profile='pc-acquisition-diagnostic-1', stages=self.stages,
+                pump_max_call_gap_us=self.pump_max_gap_us,
+                positions_before_last_pump=self.positions_before_last_pump, exit=self.final,
+                diagnostic_reads_dropped=self.dropped,
+                basis='original j_us values; extra reads/accounting overhead; not timing acceptance',
+                state_basis='loop exit may follow original fence/close; pre-pump positions are separate',
+                includes_payload_or_lease_evidence=False)
+            raw = (json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':'), allow_nan=False)+'\n').encode('ascii')
+            if len(raw) > 16*1024:
+                return
+            actor.save('pc-acquisition-diagnostic.json', value)
+        except BaseException:
+            # 진단 실패는 원 STOP/예외나 pc_worker_main의 Device close를 대체하지 않는다.
+            pass
+
+
 def run_acquisition(actor, settings):
     """실제 A main에서 한 연결을 진행한다. 종료·재시작 결정은 S에 남긴다."""
     if type(actor) is not PcWorkerActor or type(settings) is not PcAcquisitionLoop:
@@ -71,6 +173,7 @@ def run_acquisition(actor, settings):
     request = request_draft = metadata_draft = None
     start_draft = None
     source_fenced = False
+    diagnostic = _AcquisitionDiagnostic()
     try:
         # spawn은 socket의 Python timeout 상태를 보존하지 않으므로 수신 owner가 다시 고정한다.
         settings.observation_endpoint.setblocking(False)
@@ -107,29 +210,31 @@ def run_acquisition(actor, settings):
 
         while True:
             time.sleep(.002)
-            incoming = actor.poll()  # 원 STOP은 _StopWork로 pc_worker_main에 전파한다.
+            incoming = diagnostic.call('actor_poll', actor.poll)  # 원 STOP은 pc_worker_main에 전파한다.
             for packet in incoming:
                 if source_fenced or packet.kind != 'SLOT' or packet.payload.get('op') != 'GRANT' or request is None:
                     raise ValueError('unexpected PC A control statement or grant without original request')
                 grant = PcSlotMessage(packet, context, request, limits=settings.slot_limits)
                 request.record.check(j_us())
-                encoding, filled = driver.publish(grant.record)
+                encoding, filled = diagnostic.call('raw_publish', driver.publish, grant.record)
                 out = actor.required_slot(pc_filled_payload(grant, filled), request_id=grant.request_id,
                     issued=filled.completed_us, expires=grant.expires_us)
                 PcSlotMessage(out, context, grant, limits=settings.slot_limits)
-                driver.note_filled_sent(actor.await_sent(out, cap_us=driver.active.expires_us))
+                driver.note_filled_sent(diagnostic.call('raw_await_sent', actor.await_sent,
+                    out, cap_us=driver.active.expires_us))
                 metadata_draft = dict(kind='PC_EARLY_META' if encoding.phase == 'EARLY' else 'PC_NN_RESULT_META',
                     metadata=pc_slot_meta_fields(encoding, purpose=driver.active.purpose), body=encoding.descriptor_bytes,
                     request_id=driver.active.job_id, issued_us=filled.completed_us,
                     expires_us=driver.active.expires_us)
                 request = request_draft = None
+                diagnostic.copy_request = None
 
             if source_fenced:
                 # metadata/새 관측은 진행하지 않고 실제 S STOP과 원 NN drain만 처리한다.
-                actor.nn_source.poll()
+                diagnostic.call('sdk_poll', actor.nn_source.poll)
                 continue
-            flush_pc()
-            for received in link.poll():
+            diagnostic.call('metadata_flush', flush_pc)
+            for received in diagnostic.call('metadata_poll', link.poll):
                 packet = received.packet
                 if packet.kind == 'PC_SOURCE_STATE':
                     if not source_fenced: driver.source_state(received)
@@ -150,10 +255,10 @@ def run_acquisition(actor, settings):
 
             if source_fenced:
                 # 원 모델/Device는 유지한다. 원 output queue를 유한 drain할 뿐 재-enqueue하지 않는다.
-                actor.nn_source.poll()
+                diagnostic.call('sdk_poll', actor.nn_source.poll)
                 continue
 
-            result = pump.step()
+            result = diagnostic.step(pump)
             if result is not None:
                 # 수신 owner는 pump가 이미 fence/close했다. S는 이 원 사건으로 Source를 철회한다.
                 driver.fence(); source_fenced = True; actor.state = 'DEGRADED'
@@ -164,9 +269,9 @@ def run_acquisition(actor, settings):
                     request_id=str(uuid4()), issued_us=stamp, expires_us=stamp + 5_000_000)
                 # full-send는 이 호출의 실제 반환으로만 확인하며 다음 loop에서 draft를 재발급하지 않는다.
                 while link.pending is not None:
-                    if actor.poll():
+                    if diagnostic.call('actor_poll', actor.poll):
                         raise ValueError('unresolved original control arrived after PC source fence')
-                    link.flush()
+                    diagnostic.call('metadata_flush', link.flush)
                     time.sleep(.002)
                 continue
 
@@ -177,8 +282,8 @@ def run_acquisition(actor, settings):
                 raise TimeoutError('original PC write request expired before actual selection')
             if request is not None or metadata_draft is not None or link.pending is not None: continue
             driver.expire()
-            if driver.waiting_enqueue: driver.enqueue()
-            driver.poll_nn()
+            if driver.waiting_enqueue: diagnostic.call('sdk_enqueue', driver.enqueue)
+            diagnostic.call('sdk_poll', driver.poll_nn)
             driver.promote()
             job = driver.active
             if job is not None and driver.phase in ('EARLY', 'NN'):
@@ -188,17 +293,26 @@ def run_acquisition(actor, settings):
                         job_id=job.job_id, phase=driver.phase, expires_j_us=job.expires_us, full_key=job.full_key,
                         pc_frame_proof_sha256=job.proof_sha256, purpose=job.purpose), request_id=str(uuid4()),
                         issued=issued, expires=min(issued + settings.slot_limits.copy_budget_us, job.expires_us))
+                    diagnostic.pending_copy(request_draft['issued'], request_draft['expires'],
+                        driver.phase, job.expires_us, selected=False)
                 out = actor.slot(**request_draft)
                 if out is not None:
                     request = PcSlotMessage(out, context, limits=settings.slot_limits, cap_us=job.expires_us)
+                    diagnostic.pending_copy(request.record.issued_us, request.record.expires_us,
+                        driver.phase, job.expires_us, selected=True)
                     request_draft = None
     finally:
+        diagnostic.capture_exit(actor, pump, driver, source_fenced=source_fenced,
+            request_draft=request_draft, metadata_draft=metadata_draft, start_draft=start_draft)
         try:
-            if pump is not None: pump.close()
-        finally:
             try:
-                if driver is not None: driver.fence()
+                if pump is not None: pump.close()
             finally:
-                if link is not None: link.close()
-                else: settings.metadata_endpoint.close()
-                if pump is None: settings.observation_endpoint.close()
+                try:
+                    if driver is not None: driver.fence()
+                finally:
+                    if link is not None: link.close()
+                    else: settings.metadata_endpoint.close()
+                    if pump is None: settings.observation_endpoint.close()
+        finally:
+            diagnostic.save_once(actor)
