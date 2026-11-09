@@ -123,6 +123,8 @@ float lp_path_remaining(const struct lp_path *,dw_pose,size_t *nearest);
 void lp_state_import(struct lp_path *,const dw_state *);
 bool lp_state_export(const struct lp_path *,dw_state *);
 bool lp_mission_matches(const struct lp_path *,const xenova_drive_MissionGrant *);
+/* Exact metadata/current-grant stamp only; geometry/output admission is separate. */
+bool lp_execution_matches(const xenova_drive_MissionExecution *,const xenova_drive_MissionGrant *);
 /* Accepted geometry adoption only. Current output continues to use exact match. */
 bool lp_grant_revalidates(const struct lp_path *,const xenova_drive_MissionGrant *);
 void lp_bind_current_grant(struct lp_path *,const xenova_drive_MissionGrant *);

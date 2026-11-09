@@ -27,6 +27,9 @@ int dl_manual_clock_get(struct dl_clock *out,uint64_t *now){
  strcpy(out->trust.odom_epoch,fixture_sid);strcpy(out->gateway,fixture_vm);*now=1000000;return 0;
 }
 int dl_clock_get(struct dl_clock *out,uint64_t *now){return dl_manual_clock_get(out,now);}
+/* Serializer fixtures carry no actual owned path. Local-grant admission is
+ * exercised through the persistent actual input bridge, never synthesized here. */
+int dl_mission_for_local(xenova_drive_MissionGrant *out,uint64_t now){(void)out;(void)now;return -EAGAIN;}
 static xenova_drive_DirectionGateWitness fixture_gate;static bool fixture_gate_available;
 int dl_direction_get(bool role,xenova_drive_DirectionGateWitness *out,uint64_t now){(void)role;(void)now;if(!fixture_gate_available)return -EAGAIN;*out=fixture_gate;return 0;}
 static uint64_t context_u64(const char *text){
