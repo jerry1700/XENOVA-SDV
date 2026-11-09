@@ -19,7 +19,8 @@
 #define DW_STATE_FEATURES 7u
 #define DW_TASK_REFERENCE 8u
 #define DW_EPISODE 16u
-#define DW_STATE_KNOWN_FEATURES (DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE)
+#define DW_OPERATION 32u
+#define DW_STATE_KNOWN_FEATURES (DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION)
 #define DW_CELL_ROAD 8u
 typedef xenova_drive_Pose dw_pose;
 typedef xenova_drive_Point dw_point;
@@ -68,6 +69,18 @@ enum dw_result dw_episode_request_validate(const xenova_drive_EpisodeRequest *);
 enum dw_result dw_episode_receipt_validate(const xenova_drive_EpisodeReceipt *);
 enum dw_result dw_episode_status_validate(const xenova_drive_EpisodeStatus *);
 enum dw_result dw_control_facts_validate(const xenova_drive_DriveControlFacts *,const dw_vehicle *);
+/* Non-authoritative operation/input facts. Current owner/original E is checked separately. */
+enum dw_result dw_operation_binding_validate(const xenova_drive_OperationBinding *);
+enum dw_result dw_operation_status_validate(const xenova_drive_OperationStatus *);
+enum dw_result dw_auto_preflight_validate(const xenova_drive_AutoInputPreflight *);
+enum dw_result dw_pi_operation_gate_validate(const xenova_drive_PiOperationGate *);
+enum dw_result dw_operation_probe_validate(const xenova_drive_ClockProbe *);
+enum dw_result dw_operation_clock_validate(const xenova_drive_ClockReply *);
+/* Operation extension only; original mapper source/clock admission remains separate. */
+enum dw_result dw_mapper_operation_probe_validate(const xenova_drive_MapperClockProbe *);
+enum dw_result dw_mapper_operation_reply_validate(const xenova_drive_MapperClockReply *);
+bool dw_operation_binding_equal(const xenova_drive_OperationBinding *,const xenova_drive_OperationBinding *);
+bool dw_preflight_source_matches(const xenova_drive_EpisodeSourceContext *,const dw_world *);
 enum dw_result dw_episode_initial_none(xenova_drive_EpisodeSnapshot *,const xenova_drive_EpisodeStatus *);
 bool dw_episode_core_hash(const xenova_drive_EpisodeCore *,uint8_t out[32]);
 bool dw_episode_source_hash(const xenova_drive_EpisodeSourceContext *,uint8_t out[32]);
