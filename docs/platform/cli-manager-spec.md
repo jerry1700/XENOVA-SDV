@@ -4368,6 +4368,10 @@ null/무효 옵션·새 key는 허용하지 않는다. 전체 계약/오류 단�
 <a id="cmd-registrations"></a>
 ## 현재 등록 명세 조회
 
+최초 설치는 로컬 VM 등록에서 완료하며 서버에 자동 통지하지 않는다.
+네트워크와 필요한 Tailnet 접속·Spring 자격을 준비한 뒤 아래 조회로 UUID를 확인하고,
+기존 인증된 수동 notify API를 사용한다. 조회·API 재시작·완료 first-boot가 자동 전송을 시작하지 않는다.
+
 `xenova-vm registrations [UUID] [--timeout-ms MS] [--budget-ms MS] [--json]`.
 단건은 `data.registration`, 목록은 `data.registrations`다. JSON은 포맷만 바꾼다.
 execute·원 key·lifecycle 필터는 받지 않는다. UUID 없이 현재 REGISTERED 전체를 읽는다.

@@ -176,19 +176,23 @@ DNS/응답이 느려도 event loop·Manager lease에서 기다리지 않는다. 
 async 경계에서 느린 경고 sink·원 본문 수집을 기다리지 않는다. 내부 결함·다른 오류 종류/최초 원인은 축소하지 않는다.
 커널/저장장치 전체 장애에서의 hard deadline 보장은 아니다.
 
-자동 기회는 기존 create 완료 journal `registration_notice=consumed`, factory complete의 `registration_notices`가 소유한다.
-실제 송신 전 소비를 내구 확정하며, 이미 소비된 기회·과거 결과는 그대로 읽는다. 중단 직후 송신 0회도 가능하다.
+일반 VM 생성의 자동 기회는 기존 create 완료 journal `registration_notice=consumed`가 소유한다.
+실제 송신 전 소비를 내구 확정하며 이미 소비된 기회·과거 결과는 그대로 읽는다. 중단 직후 송신 0회도 가능하다.
 공통/대상 FD와 lease 반환 뒤 `xenova_registration_hook.automatic`이 로컬 FastAPI에만 1회 요청한다.
-factory는 first-boot main의 잠금 반환 후 `systemd-run --no-block`으로 원 UUID별 일시 job을 예약한다.
-job은 `Requires/After=xenova-dom0-manager.service`이며, API는 ASGI startup과 실제 listen 뒤
-`READY=1`을 보내는 `Type=notify`다. API보다 앞선 first-boot/autostart 구간에서 송신 예산을 소비하지 않는다.
-실제 job 실행 때 기존 15초 예산을 시작해 같은 UUID notify POST를 1회 시도한다. timeout 수치를 늘리지 않았다.
-등록/원 응답/autostart는 이를 기다리지 않는다. POST 뒤 조회·retry·다음 부팅 보충은 없다.
-job은 현재 등록 사건만 만들고, timer/enable/영속 spool이나 API startup의 등록 목록 순회는 없다.
-API 기동 실패·job 취소는 자동 재예약하지 않는다. 같은 boot의 dependency restart 재진입은
-`/run/xenova/registration-notices/factory-started-UUID`의 배타 생성으로 차단한다.
-이 일시 표식은 결과/등록 원본이 아니다. 재부팅에서 사라져도 원 factory progress의 내구 소비가 재송신을 막는다.
-API 부재·중단으로 결과 파일이 없으면 confirmed가 아니며, 필요하면 인증된 수동 POST로 확인한다.
+등록/원 응답/다른 VM 제어는 HTTP 응답을 기다리지 않는다. POST 뒤 조회·retry·다음 부팅 보충은 없다.
+
+최초 설치(factory)는 로컬 VM 등록·UUID·자산·실행 의도와 기존 autostart 준비만 수행한다.
+자동 notify 호출·일시 systemd 통지 job·새 `registration_notices` 기회를 만들지 않는다.
+과거 progress의 `registration_notices`와 기존 통지 결과 파일은 삭제·초기화하지 않으며,
+완료 boot/replay·API 재시작·나중의 네트워크 연결을 이유로 과거 등록을 자동 송신하지 않는다.
+로컬 설치 완료는 Spring 등록 완료를 뜻하지 않는다.
+
+운영자는 Wi-Fi/유선 연결, 필요한 Tailscale 접속과 Spring URL/token 공급을 마친 뒤
+위 GET으로 현재 등록 명세를 조회하고 UUID별 인증된 notify POST를 명시적으로 요청한다.
+전송 실패·미확정은 위 응답 의미를 유지하며 새 VM 생성·UUID 재발급으로 우회하지 않는다.
+구형 defer/after-api helper 진입점은 이미 예약된 이전 job의 호환용으로만 유지한다.
+새 first-boot는 이를 호출하지 않는다. 실행 중인 구형 job의 운영 정리는 소유와 원 결과를 확인한 별도 절차다.
+
 helper는 `/etc/xenova/dom0-manager.env`의 bind 주소/port와 기존 API token 공급만 사용한다.
 token의 unit 우선순위(manager.env가 token.env를 override)를 따르며 Spring 전용 파일은 읽지 않는다.
 API 프로세스 안의 create에서도 helper에 Spring token/URL이나 다른 서비스 자격을 환경으로 넘기지 않는다.

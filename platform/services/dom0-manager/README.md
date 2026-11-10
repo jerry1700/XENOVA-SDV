@@ -16,18 +16,19 @@ curl --fail-with-body -X POST -H "Authorization: Bearer $DOM0_SERVICE_TOKEN" \
 Spring URL과 `VM_REGISTRATION_SERVICE_TOKEN`은 root 0600 `/etc/xenova/spring-registration.env`로 FastAPI에만 공급합니다.
 미설정은 notify에만 영향을 줍니다. 성공은 `confirmed=true`와 원 HTTP 200/201을 검증한 경우이고,
 upstream 거절(502·원 http_status/code), 응답 미확인(504), 설정/연결/포화(503)를 구별합니다.
-자동 retry/redirect/후속 GET은 없습니다. 일반 생성/factory의 공통 hook이 자동 기회를 소유하며 API startup/create service가 추가 송신하지 않습니다.
+자동 retry/redirect/후속 GET은 없습니다. 일반 VM 생성의 공통 hook만 자동 기회를 소유하며 API startup/create service가 추가 송신하지 않습니다.
 
 실제 import·wire·한도·실패 처리와 설치 순서는 [공급 계약](../../../docs/contracts/vm-provisioning-v1.md),
 정상/실패의 별도 프로세스 시험은 [검증 기록](../../../docs/verification/vm-registration-api-20261102.md)을 따릅니다.
 구형 `xenova-vm registration-notify`와 하위 직접 Spring 설정은 제거했습니다. 하위 조회는 `xenova-vm registrations [UUID] --json`입니다.
 
-factory 통지는 등록 완료 사건에서 일시 systemd job을 비동기 예약합니다. API unit은 `Type=notify`이며
-제품 entrypoint가 ASGI startup·listen 완료 뒤 `READY=1`을 보냅니다. 통지 job은 그 뒤 기존 15초 예산으로
-실행하므로 first-boot·autostart는 기다리지 않습니다. API restart의 dependent 재진입도 같은 boot의
-배타 실행 표식으로 막습니다. API 기동 실패·응답 유실·다음 boot에서 자동 재예약하지 않습니다.
-API entrypoint·unit·하위 hook을 함께 설치해야 합니다. `uvicorn dom0_manager.main:app` 직접 실행은
-HTTP 개발 실행이며 systemd 준비 신호를 내는 제품 entrypoint를 대신하지 않습니다.
+최초 설치(factory)는 로컬 VM 등록만 완료하며 자동 외부 통지나 일시 통지 job을 만들지 않습니다.
+운영자가 Wi-Fi/유선 연결과 필요한 Tailnet 접속·Spring 자격을 준비한 뒤 위 GET과 UUID별 수동 POST로 등록합니다.
+API 재시작·완료 first-boot는 등록을 자동 보충하지 않습니다. 과거 factory 통지 기록은 보존합니다.
+이 변경의 로컬 근거는 [최초 설치 로컬 등록 검증](../../../docs/verification/first-install-local-registration-20261105.md)에 있습니다.
+
+API unit은 `Type=notify`이며 제품 entrypoint가 ASGI startup·listen 완료 뒤 `READY=1`을 보냅니다.
+`uvicorn dom0_manager.main:app` 직접 실행은 HTTP 개발 실행이며 systemd 준비 신호를 내는 제품 entrypoint를 대신하지 않습니다.
 
 ## MO-04 단계 3: 내부 WebSocket 프록시
 
