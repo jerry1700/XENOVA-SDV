@@ -118,7 +118,9 @@ class ManagementTest(unittest.TestCase):
              patch.object(display_sync,'is_display_registration',return_value=True), \
              patch.object(display_sync,'sync_after_registration',
                           return_value={'ui':{'state':'not-requested'},
-                                        'bindings':{'state':'pending'}}) as sync:
+                                        'bindings':{'state':'pending'}}) as sync, \
+             patch.object(display_sync,'restart_changed_services',
+                          return_value={'state':'unchanged','restarted':[],'skipped':[]}) as restart:
             result=self.call('create',self.spec,key='display-sync-create')
         self.assertTrue(result['ok'],result)
         sync.assert_called_once()
@@ -126,6 +128,7 @@ class ManagementTest(unittest.TestCase):
         self.assertEqual(registered['uuid'],self.spec['vm_id'])
         self.assertIn(self.key,records)
         self.assertEqual(result['data']['display_sync']['bindings']['state'],'pending')
+        restart.assert_called_once_with(sync.return_value)
 
     def test_display_sync_failure_is_a_warning_not_a_failed_vm_create(self):
         import xenova_display_sync as display_sync

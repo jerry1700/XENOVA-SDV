@@ -1765,10 +1765,13 @@ class Manager:
             events,self._registration_events=self._registration_events,[]
             for record in events:automatic(self.data,self.p.runtime,record)
             try:
-                from xenova_display_sync import is_display_registration,sync_after_registration
+                from xenova_display_sync import (is_display_registration,
+                                                  restart_changed_services,
+                                                  sync_after_registration)
                 display_events=[record for record in events if is_display_registration(record)]
                 records=self.p.records(validate_assets=False) if display_events else None
                 updates=[sync_after_registration(records,record) for record in display_events]
+                for update in updates:update['services']=restart_changed_services(update)
                 if response['ok'] and updates:
                     response['data']['display_sync']=updates[0] if len(updates)==1 else updates
             except (OSError,ValueError,KeyError,TypeError) as error:

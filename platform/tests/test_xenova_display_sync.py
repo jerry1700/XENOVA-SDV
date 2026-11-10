@@ -4,6 +4,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from first_install_fixture import ROOT  # noqa: F401 - platform module path setup
 import xenova_display_sync as display
@@ -178,6 +179,55 @@ class DisplayBindingsTest(unittest.TestCase):
         self.assertTrue(display.is_display_registration(self.records['vm-interaction']))
         self.assertFalse(display.is_display_registration({
             'id': 'developer-vm', 'guest_kind': 'linux', 'template_id': 'ubuntu-24.04-arm64'}))
+
+
+class DisplayServiceRestartTest(unittest.TestCase):
+    def runner(self, active=0, failure=None):
+        calls = []
+        def run(arguments, **kwargs):
+            calls.append(arguments)
+            if failure and arguments[1:] == failure:
+                return SimpleNamespace(returncode=1)
+            if arguments[1:3] == ['is-active', '--quiet']:
+                return SimpleNamespace(returncode=active)
+            return SimpleNamespace(returncode=0)
+        return calls, run
+
+    def test_restarts_only_changed_consumers_in_dependency_order(self):
+        calls, run = self.runner(active=0)
+        result = display.restart_changed_services({
+            'ui': {'state': 'updated',
+                   'changed': ['display-runtime.json', 'display-mobile.json']},
+            'bindings': {'state': 'updated'}}, run=run)
+        self.assertEqual(result['restarted'], [
+            'xenova-display-feed.service', 'xenova-display-hdmi.service',
+            'xenova-display-mobile.service'])
+        self.assertEqual([call[1:] for call in calls], [
+            ['restart', 'xenova-display-feed.service'],
+            ['restart', 'xenova-display-hdmi.service'],
+            ['is-active', '--quiet', 'xenova-display-mobile.service'],
+            ['restart', 'xenova-display-mobile.service']])
+
+    def test_skips_inactive_mobile_and_unchanged_files(self):
+        calls, run = self.runner(active=3)
+        result = display.restart_changed_services({
+            'ui': {'state': 'updated', 'changed': ['display-mobile.json']},
+            'bindings': {'state': 'unchanged'}}, run=run)
+        self.assertEqual(result['restarted'], [])
+        self.assertEqual(result['skipped'][0]['reason'], 'inactive')
+        self.assertEqual(len(calls), 1)
+        calls, run = self.runner()
+        result = display.restart_changed_services({
+            'ui': {'state': 'unchanged', 'changed': []},
+            'bindings': {'state': 'unchanged'}}, run=run)
+        self.assertEqual(result['state'], 'unchanged');self.assertEqual(calls, [])
+
+    def test_restart_failure_is_reported_to_the_creation_boundary(self):
+        _, run = self.runner(failure=['restart', 'xenova-display-hdmi.service'])
+        with self.assertRaisesRegex(OSError, 'xenova-display-hdmi'):
+            display.restart_changed_services({
+                'ui': {'state': 'updated', 'changed': ['display-runtime.json']},
+                'bindings': {'state': 'unchanged'}}, run=run)
 
 
 if __name__ == '__main__':

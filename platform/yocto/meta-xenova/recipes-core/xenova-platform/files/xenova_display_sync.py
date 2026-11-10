@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 from uuid import UUID
 
 from xenova_runtime import atomic_write
@@ -209,3 +210,45 @@ def sync_after_registration(records, registered, *, runtime_path=RUNTIME_PATH,
     else:
         bindings = sync_bindings(records, bindings_path=bindings_path, owner_uid=owner_uid)
     return {'ui': ui, 'bindings': bindings}
+
+
+def _systemctl(arguments, *, run):
+    result = run(['systemctl', *arguments], stdin=subprocess.DEVNULL,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                 timeout=30, check=False)
+    if result.returncode != 0:
+        raise OSError(f'systemctl {arguments[0]} failed for {arguments[-1]}')
+
+
+def restart_changed_services(sync_result, *, run=subprocess.run):
+    """실제로 바뀐 설정의 소비자만 고정된 systemd unit 이름으로 재시작한다."""
+    if not isinstance(sync_result, dict):
+        raise ValueError('Display service restart requires a sync result')
+    ui = sync_result.get('ui', {})
+    bindings = sync_result.get('bindings', {})
+    changed = ui.get('changed', []) if isinstance(ui, dict) else []
+    if (not isinstance(changed, list) or any(not isinstance(item, str) for item in changed)
+            or not isinstance(bindings, dict)):
+        raise ValueError('invalid Display sync result')
+
+    restarted, skipped = [], []
+    # feed가 새 UUID를 먼저 읽은 뒤 새 Chromium 화면을 열어 presentation 공백을 줄인다.
+    if bindings.get('state') == 'updated':
+        unit = 'xenova-display-feed.service'
+        _systemctl(['restart', unit], run=run);restarted.append(unit)
+    if 'display-runtime.json' in changed:
+        unit = 'xenova-display-hdmi.service'
+        _systemctl(['restart', unit], run=run);restarted.append(unit)
+    if 'display-mobile.json' in changed:
+        unit = 'xenova-display-mobile.service'
+        active = run(['systemctl', 'is-active', '--quiet', unit], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     timeout=10, check=False)
+        if active.returncode == 0:
+            _systemctl(['restart', unit], run=run);restarted.append(unit)
+        elif active.returncode == 3:
+            skipped.append({'unit': unit, 'reason': 'inactive'})
+        else:
+            raise OSError(f'systemctl is-active failed for {unit}')
+    return {'state': 'restarted' if restarted else 'unchanged',
+            'restarted': restarted, 'skipped': skipped}
