@@ -1,6 +1,7 @@
 [Unit]
 Description=Xenova read-only display state and local web feed
-After=network.target
+Requisite=xenova-first-boot.service
+After=xenova-first-boot.service network.target
 ConditionPathExists=/etc/xenova/display-bindings.json
 ConditionPathExists=/etc/xenova/display.env
 

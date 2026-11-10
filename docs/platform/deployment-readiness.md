@@ -363,3 +363,25 @@ paired binding은 기존 `${libexecdir}/xenova-domain-identities-native`를 재�
 새 필수 공개 옵션·journal 버전 선택·운영 예산은 추가하지 않았다.
 실제 import·설치 파일 hash·서비스 복구는 [시연 범위 검증](../verification/recovery-scenario-closure-20261030.md#recovery-demo-20261107)에 기록한다.
 이는 정규 RPM·전체 이미지 재빌드, 이미지/factory 기본 firmware 변경, 주행 종단 수락의 증거가 아니다.
+
+
+<a id="display-first-install"></a>
+## 표시 역할·첫 설치 자격·연결 검사
+
+새 `guest_display` Debian factory의 first-boot는 토큰을 준비하고 원 hash를 설치 진행에 고정한 뒤
+기존 private root 공급자로 전달한다. 기존 observer 계정의 read-only export, 별도 loopback feed 토큰,
+relay 데이터 설정과 identity plan의 초기 세 역할을 준비한다. 공용 이미지/템플릿에는 보드 비밀을 넣지 않는다.
+완료된 설치에서는 토큰·역할을 초기화하지 않는다. 기존 보드 갱신 시 현재 토큰·env·binding을 보존한다.
+
+배포 묶음은 `xenova-platform`의 display_setup/sync·first_boot·wrapper·check unit과
+`xenova-display`의 relay/feed unit·기존 Python 모듈이다. `assemble.platform_root_ok`는 실제 파일·
+enable·소스 일치를 검사한다. 보드 활성 설정/토큰이 든 공용 이미지는 거절한다. 설치 후 check는
+VM autostart를 막지 않고 한 번 실행하며 조기 부팅/연결 실패는 unconfirmed로 남긴다.
+기존 보드에서 새 package를 설치했다고 첫 설치 공급을 다시 실행하거나 비밀을 회전하지 않는다.
+
+일반 생성으로 Interaction 역할을 자동 바꾸지 않는다. `xenova-display-setup show`, 조건부
+`select --vm-id NEW --expected-vm-id OLD [--execute]`, `check [--live]`를 사용한다.
+서비스 재시작 실패 뒤에는 같은 선택의 `--execute --restart`, 연결 재확인은 `check --live --record`다.
+상세 [설치·실패 처리](../../platform/services/display/router/deploy/guest-display/README.md#표시-담당-선택과-설치-확인)와
+[로컬 검증](../verification/display-installation-closure-20261111.md)을 따른다. EDID/실화면·방화벽·
+실보드 재부팅·새 이미지/SD의 수락은 별도이며 로컬 HTTP 시험으로 완료를 주장하지 않는다.
