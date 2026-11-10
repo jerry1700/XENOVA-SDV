@@ -58,6 +58,7 @@ class PcRawBroker(ResidentRawBroker):
         self._grants=[None,None];self._offers=[None,None];self._previous_offers=[None,None]
         self._active_offer=None;self._reads=[deque(maxlen=2),deque(maxlen=2)]
         self._counts=Counter();self._quiescing=False;self._paused=None;self._last_reader_recovery=None
+        self._cancelled_requests=deque(maxlen=16)
         self._metadata=[None,None];self._unjoined=None;self._publication=None;self._publication_bytes=None
         self._joined=deque()
         self._broker_token=object();self._thread=get_ident()
