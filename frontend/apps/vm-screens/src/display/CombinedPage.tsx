@@ -14,6 +14,7 @@ import {
 } from './driveExtras';
 import { ROLE } from './model';
 import { DEPART_MS, ParkedView, type ParkedCallout } from './ParkedView';
+import { DisplayAudioControl, useDisplayAudio } from './DisplayAudio';
 import { driveSummary } from './presentation';
 import { useDisplayTheme } from './theme';
 import { useScenarioSteps } from './scenarioSteps';
@@ -67,6 +68,7 @@ function useDeparture(parked: boolean) {
 
 export function CombinedPage() {
   const theme = useDisplayTheme();
+  const audio = useDisplayAudio();
   const now = useClock();
   const { presentation: p, connected, error } = useDisplay();
   const { mode, modeLabel, preparing, active, selectedDrive } = driveSummary(p, connected);
@@ -116,6 +118,7 @@ export function CombinedPage() {
       callouts={callouts}
       connected={connected}
       time={time}
+      audioControl={<DisplayAudioControl controller={audio} />}
       departing={departing}
     />
   );
@@ -255,6 +258,7 @@ export function CombinedPage() {
       <section className={styles.navPanel} aria-label="내비게이션">
         <header className={styles.topBar}>
           <span>{now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>
+          <DisplayAudioControl controller={audio} compact />
           <span className={connected ? styles.linkOk : styles.linkLost}>
             {connected ? '표시 연결됨' : '표시 연결 끊김'}
           </span>
