@@ -1843,61 +1843,252 @@ button.chip:hover:not(.chipOn) {
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
 }
-.detailEvents {
-  display: grid;
+/* 앱 상태 대체 표시의 출처 줄 (heartbeat 기준 · 단계 미수신) */
+.detailTiles > div > strong .detailTileNote {
+  display: block;
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+  line-height: var(--x-space-4);
 }
-.detailEvents > div {
+/* ---- S15P31E110-438 VM 상세 CPU·메모리 추이 (Network 탭 RxTxChart 를 선 하나로) ---- */
+.detailCharts {
+  /* 선 색은 Network 탭(NetworkDashboard 의 --rx-accent)과 같게 */
+  --rx-accent: var(--x-primary);
   display: grid;
-  grid-template-columns: 90px 82px minmax(0, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--x-space-3);
-  align-items: start;
-  padding: var(--x-space-3) 0;
-  border-bottom: 1px solid var(--x-border);
 }
-.detailEvents > div:last-child {
-  border-bottom: 0;
+.detailCharts > section {
+  min-width: 0;
+  margin-top: 0;
 }
-.detailEvents > div > div {
-  display: grid;
-  gap: 3px;
+/* 카드 안 빈 공간을 그래프가 쓰게 Network 탭보다 높게 */
+.detailCharts .memoryChart {
+  min-height: calc(var(--x-space-6) * 7);
 }
-.detailEvents small {
-  color: var(--x-text-muted);
+.detailCharts .memoryChart svg,
+.detailCharts .memoryChartEmpty {
+  height: calc(var(--x-space-6) * 6);
+  min-height: 0;
 }
-.controlHandoff {
+/* 머리 한 줄: 이름 + 현재 값(큰 숫자 + 작은 단위) + 보조 문구 */
+.memoryChartBlock > header[data-summary] {
+  justify-content: flex-start;
+  align-items: baseline;
+  min-width: 0;
+}
+/* 좁은 화면에서도 머리 한 줄 유지 (세 그래프 높이 동일): 이름은 줄바꿈 없이, 보조 문구만 말줄임 */
+.memoryChartBlock > header[data-summary] > strong {
+  flex: none;
+  white-space: nowrap;
+}
+.detailChartSummary {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--x-space-4);
-  padding: var(--x-space-4) var(--x-space-5);
-  border: 1px solid var(--x-border);
-  border-radius: var(--x-radius);
-  background: color-mix(in srgb, var(--x-surface) 72%, var(--x-bg));
+  flex: 1 1 auto;
+  overflow: hidden;
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--x-space-1);
 }
-.controlHandoff > div {
-  display: grid;
-  gap: 3px;
+.detailChartSummary > b {
+  font-size: var(--x-text-lg);
+  font-weight: 800;
 }
-.controlHandoff span {
+.detailChartSummary > b[data-mono] {
+  font-family: var(--x-font-mono);
+}
+.detailChartSummary > small {
   color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.detailChartSummary > .detailChartNote {
+  overflow: hidden;
+  min-width: 0;
+  margin-left: var(--x-space-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detailChartNote[data-warn] {
+  color: var(--x-recovering);
+}
+/* ---- S15P31E110-438 VM 상세 프로세스·스레드 표: Memory 탭 막대 행 모양 (공용 .table 과 별개) ---- */
+.detailTableStatus {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--x-space-1) var(--x-space-3);
+  margin: 0 0 var(--x-space-2);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.detailTableStatus [data-warn] {
+  color: var(--x-recovering);
+}
+/* [이름] [ID·PID] [CPU %] [짧은 CPU 막대] ([메모리 RSS]) — 고정 열 폭(table-layout: fixed)이라 값 길이에 따라 열이 흔들리지 않는다.
+   열을 왼쪽에 모아 한 줄이 한 덩어리로 읽히게, 남는 폭은 오른쪽 */
+.detailTable {
+  width: auto;
+  max-width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
   font-size: var(--x-text-sm);
 }
-.controlHandoff a {
-  flex: 0 0 auto;
-  font-weight: 700;
-  text-decoration: none;
+/* 열 사이 간격은 모두 --x-space-4 (각 칸 오른쪽 여백). CPU % 와 막대는 한 덩어리라 그 사이만 --x-space-2.
+   열 폭은 그 여백을 포함한다 */
+.detailNameCol {
+  width: calc(var(--x-space-6) * 7);
+}
+/* PID 최대 7자리(작은 고정폭)가 들어가는 폭 */
+.detailIdCol {
+  width: calc(var(--x-space-6) * 2 + var(--x-space-2));
+}
+.detailValueCol {
+  width: calc(var(--x-space-6) * 2);
+}
+.detailBarCol {
+  width: calc(var(--x-space-6) * 6 + var(--x-space-4));
+}
+.detailRssCol {
+  width: calc(var(--x-space-6) * 3);
+}
+.detailTable th,
+.detailTable td {
+  padding: var(--x-space-2) var(--x-space-4) var(--x-space-2) 0;
+  border-bottom: 1px solid var(--x-border);
+  text-align: left;
+  white-space: nowrap;
+}
+.detailTable [data-cpu] {
+  padding-right: var(--x-space-2);
+}
+.detailTable th:last-child,
+.detailTable td:last-child {
+  padding-right: 0;
+}
+.detailTable th {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 600;
+}
+/* 이름이 길면 말줄임 (전체 이름은 title) */
+.detailTable td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* ID·PID: 제목과 값 모두 가운데, 값은 작은 회색 고정폭 */
+.detailTable [data-id] {
+  text-align: center;
+}
+.detailTable td[data-id] {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+}
+/* CPU %·메모리: 제목과 값의 시작점(왼쪽)을 맞춘다. 자릿수 폭 고정 */
+.detailTable [data-num] {
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.detailTable td[data-num] {
+  font-family: var(--x-font-mono);
+}
+/* 숫자 바로 뒤 막대: 왼쪽 여백 없이 붙인다 */
+.detailTable .detailBarCell {
+  vertical-align: middle;
+}
+.detailBarCell > span {
+  display: block;
+  width: calc(var(--x-space-6) * 6);
+}
+.detailTableMore {
+  margin-top: var(--x-space-2);
+  padding: var(--x-space-1) var(--x-space-2);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: transparent;
+  color: var(--x-text-muted);
+  font: inherit;
+  font-size: var(--x-text-xs);
+  cursor: pointer;
+}
+.detailTableMore:hover,
+.detailTableMore:focus-visible {
+  color: var(--x-text);
+}
+/* VM 상세 이벤트: 한 줄 [시각] [심각도 점 + 종류] [내용], 고정 열이라 모든 행의 시작점이 같다 */
+.detailEvents {
+  display: grid;
+  font-size: var(--x-text-sm);
+}
+.detailEventRow {
+  display: grid;
+  grid-template-columns:
+    calc(var(--x-space-6) * 2 + var(--x-space-3)) calc(var(--x-space-6) * 3 + var(--x-space-4))
+    minmax(0, 1fr);
+  gap: var(--x-space-4);
+  align-items: baseline;
+  padding: var(--x-space-2) 0;
+  border-bottom: 1px solid var(--x-border);
+}
+.detailEventRow:last-of-type {
+  border-bottom: 0;
+}
+.detailEventRow > time {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+/* 점 + 종류는 블록으로 두어 행의 글자 기준선(baseline)에 맞추고, 점은 글자 가운데 높이(vertical-align: middle)에 */
+.detailEventRow > .statusDot {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.detailEventRow > .statusDot > i {
+  position: relative;
+  /* middle 은 영문 x-height 기준이라 한글 글자 가운데보다 약 2px 낮다 (헤드리스 Chrome 실측) → 반 칸 올린다 */
+  top: calc(var(--x-space-1) / -2);
+  display: inline-block;
+  margin-right: var(--x-space-2);
+  vertical-align: middle;
+}
+/* 심각도 점: 정보 = 기본 강조색, 경고·오류 = 상태 색 */
+.detailEventRow > .statusDot[data-tone='info'] > i {
+  background: var(--x-primary);
+}
+.detailEventRow > .statusDot[data-tone='error'] > i {
+  background: var(--x-fault);
+}
+.detailEventText {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detailEventText small {
+  margin-left: var(--x-space-2);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.detailEventText code {
+  margin-left: var(--x-space-2);
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
 }
 @media (max-width: 800px) {
-  .controlHandoff {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .vmDetailGrid {
+  .vmDetailGrid,
+  .detailCharts {
     grid-template-columns: 1fr;
   }
-  .detailEvents > div {
-    grid-template-columns: 76px 74px minmax(0, 1fr);
-    gap: var(--x-space-2);
+  /* 좁은 화면: [시각] [점 + 종류] 아래 줄에 내용 */
+  .detailEventRow {
+    grid-template-columns: calc(var(--x-space-6) * 2 + var(--x-space-3)) minmax(0, 1fr);
+    gap: var(--x-space-1) var(--x-space-2);
+  }
+  .detailEventText {
+    grid-column: 1 / -1;
   }
 }
 /* 좁은 화면: 라벨 위·값 아래, 구성 타일 3칸은 2칸 (예약 IPv4 는 다음 줄 전체) */
@@ -1911,6 +2102,29 @@ button.chip:hover:not(.chipOn) {
   }
   .detailTiles[data-cols='3'] > div:last-child {
     grid-column: 1 / -1;
+  }
+  .detailCharts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* 좁은 화면: 막대를 숨기고 숫자만, 이름 열이 남는 폭 */
+  .detailTable {
+    width: 100%;
+  }
+  .detailNameCol {
+    width: auto;
+  }
+  .detailBarCol {
+    width: 0;
+  }
+  .detailTable .detailBarCell {
+    display: none;
+  }
+  /* 막대가 없으니 CPU % 뒤도 다른 열과 같은 간격 */
+  .detailTable [data-cpu] {
+    padding-right: var(--x-space-4);
+  }
+  .detailRssCol {
+    width: calc(var(--x-space-6) * 2 + var(--x-space-3));
   }
 }
 

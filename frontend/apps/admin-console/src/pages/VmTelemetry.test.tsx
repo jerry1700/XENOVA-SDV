@@ -551,6 +551,9 @@ describe('VM telemetry dashboard', () => {
     expect(screen.queryByText('할당 자원')).not.toBeInTheDocument();
     expect(screen.queryByText('Identity & state')).not.toBeInTheDocument();
     expect(screen.queryByText(/앱 heartbeat/)).not.toBeInTheDocument();
+    // 맨 아래 "생명주기 제어" 안내 카드와 VM Control 링크는 없앴다 (머리말 뒤로가기만 남음)
+    expect(screen.queryByText('생명주기 제어')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /VM Control에서 관리/ })).not.toBeInTheDocument();
   });
 
   it('shows the INFOTAINMENT badge beside the title of the Linux interaction VM', async () => {
@@ -590,19 +593,30 @@ describe('VM telemetry dashboard', () => {
   it('shows Zephyr thread pages, heap, RX rate, reserved IP and only its own app reports', async () => {
     const fetch = fixture();
     renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
-    expect(await screen.findByRole('columnheader', { name: '스레드 ID' })).toBeInTheDocument();
-    const cpuTable = screen.getByRole('columnheader', { name: '스레드 ID' }).closest('table')!;
+    const cpuTable = (await screen.findByText('telemetry')).closest('table')!;
+    expect(within(cpuTable).getByRole('columnheader', { name: 'ID' })).toBeInTheDocument();
+    expect(within(cpuTable).getByText('telemetry').nextElementSibling).toHaveTextContent('1');
     expect(within(cpuTable).getByText('telemetry')).toBeInTheDocument();
     expect(within(cpuTable).queryByText('8.00 KiB')).not.toBeInTheDocument();
     expect(screen.queryByRole('table', { name: '스레드 스택 스냅샷' })).not.toBeInTheDocument();
     expect(screen.queryByText('스레드 스택 스냅샷')).not.toBeInTheDocument();
-    expect(screen.getByText(/페이지 1\/2 수신/)).toBeInTheDocument();
+    // 페이지 누락은 이상 경고라 주의 색, 계측 구간 문구는 화면에서 뺐다
+    expect(screen.getByText(/페이지 1\/2 수신/)).toHaveAttribute('data-warn', 'true');
+    expect(screen.queryByText(/계측 구간/)).not.toBeInTheDocument();
     expect(screen.getByText(/대기 · 준비 미충족 · awaiting_input/)).toBeInTheDocument();
     expect(screen.queryByText(/실행 중 · 계산 준비 확인/)).not.toBeInTheDocument();
     expect(screen.getByText('192.168.77.2')).toBeInTheDocument();
     expect(await screen.findByText('KiB/s')).toBeInTheDocument();
     expect(screen.getByText('2.0')).toBeInTheDocument();
-    expect(screen.getByText('0.5')).toBeInTheDocument();
+    // 커널 힙은 Memory 탭과 같은 현재값의 용량 대비 % + 사용 / 전체 · 여유
+    // 이름 옆 같은 줄에 현재 값과 보조 문구, 그래프 라벨에 "· 최근 5분" 없음
+    const heap = within(screen.getByText('커널 힙').closest('section')!);
+    expect(screen.getByRole('heading', { name: 'CPU·메모리 추이 · 최근 5분' })).toBeInTheDocument();
+    for (const old of ['CPU · 최근 5분', '커널 힙 · 최근 5분', '최근 5분 · 실제 수신 데이터'])
+      expect(screen.queryByText(old)).not.toBeInTheDocument();
+    expect(heap.getByText('5분 전')).toBeInTheDocument();
+    expect(heap.getByText('50.0')).toBeInTheDocument();
+    expect(heap.getByText('0.50 KiB / 1.00 KiB · 여유 0.50 KiB')).toBeInTheDocument();
     // 수집기는 운영 상태 카드 아래 한 줄 요약. 시각은 모두 상대 시간
     const ops = screen.getByRole('heading', { name: '운영 상태' }).closest('section')!;
     const collector = within(within(ops).getByRole('region', { name: '텔레메트리 수집기 상태' }));
@@ -624,6 +638,132 @@ describe('VM telemetry dashboard', () => {
     const config = screen.getByRole('heading', { name: 'VM 구성' }).closest('section')!;
     expect(within(config).queryByRole('region', { name: '텔레메트리 수집기 상태' })).not.toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url.endsWith('/processes'))).toBe(false);
+  });
+
+  it('shows the fresh heartbeat in place of a missing lifecycle with its source noted', async () => {
+    fixture();
+    const missing = structuredClone(drive);
+    missing.vm_apps![VM_IDS.manual]!.drive = {
+      lifecycle: null,
+      lifecycle_source: { status: 'unknown', age_ms: null },
+      heartbeat: { state: 'standby' },
+      heartbeat_source: { status: 'fresh', age_ms: 100 },
+    };
+    useDrive.mockReturnValue({ drive: missing, socket: 'open' });
+    renderPage(`/dashboard/vms/${VM_IDS.manual}`);
+    const ops = within((await screen.findByRole('heading', { name: '운영 상태' })).closest('section')!);
+    const value = ops.getByText('앱 상태').nextElementSibling!;
+    expect(value).toHaveTextContent(/^대기heartbeat 기준 · 단계 미수신$/);
+    expect(ops.getByText('heartbeat 기준 · 단계 미수신')).toBeInTheDocument();
+  });
+
+  it('sorts threads by CPU, shows ten rows first and expands the rest', async () => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) => {
+      if (!url.endsWith(`/vms/${VM_IDS.autonomous}/threads`)) return original(url);
+      return Response.json({
+        vm_id: VM_IDS.autonomous,
+        window_ms: 1000,
+        received_at: received,
+        stale: false,
+        threads_status: 'ok',
+        parts_received: 1,
+        part_count: 1,
+        complete: true,
+        conflicting_pages: false,
+        items: [
+          ...Array.from({ length: 12 }, (_, i) => ({
+            thread_id: String(i + 1),
+            thread_name: `worker_${i + 1}`,
+            name_truncated: false,
+            cpu_percent: i === 3 ? null : i * 9,
+            unavailable_reason: null,
+          })),
+          // Zephyr idle 스레드는 목록·개수·더 보기에서 빠지고 상태 줄에 "유휴 N%"
+          {
+            thread_id: '20',
+            thread_name: 'idle',
+            name_truncated: false,
+            cpu_percent: 99.5,
+            unavailable_reason: null,
+          },
+        ],
+      });
+    });
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const table = (await screen.findByText('worker_12')).closest('table')!;
+    // [이름 + 작은 회색 ID] [CPU %] [짧은 CPU 막대] (막대 열 제목은 비움)
+    expect(
+      within(table)
+        .getAllByRole('columnheader')
+        .map((th) => th.textContent),
+    ).toEqual(['이름', 'ID', 'CPU %']);
+    const rows = () => within(table).getAllByRole('row').slice(1);
+    const names = () => rows().map((row) => row.querySelector('td')!.firstChild!.textContent);
+    expect(names()).toHaveLength(10);
+    expect(names()[0]).toBe('worker_12');
+    // ID 는 이름 뒤가 아니라 별도 열 (가운데 정렬)
+    expect(rows()[0]!.querySelectorAll('td')[1]).toHaveTextContent('12');
+    expect(rows()[0]!.querySelectorAll('td')[1]).toHaveAttribute('data-id', 'true');
+    expect(rows()[0]!.querySelector('td')).toHaveTextContent(/^worker_12$/);
+    // 상태 줄: 계측 구간·유휴는 빼고 "CPU 높은 순 · N개"만 (이상 경고는 이상할 때만)
+    expect(screen.queryByText(/유휴/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/계측 구간/)).not.toBeInTheDocument();
+    expect(screen.getByText('CPU 높은 순 · 12개')).toBeInTheDocument();
+    expect(within(table).queryByText('idle')).not.toBeInTheDocument();
+    // 막대 색: Memory 탭과 같은 80% 주의, 95% 위험
+    const level = (index: number) => rows()[index]!.querySelector('[data-level]')!.getAttribute('data-level');
+    expect([level(0), level(1), level(2), level(3)]).toEqual(['fault', 'warn', 'warn', 'ok']);
+    expect(rows()[0]!.querySelectorAll('td')[2]).toHaveTextContent('99.0');
+    expect(rows()[0]!.querySelectorAll('td')[3]!.querySelector('[data-level]')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '2개 더 보기' }));
+    expect(names()).toHaveLength(12);
+    // 값이 없는 스레드는 맨 뒤
+    expect(names().at(-1)).toBe('worker_4');
+    fireEvent.click(screen.getByRole('button', { name: '접기' }));
+    expect(names()).toHaveLength(10);
+  });
+
+  it('sorts Linux processes by CPU with right-aligned number columns', async () => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) => {
+      if (!url.endsWith(`/vms/${VM_IDS.interaction}/processes`)) return original(url);
+      return Response.json({
+        vm_id: VM_IDS.interaction,
+        observed_at: received,
+        stale: false,
+        items: [
+          { pid: 1, name: 'systemd', cpu_percent: 0.2, rss_bytes: 1048576 },
+          { pid: 412, name: 'interaction', cpu_percent: 4.2, rss_bytes: 2097152 },
+          { pid: 388, name: 'xenova-agent', cpu_percent: 1.1, rss_bytes: null },
+        ],
+      });
+    });
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const table = (await screen.findByRole('columnheader', { name: '메모리 (RSS)' })).closest('table')!;
+    const rows = within(table).getAllByRole('row').slice(1);
+    // [이름 + 작은 회색 PID] [CPU 막대] [CPU %] [메모리 RSS]
+    expect(rows.map((row) => row.querySelector('td')!.firstChild!.textContent)).toEqual([
+      'interaction',
+      'xenova-agent',
+      'systemd',
+    ]);
+    expect(rows[0]!.querySelector('td')).toHaveTextContent(/^interaction$/);
+    const cells = rows[0]!.querySelectorAll('td');
+    expect(cells[1]).toHaveAttribute('data-id', 'true');
+    expect(cells[1]).toHaveTextContent('412');
+    expect(cells[2]).toHaveAttribute('data-num', 'true');
+    expect(cells[2]).toHaveTextContent('4.2');
+    expect(cells[3]!.querySelector('[data-level]')).toHaveAttribute('data-level', 'ok');
+    expect(
+      within(table)
+        .getAllByRole('columnheader')
+        .map((th) => th.textContent),
+    ).toEqual(['이름', 'PID', 'CPU %', '메모리 (RSS)']);
+    expect(cells[4]).toHaveTextContent('2.0 MiB');
+    expect(screen.queryByRole('button', { name: /더 보기/ })).not.toBeInTheDocument();
   });
 
   it('defers stack diagnostics display while preserving CPU rows', async () => {

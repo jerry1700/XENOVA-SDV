@@ -7,7 +7,7 @@
  *   - 수동주행이 제어 중 죽으면 SAFE_STOP, 돌아오면 MANUAL. 네비게이션이 죽어도 주행은 그대로 (격리)
  *   - 인지 끊김(D5)은 모드를 바꾸지 않는다: 자율주행이 정지 명령(v=0)을 낸다
  */
-import type { DriveApp, DriveKey, DriveMode, DriveState, InputResult } from '../api/drive';
+import type { DriveApp, DriveKey, DriveMode, DriveState, InputResult, VmAppReport } from '../api/drive';
 import type { EventSeverity, EventType, VmEvent, VmState } from '../api/types';
 import { VM_IDS } from './data';
 import {
@@ -300,6 +300,29 @@ function app(
   };
 }
 
+/**
+ * VM별 주행 앱 보고(vm_apps). 운전 중인 앱은 실행 중·계산 준비 확인·동작 중, 다른 쪽은 대기·대기 자격 확인·대기.
+ * 앱이 죽어 있으면 lifecycle·heartbeat 를 관측 만료로 둔다 (heartbeat 대체 표시와 만료 표시를 화면에서 볼 수 있게)
+ */
+function vmApp(a: AppLife, driving: boolean, now: number): VmAppReport {
+  if (!a.alive)
+    return {
+      lifecycle: null,
+      lifecycle_source: { status: 'stale', age_ms: 3000 },
+      heartbeat: null,
+      heartbeat_source: { status: 'stale', age_ms: 3000 },
+    };
+  const age = now % 100;
+  return {
+    lifecycle: driving
+      ? { phase: 'EXECUTING', readiness: 'READY', reason: null }
+      : { phase: 'WAITING', readiness: 'QUALIFIED', reason: null },
+    lifecycle_source: { status: 'fresh', age_ms: age },
+    heartbeat: { state: driving ? 'active' : 'standby' },
+    heartbeat_source: { status: 'fresh', age_ms: age },
+  };
+}
+
 export function snapshot(): DriveState {
   const now = Date.now();
   const { autonomous: auto, manual, interaction: board } = store.apps;
@@ -326,6 +349,11 @@ export function snapshot(): DriveState {
       batt_v: null,
       flags: { estop: store.estop, watchdog: false, obstacle: store.obstacle },
       received_ago_ms: now % 50,
+    },
+    // 앱 ID 는 기존 apps 와 같은 키 (같은 앱이 두 번 보이지 않게)
+    vm_apps: {
+      [VM_IDS.autonomous]: { autonomous: vmApp(auto, active === 'autonomous', now) },
+      [VM_IDS.manual]: { manual: vmApp(manual, active === 'manual', now) },
     },
     apps: {
       autonomous: app(

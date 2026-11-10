@@ -411,6 +411,50 @@ export function mockAppMemorySamples(vmId: string, now = Date.now()): MetricSamp
   }).flat();
 }
 
+const CPU_INTERVAL_MS = 10_000;
+const CPU_SAMPLES = 30;
+
+/**
+ * Zephyr CPU 표본(최근 5분, 10초 간격). Telemetry 2.1 CPU 페이지처럼 cpu.system.percent 1개와
+ * 스레드별 cpu.thread.percent(labels: thread_id·thread_name·name_truncated)를 한 표본에 담는다.
+ * VM A(주 구동)는 계산 부하로 조금 높게, VM B(백업)는 대기라 낮게.
+ */
+export function mockZephyrCpuSamples(vmId: string, now = Date.now()): MetricSample[] {
+  const busy = vmId === VM_IDS.autonomous;
+  return Array.from({ length: CPU_SAMPLES }, (_, index) => {
+    const wave = Math.sin(index / 3);
+    const system = Math.round((busy ? 34 + 6 * wave : 9 + 2 * wave) * 10) / 10;
+    const threads: [string, string, number][] = [
+      ['2', 'drive_worker', busy ? system * 0.6 : system * 0.3],
+      ['3', 'telemetry', busy ? 4.2 : 3.1],
+      ['4', 'net_rx', busy ? 2.4 : 1.2],
+      ['5', 'idle', Math.max(0, 100 - system)],
+    ];
+    const observedAt = new Date(
+      now - OBSERVATION_DELAY_MS - (CPU_SAMPLES - 1 - index) * CPU_INTERVAL_MS,
+    ).toISOString();
+    return {
+      sample_id: `cpu-${vmId}-${index}-${now}`,
+      vm_id: vmId,
+      boot_id: `mock-boot-${vmId}`,
+      source: 'zephyr_telemetry',
+      observed_at: observedAt,
+      received_at: observedAt,
+      window_ms: 1000,
+      values: [
+        metric('cpu.system.percent', system, 'percent'),
+        ...threads.map(([id, name, value]) =>
+          metric('cpu.thread.percent', Math.round(value * 10) / 10, 'percent', {
+            thread_id: id,
+            thread_name: name,
+            name_truncated: 'false',
+          }),
+        ),
+      ],
+    };
+  });
+}
+
 const NETWORK_INTERVAL_MS = 2000;
 const NETWORK_SAMPLES = 30;
 
