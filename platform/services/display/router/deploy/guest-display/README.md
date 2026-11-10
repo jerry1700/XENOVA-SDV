@@ -1,6 +1,6 @@
 # guest display — HDMI A안 (S15P31E110-414) / B안 보류 (410·411·413)
 
-HDMI 선택지의 **현재 구조는 A안**이다. 웹 UI(vm-screens + 화면 앱 서버)는 표시 domU(VM3)에서 제공하고, **dom0의 기존 Chromium kiosk가 그 화면을 열어 HDMI 1대에 그린다.** dom0 relay unit과 데이터 전용 설정 예제는 `xenova-display` recipe에 연결했다. 활성 설정·토큰 공급과 실제 이미지 설치는 별도이며, B안 unit은 설치하지 않는다. 설계: [`docs/design/display-hdmi-plan-a-domu-ui.md`](../../../../../../docs/design/display-hdmi-plan-a-domu-ui.md).
+HDMI 선택지의 **현재 구조는 A안**이다. 웹 UI(vm-screens + 화면 앱 서버)는 표시 domU(VM3)에서 제공하고, **dom0의 기존 Chromium kiosk가 그 화면을 열어 HDMI 1대에 그린다.** dom0 relay unit과 데이터 전용 설정 예제는 `xenova-display` recipe에 연결했다. 새 factory에서는 첫 설치가 보드 전용 토큰과 데이터 relay 설정·세 역할 binding을 공급한다. 실제 이미지 설치·연결 수락은 별도이며, B안 unit은 설치하지 않는다. 설계: [`docs/design/display-hdmi-plan-a-domu-ui.md`](../../../../../../docs/design/display-hdmi-plan-a-domu-ui.md).
 
 - 상태 수집·정리·화면 결정(policy)은 dom0에 둔다. VM3는 정리된 데이터를 읽기 전용으로 받아 웹 UI에 넘긴다.
 - 휴대폰 선택지는 폰이 직접 렌더링한다 (이 경로와 무관).
@@ -33,7 +33,43 @@ HDMI 선택지의 **현재 구조는 A안**이다. 웹 UI(vm-screens + 화면 �
 | dom0 | `/etc/xenova/guest-display/guest-data.token` | root, 0600 | guest data 경로 |
 | VM3 | `/etc/xenova/guest-display/guest-data.token` | xenova-display, 0600 | `guest_app` (dom0와 같은 값) |
 
-위 표의 토큰은 dom0↔VM3 전용이다. 기존 loopback feed 토큰은 `/etc/xenova/display.env`의 `XENOVA_DISPLAY_TOKEN`을 relay가 읽으며 VM3에 전달하지 않는다. **업데이트·재기동 때 두 토큰을 다시 생성하지 않는다.** 활성 설정과 비밀은 recipe/추가 설치 번들에 넣지 않는다. 새 보드의 최초 토큰 공급은 별도 설치 절차이며 기존 보드 갱신과 구분한다.
+위 표의 토큰은 dom0↔VM3 전용이다. 기존 loopback feed 토큰은 `/etc/xenova/display.env`의 `XENOVA_DISPLAY_TOKEN`을 relay가 읽으며 VM3에 전달하지 않는다. **업데이트·재기동 때 두 토큰을 다시 생성하지 않는다.** 활성 설정과 비밀은 recipe/추가 설치 번들에 넣지 않는다. 실제 guest_display 제공물을 선택한 새 factory는 xenova-first-boot가 토큰을 한 번 준비해 해당 Debian private root에 복사한다. 원 토큰 hash는 설치 진행에 남기며 중단 뒤에도 같은 토큰을 사용한다. 완료된 설치에서 분실한 토큰을 자동 재발급하지 않는다. 기존 보드 갱신은 기존 설정·토큰을 유지한다.
+
+## 표시 담당 선택과 설치 확인
+
+같은 Debian 템플릿을 더 만들어도 화면 담당과 ui_origin은 바뀌지 않는다. 역할 원본은
+`/etc/xenova/display-bindings.json`의 UUID다. 새 factory에서만 identity plan의 Debian·A/B를
+초기 선택하며, 이후 교체는 root의 아래 명령으로 명시한다. VM 생성/기동·주행 권한은 조작하지 않는다.
+
+```sh
+xenova-display-setup show
+# 이미 등록·설정 공급한 새 VM과 show에서 확인한 기존 UUID를 사용한다.
+xenova-display-setup select --vm-id "$NEW_VM_UUID" --expected-vm-id "$OLD_VM_UUID"
+xenova-display-setup select --vm-id "$NEW_VM_UUID" --expected-vm-id "$OLD_VM_UUID" --execute
+# 설정 게시 뒤 서비스 재시작이 실패했다면 같은 UUID 조건으로 재실행한다.
+xenova-display-setup select --vm-id "$NEW_VM_UUID" --expected-vm-id "$OLD_VM_UUID" --execute --restart
+xenova-display-setup check
+xenova-display-setup check --live
+```
+
+계획은 설정/서비스를 변경하지 않는다. 실행은 역할·주소·기존 UI 설정을 모두 검증한 뒤
+origin과 binding을 게시하며, 실제 변경된 feed/HDMI/활성 mobile 소비자만 재시작한다.
+추가 Debian·중복 대상·오래된 선택 조건·잘못된 후속 파일은 기존 선택을 바꾸지 않는다.
+일반 쓰기 실패는 자기 변경을 되돌리며, 복구까지 실패하면 unconfirmed를 반환한다.
+전원 단절에 대한 다중 파일 원자성을 보장하지 않는다. 중단 뒤 origin/binding 불일치는 check가
+거절하며 같은 명시 선택으로 정합화한다. 기존 legacy 배열은 계속 읽고 명시 교체 때 현재 형식으로 게시한다.
+
+새 보드는 기존 read-only observer 자격을 export해 display.env를 만들고, guest 데이터 토큰과
+분리된 loopback feed 토큰을 준비한다. 기존 env·relay override는 덮지 않는다. EDID·HDMI 장치·
+휴대폰 주소와 방화벽 제한은 실제 보드 설정이며 임의 값으로 생성하지 않는다.
+
+이미지 조립은 relay 모듈·unit·enable·설치 도구를 검사하고 활성 보드 자격이 든 이미지는 거절한다.
+부팅 뒤 `xenova-display-check.service`는 VM autostart와 독립적으로 한 번 읽기 전용 검사를 수행한다.
+`/run/xenova/display-install-check.json`은 이번 확인의 시각·단계 결과이며 출력 권한이나 VM 준비 원본이 아니다.
+`configured`는 공급 확인, `connected`는 feed→relay→선택 guest 데이터/UI의 이번 HTTP 관측이다.
+무인증 relay는 401이어야 한다. 게스트가 아직 부팅 중이거나 통로가 실패하면 unconfirmed이며
+VM을 재시작하거나 무한 재시도하지 않는다. 이후 `check --live --record`로 명시 재확인한다.
+이 결과를 MQTT 신호 freshness·앱 READY·HDMI 실제 렌더링·주행 수락으로 확대하지 않는다.
 
 ## 재부팅 후 기동과 이미지 없는 갱신
 
