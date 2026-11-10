@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+from uuid import UUID
 
 from xenova_runtime import atomic_write
 
@@ -13,6 +14,7 @@ GUEST_NETWORK = ipaddress.ip_network('192.168.77.0/24')
 RUNTIME_PATH = Path('/etc/xenova/display-runtime.json')
 MOBILE_PATH = Path('/etc/xenova/display-mobile.json')
 COMBINED_PAGE = '/display/combined'
+BINDINGS_PATH = Path('/etc/xenova/display-bindings.json')
 
 
 def _address(value):
@@ -95,3 +97,77 @@ def sync_interaction_ui(address, *, runtime_path=RUNTIME_PATH, mobile_path=MOBIL
         changed.append(path.name)
     return {'state': 'updated' if changed else ('unchanged' if prepared else 'not-configured'),
             'ui_origin': origin, 'page': COMBINED_PAGE, 'changed': changed}
+
+
+def _identity(record):
+    value = record.get('uuid')
+    try:
+        identity = UUID(value)
+    except (AttributeError, TypeError, ValueError) as error:
+        raise ValueError('Display binding requires a valid VM UUID') from error
+    if identity.int == 0:
+        raise ValueError('Display binding cannot use the dom0 UUID')
+    return str(identity)
+
+
+def _record_by_id(records, instance_id):
+    matches = [record for key, record in records.items()
+               if key == instance_id or record.get('id') == instance_id]
+    if len(matches) != 1 or matches[0].get('guest_kind') != 'zephyr':
+        raise ValueError(f'Display binding requires exactly one {instance_id}')
+    return matches[0]
+
+
+def _interaction_record(records):
+    matches = [record for record in records.values()
+               if record.get('guest_kind') == 'linux'
+               and record.get('template_id') == 'debian-13-arm64']
+    if len(matches) != 1:
+        raise ValueError('Display binding requires exactly one Debian Interaction VM')
+    return matches[0]
+
+
+def _binding_target(path, owner_uid):
+    path = Path(path)
+    if not path.exists() and not path.is_symlink():
+        if not path.parent.is_dir():
+            raise ValueError('Display binding parent is unavailable')
+        return None
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o022):
+        raise ValueError('unsafe Display configuration: display-bindings.json')
+    try:
+        value = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        value = None
+    return value
+
+
+def sync_bindings(records, *, bindings_path=BINDINGS_PATH, owner_uid=0):
+    """현재 등록된 세 VM UUID를 deployment Display binding으로 게시한다."""
+    if not isinstance(records, dict):
+        raise ValueError('Display binding requires the registered VM map')
+    primary = _record_by_id(records, 'zephyr-drive-a')
+    backup = _record_by_id(records, 'zephyr-drive-b')
+    interaction = _interaction_record(records)
+    bindings = {
+        'schema_version': 1,
+        'scope': 'deployment',
+        'bindings': [
+            {'vm_id': _identity(primary), 'role': 'primary_drive', 'expected_os': 'zephyr',
+             'app_ids': ['autonomous', 'manual'], 'app_topic_scope': 'vm_scoped',
+             'report_profile': 'warm-drive-1', 'agent_supported': False},
+            {'vm_id': _identity(backup), 'role': 'backup_drive', 'expected_os': 'zephyr',
+             'app_ids': ['autonomous', 'manual'], 'app_topic_scope': 'vm_scoped',
+             'report_profile': 'warm-drive-1', 'agent_supported': False},
+            {'vm_id': _identity(interaction), 'role': 'interaction', 'expected_os': 'debian',
+             'app_id': 'interaction', 'agent_supported': True},
+        ],
+    }
+    path = Path(bindings_path)
+    previous = _binding_target(path, owner_uid)
+    if previous == bindings:
+        return {'state': 'unchanged', 'path': str(path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}
+    atomic_write(path, json.dumps(bindings, indent=2) + '\n', mode=0o644)
+    return {'state': 'updated', 'path': str(path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}

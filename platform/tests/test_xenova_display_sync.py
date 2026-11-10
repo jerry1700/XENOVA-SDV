@@ -10,6 +10,9 @@ import xenova_display_sync as display
 
 
 EDID = 'ce1acb6e187b736d79d8103859f765f9f970863ad45b38fad07f2be5cb4c0275'
+PRIMARY = '11111111-1111-4111-8111-111111111111'
+BACKUP = '22222222-2222-4222-8222-222222222222'
+INTERACTION = '33333333-3333-4333-8333-333333333333'
 
 
 class DisplaySyncTest(unittest.TestCase):
@@ -78,6 +81,68 @@ class DisplaySyncTest(unittest.TestCase):
         result = self.sync()
         self.assertEqual(result['state'], 'not-configured')
         self.assertEqual(result['changed'], [])
+
+
+class DisplayBindingsTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='xenova-display-bindings-')
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / 'display-bindings.json'
+        self.records = {
+            'zephyr-drive-a': {'id': 'zephyr-drive-a', 'uuid': PRIMARY, 'guest_kind': 'zephyr'},
+            'zephyr-drive-b': {'id': 'zephyr-drive-b', 'uuid': BACKUP, 'guest_kind': 'zephyr'},
+            'vm-interaction': {'id': 'vm-interaction', 'uuid': INTERACTION,
+                'guest_kind': 'linux', 'template_id': 'debian-13-arm64'},
+        }
+
+    def sync(self, records=None):
+        return display.sync_bindings(records or self.records, bindings_path=self.path,
+                                     owner_uid=self.path.parent.stat().st_uid)
+
+    def test_publishes_three_current_deployment_bindings(self):
+        result = self.sync()
+        value = json.loads(self.path.read_text())
+        self.assertEqual(result['state'], 'updated')
+        self.assertEqual(value['scope'], 'deployment')
+        self.assertEqual([row['vm_id'] for row in value['bindings']],
+                         [PRIMARY, BACKUP, INTERACTION])
+        self.assertEqual([row['role'] for row in value['bindings']],
+                         ['primary_drive', 'backup_drive', 'interaction'])
+        for row in value['bindings'][:2]:
+            self.assertEqual(row['app_ids'], ['autonomous', 'manual'])
+            self.assertEqual(row['app_topic_scope'], 'vm_scoped')
+            self.assertEqual(row['report_profile'], 'warm-drive-1')
+        self.assertEqual(value['bindings'][2]['app_id'], 'interaction')
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o644)
+        self.assertEqual(self.sync()['state'], 'unchanged')
+
+    def test_replaces_stale_safe_binding_with_new_interaction_uuid(self):
+        self.sync()
+        replacement = '44444444-4444-4444-8444-444444444444'
+        self.records['vm-interaction']['uuid'] = replacement
+        self.assertEqual(self.sync()['state'], 'updated')
+        value = json.loads(self.path.read_text())
+        self.assertEqual(value['bindings'][2]['vm_id'], replacement)
+
+    def test_requires_all_three_unambiguous_registered_roles(self):
+        for missing in ('zephyr-drive-a', 'zephyr-drive-b', 'vm-interaction'):
+            records = {key: value for key, value in self.records.items() if key != missing}
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, 'requires exactly one'):
+                self.sync(records)
+        duplicate = {**self.records, 'another-interaction': {
+            'id': 'another-interaction', 'uuid': '55555555-5555-4555-8555-555555555555',
+            'guest_kind': 'linux', 'template_id': 'debian-13-arm64'}}
+        with self.assertRaisesRegex(ValueError, 'exactly one Debian'):
+            self.sync(duplicate)
+
+    def test_rejects_invalid_identity_and_unsafe_existing_target(self):
+        self.records['zephyr-drive-a']['uuid'] = 'not-a-uuid'
+        with self.assertRaisesRegex(ValueError, 'valid VM UUID'):
+            self.sync()
+        self.records['zephyr-drive-a']['uuid'] = PRIMARY
+        self.path.write_text('{}');self.path.chmod(0o666)
+        with self.assertRaisesRegex(ValueError, 'unsafe Display configuration'):
+            self.sync()
 
 
 if __name__ == '__main__':
