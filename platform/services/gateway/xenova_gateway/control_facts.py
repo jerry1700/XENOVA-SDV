@@ -21,8 +21,10 @@ def float_upper(value):
     return rounded
 
 
-def build_control_facts(runner):
-    view=runner.device_view();sample=view.get('vehicle_sample');original=view.get('absolute_meter')
+def build_control_facts(runner, *, view=None):
+    """view를 지정하면 상위 Vehicle과 같은 원 스냅샷을 사용하며 다시 읽지 않는다."""
+    if view is None:view=runner.device_view()
+    sample=view.get('vehicle_sample');original=view.get('absolute_meter')
     if sample is None or original is None:return None
     anchor,_=original;now=int(runner._clock()*1000000)
     if (anchor.vehicle_sequence!=sample['sequence'] or anchor.host_boot!=runner.authority.host
@@ -65,7 +67,7 @@ def build_control_facts(runner):
         else:return value
     if now<facts.valid_until_pi_us:value.stop.CopyFrom(facts)
     # 원 pin의 APPLIED와 현재 실측 window. 속도0/arrival/cusp READY를 사용하지 않는다.
-    matched=runner.matched_stop()
+    matched=runner.matched_stop(view=view)
     if matched is not None and matched.command_payload==pin['command']:
         device=getattr(runner._sink,'device',None);policy=getattr(device,'stationary_policy',None)
         if policy is not None:

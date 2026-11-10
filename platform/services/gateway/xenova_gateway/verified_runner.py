@@ -7,7 +7,7 @@ from collections import deque
 from xenova_mqtt import topics
 from .authority import AuthorityError
 from .machine import DRIVE_APPS,ForwardDrive,ForwardStop,PublishControl,PublishEvent,Measure
-from .runner import GatewayRunner,CONSOLE_RESUME,RESUME_REQUESTED,RESUME_CANCEL_REQUESTED
+from .runner import GatewayRunner,CONSOLE_RESUME,RESUME_REQUESTED,RESUME_CANCEL_REQUESTED,log
 from .verified import VerifiedDriveMachine
 from .frame import encode,STOP_SAFE_STOP
 from .sink import SinkError
@@ -567,24 +567,32 @@ class VerifiedGatewayRunner(GatewayRunner):
         if self.operator is None:raise ValueError('operator profile not configured')
         return self.operator.submit(call)
 
-    def matched_stop(self):
+    def matched_stop(self, *, view=None):
         """feedback3 원 ingress만 stationary 증거가 된다. feedback2/write ACK는 변환하지 않는다."""
         device=getattr(self._sink,'device',None)
-        value=getattr(device,'matched_stop',None)
         policy=getattr(device,'stationary_policy',None)
-        sample=self.device_view().get('vehicle_sample')
+        selected=view is not None
+        if view is None:view=self.device_view()
+        source=view.get('stop_facts_source')
+        value=(None if selected else getattr(device,'matched_stop',None)) if source is None else source.get('matched')
+        sample=view.get('vehicle_sample')
         if value is None or policy is None or sample is None or self.machine is None:return None
         try:
             value.check(dict(vehicle=sample['vehicle'],calibration=sample['calibration'],odom_epoch=sample['odom_epoch']),
                 self.authority.host,self.drive_link.instance if self.drive_link else self._client.identity.agent_instance_id,
-                self.machine.generation,self.device_view()['pi_session'],self.device_view()['device_session'],policy,int(self._clock()*1e6))
-        except ValueError:return None
+                self.machine.generation,view['pi_session'],view['device_session'],policy,int(self._clock()*1e6))
+        except ValueError as error:
+            # 최초 거부만 INFO로 남겨 반복 표본의 로그 비용을 제한한다.
+            reason=str(error)
+            if getattr(self,'_matched_stop_error',None) is None:log.info('STOP proof unavailable: %s',reason)
+            self._matched_stop_error=reason
+            return None
         return value
 
-    def control_facts(self):
+    def control_facts(self, *, view=None):
         """원 serial owner의 불변 meter/STOP 사실. current clock나 권위를 발급하지 않는다."""
         from .control_facts import build_control_facts
-        return build_control_facts(self)
+        return build_control_facts(self, view=view)
 
     def current_scene_gate(self):
         from .scene_authority import SceneGate

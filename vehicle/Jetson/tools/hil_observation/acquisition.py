@@ -136,6 +136,11 @@ class _AcquisitionDiagnostic:
                 sender_stats=pump._session.sender.stats, receiver_stats=pump._session.receiver.stats)
             self.final = dict(source_fenced=source_fenced, actor_state=actor.state,
                 driver_phase=None if driver is None else driver.phase, leases_released=actor.leases_released,
+                driver_counts={} if driver is None else dict(getattr(driver,'counts',{})),
+                last_enqueue_timing=None if driver is None else getattr(driver,'last_enqueue_timing',None),
+                nn_counts=dict(getattr(getattr(actor,'nn_source',None),'counts',{})),
+                nn_last_unmatched=getattr(getattr(actor,'nn_source',None),'last_unmatched',None),
+                nn_last_submission_timing=getattr(getattr(actor,'nn_source',None),'last_submission_timing',None),
                 active_frame_expires_us=None if driver is None or driver.active is None else driver.active.expires_us,
                 copy_request=self.copy_request, request_draft_pending=request_draft is not None,
                 metadata_draft_pending=metadata_draft is not None, start_draft_pending=start_draft is not None,
@@ -319,6 +324,7 @@ def run_acquisition(actor, settings):
             if driver.waiting_enqueue: diagnostic.call('sdk_enqueue', driver.enqueue)
             diagnostic.call('sdk_poll', driver.poll_nn)
             driver.promote()
+            if driver.waiting_enqueue:diagnostic.call('sdk_enqueue',driver.enqueue)
             job = driver.active
             if job is not None and driver.phase in ('EARLY', 'NN'):
                 if request_draft is None:

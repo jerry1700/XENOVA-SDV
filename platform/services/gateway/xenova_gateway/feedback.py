@@ -215,7 +215,7 @@ class FeedbackSerialSink(SerialSink):
     def poll(self,now):
         return self._poll(now)
 
-    def _poll(self,now,*,owned_ready=None):
+    def _poll(self,now,*,owned_ready=None,publish_view=True):
         if self.started is None:
             self.started=now;self._send(hello(self.pi_session,self.protocol_version))
         # OutputOwner already waited on the native fd. Other callers retain
@@ -250,7 +250,7 @@ class FeedbackSerialSink(SerialSink):
                         raise SinkError('odometry submission reference invalid') from exc
                 else:
                     if submitted:self._send(wire)
-        self.snapshot=self._view()
+        if publish_view:self.snapshot=self._view()
 
     def _receive(self,kind,payload,now):
         if kind==HELLO_ACK:

@@ -1,6 +1,6 @@
 """등록된 PC M main의 slot/source/storage와 단일 compute owner를 연결한다.
 
-S가 만든 실제 연결과 boot만 받는다. EARLY pose는 NN 전에 한 번 고정하며 현재
+S가 만든 실제 연결과 boot만 받는다. EARLY pose는 NN 결과 채택 전에 한 번 고정하며 현재
 Vehicle/R1은 별도로 갱신한다. public physical 입력으로 cast하거나 SDK/GT/READY를
 만들지 않는다. Scene/COMPLETE 복원은 지원하지 않으며 A의 모델 수명은 건드리지 않는다.
 """
@@ -257,7 +257,9 @@ class _MapperMain:
 
     def _expire_heads(self):
         now=j_us()
-        if self.acquire is not None and now>=self.acquire.expires_us:
+        # copy 예약 E가 남아 있어도 해당 관측 E가 끝났다면 새 native 읽기를 시작하지 않는다.
+        if self.acquire is not None and (now>=self.acquire.expires_us
+                or self.meta is not None and now+1>=self.meta[1].expires_j_us):
             self.actor.cancel_request(self.acquire)
             self.offer=self.offer_typed=self.meta=self.acquire=self.acquire_draft=None
         if self.early is not None and now+1>=self.early['frame'].expires_j_us:
@@ -472,6 +474,14 @@ class _MapperMain:
                     self.compute.request_stop()
                     remaining=2. if self.actor.stop is None else max(0.,min(2.,(self.actor.stop.expires_us-j_us())/1_000_000))
                     self.compute.join(remaining)
+                    # 실제 compute 종료 뒤 한 번만 저장한다. 원 종료·자원 반환은 진단 실패와 독립이다.
+                    try:
+                        import json
+                        diagnostic=dict(profile='pc-mapper-exit-diagnostic-1',compute=self.compute.snapshot(),
+                            parser_ready=getattr(self.control,'ready',False),parser_streak=getattr(self.control,'streak',0),
+                            wait_reason=getattr(self.control,'wait_reason',None))
+                        if len(json.dumps(diagnostic))<=16*1024:self.actor.save('pc-mapper-diagnostic.json',diagnostic)
+                    except BaseException:pass
             except BaseException as error:
                 self.actor.failure=type(error).__name__
                 raise

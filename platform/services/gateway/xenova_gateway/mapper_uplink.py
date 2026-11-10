@@ -220,7 +220,8 @@ class _Link:
             raise ValueError('J_LOCAL_PARTIAL_SEND')
         self.pending = None
 
-    def receive(self, now):
+    def receive(self, now, *, clock=None):
+        """실제 수신 뒤 시각으로 검사한다. 회차 시작 시각은 IPC 수신 시각이 아니다."""
         result = []
         for _ in range(8):
             try:
@@ -229,6 +230,7 @@ class _Link:
                 break
             if not raw:
                 raise EOFError('J_LOCAL_EOF')
+            received = now if clock is None else clock()
             if flags & socket.MSG_TRUNC or len(raw) > PACKET_BYTES:
                 raise ValueError('J_LOCAL_TRUNCATED')
             header, body = unframe(raw)
@@ -241,9 +243,9 @@ class _Link:
                     continue
                 raise ValueError('J_LOCAL_SEQUENCE')
             self.highwater, self.last_raw = sequence, raw
-            if not decimal(header['issued_pi_us']) <= now:
+            if not decimal(header['issued_pi_us']) <= received:
                 raise ValueError('J_LOCAL_FUTURE')
-            if now >= decimal(header['expires_pi_us']) and header['kind'] not in ('STOP', 'STOPPED'):
+            if received >= decimal(header['expires_pi_us']) and header['kind'] not in ('STOP', 'STOPPED'):
                 continue
             result.append((header, body))
         return result
@@ -288,7 +290,8 @@ def uplink_main(endpoint, profile, identities):
         while stopping is None:
             now = p_us()
             link.flush(now)
-            for header, body in link.receive(now):
+            for header, body in link.receive(now, clock=p_us):
+                now = p_us()
                 kind = header['kind']
                 if kind == 'STOP':
                     value = strict_json(body)
@@ -660,7 +663,8 @@ class GatewayMapperUplink:
                 except ValueError:
                     self.counts['tof_rejected'] += 1
             self.link.flush(now)
-            for header, body in self.link.receive(now):
+            for header, body in self.link.receive(now, clock=self.clock):
+                now = self.clock()
                 if header['kind'] == 'STOPPED':
                     continue
                 if header['kind'] != 'TRUST_CANDIDATE':

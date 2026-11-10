@@ -278,6 +278,8 @@ class SimNnSource:
         self._pending = self._input = self._output = self._last = self._send_failure = None
         self._close_deadline = None
         self._counts = Counter(expired=0, unmatched=0, duplicate=0, completed=0)
+        self.last_unmatched = None
+        self.last_submission_timing = None
 
     @property
     def counts(self):
@@ -372,6 +374,8 @@ class SimNnSource:
         if self.clock() >= expires_j_us:
             raise FrameExpired('SIM frame expired before SDK send')
         self._pending, self._last = submission, current
+        self.last_submission_timing = dict(captured_j_us=captured_j_us,
+            enqueued_j_us=sample.j_after_us,expires_j_us=expires_j_us)
         try:
             self._input_queue.send(frame)
         except Exception as error:
@@ -398,10 +402,13 @@ class SimNnSource:
             pending = self._pending
             if pending is None:
                 self._counts['unmatched'] += 1
+                self.last_unmatched = dict(stream=stream,expected=None,
+                    observed=(message.getSequenceNum(),_us(message.getTimestampDevice()),_us(message.getTimestamp())))
                 continue
             key = message.getSequenceNum(), _us(message.getTimestampDevice()), _us(message.getTimestamp())
             if key != pending.key:
                 self._counts['unmatched'] += 1
+                self.last_unmatched = dict(stream=stream,expected=pending.key,observed=key)
                 continue
             if (self._input if stream == 'nn_input' else self._output) is not None:
                 self._counts['duplicate'] += 1

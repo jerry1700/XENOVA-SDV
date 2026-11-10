@@ -260,6 +260,8 @@ class SimNnTests(unittest.TestCase):
         f.nn_output.tryGet.return_value = wrong
         self.assertEqual(f.source.poll(), ())
         wrong.getData.assert_not_called()
+        self.assertEqual(f.source.last_unmatched,dict(stream='nn_output',expected=ticket.key,
+            observed=(7,70_000_001,70_000_000)))
         f.input_output.tryGet.return_value = output_message(ticket, passthrough=True)
         f.nn_output.tryGet.return_value = None
         self.assertEqual(f.source.poll(), ())

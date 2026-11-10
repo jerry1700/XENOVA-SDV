@@ -349,6 +349,15 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertTrue(self.jio.fenced)
         self.assertEqual(len(self.publications),1)
 
+    def test_odom_reset_reports_changed_field_without_origin_values(self):
+        self.vehicle();self.cycle()
+        self.sample.odom_epoch=uid();self.sample.sequence+=1;self.vehicle()
+        with self.assertRaisesRegex(SourceChanged, 'changed: odom_epoch$') as failure:
+            self.cycle(count=1)
+        self.assertNotIn(self.sample.odom_epoch,str(failure.exception))
+        self.assertTrue(self.jio.fenced)
+        self.assertEqual(len(self.publications),1)
+
     def test_current_db_material_is_kept_separate_and_no_complete_restore_success_is_invented(self):
         self.vehicle();self.cycle()
         old=self.mapper.publication
