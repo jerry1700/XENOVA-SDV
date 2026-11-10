@@ -33,7 +33,7 @@ from .pc_source_identity import PcSourceIdentityOwner
 from .pc_source_runtime import PcSupervisorSource
 from .pc_workers import PcWorkerBoot, pc_worker_main, pc_worker_release
 from .raw_leases import Endpoint, RawScope, SLOT_BYTES
-from .resident_profile import canonical, publish_runtime_artifacts, release_sha256
+from .resident_profile import canonical, release_sha256
 from .resident_recovery import ResidentRecovery
 from .health_policy import health_policy
 from .resident_runtime import _Runtime, _identifier, _redirect_worker_output
@@ -130,8 +130,6 @@ class PcResidentRuntime(_Runtime):
 
     def _prepare(self):
         """S-log에서 실제 파일 closure를 한 번 고정한다. Device나 물리 graph는 만들지 않는다."""
-        self.output.mkdir(mode=0o700)
-        self.output_owned = True
         profile = self.pc_profile
         nn = SimNnProfile(profile.oak, 'sim-pc:'+profile.source_id,
             'jetson-monotonic:'+self.clock_epoch, profile.motion.bound_calibration.sha256)
@@ -165,7 +163,7 @@ class PcResidentRuntime(_Runtime):
             graph_profile_sha256=manifest.sha256, format_table_sha256=sha256(formats).hexdigest(),
             calibration_bundle=profile.motion.bound_calibration.sha256,
             mapper_profile_sha256=profile.mapper.sha256, manifests=manifests)
-        artifacts['published'] = publish_runtime_artifacts(self.output/'artifacts', artifacts)
+        self._publish_diagnostics(artifacts)
         return artifacts
 
     def _configure_binding(self):
@@ -211,7 +209,7 @@ class PcResidentRuntime(_Runtime):
                 data_peer = DataPeer(self.service, peer.worker_instance, _identifier())
             boot = PcWorkerBoot(peer, self._pc_peers['A'], self._pc_nn_profile, self.scope,
                 self.handles.raw, self.binding.canonical_bytes, self._pc_manifest.canonical_bytes,
-                self.handles.raw_tokens, deadline, str(self.output/role/peer.worker_instance),
+                self.handles.raw_tokens, deadline, self._diagnostic_directory(role,peer.worker_instance),
                 writer_bind_raw=self.workers['A'].bind.raw if role == 'M' else None)
             if role == 'A':
                 loop = self._acquisition_factory(observation_endpoint=self._observation_endpoint,
@@ -597,7 +595,5 @@ def run_pc_runtime(profile, state_directory, storage_profile, output, *, observa
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-    if runtime.output_owned:
-        with (runtime.output/'runtime-result.json').open('xb') as destination:
-            destination.write(canonical(result))
+    runtime.save_result(result)
     return result

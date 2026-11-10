@@ -243,6 +243,7 @@ class RawRecoveryTests(unittest.TestCase):
             actor.link = Mock()
             actor.drain_sent = Mock()
             actor.fault(RuntimeError('expired SDK/J clock sample'))
+            actor._diagnostics._queue.join()
             raw = (Path(directory) / 'failure.json').read_bytes()
             saved = json.loads(raw)
             self.assertEqual(saved['exception_type'], 'RuntimeError')

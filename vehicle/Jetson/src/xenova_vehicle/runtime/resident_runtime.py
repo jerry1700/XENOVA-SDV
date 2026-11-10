@@ -210,8 +210,6 @@ class _Runtime:
         record_runtime_publication(store, ack, receipt, service_scope=self.service_scope)
 
     def _prepare(self):
-        self.output.mkdir(mode=0o700)
-        self.output_owned = True
         artifacts = runtime_artifacts(self.profile,self.perception_profile_bytes,self.mapper_profile_bytes,
             jpeg_enabled=self.http_address is not None)
         if self.mapper_profile_bytes is not None:
@@ -223,8 +221,30 @@ class _Runtime:
             MapperProfile.from_bytes(artifacts['manifests']['mapper-profile.json']).check(calibration,
                 vehicle_configuration=self.jio_profile.source_policy.configuration,
                 vehicle_calibration=self.jio_profile.source_policy.calibration)
-        artifacts['published'] = publish_runtime_artifacts(self.output / 'artifacts', artifacts)
+        self._publish_diagnostics(artifacts)
         return artifacts
+
+    def _publish_diagnostics(self, artifacts):
+        """설정 검증 후 선택 증거 사본을 저장한다. 원본 manifest는 메모리에 유지한다."""
+        from .resident_diagnostics import DiagnosticWriter
+        artifacts['published'] = {}
+        try:self._diagnostics = DiagnosticWriter()
+        except Exception as error:
+            self.event('DIAGNOSTIC_WRITE_FAILED', error=type(error).__name__)
+            return
+        manifests = dict(artifacts['manifests'])
+        def publish():
+            self.output.mkdir(mode=0o700)
+            self.output_owned = True
+            publish_runtime_artifacts(self.output / 'artifacts', {'manifests': manifests})
+        self._diagnostics.submit(publish)
+
+    def _diagnostic_directory(self, role, worker_id):
+        return str(self.output / role / worker_id) if self.output_owned else None
+
+    def save_result(self, result):
+        if hasattr(self, '_diagnostics'):
+            self._diagnostics.save(self.output if self.output_owned else None, 'runtime-result.json', result)
 
     def event(self, kind, **fields):
         self.events.append(dict(event=kind, observed_j_us=str(j_us()), **fields))
@@ -375,10 +395,10 @@ class _Runtime:
             if role=='D':
                 boot=StorageBoot(peer,deadline_us,self.storage_profile,
                     copy_handles=(self.handles.db_copy,self.handles.db_tokens),
-                    diagnostic_directory=str(self.output/role/worker_id),recovery=self.storage_recovery)
+                    diagnostic_directory=self._diagnostic_directory(role,worker_id),recovery=self.storage_recovery)
             else:
                 boot=WorkerBoot(peer,self.profile,self.scope,self.raw_profile,self.handles.raw_tokens,
-                    deadline_us,str(self.output/role/worker_id),
+                    deadline_us,self._diagnostic_directory(role,worker_id),
                     writer_bind=self.workers['A'].bind if role=='M' else None,
                     perception_profile_bytes=self.artifacts['manifests'].get('perception-calibration.json'),
                     copy_handles=(self.handles.db_copy,self.handles.db_tokens) if role=='M' else None,
@@ -1401,7 +1421,5 @@ def run_runtime(profile, state_directory, storage_profile, output, *, duration_s
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-    if runtime.output_owned:
-        with (runtime.output / 'runtime-result.json').open('xb') as destination:
-            destination.write(canonical(result))
+    runtime.save_result(result)
     return result

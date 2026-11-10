@@ -144,7 +144,7 @@ python -m xenova_vehicle runtime \
   --output /absolute/path/new-runtime-log --json
 ```
 
-`--duration-s 10`을 지정하면 capture·NN parser·DB의 로컬 준비 후 10초 상주하고 종료한다. 생략하면 SIGINT/SIGTERM까지 유지한다. 기존 DB의 기본 정책은 `EXISTING_ONLY`이며, `CREATE_IF_ABSENT`도 기존 DB를 덮어쓰지 않는다. SDK 로그는 stderr, 최종 결과는 stdout과 `output/runtime-result.json`에 기록한다.
+`--duration-s 10`을 지정하면 capture·NN parser·DB의 로컬 준비 후 10초 상주하고 종료한다. 생략하면 SIGINT/SIGTERM까지 유지한다. 기존 DB의 기본 정책은 `EXISTING_ONLY`이며, `CREATE_IF_ABSENT`도 기존 DB를 덮어쓰지 않는다. SDK 로그는 stderr, 최종 결과는 stdout으로 반환한다. `output`의 설정 사본·진단·`runtime-result.json`은 선택 저장이다. 프로세스별 진단 daemon이 최대 8개를 대기열에 보관하고, 대기열 초과·디스크 오류·종료 시 남은 기록은 버릴 수 있다. 실행·준비·STOP·장치 복구는 이 저장을 기다리지 않는다. 자원 manifest 원본과 지도 DB의 필수 영속화는 기존 소유자가 별도로 수행한다.
 
 capture 준비는 실제 RGB/depth 30쌍, NN 준비는 M의 fresh parser 결과 5회로 구별한다. Pi 시각·odom·차량 장착 보정·지도와 provenance가 준비되기 전 `metric_ready=false`, `world_valid=false`를 유지한다. 로컬 준비는 주행 허가가 아니다.
 

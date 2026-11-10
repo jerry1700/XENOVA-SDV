@@ -42,6 +42,7 @@ def runtime_for_spawn(process, *, mapper=False, selector_fail=False):
     value.service = uid(1); value.identities = {'D': (uid(2), uid(3)), 'M': (uid(4), uid(5))}
     value.artifacts = dict(release_sha256='a' * 64, manifests={})
     value.output = Path('/unused-test-output')
+    value.output_owned = False
     value.storage_profile = value.storage_recovery = value.profile = value.scope = value.raw_profile = None
     value.handles = SimpleNamespace(db_copy=object(), db_tokens=(), raw_tokens=())
     value.jio_profile = SimpleNamespace(source_policy=object(), device='oak-test',clock_policy=object()) if mapper else None
