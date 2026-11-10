@@ -76,7 +76,7 @@ def runtime_sources():
         "xenova_zephyr_transition", "xenova_domain_identity", "xenova_catalog",
         "xenova_management", "xenova_management_cli", "xenova_first_boot", "xenova_wifi",
         "xenova_preparation", "xenova_creation", "xenova_creation_auto", "xenova_provisioning", "xenova_guest_profile",
-        "xenova_registration_hook", "xenova_registration", "xenova_display_sync", "xenova_drive_binding")}
+        "xenova_registration_hook", "xenova_registration", "xenova_display_sync", "xenova_display_setup", "xenova_drive_binding")}
     result["xenova_broker.py"] = "platform/deploy/mosquitto/scripts/xenova_broker.py"
     result.update({name + ".py": f"platform/first-install/{name}.py"
                    for name in ("artifact_io", "first_install_contract")})

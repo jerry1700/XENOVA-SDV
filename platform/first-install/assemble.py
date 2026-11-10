@@ -329,7 +329,7 @@ def platform_root_ok(root):
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
                  'xenova_creation.py','xenova_creation_auto.py',
                  'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
-                 'xenova_display_sync.py'):
+                 'xenova_display_sync.py','xenova_display_setup.py'):
         expected['usr/lib/xenova/'+name] = FILES/name
     expected['usr/lib/xenova/xenova_broker.py']=ROOT/'platform/deploy/mosquitto/scripts/xenova_broker.py'
     expected['usr/share/xenova/mqtt/policy.json']=ROOT/'platform/deploy/mosquitto/etc/policy.json'

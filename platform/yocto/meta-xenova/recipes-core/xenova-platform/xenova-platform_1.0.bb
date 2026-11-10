@@ -19,6 +19,7 @@ SRC_URI += " file://xenova_domain_identity_native.c"
 SRC_URI += " file://xenova_domain_identities_native.c"
 SRC_URI += " file://xenova_guest_profile.py file://xenova_provisioning.py file://xenova_registration.py file://xenova_registration_hook.py file://xenova_display_sync.py file://xenova-world-install"
 inherit systemd
+SRC_URI += " file://xenova_display_setup.py file://xenova-display-setup file://xenova-display-check.service"
 
 # 기존 이미지의 Python 코어에 사용자 승인한 표준 JSON 패키지를 추가한다.
 RDEPENDS:${PN} = "python3-core python3-json python3-stringold python3-crypt python3-ctypes python3-unixadmin xen-tools-libxenmanage wpa-supplicant wpa-supplicant-cli linux-firmware-bcm43455 wireless-regdb-static iw kernel-module-brcmfmac kernel-module-brcmfmac-cyw iproute2 iproute2-ss util-linux-lsblk xen-tools-xl xen-tools-xenstore openssh-sshd systemd-extra-utils \
@@ -28,6 +29,7 @@ RDEPENDS:${PN} = "python3-core python3-json python3-stringold python3-crypt pyth
 RDEPENDS:${PN} += "xenova-mqtt-broker-provider python3-netclient python3-io"
 SYSTEMD_SERVICE:${PN} = "xenova-boot-status.service xenova-host-admission.service xenova-first-boot.service srv-xenova.mount xenova-vm-shutdown.service xenova-vms.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
+SYSTEMD_SERVICE:${PN} += "xenova-display-check.service"
 SYSTEMD_SERVICE:${PN} += "xenova-telemetry-clock.timer"
 SYSTEMD_SERVICE:${PN} += "xenova-telemetry-evidence.timer"
 
@@ -47,6 +49,9 @@ do_install() {
     install -m 0755 "${S}/verify-xenova-runtime-artifacts.py" "${D}${sbindir}/xenova-verify-artifacts"
     install -m 0755 "${S}/xenova-vm" "${D}${sbindir}/xenova-vm"
     install -m 0755 "${S}/xenova-world-install" "${D}${sbindir}/xenova-world-install"
+    install -m 0755 "${S}/xenova-display-setup" "${D}${sbindir}/xenova-display-setup"
+    install -m 0644 "${S}/xenova_display_setup.py" "${D}${libdir}/xenova/xenova_display_setup.py"
+    install -m 0644 "${S}/xenova-display-check.service" "${D}${systemd_system_unitdir}/xenova-display-check.service"
     for module in xenova_guest_profile.py xenova_provisioning.py xenova_registration.py xenova_registration_hook.py xenova_display_sync.py; do
         install -m 0644 "${S}/$module" "${D}${libdir}/xenova/$module"
     done
@@ -113,5 +118,6 @@ FILES:${PN} += "${systemd_system_unitdir}/xenova-boot-status.service ${systemd_s
     ${systemd_system_unitdir}/xenova-vm-shutdown.service \
     ${systemd_system_unitdir}/xenova-vms.service ${systemd_system_unitdir}/xenova-wifi@.service"
 FILES:${PN} += "${systemd_system_unitdir}/xenova-telemetry-clock.service ${systemd_system_unitdir}/xenova-telemetry-clock.timer"
+FILES:${PN} += "${systemd_system_unitdir}/xenova-display-check.service"
 FILES:${PN} += "${systemd_system_unitdir}/xenova-telemetry-evidence.service ${systemd_system_unitdir}/xenova-telemetry-evidence.timer ${sysconfdir}/systemd/system/xenconsoled.service.d/20-xenova-evidence.conf"
 CONFFILES:${PN} += "${sysconfdir}/xenova/cpu-policy-preset.json ${sysconfdir}/modprobe.d/xenova-wifi.conf ${sysconfdir}/xenova/execution-policy.json ${sysconfdir}/xenova/defaults.json ${sysconfdir}/ssh/xenova-auth.conf ${sysconfdir}/systemd/journald.conf.d/20-xenova.conf ${sysconfdir}/systemd/system.conf.d/20-xenova.conf"
