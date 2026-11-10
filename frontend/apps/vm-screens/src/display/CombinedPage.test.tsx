@@ -9,6 +9,10 @@ import { themeAt } from './theme';
 import { useDisplay } from './useDisplay';
 
 vi.mock('./useDisplay', () => ({ useDisplay: vi.fn() }));
+vi.mock('./DisplayAudio', () => ({
+  useDisplayAudio: () => ({ state: 'ready', volume: 0.55, toggle: vi.fn(), setVolume: vi.fn() }),
+  DisplayAudioControl: () => <div data-testid="display-audio" />,
+}));
 
 const fresh = { status: 'fresh', age_ms: 50 } as const;
 
