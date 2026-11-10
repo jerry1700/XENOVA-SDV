@@ -231,8 +231,10 @@ Manager().call("cpu-host-prepare", {"timeout_ms":15000}, execute=True)
 느린 관측은 공통 잠금 밖에서 수행하고, 잠금을 다시 얻은 뒤 원 작업·registry·부팅·종료 gate·CPU 정책과
 private 자산 신원을 재확인한다. 근거는 이번 준비 호출에서만 사용하며 저장하거나 재사용하지 않는다.
 
-이 경우에도 실패 자산·원 오류·기한·디스크/IP 예약은 그대로다. 폐기·예약 반환은 기존 명시
-`operation-reconcile` 절차로만 수행한다. 새 CPU 정책 변경에는 이 예외를 적용하지 않는다.
+이 경우에도 CPU 준비는 실패 자산·원 오류·기한·디스크/IP 예약을 바꾸지 않는다. 폐기·예약 반환은
+별도 `operation-reconcile` 절차가 수행한다. 명시 수습과
+[신규 생성에 허용한 자동 후속](cli-manager-spec.md#automatic-private-cleanup)이 같은 수습을 사용하며,
+CPU 준비 자체가 정리를 시작하거나 기다리지는 않는다. 새 CPU 정책 변경에는 이 예외를 적용하지 않는다.
 실행 중 관리 VM·미확정 launch·진행 중 자산 작업·수습·불완전한 사용 관측의 차단도 유지한다.
 일반 create/delete/start/조회에 새 CPU 준비 관문을 넣지 않는다. 생성·삭제·수습의 긴 I/O와
 CPU 준비의 private 사용 관측 중에도 다른 VM의 조회·stop은 기존 경로로 진행한다.

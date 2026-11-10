@@ -215,6 +215,18 @@ env example의 선택 입력이다. 파일/차량/시간 승인값은 설치 담
 | Worker·Agent / 제품 담당 | 기존 unit 환경/override와 runtime 경로, Agent별 identity·필수 앱 제공물 | `/run`의 host 재부팅 보존 한계·episode 정책을 영속 이관/SQLite/새 상수로 바꾸지 않음 |
 | 콘솔·진단 / 플랫폼·각 제품 | 기존 optional recorder·trace와 공개 CLI/PTY, 각 제품 logging 설정 | 선택 진단과 필수 원장·Authority·receipt를 분리. 인증/console lease·필수 프로토콜/원 PTY를 보존 |
 
+### 실패 private 생성의 자동 수습 시험 프로필
+
+`xenova-platform`은 `xenova_creation_auto.py`와 비활성 예시
+`/usr/share/xenova/creation-reconcile-policy.json.example`을 설치한다. 신규 Linux create에 허용하려면
+승인된 시험 배치에서 `/etc/xenova/creation-reconcile-policy.json`을 별도 공급한다.
+프로필은 최초 1회·조건 변화 시 추가 최대 1회의 시험안이며, 시간은 원 생성의 `cleanup_ms`만 사용한다.
+새 운영 시간값·기본 enable·기존 기록 변환·부팅 때 일괄 정리를 추가하지 않았다.
+Manager·creation·automatic helper·preparation은 같은 하위 후보로 설치해야 한다. 기존 외부 HTTP 소비자의
+동시 교체나 내부 journal 버전 지정은 요구하지 않는다. 최종 rootfs의 creation/automatic 모듈 바이트 검사와
+G1 하위 런타임 인계 목록에 포함했다. 현재 로컬 근거와 ARM/RPM·보드 미수행 범위는
+[자동 수습 검증](../verification/automatic-private-reconciliation-20261110.md)을 따른다.
+
 ### 보드별 Recovery Worker와 factory Gateway 설정
 
 `xenova-recovery-config.service`는 첫 설치 성공 뒤 기존 MQTT 원본에서
