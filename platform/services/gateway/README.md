@@ -603,13 +603,15 @@ feedback3 profile exact fields는 `Feedback3Profile`의 등록 config/firmware S
 `steering_tolerance_rad`, `steering_settle_us`다. `stationary`는 Scene의
 `StationaryPolicy`와 같은 exact 단위·필드를 쓴다. 실제 firmware와 hash/capability를
 검산하고, 원 CLOCK_INSTALL ACK 전에는 DRIVE를 전달하지 않는다. STOP은 별도다.
-ToF source가 없는 `tof_profiles: []` 구성은 유효하다. 선택된 source만 feedback-3의
-기존 `TOF_FRAGMENT3(0x0f16/209B)`를 소비하며 실제 MCU cap0x200과 원 INSTALL ACK를
-검사한다. cap 부족·센서 오류·조립 실패는 ToF만 폐기하고 clock/encoder/STOP을 막지 않는다.
-단일 RX의 queue8 뒤 기존 Gateway actor가 센서별393B partial/latest를 조립해 원 capture
-시각·CRC·generation/instance와 TTL을 보존한 `TofObservation`을 기존 J port로 보낸다.
-새 thread/serial handle/상태 응답 필드는 없다. 원 고정 vector41 결과와 새 consumer의
-동적 검증·MCU/실측 보정·FREE/460800 line 수락은 구분한다.
+ToF source가 없는 `tof_profiles: []` 구성은 유효하다. 장착 구성은 앞 중앙0·뒤 중앙1의
+단일존1×1 센서2개이며, 선택 source만 `TOF_SAMPLE3(0x0f17/145B)` 한 패킷으로 소비한다.
+신규 MCU cap0x0800·원 INSTALL ACK를 검사하며 구0x0f16/8×8 조각과 cap0x0200은 현재
+지원으로 인정하지 않는다. 구 고정 vector는 역사 자료다. 거리/status/quality는 각각1개,
+sample CRC domain은141B다. cap 부족·센서 오류·누락은 ToF만 폐기하고 clock/encoder/STOP을 막지 않는다.
+단일 RX queue8 뒤 기존 actor가 센서별 완전 관측 최신1만 보유한다. partial/재조립 timer는 없고
+원 capture 시각·CRC·generation/instance와 TTL을 보존한1×1 `TofObservation`을 기존 J port로 보낸다.
+ToF는 근거리 장애물 HIT-only이며 정상 거리·NO_TARGET·out-of-range를 FREE로 carve하지 않는다.
+모델·FOV·측정 오차·native 상태 매핑·baud/율과 물리 수락은 별도 확인한다. 새 thread/serial handle은 없다.
 [정확 계약과 시험 경계](../../../docs/contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)를 따른다.
 
 actor는 권한·입력·기한을 판정하고, serial owner 하나가 실제 출력/feedback을 소유한다.
