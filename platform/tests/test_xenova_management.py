@@ -112,6 +112,31 @@ class ManagementTest(unittest.TestCase):
         self.assertTrue(result['ok'],result)
         return result['data']['vm_id']
 
+    def test_completed_create_runs_display_sync_after_durable_registration(self):
+        import xenova_display_sync as display_sync
+        with patch('xenova_registration_hook.automatic'), \
+             patch.object(display_sync,'is_display_registration',return_value=True), \
+             patch.object(display_sync,'sync_after_registration',
+                          return_value={'ui':{'state':'not-requested'},
+                                        'bindings':{'state':'pending'}}) as sync:
+            result=self.call('create',self.spec,key='display-sync-create')
+        self.assertTrue(result['ok'],result)
+        sync.assert_called_once()
+        records,registered=sync.call_args.args
+        self.assertEqual(registered['uuid'],self.spec['vm_id'])
+        self.assertIn(self.key,records)
+        self.assertEqual(result['data']['display_sync']['bindings']['state'],'pending')
+
+    def test_display_sync_failure_is_a_warning_not_a_failed_vm_create(self):
+        import xenova_display_sync as display_sync
+        with patch('xenova_registration_hook.automatic'), \
+             patch.object(display_sync,'is_display_registration',return_value=True), \
+             patch.object(display_sync,'sync_after_registration',side_effect=ValueError('fixture')):
+            result=self.call('create',self.spec,key='display-sync-warning')
+        self.assertTrue(result['ok'],result)
+        self.assertEqual(result['data']['diagnostic_warnings'][0]['code'],'DISPLAY_SYNC_DEFERRED')
+        self.assertEqual(self.state(self.spec['vm_id'])['lifecycle'],'REGISTERED')
+
     def test_create_registration_waits_for_admission_in_the_existing_call_budget(self):
         import xenova_execution as execution
         now=[1000.0];holder=[None];waits=[]

@@ -1764,6 +1764,18 @@ class Manager:
             from xenova_registration_hook import automatic
             events,self._registration_events=self._registration_events,[]
             for record in events:automatic(self.data,self.p.runtime,record)
+            try:
+                from xenova_display_sync import is_display_registration,sync_after_registration
+                display_events=[record for record in events if is_display_registration(record)]
+                records=self.p.records(validate_assets=False) if display_events else None
+                updates=[sync_after_registration(records,record) for record in display_events]
+                if response['ok'] and updates:
+                    response['data']['display_sync']=updates[0] if len(updates)==1 else updates
+            except (OSError,ValueError,KeyError,TypeError) as error:
+                destination=response['data'] if response['ok'] else response['error']['details']
+                destination.setdefault('diagnostic_warnings',[]).append({
+                    'code':'DISPLAY_SYNC_DEFERRED','sink':'display-configuration',
+                    'cause_type':type(error).__name__})
         try:
             self.last_trace = trace.export()
             if self.trace_sink is not None:

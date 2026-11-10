@@ -144,6 +144,41 @@ class DisplayBindingsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unsafe Display configuration'):
             self.sync()
 
+    def test_registration_updates_ui_and_bindings_when_all_roles_exist(self):
+        runtime = self.path.parent / 'display-runtime.json'
+        mobile = self.path.parent / 'display-mobile.json'
+        runtime.write_text(json.dumps({
+            'backend': 'x11', 'display': ':5', 'feed_origin': 'http://127.0.0.1:8082',
+            'outputs': [{'output_id': 'monitor-1', 'connector': 'HDMI-1',
+                'edid_sha256': EDID, 'x': 0, 'y': 0, 'width': 1920, 'height': 1080}]}))
+        runtime.chmod(0o644)
+        mobile.write_text(json.dumps({'schema_version': 1, 'usb_interface': 'usb0',
+            'phone_ipv4': '10.104.83.148', 'port': 8084}));mobile.chmod(0o600)
+        interaction = self.records['vm-interaction'];interaction['ipv4'] = '192.168.77.6'
+        result = display.sync_after_registration(self.records, interaction,
+            runtime_path=runtime, mobile_path=mobile, bindings_path=self.path,
+            owner_uid=runtime.stat().st_uid)
+        self.assertEqual(result['ui']['state'], 'updated')
+        self.assertEqual(result['bindings']['state'], 'updated')
+        self.assertEqual(json.loads(runtime.read_text())['ui_origin'], 'http://192.168.77.6:8086')
+
+    def test_registration_waits_for_missing_roles_without_writing_binding(self):
+        interaction = self.records['vm-interaction'];interaction['ipv4'] = '192.168.77.6'
+        records = {'vm-interaction': interaction}
+        result = display.sync_after_registration(records, interaction,
+            runtime_path=self.path.parent/'missing-runtime.json',
+            mobile_path=self.path.parent/'missing-mobile.json', bindings_path=self.path,
+            owner_uid=self.path.parent.stat().st_uid)
+        self.assertEqual(result['ui']['state'], 'not-configured')
+        self.assertEqual(result['bindings']['state'], 'pending')
+        self.assertFalse(self.path.exists())
+
+    def test_only_display_role_registrations_trigger_followup(self):
+        self.assertTrue(display.is_display_registration(self.records['zephyr-drive-a']))
+        self.assertTrue(display.is_display_registration(self.records['vm-interaction']))
+        self.assertFalse(display.is_display_registration({
+            'id': 'developer-vm', 'guest_kind': 'linux', 'template_id': 'ubuntu-24.04-arm64'}))
+
 
 if __name__ == '__main__':
     unittest.main()

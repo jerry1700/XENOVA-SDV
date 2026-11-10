@@ -17,6 +17,14 @@ COMBINED_PAGE = '/display/combined'
 BINDINGS_PATH = Path('/etc/xenova/display-bindings.json')
 
 
+def is_display_registration(record):
+    """이 등록이 HDMI 화면 주소나 세 역할 binding에 영향을 주는지 판별한다."""
+    return bool(isinstance(record, dict) and (
+        record.get('id') in ('zephyr-drive-a', 'zephyr-drive-b')
+        or (record.get('guest_kind') == 'linux'
+            and record.get('template_id') == 'debian-13-arm64')))
+
+
 def _address(value):
     try:
         address = ipaddress.ip_address(value)
@@ -171,3 +179,33 @@ def sync_bindings(records, *, bindings_path=BINDINGS_PATH, owner_uid=0):
         return {'state': 'unchanged', 'path': str(path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}
     atomic_write(path, json.dumps(bindings, indent=2) + '\n', mode=0o644)
     return {'state': 'updated', 'path': str(path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}
+
+
+def sync_after_registration(records, registered, *, runtime_path=RUNTIME_PATH,
+                            mobile_path=MOBILE_PATH, bindings_path=BINDINGS_PATH,
+                            owner_uid=0):
+    """영구 등록이 끝난 뒤 가능한 Display projection만 갱신한다.
+
+    세 역할이 아직 모두 등록되지 않은 최초 설치 중에는 bindings를 만들지 않는다.
+    잘못되거나 중복된 역할은 pending으로 숨기지 않고 sync_bindings가 거부한다.
+    """
+    if not isinstance(registered, dict):
+        raise ValueError('Display sync requires the registered VM')
+    interaction = (registered.get('guest_kind') == 'linux'
+                   and registered.get('template_id') == 'debian-13-arm64')
+    ui = (sync_interaction_ui(registered.get('ipv4'), runtime_path=runtime_path,
+                              mobile_path=mobile_path, owner_uid=owner_uid)
+          if interaction else {'state': 'not-requested'})
+
+    drive_a = [record for key, record in records.items()
+               if key == 'zephyr-drive-a' or record.get('id') == 'zephyr-drive-a']
+    drive_b = [record for key, record in records.items()
+               if key == 'zephyr-drive-b' or record.get('id') == 'zephyr-drive-b']
+    interactions = [record for record in records.values()
+                    if record.get('guest_kind') == 'linux'
+                    and record.get('template_id') == 'debian-13-arm64']
+    if not drive_a or not drive_b or not interactions:
+        bindings = {'state': 'pending', 'reason': 'three-display-roles-not-registered'}
+    else:
+        bindings = sync_bindings(records, bindings_path=bindings_path, owner_uid=owner_uid)
+    return {'ui': ui, 'bindings': bindings}
