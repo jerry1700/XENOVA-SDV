@@ -205,7 +205,7 @@ for key, value in values.items():
       bitbake -e "$target" | python3 -c '
 import re, sys
 values = dict(re.findall(r"^([A-Za-z0-9_:/.-]+)=\"(.*)\"$", sys.stdin.read(), re.M))
-expected = {"PN": sys.argv[1], "MACHINE": "raspberrypi4-64", "DISTRO": "poky",
+expected = {"PN": sys.argv[1], "MACHINE": "raspberrypi4-64", "DISTRO": "xenova",
             "INIT_MANAGER": "systemd", "RPI_DOM0_MEM": "3072M",
             "PREFERRED_PROVIDER_virtual/kernel": "linux-raspberrypi"}
 for key, value in expected.items():
