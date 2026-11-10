@@ -18,6 +18,8 @@ def web_root(tmp_path):
     (root/"assets").mkdir(parents=True)
     (root/"index.html").write_text("<!doctype html><title>vm-screens</title>")
     (root/"assets"/"app-1a2b.js").write_text("console.log('screen')")
+    (root/"assets"/"track-01-a1b2.mp3").write_bytes(b"ID3\x04" + bytes(64))
+    (root/"assets"/"clip.wav").write_bytes(b"RIFF" + bytes(16))
     (root/"secret.txt").write_text("not an asset")
     return root
 
@@ -109,6 +111,8 @@ def test_server_binds_loopback_and_serves_pages_assets_and_data(app):
         assert status == 200 and kind.startswith("text/html") and b"vm-screens" in body
     status, kind, body = get(app, "/assets/app-1a2b.js")
     assert status == 200 and kind == "text/javascript"
+    status, kind, body = get(app, "/assets/track-01-a1b2.mp3")
+    assert status == 200 and kind == "audio/mpeg" and body.startswith(b"ID3")
     status, kind, body = get(app, "/api/v1/display/presentation")
     assert status == 200 and kind == "application/json" and json.loads(body) == PRESENTATION
     assert TOKEN.encode() not in body
@@ -116,6 +120,7 @@ def test_server_binds_loopback_and_serves_pages_assets_and_data(app):
 
 @pytest.mark.parametrize("path,method,status", [
     ("/secret.txt", "GET", 404), ("/assets/../secret.txt", "GET", 404), ("/assets/missing.js", "GET", 404),
+    ("/assets/clip.wav", "GET", 404), ("/assets/missing.mp3", "GET", 404),
     ("/display/admin", "GET", 404), ("/display/mobile?token=x", "GET", 404),
     ("/api/v1/display/state", "GET", 404), ("/api/v1/display/outputs/monitor-1/ack", "POST", 405),
     ("/api/v1/display/presentation", "POST", 405),
