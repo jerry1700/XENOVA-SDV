@@ -1,4 +1,4 @@
-"""dom0 API·MQTT·실행 로그 설치 소스 계약. 조립 시 파일 누락과 과거 이미지 재사용을 거부한다."""
+"""dom0 API·MQTT·Gateway·실행 로그 설치 소스 계약. 조립 시 과거 payload를 거부한다."""
 from pathlib import Path
 import stat
 
@@ -8,6 +8,8 @@ ROOT = Path(__file__).resolve().parents[2]
 RECIPES = ROOT / "platform/yocto/meta-xenova/recipes-core"
 API = ROOT / "platform/services/dom0-manager"
 MQTT = ROOT / "platform/services/vm-agent/mqtt-client"
+GATEWAY = ROOT / "platform/services/gateway"
+WORLD = ROOT / "platform/apps/drive/world/python"
 RUNTIME_LOGS = RECIPES / "xenova-dom0-manager/files/runtime-logs"
 COLLECTOR = "xenova-runtime-log-collector.service"
 LOG_ENV = "etc/xenova/runtime-logs/collector.env"
@@ -16,7 +18,8 @@ LOG_ENV = "etc/xenova/runtime-logs/collector.env"
 def source_files(site_packages):
     """배포 대상 소스와 rootfs 경로를 연결한다. 실행·파일 변경은 하지 않는다."""
     result = {}
-    for project, package in ((API, "dom0_manager"), (MQTT, "xenova_mqtt")):
+    for project, package in ((API, "dom0_manager"), (MQTT, "xenova_mqtt"),
+                             (GATEWAY, "xenova_gateway"), (WORLD, "xenova_drive_world")):
         if not (project/package/"__init__.py").is_file():
             raise ValueError("required deployment source package missing: " + package)
         for source in sorted((project/package).rglob("*.py")):
