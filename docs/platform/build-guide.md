@@ -11,17 +11,23 @@
 | 호스트 | Windows 11 + WSL2 Ubuntu 24.04, x86_64 |
 | 타깃 | Raspberry Pi 4, `raspberrypi4-64` |
 | dom0 | `xenova-xen-bringup-image` |
+| 배포판 | `xenova` — 고정 Poky 정책을 계승하며 표시 버전은 해당 기반 버전 유지 |
 | dom0 설치 | Manager·CLI·복구/신원·CPU 정책, FastAPI/Uvicorn·통계·heartbeat worker, Paho·공용 MQTT 클라이언트, xentop·Mosquitto |
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
 | 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.4, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
+| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.5, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
 | 이미지 구성 | FAT boot + dom0 rootfs + `xenova-data` ext4 |
 
 소스·빌드·캐시는 WSL의 Linux 파일시스템에 둔다. Windows 경로는 완성된 압축 이미지와 로그를 전달할 때 사용한다.
+
+배포판 정의는 `meta-xenova/conf/distro/xenova.conf`에 있다. 고정된 `poky.conf`를 계승해 기존 패키지 정책·기능·컴파일 대상과 SDK vendor를 유지한다. 현재 표시 버전 `6.0.4`와 codename `wrynose`는 기반 설정의 값이며 별도의 Xenova 제품 릴리스 번호나 게스트 펌웨어 버전이 아니다.
+`os-release`의 ID·NAME과 로그인 배너는 Xenova를 표시하며, `ID_LIKE=poky`와 기존 CPE는 기반 계보를 보존한다. 로그인 후 안내문은 `Welcome to Xenova.` 한 줄이다. 기존 hostname·계정·SSH·getty 설정은 유지한다.
+
+기존 빌드 디렉터리를 전환할 때는 설정을 백업한 뒤 관리 블록의 `DISTRO = "poky"` 한 줄만 `DISTRO = "xenova"`로 바꾸고 `setup-yocto.sh --verify`로 확인한다. `TARGET_VENDOR=-poky`는 기존 컴파일 대상·캐시를 유지하기 위한 내부 식별자다. download·sstate를 삭제하거나 컴파일 대상의 모든 Poky 문자열을 일괄 변경하지 않는다.
 
 **PowerShell:**
 
@@ -128,6 +134,8 @@ FastAPI·Pydantic Core·MQTT와 필수 호스트 빌드 도구는 이미지 의�
 고정 meta-clang·meta-browser 레이어로 X11·Chromium을 빌드한다. FFmpeg x11grab/MJPEG,
 한글 폰트와 Playwright도 이미지에 설치한다. Chromium 빌드는 메모리와 시간이 많이
 필요하므로 download·sstate·hash-equivalence 캐시를 실행 간 공유한다.
+HDMI 키오스크의 화면 꺼짐 방지에는 `xset`을, 선택형 native JPEG 송신에는 `libturbojpeg`를 포함한다.
+라이브러리 설치만으로 화면 캡처·송신을 활성화하지 않는다.
 
 display 웹 화면은 Linux Node.js 22.12 이상과 저장소의 npm lockfile로 먼저 빌드한다.
 NODE_ROOT는 기존 도구 캐시의 절대 경로이며, 처음 준비할 때는 공식 archive의
@@ -144,7 +152,8 @@ cp -a "$REPO/frontend" "$RUN/frontend-build"
 )
 mkdir "$RUN/display-web-input"
 cp -a "$RUN/frontend-build/apps/vm-screens/dist" "$RUN/display-web-input/display-web"
-printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$RUN/display-web-input" \
+export XENOVA_DISPLAY_WEB_ASSETS="$RUN/display-web-input"
+printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$XENOVA_DISPLAY_WEB_ASSETS" \
   >> "$YOCTO_BUILD_DIR/conf/local.conf"
 ```
 
@@ -155,6 +164,11 @@ xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 use
 [display 실행 절차](../../platform/services/display/router/README.md#4단계-x11-실행과-원격-시연)를
 따른다. 설정 예제는 /usr/share/xenova/display/examples/에 있다.
 공통 이미지에 토큰·장치별 매핑·시연 키를 넣지 않는다.
+
+휴대폰 USB 테더링 개발을 위해 이미지에 RNDIS·CDC-ECM·CDC-NCM 호스트 모듈을 포함한다.
+현재 고정 커널의 `CONFIG_USB_USBNET=y`와 해당 드라이버의 `=m` 설정을 사용한다.
+모듈 포함만으로 IP·DHCP·라우트·DNS를 설정하거나 휴대폰 접속 서비스를 활성화하지 않는다.
+실제 USB 인식·주소 확인 뒤 [휴대폰 접속 절차](../../platform/services/display/router/deploy/mobile-access/mobile-access.README.md)를 따른다.
 
 xenova-gateway는 기존 코드·pyserial·비활성 서비스 템플릿을 포함한다.
 A/B UUID·실행 바인딩·권한 원본·broker·시리얼 장치를 확인한 뒤
@@ -831,7 +845,7 @@ required = {"xenova-platform", "xenova-bringup", "xenova-dom0-manager",
     "xen-tools-xenstat", "libxenmanage1", "mosquitto", "mosquitto-clients",
     "qemu-system-i386", "systemd-extra-utils", "tailscale", "tailscaled",
     "xenova-display", "xenova-gateway", "python3-pyserial", "python3-playwright",
-    "nodejs", "chromium-x11", "ffmpeg", "xserver-xorg", "openbox",
+    "nodejs", "chromium-x11", "ffmpeg", "xserver-xorg", "openbox", "xset", "libturbojpeg0",
     "source-han-sans-kr-fonts", "xf86-input-libinput", "xf86-video-fbdev"}
 assert required <= names, sorted(required-names)
 assert any(n.startswith("kernel-module-brcmfmac-cyw-") for n in names)
@@ -843,6 +857,8 @@ print(path)
 print("PASS", len(required)+1, "required packages including kernel-versioned CYW module")
 PY
 ```
+
+현재 고정 빌드에서 recipe/RDEPENDS 이름은 `libturbojpeg`이고, 실제 이미지 manifest의 ABI 패키지명은 `libturbojpeg0`이다. pkgdata의 `PKG:libturbojpeg` 대응과 실제 라이브러리 로딩을 함께 확인한다.
 
 ## 6. 완료 dom0 게시
 
@@ -1053,6 +1069,7 @@ sha256sum "$EXPORT/xenova-first-install.img.zst" \
 | 확인 대상 | 수락 근거 |
 |---|---|
 | 최초 등록·신원 | 기본 세 VM의 UUID/MAC, Linux machine-id·SSH 공개키, seed 등록 완료 |
+| 외부 서버 등록 | 최초 설치에서는 자동 전송하지 않음. 네트워크·필요한 Tailnet 접속·Spring 자격 준비 뒤 [등록 조회·수동 notify](cli-manager-spec.md#cmd-registrations)로 별도 확인 |
 | CPU 준비·자동 시작 | first-boot·Xen ready → CPU prepare → VM autostart → host admission 순서. `cpu-layout --json`의 host.ready와 실제 모든 vCPU hard mask |
 | 재부팅·복구 | A/B 협조형 reboot·Linux 일반 reboot·recover_once·host 재부팅 뒤 같은 정책 revision과 실제 배치, 새로운 실행 신원 |
 | 서비스 | dom0-manager·recovery worker enable/active, xentop 통계 조회, broker 인증·구독·건강 상태 게시 |
