@@ -85,7 +85,7 @@ class RegistrationApiProcessTest(unittest.TestCase):
             if self.process.poll() is not None:
                 self.fail(self.process.stdout.read().decode())
             try:
-                status,_=self.request('GET','/openapi.json',auth=False)
+                status,_=self.request('GET','/openapi.json')
                 if status==200:break
             except OSError:pass
             time.sleep(.02)
@@ -126,7 +126,8 @@ class RegistrationApiProcessTest(unittest.TestCase):
         self.assertEqual(self.calls,[])
         self.assertEqual(set(rows[0]),{'vm_id','name','guest_kind','template_id','template_version','vcpus','memory_mib','assigned_ipv4'})
         z=next(row for row in rows if row['guest_kind']=='zephyr');self.assertEqual(z['assigned_ipv4'],'192.168.77.90')
-        schema=self.request('GET','/openapi.json',auth=False)[1]
+        self.assertEqual(self.request('GET','/openapi.json',auth=False)[0],401)
+        schema=self.request('GET','/openapi.json')[1]
         self.assertEqual(schema['paths']['/api/v1/vm-registrations']['get']['responses']['200']['content']['application/json']['schema']['type'],'array')
         command=['curl','--silent','--show-error','--fail','-H','Authorization: Bearer '+TOKEN,
                  f'http://127.0.0.1:{self.port}/api/v1/vm-registrations']

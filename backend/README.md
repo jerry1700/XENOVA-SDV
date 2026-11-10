@@ -131,7 +131,7 @@ WS  /ws/v1/drive/state       같은 Drive 스냅샷 (첫 프레임 사용자 JWT
 자율주행 재개와 취소는 운영자 콘솔에서 보냅니다 (MQTT 계약 §5.2·§6, v1.7).
 
 ```text
-POST   /api/v1/drive/resume  AUTO_READY 에서 재개 요청 → console/resume 에 drive.resume.requested (202, 그 밖의 모드 409 NOT_AUTO_READY)
+POST   /api/v1/drive/resume  AUTO_READY 재개, 출력 금지된 MANUAL·AUTO 재무장, SAFE_STOP 재무장(게이트웨이가 준비된 수동 VM 선택) 요청 → console/resume 에 drive.resume.requested (202 = 보냄, 그 밖의 모드 409 NOT_AUTO_READY)
 DELETE /api/v1/drive/resume  3초 카운트다운 취소 → drive.resume.cancel_requested (202, 카운트다운 없으면 409 NO_RESUME_COUNTDOWN)
 ```
 
@@ -251,6 +251,23 @@ DELETE /api/v1/drive/resume  3초 카운트다운 취소 → drive.resume.cancel
 `truncated`는 Agent의 목록 크기 제한을 나타내며 API 조회의 `limit`과 독립적입니다.
 보고가 없는 구형 Agent나 과거 DB 행의 값은 `null`이며 빈 표만으로 수집 결과를 판단할 수 없습니다.
 표본 만료는 기존 `stale` 필드로 확인합니다. Flyway V8은 기존 프로세스 스냅샷에 nullable 열을 추가합니다.
+
+## VM 부하·장애 주입 명령
+
+Linux VM의 CPU·메모리 부하, Zephyr AUTO 연산 지연, 명령 상태 조회 계약은
+[VM 명령 API v1](../docs/contracts/vm-command-api-v1.md)을 따릅니다.
+
+```text
+POST /api/v1/vms/{vmId}/stress/cpu
+POST /api/v1/vms/{vmId}/stress/memory
+POST /api/v1/vms/{vmId}/faults/auto-delay
+POST /api/v1/vms/{vmId}/faults/agent-exit
+GET  /api/v1/vms/{vmId}/commands/{commandId}
+```
+
+제출 API는 `202`와 `command_id`를 반환합니다. MQTT 결과를 받기 전에는 `PENDING`, 이후에는
+`ACCEPTED/RUNNING/SUCCEEDED/FAILED/REJECTED`입니다. Flyway V9의
+`agent_command_results`가 명령별 최신 상태와 계약 위반을 저장합니다.
 
 ## 테스트
 

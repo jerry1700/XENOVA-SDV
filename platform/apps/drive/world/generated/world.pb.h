@@ -27,9 +27,1109 @@ typedef struct _xenova_drive_PathPoint {
     float velocity_mps;
 } xenova_drive_PathPoint;
 
+typedef struct _xenova_drive_VehicleSample {
+    uint32_t major;
+    char vehicle[65];
+    char host_boot[37];
+    char device_session[37];
+    char odom_epoch[37];
+    uint64_t sequence;
+    uint64_t source_sample;
+    uint64_t source_us;
+    uint64_t pi_sample_us;
+    uint32_t clock_error_us;
+    int64_t left_ticks;
+    int64_t right_ticks;
+    xenova_drive_Pose odom_pose;
+    float velocity_mps;
+    bool has_measured_steering_rad;
+    float measured_steering_rad;
+    bool has_estimated_steering_rad;
+    float estimated_steering_rad;
+    float position_error_m;
+    float heading_error_rad;
+    uint32_t quality; /* bit0 encoder valid, bit1 clock valid; other bits unsupported. */
+    char calibration[65];
+    bool has_steering_error_rad;
+    float steering_error_rad;
+    bool has_gateway_instance;
+    char gateway_instance[37];
+    bool has_pi_session;
+    char pi_session[37];
+} xenova_drive_VehicleSample;
+
+/* Presence means both native intent.active and basis.bound. Parent reference/source
+ fields retain their existing meanings; basis_revision is the original prefix's. */
+typedef struct _xenova_drive_TaskReferenceState {
+    uint32_t home_lane_id;
+    uint32_t from_lane_id;
+    uint32_t selected_lane_id;
+    bool changing;
+    uint64_t basis_revision;
+    pb_size_t basis_prefix_count;
+    xenova_drive_Point basis_prefix[64];
+    char vehicle[65];
+    char mapper_boot[37];
+    char mapper_instance[37];
+    char clock_epoch[37];
+} xenova_drive_TaskReferenceState;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_GuestClockReceipt_reply_sha256_t;
+/* Receipt of one exact original stamped Reply; arrival does not renew its lease. */
+typedef struct _xenova_drive_GuestClockReceipt {
+    uint64_t probe_sequence;
+    xenova_drive_GuestClockReceipt_reply_sha256_t reply_sha256;
+    uint64_t guest_receive_us;
+} xenova_drive_GuestClockReceipt;
+
+typedef struct _xenova_drive_WorldTrust {
+    char vehicle[65];
+    char mapper_boot[37];
+    char mapper_instance[37];
+    char map_epoch[37];
+    char frame_epoch[37];
+    char odom_epoch[37];
+    char configuration[65];
+    char calibration[65];
+    char primitive[65];
+    char clock_epoch[37];
+    int64_t lower_offset_us; /* mapper -> Pi clock interval */
+    int64_t upper_offset_us;
+    uint64_t expires_pi_us;
+    uint32_t max_error_us;
+} xenova_drive_WorldTrust;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_OperationBinding_service_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_OperationBinding_departure_nonce_t;
+/* Setting/explicit-departure binding, separate from output permission and path geometry. */
+typedef struct _xenova_drive_OperationBinding {
+    xenova_drive_OperationBinding_service_epoch_t service_epoch; /* Existing Gateway instance UUID. */
+    uint64_t operation_revision;
+    xenova_drive_OperationBinding_departure_nonce_t departure_nonce; /* NIL only while no departure is active. */
+    uint64_t permission_revision;
+    bool parking_enabled;
+} xenova_drive_OperationBinding;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_OperationStatus_active_request_nonce_t;
+typedef struct _xenova_drive_OperationStatus {
+    uint32_t major;
+    xenova_drive_OperationBinding binding;
+    uint32_t vehicle_phase; /* 1STOPPING,2WAIT,3COUNTDOWN,4APPLYING,5ACTIVE. */
+    uint64_t ready_revision;
+    bool auto_ready; /* Input preflight for accepting a request, not DRIVE readiness. */
+    uint32_t blocked_reason; /* 0ready,1..31 registered blocked reasons. */
+    uint64_t valid_until_pi_us;
+    xenova_drive_OperationStatus_active_request_nonce_t active_request_nonce;
+    uint64_t countdown_until_pi_us;
+    uint32_t desired_mode; /* 0none,1AUTO,2MANUAL. */
+} xenova_drive_OperationStatus;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_PiOperationGate_gateway_instance_t;
+/* Pi's current restriction on an explicit Jetson STANDBY request, never movement permission. */
+typedef struct _xenova_drive_PiOperationGate {
+    xenova_drive_PiOperationGate_gateway_instance_t gateway_instance;
+    uint32_t control_generation;
+    uint64_t operation_revision;
+    uint32_t mode; /* 0SAFE_STOP,1AUTO,2MANUAL. */
+    bool wait_confirmed;
+    bool manual_local_admitted;
+    uint64_t vehicle_sequence; /* Exact original Vehicle carries device/session/source. */
+    uint64_t stop_command_sequence; /* Positive for a confirmed WAIT. */
+    uint64_t valid_until_pi_us;
+} xenova_drive_PiOperationGate;
+
+typedef struct _xenova_drive_AppliedState {
+    char vm[37];
+    char execution[37];
+    char app_instance[37];
+    char host_boot[37];
+    char gateway_instance[37];
+    bool has_copy_message_id;
+    char copy_message_id[37];
+    uint64_t state_revision;
+    char frame_epoch[37];
+    char odom_epoch[37];
+    char configuration[65];
+    char calibration[65];
+    char primitive[65];
+    char reference_id[65];
+    uint64_t reference_revision;
+    uint64_t path_revision;
+    bool has_vehicle_sequence;
+    uint64_t vehicle_sequence;
+    bool has_calculation_sequence;
+    uint64_t calculation_sequence;
+    bool rebuilt;
+    bool applied;
+    uint64_t maneuver_revision;
+    bool has_reason;
+    char reason[65];
+    uint64_t application_sequence;
+} xenova_drive_AppliedState;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeCore_episode_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeCore_birth_snapshot_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeCore_basis_prefix_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeCore_source_geometry_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeCore_meter_epoch_t;
+/* Registry core only: progress and the receipt are deliberately outside its SHA.
+ state:0 UNKNOWN,1 NONE,2 ACTIVE. phase:0 FOLLOW,1 ASSESS,2 CHANGE_OUT,
+ 3 PASS,4 REJOIN,5 FINISHED. FINISHED preserves the closed episode's original key. */
+typedef struct _xenova_drive_EpisodeCore {
+    uint32_t state;
+    xenova_drive_EpisodeCore_episode_id_t episode_id;
+    uint64_t revision;
+    uint32_t phase;
+    uint64_t phase_revision;
+    uint32_t home_lane_id;
+    uint32_t target_lane_id;
+    uint32_t policy; /* 0 inactive,1 RETURN_HOME,2 KEEP_TARGET. */
+    pb_size_t blocker_count;
+    xenova_drive_Point blocker[8]; /* Conservative original occupied hull; max8 vertices. */
+    float blocker_position_bound_m;
+    uint64_t blocker_world_sequence;
+    uint64_t blocker_observation_sequence;
+    xenova_drive_EpisodeCore_birth_snapshot_id_t birth_snapshot_id;
+    uint64_t basis_revision;
+    uint32_t basis_prefix_count;
+    xenova_drive_EpisodeCore_basis_prefix_sha256_t basis_prefix_sha256;
+    xenova_drive_EpisodeCore_source_geometry_sha256_t source_geometry_sha256;
+    uint64_t origin_vehicle_sequence;
+    uint64_t started_pi_us;
+    uint64_t deadline_pi_us;
+    uint64_t phase_started_pi_us;
+    uint64_t phase_deadline_pi_us;
+    int64_t left_baseline_ticks;
+    int64_t right_baseline_ticks;
+    xenova_drive_EpisodeCore_meter_epoch_t meter_epoch;
+    uint64_t meter_baseline_total_ticks;
+    float max_travel_m;
+    uint32_t progress_mode; /* 0 inactive,1 station lower,2 fixed-goal remaining. */
+    xenova_drive_Pose phase_goal;
+    bool stop_wait;
+    uint64_t stop_wait_started_pi_us;
+} xenova_drive_EpisodeCore;
+
+typedef struct _xenova_drive_EpisodeProgress {
+    uint64_t used_travel_ticks;
+    uint64_t last_progress_pi_us;
+    uint64_t vehicle_sequence;
+    float station_lower_m;
+    float remaining_upper_m;
+    uint64_t revision;
+} xenova_drive_EpisodeProgress;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeAcceptanceRef_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeAcceptanceRef_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeAcceptanceRef_request_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeAcceptanceRef_accepted_core_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeAcceptanceRef_origin_vm_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeAcceptanceRef_origin_execution_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeAcceptanceRef_origin_app_instance_t;
+typedef struct _xenova_drive_EpisodeAcceptanceRef {
+    xenova_drive_EpisodeAcceptanceRef_registry_epoch_t registry_epoch;
+    uint64_t registry_revision;
+    xenova_drive_EpisodeAcceptanceRef_request_nonce_t request_nonce;
+    xenova_drive_EpisodeAcceptanceRef_request_sha256_t request_sha256;
+    xenova_drive_EpisodeAcceptanceRef_accepted_core_sha256_t accepted_core_sha256;
+    uint64_t request_sequence;
+    xenova_drive_EpisodeAcceptanceRef_origin_vm_t origin_vm;
+    xenova_drive_EpisodeAcceptanceRef_origin_execution_t origin_execution;
+    xenova_drive_EpisodeAcceptanceRef_origin_app_instance_t origin_app_instance;
+    uint32_t origin_generation;
+    uint64_t origin_grant_revision;
+} xenova_drive_EpisodeAcceptanceRef;
+
+typedef struct _xenova_drive_EpisodeSnapshot {
+    xenova_drive_EpisodeCore core;
+    xenova_drive_EpisodeProgress progress;
+    xenova_drive_EpisodeAcceptanceRef acceptance;
+} xenova_drive_EpisodeSnapshot;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeSourceContext_primitive_t;
+/* A request has no parent DriveState. These are the actual source geometry keys.
+ A snapshot reuses the equivalent parent State/Task33 fields instead. */
+typedef struct _xenova_drive_EpisodeSourceContext {
+    char vehicle[65];
+    char mapper_boot[37];
+    char mapper_instance[37];
+    char map_epoch[37];
+    char frame_epoch[37];
+    char odom_epoch[37];
+    char clock_epoch[37];
+    char configuration[65];
+    char calibration[65];
+    xenova_drive_EpisodeSourceContext_primitive_t primitive;
+    char reference_id[65];
+    uint64_t reference_revision;
+    uint64_t world_sequence;
+    uint64_t observation_sequence;
+} xenova_drive_EpisodeSourceContext;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_AutoInputPreflight_clock_reply_sha256_t;
+/* Historical source-context shape reused without episode/authority semantics. */
+typedef struct _xenova_drive_AutoInputPreflight {
+    uint32_t major;
+    xenova_drive_EpisodeSourceContext source;
+    uint64_t vehicle_sequence;
+    uint32_t control_generation;
+    uint64_t checked_guest_us;
+    uint64_t valid_until_pi_us;
+    uint64_t clock_probe_sequence; /* A prior actually confirmed P4 clock. */
+    xenova_drive_AutoInputPreflight_clock_reply_sha256_t clock_reply_sha256;
+} xenova_drive_AutoInputPreflight;
+
+/* Separate Pi state connection. These bounded management/state messages are
+ not part of the small command/control JSON socket or the Jetson map client. */
+typedef struct _xenova_drive_ClockProbe {
+    char vm[37];
+    char execution[37];
+    char app_instance[37];
+    uint64_t sequence;
+    uint64_t guest_send_us;
+    bool has_receipt;
+    xenova_drive_GuestClockReceipt receipt;
+    /* Capability only (bits7/8/16/32/64), not one DriveState presence mask.
+ Absence is legacy; authenticated peer and approved profile are also required. */
+    bool has_supported_state_features;
+    uint32_t supported_state_features;
+    /* Non-authoritative current input check. Absence/expiry never blocks clock bootstrap. */
+    bool has_auto_input_preflight;
+    xenova_drive_AutoInputPreflight auto_input_preflight;
+} xenova_drive_ClockProbe;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeRequest_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeRequest_mission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeRequest_scene_admission_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeRequest_clock_reply_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeRequest_expected_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeRequest_expected_episode_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeRequest_phase_state_message_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeRequest_plan_sha256_t;
+typedef struct _xenova_drive_EpisodeRequest {
+    uint32_t major;
+    xenova_drive_EpisodeRequest_request_nonce_t request_nonce;
+    uint64_t request_sequence;
+    uint32_t action; /* 1 BEGIN,2 ADVANCE,3 FINISH. */
+    char vm[37];
+    char execution[37];
+    char app_instance[37];
+    uint32_t control_generation;
+    xenova_drive_EpisodeRequest_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint64_t expected_grant_revision;
+    uint64_t cancel_fence_revision;
+    xenova_drive_EpisodeRequest_scene_admission_id_t scene_admission_id;
+    uint64_t scene_revision;
+    xenova_drive_EpisodeSourceContext source;
+    xenova_drive_EpisodeCore candidate;
+    xenova_drive_EpisodeProgress progress;
+    uint64_t completed_guest_us;
+    uint64_t began_guest_us; /* BEGIN only;0 on ADVANCE/FINISH across guest clocks. */
+    uint64_t phase_started_guest_us;
+    uint64_t valid_until_pi_us;
+    uint64_t clock_probe_sequence;
+    xenova_drive_EpisodeRequest_clock_reply_sha256_t clock_reply_sha256;
+    uint64_t vehicle_sequence;
+    xenova_drive_EpisodeRequest_expected_registry_epoch_t expected_registry_epoch;
+    uint64_t expected_registry_revision;
+    xenova_drive_EpisodeRequest_expected_episode_id_t expected_episode_id;
+    uint64_t expected_episode_revision;
+    xenova_drive_EpisodeRequest_phase_state_message_id_t phase_state_message_id;
+    uint64_t plan_revision;
+    uint64_t phase_revision;
+    uint64_t calculation_sequence;
+    xenova_drive_EpisodeRequest_plan_sha256_t plan_sha256;
+    bool has_stop_command_sequence;
+    uint64_t stop_command_sequence;
+} xenova_drive_EpisodeRequest;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeReceipt_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeReceipt_request_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeReceipt_registry_epoch_t;
+typedef struct _xenova_drive_EpisodeReceipt {
+    uint32_t major;
+    xenova_drive_EpisodeReceipt_request_nonce_t request_nonce;
+    xenova_drive_EpisodeReceipt_request_sha256_t request_sha256;
+    uint32_t result; /* 1 accepted,2 rejected,3 stale,4 unsupported,5 exhausted. */
+    uint32_t reason;
+    xenova_drive_EpisodeReceipt_registry_epoch_t registry_epoch;
+    uint64_t registry_revision;
+    bool has_snapshot;
+    xenova_drive_EpisodeSnapshot snapshot;
+    uint64_t request_sequence;
+} xenova_drive_EpisodeReceipt;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeStatus_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeStatus_accepted_core_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeStatus_episode_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_EpisodeStatus_state_message_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_EpisodeStatus_state_sha256_t;
+typedef struct _xenova_drive_EpisodeStatus {
+    uint32_t major;
+    uint32_t state; /* 0 UNKNOWN,1 NONE,2 ACTIVE; never inferred from absence. */
+    xenova_drive_EpisodeStatus_registry_epoch_t registry_epoch;
+    uint64_t registry_revision;
+    xenova_drive_EpisodeStatus_accepted_core_sha256_t accepted_core_sha256;
+    xenova_drive_EpisodeStatus_episode_id_t episode_id;
+    uint64_t episode_revision;
+    uint32_t commit_state; /* 0 unknown,1 registered/pending state,2 full state admitted. */
+    xenova_drive_EpisodeStatus_state_message_id_t state_message_id;
+    xenova_drive_EpisodeStatus_state_sha256_t state_sha256;
+    uint64_t state_revision;
+    uint64_t plan_revision;
+    uint64_t phase_revision;
+    uint64_t calculation_hwm;
+    uint64_t vehicle_hwm;
+    uint64_t valid_until_pi_us;
+    bool has_receipt;
+    xenova_drive_EpisodeReceipt receipt;
+} xenova_drive_EpisodeStatus;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_PiAbsoluteMeter_meter_epoch_t;
+/* The parent ClockReply.vehicle supplies exact host/device/odom/Pi session,
+ calibration, source sample/time and timestamp error at vehicle_sequence. */
+typedef struct _xenova_drive_PiAbsoluteMeter {
+    xenova_drive_PiAbsoluteMeter_meter_epoch_t meter_epoch;
+    uint64_t total_ticks;
+    double metres_per_tick; /* Conservative upper m/tick; scale changes replace meter_epoch. */
+    uint64_t gap_revision;
+    bool valid;
+    uint64_t vehicle_sequence;
+} xenova_drive_PiAbsoluteMeter;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StopFacts_source_vm_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StopFacts_source_execution_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StopFacts_source_app_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StopFacts_mission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StopFacts_driver_session_t;
+/* Ordinary STOP physical facts, distinct from cusp DirectionGateWitness.
+ state:0 UNKNOWN,1 SUBMITTED,2 APPLIED,3 fresh STATIONARY. No output permission. */
+typedef struct _xenova_drive_StopFacts {
+    uint32_t state;
+    char pi_session[37];
+    char device_session[37];
+    uint64_t command_sequence;
+    uint32_t control_generation;
+    uint32_t producer_role; /* 0 Pi-owned safety STOP,1 AUTO,2 MANUAL. */
+    xenova_drive_StopFacts_source_vm_t source_vm;
+    xenova_drive_StopFacts_source_execution_t source_execution;
+    xenova_drive_StopFacts_source_app_instance_t source_app_instance;
+    uint64_t calculation_sequence;
+    uint64_t counter;
+    uint64_t applied_report_sequence;
+    uint64_t applied_source_sample;
+    uint64_t applied_pi_lower_us;
+    uint64_t applied_pi_upper_us;
+    uint64_t stationary_first_sequence;
+    uint64_t stationary_last_sequence;
+    uint64_t stationary_started_pi_us;
+    uint64_t stationary_observed_pi_us;
+    uint64_t valid_until_pi_us;
+    float left_speed_bound_mps;
+    float right_speed_bound_mps;
+    float yaw_rate_bound_rps;
+    uint64_t plan_revision;
+    uint64_t phase_revision;
+    xenova_drive_StopFacts_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint64_t grant_revision;
+    xenova_drive_StopFacts_driver_session_t driver_session;
+    uint64_t driver_action_seq;
+    uint64_t driver_state_seq;
+} xenova_drive_StopFacts;
+
+typedef struct _xenova_drive_DriveControlFacts {
+    uint32_t major;
+    xenova_drive_PiAbsoluteMeter meter;
+    bool has_stop;
+    xenova_drive_StopFacts stop;
+    uint64_t valid_until_pi_us;
+} xenova_drive_DriveControlFacts;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_LaneGeometry_point_state_t;
+typedef struct _xenova_drive_LaneGeometry {
+    uint32_t lane_id;
+    pb_size_t centerline_count;
+    xenova_drive_Point centerline[32];
+    uint32_t travel_direction; /* 1: polyline forward only. */
+    float position_bound_m;
+    float heading_bound_rad;
+    uint64_t revision;
+    uint32_t adjacent_lane_id;
+    xenova_drive_LaneGeometry_point_state_t point_state; /* 0 observed,1 inferred; exactly centerline count. */
+} xenova_drive_LaneGeometry;
+
+typedef PB_BYTES_ARRAY_T(31) xenova_drive_LaneModel_crossing_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_LaneModel_divider_state_t;
+typedef struct _xenova_drive_LaneModel {
+    pb_size_t lanes_count;
+    xenova_drive_LaneGeometry lanes[2]; /* Exactly2, sharing divider station indices. */
+    pb_size_t divider_count;
+    xenova_drive_Point divider[32];
+    xenova_drive_LaneModel_crossing_t crossing; /* 0 forbidden,1 allowed; divider_count-1. */
+    xenova_drive_LaneModel_divider_state_t divider_state;
+    uint64_t revision;
+    float divider_position_bound_m;
+    float divider_heading_bound_rad;
+} xenova_drive_LaneModel;
+
+typedef struct _xenova_drive_ParkingSlot {
+    uint32_t slot_id;
+    uint64_t geometry_revision;
+    uint32_t geometry_state;
+    uint32_t occupancy_state;
+    pb_size_t corners_count;
+    xenova_drive_Point corners[4];
+    uint32_t entry_edge;
+    bool has_reverse_goal;
+    xenova_drive_Pose reverse_goal;
+    bool has_forward_goal;
+    xenova_drive_Pose forward_goal;
+    float position_bound_m;
+    float heading_bound_rad;
+    uint32_t geometry_age_ms;
+    uint32_t clearance_age_ms;
+    uint64_t evidence_sequence;
+    bool geometry_complete;
+    uint32_t occupancy_reason;
+    uint32_t source_kinds;
+    uint64_t occupancy_revision;
+    float usable_width_m;
+    float usable_depth_m;
+    uint32_t approach_lane_id;
+    uint32_t goal_mask;
+} xenova_drive_ParkingSlot;
+
+typedef struct _xenova_drive_ParkingSetMeta {
+    uint64_t revision;
+    bool complete;
+    uint32_t track_count_in_roi;
+    bool capacity_limited;
+    uint64_t evidence_sequence;
+    uint32_t state;
+} xenova_drive_ParkingSetMeta;
+
+typedef struct _xenova_drive_MapLocalization {
+    uint64_t registration_revision;
+    float anchor_position_bound_m;
+    float anchor_heading_bound_rad;
+    float geometry_position_bound_m;
+    float geometry_heading_bound_rad;
+    uint64_t observed_mapper_us;
+    uint32_t valid_for_us;
+    float position_drift_bound_mps;
+    float heading_drift_bound_rps;
+    uint32_t quality; /* 1 unique/admitted;0 never enables movement. */
+    uint32_t timestamp_error_us;
+} xenova_drive_MapLocalization;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_SceneAdmissionRef_admission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_SceneAdmissionRef_survey_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_SceneAdmissionRef_coverage_profile_sha256_t;
+typedef struct _xenova_drive_SceneAdmissionRef {
+    xenova_drive_SceneAdmissionRef_admission_id_t admission_id; /* Exact UUID16, not an ASCII UUID string. */
+    uint64_t admission_revision;
+    xenova_drive_SceneAdmissionRef_survey_id_t survey_id;
+    uint64_t survey_revision;
+    uint32_t policy;
+    xenova_drive_SceneAdmissionRef_coverage_profile_sha256_t coverage_profile_sha256;
+    bool allow_restore_after_mapper_restart;
+} xenova_drive_SceneAdmissionRef;
+
+typedef struct _xenova_drive_GearSegment {
+    uint32_t first_index;
+    uint32_t last_index;
+    int32_t signed_direction;
+} xenova_drive_GearSegment;
+
+typedef struct _xenova_drive_DirectionGateRef {
+    uint64_t gate_revision;
+    uint64_t stop_command_sequence;
+    uint32_t state;
+    int32_t requested_direction;
+} xenova_drive_DirectionGateRef;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_DirectionGateWitness_mission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_DirectionGateWitness_driver_session_t;
+/* Pi-owned STOP/APPLIED + stationary/steering result, never a copied State gate.
+ Parent Reply binds the exact VM/execution/app and Pi host/Gateway. The A7 key
+ names the original pending transition; serial STOP and VM calculation differ. */
+typedef struct _xenova_drive_DirectionGateWitness {
+    xenova_drive_DirectionGateRef gate;
+    uint32_t control_generation;
+    uint32_t producer_role; /* 1AUTO,2MANUAL */
+    uint64_t calculation_sequence; /* original VM STOP; 0 only Pi/K MANUAL STOP */
+    uint64_t plan_revision;
+    uint64_t phase_revision;
+    uint32_t segment_index;
+    uint32_t cusp_index;
+    xenova_drive_DirectionGateWitness_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint64_t grant_revision;
+    xenova_drive_DirectionGateWitness_driver_session_t driver_session;
+    uint64_t driver_action_seq;
+    uint64_t driver_state_seq;
+    uint64_t vehicle_sequence;
+    uint64_t valid_until_pi_us;
+    char pi_session[37];
+    char device_session[37];
+} xenova_drive_DirectionGateWitness;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionBudgetRequest_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionBudgetRequest_mission_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MissionBudgetRequest_plan_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MissionBudgetRequest_selected_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionBudgetRequest_scene_admission_id_t;
+typedef struct _xenova_drive_MissionBudgetRequest {
+    uint32_t major;
+    xenova_drive_MissionBudgetRequest_request_nonce_t request_nonce;
+    xenova_drive_MissionBudgetRequest_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint32_t control_generation;
+    uint64_t expected_grant_revision;
+    uint32_t action;
+    uint32_t slot_id;
+    uint64_t slot_revision;
+    uint64_t goal_revision;
+    uint64_t plan_revision;
+    xenova_drive_MissionBudgetRequest_plan_sha256_t plan_sha256;
+    xenova_drive_MissionBudgetRequest_selected_goal_sha256_t selected_goal_sha256;
+    xenova_drive_MissionBudgetRequest_scene_admission_id_t scene_admission_id;
+    uint64_t scene_revision;
+    uint64_t completed_guest_us;
+    uint64_t valid_until_pi_us;
+} xenova_drive_MissionBudgetRequest;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperClockProbe_nonce_t;
+typedef struct _xenova_drive_MapperClockProbe {
+    uint32_t major;
+    char vehicle[65];
+    char device[65];
+    char pi_host_boot[37];
+    char pi_client_instance[37];
+    uint64_t probe_seq;
+    xenova_drive_MapperClockProbe_nonce_t nonce; /* Appendix A6's nonce16 denotes exact16 bytes. */
+    uint64_t pi_send_us;
+    bool has_expected_mapper_boot;
+    char expected_mapper_boot[37];
+    bool has_expected_mapper_instance;
+    char expected_mapper_instance[37];
+    bool has_expected_clock_epoch;
+    char expected_clock_epoch[37];
+    uint64_t admission_revision;
+    /* Pi clock owner returns a previously accepted immutable J/Pi lease.
+ This is absent during initial probes; it does not report the current P4. */
+    bool has_mapper_trust;
+    xenova_drive_WorldTrust mapper_trust;
+    bool has_operation_gate;
+    xenova_drive_PiOperationGate operation_gate;
+} xenova_drive_MapperClockProbe;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_SceneGrant_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_SceneGrant_frozen_evidence_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_SceneGrant_restore_checkpoint_sha256_t;
+typedef struct _xenova_drive_SceneGrant {
+    uint32_t major;
+    char vehicle[65];
+    char pi_host_boot[37];
+    char gateway_instance[37];
+    uint64_t source_admission_revision;
+    /* Appendix A6 fixes the type/tag; scene follows WorldSnapshot's field name. */
+    xenova_drive_SceneAdmissionRef scene;
+    char mapper_device[65];
+    char map_epoch[37];
+    char frame_epoch[37];
+    char odom_epoch[37];
+    char configuration[65];
+    char calibration[65];
+    char primitive[65];
+    uint64_t issued_pi_us;
+    uint64_t valid_until_pi_us;
+    uint32_t lifecycle_state;
+    xenova_drive_SceneGrant_request_nonce_t request_nonce;
+    uint64_t survey_deadline_pi_us;
+    uint32_t max_observation_stations;
+    uint32_t purpose;
+    bool has_frozen_evidence_sha256;
+    xenova_drive_SceneGrant_frozen_evidence_sha256_t frozen_evidence_sha256;
+    uint64_t frozen_survey_revision;
+    uint64_t frozen_hazard_revision;
+    bool has_restore_checkpoint_sha256;
+    xenova_drive_SceneGrant_restore_checkpoint_sha256_t restore_checkpoint_sha256;
+    uint64_t lifecycle_revision;
+} xenova_drive_SceneGrant;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_SurveySummary_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_SurveySummary_survey_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_SurveySummary_evidence_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_SurveySummary_coverage_profile_sha256_t;
+typedef struct _xenova_drive_SurveySummary {
+    uint32_t major;
+    xenova_drive_SurveySummary_request_nonce_t request_nonce;
+    xenova_drive_SurveySummary_survey_id_t survey_id;
+    uint64_t survey_revision;
+    uint32_t status;
+    uint64_t world_sequence;
+    uint64_t evidence_sequence;
+    uint64_t started_peer_us;
+    uint64_t last_observed_peer_us;
+    uint64_t completed_peer_us;
+    uint32_t positive_cell_count;
+    uint32_t observed_slot_count;
+    uint32_t required_sensor_mask;
+    uint32_t valid_sensor_mask;
+    xenova_drive_SurveySummary_evidence_sha256_t evidence_sha256;
+    xenova_drive_SurveySummary_coverage_profile_sha256_t coverage_profile_sha256;
+    uint32_t observation_station_count;
+    uint64_t hazard_revision;
+    uint64_t alignment_revision;
+    float anchor_position_bound_m;
+    float anchor_heading_bound_rad;
+    uint32_t evidence_flags;
+    uint32_t failure_flags;
+    uint32_t timestamp_error_us;
+} xenova_drive_SurveySummary;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperClockReply_nonce_t;
+typedef struct _xenova_drive_MapperClockReply {
+    uint32_t major;
+    char pi_host_boot[37];
+    char pi_client_instance[37];
+    uint64_t probe_seq;
+    xenova_drive_MapperClockReply_nonce_t nonce;
+    uint64_t pi_send_us;
+    char device[65];
+    char mapper_boot[37];
+    char mapper_instance[37];
+    char clock_epoch[37];
+    char map_epoch[37];
+    char frame_epoch[37];
+    char odom_epoch[37];
+    char configuration[65];
+    char calibration[65];
+    char primitive[65];
+    uint64_t j2;
+    uint64_t j3;
+    bool has_survey_summary;
+    xenova_drive_SurveySummary survey_summary;
+    bool has_supported_mapper_features;
+    uint32_t supported_mapper_features; /* bit1 operation gate, bit2 route management; absent is legacy. */
+} xenova_drive_MapperClockReply;
+
+typedef PB_BYTES_ARRAY_T(128) xenova_drive_TofObservation_distance_mm_le_t;
+typedef PB_BYTES_ARRAY_T(64) xenova_drive_TofObservation_status_t;
+typedef PB_BYTES_ARRAY_T(64) xenova_drive_TofObservation_quality_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_TofObservation_sensor_instance_t;
+typedef struct _xenova_drive_TofObservation {
+    uint32_t major;
+    char vehicle[65];
+    char host_boot[37];
+    char gateway_instance[37];
+    char pi_session[37];
+    char device_session[37];
+    uint32_t sensor_id;
+    uint64_t source_sample;
+    uint64_t source_us;
+    uint64_t pi_sample_us;
+    uint32_t clock_error_us;
+    uint32_t sensor_time_error_us;
+    char calibration[65];
+    uint32_t sensor_config_revision;
+    uint32_t rows;
+    uint32_t cols;
+    xenova_drive_TofObservation_distance_mm_le_t distance_mm_le;
+    xenova_drive_TofObservation_status_t status;
+    xenova_drive_TofObservation_quality_t quality;
+    uint32_t frame_status;
+    uint32_t source_crc32;
+    char clock_epoch[37];
+    uint64_t clock_seq;
+    bool complete;
+    xenova_drive_TofObservation_sensor_instance_t sensor_instance;
+    uint32_t sensor_generation;
+} xenova_drive_TofObservation;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteBinding_route_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteBinding_core_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteBinding_global_plan_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteBinding_goal_sha256_t;
+/* drive-route-1 is an explicitly approved opt-in profile. Records/queries/facts
+ are not motion authority. Legacy fields/domains retain their meanings. */
+typedef struct _xenova_drive_RouteBinding {
+    xenova_drive_RouteBinding_route_id_t route_id;
+    uint64_t revision;
+    uint32_t purpose;
+    xenova_drive_RouteBinding_core_sha256_t core_sha256;
+    xenova_drive_RouteBinding_global_plan_sha256_t global_plan_sha256;
+    xenova_drive_RouteBinding_goal_sha256_t goal_sha256;
+} xenova_drive_RouteBinding;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionExecution_mission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionExecution_operator_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionExecution_scene_admission_id_t;
+typedef struct _xenova_drive_MissionExecution {
+    xenova_drive_MissionExecution_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint32_t kind; /* 0none,1lane,2parking; no implicit movement permission. */
+    uint32_t phase;
+    uint32_t result;
+    xenova_drive_MissionExecution_operator_request_nonce_t operator_request_nonce;
+    bool has_slot_id;
+    uint32_t slot_id;
+    bool has_slot_revision;
+    uint64_t slot_revision;
+    bool has_goal;
+    xenova_drive_Pose goal;
+    bool has_goal_revision;
+    uint64_t goal_revision;
+    uint64_t mission_deadline_pi_us;
+    uint64_t cancel_fence_revision;
+    uint32_t active_segment;
+    pb_size_t selected_slot_polygon_count;
+    xenova_drive_Point selected_slot_polygon[4];
+    bool has_goal_position_bound_m;
+    float goal_position_bound_m;
+    bool has_goal_heading_bound_rad;
+    float goal_heading_bound_rad;
+    xenova_drive_MissionExecution_scene_admission_id_t scene_admission_id;
+    uint64_t scene_admission_revision;
+    uint32_t strategy;
+    uint64_t execution_deadline_pi_us;
+    uint32_t correction_attempts_used;
+    float execution_travel_m;
+    uint64_t grant_revision;
+    float search_travel_m;
+    uint64_t search_deadline_pi_us;
+    /* State feature32 exactly matches this presence; legacy fields keep their meaning. */
+    bool has_operation_binding;
+    xenova_drive_OperationBinding operation_binding;
+    bool has_route_binding;
+    xenova_drive_RouteBinding route_binding;
+} xenova_drive_MissionExecution;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_pi_host_boot_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_gateway_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_owner_vm_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_owner_execution_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_app_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_mission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_operator_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionGrant_scene_admission_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MissionGrant_primitive_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MissionGrant_locked_goal_sha256_t;
+typedef struct _xenova_drive_MissionGrant {
+    uint32_t major;
+    char vehicle[65];
+    xenova_drive_MissionGrant_pi_host_boot_t pi_host_boot;
+    xenova_drive_MissionGrant_gateway_instance_t gateway_instance;
+    xenova_drive_MissionGrant_owner_vm_t owner_vm;
+    xenova_drive_MissionGrant_owner_execution_t owner_execution;
+    xenova_drive_MissionGrant_app_instance_t app_instance;
+    uint32_t control_generation;
+    xenova_drive_MissionGrant_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint64_t grant_revision;
+    uint32_t kind;
+    uint32_t strategy;
+    xenova_drive_MissionGrant_operator_request_nonce_t operator_request_nonce;
+    uint64_t issued_pi_us;
+    uint64_t mission_deadline_pi_us;
+    uint64_t cancel_fence_revision;
+    xenova_drive_MissionGrant_scene_admission_id_t scene_admission_id;
+    uint64_t scene_revision;
+    char configuration[65];
+    char calibration[65];
+    xenova_drive_MissionGrant_primitive_t primitive;
+    uint64_t execution_deadline_pi_us;
+    uint32_t correction_attempts_used;
+    float execution_travel_m;
+    float max_execution_travel_m;
+    bool admitted;
+    uint64_t search_deadline_pi_us;
+    float search_travel_m;
+    float max_search_travel_m;
+    bool has_locked_goal_sha256;
+    xenova_drive_MissionGrant_locked_goal_sha256_t locked_goal_sha256;
+    bool has_operation_binding;
+    xenova_drive_OperationBinding operation_binding;
+    bool has_route_binding;
+    xenova_drive_RouteBinding route_binding;
+} xenova_drive_MissionGrant;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MissionBudgetReply_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MissionBudgetReply_request_sha256_t;
+typedef struct _xenova_drive_MissionBudgetReply {
+    uint32_t major;
+    xenova_drive_MissionBudgetReply_request_nonce_t request_nonce;
+    xenova_drive_MissionBudgetReply_request_sha256_t request_sha256;
+    uint32_t result;
+    uint32_t reason;
+    bool has_grant;
+    xenova_drive_MissionGrant grant;
+} xenova_drive_MissionBudgetReply;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadSectionRef_section_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadSectionRef_section_sha256_t;
+typedef struct _xenova_drive_RoadSectionRef {
+    xenova_drive_RoadSectionRef_section_id_t section_id;
+    xenova_drive_RoadSectionRef_section_sha256_t section_sha256;
+    uint32_t left_lane_id;
+    uint32_t right_lane_id;
+    float length_m;
+    uint32_t order;
+} xenova_drive_RoadSectionRef;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadEdge_connection_sha256_t;
+typedef struct _xenova_drive_RoadEdge {
+    uint32_t from_section_index;
+    uint32_t to_section_index;
+    uint32_t from_lane_id;
+    uint32_t to_lane_id;
+    uint32_t kind;
+    float from_station_m;
+    float to_station_m;
+    xenova_drive_RoadEdge_connection_sha256_t connection_sha256;
+    bool closes_circuit;
+} xenova_drive_RoadEdge;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadTopology_topology_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadTopology_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadTopology_origin_roots_sha256_t;
+typedef struct _xenova_drive_RoadTopology {
+    uint32_t major;
+    xenova_drive_RoadTopology_topology_id_t topology_id;
+    uint64_t revision;
+    xenova_drive_RoadTopology_geometry_scope_sha256_t geometry_scope_sha256;
+    pb_size_t sections_count;
+    xenova_drive_RoadSectionRef sections[32];
+    pb_size_t edges_count;
+    xenova_drive_RoadEdge edges[96];
+    bool closed_observed;
+    xenova_drive_RoadTopology_origin_roots_sha256_t origin_roots_sha256;
+} xenova_drive_RoadTopology;
+
+typedef struct _xenova_drive_RouteOccurrence {
+    uint32_t section_index;
+    uint32_t lane_id;
+    float entry_station_m;
+    float exit_station_m;
+    uint32_t edge_index;
+} xenova_drive_RouteOccurrence;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoutePlan_route_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoutePlan_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoutePlan_topology_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoutePlan_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoutePlan_exit_space_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoutePlan_origin_guest_witness_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoutePlan_merge_section_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoutePlan_terminal_profile_sha256_t;
+typedef struct _xenova_drive_RoutePlan {
+    uint32_t major;
+    xenova_drive_RoutePlan_route_id_t route_id;
+    uint64_t revision;
+    uint32_t purpose;
+    xenova_drive_RoutePlan_goal_sha256_t goal_sha256;
+    xenova_drive_RoutePlan_topology_sha256_t topology_sha256;
+    xenova_drive_RoutePlan_geometry_scope_sha256_t geometry_scope_sha256;
+    pb_size_t occurrences_count;
+    xenova_drive_RouteOccurrence occurrences[96];
+    uint32_t max_laps;
+    xenova_drive_RoutePlan_exit_space_sha256_t exit_space_sha256;
+    xenova_drive_RoutePlan_origin_guest_witness_sha256_t origin_guest_witness_sha256;
+    xenova_drive_RoutePlan_merge_section_id_t merge_section_id;
+    uint32_t merge_lane_id;
+    float merge_station_lower_m;
+    float merge_station_upper_m;
+    xenova_drive_Pose merge_seed_pose;
+    xenova_drive_RoutePlan_terminal_profile_sha256_t terminal_profile_sha256;
+} xenova_drive_RoutePlan;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCore_route_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_topology_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_global_plan_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCore_meter_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCore_parking_attempt_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_parking_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_predecessor_episode_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_budget_profile_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_local_path_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCore_stop_wait_facts_sha256_t;
+typedef struct _xenova_drive_RouteCore {
+    xenova_drive_RouteCore_route_id_t route_id;
+    uint64_t revision;
+    uint32_t purpose;
+    xenova_drive_RouteCore_goal_sha256_t goal_sha256;
+    xenova_drive_RouteCore_topology_sha256_t topology_sha256;
+    xenova_drive_RouteCore_global_plan_sha256_t global_plan_sha256;
+    xenova_drive_RouteCore_geometry_scope_sha256_t geometry_scope_sha256;
+    uint64_t started_pi_us;
+    uint64_t deadline_pi_us;
+    xenova_drive_RouteCore_meter_epoch_t meter_epoch;
+    uint64_t meter_baseline_total_ticks;
+    double max_travel_m;
+    uint32_t phase;
+    uint64_t phase_revision;
+    uint64_t phase_started_pi_us;
+    uint64_t phase_expires_pi_us;
+    xenova_drive_RouteCore_parking_attempt_id_t parking_attempt_id;
+    xenova_drive_RouteCore_parking_goal_sha256_t parking_goal_sha256;
+    xenova_drive_RouteCore_predecessor_episode_sha256_t predecessor_episode_sha256;
+    xenova_drive_RouteCore_budget_profile_sha256_t budget_profile_sha256;
+    uint32_t target_lane_id;
+    uint32_t max_laps;
+    uint64_t stop_wait_command_sequence;
+    xenova_drive_RouteCore_local_path_sha256_t local_path_sha256;
+    uint64_t meter_gap_revision;
+    double metres_per_tick_upper;
+    uint32_t progress_mode;
+    xenova_drive_Pose phase_goal;
+    xenova_drive_RouteCore_stop_wait_facts_sha256_t stop_wait_facts_sha256;
+    uint64_t stop_wait_started_pi_us;
+    uint32_t terminal_result;
+    uint32_t terminal_reason;
+} xenova_drive_RouteCore;
+
+typedef struct _xenova_drive_RouteProgress {
+    uint32_t occurrence_index;
+    float station_lower_m;
+    float station_upper_m;
+    uint64_t used_travel_ticks;
+    uint64_t last_progress_pi_us;
+    uint64_t vehicle_sequence;
+    uint64_t calculation_sequence;
+    uint64_t revision;
+    uint32_t completed_laps;
+    uint64_t confirmed_stop_wait_us;
+    float remaining_upper_m;
+    uint64_t stop_wait_hwm_pi_us;
+} xenova_drive_RouteProgress;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteAcceptanceRef_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteAcceptanceRef_acceptance_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteAcceptanceRef_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteAcceptanceRef_request_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteAcceptanceRef_accepted_core_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteAcceptanceRef_origin_owner_sha256_t;
+typedef struct _xenova_drive_RouteAcceptanceRef {
+    xenova_drive_RouteAcceptanceRef_registry_epoch_t registry_epoch;
+    uint64_t registry_revision;
+    xenova_drive_RouteAcceptanceRef_acceptance_nonce_t acceptance_nonce;
+    xenova_drive_RouteAcceptanceRef_request_nonce_t request_nonce;
+    xenova_drive_RouteAcceptanceRef_request_sha256_t request_sha256;
+    xenova_drive_RouteAcceptanceRef_accepted_core_sha256_t accepted_core_sha256;
+    uint64_t request_sequence;
+    xenova_drive_RouteAcceptanceRef_origin_owner_sha256_t origin_owner_sha256;
+} xenova_drive_RouteAcceptanceRef;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteSnapshot_current_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteSnapshot_exit_space_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteSnapshot_basis_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteSnapshot_current_world_sha256_t;
+typedef struct _xenova_drive_RouteSnapshot {
+    xenova_drive_RouteCore core;
+    xenova_drive_RouteProgress progress;
+    xenova_drive_RouteAcceptanceRef acceptance;
+    xenova_drive_RouteSnapshot_current_window_sha256_t current_window_sha256;
+    uint32_t state;
+    uint32_t task_space_kind;
+    xenova_drive_RouteSnapshot_exit_space_sha256_t exit_space_sha256;
+    xenova_drive_RouteSnapshot_basis_window_sha256_t basis_window_sha256;
+    uint64_t basis_window_revision;
+    xenova_drive_RouteSnapshot_current_world_sha256_t current_world_sha256;
+} xenova_drive_RouteSnapshot;
+
+typedef struct _xenova_drive_DriveState {
+    uint32_t major;
+    char source_vm[37];
+    char source_execution[37];
+    char source_app_instance[37];
+    uint32_t source_generation;
+    uint64_t state_revision;
+    char frame_epoch[37];
+    char odom_epoch[37];
+    char configuration[65];
+    char primitive[65];
+    char reference_id[65];
+    uint64_t reference_revision;
+    uint64_t path_revision;
+    uint64_t maneuver_revision;
+    int32_t direction; /* -1/right, 0/reference, +1/left */
+    uint32_t maneuver_phase; /* 0/reference, 1/bypass, 2/rejoin */
+    xenova_drive_Pose merge_goal;
+    uint64_t vehicle_sequence;
+    uint64_t calculation_sequence;
+    uint32_t tracker_index;
+    bool complete;
+    pb_size_t path_count;
+    xenova_drive_PathPoint path[512];
+    char message_id[37];
+    char calibration[65];
+    char map_epoch[37];
+    uint64_t observation_seq;
+    /* Present only after this maneuver's merge milestone was actually passed on
+ this reference revision. Absence is not proof of passage. */
+    bool has_merge_passed_reference_revision;
+    uint64_t merge_passed_reference_revision;
+    bool has_world_features;
+    uint32_t world_features; /* absent: legacy map semantics (0) */
+    bool has_state_features;
+    uint32_t state_features; /* drive-parking-2 requires semantic mask7. */
+    bool has_mission;
+    xenova_drive_MissionExecution mission;
+    pb_size_t segments_count;
+    xenova_drive_GearSegment segments[3];
+    bool has_direction_gate;
+    xenova_drive_DirectionGateRef direction_gate;
+    /* State feature8 binds the original lane intent and basis to this path snapshot. */
+    bool has_task_reference;
+    xenova_drive_TaskReferenceState task_reference;
+    /* Feature16 is opt-in; absence is not an authoritative NONE episode. */
+    bool has_episode;
+    xenova_drive_EpisodeSnapshot episode;
+    bool has_route;
+    xenova_drive_RouteSnapshot route;
+} xenova_drive_DriveState;
+
+typedef struct _xenova_drive_AcceptedState {
+    char host_boot[37];
+    char gateway_instance[37];
+    xenova_drive_DriveState state;
+} xenova_drive_AcceptedState;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WorldRouteView_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WorldRouteView_topology_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WorldRouteView_window_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WorldRouteView_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WorldRouteView_from_window_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WorldRouteView_from_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WorldRouteView_transition_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WorldRouteView_first_section_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WorldRouteView_last_section_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WorldRouteView_overlap_prefix_sha256_t;
+typedef struct _xenova_drive_WorldRouteView {
+    uint32_t major;
+    xenova_drive_WorldRouteView_geometry_scope_sha256_t geometry_scope_sha256;
+    xenova_drive_WorldRouteView_topology_sha256_t topology_sha256;
+    xenova_drive_WorldRouteView_window_id_t window_id;
+    uint64_t window_revision;
+    xenova_drive_WorldRouteView_window_sha256_t window_sha256;
+    xenova_drive_WorldRouteView_from_window_id_t from_window_id;
+    xenova_drive_WorldRouteView_from_window_sha256_t from_window_sha256;
+    xenova_drive_WorldRouteView_transition_id_t transition_id;
+    xenova_drive_WorldRouteView_first_section_id_t first_section_id;
+    xenova_drive_WorldRouteView_last_section_id_t last_section_id;
+    xenova_drive_WorldRouteView_overlap_prefix_sha256_t overlap_prefix_sha256;
+    uint64_t geometry_revision;
+} xenova_drive_WorldRouteView;
+
 typedef PB_BYTES_ARRAY_T(4096) xenova_drive_WorldSnapshot_occupancy_t;
 typedef PB_BYTES_ARRAY_T(4096) xenova_drive_WorldSnapshot_cell_flags_t;
 typedef PB_BYTES_ARRAY_T(16384) xenova_drive_WorldSnapshot_age_le32_t;
+typedef PB_BYTES_ARRAY_T(512) xenova_drive_WorldSnapshot_drivable_permission_t;
 typedef struct _xenova_drive_WorldSnapshot {
     uint32_t major;
     uint32_t minor;
@@ -74,101 +1174,471 @@ typedef struct _xenova_drive_WorldSnapshot {
     bool complete;
     bool truncated;
     uint32_t inflation_policy; /* 0: raw occupied cells; Pi adds footprint/margin. */
+    bool has_lane_model;
+    xenova_drive_LaneModel lane_model;
+    pb_size_t parking_slots_count;
+    xenova_drive_ParkingSlot parking_slots[8];
+    bool has_drivable_permission;
+    xenova_drive_WorldSnapshot_drivable_permission_t drivable_permission;
+    bool has_localization;
+    xenova_drive_MapLocalization localization;
+    bool has_scene;
+    xenova_drive_SceneAdmissionRef scene;
+    bool has_parking_set;
+    xenova_drive_ParkingSetMeta parking_set;
+    bool has_route_view;
+    xenova_drive_WorldRouteView route_view;
 } xenova_drive_WorldSnapshot;
 
-typedef struct _xenova_drive_VehicleSample {
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_dataset_uuid_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_map_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_frame_epoch_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadGeometryScope_primitive_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_origin_pi_host_boot_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_origin_gateway_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_origin_pi_session_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_origin_device_session_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadGeometryScope_origin_odom_epoch_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadGeometryScope_alignment_frame_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadGeometryScope_geometry_policy_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadGeometryScope_origin_storage_context_sha256_t;
+typedef struct _xenova_drive_RoadGeometryScope {
     uint32_t major;
+    xenova_drive_RoadGeometryScope_dataset_uuid_t dataset_uuid;
+    xenova_drive_RoadGeometryScope_map_epoch_t map_epoch;
+    xenova_drive_RoadGeometryScope_frame_epoch_t frame_epoch;
     char vehicle[65];
-    char host_boot[37];
-    char device_session[37];
-    char odom_epoch[37];
-    uint64_t sequence;
-    uint64_t source_sample;
-    uint64_t source_us;
-    uint64_t pi_sample_us;
-    uint32_t clock_error_us;
-    int64_t left_ticks;
-    int64_t right_ticks;
-    xenova_drive_Pose odom_pose;
-    float velocity_mps;
-    bool has_measured_steering_rad;
-    float measured_steering_rad;
-    bool has_estimated_steering_rad;
-    float estimated_steering_rad;
+    char configuration[65];
+    char calibration[65];
+    xenova_drive_RoadGeometryScope_primitive_t primitive;
+    xenova_drive_RoadGeometryScope_origin_pi_host_boot_t origin_pi_host_boot;
+    xenova_drive_RoadGeometryScope_origin_gateway_instance_t origin_gateway_instance;
+    xenova_drive_RoadGeometryScope_origin_pi_session_t origin_pi_session;
+    xenova_drive_RoadGeometryScope_origin_device_session_t origin_device_session;
+    xenova_drive_RoadGeometryScope_origin_odom_epoch_t origin_odom_epoch;
+    xenova_drive_RoadGeometryScope_alignment_frame_sha256_t alignment_frame_sha256;
+    xenova_drive_RoadGeometryScope_geometry_policy_sha256_t geometry_policy_sha256;
+    uint32_t coordinate_policy;
+    xenova_drive_RoadGeometryScope_origin_storage_context_sha256_t origin_storage_context_sha256;
+} xenova_drive_RoadGeometryScope;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadDurableRef_database_uuid_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadDurableRef_job_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadDurableRef_job_digest_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadDurableRef_origin_context_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadDurableRef_record_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadDurableRef_original_receipt_sha256_t;
+typedef struct _xenova_drive_RoadDurableRef {
+    xenova_drive_RoadDurableRef_database_uuid_t database_uuid;
+    xenova_drive_RoadDurableRef_job_id_t job_id;
+    xenova_drive_RoadDurableRef_job_digest_t job_digest;
+    uint32_t status;
+    uint64_t durable_revision;
+    uint64_t committed_mapper_us;
+    xenova_drive_RoadDurableRef_origin_context_sha256_t origin_context_sha256;
+    xenova_drive_RoadDurableRef_record_sha256_t record_sha256;
+    xenova_drive_RoadDurableRef_original_receipt_sha256_t original_receipt_sha256;
+} xenova_drive_RoadDurableRef;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadObservationOrigin_mapper_boot_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadObservationOrigin_mapper_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadObservationOrigin_clock_epoch_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadObservationOrigin_raw_binding_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadObservationOrigin_frame_evidence_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadObservationOrigin_origin_context_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadObservationOrigin_alignment_raw_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadObservationOrigin_mapper_clock_reply_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadObservationOrigin_independent_world_sha256_t;
+typedef struct _xenova_drive_RoadObservationOrigin {
+    uint32_t major;
+    xenova_drive_RoadObservationOrigin_mapper_boot_t mapper_boot;
+    xenova_drive_RoadObservationOrigin_mapper_instance_t mapper_instance;
+    xenova_drive_RoadObservationOrigin_clock_epoch_t clock_epoch;
+    uint64_t observation_sequence;
+    uint64_t frame_source_sequence;
+    uint64_t capture_mapper_lower_us;
+    uint64_t capture_mapper_upper_us;
+    uint64_t completed_mapper_us;
+    xenova_drive_RoadObservationOrigin_raw_binding_sha256_t raw_binding_sha256;
+    xenova_drive_RoadObservationOrigin_frame_evidence_sha256_t frame_evidence_sha256;
+    xenova_drive_RoadObservationOrigin_origin_context_sha256_t origin_context_sha256;
+    xenova_drive_RoadObservationOrigin_alignment_raw_sha256_t alignment_raw_sha256;
+    xenova_drive_RoadObservationOrigin_mapper_clock_reply_sha256_t mapper_clock_reply_sha256;
+    uint64_t vehicle_sequence;
+    bool has_independent_world_sha256;
+    xenova_drive_RoadObservationOrigin_independent_world_sha256_t independent_world_sha256;
+} xenova_drive_RoadObservationOrigin;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StartGoal_goal_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_StartGoal_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_StartGoal_section_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_StartGoal_vehicle_raw_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_StartGoal_alignment_raw_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_StartGoal_world_raw_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_StartGoal_terminal_profile_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_StartGoal_stop_facts_sha256_t;
+typedef struct _xenova_drive_StartGoal {
+    uint32_t major;
+    xenova_drive_StartGoal_goal_id_t goal_id;
+    uint64_t revision;
+    xenova_drive_StartGoal_geometry_scope_sha256_t geometry_scope_sha256;
+    xenova_drive_Pose rear_axle_pose;
     float position_error_m;
     float heading_error_rad;
-    uint32_t quality; /* bit0 encoder valid, bit1 clock valid; other bits unsupported. */
-    char calibration[65];
-    bool has_steering_error_rad;
-    float steering_error_rad;
-    bool has_gateway_instance;
-    char gateway_instance[37];
-    bool has_pi_session;
-    char pi_session[37];
-} xenova_drive_VehicleSample;
+    xenova_drive_StartGoal_section_id_t section_id;
+    uint32_t lane_id;
+    float station_m;
+    xenova_drive_RoadObservationOrigin origin;
+    xenova_drive_StartGoal_vehicle_raw_sha256_t vehicle_raw_sha256;
+    xenova_drive_StartGoal_alignment_raw_sha256_t alignment_raw_sha256;
+    xenova_drive_StartGoal_world_raw_sha256_t world_raw_sha256;
+    xenova_drive_StartGoal_terminal_profile_sha256_t terminal_profile_sha256;
+    uint64_t origin_vehicle_sequence;
+    uint64_t registered_pi_us;
+    uint64_t stop_command_sequence;
+    uint64_t stop_report_sequence;
+    xenova_drive_StartGoal_stop_facts_sha256_t stop_facts_sha256;
+} xenova_drive_StartGoal;
 
-typedef struct _xenova_drive_DriveState {
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadSection_section_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadSection_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadSection_alignment_raw_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadSection_observation_evidence_sha256_t;
+typedef struct _xenova_drive_RoadSection {
     uint32_t major;
-    char source_vm[37];
-    char source_execution[37];
-    char source_app_instance[37];
-    uint32_t source_generation;
-    uint64_t state_revision;
-    char frame_epoch[37];
-    char odom_epoch[37];
-    char configuration[65];
-    char primitive[65];
-    char reference_id[65];
-    uint64_t reference_revision;
-    uint64_t path_revision;
-    uint64_t maneuver_revision;
-    int32_t direction; /* -1/right, 0/reference, +1/left */
-    uint32_t maneuver_phase; /* 0/reference, 1/bypass, 2/rejoin */
-    xenova_drive_Pose merge_goal;
+    xenova_drive_RoadSection_section_id_t section_id;
+    uint64_t revision;
+    xenova_drive_RoadSection_geometry_scope_sha256_t geometry_scope_sha256;
+    xenova_drive_RoadObservationOrigin origin;
+    xenova_drive_LaneModel road;
+    pb_size_t reference_count;
+    xenova_drive_Point reference[32];
+    pb_size_t left_boundary_count;
+    xenova_drive_Point left_boundary[32];
+    pb_size_t right_boundary_count;
+    xenova_drive_Point right_boundary[32];
+    pb_size_t point_error_m_count;
+    float point_error_m[32];
+    float heading_error_rad;
+    xenova_drive_RoadSection_alignment_raw_sha256_t alignment_raw_sha256;
+    xenova_drive_RoadSection_observation_evidence_sha256_t observation_evidence_sha256;
+} xenova_drive_RoadSection;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadConnection_connection_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadConnection_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadConnection_from_section_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadConnection_to_section_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadConnection_evidence_roots_sha256_t;
+typedef struct _xenova_drive_RoadConnection {
+    uint32_t major;
+    xenova_drive_RoadConnection_connection_id_t connection_id;
+    uint64_t revision;
+    xenova_drive_RoadConnection_geometry_scope_sha256_t geometry_scope_sha256;
+    xenova_drive_RoadObservationOrigin origin;
+    xenova_drive_RoadConnection_from_section_sha256_t from_section_sha256;
+    xenova_drive_RoadConnection_to_section_sha256_t to_section_sha256;
+    uint32_t from_lane_id;
+    uint32_t to_lane_id;
+    uint32_t from_point_index;
+    uint32_t to_point_index;
+    pb_size_t overlap_reference_count;
+    xenova_drive_Point overlap_reference[8];
+    pb_size_t overlap_error_m_count;
+    float overlap_error_m[8];
+    pb_size_t connector_polygon_count;
+    xenova_drive_Point connector_polygon[8];
+    float heading_error_rad;
+    uint32_t kind;
+    pb_size_t evidence_roots_sha256_count;
+    xenova_drive_RoadConnection_evidence_roots_sha256_t evidence_roots_sha256[4];
+} xenova_drive_RoadConnection;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_ExitSpace_space_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_ExitSpace_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_ExitSpace_parking_attempt_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_ExitSpace_parking_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_ExitSpace_road_section_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_ExitSpace_connection_sha256_t;
+typedef struct _xenova_drive_ExitSpace {
+    uint32_t major;
+    xenova_drive_ExitSpace_space_id_t space_id;
+    uint64_t revision;
+    xenova_drive_ExitSpace_geometry_scope_sha256_t geometry_scope_sha256;
+    xenova_drive_RoadObservationOrigin origin;
+    xenova_drive_ExitSpace_parking_attempt_id_t parking_attempt_id;
+    xenova_drive_ExitSpace_parking_goal_sha256_t parking_goal_sha256;
+    uint32_t slot_id;
+    uint64_t slot_revision;
+    pb_size_t selected_slot_polygon_count;
+    xenova_drive_Point selected_slot_polygon[4];
+    uint32_t aisle_lane_id;
+    xenova_drive_ExitSpace_road_section_sha256_t road_section_sha256;
+    pb_size_t connection_sha256_count;
+    xenova_drive_ExitSpace_connection_sha256_t connection_sha256[2];
+    float position_error_m;
+    float heading_error_rad;
+} xenova_drive_ExitSpace;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadWindow_window_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadWindow_geometry_scope_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadWindow_topology_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadWindow_section_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadWindow_from_window_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadWindow_from_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadWindow_overlap_prefix_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadWindow_transition_id_t;
+typedef struct _xenova_drive_RoadWindow {
+    uint32_t major;
+    xenova_drive_RoadWindow_window_id_t window_id;
+    uint64_t revision;
+    xenova_drive_RoadWindow_geometry_scope_sha256_t geometry_scope_sha256;
+    xenova_drive_RoadWindow_topology_sha256_t topology_sha256;
+    pb_size_t section_sha256_count;
+    xenova_drive_RoadWindow_section_sha256_t section_sha256[2];
+    xenova_drive_RoadObservationOrigin origin;
+    xenova_drive_LaneModel road;
+    pb_size_t reference_count;
+    xenova_drive_Point reference[32];
+    pb_size_t left_boundary_count;
+    xenova_drive_Point left_boundary[32];
+    pb_size_t right_boundary_count;
+    xenova_drive_Point right_boundary[32];
+    pb_size_t point_error_m_count;
+    float point_error_m[32];
+    float heading_error_rad;
+    xenova_drive_RoadWindow_from_window_id_t from_window_id;
+    xenova_drive_RoadWindow_from_window_sha256_t from_window_sha256;
+    xenova_drive_RoadWindow_overlap_prefix_sha256_t overlap_prefix_sha256;
+    xenova_drive_RoadWindow_transition_id_t transition_id;
+    uint32_t overlap_point_count;
+} xenova_drive_RoadWindow;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperRouteWitness_mapper_boot_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperRouteWitness_mapper_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperRouteWitness_clock_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperRouteWitness_pi_host_boot_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperRouteWitness_pi_client_instance_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MapperRouteWitness_clock_reply_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MapperRouteWitness_raw_binding_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MapperRouteWitness_frame_evidence_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_MapperRouteWitness_scene_admission_id_t;
+typedef struct _xenova_drive_MapperRouteWitness {
+    xenova_drive_MapperRouteWitness_mapper_boot_t mapper_boot;
+    xenova_drive_MapperRouteWitness_mapper_instance_t mapper_instance;
+    xenova_drive_MapperRouteWitness_clock_epoch_t clock_epoch;
+    xenova_drive_MapperRouteWitness_pi_host_boot_t pi_host_boot;
+    xenova_drive_MapperRouteWitness_pi_client_instance_t pi_client_instance;
+    uint64_t clock_probe_sequence;
+    xenova_drive_MapperRouteWitness_clock_reply_sha256_t clock_reply_sha256;
+    uint64_t checked_mapper_us;
+    uint64_t valid_until_pi_us;
+    uint64_t source_binding_revision;
+    xenova_drive_MapperRouteWitness_raw_binding_sha256_t raw_binding_sha256;
     uint64_t vehicle_sequence;
+    uint64_t observation_sequence;
+    xenova_drive_MapperRouteWitness_frame_evidence_sha256_t frame_evidence_sha256;
+    xenova_drive_MapperRouteWitness_scene_admission_id_t scene_admission_id;
+    uint64_t scene_revision;
+} xenova_drive_MapperRouteWitness;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteOwnerContext_vm_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteOwnerContext_execution_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteOwnerContext_app_instance_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteOwnerContext_mission_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteOwnerContext_scene_admission_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteOwnerContext_source_key_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteOwnerContext_geometry_scope_sha256_t;
+typedef struct _xenova_drive_RouteOwnerContext {
+    xenova_drive_RouteOwnerContext_vm_t vm;
+    xenova_drive_RouteOwnerContext_execution_t execution;
+    xenova_drive_RouteOwnerContext_app_instance_t app_instance;
+    uint32_t control_generation;
+    xenova_drive_OperationBinding operation_binding;
+    xenova_drive_RouteOwnerContext_mission_id_t mission_id;
+    uint64_t mission_revision;
+    uint64_t grant_revision;
+    uint64_t cancel_fence_revision;
+    xenova_drive_RouteOwnerContext_scene_admission_id_t scene_admission_id;
+    uint64_t scene_revision;
+    xenova_drive_RouteOwnerContext_source_key_sha256_t source_key_sha256;
+    xenova_drive_RouteOwnerContext_geometry_scope_sha256_t geometry_scope_sha256;
+} xenova_drive_RouteOwnerContext;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteQuery_query_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteQuery_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteQuery_operator_request_nonce_t;
+typedef struct _xenova_drive_RouteQuery {
+    uint32_t major;
+    xenova_drive_RouteQuery_query_id_t query_id;
+    uint32_t purpose;
+    xenova_drive_RouteQuery_goal_sha256_t goal_sha256;
+    xenova_drive_RouteOwnerContext owner;
+    uint64_t issued_pi_us;
+    uint64_t valid_until_pi_us;
+    xenova_drive_RouteQuery_operator_request_nonce_t operator_request_nonce;
+} xenova_drive_RouteQuery;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteReceipt_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteReceipt_request_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteReceipt_query_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteReceipt_query_sha256_t;
+typedef struct _xenova_drive_RouteReceipt {
+    uint32_t major;
+    xenova_drive_RouteReceipt_request_nonce_t request_nonce;
+    xenova_drive_RouteReceipt_request_sha256_t request_sha256;
+    uint32_t result;
+    uint32_t reason;
+    bool has_snapshot;
+    xenova_drive_RouteSnapshot snapshot;
+    uint64_t request_sequence;
+    xenova_drive_RouteReceipt_query_id_t query_id;
+    xenova_drive_RouteReceipt_query_sha256_t query_sha256;
+    bool has_initial_target_context;
+    xenova_drive_RouteOwnerContext initial_target_context;
+} xenova_drive_RouteReceipt;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCurrentWitness_clock_reply_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCurrentWitness_world_raw_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCurrentWitness_vehicle_raw_sha256_t;
+typedef struct _xenova_drive_RouteCurrentWitness {
+    xenova_drive_EpisodeSourceContext source;
+    uint64_t vehicle_sequence;
+    uint64_t checked_guest_us;
+    uint64_t valid_until_pi_us;
+    uint64_t clock_probe_sequence;
+    xenova_drive_RouteCurrentWitness_clock_reply_sha256_t clock_reply_sha256;
+    xenova_drive_RouteCurrentWitness_world_raw_sha256_t world_raw_sha256;
+    xenova_drive_RouteCurrentWitness_vehicle_raw_sha256_t vehicle_raw_sha256;
+} xenova_drive_RouteCurrentWitness;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteExtentProof_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteExtentProof_exit_space_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteExtentProof_cusp_sweep_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteExtentProof_s19_sweep_sha256_t;
+typedef struct _xenova_drive_RouteExtentProof {
+    uint32_t mode;
+    xenova_drive_RouteExtentProof_window_sha256_t window_sha256;
+    xenova_drive_RouteExtentProof_exit_space_sha256_t exit_space_sha256;
+    float available_forward_m;
+    float available_backward_m;
+    float required_forward_m;
+    float required_backward_m;
+    float braking_distance_m;
+    float body_radius_m;
+    float position_bound_m;
+    float heading_bound_rad;
+    xenova_drive_RouteExtentProof_cusp_sweep_sha256_t cusp_sweep_sha256;
+    xenova_drive_RouteExtentProof_s19_sweep_sha256_t s19_sweep_sha256;
+    uint64_t vehicle_sequence;
+} xenova_drive_RouteExtentProof;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCandidate_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCandidate_query_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCandidate_query_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCandidate_expected_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCandidate_current_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCandidate_basis_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCandidate_exit_space_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteCandidate_phase_state_message_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteCandidate_control_facts_sha256_t;
+typedef struct _xenova_drive_RouteCandidate {
+    uint32_t major;
+    xenova_drive_RouteCandidate_request_nonce_t request_nonce;
+    uint64_t request_sequence;
+    uint32_t action;
+    xenova_drive_RouteCandidate_query_id_t query_id;
+    xenova_drive_RouteCandidate_query_sha256_t query_sha256;
+    xenova_drive_RouteOwnerContext owner;
+    xenova_drive_RouteCurrentWitness witness;
+    xenova_drive_RouteCandidate_expected_registry_epoch_t expected_registry_epoch;
+    uint64_t expected_registry_revision;
+    uint64_t expected_route_revision;
+    xenova_drive_RouteCore core;
+    xenova_drive_RouteProgress progress;
+    uint32_t task_space_kind;
+    xenova_drive_RouteCandidate_current_window_sha256_t current_window_sha256;
+    xenova_drive_RouteCandidate_basis_window_sha256_t basis_window_sha256;
+    uint64_t basis_window_revision;
+    xenova_drive_RouteCandidate_exit_space_sha256_t exit_space_sha256;
+    xenova_drive_RouteCandidate_phase_state_message_id_t phase_state_message_id;
+    uint64_t plan_revision;
     uint64_t calculation_sequence;
-    uint32_t tracker_index;
-    bool complete;
-    pb_size_t path_count;
-    xenova_drive_PathPoint path[512];
-    char message_id[37];
-    char calibration[65];
-    char map_epoch[37];
-    uint64_t observation_seq;
-    /* Present only after this maneuver's merge milestone was actually passed on
- this reference revision. Absence is not proof of passage. */
-    bool has_merge_passed_reference_revision;
-    uint64_t merge_passed_reference_revision;
-    bool has_world_features;
-    uint32_t world_features; /* absent: legacy map semantics (0) */
-} xenova_drive_DriveState;
+    uint64_t began_guest_us;
+    uint64_t phase_started_guest_us;
+    xenova_drive_RouteCandidate_control_facts_sha256_t control_facts_sha256;
+    xenova_drive_RouteExtentProof extent;
+} xenova_drive_RouteCandidate;
 
-/* Separate Pi state connection. These bounded management/state messages are
- not part of the small command/control JSON socket or the Jetson map client. */
-typedef struct _xenova_drive_ClockProbe {
-    char vm[37];
-    char execution[37];
-    char app_instance[37];
-    uint64_t sequence;
-    uint64_t guest_send_us;
-} xenova_drive_ClockProbe;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteEligibility_eligibility_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteEligibility_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteEligibility_exit_space_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteEligibility_topology_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteEligibility_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteEligibility_global_plan_sha256_t;
+typedef struct _xenova_drive_RouteEligibility {
+    uint32_t major;
+    xenova_drive_RouteEligibility_eligibility_id_t eligibility_id;
+    uint32_t purpose;
+    xenova_drive_RouteOwnerContext owner;
+    xenova_drive_RouteCurrentWitness witness;
+    uint32_t task_space_kind;
+    xenova_drive_RouteEligibility_goal_sha256_t goal_sha256;
+    xenova_drive_RouteEligibility_exit_space_sha256_t exit_space_sha256;
+    xenova_drive_RouteEligibility_topology_sha256_t topology_sha256;
+    xenova_drive_RouteEligibility_window_sha256_t window_sha256;
+    xenova_drive_RouteEligibility_global_plan_sha256_t global_plan_sha256;
+    bool eligible;
+    uint32_t reason;
+    xenova_drive_RouteExtentProof extent;
+} xenova_drive_RouteEligibility;
 
-typedef struct _xenova_drive_WorldTrust {
-    char vehicle[65];
-    char mapper_boot[37];
-    char mapper_instance[37];
-    char map_epoch[37];
-    char frame_epoch[37];
-    char odom_epoch[37];
-    char configuration[65];
-    char calibration[65];
-    char primitive[65];
-    char clock_epoch[37];
-    int64_t lower_offset_us; /* mapper -> Pi clock interval */
-    int64_t upper_offset_us;
-    uint64_t expires_pi_us;
-    uint32_t max_error_us;
-} xenova_drive_WorldTrust;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteEligibilityRef_eligibility_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteEligibilityRef_body_sha256_t;
+typedef struct _xenova_drive_RouteEligibilityRef {
+    xenova_drive_RouteEligibilityRef_eligibility_id_t eligibility_id;
+    xenova_drive_RouteEligibilityRef_body_sha256_t body_sha256;
+    uint32_t purpose;
+    uint64_t ready_revision;
+    uint64_t valid_until_pi_us;
+    uint32_t reason;
+    uint32_t task_space_kind;
+    bool eligible;
+} xenova_drive_RouteEligibilityRef;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteStatus_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteStatus_route_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteStatus_accepted_core_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteStatus_global_plan_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteStatus_local_path_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RouteStatus_state_message_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteStatus_state_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteStatus_current_permission_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RouteStatus_current_window_sha256_t;
+typedef struct _xenova_drive_RouteStatus {
+    uint32_t major;
+    xenova_drive_RouteStatus_registry_epoch_t registry_epoch;
+    uint64_t registry_revision;
+    xenova_drive_RouteStatus_route_id_t route_id;
+    xenova_drive_RouteStatus_accepted_core_sha256_t accepted_core_sha256;
+    xenova_drive_RouteStatus_global_plan_sha256_t global_plan_sha256;
+    xenova_drive_RouteStatus_local_path_sha256_t local_path_sha256;
+    uint32_t route_state;
+    uint32_t commit_state;
+    uint32_t reason;
+    uint64_t valid_until_pi_us;
+    xenova_drive_RouteStatus_state_message_id_t state_message_id;
+    xenova_drive_RouteStatus_state_sha256_t state_sha256;
+    uint64_t state_revision;
+    uint64_t plan_revision;
+    uint64_t phase_revision;
+    uint64_t calculation_hwm;
+    uint64_t vehicle_hwm;
+    xenova_drive_RouteStatus_current_permission_sha256_t current_permission_sha256;
+    xenova_drive_RouteStatus_current_window_sha256_t current_window_sha256;
+    pb_size_t eligibility_count;
+    xenova_drive_RouteEligibilityRef eligibility[2];
+    uint32_t terminal_result;
+} xenova_drive_RouteStatus;
 
 typedef struct _xenova_drive_ClockReply {
     xenova_drive_ClockProbe probe;
@@ -179,42 +1649,159 @@ typedef struct _xenova_drive_ClockReply {
     bool has_trust;
     xenova_drive_WorldTrust trust;
     xenova_drive_VehicleSample vehicle;
+    bool has_current_mission;
+    xenova_drive_MissionGrant current_mission;
+    bool has_direction_gate;
+    xenova_drive_DirectionGateWitness direction_gate;
+    /* Set only after Pi validates its original emitted Reply/P4 receipt. The Probe
+ echo is not an acknowledgement. VM promotes that prior clock, not this Reply. */
+    bool has_accepted_receipt;
+    xenova_drive_GuestClockReceipt accepted_receipt;
+    /* Pi-owned expiry fixed before enqueue; send stamp/receipt/ACK never renew it. */
+    bool has_guest_clock_valid_until_pi_us;
+    uint64_t guest_clock_valid_until_pi_us;
+    bool has_episode_status;
+    xenova_drive_EpisodeStatus episode_status;
+    bool has_control_facts;
+    xenova_drive_DriveControlFacts control_facts;
+    bool has_operation_status;
+    xenova_drive_OperationStatus operation_status;
+    bool has_route_status;
+    xenova_drive_RouteStatus route_status;
 } xenova_drive_ClockReply;
 
-typedef struct _xenova_drive_AcceptedState {
-    char host_boot[37];
-    char gateway_instance[37];
-    xenova_drive_DriveState state;
-} xenova_drive_AcceptedState;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_MapperWorldWitness_world_raw_sha256_t;
+typedef struct _xenova_drive_MapperWorldWitness {
+    uint32_t major;
+    xenova_drive_MapperRouteWitness mapper;
+    xenova_drive_EpisodeSourceContext source;
+    xenova_drive_MapperWorldWitness_world_raw_sha256_t world_raw_sha256;
+} xenova_drive_MapperWorldWitness;
 
-typedef struct _xenova_drive_AppliedState {
-    char vm[37];
-    char execution[37];
-    char app_instance[37];
-    char host_boot[37];
-    char gateway_instance[37];
-    bool has_copy_message_id;
-    char copy_message_id[37];
-    uint64_t state_revision;
-    char frame_epoch[37];
-    char odom_epoch[37];
-    char configuration[65];
-    char calibration[65];
-    char primitive[65];
-    char reference_id[65];
-    uint64_t reference_revision;
-    uint64_t path_revision;
-    bool has_vehicle_sequence;
-    uint64_t vehicle_sequence;
-    bool has_calculation_sequence;
-    uint64_t calculation_sequence;
-    bool rebuilt;
-    bool applied;
-    uint64_t maneuver_revision;
-    bool has_reason;
-    char reason[65];
-    uint64_t application_sequence;
-} xenova_drive_AppliedState;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionRequest_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionRequest_query_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionRequest_query_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionRequest_route_id_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionRequest_expected_registry_epoch_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionRequest_transition_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionRequest_from_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionRequest_to_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionRequest_from_world_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionRequest_candidate_local_path_sha256_t;
+typedef struct _xenova_drive_WindowTransitionRequest {
+    uint32_t major;
+    xenova_drive_WindowTransitionRequest_request_nonce_t request_nonce;
+    uint32_t action;
+    xenova_drive_RouteOwnerContext owner;
+    xenova_drive_WindowTransitionRequest_query_id_t query_id;
+    xenova_drive_WindowTransitionRequest_query_sha256_t query_sha256;
+    xenova_drive_WindowTransitionRequest_route_id_t route_id;
+    xenova_drive_WindowTransitionRequest_expected_registry_epoch_t expected_registry_epoch;
+    uint64_t expected_registry_revision;
+    xenova_drive_WindowTransitionRequest_transition_id_t transition_id;
+    xenova_drive_WindowTransitionRequest_from_window_sha256_t from_window_sha256;
+    xenova_drive_WindowTransitionRequest_to_window_sha256_t to_window_sha256;
+    xenova_drive_WindowTransitionRequest_from_world_sha256_t from_world_sha256;
+    xenova_drive_WindowTransitionRequest_candidate_local_path_sha256_t candidate_local_path_sha256;
+    xenova_drive_RouteCurrentWitness witness;
+    uint64_t expected_source_binding_revision;
+    uint64_t phase_revision;
+    xenova_drive_RouteExtentProof extent;
+} xenova_drive_WindowTransitionRequest;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionReceipt_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionReceipt_request_sha256_t;
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_WindowTransitionReceipt_transition_id_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionReceipt_from_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionReceipt_to_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionReceipt_active_window_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_WindowTransitionReceipt_activated_world_sha256_t;
+typedef struct _xenova_drive_WindowTransitionReceipt {
+    uint32_t major;
+    xenova_drive_WindowTransitionReceipt_request_nonce_t request_nonce;
+    xenova_drive_WindowTransitionReceipt_request_sha256_t request_sha256;
+    xenova_drive_WindowTransitionReceipt_transition_id_t transition_id;
+    uint32_t state;
+    xenova_drive_WindowTransitionReceipt_from_window_sha256_t from_window_sha256;
+    xenova_drive_WindowTransitionReceipt_to_window_sha256_t to_window_sha256;
+    xenova_drive_WindowTransitionReceipt_active_window_sha256_t active_window_sha256;
+    uint64_t source_binding_revision;
+    xenova_drive_WindowTransitionReceipt_activated_world_sha256_t activated_world_sha256;
+    uint64_t activated_world_sequence;
+    xenova_drive_MapperRouteWitness mapper;
+    uint32_t reason;
+    uint64_t transition_generation;
+    uint64_t valid_until_pi_us;
+} xenova_drive_WindowTransitionReceipt;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadDataRequest_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadDataRequest_record_sha256_t;
+typedef struct _xenova_drive_RoadDataRequest {
+    uint32_t major;
+    xenova_drive_RoadDataRequest_request_nonce_t request_nonce;
+    uint32_t record_kind;
+    xenova_drive_RoadDataRequest_record_sha256_t record_sha256;
+    xenova_drive_RouteOwnerContext owner;
+    uint64_t valid_until_pi_us;
+} xenova_drive_RoadDataRequest;
+
+typedef PB_BYTES_ARRAY_T(16) xenova_drive_RoadRegistrationRequest_request_nonce_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadRegistrationRequest_expected_goal_sha256_t;
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadRegistrationRequest_world_raw_sha256_t;
+typedef struct _xenova_drive_RoadRegistrationRequest {
+    uint32_t major;
+    xenova_drive_RoadRegistrationRequest_request_nonce_t request_nonce;
+    xenova_drive_RouteOwnerContext owner;
+    uint64_t expected_goal_revision;
+    xenova_drive_RoadRegistrationRequest_expected_goal_sha256_t expected_goal_sha256;
+    xenova_drive_RoadRegistrationRequest_world_raw_sha256_t world_raw_sha256;
+    xenova_drive_VehicleSample vehicle;
+    xenova_drive_DriveControlFacts facts;
+    uint64_t issued_pi_us;
+    uint64_t valid_until_pi_us;
+} xenova_drive_RoadRegistrationRequest;
+
+typedef PB_BYTES_ARRAY_T(32) xenova_drive_RoadData_record_sha256_t;
+typedef struct _xenova_drive_RoadData {
+    uint32_t major;
+    uint32_t publisher_kind;
+    bool has_mapper;
+    xenova_drive_MapperRouteWitness mapper;
+    bool has_guest_owner;
+    xenova_drive_RouteOwnerContext guest_owner;
+    bool has_guest_witness;
+    xenova_drive_RouteCurrentWitness guest_witness;
+    xenova_drive_RoadData_record_sha256_t record_sha256;
+    bool has_durable;
+    xenova_drive_RoadDurableRef durable;
+    pb_size_t which_payload;
+    union {
+        xenova_drive_StartGoal start_goal;
+        xenova_drive_RoadTopology road_topology;
+        xenova_drive_RoadSection road_section;
+        xenova_drive_RoadConnection road_connection;
+        xenova_drive_RoadWindow road_window;
+        xenova_drive_ExitSpace exit_space;
+        xenova_drive_RoutePlan route_plan;
+        xenova_drive_RoadGeometryScope road_geometry_scope;
+    } payload;
+} xenova_drive_RoadData;
+
+typedef struct _xenova_drive_RouteExchange {
+    uint32_t major;
+    pb_size_t which_payload;
+    union {
+        xenova_drive_RouteQuery route_query;
+        xenova_drive_RouteEligibility route_eligibility;
+        xenova_drive_RouteCandidate route_candidate;
+        xenova_drive_RouteReceipt route_receipt;
+        xenova_drive_WindowTransitionRequest window_transition_request;
+        xenova_drive_WindowTransitionReceipt window_transition_receipt;
+        xenova_drive_RoadDataRequest road_data_request;
+        xenova_drive_MapperWorldWitness mapper_world_witness;
+        xenova_drive_RoadRegistrationRequest road_registration_request;
+    } payload;
+} xenova_drive_RouteExchange;
 
 typedef struct _xenova_drive_DriveLink {
     uint32_t major;
@@ -225,6 +1812,14 @@ typedef struct _xenova_drive_DriveLink {
         xenova_drive_DriveState snapshot;
         xenova_drive_AcceptedState accepted;
         xenova_drive_AppliedState applied;
+        xenova_drive_MissionGrant mission_grant;
+        xenova_drive_MissionBudgetRequest budget_request;
+        xenova_drive_MissionBudgetReply budget_reply;
+        /* The original Pi SceneGrant, including revocation and original expiry. */
+        xenova_drive_SceneGrant scene_grant;
+        xenova_drive_EpisodeRequest episode_request;
+        xenova_drive_RoadData road_data;
+        xenova_drive_RouteExchange route_exchange;
     } payload;
 } xenova_drive_DriveLink;
 
@@ -237,27 +1832,169 @@ extern "C" {
 #define xenova_drive_Pose_init_default           {0, 0, 0}
 #define xenova_drive_Point_init_default          {0, 0}
 #define xenova_drive_PathPoint_init_default      {xenova_drive_Pose_init_default, 0, 0}
-#define xenova_drive_WorldSnapshot_init_default  {0, 0, 0, "", "", "", "", "", "", 0, "", "", "", "", 0, xenova_drive_Pose_init_default, 0, 0, 0, 0, xenova_drive_Pose_init_default, 0, 0, 0, 0, "", {0, {0}}, {0, {0}}, {0, {0}}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0}
+#define xenova_drive_WorldSnapshot_init_default  {0, 0, 0, "", "", "", "", "", "", 0, "", "", "", "", 0, xenova_drive_Pose_init_default, 0, 0, 0, 0, xenova_drive_Pose_init_default, 0, 0, 0, 0, "", {0, {0}}, {0, {0}}, {0, {0}}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0, false, xenova_drive_LaneModel_init_default, 0, {xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default, xenova_drive_ParkingSlot_init_default}, false, {0, {0}}, false, xenova_drive_MapLocalization_init_default, false, xenova_drive_SceneAdmissionRef_init_default, false, xenova_drive_ParkingSetMeta_init_default, false, xenova_drive_WorldRouteView_init_default}
 #define xenova_drive_VehicleSample_init_default  {0, "", "", "", "", 0, 0, 0, 0, 0, 0, 0, xenova_drive_Pose_init_default, 0, false, 0, false, 0, 0, 0, 0, "", false, 0, false, "", false, ""}
-#define xenova_drive_DriveState_init_default     {0, "", "", "", 0, 0, "", "", "", "", "", 0, 0, 0, 0, 0, xenova_drive_Pose_init_default, 0, 0, 0, 0, 0, {xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default}, "", "", "", 0, false, 0, false, 0}
-#define xenova_drive_ClockProbe_init_default     {"", "", "", 0, 0}
+#define xenova_drive_DriveState_init_default     {0, "", "", "", 0, 0, "", "", "", "", "", 0, 0, 0, 0, 0, xenova_drive_Pose_init_default, 0, 0, 0, 0, 0, {xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default, xenova_drive_PathPoint_init_default}, "", "", "", 0, false, 0, false, 0, false, 0, false, xenova_drive_MissionExecution_init_default, 0, {xenova_drive_GearSegment_init_default, xenova_drive_GearSegment_init_default, xenova_drive_GearSegment_init_default}, false, xenova_drive_DirectionGateRef_init_default, false, xenova_drive_TaskReferenceState_init_default, false, xenova_drive_EpisodeSnapshot_init_default, false, xenova_drive_RouteSnapshot_init_default}
+#define xenova_drive_TaskReferenceState_init_default {0, 0, 0, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, "", "", "", ""}
+#define xenova_drive_ClockProbe_init_default     {"", "", "", 0, 0, false, xenova_drive_GuestClockReceipt_init_default, false, 0, false, xenova_drive_AutoInputPreflight_init_default}
+#define xenova_drive_GuestClockReceipt_init_default {0, {0, {0}}, 0}
 #define xenova_drive_WorldTrust_init_default     {"", "", "", "", "", "", "", "", "", "", 0, 0, 0, 0}
-#define xenova_drive_ClockReply_init_default     {xenova_drive_ClockProbe_init_default, "", "", 0, 0, false, xenova_drive_WorldTrust_init_default, xenova_drive_VehicleSample_init_default}
+#define xenova_drive_ClockReply_init_default     {xenova_drive_ClockProbe_init_default, "", "", 0, 0, false, xenova_drive_WorldTrust_init_default, xenova_drive_VehicleSample_init_default, false, xenova_drive_MissionGrant_init_default, false, xenova_drive_DirectionGateWitness_init_default, false, xenova_drive_GuestClockReceipt_init_default, false, 0, false, xenova_drive_EpisodeStatus_init_default, false, xenova_drive_DriveControlFacts_init_default, false, xenova_drive_OperationStatus_init_default, false, xenova_drive_RouteStatus_init_default}
+#define xenova_drive_OperationBinding_init_default {{0, {0}}, 0, {0, {0}}, 0, 0}
+#define xenova_drive_OperationStatus_init_default {0, xenova_drive_OperationBinding_init_default, 0, 0, 0, 0, 0, {0, {0}}, 0, 0}
+#define xenova_drive_AutoInputPreflight_init_default {0, xenova_drive_EpisodeSourceContext_init_default, 0, 0, 0, 0, 0, {0, {0}}}
+#define xenova_drive_PiOperationGate_init_default {{0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0}
 #define xenova_drive_AcceptedState_init_default  {"", "", xenova_drive_DriveState_init_default}
 #define xenova_drive_AppliedState_init_default   {"", "", "", "", "", false, "", 0, "", "", "", "", "", "", 0, 0, false, 0, false, 0, 0, 0, 0, false, "", 0}
 #define xenova_drive_DriveLink_init_default      {0, 0, {xenova_drive_ClockProbe_init_default}}
+#define xenova_drive_EpisodeCore_init_default    {0, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, 0, xenova_drive_Pose_init_default, 0, 0}
+#define xenova_drive_EpisodeProgress_init_default {0, 0, 0, 0, 0, 0}
+#define xenova_drive_EpisodeAcceptanceRef_init_default {{0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0}
+#define xenova_drive_EpisodeSnapshot_init_default {xenova_drive_EpisodeCore_init_default, xenova_drive_EpisodeProgress_init_default, xenova_drive_EpisodeAcceptanceRef_init_default}
+#define xenova_drive_EpisodeSourceContext_init_default {"", "", "", "", "", "", "", "", "", {0, {0}}, "", 0, 0, 0}
+#define xenova_drive_EpisodeRequest_init_default {0, {0, {0}}, 0, 0, "", "", "", 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0, xenova_drive_EpisodeSourceContext_init_default, xenova_drive_EpisodeCore_init_default, xenova_drive_EpisodeProgress_init_default, 0, 0, 0, 0, 0, {0, {0}}, 0, {0, {0}}, 0, {0, {0}}, 0, {0, {0}}, 0, 0, 0, {0, {0}}, false, 0}
+#define xenova_drive_EpisodeReceipt_init_default {0, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, false, xenova_drive_EpisodeSnapshot_init_default, 0}
+#define xenova_drive_EpisodeStatus_init_default  {0, 0, {0, {0}}, 0, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, false, xenova_drive_EpisodeReceipt_init_default}
+#define xenova_drive_PiAbsoluteMeter_init_default {{0, {0}}, 0, 0, 0, 0, 0}
+#define xenova_drive_StopFacts_init_default      {0, "", "", 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, 0, 0}
+#define xenova_drive_DriveControlFacts_init_default {0, xenova_drive_PiAbsoluteMeter_init_default, false, xenova_drive_StopFacts_init_default, 0}
+#define xenova_drive_LaneGeometry_init_default   {0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0, 0, 0, {0, {0}}}
+#define xenova_drive_LaneModel_init_default      {0, {xenova_drive_LaneGeometry_init_default, xenova_drive_LaneGeometry_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, {0, {0}}, {0, {0}}, 0, 0, 0}
+#define xenova_drive_ParkingSlot_init_default    {0, 0, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, false, xenova_drive_Pose_init_default, false, xenova_drive_Pose_init_default, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_ParkingSetMeta_init_default {0, 0, 0, 0, 0, 0}
+#define xenova_drive_MapLocalization_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_SceneAdmissionRef_init_default {{0, {0}}, 0, {0, {0}}, 0, 0, {0, {0}}, 0}
+#define xenova_drive_MissionExecution_init_default {{0, {0}}, 0, 0, 0, 0, {0, {0}}, false, 0, false, 0, false, xenova_drive_Pose_init_default, false, 0, 0, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, false, 0, false, 0, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, false, xenova_drive_OperationBinding_init_default, false, xenova_drive_RouteBinding_init_default}
+#define xenova_drive_GearSegment_init_default    {0, 0, 0}
+#define xenova_drive_DirectionGateRef_init_default {0, 0, 0, 0}
+#define xenova_drive_DirectionGateWitness_init_default {xenova_drive_DirectionGateRef_init_default, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, 0, 0, 0, 0, "", ""}
+#define xenova_drive_MissionGrant_init_default   {0, "", {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, 0, 0, 0, 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0, "", "", {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, false, {0, {0}}, false, xenova_drive_OperationBinding_init_default, false, xenova_drive_RouteBinding_init_default}
+#define xenova_drive_MissionBudgetRequest_init_default {0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0}
+#define xenova_drive_MissionBudgetReply_init_default {0, {0, {0}}, {0, {0}}, 0, 0, false, xenova_drive_MissionGrant_init_default}
+#define xenova_drive_MapperClockProbe_init_default {0, "", "", "", "", 0, {0, {0}}, 0, false, "", false, "", false, "", 0, false, xenova_drive_WorldTrust_init_default, false, xenova_drive_PiOperationGate_init_default}
+#define xenova_drive_MapperClockReply_init_default {0, "", "", 0, {0, {0}}, 0, "", "", "", "", "", "", "", "", "", "", 0, 0, false, xenova_drive_SurveySummary_init_default, false, 0}
+#define xenova_drive_SceneGrant_init_default     {0, "", "", "", 0, xenova_drive_SceneAdmissionRef_init_default, "", "", "", "", "", "", "", 0, 0, 0, {0, {0}}, 0, 0, 0, false, {0, {0}}, 0, 0, false, {0, {0}}, 0}
+#define xenova_drive_SurveySummary_init_default  {0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_TofObservation_init_default {0, "", "", "", "", "", 0, 0, 0, 0, 0, 0, "", 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, "", 0, 0, {0, {0}}, 0}
+#define xenova_drive_RouteBinding_init_default   {{0, {0}}, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}}
+#define xenova_drive_StartGoal_init_default      {0, {0, {0}}, 0, {0, {0}}, xenova_drive_Pose_init_default, 0, 0, {0, {0}}, 0, 0, xenova_drive_RoadObservationOrigin_init_default, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, {0, {0}}}
+#define xenova_drive_RoadSectionRef_init_default {{0, {0}}, {0, {0}}, 0, 0, 0, 0}
+#define xenova_drive_RoadEdge_init_default       {0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0}
+#define xenova_drive_RoadTopology_init_default   {0, {0, {0}}, 0, {0, {0}}, 0, {xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default, xenova_drive_RoadSectionRef_init_default}, 0, {xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default, xenova_drive_RoadEdge_init_default}, 0, {0, {0}}}
+#define xenova_drive_RoadSection_init_default    {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RoadObservationOrigin_init_default, xenova_drive_LaneModel_init_default, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, {0}}, {0, {0}}}
+#define xenova_drive_RoadConnection_init_default {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RoadObservationOrigin_init_default, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0, {{0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}}}
+#define xenova_drive_ExitSpace_init_default      {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RoadObservationOrigin_init_default, {0, {0}}, {0, {0}}, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {0, {0}}, 0, {{0, {0}}, {0, {0}}}, 0, 0}
+#define xenova_drive_RouteOccurrence_init_default {0, 0, 0, 0, 0}
+#define xenova_drive_RoutePlan_init_default      {0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default, xenova_drive_RouteOccurrence_init_default}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, xenova_drive_Pose_init_default, {0, {0}}}
+#define xenova_drive_RouteCore_init_default      {{0, {0}}, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, {0, {0}}, 0, 0, 0, xenova_drive_Pose_init_default, {0, {0}}, 0, 0, 0}
+#define xenova_drive_RouteProgress_init_default  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_RouteAcceptanceRef_init_default {{0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}}
+#define xenova_drive_RouteSnapshot_init_default  {xenova_drive_RouteCore_init_default, xenova_drive_RouteProgress_init_default, xenova_drive_RouteAcceptanceRef_init_default, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0, {0, {0}}}
+#define xenova_drive_WorldRouteView_init_default {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RouteStatus_init_default    {0, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0, {xenova_drive_RouteEligibilityRef_init_default, xenova_drive_RouteEligibilityRef_init_default}, 0}
+#define xenova_drive_RouteQuery_init_default     {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RouteOwnerContext_init_default, 0, 0, {0, {0}}}
+#define xenova_drive_RouteCandidate_init_default {0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, xenova_drive_RouteOwnerContext_init_default, xenova_drive_RouteCurrentWitness_init_default, {0, {0}}, 0, 0, xenova_drive_RouteCore_init_default, xenova_drive_RouteProgress_init_default, 0, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, {0, {0}}, xenova_drive_RouteExtentProof_init_default}
+#define xenova_drive_RouteReceipt_init_default   {0, {0, {0}}, {0, {0}}, 0, 0, false, xenova_drive_RouteSnapshot_init_default, 0, {0, {0}}, {0, {0}}, false, xenova_drive_RouteOwnerContext_init_default}
+#define xenova_drive_RoadWindow_init_default     {0, {0, {0}}, 0, {0, {0}}, {0, {0}}, 0, {{0, {0}}, {0, {0}}}, xenova_drive_RoadObservationOrigin_init_default, xenova_drive_LaneModel_init_default, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RoadGeometryScope_init_default {0, {0, {0}}, {0, {0}}, {0, {0}}, "", "", "", {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}}
+#define xenova_drive_RoadDurableRef_init_default {{0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}}
+#define xenova_drive_RoadObservationOrigin_init_default {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, false, {0, {0}}}
+#define xenova_drive_MapperRouteWitness_init_default {{0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RouteOwnerContext_init_default {{0, {0}}, {0, {0}}, {0, {0}}, 0, xenova_drive_OperationBinding_init_default, {0, {0}}, 0, 0, 0, {0, {0}}, 0, {0, {0}}, {0, {0}}}
+#define xenova_drive_RouteCurrentWitness_init_default {xenova_drive_EpisodeSourceContext_init_default, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}}
+#define xenova_drive_RouteExtentProof_init_default {0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RouteEligibility_init_default {0, {0, {0}}, 0, xenova_drive_RouteOwnerContext_init_default, xenova_drive_RouteCurrentWitness_init_default, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, xenova_drive_RouteExtentProof_init_default}
+#define xenova_drive_RouteEligibilityRef_init_default {{0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_MapperWorldWitness_init_default {0, xenova_drive_MapperRouteWitness_init_default, xenova_drive_EpisodeSourceContext_init_default, {0, {0}}}
+#define xenova_drive_WindowTransitionRequest_init_default {0, {0, {0}}, 0, xenova_drive_RouteOwnerContext_init_default, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, xenova_drive_RouteCurrentWitness_init_default, 0, 0, xenova_drive_RouteExtentProof_init_default}
+#define xenova_drive_WindowTransitionReceipt_init_default {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, 0, xenova_drive_MapperRouteWitness_init_default, 0, 0, 0}
+#define xenova_drive_RoadDataRequest_init_default {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RouteOwnerContext_init_default, 0}
+#define xenova_drive_RoadRegistrationRequest_init_default {0, {0, {0}}, xenova_drive_RouteOwnerContext_init_default, 0, {0, {0}}, {0, {0}}, xenova_drive_VehicleSample_init_default, xenova_drive_DriveControlFacts_init_default, 0, 0}
+#define xenova_drive_RoadData_init_default       {0, 0, false, xenova_drive_MapperRouteWitness_init_default, false, xenova_drive_RouteOwnerContext_init_default, false, xenova_drive_RouteCurrentWitness_init_default, {0, {0}}, false, xenova_drive_RoadDurableRef_init_default, 0, {xenova_drive_StartGoal_init_default}}
+#define xenova_drive_RouteExchange_init_default  {0, 0, {xenova_drive_RouteQuery_init_default}}
 #define xenova_drive_Pose_init_zero              {0, 0, 0}
 #define xenova_drive_Point_init_zero             {0, 0}
 #define xenova_drive_PathPoint_init_zero         {xenova_drive_Pose_init_zero, 0, 0}
-#define xenova_drive_WorldSnapshot_init_zero     {0, 0, 0, "", "", "", "", "", "", 0, "", "", "", "", 0, xenova_drive_Pose_init_zero, 0, 0, 0, 0, xenova_drive_Pose_init_zero, 0, 0, 0, 0, "", {0, {0}}, {0, {0}}, {0, {0}}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0}
+#define xenova_drive_WorldSnapshot_init_zero     {0, 0, 0, "", "", "", "", "", "", 0, "", "", "", "", 0, xenova_drive_Pose_init_zero, 0, 0, 0, 0, xenova_drive_Pose_init_zero, 0, 0, 0, 0, "", {0, {0}}, {0, {0}}, {0, {0}}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0, false, xenova_drive_LaneModel_init_zero, 0, {xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero, xenova_drive_ParkingSlot_init_zero}, false, {0, {0}}, false, xenova_drive_MapLocalization_init_zero, false, xenova_drive_SceneAdmissionRef_init_zero, false, xenova_drive_ParkingSetMeta_init_zero, false, xenova_drive_WorldRouteView_init_zero}
 #define xenova_drive_VehicleSample_init_zero     {0, "", "", "", "", 0, 0, 0, 0, 0, 0, 0, xenova_drive_Pose_init_zero, 0, false, 0, false, 0, 0, 0, 0, "", false, 0, false, "", false, ""}
-#define xenova_drive_DriveState_init_zero        {0, "", "", "", 0, 0, "", "", "", "", "", 0, 0, 0, 0, 0, xenova_drive_Pose_init_zero, 0, 0, 0, 0, 0, {xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero}, "", "", "", 0, false, 0, false, 0}
-#define xenova_drive_ClockProbe_init_zero        {"", "", "", 0, 0}
+#define xenova_drive_DriveState_init_zero        {0, "", "", "", 0, 0, "", "", "", "", "", 0, 0, 0, 0, 0, xenova_drive_Pose_init_zero, 0, 0, 0, 0, 0, {xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero, xenova_drive_PathPoint_init_zero}, "", "", "", 0, false, 0, false, 0, false, 0, false, xenova_drive_MissionExecution_init_zero, 0, {xenova_drive_GearSegment_init_zero, xenova_drive_GearSegment_init_zero, xenova_drive_GearSegment_init_zero}, false, xenova_drive_DirectionGateRef_init_zero, false, xenova_drive_TaskReferenceState_init_zero, false, xenova_drive_EpisodeSnapshot_init_zero, false, xenova_drive_RouteSnapshot_init_zero}
+#define xenova_drive_TaskReferenceState_init_zero {0, 0, 0, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, "", "", "", ""}
+#define xenova_drive_ClockProbe_init_zero        {"", "", "", 0, 0, false, xenova_drive_GuestClockReceipt_init_zero, false, 0, false, xenova_drive_AutoInputPreflight_init_zero}
+#define xenova_drive_GuestClockReceipt_init_zero {0, {0, {0}}, 0}
 #define xenova_drive_WorldTrust_init_zero        {"", "", "", "", "", "", "", "", "", "", 0, 0, 0, 0}
-#define xenova_drive_ClockReply_init_zero        {xenova_drive_ClockProbe_init_zero, "", "", 0, 0, false, xenova_drive_WorldTrust_init_zero, xenova_drive_VehicleSample_init_zero}
+#define xenova_drive_ClockReply_init_zero        {xenova_drive_ClockProbe_init_zero, "", "", 0, 0, false, xenova_drive_WorldTrust_init_zero, xenova_drive_VehicleSample_init_zero, false, xenova_drive_MissionGrant_init_zero, false, xenova_drive_DirectionGateWitness_init_zero, false, xenova_drive_GuestClockReceipt_init_zero, false, 0, false, xenova_drive_EpisodeStatus_init_zero, false, xenova_drive_DriveControlFacts_init_zero, false, xenova_drive_OperationStatus_init_zero, false, xenova_drive_RouteStatus_init_zero}
+#define xenova_drive_OperationBinding_init_zero  {{0, {0}}, 0, {0, {0}}, 0, 0}
+#define xenova_drive_OperationStatus_init_zero   {0, xenova_drive_OperationBinding_init_zero, 0, 0, 0, 0, 0, {0, {0}}, 0, 0}
+#define xenova_drive_AutoInputPreflight_init_zero {0, xenova_drive_EpisodeSourceContext_init_zero, 0, 0, 0, 0, 0, {0, {0}}}
+#define xenova_drive_PiOperationGate_init_zero   {{0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0}
 #define xenova_drive_AcceptedState_init_zero     {"", "", xenova_drive_DriveState_init_zero}
 #define xenova_drive_AppliedState_init_zero      {"", "", "", "", "", false, "", 0, "", "", "", "", "", "", 0, 0, false, 0, false, 0, 0, 0, 0, false, "", 0}
 #define xenova_drive_DriveLink_init_zero         {0, 0, {xenova_drive_ClockProbe_init_zero}}
+#define xenova_drive_EpisodeCore_init_zero       {0, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, 0, xenova_drive_Pose_init_zero, 0, 0}
+#define xenova_drive_EpisodeProgress_init_zero   {0, 0, 0, 0, 0, 0}
+#define xenova_drive_EpisodeAcceptanceRef_init_zero {{0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0}
+#define xenova_drive_EpisodeSnapshot_init_zero   {xenova_drive_EpisodeCore_init_zero, xenova_drive_EpisodeProgress_init_zero, xenova_drive_EpisodeAcceptanceRef_init_zero}
+#define xenova_drive_EpisodeSourceContext_init_zero {"", "", "", "", "", "", "", "", "", {0, {0}}, "", 0, 0, 0}
+#define xenova_drive_EpisodeRequest_init_zero    {0, {0, {0}}, 0, 0, "", "", "", 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0, xenova_drive_EpisodeSourceContext_init_zero, xenova_drive_EpisodeCore_init_zero, xenova_drive_EpisodeProgress_init_zero, 0, 0, 0, 0, 0, {0, {0}}, 0, {0, {0}}, 0, {0, {0}}, 0, {0, {0}}, 0, 0, 0, {0, {0}}, false, 0}
+#define xenova_drive_EpisodeReceipt_init_zero    {0, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, false, xenova_drive_EpisodeSnapshot_init_zero, 0}
+#define xenova_drive_EpisodeStatus_init_zero     {0, 0, {0, {0}}, 0, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, false, xenova_drive_EpisodeReceipt_init_zero}
+#define xenova_drive_PiAbsoluteMeter_init_zero   {{0, {0}}, 0, 0, 0, 0, 0}
+#define xenova_drive_StopFacts_init_zero         {0, "", "", 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, 0, 0}
+#define xenova_drive_DriveControlFacts_init_zero {0, xenova_drive_PiAbsoluteMeter_init_zero, false, xenova_drive_StopFacts_init_zero, 0}
+#define xenova_drive_LaneGeometry_init_zero      {0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0, 0, 0, {0, {0}}}
+#define xenova_drive_LaneModel_init_zero         {0, {xenova_drive_LaneGeometry_init_zero, xenova_drive_LaneGeometry_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, {0, {0}}, {0, {0}}, 0, 0, 0}
+#define xenova_drive_ParkingSlot_init_zero       {0, 0, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, false, xenova_drive_Pose_init_zero, false, xenova_drive_Pose_init_zero, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_ParkingSetMeta_init_zero    {0, 0, 0, 0, 0, 0}
+#define xenova_drive_MapLocalization_init_zero   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_SceneAdmissionRef_init_zero {{0, {0}}, 0, {0, {0}}, 0, 0, {0, {0}}, 0}
+#define xenova_drive_MissionExecution_init_zero  {{0, {0}}, 0, 0, 0, 0, {0, {0}}, false, 0, false, 0, false, xenova_drive_Pose_init_zero, false, 0, 0, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, false, 0, false, 0, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, false, xenova_drive_OperationBinding_init_zero, false, xenova_drive_RouteBinding_init_zero}
+#define xenova_drive_GearSegment_init_zero       {0, 0, 0}
+#define xenova_drive_DirectionGateRef_init_zero  {0, 0, 0, 0}
+#define xenova_drive_DirectionGateWitness_init_zero {xenova_drive_DirectionGateRef_init_zero, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, 0, 0, 0, 0, "", ""}
+#define xenova_drive_MissionGrant_init_zero      {0, "", {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, 0, 0, 0, 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0, "", "", {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, false, {0, {0}}, false, xenova_drive_OperationBinding_init_zero, false, xenova_drive_RouteBinding_init_zero}
+#define xenova_drive_MissionBudgetRequest_init_zero {0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0}
+#define xenova_drive_MissionBudgetReply_init_zero {0, {0, {0}}, {0, {0}}, 0, 0, false, xenova_drive_MissionGrant_init_zero}
+#define xenova_drive_MapperClockProbe_init_zero  {0, "", "", "", "", 0, {0, {0}}, 0, false, "", false, "", false, "", 0, false, xenova_drive_WorldTrust_init_zero, false, xenova_drive_PiOperationGate_init_zero}
+#define xenova_drive_MapperClockReply_init_zero  {0, "", "", 0, {0, {0}}, 0, "", "", "", "", "", "", "", "", "", "", 0, 0, false, xenova_drive_SurveySummary_init_zero, false, 0}
+#define xenova_drive_SceneGrant_init_zero        {0, "", "", "", 0, xenova_drive_SceneAdmissionRef_init_zero, "", "", "", "", "", "", "", 0, 0, 0, {0, {0}}, 0, 0, 0, false, {0, {0}}, 0, 0, false, {0, {0}}, 0}
+#define xenova_drive_SurveySummary_init_zero     {0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_TofObservation_init_zero    {0, "", "", "", "", "", 0, 0, 0, 0, 0, 0, "", 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, "", 0, 0, {0, {0}}, 0}
+#define xenova_drive_RouteBinding_init_zero      {{0, {0}}, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}}
+#define xenova_drive_StartGoal_init_zero         {0, {0, {0}}, 0, {0, {0}}, xenova_drive_Pose_init_zero, 0, 0, {0, {0}}, 0, 0, xenova_drive_RoadObservationOrigin_init_zero, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, {0, {0}}}
+#define xenova_drive_RoadSectionRef_init_zero    {{0, {0}}, {0, {0}}, 0, 0, 0, 0}
+#define xenova_drive_RoadEdge_init_zero          {0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0}
+#define xenova_drive_RoadTopology_init_zero      {0, {0, {0}}, 0, {0, {0}}, 0, {xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero, xenova_drive_RoadSectionRef_init_zero}, 0, {xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero, xenova_drive_RoadEdge_init_zero}, 0, {0, {0}}}
+#define xenova_drive_RoadSection_init_zero       {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RoadObservationOrigin_init_zero, xenova_drive_LaneModel_init_zero, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, {0}}, {0, {0}}}
+#define xenova_drive_RoadConnection_init_zero    {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RoadObservationOrigin_init_zero, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {0, 0, 0, 0, 0, 0, 0, 0}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0, {{0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}}}
+#define xenova_drive_ExitSpace_init_zero         {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RoadObservationOrigin_init_zero, {0, {0}}, {0, {0}}, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {0, {0}}, 0, {{0, {0}}, {0, {0}}}, 0, 0}
+#define xenova_drive_RouteOccurrence_init_zero   {0, 0, 0, 0, 0}
+#define xenova_drive_RoutePlan_init_zero         {0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero, xenova_drive_RouteOccurrence_init_zero}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, xenova_drive_Pose_init_zero, {0, {0}}}
+#define xenova_drive_RouteCore_init_zero         {{0, {0}}, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, {0, {0}}, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, {0, {0}}, 0, 0, 0, xenova_drive_Pose_init_zero, {0, {0}}, 0, 0, 0}
+#define xenova_drive_RouteProgress_init_zero     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_RouteAcceptanceRef_init_zero {{0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}}
+#define xenova_drive_RouteSnapshot_init_zero     {xenova_drive_RouteCore_init_zero, xenova_drive_RouteProgress_init_zero, xenova_drive_RouteAcceptanceRef_init_zero, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0, {0, {0}}}
+#define xenova_drive_WorldRouteView_init_zero    {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RouteStatus_init_zero       {0, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0, {xenova_drive_RouteEligibilityRef_init_zero, xenova_drive_RouteEligibilityRef_init_zero}, 0}
+#define xenova_drive_RouteQuery_init_zero        {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RouteOwnerContext_init_zero, 0, 0, {0, {0}}}
+#define xenova_drive_RouteCandidate_init_zero    {0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, xenova_drive_RouteOwnerContext_init_zero, xenova_drive_RouteCurrentWitness_init_zero, {0, {0}}, 0, 0, xenova_drive_RouteCore_init_zero, xenova_drive_RouteProgress_init_zero, 0, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, {0, {0}}, xenova_drive_RouteExtentProof_init_zero}
+#define xenova_drive_RouteReceipt_init_zero      {0, {0, {0}}, {0, {0}}, 0, 0, false, xenova_drive_RouteSnapshot_init_zero, 0, {0, {0}}, {0, {0}}, false, xenova_drive_RouteOwnerContext_init_zero}
+#define xenova_drive_RoadWindow_init_zero        {0, {0, {0}}, 0, {0, {0}}, {0, {0}}, 0, {{0, {0}}, {0, {0}}}, xenova_drive_RoadObservationOrigin_init_zero, xenova_drive_LaneModel_init_zero, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RoadGeometryScope_init_zero {0, {0, {0}}, {0, {0}}, {0, {0}}, "", "", "", {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}}
+#define xenova_drive_RoadDurableRef_init_zero    {{0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}}
+#define xenova_drive_RoadObservationOrigin_init_zero {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, false, {0, {0}}}
+#define xenova_drive_MapperRouteWitness_init_zero {{0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RouteOwnerContext_init_zero {{0, {0}}, {0, {0}}, {0, {0}}, 0, xenova_drive_OperationBinding_init_zero, {0, {0}}, 0, 0, 0, {0, {0}}, 0, {0, {0}}, {0, {0}}}
+#define xenova_drive_RouteCurrentWitness_init_zero {xenova_drive_EpisodeSourceContext_init_zero, 0, 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}}
+#define xenova_drive_RouteExtentProof_init_zero  {0, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, {0, {0}}, 0}
+#define xenova_drive_RouteEligibility_init_zero  {0, {0, {0}}, 0, xenova_drive_RouteOwnerContext_init_zero, xenova_drive_RouteCurrentWitness_init_zero, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, xenova_drive_RouteExtentProof_init_zero}
+#define xenova_drive_RouteEligibilityRef_init_zero {{0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0}
+#define xenova_drive_MapperWorldWitness_init_zero {0, xenova_drive_MapperRouteWitness_init_zero, xenova_drive_EpisodeSourceContext_init_zero, {0, {0}}}
+#define xenova_drive_WindowTransitionRequest_init_zero {0, {0, {0}}, 0, xenova_drive_RouteOwnerContext_init_zero, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, {0, {0}}, xenova_drive_RouteCurrentWitness_init_zero, 0, 0, xenova_drive_RouteExtentProof_init_zero}
+#define xenova_drive_WindowTransitionReceipt_init_zero {0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, {0, {0}}, 0, xenova_drive_MapperRouteWitness_init_zero, 0, 0, 0}
+#define xenova_drive_RoadDataRequest_init_zero   {0, {0, {0}}, 0, {0, {0}}, xenova_drive_RouteOwnerContext_init_zero, 0}
+#define xenova_drive_RoadRegistrationRequest_init_zero {0, {0, {0}}, xenova_drive_RouteOwnerContext_init_zero, 0, {0, {0}}, {0, {0}}, xenova_drive_VehicleSample_init_zero, xenova_drive_DriveControlFacts_init_zero, 0, 0}
+#define xenova_drive_RoadData_init_zero          {0, 0, false, xenova_drive_MapperRouteWitness_init_zero, false, xenova_drive_RouteOwnerContext_init_zero, false, xenova_drive_RouteCurrentWitness_init_zero, {0, {0}}, false, xenova_drive_RoadDurableRef_init_zero, 0, {xenova_drive_StartGoal_init_zero}}
+#define xenova_drive_RouteExchange_init_zero     {0, 0, {xenova_drive_RouteQuery_init_zero}}
 
 /* Field tags (for use in manual encoding/decoding) */
 #define xenova_drive_Pose_x_tag                  1
@@ -268,6 +2005,725 @@ extern "C" {
 #define xenova_drive_PathPoint_pose_tag          1
 #define xenova_drive_PathPoint_steering_rad_tag  2
 #define xenova_drive_PathPoint_velocity_mps_tag  3
+#define xenova_drive_VehicleSample_major_tag     1
+#define xenova_drive_VehicleSample_vehicle_tag   2
+#define xenova_drive_VehicleSample_host_boot_tag 3
+#define xenova_drive_VehicleSample_device_session_tag 4
+#define xenova_drive_VehicleSample_odom_epoch_tag 5
+#define xenova_drive_VehicleSample_sequence_tag  6
+#define xenova_drive_VehicleSample_source_sample_tag 7
+#define xenova_drive_VehicleSample_source_us_tag 8
+#define xenova_drive_VehicleSample_pi_sample_us_tag 9
+#define xenova_drive_VehicleSample_clock_error_us_tag 10
+#define xenova_drive_VehicleSample_left_ticks_tag 11
+#define xenova_drive_VehicleSample_right_ticks_tag 12
+#define xenova_drive_VehicleSample_odom_pose_tag 13
+#define xenova_drive_VehicleSample_velocity_mps_tag 14
+#define xenova_drive_VehicleSample_measured_steering_rad_tag 15
+#define xenova_drive_VehicleSample_estimated_steering_rad_tag 16
+#define xenova_drive_VehicleSample_position_error_m_tag 17
+#define xenova_drive_VehicleSample_heading_error_rad_tag 18
+#define xenova_drive_VehicleSample_quality_tag   19
+#define xenova_drive_VehicleSample_calibration_tag 20
+#define xenova_drive_VehicleSample_steering_error_rad_tag 21
+#define xenova_drive_VehicleSample_gateway_instance_tag 22
+#define xenova_drive_VehicleSample_pi_session_tag 23
+#define xenova_drive_TaskReferenceState_home_lane_id_tag 1
+#define xenova_drive_TaskReferenceState_from_lane_id_tag 2
+#define xenova_drive_TaskReferenceState_selected_lane_id_tag 3
+#define xenova_drive_TaskReferenceState_changing_tag 4
+#define xenova_drive_TaskReferenceState_basis_revision_tag 5
+#define xenova_drive_TaskReferenceState_basis_prefix_tag 6
+#define xenova_drive_TaskReferenceState_vehicle_tag 7
+#define xenova_drive_TaskReferenceState_mapper_boot_tag 8
+#define xenova_drive_TaskReferenceState_mapper_instance_tag 9
+#define xenova_drive_TaskReferenceState_clock_epoch_tag 10
+#define xenova_drive_GuestClockReceipt_probe_sequence_tag 1
+#define xenova_drive_GuestClockReceipt_reply_sha256_tag 2
+#define xenova_drive_GuestClockReceipt_guest_receive_us_tag 3
+#define xenova_drive_WorldTrust_vehicle_tag      1
+#define xenova_drive_WorldTrust_mapper_boot_tag  2
+#define xenova_drive_WorldTrust_mapper_instance_tag 3
+#define xenova_drive_WorldTrust_map_epoch_tag    4
+#define xenova_drive_WorldTrust_frame_epoch_tag  5
+#define xenova_drive_WorldTrust_odom_epoch_tag   6
+#define xenova_drive_WorldTrust_configuration_tag 7
+#define xenova_drive_WorldTrust_calibration_tag  8
+#define xenova_drive_WorldTrust_primitive_tag    9
+#define xenova_drive_WorldTrust_clock_epoch_tag  10
+#define xenova_drive_WorldTrust_lower_offset_us_tag 11
+#define xenova_drive_WorldTrust_upper_offset_us_tag 12
+#define xenova_drive_WorldTrust_expires_pi_us_tag 13
+#define xenova_drive_WorldTrust_max_error_us_tag 14
+#define xenova_drive_OperationBinding_service_epoch_tag 1
+#define xenova_drive_OperationBinding_operation_revision_tag 2
+#define xenova_drive_OperationBinding_departure_nonce_tag 3
+#define xenova_drive_OperationBinding_permission_revision_tag 4
+#define xenova_drive_OperationBinding_parking_enabled_tag 5
+#define xenova_drive_OperationStatus_major_tag   1
+#define xenova_drive_OperationStatus_binding_tag 2
+#define xenova_drive_OperationStatus_vehicle_phase_tag 3
+#define xenova_drive_OperationStatus_ready_revision_tag 4
+#define xenova_drive_OperationStatus_auto_ready_tag 5
+#define xenova_drive_OperationStatus_blocked_reason_tag 6
+#define xenova_drive_OperationStatus_valid_until_pi_us_tag 7
+#define xenova_drive_OperationStatus_active_request_nonce_tag 8
+#define xenova_drive_OperationStatus_countdown_until_pi_us_tag 9
+#define xenova_drive_OperationStatus_desired_mode_tag 10
+#define xenova_drive_PiOperationGate_gateway_instance_tag 1
+#define xenova_drive_PiOperationGate_control_generation_tag 2
+#define xenova_drive_PiOperationGate_operation_revision_tag 3
+#define xenova_drive_PiOperationGate_mode_tag    4
+#define xenova_drive_PiOperationGate_wait_confirmed_tag 5
+#define xenova_drive_PiOperationGate_manual_local_admitted_tag 6
+#define xenova_drive_PiOperationGate_vehicle_sequence_tag 7
+#define xenova_drive_PiOperationGate_stop_command_sequence_tag 8
+#define xenova_drive_PiOperationGate_valid_until_pi_us_tag 9
+#define xenova_drive_AppliedState_vm_tag         1
+#define xenova_drive_AppliedState_execution_tag  2
+#define xenova_drive_AppliedState_app_instance_tag 3
+#define xenova_drive_AppliedState_host_boot_tag  4
+#define xenova_drive_AppliedState_gateway_instance_tag 5
+#define xenova_drive_AppliedState_copy_message_id_tag 6
+#define xenova_drive_AppliedState_state_revision_tag 7
+#define xenova_drive_AppliedState_frame_epoch_tag 8
+#define xenova_drive_AppliedState_odom_epoch_tag 9
+#define xenova_drive_AppliedState_configuration_tag 10
+#define xenova_drive_AppliedState_calibration_tag 11
+#define xenova_drive_AppliedState_primitive_tag  12
+#define xenova_drive_AppliedState_reference_id_tag 13
+#define xenova_drive_AppliedState_reference_revision_tag 14
+#define xenova_drive_AppliedState_path_revision_tag 15
+#define xenova_drive_AppliedState_vehicle_sequence_tag 16
+#define xenova_drive_AppliedState_calculation_sequence_tag 17
+#define xenova_drive_AppliedState_rebuilt_tag    18
+#define xenova_drive_AppliedState_applied_tag    19
+#define xenova_drive_AppliedState_maneuver_revision_tag 20
+#define xenova_drive_AppliedState_reason_tag     21
+#define xenova_drive_AppliedState_application_sequence_tag 22
+#define xenova_drive_EpisodeCore_state_tag       1
+#define xenova_drive_EpisodeCore_episode_id_tag  2
+#define xenova_drive_EpisodeCore_revision_tag    3
+#define xenova_drive_EpisodeCore_phase_tag       4
+#define xenova_drive_EpisodeCore_phase_revision_tag 5
+#define xenova_drive_EpisodeCore_home_lane_id_tag 6
+#define xenova_drive_EpisodeCore_target_lane_id_tag 7
+#define xenova_drive_EpisodeCore_policy_tag      8
+#define xenova_drive_EpisodeCore_blocker_tag     9
+#define xenova_drive_EpisodeCore_blocker_position_bound_m_tag 10
+#define xenova_drive_EpisodeCore_blocker_world_sequence_tag 11
+#define xenova_drive_EpisodeCore_blocker_observation_sequence_tag 12
+#define xenova_drive_EpisodeCore_birth_snapshot_id_tag 13
+#define xenova_drive_EpisodeCore_basis_revision_tag 14
+#define xenova_drive_EpisodeCore_basis_prefix_count_tag 15
+#define xenova_drive_EpisodeCore_basis_prefix_sha256_tag 16
+#define xenova_drive_EpisodeCore_source_geometry_sha256_tag 17
+#define xenova_drive_EpisodeCore_origin_vehicle_sequence_tag 18
+#define xenova_drive_EpisodeCore_started_pi_us_tag 19
+#define xenova_drive_EpisodeCore_deadline_pi_us_tag 20
+#define xenova_drive_EpisodeCore_phase_started_pi_us_tag 21
+#define xenova_drive_EpisodeCore_phase_deadline_pi_us_tag 22
+#define xenova_drive_EpisodeCore_left_baseline_ticks_tag 23
+#define xenova_drive_EpisodeCore_right_baseline_ticks_tag 24
+#define xenova_drive_EpisodeCore_meter_epoch_tag 25
+#define xenova_drive_EpisodeCore_meter_baseline_total_ticks_tag 26
+#define xenova_drive_EpisodeCore_max_travel_m_tag 27
+#define xenova_drive_EpisodeCore_progress_mode_tag 28
+#define xenova_drive_EpisodeCore_phase_goal_tag  29
+#define xenova_drive_EpisodeCore_stop_wait_tag   30
+#define xenova_drive_EpisodeCore_stop_wait_started_pi_us_tag 31
+#define xenova_drive_EpisodeProgress_used_travel_ticks_tag 1
+#define xenova_drive_EpisodeProgress_last_progress_pi_us_tag 2
+#define xenova_drive_EpisodeProgress_vehicle_sequence_tag 3
+#define xenova_drive_EpisodeProgress_station_lower_m_tag 4
+#define xenova_drive_EpisodeProgress_remaining_upper_m_tag 5
+#define xenova_drive_EpisodeProgress_revision_tag 6
+#define xenova_drive_EpisodeAcceptanceRef_registry_epoch_tag 1
+#define xenova_drive_EpisodeAcceptanceRef_registry_revision_tag 2
+#define xenova_drive_EpisodeAcceptanceRef_request_nonce_tag 3
+#define xenova_drive_EpisodeAcceptanceRef_request_sha256_tag 4
+#define xenova_drive_EpisodeAcceptanceRef_accepted_core_sha256_tag 5
+#define xenova_drive_EpisodeAcceptanceRef_request_sequence_tag 6
+#define xenova_drive_EpisodeAcceptanceRef_origin_vm_tag 7
+#define xenova_drive_EpisodeAcceptanceRef_origin_execution_tag 8
+#define xenova_drive_EpisodeAcceptanceRef_origin_app_instance_tag 9
+#define xenova_drive_EpisodeAcceptanceRef_origin_generation_tag 10
+#define xenova_drive_EpisodeAcceptanceRef_origin_grant_revision_tag 11
+#define xenova_drive_EpisodeSnapshot_core_tag    1
+#define xenova_drive_EpisodeSnapshot_progress_tag 2
+#define xenova_drive_EpisodeSnapshot_acceptance_tag 3
+#define xenova_drive_EpisodeSourceContext_vehicle_tag 1
+#define xenova_drive_EpisodeSourceContext_mapper_boot_tag 2
+#define xenova_drive_EpisodeSourceContext_mapper_instance_tag 3
+#define xenova_drive_EpisodeSourceContext_map_epoch_tag 4
+#define xenova_drive_EpisodeSourceContext_frame_epoch_tag 5
+#define xenova_drive_EpisodeSourceContext_odom_epoch_tag 6
+#define xenova_drive_EpisodeSourceContext_clock_epoch_tag 7
+#define xenova_drive_EpisodeSourceContext_configuration_tag 8
+#define xenova_drive_EpisodeSourceContext_calibration_tag 9
+#define xenova_drive_EpisodeSourceContext_primitive_tag 10
+#define xenova_drive_EpisodeSourceContext_reference_id_tag 11
+#define xenova_drive_EpisodeSourceContext_reference_revision_tag 12
+#define xenova_drive_EpisodeSourceContext_world_sequence_tag 13
+#define xenova_drive_EpisodeSourceContext_observation_sequence_tag 14
+#define xenova_drive_AutoInputPreflight_major_tag 1
+#define xenova_drive_AutoInputPreflight_source_tag 2
+#define xenova_drive_AutoInputPreflight_vehicle_sequence_tag 3
+#define xenova_drive_AutoInputPreflight_control_generation_tag 4
+#define xenova_drive_AutoInputPreflight_checked_guest_us_tag 5
+#define xenova_drive_AutoInputPreflight_valid_until_pi_us_tag 6
+#define xenova_drive_AutoInputPreflight_clock_probe_sequence_tag 7
+#define xenova_drive_AutoInputPreflight_clock_reply_sha256_tag 8
+#define xenova_drive_ClockProbe_vm_tag           1
+#define xenova_drive_ClockProbe_execution_tag    2
+#define xenova_drive_ClockProbe_app_instance_tag 3
+#define xenova_drive_ClockProbe_sequence_tag     4
+#define xenova_drive_ClockProbe_guest_send_us_tag 5
+#define xenova_drive_ClockProbe_receipt_tag      6
+#define xenova_drive_ClockProbe_supported_state_features_tag 7
+#define xenova_drive_ClockProbe_auto_input_preflight_tag 8
+#define xenova_drive_EpisodeRequest_major_tag    1
+#define xenova_drive_EpisodeRequest_request_nonce_tag 2
+#define xenova_drive_EpisodeRequest_request_sequence_tag 3
+#define xenova_drive_EpisodeRequest_action_tag   4
+#define xenova_drive_EpisodeRequest_vm_tag       5
+#define xenova_drive_EpisodeRequest_execution_tag 6
+#define xenova_drive_EpisodeRequest_app_instance_tag 7
+#define xenova_drive_EpisodeRequest_control_generation_tag 8
+#define xenova_drive_EpisodeRequest_mission_id_tag 9
+#define xenova_drive_EpisodeRequest_mission_revision_tag 10
+#define xenova_drive_EpisodeRequest_expected_grant_revision_tag 11
+#define xenova_drive_EpisodeRequest_cancel_fence_revision_tag 12
+#define xenova_drive_EpisodeRequest_scene_admission_id_tag 13
+#define xenova_drive_EpisodeRequest_scene_revision_tag 14
+#define xenova_drive_EpisodeRequest_source_tag   15
+#define xenova_drive_EpisodeRequest_candidate_tag 16
+#define xenova_drive_EpisodeRequest_progress_tag 17
+#define xenova_drive_EpisodeRequest_completed_guest_us_tag 18
+#define xenova_drive_EpisodeRequest_began_guest_us_tag 19
+#define xenova_drive_EpisodeRequest_phase_started_guest_us_tag 20
+#define xenova_drive_EpisodeRequest_valid_until_pi_us_tag 21
+#define xenova_drive_EpisodeRequest_clock_probe_sequence_tag 22
+#define xenova_drive_EpisodeRequest_clock_reply_sha256_tag 23
+#define xenova_drive_EpisodeRequest_vehicle_sequence_tag 24
+#define xenova_drive_EpisodeRequest_expected_registry_epoch_tag 25
+#define xenova_drive_EpisodeRequest_expected_registry_revision_tag 26
+#define xenova_drive_EpisodeRequest_expected_episode_id_tag 27
+#define xenova_drive_EpisodeRequest_expected_episode_revision_tag 28
+#define xenova_drive_EpisodeRequest_phase_state_message_id_tag 29
+#define xenova_drive_EpisodeRequest_plan_revision_tag 30
+#define xenova_drive_EpisodeRequest_phase_revision_tag 31
+#define xenova_drive_EpisodeRequest_calculation_sequence_tag 32
+#define xenova_drive_EpisodeRequest_plan_sha256_tag 33
+#define xenova_drive_EpisodeRequest_stop_command_sequence_tag 34
+#define xenova_drive_EpisodeReceipt_major_tag    1
+#define xenova_drive_EpisodeReceipt_request_nonce_tag 2
+#define xenova_drive_EpisodeReceipt_request_sha256_tag 3
+#define xenova_drive_EpisodeReceipt_result_tag   4
+#define xenova_drive_EpisodeReceipt_reason_tag   5
+#define xenova_drive_EpisodeReceipt_registry_epoch_tag 6
+#define xenova_drive_EpisodeReceipt_registry_revision_tag 7
+#define xenova_drive_EpisodeReceipt_snapshot_tag 8
+#define xenova_drive_EpisodeReceipt_request_sequence_tag 9
+#define xenova_drive_EpisodeStatus_major_tag     1
+#define xenova_drive_EpisodeStatus_state_tag     2
+#define xenova_drive_EpisodeStatus_registry_epoch_tag 3
+#define xenova_drive_EpisodeStatus_registry_revision_tag 4
+#define xenova_drive_EpisodeStatus_accepted_core_sha256_tag 5
+#define xenova_drive_EpisodeStatus_episode_id_tag 6
+#define xenova_drive_EpisodeStatus_episode_revision_tag 7
+#define xenova_drive_EpisodeStatus_commit_state_tag 8
+#define xenova_drive_EpisodeStatus_state_message_id_tag 9
+#define xenova_drive_EpisodeStatus_state_sha256_tag 10
+#define xenova_drive_EpisodeStatus_state_revision_tag 11
+#define xenova_drive_EpisodeStatus_plan_revision_tag 12
+#define xenova_drive_EpisodeStatus_phase_revision_tag 13
+#define xenova_drive_EpisodeStatus_calculation_hwm_tag 14
+#define xenova_drive_EpisodeStatus_vehicle_hwm_tag 15
+#define xenova_drive_EpisodeStatus_valid_until_pi_us_tag 16
+#define xenova_drive_EpisodeStatus_receipt_tag   17
+#define xenova_drive_PiAbsoluteMeter_meter_epoch_tag 1
+#define xenova_drive_PiAbsoluteMeter_total_ticks_tag 2
+#define xenova_drive_PiAbsoluteMeter_metres_per_tick_tag 3
+#define xenova_drive_PiAbsoluteMeter_gap_revision_tag 4
+#define xenova_drive_PiAbsoluteMeter_valid_tag   5
+#define xenova_drive_PiAbsoluteMeter_vehicle_sequence_tag 6
+#define xenova_drive_StopFacts_state_tag         1
+#define xenova_drive_StopFacts_pi_session_tag    2
+#define xenova_drive_StopFacts_device_session_tag 3
+#define xenova_drive_StopFacts_command_sequence_tag 4
+#define xenova_drive_StopFacts_control_generation_tag 5
+#define xenova_drive_StopFacts_producer_role_tag 6
+#define xenova_drive_StopFacts_source_vm_tag     7
+#define xenova_drive_StopFacts_source_execution_tag 8
+#define xenova_drive_StopFacts_source_app_instance_tag 9
+#define xenova_drive_StopFacts_calculation_sequence_tag 10
+#define xenova_drive_StopFacts_counter_tag       11
+#define xenova_drive_StopFacts_applied_report_sequence_tag 12
+#define xenova_drive_StopFacts_applied_source_sample_tag 13
+#define xenova_drive_StopFacts_applied_pi_lower_us_tag 14
+#define xenova_drive_StopFacts_applied_pi_upper_us_tag 15
+#define xenova_drive_StopFacts_stationary_first_sequence_tag 16
+#define xenova_drive_StopFacts_stationary_last_sequence_tag 17
+#define xenova_drive_StopFacts_stationary_started_pi_us_tag 18
+#define xenova_drive_StopFacts_stationary_observed_pi_us_tag 19
+#define xenova_drive_StopFacts_valid_until_pi_us_tag 20
+#define xenova_drive_StopFacts_left_speed_bound_mps_tag 21
+#define xenova_drive_StopFacts_right_speed_bound_mps_tag 22
+#define xenova_drive_StopFacts_yaw_rate_bound_rps_tag 23
+#define xenova_drive_StopFacts_plan_revision_tag 24
+#define xenova_drive_StopFacts_phase_revision_tag 25
+#define xenova_drive_StopFacts_mission_id_tag    26
+#define xenova_drive_StopFacts_mission_revision_tag 27
+#define xenova_drive_StopFacts_grant_revision_tag 28
+#define xenova_drive_StopFacts_driver_session_tag 29
+#define xenova_drive_StopFacts_driver_action_seq_tag 30
+#define xenova_drive_StopFacts_driver_state_seq_tag 31
+#define xenova_drive_DriveControlFacts_major_tag 1
+#define xenova_drive_DriveControlFacts_meter_tag 2
+#define xenova_drive_DriveControlFacts_stop_tag  3
+#define xenova_drive_DriveControlFacts_valid_until_pi_us_tag 4
+#define xenova_drive_LaneGeometry_lane_id_tag    1
+#define xenova_drive_LaneGeometry_centerline_tag 2
+#define xenova_drive_LaneGeometry_travel_direction_tag 3
+#define xenova_drive_LaneGeometry_position_bound_m_tag 4
+#define xenova_drive_LaneGeometry_heading_bound_rad_tag 5
+#define xenova_drive_LaneGeometry_revision_tag   6
+#define xenova_drive_LaneGeometry_adjacent_lane_id_tag 7
+#define xenova_drive_LaneGeometry_point_state_tag 8
+#define xenova_drive_LaneModel_lanes_tag         1
+#define xenova_drive_LaneModel_divider_tag       2
+#define xenova_drive_LaneModel_crossing_tag      3
+#define xenova_drive_LaneModel_divider_state_tag 4
+#define xenova_drive_LaneModel_revision_tag      5
+#define xenova_drive_LaneModel_divider_position_bound_m_tag 6
+#define xenova_drive_LaneModel_divider_heading_bound_rad_tag 7
+#define xenova_drive_ParkingSlot_slot_id_tag     1
+#define xenova_drive_ParkingSlot_geometry_revision_tag 2
+#define xenova_drive_ParkingSlot_geometry_state_tag 3
+#define xenova_drive_ParkingSlot_occupancy_state_tag 4
+#define xenova_drive_ParkingSlot_corners_tag     5
+#define xenova_drive_ParkingSlot_entry_edge_tag  6
+#define xenova_drive_ParkingSlot_reverse_goal_tag 7
+#define xenova_drive_ParkingSlot_forward_goal_tag 8
+#define xenova_drive_ParkingSlot_position_bound_m_tag 9
+#define xenova_drive_ParkingSlot_heading_bound_rad_tag 10
+#define xenova_drive_ParkingSlot_geometry_age_ms_tag 11
+#define xenova_drive_ParkingSlot_clearance_age_ms_tag 12
+#define xenova_drive_ParkingSlot_evidence_sequence_tag 13
+#define xenova_drive_ParkingSlot_geometry_complete_tag 14
+#define xenova_drive_ParkingSlot_occupancy_reason_tag 15
+#define xenova_drive_ParkingSlot_source_kinds_tag 16
+#define xenova_drive_ParkingSlot_occupancy_revision_tag 17
+#define xenova_drive_ParkingSlot_usable_width_m_tag 18
+#define xenova_drive_ParkingSlot_usable_depth_m_tag 19
+#define xenova_drive_ParkingSlot_approach_lane_id_tag 20
+#define xenova_drive_ParkingSlot_goal_mask_tag   21
+#define xenova_drive_ParkingSetMeta_revision_tag 1
+#define xenova_drive_ParkingSetMeta_complete_tag 2
+#define xenova_drive_ParkingSetMeta_track_count_in_roi_tag 3
+#define xenova_drive_ParkingSetMeta_capacity_limited_tag 4
+#define xenova_drive_ParkingSetMeta_evidence_sequence_tag 5
+#define xenova_drive_ParkingSetMeta_state_tag    6
+#define xenova_drive_MapLocalization_registration_revision_tag 1
+#define xenova_drive_MapLocalization_anchor_position_bound_m_tag 2
+#define xenova_drive_MapLocalization_anchor_heading_bound_rad_tag 3
+#define xenova_drive_MapLocalization_geometry_position_bound_m_tag 4
+#define xenova_drive_MapLocalization_geometry_heading_bound_rad_tag 5
+#define xenova_drive_MapLocalization_observed_mapper_us_tag 6
+#define xenova_drive_MapLocalization_valid_for_us_tag 7
+#define xenova_drive_MapLocalization_position_drift_bound_mps_tag 8
+#define xenova_drive_MapLocalization_heading_drift_bound_rps_tag 9
+#define xenova_drive_MapLocalization_quality_tag 10
+#define xenova_drive_MapLocalization_timestamp_error_us_tag 11
+#define xenova_drive_SceneAdmissionRef_admission_id_tag 1
+#define xenova_drive_SceneAdmissionRef_admission_revision_tag 2
+#define xenova_drive_SceneAdmissionRef_survey_id_tag 3
+#define xenova_drive_SceneAdmissionRef_survey_revision_tag 4
+#define xenova_drive_SceneAdmissionRef_policy_tag 5
+#define xenova_drive_SceneAdmissionRef_coverage_profile_sha256_tag 6
+#define xenova_drive_SceneAdmissionRef_allow_restore_after_mapper_restart_tag 7
+#define xenova_drive_GearSegment_first_index_tag 1
+#define xenova_drive_GearSegment_last_index_tag  2
+#define xenova_drive_GearSegment_signed_direction_tag 3
+#define xenova_drive_DirectionGateRef_gate_revision_tag 1
+#define xenova_drive_DirectionGateRef_stop_command_sequence_tag 2
+#define xenova_drive_DirectionGateRef_state_tag  3
+#define xenova_drive_DirectionGateRef_requested_direction_tag 4
+#define xenova_drive_DirectionGateWitness_gate_tag 1
+#define xenova_drive_DirectionGateWitness_control_generation_tag 2
+#define xenova_drive_DirectionGateWitness_producer_role_tag 3
+#define xenova_drive_DirectionGateWitness_calculation_sequence_tag 4
+#define xenova_drive_DirectionGateWitness_plan_revision_tag 5
+#define xenova_drive_DirectionGateWitness_phase_revision_tag 6
+#define xenova_drive_DirectionGateWitness_segment_index_tag 7
+#define xenova_drive_DirectionGateWitness_cusp_index_tag 8
+#define xenova_drive_DirectionGateWitness_mission_id_tag 9
+#define xenova_drive_DirectionGateWitness_mission_revision_tag 10
+#define xenova_drive_DirectionGateWitness_grant_revision_tag 11
+#define xenova_drive_DirectionGateWitness_driver_session_tag 12
+#define xenova_drive_DirectionGateWitness_driver_action_seq_tag 13
+#define xenova_drive_DirectionGateWitness_driver_state_seq_tag 14
+#define xenova_drive_DirectionGateWitness_vehicle_sequence_tag 15
+#define xenova_drive_DirectionGateWitness_valid_until_pi_us_tag 16
+#define xenova_drive_DirectionGateWitness_pi_session_tag 17
+#define xenova_drive_DirectionGateWitness_device_session_tag 18
+#define xenova_drive_MissionBudgetRequest_major_tag 1
+#define xenova_drive_MissionBudgetRequest_request_nonce_tag 2
+#define xenova_drive_MissionBudgetRequest_mission_id_tag 3
+#define xenova_drive_MissionBudgetRequest_mission_revision_tag 4
+#define xenova_drive_MissionBudgetRequest_control_generation_tag 5
+#define xenova_drive_MissionBudgetRequest_expected_grant_revision_tag 6
+#define xenova_drive_MissionBudgetRequest_action_tag 7
+#define xenova_drive_MissionBudgetRequest_slot_id_tag 8
+#define xenova_drive_MissionBudgetRequest_slot_revision_tag 9
+#define xenova_drive_MissionBudgetRequest_goal_revision_tag 10
+#define xenova_drive_MissionBudgetRequest_plan_revision_tag 11
+#define xenova_drive_MissionBudgetRequest_plan_sha256_tag 12
+#define xenova_drive_MissionBudgetRequest_selected_goal_sha256_tag 13
+#define xenova_drive_MissionBudgetRequest_scene_admission_id_tag 14
+#define xenova_drive_MissionBudgetRequest_scene_revision_tag 15
+#define xenova_drive_MissionBudgetRequest_completed_guest_us_tag 16
+#define xenova_drive_MissionBudgetRequest_valid_until_pi_us_tag 17
+#define xenova_drive_MapperClockProbe_major_tag  1
+#define xenova_drive_MapperClockProbe_vehicle_tag 2
+#define xenova_drive_MapperClockProbe_device_tag 3
+#define xenova_drive_MapperClockProbe_pi_host_boot_tag 4
+#define xenova_drive_MapperClockProbe_pi_client_instance_tag 5
+#define xenova_drive_MapperClockProbe_probe_seq_tag 6
+#define xenova_drive_MapperClockProbe_nonce_tag  7
+#define xenova_drive_MapperClockProbe_pi_send_us_tag 8
+#define xenova_drive_MapperClockProbe_expected_mapper_boot_tag 9
+#define xenova_drive_MapperClockProbe_expected_mapper_instance_tag 10
+#define xenova_drive_MapperClockProbe_expected_clock_epoch_tag 11
+#define xenova_drive_MapperClockProbe_admission_revision_tag 12
+#define xenova_drive_MapperClockProbe_mapper_trust_tag 13
+#define xenova_drive_MapperClockProbe_operation_gate_tag 14
+#define xenova_drive_SceneGrant_major_tag        1
+#define xenova_drive_SceneGrant_vehicle_tag      2
+#define xenova_drive_SceneGrant_pi_host_boot_tag 3
+#define xenova_drive_SceneGrant_gateway_instance_tag 4
+#define xenova_drive_SceneGrant_source_admission_revision_tag 5
+#define xenova_drive_SceneGrant_scene_tag        6
+#define xenova_drive_SceneGrant_mapper_device_tag 7
+#define xenova_drive_SceneGrant_map_epoch_tag    8
+#define xenova_drive_SceneGrant_frame_epoch_tag  9
+#define xenova_drive_SceneGrant_odom_epoch_tag   10
+#define xenova_drive_SceneGrant_configuration_tag 11
+#define xenova_drive_SceneGrant_calibration_tag  12
+#define xenova_drive_SceneGrant_primitive_tag    13
+#define xenova_drive_SceneGrant_issued_pi_us_tag 14
+#define xenova_drive_SceneGrant_valid_until_pi_us_tag 15
+#define xenova_drive_SceneGrant_lifecycle_state_tag 16
+#define xenova_drive_SceneGrant_request_nonce_tag 17
+#define xenova_drive_SceneGrant_survey_deadline_pi_us_tag 18
+#define xenova_drive_SceneGrant_max_observation_stations_tag 19
+#define xenova_drive_SceneGrant_purpose_tag      20
+#define xenova_drive_SceneGrant_frozen_evidence_sha256_tag 21
+#define xenova_drive_SceneGrant_frozen_survey_revision_tag 22
+#define xenova_drive_SceneGrant_frozen_hazard_revision_tag 23
+#define xenova_drive_SceneGrant_restore_checkpoint_sha256_tag 24
+#define xenova_drive_SceneGrant_lifecycle_revision_tag 25
+#define xenova_drive_SurveySummary_major_tag     1
+#define xenova_drive_SurveySummary_request_nonce_tag 2
+#define xenova_drive_SurveySummary_survey_id_tag 3
+#define xenova_drive_SurveySummary_survey_revision_tag 4
+#define xenova_drive_SurveySummary_status_tag    5
+#define xenova_drive_SurveySummary_world_sequence_tag 6
+#define xenova_drive_SurveySummary_evidence_sequence_tag 7
+#define xenova_drive_SurveySummary_started_peer_us_tag 8
+#define xenova_drive_SurveySummary_last_observed_peer_us_tag 9
+#define xenova_drive_SurveySummary_completed_peer_us_tag 10
+#define xenova_drive_SurveySummary_positive_cell_count_tag 11
+#define xenova_drive_SurveySummary_observed_slot_count_tag 12
+#define xenova_drive_SurveySummary_required_sensor_mask_tag 13
+#define xenova_drive_SurveySummary_valid_sensor_mask_tag 14
+#define xenova_drive_SurveySummary_evidence_sha256_tag 15
+#define xenova_drive_SurveySummary_coverage_profile_sha256_tag 16
+#define xenova_drive_SurveySummary_observation_station_count_tag 17
+#define xenova_drive_SurveySummary_hazard_revision_tag 18
+#define xenova_drive_SurveySummary_alignment_revision_tag 19
+#define xenova_drive_SurveySummary_anchor_position_bound_m_tag 20
+#define xenova_drive_SurveySummary_anchor_heading_bound_rad_tag 21
+#define xenova_drive_SurveySummary_evidence_flags_tag 22
+#define xenova_drive_SurveySummary_failure_flags_tag 23
+#define xenova_drive_SurveySummary_timestamp_error_us_tag 24
+#define xenova_drive_MapperClockReply_major_tag  1
+#define xenova_drive_MapperClockReply_pi_host_boot_tag 2
+#define xenova_drive_MapperClockReply_pi_client_instance_tag 3
+#define xenova_drive_MapperClockReply_probe_seq_tag 4
+#define xenova_drive_MapperClockReply_nonce_tag  5
+#define xenova_drive_MapperClockReply_pi_send_us_tag 6
+#define xenova_drive_MapperClockReply_device_tag 7
+#define xenova_drive_MapperClockReply_mapper_boot_tag 8
+#define xenova_drive_MapperClockReply_mapper_instance_tag 9
+#define xenova_drive_MapperClockReply_clock_epoch_tag 10
+#define xenova_drive_MapperClockReply_map_epoch_tag 11
+#define xenova_drive_MapperClockReply_frame_epoch_tag 12
+#define xenova_drive_MapperClockReply_odom_epoch_tag 13
+#define xenova_drive_MapperClockReply_configuration_tag 14
+#define xenova_drive_MapperClockReply_calibration_tag 15
+#define xenova_drive_MapperClockReply_primitive_tag 16
+#define xenova_drive_MapperClockReply_j2_tag     17
+#define xenova_drive_MapperClockReply_j3_tag     18
+#define xenova_drive_MapperClockReply_survey_summary_tag 19
+#define xenova_drive_MapperClockReply_supported_mapper_features_tag 20
+#define xenova_drive_TofObservation_major_tag    1
+#define xenova_drive_TofObservation_vehicle_tag  2
+#define xenova_drive_TofObservation_host_boot_tag 3
+#define xenova_drive_TofObservation_gateway_instance_tag 4
+#define xenova_drive_TofObservation_pi_session_tag 5
+#define xenova_drive_TofObservation_device_session_tag 6
+#define xenova_drive_TofObservation_sensor_id_tag 7
+#define xenova_drive_TofObservation_source_sample_tag 8
+#define xenova_drive_TofObservation_source_us_tag 9
+#define xenova_drive_TofObservation_pi_sample_us_tag 10
+#define xenova_drive_TofObservation_clock_error_us_tag 11
+#define xenova_drive_TofObservation_sensor_time_error_us_tag 12
+#define xenova_drive_TofObservation_calibration_tag 13
+#define xenova_drive_TofObservation_sensor_config_revision_tag 14
+#define xenova_drive_TofObservation_rows_tag     15
+#define xenova_drive_TofObservation_cols_tag     16
+#define xenova_drive_TofObservation_distance_mm_le_tag 17
+#define xenova_drive_TofObservation_status_tag   18
+#define xenova_drive_TofObservation_quality_tag  19
+#define xenova_drive_TofObservation_frame_status_tag 20
+#define xenova_drive_TofObservation_source_crc32_tag 21
+#define xenova_drive_TofObservation_clock_epoch_tag 22
+#define xenova_drive_TofObservation_clock_seq_tag 23
+#define xenova_drive_TofObservation_complete_tag 24
+#define xenova_drive_TofObservation_sensor_instance_tag 25
+#define xenova_drive_TofObservation_sensor_generation_tag 26
+#define xenova_drive_RouteBinding_route_id_tag   1
+#define xenova_drive_RouteBinding_revision_tag   2
+#define xenova_drive_RouteBinding_purpose_tag    3
+#define xenova_drive_RouteBinding_core_sha256_tag 4
+#define xenova_drive_RouteBinding_global_plan_sha256_tag 5
+#define xenova_drive_RouteBinding_goal_sha256_tag 6
+#define xenova_drive_MissionExecution_mission_id_tag 1
+#define xenova_drive_MissionExecution_mission_revision_tag 2
+#define xenova_drive_MissionExecution_kind_tag   3
+#define xenova_drive_MissionExecution_phase_tag  4
+#define xenova_drive_MissionExecution_result_tag 5
+#define xenova_drive_MissionExecution_operator_request_nonce_tag 6
+#define xenova_drive_MissionExecution_slot_id_tag 7
+#define xenova_drive_MissionExecution_slot_revision_tag 8
+#define xenova_drive_MissionExecution_goal_tag   9
+#define xenova_drive_MissionExecution_goal_revision_tag 10
+#define xenova_drive_MissionExecution_mission_deadline_pi_us_tag 11
+#define xenova_drive_MissionExecution_cancel_fence_revision_tag 12
+#define xenova_drive_MissionExecution_active_segment_tag 13
+#define xenova_drive_MissionExecution_selected_slot_polygon_tag 14
+#define xenova_drive_MissionExecution_goal_position_bound_m_tag 15
+#define xenova_drive_MissionExecution_goal_heading_bound_rad_tag 16
+#define xenova_drive_MissionExecution_scene_admission_id_tag 17
+#define xenova_drive_MissionExecution_scene_admission_revision_tag 18
+#define xenova_drive_MissionExecution_strategy_tag 19
+#define xenova_drive_MissionExecution_execution_deadline_pi_us_tag 20
+#define xenova_drive_MissionExecution_correction_attempts_used_tag 21
+#define xenova_drive_MissionExecution_execution_travel_m_tag 22
+#define xenova_drive_MissionExecution_grant_revision_tag 23
+#define xenova_drive_MissionExecution_search_travel_m_tag 24
+#define xenova_drive_MissionExecution_search_deadline_pi_us_tag 25
+#define xenova_drive_MissionExecution_operation_binding_tag 26
+#define xenova_drive_MissionExecution_route_binding_tag 27
+#define xenova_drive_MissionGrant_major_tag      1
+#define xenova_drive_MissionGrant_vehicle_tag    2
+#define xenova_drive_MissionGrant_pi_host_boot_tag 3
+#define xenova_drive_MissionGrant_gateway_instance_tag 4
+#define xenova_drive_MissionGrant_owner_vm_tag   5
+#define xenova_drive_MissionGrant_owner_execution_tag 6
+#define xenova_drive_MissionGrant_app_instance_tag 7
+#define xenova_drive_MissionGrant_control_generation_tag 8
+#define xenova_drive_MissionGrant_mission_id_tag 9
+#define xenova_drive_MissionGrant_mission_revision_tag 10
+#define xenova_drive_MissionGrant_grant_revision_tag 11
+#define xenova_drive_MissionGrant_kind_tag       12
+#define xenova_drive_MissionGrant_strategy_tag   13
+#define xenova_drive_MissionGrant_operator_request_nonce_tag 14
+#define xenova_drive_MissionGrant_issued_pi_us_tag 15
+#define xenova_drive_MissionGrant_mission_deadline_pi_us_tag 16
+#define xenova_drive_MissionGrant_cancel_fence_revision_tag 17
+#define xenova_drive_MissionGrant_scene_admission_id_tag 18
+#define xenova_drive_MissionGrant_scene_revision_tag 19
+#define xenova_drive_MissionGrant_configuration_tag 20
+#define xenova_drive_MissionGrant_calibration_tag 21
+#define xenova_drive_MissionGrant_primitive_tag  22
+#define xenova_drive_MissionGrant_execution_deadline_pi_us_tag 23
+#define xenova_drive_MissionGrant_correction_attempts_used_tag 24
+#define xenova_drive_MissionGrant_execution_travel_m_tag 25
+#define xenova_drive_MissionGrant_max_execution_travel_m_tag 26
+#define xenova_drive_MissionGrant_admitted_tag   27
+#define xenova_drive_MissionGrant_search_deadline_pi_us_tag 28
+#define xenova_drive_MissionGrant_search_travel_m_tag 29
+#define xenova_drive_MissionGrant_max_search_travel_m_tag 30
+#define xenova_drive_MissionGrant_locked_goal_sha256_tag 31
+#define xenova_drive_MissionGrant_operation_binding_tag 32
+#define xenova_drive_MissionGrant_route_binding_tag 33
+#define xenova_drive_MissionBudgetReply_major_tag 1
+#define xenova_drive_MissionBudgetReply_request_nonce_tag 2
+#define xenova_drive_MissionBudgetReply_request_sha256_tag 3
+#define xenova_drive_MissionBudgetReply_result_tag 4
+#define xenova_drive_MissionBudgetReply_reason_tag 5
+#define xenova_drive_MissionBudgetReply_grant_tag 6
+#define xenova_drive_RoadSectionRef_section_id_tag 1
+#define xenova_drive_RoadSectionRef_section_sha256_tag 2
+#define xenova_drive_RoadSectionRef_left_lane_id_tag 3
+#define xenova_drive_RoadSectionRef_right_lane_id_tag 4
+#define xenova_drive_RoadSectionRef_length_m_tag 5
+#define xenova_drive_RoadSectionRef_order_tag    6
+#define xenova_drive_RoadEdge_from_section_index_tag 1
+#define xenova_drive_RoadEdge_to_section_index_tag 2
+#define xenova_drive_RoadEdge_from_lane_id_tag   3
+#define xenova_drive_RoadEdge_to_lane_id_tag     4
+#define xenova_drive_RoadEdge_kind_tag           5
+#define xenova_drive_RoadEdge_from_station_m_tag 6
+#define xenova_drive_RoadEdge_to_station_m_tag   7
+#define xenova_drive_RoadEdge_connection_sha256_tag 8
+#define xenova_drive_RoadEdge_closes_circuit_tag 9
+#define xenova_drive_RoadTopology_major_tag      1
+#define xenova_drive_RoadTopology_topology_id_tag 2
+#define xenova_drive_RoadTopology_revision_tag   3
+#define xenova_drive_RoadTopology_geometry_scope_sha256_tag 4
+#define xenova_drive_RoadTopology_sections_tag   5
+#define xenova_drive_RoadTopology_edges_tag      6
+#define xenova_drive_RoadTopology_closed_observed_tag 7
+#define xenova_drive_RoadTopology_origin_roots_sha256_tag 8
+#define xenova_drive_RouteOccurrence_section_index_tag 1
+#define xenova_drive_RouteOccurrence_lane_id_tag 2
+#define xenova_drive_RouteOccurrence_entry_station_m_tag 3
+#define xenova_drive_RouteOccurrence_exit_station_m_tag 4
+#define xenova_drive_RouteOccurrence_edge_index_tag 5
+#define xenova_drive_RoutePlan_major_tag         1
+#define xenova_drive_RoutePlan_route_id_tag      2
+#define xenova_drive_RoutePlan_revision_tag      3
+#define xenova_drive_RoutePlan_purpose_tag       4
+#define xenova_drive_RoutePlan_goal_sha256_tag   5
+#define xenova_drive_RoutePlan_topology_sha256_tag 6
+#define xenova_drive_RoutePlan_geometry_scope_sha256_tag 7
+#define xenova_drive_RoutePlan_occurrences_tag   8
+#define xenova_drive_RoutePlan_max_laps_tag      9
+#define xenova_drive_RoutePlan_exit_space_sha256_tag 10
+#define xenova_drive_RoutePlan_origin_guest_witness_sha256_tag 11
+#define xenova_drive_RoutePlan_merge_section_id_tag 12
+#define xenova_drive_RoutePlan_merge_lane_id_tag 13
+#define xenova_drive_RoutePlan_merge_station_lower_m_tag 14
+#define xenova_drive_RoutePlan_merge_station_upper_m_tag 15
+#define xenova_drive_RoutePlan_merge_seed_pose_tag 16
+#define xenova_drive_RoutePlan_terminal_profile_sha256_tag 17
+#define xenova_drive_RouteCore_route_id_tag      1
+#define xenova_drive_RouteCore_revision_tag      2
+#define xenova_drive_RouteCore_purpose_tag       3
+#define xenova_drive_RouteCore_goal_sha256_tag   4
+#define xenova_drive_RouteCore_topology_sha256_tag 5
+#define xenova_drive_RouteCore_global_plan_sha256_tag 6
+#define xenova_drive_RouteCore_geometry_scope_sha256_tag 7
+#define xenova_drive_RouteCore_started_pi_us_tag 8
+#define xenova_drive_RouteCore_deadline_pi_us_tag 9
+#define xenova_drive_RouteCore_meter_epoch_tag   10
+#define xenova_drive_RouteCore_meter_baseline_total_ticks_tag 11
+#define xenova_drive_RouteCore_max_travel_m_tag  12
+#define xenova_drive_RouteCore_phase_tag         13
+#define xenova_drive_RouteCore_phase_revision_tag 14
+#define xenova_drive_RouteCore_phase_started_pi_us_tag 15
+#define xenova_drive_RouteCore_phase_expires_pi_us_tag 16
+#define xenova_drive_RouteCore_parking_attempt_id_tag 17
+#define xenova_drive_RouteCore_parking_goal_sha256_tag 18
+#define xenova_drive_RouteCore_predecessor_episode_sha256_tag 19
+#define xenova_drive_RouteCore_budget_profile_sha256_tag 20
+#define xenova_drive_RouteCore_target_lane_id_tag 21
+#define xenova_drive_RouteCore_max_laps_tag      22
+#define xenova_drive_RouteCore_stop_wait_command_sequence_tag 23
+#define xenova_drive_RouteCore_local_path_sha256_tag 24
+#define xenova_drive_RouteCore_meter_gap_revision_tag 25
+#define xenova_drive_RouteCore_metres_per_tick_upper_tag 26
+#define xenova_drive_RouteCore_progress_mode_tag 27
+#define xenova_drive_RouteCore_phase_goal_tag    28
+#define xenova_drive_RouteCore_stop_wait_facts_sha256_tag 29
+#define xenova_drive_RouteCore_stop_wait_started_pi_us_tag 30
+#define xenova_drive_RouteCore_terminal_result_tag 31
+#define xenova_drive_RouteCore_terminal_reason_tag 32
+#define xenova_drive_RouteProgress_occurrence_index_tag 1
+#define xenova_drive_RouteProgress_station_lower_m_tag 2
+#define xenova_drive_RouteProgress_station_upper_m_tag 3
+#define xenova_drive_RouteProgress_used_travel_ticks_tag 4
+#define xenova_drive_RouteProgress_last_progress_pi_us_tag 5
+#define xenova_drive_RouteProgress_vehicle_sequence_tag 6
+#define xenova_drive_RouteProgress_calculation_sequence_tag 7
+#define xenova_drive_RouteProgress_revision_tag  8
+#define xenova_drive_RouteProgress_completed_laps_tag 9
+#define xenova_drive_RouteProgress_confirmed_stop_wait_us_tag 10
+#define xenova_drive_RouteProgress_remaining_upper_m_tag 11
+#define xenova_drive_RouteProgress_stop_wait_hwm_pi_us_tag 12
+#define xenova_drive_RouteAcceptanceRef_registry_epoch_tag 1
+#define xenova_drive_RouteAcceptanceRef_registry_revision_tag 2
+#define xenova_drive_RouteAcceptanceRef_acceptance_nonce_tag 3
+#define xenova_drive_RouteAcceptanceRef_request_nonce_tag 4
+#define xenova_drive_RouteAcceptanceRef_request_sha256_tag 5
+#define xenova_drive_RouteAcceptanceRef_accepted_core_sha256_tag 6
+#define xenova_drive_RouteAcceptanceRef_request_sequence_tag 7
+#define xenova_drive_RouteAcceptanceRef_origin_owner_sha256_tag 8
+#define xenova_drive_RouteSnapshot_core_tag      1
+#define xenova_drive_RouteSnapshot_progress_tag  2
+#define xenova_drive_RouteSnapshot_acceptance_tag 3
+#define xenova_drive_RouteSnapshot_current_window_sha256_tag 4
+#define xenova_drive_RouteSnapshot_state_tag     5
+#define xenova_drive_RouteSnapshot_task_space_kind_tag 6
+#define xenova_drive_RouteSnapshot_exit_space_sha256_tag 7
+#define xenova_drive_RouteSnapshot_basis_window_sha256_tag 8
+#define xenova_drive_RouteSnapshot_basis_window_revision_tag 9
+#define xenova_drive_RouteSnapshot_current_world_sha256_tag 10
+#define xenova_drive_DriveState_major_tag        1
+#define xenova_drive_DriveState_source_vm_tag    2
+#define xenova_drive_DriveState_source_execution_tag 3
+#define xenova_drive_DriveState_source_app_instance_tag 4
+#define xenova_drive_DriveState_source_generation_tag 5
+#define xenova_drive_DriveState_state_revision_tag 6
+#define xenova_drive_DriveState_frame_epoch_tag  7
+#define xenova_drive_DriveState_odom_epoch_tag   8
+#define xenova_drive_DriveState_configuration_tag 9
+#define xenova_drive_DriveState_primitive_tag    10
+#define xenova_drive_DriveState_reference_id_tag 11
+#define xenova_drive_DriveState_reference_revision_tag 12
+#define xenova_drive_DriveState_path_revision_tag 13
+#define xenova_drive_DriveState_maneuver_revision_tag 14
+#define xenova_drive_DriveState_direction_tag    15
+#define xenova_drive_DriveState_maneuver_phase_tag 16
+#define xenova_drive_DriveState_merge_goal_tag   17
+#define xenova_drive_DriveState_vehicle_sequence_tag 18
+#define xenova_drive_DriveState_calculation_sequence_tag 19
+#define xenova_drive_DriveState_tracker_index_tag 20
+#define xenova_drive_DriveState_complete_tag     21
+#define xenova_drive_DriveState_path_tag         22
+#define xenova_drive_DriveState_message_id_tag   23
+#define xenova_drive_DriveState_calibration_tag  24
+#define xenova_drive_DriveState_map_epoch_tag    25
+#define xenova_drive_DriveState_observation_seq_tag 26
+#define xenova_drive_DriveState_merge_passed_reference_revision_tag 27
+#define xenova_drive_DriveState_world_features_tag 28
+#define xenova_drive_DriveState_state_features_tag 29
+#define xenova_drive_DriveState_mission_tag      30
+#define xenova_drive_DriveState_segments_tag     31
+#define xenova_drive_DriveState_direction_gate_tag 32
+#define xenova_drive_DriveState_task_reference_tag 33
+#define xenova_drive_DriveState_episode_tag      34
+#define xenova_drive_DriveState_route_tag        35
+#define xenova_drive_AcceptedState_host_boot_tag 1
+#define xenova_drive_AcceptedState_gateway_instance_tag 2
+#define xenova_drive_AcceptedState_state_tag     3
+#define xenova_drive_WorldRouteView_major_tag    1
+#define xenova_drive_WorldRouteView_geometry_scope_sha256_tag 2
+#define xenova_drive_WorldRouteView_topology_sha256_tag 3
+#define xenova_drive_WorldRouteView_window_id_tag 4
+#define xenova_drive_WorldRouteView_window_revision_tag 5
+#define xenova_drive_WorldRouteView_window_sha256_tag 6
+#define xenova_drive_WorldRouteView_from_window_id_tag 7
+#define xenova_drive_WorldRouteView_from_window_sha256_tag 8
+#define xenova_drive_WorldRouteView_transition_id_tag 9
+#define xenova_drive_WorldRouteView_first_section_id_tag 10
+#define xenova_drive_WorldRouteView_last_section_id_tag 11
+#define xenova_drive_WorldRouteView_overlap_prefix_sha256_tag 12
+#define xenova_drive_WorldRouteView_geometry_revision_tag 13
 #define xenova_drive_WorldSnapshot_major_tag     1
 #define xenova_drive_WorldSnapshot_minor_tag     2
 #define xenova_drive_WorldSnapshot_required_features_tag 3
@@ -303,76 +2759,276 @@ extern "C" {
 #define xenova_drive_WorldSnapshot_complete_tag  33
 #define xenova_drive_WorldSnapshot_truncated_tag 34
 #define xenova_drive_WorldSnapshot_inflation_policy_tag 35
-#define xenova_drive_VehicleSample_major_tag     1
-#define xenova_drive_VehicleSample_vehicle_tag   2
-#define xenova_drive_VehicleSample_host_boot_tag 3
-#define xenova_drive_VehicleSample_device_session_tag 4
-#define xenova_drive_VehicleSample_odom_epoch_tag 5
-#define xenova_drive_VehicleSample_sequence_tag  6
-#define xenova_drive_VehicleSample_source_sample_tag 7
-#define xenova_drive_VehicleSample_source_us_tag 8
-#define xenova_drive_VehicleSample_pi_sample_us_tag 9
-#define xenova_drive_VehicleSample_clock_error_us_tag 10
-#define xenova_drive_VehicleSample_left_ticks_tag 11
-#define xenova_drive_VehicleSample_right_ticks_tag 12
-#define xenova_drive_VehicleSample_odom_pose_tag 13
-#define xenova_drive_VehicleSample_velocity_mps_tag 14
-#define xenova_drive_VehicleSample_measured_steering_rad_tag 15
-#define xenova_drive_VehicleSample_estimated_steering_rad_tag 16
-#define xenova_drive_VehicleSample_position_error_m_tag 17
-#define xenova_drive_VehicleSample_heading_error_rad_tag 18
-#define xenova_drive_VehicleSample_quality_tag   19
-#define xenova_drive_VehicleSample_calibration_tag 20
-#define xenova_drive_VehicleSample_steering_error_rad_tag 21
-#define xenova_drive_VehicleSample_gateway_instance_tag 22
-#define xenova_drive_VehicleSample_pi_session_tag 23
-#define xenova_drive_DriveState_major_tag        1
-#define xenova_drive_DriveState_source_vm_tag    2
-#define xenova_drive_DriveState_source_execution_tag 3
-#define xenova_drive_DriveState_source_app_instance_tag 4
-#define xenova_drive_DriveState_source_generation_tag 5
-#define xenova_drive_DriveState_state_revision_tag 6
-#define xenova_drive_DriveState_frame_epoch_tag  7
-#define xenova_drive_DriveState_odom_epoch_tag   8
-#define xenova_drive_DriveState_configuration_tag 9
-#define xenova_drive_DriveState_primitive_tag    10
-#define xenova_drive_DriveState_reference_id_tag 11
-#define xenova_drive_DriveState_reference_revision_tag 12
-#define xenova_drive_DriveState_path_revision_tag 13
-#define xenova_drive_DriveState_maneuver_revision_tag 14
-#define xenova_drive_DriveState_direction_tag    15
-#define xenova_drive_DriveState_maneuver_phase_tag 16
-#define xenova_drive_DriveState_merge_goal_tag   17
-#define xenova_drive_DriveState_vehicle_sequence_tag 18
-#define xenova_drive_DriveState_calculation_sequence_tag 19
-#define xenova_drive_DriveState_tracker_index_tag 20
-#define xenova_drive_DriveState_complete_tag     21
-#define xenova_drive_DriveState_path_tag         22
-#define xenova_drive_DriveState_message_id_tag   23
-#define xenova_drive_DriveState_calibration_tag  24
-#define xenova_drive_DriveState_map_epoch_tag    25
-#define xenova_drive_DriveState_observation_seq_tag 26
-#define xenova_drive_DriveState_merge_passed_reference_revision_tag 27
-#define xenova_drive_DriveState_world_features_tag 28
-#define xenova_drive_ClockProbe_vm_tag           1
-#define xenova_drive_ClockProbe_execution_tag    2
-#define xenova_drive_ClockProbe_app_instance_tag 3
-#define xenova_drive_ClockProbe_sequence_tag     4
-#define xenova_drive_ClockProbe_guest_send_us_tag 5
-#define xenova_drive_WorldTrust_vehicle_tag      1
-#define xenova_drive_WorldTrust_mapper_boot_tag  2
-#define xenova_drive_WorldTrust_mapper_instance_tag 3
-#define xenova_drive_WorldTrust_map_epoch_tag    4
-#define xenova_drive_WorldTrust_frame_epoch_tag  5
-#define xenova_drive_WorldTrust_odom_epoch_tag   6
-#define xenova_drive_WorldTrust_configuration_tag 7
-#define xenova_drive_WorldTrust_calibration_tag  8
-#define xenova_drive_WorldTrust_primitive_tag    9
-#define xenova_drive_WorldTrust_clock_epoch_tag  10
-#define xenova_drive_WorldTrust_lower_offset_us_tag 11
-#define xenova_drive_WorldTrust_upper_offset_us_tag 12
-#define xenova_drive_WorldTrust_expires_pi_us_tag 13
-#define xenova_drive_WorldTrust_max_error_us_tag 14
+#define xenova_drive_WorldSnapshot_lane_model_tag 36
+#define xenova_drive_WorldSnapshot_parking_slots_tag 37
+#define xenova_drive_WorldSnapshot_drivable_permission_tag 38
+#define xenova_drive_WorldSnapshot_localization_tag 39
+#define xenova_drive_WorldSnapshot_scene_tag     40
+#define xenova_drive_WorldSnapshot_parking_set_tag 41
+#define xenova_drive_WorldSnapshot_route_view_tag 42
+#define xenova_drive_RoadGeometryScope_major_tag 1
+#define xenova_drive_RoadGeometryScope_dataset_uuid_tag 2
+#define xenova_drive_RoadGeometryScope_map_epoch_tag 3
+#define xenova_drive_RoadGeometryScope_frame_epoch_tag 4
+#define xenova_drive_RoadGeometryScope_vehicle_tag 5
+#define xenova_drive_RoadGeometryScope_configuration_tag 6
+#define xenova_drive_RoadGeometryScope_calibration_tag 7
+#define xenova_drive_RoadGeometryScope_primitive_tag 8
+#define xenova_drive_RoadGeometryScope_origin_pi_host_boot_tag 9
+#define xenova_drive_RoadGeometryScope_origin_gateway_instance_tag 10
+#define xenova_drive_RoadGeometryScope_origin_pi_session_tag 11
+#define xenova_drive_RoadGeometryScope_origin_device_session_tag 12
+#define xenova_drive_RoadGeometryScope_origin_odom_epoch_tag 13
+#define xenova_drive_RoadGeometryScope_alignment_frame_sha256_tag 14
+#define xenova_drive_RoadGeometryScope_geometry_policy_sha256_tag 15
+#define xenova_drive_RoadGeometryScope_coordinate_policy_tag 16
+#define xenova_drive_RoadGeometryScope_origin_storage_context_sha256_tag 17
+#define xenova_drive_RoadDurableRef_database_uuid_tag 1
+#define xenova_drive_RoadDurableRef_job_id_tag   2
+#define xenova_drive_RoadDurableRef_job_digest_tag 3
+#define xenova_drive_RoadDurableRef_status_tag   4
+#define xenova_drive_RoadDurableRef_durable_revision_tag 5
+#define xenova_drive_RoadDurableRef_committed_mapper_us_tag 6
+#define xenova_drive_RoadDurableRef_origin_context_sha256_tag 7
+#define xenova_drive_RoadDurableRef_record_sha256_tag 8
+#define xenova_drive_RoadDurableRef_original_receipt_sha256_tag 9
+#define xenova_drive_RoadObservationOrigin_major_tag 1
+#define xenova_drive_RoadObservationOrigin_mapper_boot_tag 2
+#define xenova_drive_RoadObservationOrigin_mapper_instance_tag 3
+#define xenova_drive_RoadObservationOrigin_clock_epoch_tag 4
+#define xenova_drive_RoadObservationOrigin_observation_sequence_tag 5
+#define xenova_drive_RoadObservationOrigin_frame_source_sequence_tag 6
+#define xenova_drive_RoadObservationOrigin_capture_mapper_lower_us_tag 7
+#define xenova_drive_RoadObservationOrigin_capture_mapper_upper_us_tag 8
+#define xenova_drive_RoadObservationOrigin_completed_mapper_us_tag 9
+#define xenova_drive_RoadObservationOrigin_raw_binding_sha256_tag 10
+#define xenova_drive_RoadObservationOrigin_frame_evidence_sha256_tag 11
+#define xenova_drive_RoadObservationOrigin_origin_context_sha256_tag 12
+#define xenova_drive_RoadObservationOrigin_alignment_raw_sha256_tag 13
+#define xenova_drive_RoadObservationOrigin_mapper_clock_reply_sha256_tag 14
+#define xenova_drive_RoadObservationOrigin_vehicle_sequence_tag 15
+#define xenova_drive_RoadObservationOrigin_independent_world_sha256_tag 16
+#define xenova_drive_StartGoal_major_tag         1
+#define xenova_drive_StartGoal_goal_id_tag       2
+#define xenova_drive_StartGoal_revision_tag      3
+#define xenova_drive_StartGoal_geometry_scope_sha256_tag 4
+#define xenova_drive_StartGoal_rear_axle_pose_tag 5
+#define xenova_drive_StartGoal_position_error_m_tag 6
+#define xenova_drive_StartGoal_heading_error_rad_tag 7
+#define xenova_drive_StartGoal_section_id_tag    8
+#define xenova_drive_StartGoal_lane_id_tag       9
+#define xenova_drive_StartGoal_station_m_tag     10
+#define xenova_drive_StartGoal_origin_tag        11
+#define xenova_drive_StartGoal_vehicle_raw_sha256_tag 12
+#define xenova_drive_StartGoal_alignment_raw_sha256_tag 13
+#define xenova_drive_StartGoal_world_raw_sha256_tag 14
+#define xenova_drive_StartGoal_terminal_profile_sha256_tag 15
+#define xenova_drive_StartGoal_origin_vehicle_sequence_tag 16
+#define xenova_drive_StartGoal_registered_pi_us_tag 17
+#define xenova_drive_StartGoal_stop_command_sequence_tag 18
+#define xenova_drive_StartGoal_stop_report_sequence_tag 19
+#define xenova_drive_StartGoal_stop_facts_sha256_tag 20
+#define xenova_drive_RoadSection_major_tag       1
+#define xenova_drive_RoadSection_section_id_tag  2
+#define xenova_drive_RoadSection_revision_tag    3
+#define xenova_drive_RoadSection_geometry_scope_sha256_tag 4
+#define xenova_drive_RoadSection_origin_tag      5
+#define xenova_drive_RoadSection_road_tag        6
+#define xenova_drive_RoadSection_reference_tag   7
+#define xenova_drive_RoadSection_left_boundary_tag 8
+#define xenova_drive_RoadSection_right_boundary_tag 9
+#define xenova_drive_RoadSection_point_error_m_tag 10
+#define xenova_drive_RoadSection_heading_error_rad_tag 11
+#define xenova_drive_RoadSection_alignment_raw_sha256_tag 12
+#define xenova_drive_RoadSection_observation_evidence_sha256_tag 13
+#define xenova_drive_RoadConnection_major_tag    1
+#define xenova_drive_RoadConnection_connection_id_tag 2
+#define xenova_drive_RoadConnection_revision_tag 3
+#define xenova_drive_RoadConnection_geometry_scope_sha256_tag 4
+#define xenova_drive_RoadConnection_origin_tag   5
+#define xenova_drive_RoadConnection_from_section_sha256_tag 6
+#define xenova_drive_RoadConnection_to_section_sha256_tag 7
+#define xenova_drive_RoadConnection_from_lane_id_tag 8
+#define xenova_drive_RoadConnection_to_lane_id_tag 9
+#define xenova_drive_RoadConnection_from_point_index_tag 10
+#define xenova_drive_RoadConnection_to_point_index_tag 11
+#define xenova_drive_RoadConnection_overlap_reference_tag 12
+#define xenova_drive_RoadConnection_overlap_error_m_tag 13
+#define xenova_drive_RoadConnection_connector_polygon_tag 14
+#define xenova_drive_RoadConnection_heading_error_rad_tag 15
+#define xenova_drive_RoadConnection_kind_tag     16
+#define xenova_drive_RoadConnection_evidence_roots_sha256_tag 17
+#define xenova_drive_ExitSpace_major_tag         1
+#define xenova_drive_ExitSpace_space_id_tag      2
+#define xenova_drive_ExitSpace_revision_tag      3
+#define xenova_drive_ExitSpace_geometry_scope_sha256_tag 4
+#define xenova_drive_ExitSpace_origin_tag        5
+#define xenova_drive_ExitSpace_parking_attempt_id_tag 6
+#define xenova_drive_ExitSpace_parking_goal_sha256_tag 7
+#define xenova_drive_ExitSpace_slot_id_tag       8
+#define xenova_drive_ExitSpace_slot_revision_tag 9
+#define xenova_drive_ExitSpace_selected_slot_polygon_tag 10
+#define xenova_drive_ExitSpace_aisle_lane_id_tag 11
+#define xenova_drive_ExitSpace_road_section_sha256_tag 12
+#define xenova_drive_ExitSpace_connection_sha256_tag 13
+#define xenova_drive_ExitSpace_position_error_m_tag 14
+#define xenova_drive_ExitSpace_heading_error_rad_tag 15
+#define xenova_drive_RoadWindow_major_tag        1
+#define xenova_drive_RoadWindow_window_id_tag    2
+#define xenova_drive_RoadWindow_revision_tag     3
+#define xenova_drive_RoadWindow_geometry_scope_sha256_tag 4
+#define xenova_drive_RoadWindow_topology_sha256_tag 5
+#define xenova_drive_RoadWindow_section_sha256_tag 6
+#define xenova_drive_RoadWindow_origin_tag       7
+#define xenova_drive_RoadWindow_road_tag         8
+#define xenova_drive_RoadWindow_reference_tag    9
+#define xenova_drive_RoadWindow_left_boundary_tag 10
+#define xenova_drive_RoadWindow_right_boundary_tag 11
+#define xenova_drive_RoadWindow_point_error_m_tag 12
+#define xenova_drive_RoadWindow_heading_error_rad_tag 13
+#define xenova_drive_RoadWindow_from_window_id_tag 14
+#define xenova_drive_RoadWindow_from_window_sha256_tag 15
+#define xenova_drive_RoadWindow_overlap_prefix_sha256_tag 16
+#define xenova_drive_RoadWindow_transition_id_tag 17
+#define xenova_drive_RoadWindow_overlap_point_count_tag 18
+#define xenova_drive_MapperRouteWitness_mapper_boot_tag 1
+#define xenova_drive_MapperRouteWitness_mapper_instance_tag 2
+#define xenova_drive_MapperRouteWitness_clock_epoch_tag 3
+#define xenova_drive_MapperRouteWitness_pi_host_boot_tag 4
+#define xenova_drive_MapperRouteWitness_pi_client_instance_tag 5
+#define xenova_drive_MapperRouteWitness_clock_probe_sequence_tag 6
+#define xenova_drive_MapperRouteWitness_clock_reply_sha256_tag 7
+#define xenova_drive_MapperRouteWitness_checked_mapper_us_tag 8
+#define xenova_drive_MapperRouteWitness_valid_until_pi_us_tag 9
+#define xenova_drive_MapperRouteWitness_source_binding_revision_tag 10
+#define xenova_drive_MapperRouteWitness_raw_binding_sha256_tag 11
+#define xenova_drive_MapperRouteWitness_vehicle_sequence_tag 12
+#define xenova_drive_MapperRouteWitness_observation_sequence_tag 13
+#define xenova_drive_MapperRouteWitness_frame_evidence_sha256_tag 14
+#define xenova_drive_MapperRouteWitness_scene_admission_id_tag 15
+#define xenova_drive_MapperRouteWitness_scene_revision_tag 16
+#define xenova_drive_RouteOwnerContext_vm_tag    1
+#define xenova_drive_RouteOwnerContext_execution_tag 2
+#define xenova_drive_RouteOwnerContext_app_instance_tag 3
+#define xenova_drive_RouteOwnerContext_control_generation_tag 4
+#define xenova_drive_RouteOwnerContext_operation_binding_tag 5
+#define xenova_drive_RouteOwnerContext_mission_id_tag 6
+#define xenova_drive_RouteOwnerContext_mission_revision_tag 7
+#define xenova_drive_RouteOwnerContext_grant_revision_tag 8
+#define xenova_drive_RouteOwnerContext_cancel_fence_revision_tag 9
+#define xenova_drive_RouteOwnerContext_scene_admission_id_tag 10
+#define xenova_drive_RouteOwnerContext_scene_revision_tag 11
+#define xenova_drive_RouteOwnerContext_source_key_sha256_tag 12
+#define xenova_drive_RouteOwnerContext_geometry_scope_sha256_tag 13
+#define xenova_drive_RouteQuery_major_tag        1
+#define xenova_drive_RouteQuery_query_id_tag     2
+#define xenova_drive_RouteQuery_purpose_tag      3
+#define xenova_drive_RouteQuery_goal_sha256_tag  4
+#define xenova_drive_RouteQuery_owner_tag        5
+#define xenova_drive_RouteQuery_issued_pi_us_tag 6
+#define xenova_drive_RouteQuery_valid_until_pi_us_tag 7
+#define xenova_drive_RouteQuery_operator_request_nonce_tag 8
+#define xenova_drive_RouteReceipt_major_tag      1
+#define xenova_drive_RouteReceipt_request_nonce_tag 2
+#define xenova_drive_RouteReceipt_request_sha256_tag 3
+#define xenova_drive_RouteReceipt_result_tag     4
+#define xenova_drive_RouteReceipt_reason_tag     5
+#define xenova_drive_RouteReceipt_snapshot_tag   6
+#define xenova_drive_RouteReceipt_request_sequence_tag 7
+#define xenova_drive_RouteReceipt_query_id_tag   8
+#define xenova_drive_RouteReceipt_query_sha256_tag 9
+#define xenova_drive_RouteReceipt_initial_target_context_tag 10
+#define xenova_drive_RouteCurrentWitness_source_tag 1
+#define xenova_drive_RouteCurrentWitness_vehicle_sequence_tag 2
+#define xenova_drive_RouteCurrentWitness_checked_guest_us_tag 3
+#define xenova_drive_RouteCurrentWitness_valid_until_pi_us_tag 4
+#define xenova_drive_RouteCurrentWitness_clock_probe_sequence_tag 5
+#define xenova_drive_RouteCurrentWitness_clock_reply_sha256_tag 6
+#define xenova_drive_RouteCurrentWitness_world_raw_sha256_tag 7
+#define xenova_drive_RouteCurrentWitness_vehicle_raw_sha256_tag 8
+#define xenova_drive_RouteExtentProof_mode_tag   1
+#define xenova_drive_RouteExtentProof_window_sha256_tag 2
+#define xenova_drive_RouteExtentProof_exit_space_sha256_tag 3
+#define xenova_drive_RouteExtentProof_available_forward_m_tag 4
+#define xenova_drive_RouteExtentProof_available_backward_m_tag 5
+#define xenova_drive_RouteExtentProof_required_forward_m_tag 6
+#define xenova_drive_RouteExtentProof_required_backward_m_tag 7
+#define xenova_drive_RouteExtentProof_braking_distance_m_tag 8
+#define xenova_drive_RouteExtentProof_body_radius_m_tag 9
+#define xenova_drive_RouteExtentProof_position_bound_m_tag 10
+#define xenova_drive_RouteExtentProof_heading_bound_rad_tag 11
+#define xenova_drive_RouteExtentProof_cusp_sweep_sha256_tag 12
+#define xenova_drive_RouteExtentProof_s19_sweep_sha256_tag 13
+#define xenova_drive_RouteExtentProof_vehicle_sequence_tag 14
+#define xenova_drive_RouteCandidate_major_tag    1
+#define xenova_drive_RouteCandidate_request_nonce_tag 2
+#define xenova_drive_RouteCandidate_request_sequence_tag 3
+#define xenova_drive_RouteCandidate_action_tag   4
+#define xenova_drive_RouteCandidate_query_id_tag 5
+#define xenova_drive_RouteCandidate_query_sha256_tag 6
+#define xenova_drive_RouteCandidate_owner_tag    7
+#define xenova_drive_RouteCandidate_witness_tag  8
+#define xenova_drive_RouteCandidate_expected_registry_epoch_tag 9
+#define xenova_drive_RouteCandidate_expected_registry_revision_tag 10
+#define xenova_drive_RouteCandidate_expected_route_revision_tag 11
+#define xenova_drive_RouteCandidate_core_tag     12
+#define xenova_drive_RouteCandidate_progress_tag 13
+#define xenova_drive_RouteCandidate_task_space_kind_tag 14
+#define xenova_drive_RouteCandidate_current_window_sha256_tag 15
+#define xenova_drive_RouteCandidate_basis_window_sha256_tag 16
+#define xenova_drive_RouteCandidate_basis_window_revision_tag 17
+#define xenova_drive_RouteCandidate_exit_space_sha256_tag 18
+#define xenova_drive_RouteCandidate_phase_state_message_id_tag 19
+#define xenova_drive_RouteCandidate_plan_revision_tag 20
+#define xenova_drive_RouteCandidate_calculation_sequence_tag 21
+#define xenova_drive_RouteCandidate_began_guest_us_tag 22
+#define xenova_drive_RouteCandidate_phase_started_guest_us_tag 23
+#define xenova_drive_RouteCandidate_control_facts_sha256_tag 24
+#define xenova_drive_RouteCandidate_extent_tag   25
+#define xenova_drive_RouteEligibility_major_tag  1
+#define xenova_drive_RouteEligibility_eligibility_id_tag 2
+#define xenova_drive_RouteEligibility_purpose_tag 3
+#define xenova_drive_RouteEligibility_owner_tag  4
+#define xenova_drive_RouteEligibility_witness_tag 5
+#define xenova_drive_RouteEligibility_task_space_kind_tag 6
+#define xenova_drive_RouteEligibility_goal_sha256_tag 7
+#define xenova_drive_RouteEligibility_exit_space_sha256_tag 8
+#define xenova_drive_RouteEligibility_topology_sha256_tag 9
+#define xenova_drive_RouteEligibility_window_sha256_tag 10
+#define xenova_drive_RouteEligibility_global_plan_sha256_tag 11
+#define xenova_drive_RouteEligibility_eligible_tag 12
+#define xenova_drive_RouteEligibility_reason_tag 13
+#define xenova_drive_RouteEligibility_extent_tag 14
+#define xenova_drive_RouteEligibilityRef_eligibility_id_tag 1
+#define xenova_drive_RouteEligibilityRef_body_sha256_tag 2
+#define xenova_drive_RouteEligibilityRef_purpose_tag 3
+#define xenova_drive_RouteEligibilityRef_ready_revision_tag 4
+#define xenova_drive_RouteEligibilityRef_valid_until_pi_us_tag 5
+#define xenova_drive_RouteEligibilityRef_reason_tag 6
+#define xenova_drive_RouteEligibilityRef_task_space_kind_tag 7
+#define xenova_drive_RouteEligibilityRef_eligible_tag 8
+#define xenova_drive_RouteStatus_major_tag       1
+#define xenova_drive_RouteStatus_registry_epoch_tag 2
+#define xenova_drive_RouteStatus_registry_revision_tag 3
+#define xenova_drive_RouteStatus_route_id_tag    4
+#define xenova_drive_RouteStatus_accepted_core_sha256_tag 5
+#define xenova_drive_RouteStatus_global_plan_sha256_tag 6
+#define xenova_drive_RouteStatus_local_path_sha256_tag 7
+#define xenova_drive_RouteStatus_route_state_tag 8
+#define xenova_drive_RouteStatus_commit_state_tag 9
+#define xenova_drive_RouteStatus_reason_tag      10
+#define xenova_drive_RouteStatus_valid_until_pi_us_tag 11
+#define xenova_drive_RouteStatus_state_message_id_tag 12
+#define xenova_drive_RouteStatus_state_sha256_tag 13
+#define xenova_drive_RouteStatus_state_revision_tag 14
+#define xenova_drive_RouteStatus_plan_revision_tag 15
+#define xenova_drive_RouteStatus_phase_revision_tag 16
+#define xenova_drive_RouteStatus_calculation_hwm_tag 17
+#define xenova_drive_RouteStatus_vehicle_hwm_tag 18
+#define xenova_drive_RouteStatus_current_permission_sha256_tag 19
+#define xenova_drive_RouteStatus_current_window_sha256_tag 20
+#define xenova_drive_RouteStatus_eligibility_tag 21
+#define xenova_drive_RouteStatus_terminal_result_tag 22
 #define xenova_drive_ClockReply_probe_tag        1
 #define xenova_drive_ClockReply_host_boot_tag    2
 #define xenova_drive_ClockReply_gateway_instance_tag 3
@@ -380,37 +3036,105 @@ extern "C" {
 #define xenova_drive_ClockReply_pi_send_us_tag   5
 #define xenova_drive_ClockReply_trust_tag        6
 #define xenova_drive_ClockReply_vehicle_tag      7
-#define xenova_drive_AcceptedState_host_boot_tag 1
-#define xenova_drive_AcceptedState_gateway_instance_tag 2
-#define xenova_drive_AcceptedState_state_tag     3
-#define xenova_drive_AppliedState_vm_tag         1
-#define xenova_drive_AppliedState_execution_tag  2
-#define xenova_drive_AppliedState_app_instance_tag 3
-#define xenova_drive_AppliedState_host_boot_tag  4
-#define xenova_drive_AppliedState_gateway_instance_tag 5
-#define xenova_drive_AppliedState_copy_message_id_tag 6
-#define xenova_drive_AppliedState_state_revision_tag 7
-#define xenova_drive_AppliedState_frame_epoch_tag 8
-#define xenova_drive_AppliedState_odom_epoch_tag 9
-#define xenova_drive_AppliedState_configuration_tag 10
-#define xenova_drive_AppliedState_calibration_tag 11
-#define xenova_drive_AppliedState_primitive_tag  12
-#define xenova_drive_AppliedState_reference_id_tag 13
-#define xenova_drive_AppliedState_reference_revision_tag 14
-#define xenova_drive_AppliedState_path_revision_tag 15
-#define xenova_drive_AppliedState_vehicle_sequence_tag 16
-#define xenova_drive_AppliedState_calculation_sequence_tag 17
-#define xenova_drive_AppliedState_rebuilt_tag    18
-#define xenova_drive_AppliedState_applied_tag    19
-#define xenova_drive_AppliedState_maneuver_revision_tag 20
-#define xenova_drive_AppliedState_reason_tag     21
-#define xenova_drive_AppliedState_application_sequence_tag 22
+#define xenova_drive_ClockReply_current_mission_tag 8
+#define xenova_drive_ClockReply_direction_gate_tag 9
+#define xenova_drive_ClockReply_accepted_receipt_tag 10
+#define xenova_drive_ClockReply_guest_clock_valid_until_pi_us_tag 11
+#define xenova_drive_ClockReply_episode_status_tag 12
+#define xenova_drive_ClockReply_control_facts_tag 13
+#define xenova_drive_ClockReply_operation_status_tag 14
+#define xenova_drive_ClockReply_route_status_tag 15
+#define xenova_drive_MapperWorldWitness_major_tag 1
+#define xenova_drive_MapperWorldWitness_mapper_tag 2
+#define xenova_drive_MapperWorldWitness_source_tag 3
+#define xenova_drive_MapperWorldWitness_world_raw_sha256_tag 4
+#define xenova_drive_WindowTransitionRequest_major_tag 1
+#define xenova_drive_WindowTransitionRequest_request_nonce_tag 2
+#define xenova_drive_WindowTransitionRequest_action_tag 3
+#define xenova_drive_WindowTransitionRequest_owner_tag 4
+#define xenova_drive_WindowTransitionRequest_query_id_tag 5
+#define xenova_drive_WindowTransitionRequest_query_sha256_tag 6
+#define xenova_drive_WindowTransitionRequest_route_id_tag 7
+#define xenova_drive_WindowTransitionRequest_expected_registry_epoch_tag 8
+#define xenova_drive_WindowTransitionRequest_expected_registry_revision_tag 9
+#define xenova_drive_WindowTransitionRequest_transition_id_tag 10
+#define xenova_drive_WindowTransitionRequest_from_window_sha256_tag 11
+#define xenova_drive_WindowTransitionRequest_to_window_sha256_tag 12
+#define xenova_drive_WindowTransitionRequest_from_world_sha256_tag 13
+#define xenova_drive_WindowTransitionRequest_candidate_local_path_sha256_tag 14
+#define xenova_drive_WindowTransitionRequest_witness_tag 15
+#define xenova_drive_WindowTransitionRequest_expected_source_binding_revision_tag 16
+#define xenova_drive_WindowTransitionRequest_phase_revision_tag 17
+#define xenova_drive_WindowTransitionRequest_extent_tag 18
+#define xenova_drive_WindowTransitionReceipt_major_tag 1
+#define xenova_drive_WindowTransitionReceipt_request_nonce_tag 2
+#define xenova_drive_WindowTransitionReceipt_request_sha256_tag 3
+#define xenova_drive_WindowTransitionReceipt_transition_id_tag 4
+#define xenova_drive_WindowTransitionReceipt_state_tag 5
+#define xenova_drive_WindowTransitionReceipt_from_window_sha256_tag 6
+#define xenova_drive_WindowTransitionReceipt_to_window_sha256_tag 7
+#define xenova_drive_WindowTransitionReceipt_active_window_sha256_tag 8
+#define xenova_drive_WindowTransitionReceipt_source_binding_revision_tag 9
+#define xenova_drive_WindowTransitionReceipt_activated_world_sha256_tag 10
+#define xenova_drive_WindowTransitionReceipt_activated_world_sequence_tag 11
+#define xenova_drive_WindowTransitionReceipt_mapper_tag 12
+#define xenova_drive_WindowTransitionReceipt_reason_tag 13
+#define xenova_drive_WindowTransitionReceipt_transition_generation_tag 14
+#define xenova_drive_WindowTransitionReceipt_valid_until_pi_us_tag 15
+#define xenova_drive_RoadDataRequest_major_tag   1
+#define xenova_drive_RoadDataRequest_request_nonce_tag 2
+#define xenova_drive_RoadDataRequest_record_kind_tag 3
+#define xenova_drive_RoadDataRequest_record_sha256_tag 4
+#define xenova_drive_RoadDataRequest_owner_tag   5
+#define xenova_drive_RoadDataRequest_valid_until_pi_us_tag 6
+#define xenova_drive_RoadRegistrationRequest_major_tag 1
+#define xenova_drive_RoadRegistrationRequest_request_nonce_tag 2
+#define xenova_drive_RoadRegistrationRequest_owner_tag 3
+#define xenova_drive_RoadRegistrationRequest_expected_goal_revision_tag 4
+#define xenova_drive_RoadRegistrationRequest_expected_goal_sha256_tag 5
+#define xenova_drive_RoadRegistrationRequest_world_raw_sha256_tag 6
+#define xenova_drive_RoadRegistrationRequest_vehicle_tag 7
+#define xenova_drive_RoadRegistrationRequest_facts_tag 8
+#define xenova_drive_RoadRegistrationRequest_issued_pi_us_tag 9
+#define xenova_drive_RoadRegistrationRequest_valid_until_pi_us_tag 10
+#define xenova_drive_RoadData_major_tag          1
+#define xenova_drive_RoadData_publisher_kind_tag 2
+#define xenova_drive_RoadData_mapper_tag         3
+#define xenova_drive_RoadData_guest_owner_tag    4
+#define xenova_drive_RoadData_guest_witness_tag  5
+#define xenova_drive_RoadData_record_sha256_tag  6
+#define xenova_drive_RoadData_durable_tag        7
+#define xenova_drive_RoadData_start_goal_tag     10
+#define xenova_drive_RoadData_road_topology_tag  11
+#define xenova_drive_RoadData_road_section_tag   12
+#define xenova_drive_RoadData_road_connection_tag 13
+#define xenova_drive_RoadData_road_window_tag    14
+#define xenova_drive_RoadData_exit_space_tag     15
+#define xenova_drive_RoadData_route_plan_tag     16
+#define xenova_drive_RoadData_road_geometry_scope_tag 17
+#define xenova_drive_RouteExchange_major_tag     1
+#define xenova_drive_RouteExchange_route_query_tag 2
+#define xenova_drive_RouteExchange_route_eligibility_tag 3
+#define xenova_drive_RouteExchange_route_candidate_tag 4
+#define xenova_drive_RouteExchange_route_receipt_tag 5
+#define xenova_drive_RouteExchange_window_transition_request_tag 6
+#define xenova_drive_RouteExchange_window_transition_receipt_tag 7
+#define xenova_drive_RouteExchange_road_data_request_tag 8
+#define xenova_drive_RouteExchange_mapper_world_witness_tag 9
+#define xenova_drive_RouteExchange_road_registration_request_tag 10
 #define xenova_drive_DriveLink_major_tag         1
 #define xenova_drive_DriveLink_probe_tag         2
 #define xenova_drive_DriveLink_clock_tag         3
 #define xenova_drive_DriveLink_snapshot_tag      4
 #define xenova_drive_DriveLink_accepted_tag      5
 #define xenova_drive_DriveLink_applied_tag       6
+#define xenova_drive_DriveLink_mission_grant_tag 7
+#define xenova_drive_DriveLink_budget_request_tag 8
+#define xenova_drive_DriveLink_budget_reply_tag  9
+#define xenova_drive_DriveLink_scene_grant_tag   10
+#define xenova_drive_DriveLink_episode_request_tag 11
+#define xenova_drive_DriveLink_road_data_tag     12
+#define xenova_drive_DriveLink_route_exchange_tag 13
 
 /* Struct field encoding specification for nanopb */
 #define xenova_drive_Pose_FIELDLIST(X, a) \
@@ -469,7 +3193,14 @@ X(a, STATIC,   REPEATED, MESSAGE,  left_boundary,    31) \
 X(a, STATIC,   REPEATED, MESSAGE,  right_boundary,   32) \
 X(a, STATIC,   REQUIRED, BOOL,     complete,         33) \
 X(a, STATIC,   REQUIRED, BOOL,     truncated,        34) \
-X(a, STATIC,   REQUIRED, UINT32,   inflation_policy,  35)
+X(a, STATIC,   REQUIRED, UINT32,   inflation_policy,  35) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  lane_model,       36) \
+X(a, STATIC,   REPEATED, MESSAGE,  parking_slots,    37) \
+X(a, STATIC,   OPTIONAL, BYTES,    drivable_permission,  38) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  localization,     39) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  scene,            40) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  parking_set,      41) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  route_view,       42)
 #define xenova_drive_WorldSnapshot_CALLBACK NULL
 #define xenova_drive_WorldSnapshot_DEFAULT NULL
 #define xenova_drive_WorldSnapshot_origin_MSGTYPE xenova_drive_Pose
@@ -477,6 +3208,12 @@ X(a, STATIC,   REQUIRED, UINT32,   inflation_policy,  35)
 #define xenova_drive_WorldSnapshot_reference_MSGTYPE xenova_drive_Point
 #define xenova_drive_WorldSnapshot_left_boundary_MSGTYPE xenova_drive_Point
 #define xenova_drive_WorldSnapshot_right_boundary_MSGTYPE xenova_drive_Point
+#define xenova_drive_WorldSnapshot_lane_model_MSGTYPE xenova_drive_LaneModel
+#define xenova_drive_WorldSnapshot_parking_slots_MSGTYPE xenova_drive_ParkingSlot
+#define xenova_drive_WorldSnapshot_localization_MSGTYPE xenova_drive_MapLocalization
+#define xenova_drive_WorldSnapshot_scene_MSGTYPE xenova_drive_SceneAdmissionRef
+#define xenova_drive_WorldSnapshot_parking_set_MSGTYPE xenova_drive_ParkingSetMeta
+#define xenova_drive_WorldSnapshot_route_view_MSGTYPE xenova_drive_WorldRouteView
 
 #define xenova_drive_VehicleSample_FIELDLIST(X, a) \
 X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
@@ -534,20 +3271,60 @@ X(a, STATIC,   REQUIRED, STRING,   calibration,      24) \
 X(a, STATIC,   REQUIRED, STRING,   map_epoch,        25) \
 X(a, STATIC,   REQUIRED, UINT64,   observation_seq,  26) \
 X(a, STATIC,   OPTIONAL, UINT64,   merge_passed_reference_revision,  27) \
-X(a, STATIC,   OPTIONAL, UINT32,   world_features,   28)
+X(a, STATIC,   OPTIONAL, UINT32,   world_features,   28) \
+X(a, STATIC,   OPTIONAL, UINT32,   state_features,   29) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  mission,          30) \
+X(a, STATIC,   REPEATED, MESSAGE,  segments,         31) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  direction_gate,   32) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  task_reference,   33) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  episode,          34) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  route,            35)
 #define xenova_drive_DriveState_CALLBACK NULL
 #define xenova_drive_DriveState_DEFAULT NULL
 #define xenova_drive_DriveState_merge_goal_MSGTYPE xenova_drive_Pose
 #define xenova_drive_DriveState_path_MSGTYPE xenova_drive_PathPoint
+#define xenova_drive_DriveState_mission_MSGTYPE xenova_drive_MissionExecution
+#define xenova_drive_DriveState_segments_MSGTYPE xenova_drive_GearSegment
+#define xenova_drive_DriveState_direction_gate_MSGTYPE xenova_drive_DirectionGateRef
+#define xenova_drive_DriveState_task_reference_MSGTYPE xenova_drive_TaskReferenceState
+#define xenova_drive_DriveState_episode_MSGTYPE xenova_drive_EpisodeSnapshot
+#define xenova_drive_DriveState_route_MSGTYPE xenova_drive_RouteSnapshot
+
+#define xenova_drive_TaskReferenceState_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, FIXED32,  home_lane_id,      1) \
+X(a, STATIC,   REQUIRED, FIXED32,  from_lane_id,      2) \
+X(a, STATIC,   REQUIRED, FIXED32,  selected_lane_id,   3) \
+X(a, STATIC,   REQUIRED, BOOL,     changing,          4) \
+X(a, STATIC,   REQUIRED, UINT64,   basis_revision,    5) \
+X(a, STATIC,   REPEATED, MESSAGE,  basis_prefix,      6) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           7) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_boot,       8) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_instance,   9) \
+X(a, STATIC,   REQUIRED, STRING,   clock_epoch,      10)
+#define xenova_drive_TaskReferenceState_CALLBACK NULL
+#define xenova_drive_TaskReferenceState_DEFAULT NULL
+#define xenova_drive_TaskReferenceState_basis_prefix_MSGTYPE xenova_drive_Point
 
 #define xenova_drive_ClockProbe_FIELDLIST(X, a) \
 X(a, STATIC,   REQUIRED, STRING,   vm,                1) \
 X(a, STATIC,   REQUIRED, STRING,   execution,         2) \
 X(a, STATIC,   REQUIRED, STRING,   app_instance,      3) \
 X(a, STATIC,   REQUIRED, UINT64,   sequence,          4) \
-X(a, STATIC,   REQUIRED, UINT64,   guest_send_us,     5)
+X(a, STATIC,   REQUIRED, UINT64,   guest_send_us,     5) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  receipt,           6) \
+X(a, STATIC,   OPTIONAL, UINT32,   supported_state_features,   7) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  auto_input_preflight,   8)
 #define xenova_drive_ClockProbe_CALLBACK NULL
 #define xenova_drive_ClockProbe_DEFAULT NULL
+#define xenova_drive_ClockProbe_receipt_MSGTYPE xenova_drive_GuestClockReceipt
+#define xenova_drive_ClockProbe_auto_input_preflight_MSGTYPE xenova_drive_AutoInputPreflight
+
+#define xenova_drive_GuestClockReceipt_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT64,   probe_sequence,    1) \
+X(a, STATIC,   REQUIRED, BYTES,    reply_sha256,      2) \
+X(a, STATIC,   REQUIRED, UINT64,   guest_receive_us,   3)
+#define xenova_drive_GuestClockReceipt_CALLBACK NULL
+#define xenova_drive_GuestClockReceipt_DEFAULT NULL
 
 #define xenova_drive_WorldTrust_FIELDLIST(X, a) \
 X(a, STATIC,   REQUIRED, STRING,   vehicle,           1) \
@@ -574,12 +3351,77 @@ X(a, STATIC,   REQUIRED, STRING,   gateway_instance,   3) \
 X(a, STATIC,   REQUIRED, UINT64,   pi_receive_us,     4) \
 X(a, STATIC,   REQUIRED, UINT64,   pi_send_us,        5) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  trust,             6) \
-X(a, STATIC,   REQUIRED, MESSAGE,  vehicle,           7)
+X(a, STATIC,   REQUIRED, MESSAGE,  vehicle,           7) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  current_mission,   8) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  direction_gate,    9) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  accepted_receipt,  10) \
+X(a, STATIC,   OPTIONAL, UINT64,   guest_clock_valid_until_pi_us,  11) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  episode_status,   12) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  control_facts,    13) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  operation_status,  14) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  route_status,     15)
 #define xenova_drive_ClockReply_CALLBACK NULL
 #define xenova_drive_ClockReply_DEFAULT NULL
 #define xenova_drive_ClockReply_probe_MSGTYPE xenova_drive_ClockProbe
 #define xenova_drive_ClockReply_trust_MSGTYPE xenova_drive_WorldTrust
 #define xenova_drive_ClockReply_vehicle_MSGTYPE xenova_drive_VehicleSample
+#define xenova_drive_ClockReply_current_mission_MSGTYPE xenova_drive_MissionGrant
+#define xenova_drive_ClockReply_direction_gate_MSGTYPE xenova_drive_DirectionGateWitness
+#define xenova_drive_ClockReply_accepted_receipt_MSGTYPE xenova_drive_GuestClockReceipt
+#define xenova_drive_ClockReply_episode_status_MSGTYPE xenova_drive_EpisodeStatus
+#define xenova_drive_ClockReply_control_facts_MSGTYPE xenova_drive_DriveControlFacts
+#define xenova_drive_ClockReply_operation_status_MSGTYPE xenova_drive_OperationStatus
+#define xenova_drive_ClockReply_route_status_MSGTYPE xenova_drive_RouteStatus
+
+#define xenova_drive_OperationBinding_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    service_epoch,     1) \
+X(a, STATIC,   REQUIRED, UINT64,   operation_revision,   2) \
+X(a, STATIC,   REQUIRED, BYTES,    departure_nonce,   3) \
+X(a, STATIC,   REQUIRED, UINT64,   permission_revision,   4) \
+X(a, STATIC,   REQUIRED, BOOL,     parking_enabled,   5)
+#define xenova_drive_OperationBinding_CALLBACK NULL
+#define xenova_drive_OperationBinding_DEFAULT NULL
+
+#define xenova_drive_OperationStatus_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, MESSAGE,  binding,           2) \
+X(a, STATIC,   REQUIRED, UINT32,   vehicle_phase,     3) \
+X(a, STATIC,   REQUIRED, UINT64,   ready_revision,    4) \
+X(a, STATIC,   REQUIRED, BOOL,     auto_ready,        5) \
+X(a, STATIC,   REQUIRED, UINT32,   blocked_reason,    6) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    active_request_nonce,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   countdown_until_pi_us,   9) \
+X(a, STATIC,   REQUIRED, UINT32,   desired_mode,     10)
+#define xenova_drive_OperationStatus_CALLBACK NULL
+#define xenova_drive_OperationStatus_DEFAULT NULL
+#define xenova_drive_OperationStatus_binding_MSGTYPE xenova_drive_OperationBinding
+
+#define xenova_drive_AutoInputPreflight_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, MESSAGE,  source,            2) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,   3) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   4) \
+X(a, STATIC,   REQUIRED, UINT64,   checked_guest_us,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   6) \
+X(a, STATIC,   REQUIRED, UINT64,   clock_probe_sequence,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    clock_reply_sha256,   8)
+#define xenova_drive_AutoInputPreflight_CALLBACK NULL
+#define xenova_drive_AutoInputPreflight_DEFAULT NULL
+#define xenova_drive_AutoInputPreflight_source_MSGTYPE xenova_drive_EpisodeSourceContext
+
+#define xenova_drive_PiOperationGate_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    gateway_instance,   1) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   2) \
+X(a, STATIC,   REQUIRED, UINT64,   operation_revision,   3) \
+X(a, STATIC,   REQUIRED, UINT32,   mode,              4) \
+X(a, STATIC,   REQUIRED, BOOL,     wait_confirmed,    5) \
+X(a, STATIC,   REQUIRED, BOOL,     manual_local_admitted,   6) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_command_sequence,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   9)
+#define xenova_drive_PiOperationGate_CALLBACK NULL
+#define xenova_drive_PiOperationGate_DEFAULT NULL
 
 #define xenova_drive_AcceptedState_FIELDLIST(X, a) \
 X(a, STATIC,   REQUIRED, STRING,   host_boot,         1) \
@@ -621,7 +3463,14 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,probe,payload.probe),   2) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,clock,payload.clock),   3) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,snapshot,payload.snapshot),   4) \
 X(a, STATIC,   ONEOF,    MESSAGE,  (payload,accepted,payload.accepted),   5) \
-X(a, STATIC,   ONEOF,    MESSAGE,  (payload,applied,payload.applied),   6)
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,applied,payload.applied),   6) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,mission_grant,payload.mission_grant),   7) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,budget_request,payload.budget_request),   8) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,budget_reply,payload.budget_reply),   9) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,scene_grant,payload.scene_grant),  10) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,episode_request,payload.episode_request),  11) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_data,payload.road_data),  12) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,route_exchange,payload.route_exchange),  13)
 #define xenova_drive_DriveLink_CALLBACK NULL
 #define xenova_drive_DriveLink_DEFAULT NULL
 #define xenova_drive_DriveLink_payload_probe_MSGTYPE xenova_drive_ClockProbe
@@ -629,6 +3478,1283 @@ X(a, STATIC,   ONEOF,    MESSAGE,  (payload,applied,payload.applied),   6)
 #define xenova_drive_DriveLink_payload_snapshot_MSGTYPE xenova_drive_DriveState
 #define xenova_drive_DriveLink_payload_accepted_MSGTYPE xenova_drive_AcceptedState
 #define xenova_drive_DriveLink_payload_applied_MSGTYPE xenova_drive_AppliedState
+#define xenova_drive_DriveLink_payload_mission_grant_MSGTYPE xenova_drive_MissionGrant
+#define xenova_drive_DriveLink_payload_budget_request_MSGTYPE xenova_drive_MissionBudgetRequest
+#define xenova_drive_DriveLink_payload_budget_reply_MSGTYPE xenova_drive_MissionBudgetReply
+#define xenova_drive_DriveLink_payload_scene_grant_MSGTYPE xenova_drive_SceneGrant
+#define xenova_drive_DriveLink_payload_episode_request_MSGTYPE xenova_drive_EpisodeRequest
+#define xenova_drive_DriveLink_payload_road_data_MSGTYPE xenova_drive_RoadData
+#define xenova_drive_DriveLink_payload_route_exchange_MSGTYPE xenova_drive_RouteExchange
+
+#define xenova_drive_EpisodeCore_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    episode_id,        2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, UINT32,   phase,             4) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,    5) \
+X(a, STATIC,   REQUIRED, FIXED32,  home_lane_id,      6) \
+X(a, STATIC,   REQUIRED, FIXED32,  target_lane_id,    7) \
+X(a, STATIC,   REQUIRED, UINT32,   policy,            8) \
+X(a, STATIC,   REPEATED, MESSAGE,  blocker,           9) \
+X(a, STATIC,   REQUIRED, FLOAT,    blocker_position_bound_m,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   blocker_world_sequence,  11) \
+X(a, STATIC,   REQUIRED, UINT64,   blocker_observation_sequence,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    birth_snapshot_id,  13) \
+X(a, STATIC,   REQUIRED, UINT64,   basis_revision,   14) \
+X(a, STATIC,   REQUIRED, UINT32,   basis_prefix_count,  15) \
+X(a, STATIC,   REQUIRED, BYTES,    basis_prefix_sha256,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    source_geometry_sha256,  17) \
+X(a, STATIC,   REQUIRED, UINT64,   origin_vehicle_sequence,  18) \
+X(a, STATIC,   REQUIRED, UINT64,   started_pi_us,    19) \
+X(a, STATIC,   REQUIRED, UINT64,   deadline_pi_us,   20) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_started_pi_us,  21) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_deadline_pi_us,  22) \
+X(a, STATIC,   REQUIRED, SINT64,   left_baseline_ticks,  23) \
+X(a, STATIC,   REQUIRED, SINT64,   right_baseline_ticks,  24) \
+X(a, STATIC,   REQUIRED, BYTES,    meter_epoch,      25) \
+X(a, STATIC,   REQUIRED, UINT64,   meter_baseline_total_ticks,  26) \
+X(a, STATIC,   REQUIRED, FLOAT,    max_travel_m,     27) \
+X(a, STATIC,   REQUIRED, UINT32,   progress_mode,    28) \
+X(a, STATIC,   REQUIRED, MESSAGE,  phase_goal,       29) \
+X(a, STATIC,   REQUIRED, BOOL,     stop_wait,        30) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_wait_started_pi_us,  31)
+#define xenova_drive_EpisodeCore_CALLBACK NULL
+#define xenova_drive_EpisodeCore_DEFAULT NULL
+#define xenova_drive_EpisodeCore_blocker_MSGTYPE xenova_drive_Point
+#define xenova_drive_EpisodeCore_phase_goal_MSGTYPE xenova_drive_Pose
+
+#define xenova_drive_EpisodeProgress_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT64,   used_travel_ticks,   1) \
+X(a, STATIC,   REQUIRED, UINT64,   last_progress_pi_us,   2) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,   3) \
+X(a, STATIC,   REQUIRED, FLOAT,    station_lower_m,   4) \
+X(a, STATIC,   REQUIRED, FLOAT,    remaining_upper_m,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          6)
+#define xenova_drive_EpisodeProgress_CALLBACK NULL
+#define xenova_drive_EpisodeProgress_DEFAULT NULL
+
+#define xenova_drive_EpisodeAcceptanceRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    registry_epoch,    1) \
+X(a, STATIC,   REQUIRED, UINT64,   registry_revision,   2) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     3) \
+X(a, STATIC,   REQUIRED, BYTES,    request_sha256,    4) \
+X(a, STATIC,   REQUIRED, BYTES,    accepted_core_sha256,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   request_sequence,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_vm,         7) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_execution,   8) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_app_instance,   9) \
+X(a, STATIC,   REQUIRED, UINT32,   origin_generation,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   origin_grant_revision,  11)
+#define xenova_drive_EpisodeAcceptanceRef_CALLBACK NULL
+#define xenova_drive_EpisodeAcceptanceRef_DEFAULT NULL
+
+#define xenova_drive_EpisodeSnapshot_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, MESSAGE,  core,              1) \
+X(a, STATIC,   REQUIRED, MESSAGE,  progress,          2) \
+X(a, STATIC,   REQUIRED, MESSAGE,  acceptance,        3)
+#define xenova_drive_EpisodeSnapshot_CALLBACK NULL
+#define xenova_drive_EpisodeSnapshot_DEFAULT NULL
+#define xenova_drive_EpisodeSnapshot_core_MSGTYPE xenova_drive_EpisodeCore
+#define xenova_drive_EpisodeSnapshot_progress_MSGTYPE xenova_drive_EpisodeProgress
+#define xenova_drive_EpisodeSnapshot_acceptance_MSGTYPE xenova_drive_EpisodeAcceptanceRef
+
+#define xenova_drive_EpisodeSourceContext_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           1) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_boot,       2) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_instance,   3) \
+X(a, STATIC,   REQUIRED, STRING,   map_epoch,         4) \
+X(a, STATIC,   REQUIRED, STRING,   frame_epoch,       5) \
+X(a, STATIC,   REQUIRED, STRING,   odom_epoch,        6) \
+X(a, STATIC,   REQUIRED, STRING,   clock_epoch,       7) \
+X(a, STATIC,   REQUIRED, STRING,   configuration,     8) \
+X(a, STATIC,   REQUIRED, STRING,   calibration,       9) \
+X(a, STATIC,   REQUIRED, BYTES,    primitive,        10) \
+X(a, STATIC,   REQUIRED, STRING,   reference_id,     11) \
+X(a, STATIC,   REQUIRED, UINT64,   reference_revision,  12) \
+X(a, STATIC,   REQUIRED, UINT64,   world_sequence,   13) \
+X(a, STATIC,   REQUIRED, UINT64,   observation_sequence,  14)
+#define xenova_drive_EpisodeSourceContext_CALLBACK NULL
+#define xenova_drive_EpisodeSourceContext_DEFAULT NULL
+
+#define xenova_drive_EpisodeRequest_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, UINT64,   request_sequence,   3) \
+X(a, STATIC,   REQUIRED, UINT32,   action,            4) \
+X(a, STATIC,   REQUIRED, STRING,   vm,                5) \
+X(a, STATIC,   REQUIRED, STRING,   execution,         6) \
+X(a, STATIC,   REQUIRED, STRING,   app_instance,      7) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   8) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,        9) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_grant_revision,  11) \
+X(a, STATIC,   REQUIRED, UINT64,   cancel_fence_revision,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    scene_admission_id,  13) \
+X(a, STATIC,   REQUIRED, UINT64,   scene_revision,   14) \
+X(a, STATIC,   REQUIRED, MESSAGE,  source,           15) \
+X(a, STATIC,   REQUIRED, MESSAGE,  candidate,        16) \
+X(a, STATIC,   REQUIRED, MESSAGE,  progress,         17) \
+X(a, STATIC,   REQUIRED, UINT64,   completed_guest_us,  18) \
+X(a, STATIC,   REQUIRED, UINT64,   began_guest_us,   19) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_started_guest_us,  20) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  21) \
+X(a, STATIC,   REQUIRED, UINT64,   clock_probe_sequence,  22) \
+X(a, STATIC,   REQUIRED, BYTES,    clock_reply_sha256,  23) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,  24) \
+X(a, STATIC,   REQUIRED, BYTES,    expected_registry_epoch,  25) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_registry_revision,  26) \
+X(a, STATIC,   REQUIRED, BYTES,    expected_episode_id,  27) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_episode_revision,  28) \
+X(a, STATIC,   REQUIRED, BYTES,    phase_state_message_id,  29) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,    30) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,   31) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_sequence,  32) \
+X(a, STATIC,   REQUIRED, BYTES,    plan_sha256,      33) \
+X(a, STATIC,   OPTIONAL, UINT64,   stop_command_sequence,  34)
+#define xenova_drive_EpisodeRequest_CALLBACK NULL
+#define xenova_drive_EpisodeRequest_DEFAULT NULL
+#define xenova_drive_EpisodeRequest_source_MSGTYPE xenova_drive_EpisodeSourceContext
+#define xenova_drive_EpisodeRequest_candidate_MSGTYPE xenova_drive_EpisodeCore
+#define xenova_drive_EpisodeRequest_progress_MSGTYPE xenova_drive_EpisodeProgress
+
+#define xenova_drive_EpisodeReceipt_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    request_sha256,    3) \
+X(a, STATIC,   REQUIRED, UINT32,   result,            4) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,            5) \
+X(a, STATIC,   REQUIRED, BYTES,    registry_epoch,    6) \
+X(a, STATIC,   REQUIRED, UINT64,   registry_revision,   7) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  snapshot,          8) \
+X(a, STATIC,   REQUIRED, UINT64,   request_sequence,   9)
+#define xenova_drive_EpisodeReceipt_CALLBACK NULL
+#define xenova_drive_EpisodeReceipt_DEFAULT NULL
+#define xenova_drive_EpisodeReceipt_snapshot_MSGTYPE xenova_drive_EpisodeSnapshot
+
+#define xenova_drive_EpisodeStatus_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             2) \
+X(a, STATIC,   REQUIRED, BYTES,    registry_epoch,    3) \
+X(a, STATIC,   REQUIRED, UINT64,   registry_revision,   4) \
+X(a, STATIC,   REQUIRED, BYTES,    accepted_core_sha256,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    episode_id,        6) \
+X(a, STATIC,   REQUIRED, UINT64,   episode_revision,   7) \
+X(a, STATIC,   REQUIRED, UINT32,   commit_state,      8) \
+X(a, STATIC,   REQUIRED, BYTES,    state_message_id,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    state_sha256,     10) \
+X(a, STATIC,   REQUIRED, UINT64,   state_revision,   11) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,    12) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,   13) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_hwm,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_hwm,      15) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  16) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  receipt,          17)
+#define xenova_drive_EpisodeStatus_CALLBACK NULL
+#define xenova_drive_EpisodeStatus_DEFAULT NULL
+#define xenova_drive_EpisodeStatus_receipt_MSGTYPE xenova_drive_EpisodeReceipt
+
+#define xenova_drive_PiAbsoluteMeter_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    meter_epoch,       1) \
+X(a, STATIC,   REQUIRED, UINT64,   total_ticks,       2) \
+X(a, STATIC,   REQUIRED, DOUBLE,   metres_per_tick,   3) \
+X(a, STATIC,   REQUIRED, UINT64,   gap_revision,      4) \
+X(a, STATIC,   REQUIRED, BOOL,     valid,             5) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,   6)
+#define xenova_drive_PiAbsoluteMeter_CALLBACK NULL
+#define xenova_drive_PiAbsoluteMeter_DEFAULT NULL
+
+#define xenova_drive_StopFacts_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             1) \
+X(a, STATIC,   REQUIRED, STRING,   pi_session,        2) \
+X(a, STATIC,   REQUIRED, STRING,   device_session,    3) \
+X(a, STATIC,   REQUIRED, UINT64,   command_sequence,   4) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   5) \
+X(a, STATIC,   REQUIRED, UINT32,   producer_role,     6) \
+X(a, STATIC,   REQUIRED, BYTES,    source_vm,         7) \
+X(a, STATIC,   REQUIRED, BYTES,    source_execution,   8) \
+X(a, STATIC,   REQUIRED, BYTES,    source_app_instance,   9) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_sequence,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   counter,          11) \
+X(a, STATIC,   REQUIRED, UINT64,   applied_report_sequence,  12) \
+X(a, STATIC,   REQUIRED, UINT64,   applied_source_sample,  13) \
+X(a, STATIC,   REQUIRED, UINT64,   applied_pi_lower_us,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   applied_pi_upper_us,  15) \
+X(a, STATIC,   REQUIRED, UINT64,   stationary_first_sequence,  16) \
+X(a, STATIC,   REQUIRED, UINT64,   stationary_last_sequence,  17) \
+X(a, STATIC,   REQUIRED, UINT64,   stationary_started_pi_us,  18) \
+X(a, STATIC,   REQUIRED, UINT64,   stationary_observed_pi_us,  19) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  20) \
+X(a, STATIC,   REQUIRED, FLOAT,    left_speed_bound_mps,  21) \
+X(a, STATIC,   REQUIRED, FLOAT,    right_speed_bound_mps,  22) \
+X(a, STATIC,   REQUIRED, FLOAT,    yaw_rate_bound_rps,  23) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,    24) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,   25) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,       26) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,  27) \
+X(a, STATIC,   REQUIRED, UINT64,   grant_revision,   28) \
+X(a, STATIC,   REQUIRED, BYTES,    driver_session,   29) \
+X(a, STATIC,   REQUIRED, UINT64,   driver_action_seq,  30) \
+X(a, STATIC,   REQUIRED, UINT64,   driver_state_seq,  31)
+#define xenova_drive_StopFacts_CALLBACK NULL
+#define xenova_drive_StopFacts_DEFAULT NULL
+
+#define xenova_drive_DriveControlFacts_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, MESSAGE,  meter,             2) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  stop,              3) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   4)
+#define xenova_drive_DriveControlFacts_CALLBACK NULL
+#define xenova_drive_DriveControlFacts_DEFAULT NULL
+#define xenova_drive_DriveControlFacts_meter_MSGTYPE xenova_drive_PiAbsoluteMeter
+#define xenova_drive_DriveControlFacts_stop_MSGTYPE xenova_drive_StopFacts
+
+#define xenova_drive_LaneGeometry_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, FIXED32,  lane_id,           1) \
+X(a, STATIC,   REPEATED, MESSAGE,  centerline,        2) \
+X(a, STATIC,   REQUIRED, UINT32,   travel_direction,   3) \
+X(a, STATIC,   REQUIRED, FLOAT,    position_bound_m,   4) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_bound_rad,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          6) \
+X(a, STATIC,   REQUIRED, FIXED32,  adjacent_lane_id,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    point_state,       8)
+#define xenova_drive_LaneGeometry_CALLBACK NULL
+#define xenova_drive_LaneGeometry_DEFAULT NULL
+#define xenova_drive_LaneGeometry_centerline_MSGTYPE xenova_drive_Point
+
+#define xenova_drive_LaneModel_FIELDLIST(X, a) \
+X(a, STATIC,   REPEATED, MESSAGE,  lanes,             1) \
+X(a, STATIC,   REPEATED, MESSAGE,  divider,           2) \
+X(a, STATIC,   REQUIRED, BYTES,    crossing,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    divider_state,     4) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          5) \
+X(a, STATIC,   REQUIRED, FLOAT,    divider_position_bound_m,   6) \
+X(a, STATIC,   REQUIRED, FLOAT,    divider_heading_bound_rad,   7)
+#define xenova_drive_LaneModel_CALLBACK NULL
+#define xenova_drive_LaneModel_DEFAULT NULL
+#define xenova_drive_LaneModel_lanes_MSGTYPE xenova_drive_LaneGeometry
+#define xenova_drive_LaneModel_divider_MSGTYPE xenova_drive_Point
+
+#define xenova_drive_ParkingSlot_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, FIXED32,  slot_id,           1) \
+X(a, STATIC,   REQUIRED, UINT64,   geometry_revision,   2) \
+X(a, STATIC,   REQUIRED, UINT32,   geometry_state,    3) \
+X(a, STATIC,   REQUIRED, UINT32,   occupancy_state,   4) \
+X(a, STATIC,   REPEATED, MESSAGE,  corners,           5) \
+X(a, STATIC,   REQUIRED, UINT32,   entry_edge,        6) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  reverse_goal,      7) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  forward_goal,      8) \
+X(a, STATIC,   REQUIRED, FLOAT,    position_bound_m,   9) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_bound_rad,  10) \
+X(a, STATIC,   REQUIRED, UINT32,   geometry_age_ms,  11) \
+X(a, STATIC,   REQUIRED, UINT32,   clearance_age_ms,  12) \
+X(a, STATIC,   REQUIRED, UINT64,   evidence_sequence,  13) \
+X(a, STATIC,   REQUIRED, BOOL,     geometry_complete,  14) \
+X(a, STATIC,   REQUIRED, UINT32,   occupancy_reason,  15) \
+X(a, STATIC,   REQUIRED, UINT32,   source_kinds,     16) \
+X(a, STATIC,   REQUIRED, UINT64,   occupancy_revision,  17) \
+X(a, STATIC,   REQUIRED, FLOAT,    usable_width_m,   18) \
+X(a, STATIC,   REQUIRED, FLOAT,    usable_depth_m,   19) \
+X(a, STATIC,   REQUIRED, FIXED32,  approach_lane_id,  20) \
+X(a, STATIC,   REQUIRED, UINT32,   goal_mask,        21)
+#define xenova_drive_ParkingSlot_CALLBACK NULL
+#define xenova_drive_ParkingSlot_DEFAULT NULL
+#define xenova_drive_ParkingSlot_corners_MSGTYPE xenova_drive_Point
+#define xenova_drive_ParkingSlot_reverse_goal_MSGTYPE xenova_drive_Pose
+#define xenova_drive_ParkingSlot_forward_goal_MSGTYPE xenova_drive_Pose
+
+#define xenova_drive_ParkingSetMeta_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          1) \
+X(a, STATIC,   REQUIRED, BOOL,     complete,          2) \
+X(a, STATIC,   REQUIRED, UINT32,   track_count_in_roi,   3) \
+X(a, STATIC,   REQUIRED, BOOL,     capacity_limited,   4) \
+X(a, STATIC,   REQUIRED, UINT64,   evidence_sequence,   5) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             6)
+#define xenova_drive_ParkingSetMeta_CALLBACK NULL
+#define xenova_drive_ParkingSetMeta_DEFAULT NULL
+
+#define xenova_drive_MapLocalization_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT64,   registration_revision,   1) \
+X(a, STATIC,   REQUIRED, FLOAT,    anchor_position_bound_m,   2) \
+X(a, STATIC,   REQUIRED, FLOAT,    anchor_heading_bound_rad,   3) \
+X(a, STATIC,   REQUIRED, FLOAT,    geometry_position_bound_m,   4) \
+X(a, STATIC,   REQUIRED, FLOAT,    geometry_heading_bound_rad,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   observed_mapper_us,   6) \
+X(a, STATIC,   REQUIRED, UINT32,   valid_for_us,      7) \
+X(a, STATIC,   REQUIRED, FLOAT,    position_drift_bound_mps,   8) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_drift_bound_rps,   9) \
+X(a, STATIC,   REQUIRED, UINT32,   quality,          10) \
+X(a, STATIC,   REQUIRED, UINT32,   timestamp_error_us,  11)
+#define xenova_drive_MapLocalization_CALLBACK NULL
+#define xenova_drive_MapLocalization_DEFAULT NULL
+
+#define xenova_drive_SceneAdmissionRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    admission_id,      1) \
+X(a, STATIC,   REQUIRED, UINT64,   admission_revision,   2) \
+X(a, STATIC,   REQUIRED, BYTES,    survey_id,         3) \
+X(a, STATIC,   REQUIRED, UINT64,   survey_revision,   4) \
+X(a, STATIC,   REQUIRED, UINT32,   policy,            5) \
+X(a, STATIC,   REQUIRED, BYTES,    coverage_profile_sha256,   6) \
+X(a, STATIC,   REQUIRED, BOOL,     allow_restore_after_mapper_restart,   7)
+#define xenova_drive_SceneAdmissionRef_CALLBACK NULL
+#define xenova_drive_SceneAdmissionRef_DEFAULT NULL
+
+#define xenova_drive_MissionExecution_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,        1) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,   2) \
+X(a, STATIC,   REQUIRED, UINT32,   kind,              3) \
+X(a, STATIC,   REQUIRED, UINT32,   phase,             4) \
+X(a, STATIC,   REQUIRED, UINT32,   result,            5) \
+X(a, STATIC,   REQUIRED, BYTES,    operator_request_nonce,   6) \
+X(a, STATIC,   OPTIONAL, FIXED32,  slot_id,           7) \
+X(a, STATIC,   OPTIONAL, UINT64,   slot_revision,     8) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  goal,              9) \
+X(a, STATIC,   OPTIONAL, UINT64,   goal_revision,    10) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_deadline_pi_us,  11) \
+X(a, STATIC,   REQUIRED, UINT64,   cancel_fence_revision,  12) \
+X(a, STATIC,   REQUIRED, UINT32,   active_segment,   13) \
+X(a, STATIC,   REPEATED, MESSAGE,  selected_slot_polygon,  14) \
+X(a, STATIC,   OPTIONAL, FLOAT,    goal_position_bound_m,  15) \
+X(a, STATIC,   OPTIONAL, FLOAT,    goal_heading_bound_rad,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    scene_admission_id,  17) \
+X(a, STATIC,   REQUIRED, UINT64,   scene_admission_revision,  18) \
+X(a, STATIC,   REQUIRED, UINT32,   strategy,         19) \
+X(a, STATIC,   REQUIRED, UINT64,   execution_deadline_pi_us,  20) \
+X(a, STATIC,   REQUIRED, UINT32,   correction_attempts_used,  21) \
+X(a, STATIC,   REQUIRED, FLOAT,    execution_travel_m,  22) \
+X(a, STATIC,   REQUIRED, UINT64,   grant_revision,   23) \
+X(a, STATIC,   REQUIRED, FLOAT,    search_travel_m,  24) \
+X(a, STATIC,   REQUIRED, UINT64,   search_deadline_pi_us,  25) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  operation_binding,  26) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  route_binding,    27)
+#define xenova_drive_MissionExecution_CALLBACK NULL
+#define xenova_drive_MissionExecution_DEFAULT NULL
+#define xenova_drive_MissionExecution_goal_MSGTYPE xenova_drive_Pose
+#define xenova_drive_MissionExecution_selected_slot_polygon_MSGTYPE xenova_drive_Point
+#define xenova_drive_MissionExecution_operation_binding_MSGTYPE xenova_drive_OperationBinding
+#define xenova_drive_MissionExecution_route_binding_MSGTYPE xenova_drive_RouteBinding
+
+#define xenova_drive_GearSegment_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   first_index,       1) \
+X(a, STATIC,   REQUIRED, UINT32,   last_index,        2) \
+X(a, STATIC,   REQUIRED, SINT32,   signed_direction,   3)
+#define xenova_drive_GearSegment_CALLBACK NULL
+#define xenova_drive_GearSegment_DEFAULT NULL
+
+#define xenova_drive_DirectionGateRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT64,   gate_revision,     1) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_command_sequence,   2) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             3) \
+X(a, STATIC,   REQUIRED, SINT32,   requested_direction,   4)
+#define xenova_drive_DirectionGateRef_CALLBACK NULL
+#define xenova_drive_DirectionGateRef_DEFAULT NULL
+
+#define xenova_drive_DirectionGateWitness_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, MESSAGE,  gate,              1) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   2) \
+X(a, STATIC,   REQUIRED, UINT32,   producer_role,     3) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_sequence,   4) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,     5) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,    6) \
+X(a, STATIC,   REQUIRED, UINT32,   segment_index,     7) \
+X(a, STATIC,   REQUIRED, UINT32,   cusp_index,        8) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,        9) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   grant_revision,   11) \
+X(a, STATIC,   REQUIRED, BYTES,    driver_session,   12) \
+X(a, STATIC,   REQUIRED, UINT64,   driver_action_seq,  13) \
+X(a, STATIC,   REQUIRED, UINT64,   driver_state_seq,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,  15) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  16) \
+X(a, STATIC,   REQUIRED, STRING,   pi_session,       17) \
+X(a, STATIC,   REQUIRED, STRING,   device_session,   18)
+#define xenova_drive_DirectionGateWitness_CALLBACK NULL
+#define xenova_drive_DirectionGateWitness_DEFAULT NULL
+#define xenova_drive_DirectionGateWitness_gate_MSGTYPE xenova_drive_DirectionGateRef
+
+#define xenova_drive_MissionGrant_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           2) \
+X(a, STATIC,   REQUIRED, BYTES,    pi_host_boot,      3) \
+X(a, STATIC,   REQUIRED, BYTES,    gateway_instance,   4) \
+X(a, STATIC,   REQUIRED, BYTES,    owner_vm,          5) \
+X(a, STATIC,   REQUIRED, BYTES,    owner_execution,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    app_instance,      7) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   8) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,        9) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   grant_revision,   11) \
+X(a, STATIC,   REQUIRED, UINT32,   kind,             12) \
+X(a, STATIC,   REQUIRED, UINT32,   strategy,         13) \
+X(a, STATIC,   REQUIRED, BYTES,    operator_request_nonce,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   issued_pi_us,     15) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_deadline_pi_us,  16) \
+X(a, STATIC,   REQUIRED, UINT64,   cancel_fence_revision,  17) \
+X(a, STATIC,   REQUIRED, BYTES,    scene_admission_id,  18) \
+X(a, STATIC,   REQUIRED, UINT64,   scene_revision,   19) \
+X(a, STATIC,   REQUIRED, STRING,   configuration,    20) \
+X(a, STATIC,   REQUIRED, STRING,   calibration,      21) \
+X(a, STATIC,   REQUIRED, BYTES,    primitive,        22) \
+X(a, STATIC,   REQUIRED, UINT64,   execution_deadline_pi_us,  23) \
+X(a, STATIC,   REQUIRED, UINT32,   correction_attempts_used,  24) \
+X(a, STATIC,   REQUIRED, FLOAT,    execution_travel_m,  25) \
+X(a, STATIC,   REQUIRED, FLOAT,    max_execution_travel_m,  26) \
+X(a, STATIC,   REQUIRED, BOOL,     admitted,         27) \
+X(a, STATIC,   REQUIRED, UINT64,   search_deadline_pi_us,  28) \
+X(a, STATIC,   REQUIRED, FLOAT,    search_travel_m,  29) \
+X(a, STATIC,   REQUIRED, FLOAT,    max_search_travel_m,  30) \
+X(a, STATIC,   OPTIONAL, BYTES,    locked_goal_sha256,  31) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  operation_binding,  32) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  route_binding,    33)
+#define xenova_drive_MissionGrant_CALLBACK NULL
+#define xenova_drive_MissionGrant_DEFAULT NULL
+#define xenova_drive_MissionGrant_operation_binding_MSGTYPE xenova_drive_OperationBinding
+#define xenova_drive_MissionGrant_route_binding_MSGTYPE xenova_drive_RouteBinding
+
+#define xenova_drive_MissionBudgetRequest_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,        3) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,   4) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_grant_revision,   6) \
+X(a, STATIC,   REQUIRED, UINT32,   action,            7) \
+X(a, STATIC,   REQUIRED, FIXED32,  slot_id,           8) \
+X(a, STATIC,   REQUIRED, UINT64,   slot_revision,     9) \
+X(a, STATIC,   REQUIRED, UINT64,   goal_revision,    10) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,    11) \
+X(a, STATIC,   REQUIRED, BYTES,    plan_sha256,      12) \
+X(a, STATIC,   REQUIRED, BYTES,    selected_goal_sha256,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    scene_admission_id,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   scene_revision,   15) \
+X(a, STATIC,   REQUIRED, UINT64,   completed_guest_us,  16) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  17)
+#define xenova_drive_MissionBudgetRequest_CALLBACK NULL
+#define xenova_drive_MissionBudgetRequest_DEFAULT NULL
+
+#define xenova_drive_MissionBudgetReply_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    request_sha256,    3) \
+X(a, STATIC,   REQUIRED, UINT32,   result,            4) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,            5) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  grant,             6)
+#define xenova_drive_MissionBudgetReply_CALLBACK NULL
+#define xenova_drive_MissionBudgetReply_DEFAULT NULL
+#define xenova_drive_MissionBudgetReply_grant_MSGTYPE xenova_drive_MissionGrant
+
+#define xenova_drive_MapperClockProbe_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           2) \
+X(a, STATIC,   REQUIRED, STRING,   device,            3) \
+X(a, STATIC,   REQUIRED, STRING,   pi_host_boot,      4) \
+X(a, STATIC,   REQUIRED, STRING,   pi_client_instance,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   probe_seq,         6) \
+X(a, STATIC,   REQUIRED, BYTES,    nonce,             7) \
+X(a, STATIC,   REQUIRED, UINT64,   pi_send_us,        8) \
+X(a, STATIC,   OPTIONAL, STRING,   expected_mapper_boot,   9) \
+X(a, STATIC,   OPTIONAL, STRING,   expected_mapper_instance,  10) \
+X(a, STATIC,   OPTIONAL, STRING,   expected_clock_epoch,  11) \
+X(a, STATIC,   REQUIRED, UINT64,   admission_revision,  12) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  mapper_trust,     13) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  operation_gate,   14)
+#define xenova_drive_MapperClockProbe_CALLBACK NULL
+#define xenova_drive_MapperClockProbe_DEFAULT NULL
+#define xenova_drive_MapperClockProbe_mapper_trust_MSGTYPE xenova_drive_WorldTrust
+#define xenova_drive_MapperClockProbe_operation_gate_MSGTYPE xenova_drive_PiOperationGate
+
+#define xenova_drive_MapperClockReply_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, STRING,   pi_host_boot,      2) \
+X(a, STATIC,   REQUIRED, STRING,   pi_client_instance,   3) \
+X(a, STATIC,   REQUIRED, UINT64,   probe_seq,         4) \
+X(a, STATIC,   REQUIRED, BYTES,    nonce,             5) \
+X(a, STATIC,   REQUIRED, UINT64,   pi_send_us,        6) \
+X(a, STATIC,   REQUIRED, STRING,   device,            7) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_boot,       8) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_instance,   9) \
+X(a, STATIC,   REQUIRED, STRING,   clock_epoch,      10) \
+X(a, STATIC,   REQUIRED, STRING,   map_epoch,        11) \
+X(a, STATIC,   REQUIRED, STRING,   frame_epoch,      12) \
+X(a, STATIC,   REQUIRED, STRING,   odom_epoch,       13) \
+X(a, STATIC,   REQUIRED, STRING,   configuration,    14) \
+X(a, STATIC,   REQUIRED, STRING,   calibration,      15) \
+X(a, STATIC,   REQUIRED, STRING,   primitive,        16) \
+X(a, STATIC,   REQUIRED, UINT64,   j2,               17) \
+X(a, STATIC,   REQUIRED, UINT64,   j3,               18) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  survey_summary,   19) \
+X(a, STATIC,   OPTIONAL, UINT32,   supported_mapper_features,  20)
+#define xenova_drive_MapperClockReply_CALLBACK NULL
+#define xenova_drive_MapperClockReply_DEFAULT NULL
+#define xenova_drive_MapperClockReply_survey_summary_MSGTYPE xenova_drive_SurveySummary
+
+#define xenova_drive_SceneGrant_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           2) \
+X(a, STATIC,   REQUIRED, STRING,   pi_host_boot,      3) \
+X(a, STATIC,   REQUIRED, STRING,   gateway_instance,   4) \
+X(a, STATIC,   REQUIRED, UINT64,   source_admission_revision,   5) \
+X(a, STATIC,   REQUIRED, MESSAGE,  scene,             6) \
+X(a, STATIC,   REQUIRED, STRING,   mapper_device,     7) \
+X(a, STATIC,   REQUIRED, STRING,   map_epoch,         8) \
+X(a, STATIC,   REQUIRED, STRING,   frame_epoch,       9) \
+X(a, STATIC,   REQUIRED, STRING,   odom_epoch,       10) \
+X(a, STATIC,   REQUIRED, STRING,   configuration,    11) \
+X(a, STATIC,   REQUIRED, STRING,   calibration,      12) \
+X(a, STATIC,   REQUIRED, STRING,   primitive,        13) \
+X(a, STATIC,   REQUIRED, UINT64,   issued_pi_us,     14) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  15) \
+X(a, STATIC,   REQUIRED, UINT32,   lifecycle_state,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,    17) \
+X(a, STATIC,   REQUIRED, UINT64,   survey_deadline_pi_us,  18) \
+X(a, STATIC,   REQUIRED, UINT32,   max_observation_stations,  19) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,          20) \
+X(a, STATIC,   OPTIONAL, BYTES,    frozen_evidence_sha256,  21) \
+X(a, STATIC,   REQUIRED, UINT64,   frozen_survey_revision,  22) \
+X(a, STATIC,   REQUIRED, UINT64,   frozen_hazard_revision,  23) \
+X(a, STATIC,   OPTIONAL, BYTES,    restore_checkpoint_sha256,  24) \
+X(a, STATIC,   REQUIRED, UINT64,   lifecycle_revision,  25)
+#define xenova_drive_SceneGrant_CALLBACK NULL
+#define xenova_drive_SceneGrant_DEFAULT NULL
+#define xenova_drive_SceneGrant_scene_MSGTYPE xenova_drive_SceneAdmissionRef
+
+#define xenova_drive_SurveySummary_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    survey_id,         3) \
+X(a, STATIC,   REQUIRED, UINT64,   survey_revision,   4) \
+X(a, STATIC,   REQUIRED, UINT32,   status,            5) \
+X(a, STATIC,   REQUIRED, UINT64,   world_sequence,    6) \
+X(a, STATIC,   REQUIRED, UINT64,   evidence_sequence,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   started_peer_us,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   last_observed_peer_us,   9) \
+X(a, STATIC,   REQUIRED, UINT64,   completed_peer_us,  10) \
+X(a, STATIC,   REQUIRED, UINT32,   positive_cell_count,  11) \
+X(a, STATIC,   REQUIRED, UINT32,   observed_slot_count,  12) \
+X(a, STATIC,   REQUIRED, UINT32,   required_sensor_mask,  13) \
+X(a, STATIC,   REQUIRED, UINT32,   valid_sensor_mask,  14) \
+X(a, STATIC,   REQUIRED, BYTES,    evidence_sha256,  15) \
+X(a, STATIC,   REQUIRED, BYTES,    coverage_profile_sha256,  16) \
+X(a, STATIC,   REQUIRED, UINT32,   observation_station_count,  17) \
+X(a, STATIC,   REQUIRED, UINT64,   hazard_revision,  18) \
+X(a, STATIC,   REQUIRED, UINT64,   alignment_revision,  19) \
+X(a, STATIC,   REQUIRED, FLOAT,    anchor_position_bound_m,  20) \
+X(a, STATIC,   REQUIRED, FLOAT,    anchor_heading_bound_rad,  21) \
+X(a, STATIC,   REQUIRED, UINT32,   evidence_flags,   22) \
+X(a, STATIC,   REQUIRED, UINT32,   failure_flags,    23) \
+X(a, STATIC,   REQUIRED, UINT32,   timestamp_error_us,  24)
+#define xenova_drive_SurveySummary_CALLBACK NULL
+#define xenova_drive_SurveySummary_DEFAULT NULL
+
+#define xenova_drive_TofObservation_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           2) \
+X(a, STATIC,   REQUIRED, STRING,   host_boot,         3) \
+X(a, STATIC,   REQUIRED, STRING,   gateway_instance,   4) \
+X(a, STATIC,   REQUIRED, STRING,   pi_session,        5) \
+X(a, STATIC,   REQUIRED, STRING,   device_session,    6) \
+X(a, STATIC,   REQUIRED, UINT32,   sensor_id,         7) \
+X(a, STATIC,   REQUIRED, UINT64,   source_sample,     8) \
+X(a, STATIC,   REQUIRED, UINT64,   source_us,         9) \
+X(a, STATIC,   REQUIRED, UINT64,   pi_sample_us,     10) \
+X(a, STATIC,   REQUIRED, UINT32,   clock_error_us,   11) \
+X(a, STATIC,   REQUIRED, UINT32,   sensor_time_error_us,  12) \
+X(a, STATIC,   REQUIRED, STRING,   calibration,      13) \
+X(a, STATIC,   REQUIRED, UINT32,   sensor_config_revision,  14) \
+X(a, STATIC,   REQUIRED, UINT32,   rows,             15) \
+X(a, STATIC,   REQUIRED, UINT32,   cols,             16) \
+X(a, STATIC,   REQUIRED, BYTES,    distance_mm_le,   17) \
+X(a, STATIC,   REQUIRED, BYTES,    status,           18) \
+X(a, STATIC,   REQUIRED, BYTES,    quality,          19) \
+X(a, STATIC,   REQUIRED, UINT32,   frame_status,     20) \
+X(a, STATIC,   REQUIRED, FIXED32,  source_crc32,     21) \
+X(a, STATIC,   REQUIRED, STRING,   clock_epoch,      22) \
+X(a, STATIC,   REQUIRED, UINT64,   clock_seq,        23) \
+X(a, STATIC,   REQUIRED, BOOL,     complete,         24) \
+X(a, STATIC,   REQUIRED, BYTES,    sensor_instance,  25) \
+X(a, STATIC,   REQUIRED, UINT32,   sensor_generation,  26)
+#define xenova_drive_TofObservation_CALLBACK NULL
+#define xenova_drive_TofObservation_DEFAULT NULL
+
+#define xenova_drive_RouteBinding_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    route_id,          1) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          2) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,           3) \
+X(a, STATIC,   REQUIRED, BYTES,    core_sha256,       4) \
+X(a, STATIC,   REQUIRED, BYTES,    global_plan_sha256,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    goal_sha256,       6)
+#define xenova_drive_RouteBinding_CALLBACK NULL
+#define xenova_drive_RouteBinding_DEFAULT NULL
+
+#define xenova_drive_StartGoal_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    goal_id,           2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  rear_axle_pose,    5) \
+X(a, STATIC,   REQUIRED, FLOAT,    position_error_m,   6) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_error_rad,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    section_id,        8) \
+X(a, STATIC,   REQUIRED, FIXED32,  lane_id,           9) \
+X(a, STATIC,   REQUIRED, FLOAT,    station_m,        10) \
+X(a, STATIC,   REQUIRED, MESSAGE,  origin,           11) \
+X(a, STATIC,   REQUIRED, BYTES,    vehicle_raw_sha256,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    alignment_raw_sha256,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    world_raw_sha256,  14) \
+X(a, STATIC,   REQUIRED, BYTES,    terminal_profile_sha256,  15) \
+X(a, STATIC,   REQUIRED, UINT64,   origin_vehicle_sequence,  16) \
+X(a, STATIC,   REQUIRED, UINT64,   registered_pi_us,  17) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_command_sequence,  18) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_report_sequence,  19) \
+X(a, STATIC,   REQUIRED, BYTES,    stop_facts_sha256,  20)
+#define xenova_drive_StartGoal_CALLBACK NULL
+#define xenova_drive_StartGoal_DEFAULT NULL
+#define xenova_drive_StartGoal_rear_axle_pose_MSGTYPE xenova_drive_Pose
+#define xenova_drive_StartGoal_origin_MSGTYPE xenova_drive_RoadObservationOrigin
+
+#define xenova_drive_RoadSectionRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    section_id,        1) \
+X(a, STATIC,   REQUIRED, BYTES,    section_sha256,    2) \
+X(a, STATIC,   REQUIRED, FIXED32,  left_lane_id,      3) \
+X(a, STATIC,   REQUIRED, FIXED32,  right_lane_id,     4) \
+X(a, STATIC,   REQUIRED, FLOAT,    length_m,          5) \
+X(a, STATIC,   REQUIRED, UINT32,   order,             6)
+#define xenova_drive_RoadSectionRef_CALLBACK NULL
+#define xenova_drive_RoadSectionRef_DEFAULT NULL
+
+#define xenova_drive_RoadEdge_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   from_section_index,   1) \
+X(a, STATIC,   REQUIRED, UINT32,   to_section_index,   2) \
+X(a, STATIC,   REQUIRED, FIXED32,  from_lane_id,      3) \
+X(a, STATIC,   REQUIRED, FIXED32,  to_lane_id,        4) \
+X(a, STATIC,   REQUIRED, UINT32,   kind,              5) \
+X(a, STATIC,   REQUIRED, FLOAT,    from_station_m,    6) \
+X(a, STATIC,   REQUIRED, FLOAT,    to_station_m,      7) \
+X(a, STATIC,   REQUIRED, BYTES,    connection_sha256,   8) \
+X(a, STATIC,   REQUIRED, BOOL,     closes_circuit,    9)
+#define xenova_drive_RoadEdge_CALLBACK NULL
+#define xenova_drive_RoadEdge_DEFAULT NULL
+
+#define xenova_drive_RoadTopology_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    topology_id,       2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   4) \
+X(a, STATIC,   REPEATED, MESSAGE,  sections,          5) \
+X(a, STATIC,   REPEATED, MESSAGE,  edges,             6) \
+X(a, STATIC,   REQUIRED, BOOL,     closed_observed,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_roots_sha256,   8)
+#define xenova_drive_RoadTopology_CALLBACK NULL
+#define xenova_drive_RoadTopology_DEFAULT NULL
+#define xenova_drive_RoadTopology_sections_MSGTYPE xenova_drive_RoadSectionRef
+#define xenova_drive_RoadTopology_edges_MSGTYPE xenova_drive_RoadEdge
+
+#define xenova_drive_RoadSection_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    section_id,        2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  origin,            5) \
+X(a, STATIC,   REQUIRED, MESSAGE,  road,              6) \
+X(a, STATIC,   REPEATED, MESSAGE,  reference,         7) \
+X(a, STATIC,   REPEATED, MESSAGE,  left_boundary,     8) \
+X(a, STATIC,   REPEATED, MESSAGE,  right_boundary,    9) \
+X(a, STATIC,   REPEATED, FLOAT,    point_error_m,    10) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_error_rad,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    alignment_raw_sha256,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    observation_evidence_sha256,  13)
+#define xenova_drive_RoadSection_CALLBACK NULL
+#define xenova_drive_RoadSection_DEFAULT NULL
+#define xenova_drive_RoadSection_origin_MSGTYPE xenova_drive_RoadObservationOrigin
+#define xenova_drive_RoadSection_road_MSGTYPE xenova_drive_LaneModel
+#define xenova_drive_RoadSection_reference_MSGTYPE xenova_drive_Point
+#define xenova_drive_RoadSection_left_boundary_MSGTYPE xenova_drive_Point
+#define xenova_drive_RoadSection_right_boundary_MSGTYPE xenova_drive_Point
+
+#define xenova_drive_RoadConnection_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    connection_id,     2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  origin,            5) \
+X(a, STATIC,   REQUIRED, BYTES,    from_section_sha256,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    to_section_sha256,   7) \
+X(a, STATIC,   REQUIRED, FIXED32,  from_lane_id,      8) \
+X(a, STATIC,   REQUIRED, FIXED32,  to_lane_id,        9) \
+X(a, STATIC,   REQUIRED, UINT32,   from_point_index,  10) \
+X(a, STATIC,   REQUIRED, UINT32,   to_point_index,   11) \
+X(a, STATIC,   REPEATED, MESSAGE,  overlap_reference,  12) \
+X(a, STATIC,   REPEATED, FLOAT,    overlap_error_m,  13) \
+X(a, STATIC,   REPEATED, MESSAGE,  connector_polygon,  14) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_error_rad,  15) \
+X(a, STATIC,   REQUIRED, UINT32,   kind,             16) \
+X(a, STATIC,   REPEATED, BYTES,    evidence_roots_sha256,  17)
+#define xenova_drive_RoadConnection_CALLBACK NULL
+#define xenova_drive_RoadConnection_DEFAULT NULL
+#define xenova_drive_RoadConnection_origin_MSGTYPE xenova_drive_RoadObservationOrigin
+#define xenova_drive_RoadConnection_overlap_reference_MSGTYPE xenova_drive_Point
+#define xenova_drive_RoadConnection_connector_polygon_MSGTYPE xenova_drive_Point
+
+#define xenova_drive_ExitSpace_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    space_id,          2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  origin,            5) \
+X(a, STATIC,   REQUIRED, BYTES,    parking_attempt_id,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    parking_goal_sha256,   7) \
+X(a, STATIC,   REQUIRED, FIXED32,  slot_id,           8) \
+X(a, STATIC,   REQUIRED, UINT64,   slot_revision,     9) \
+X(a, STATIC,   REPEATED, MESSAGE,  selected_slot_polygon,  10) \
+X(a, STATIC,   REQUIRED, FIXED32,  aisle_lane_id,    11) \
+X(a, STATIC,   REQUIRED, BYTES,    road_section_sha256,  12) \
+X(a, STATIC,   REPEATED, BYTES,    connection_sha256,  13) \
+X(a, STATIC,   REQUIRED, FLOAT,    position_error_m,  14) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_error_rad,  15)
+#define xenova_drive_ExitSpace_CALLBACK NULL
+#define xenova_drive_ExitSpace_DEFAULT NULL
+#define xenova_drive_ExitSpace_origin_MSGTYPE xenova_drive_RoadObservationOrigin
+#define xenova_drive_ExitSpace_selected_slot_polygon_MSGTYPE xenova_drive_Point
+
+#define xenova_drive_RouteOccurrence_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   section_index,     1) \
+X(a, STATIC,   REQUIRED, FIXED32,  lane_id,           2) \
+X(a, STATIC,   REQUIRED, FLOAT,    entry_station_m,   3) \
+X(a, STATIC,   REQUIRED, FLOAT,    exit_station_m,    4) \
+X(a, STATIC,   REQUIRED, UINT32,   edge_index,        5)
+#define xenova_drive_RouteOccurrence_CALLBACK NULL
+#define xenova_drive_RouteOccurrence_DEFAULT NULL
+
+#define xenova_drive_RoutePlan_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    route_id,          2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,           4) \
+X(a, STATIC,   REQUIRED, BYTES,    goal_sha256,       5) \
+X(a, STATIC,   REQUIRED, BYTES,    topology_sha256,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   7) \
+X(a, STATIC,   REPEATED, MESSAGE,  occurrences,       8) \
+X(a, STATIC,   REQUIRED, UINT32,   max_laps,          9) \
+X(a, STATIC,   REQUIRED, BYTES,    exit_space_sha256,  10) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_guest_witness_sha256,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    merge_section_id,  12) \
+X(a, STATIC,   REQUIRED, FIXED32,  merge_lane_id,    13) \
+X(a, STATIC,   REQUIRED, FLOAT,    merge_station_lower_m,  14) \
+X(a, STATIC,   REQUIRED, FLOAT,    merge_station_upper_m,  15) \
+X(a, STATIC,   REQUIRED, MESSAGE,  merge_seed_pose,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    terminal_profile_sha256,  17)
+#define xenova_drive_RoutePlan_CALLBACK NULL
+#define xenova_drive_RoutePlan_DEFAULT NULL
+#define xenova_drive_RoutePlan_occurrences_MSGTYPE xenova_drive_RouteOccurrence
+#define xenova_drive_RoutePlan_merge_seed_pose_MSGTYPE xenova_drive_Pose
+
+#define xenova_drive_RouteCore_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    route_id,          1) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          2) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,           3) \
+X(a, STATIC,   REQUIRED, BYTES,    goal_sha256,       4) \
+X(a, STATIC,   REQUIRED, BYTES,    topology_sha256,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    global_plan_sha256,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   started_pi_us,     8) \
+X(a, STATIC,   REQUIRED, UINT64,   deadline_pi_us,    9) \
+X(a, STATIC,   REQUIRED, BYTES,    meter_epoch,      10) \
+X(a, STATIC,   REQUIRED, UINT64,   meter_baseline_total_ticks,  11) \
+X(a, STATIC,   REQUIRED, DOUBLE,   max_travel_m,     12) \
+X(a, STATIC,   REQUIRED, UINT32,   phase,            13) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,   14) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_started_pi_us,  15) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_expires_pi_us,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    parking_attempt_id,  17) \
+X(a, STATIC,   REQUIRED, BYTES,    parking_goal_sha256,  18) \
+X(a, STATIC,   REQUIRED, BYTES,    predecessor_episode_sha256,  19) \
+X(a, STATIC,   REQUIRED, BYTES,    budget_profile_sha256,  20) \
+X(a, STATIC,   REQUIRED, FIXED32,  target_lane_id,   21) \
+X(a, STATIC,   REQUIRED, UINT32,   max_laps,         22) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_wait_command_sequence,  23) \
+X(a, STATIC,   REQUIRED, BYTES,    local_path_sha256,  24) \
+X(a, STATIC,   REQUIRED, UINT64,   meter_gap_revision,  25) \
+X(a, STATIC,   REQUIRED, DOUBLE,   metres_per_tick_upper,  26) \
+X(a, STATIC,   REQUIRED, UINT32,   progress_mode,    27) \
+X(a, STATIC,   REQUIRED, MESSAGE,  phase_goal,       28) \
+X(a, STATIC,   REQUIRED, BYTES,    stop_wait_facts_sha256,  29) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_wait_started_pi_us,  30) \
+X(a, STATIC,   REQUIRED, UINT32,   terminal_result,  31) \
+X(a, STATIC,   REQUIRED, UINT32,   terminal_reason,  32)
+#define xenova_drive_RouteCore_CALLBACK NULL
+#define xenova_drive_RouteCore_DEFAULT NULL
+#define xenova_drive_RouteCore_phase_goal_MSGTYPE xenova_drive_Pose
+
+#define xenova_drive_RouteProgress_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   occurrence_index,   1) \
+X(a, STATIC,   REQUIRED, FLOAT,    station_lower_m,   2) \
+X(a, STATIC,   REQUIRED, FLOAT,    station_upper_m,   3) \
+X(a, STATIC,   REQUIRED, UINT64,   used_travel_ticks,   4) \
+X(a, STATIC,   REQUIRED, UINT64,   last_progress_pi_us,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,   6) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_sequence,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          8) \
+X(a, STATIC,   REQUIRED, UINT32,   completed_laps,    9) \
+X(a, STATIC,   REQUIRED, UINT64,   confirmed_stop_wait_us,  10) \
+X(a, STATIC,   REQUIRED, FLOAT,    remaining_upper_m,  11) \
+X(a, STATIC,   REQUIRED, UINT64,   stop_wait_hwm_pi_us,  12)
+#define xenova_drive_RouteProgress_CALLBACK NULL
+#define xenova_drive_RouteProgress_DEFAULT NULL
+
+#define xenova_drive_RouteAcceptanceRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    registry_epoch,    1) \
+X(a, STATIC,   REQUIRED, UINT64,   registry_revision,   2) \
+X(a, STATIC,   REQUIRED, BYTES,    acceptance_nonce,   3) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     4) \
+X(a, STATIC,   REQUIRED, BYTES,    request_sha256,    5) \
+X(a, STATIC,   REQUIRED, BYTES,    accepted_core_sha256,   6) \
+X(a, STATIC,   REQUIRED, UINT64,   request_sequence,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_owner_sha256,   8)
+#define xenova_drive_RouteAcceptanceRef_CALLBACK NULL
+#define xenova_drive_RouteAcceptanceRef_DEFAULT NULL
+
+#define xenova_drive_RouteSnapshot_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, MESSAGE,  core,              1) \
+X(a, STATIC,   REQUIRED, MESSAGE,  progress,          2) \
+X(a, STATIC,   REQUIRED, MESSAGE,  acceptance,        3) \
+X(a, STATIC,   REQUIRED, BYTES,    current_window_sha256,   4) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             5) \
+X(a, STATIC,   REQUIRED, UINT32,   task_space_kind,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    exit_space_sha256,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    basis_window_sha256,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   basis_window_revision,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    current_world_sha256,  10)
+#define xenova_drive_RouteSnapshot_CALLBACK NULL
+#define xenova_drive_RouteSnapshot_DEFAULT NULL
+#define xenova_drive_RouteSnapshot_core_MSGTYPE xenova_drive_RouteCore
+#define xenova_drive_RouteSnapshot_progress_MSGTYPE xenova_drive_RouteProgress
+#define xenova_drive_RouteSnapshot_acceptance_MSGTYPE xenova_drive_RouteAcceptanceRef
+
+#define xenova_drive_WorldRouteView_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   2) \
+X(a, STATIC,   REQUIRED, BYTES,    topology_sha256,   3) \
+X(a, STATIC,   REQUIRED, BYTES,    window_id,         4) \
+X(a, STATIC,   REQUIRED, UINT64,   window_revision,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    window_sha256,     6) \
+X(a, STATIC,   REQUIRED, BYTES,    from_window_id,    7) \
+X(a, STATIC,   REQUIRED, BYTES,    from_window_sha256,   8) \
+X(a, STATIC,   REQUIRED, BYTES,    transition_id,     9) \
+X(a, STATIC,   REQUIRED, BYTES,    first_section_id,  10) \
+X(a, STATIC,   REQUIRED, BYTES,    last_section_id,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    overlap_prefix_sha256,  12) \
+X(a, STATIC,   REQUIRED, UINT64,   geometry_revision,  13)
+#define xenova_drive_WorldRouteView_CALLBACK NULL
+#define xenova_drive_WorldRouteView_DEFAULT NULL
+
+#define xenova_drive_RouteStatus_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    registry_epoch,    2) \
+X(a, STATIC,   REQUIRED, UINT64,   registry_revision,   3) \
+X(a, STATIC,   REQUIRED, BYTES,    route_id,          4) \
+X(a, STATIC,   REQUIRED, BYTES,    accepted_core_sha256,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    global_plan_sha256,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    local_path_sha256,   7) \
+X(a, STATIC,   REQUIRED, UINT32,   route_state,       8) \
+X(a, STATIC,   REQUIRED, UINT32,   commit_state,      9) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,           10) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    state_message_id,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    state_sha256,     13) \
+X(a, STATIC,   REQUIRED, UINT64,   state_revision,   14) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,    15) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,   16) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_hwm,  17) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_hwm,      18) \
+X(a, STATIC,   REQUIRED, BYTES,    current_permission_sha256,  19) \
+X(a, STATIC,   REQUIRED, BYTES,    current_window_sha256,  20) \
+X(a, STATIC,   REPEATED, MESSAGE,  eligibility,      21) \
+X(a, STATIC,   REQUIRED, UINT32,   terminal_result,  22)
+#define xenova_drive_RouteStatus_CALLBACK NULL
+#define xenova_drive_RouteStatus_DEFAULT NULL
+#define xenova_drive_RouteStatus_eligibility_MSGTYPE xenova_drive_RouteEligibilityRef
+
+#define xenova_drive_RouteQuery_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    query_id,          2) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,           3) \
+X(a, STATIC,   REQUIRED, BYTES,    goal_sha256,       4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  owner,             5) \
+X(a, STATIC,   REQUIRED, UINT64,   issued_pi_us,      6) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    operator_request_nonce,   8)
+#define xenova_drive_RouteQuery_CALLBACK NULL
+#define xenova_drive_RouteQuery_DEFAULT NULL
+#define xenova_drive_RouteQuery_owner_MSGTYPE xenova_drive_RouteOwnerContext
+
+#define xenova_drive_RouteCandidate_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, UINT64,   request_sequence,   3) \
+X(a, STATIC,   REQUIRED, UINT32,   action,            4) \
+X(a, STATIC,   REQUIRED, BYTES,    query_id,          5) \
+X(a, STATIC,   REQUIRED, BYTES,    query_sha256,      6) \
+X(a, STATIC,   REQUIRED, MESSAGE,  owner,             7) \
+X(a, STATIC,   REQUIRED, MESSAGE,  witness,           8) \
+X(a, STATIC,   REQUIRED, BYTES,    expected_registry_epoch,   9) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_registry_revision,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_route_revision,  11) \
+X(a, STATIC,   REQUIRED, MESSAGE,  core,             12) \
+X(a, STATIC,   REQUIRED, MESSAGE,  progress,         13) \
+X(a, STATIC,   REQUIRED, UINT32,   task_space_kind,  14) \
+X(a, STATIC,   REQUIRED, BYTES,    current_window_sha256,  15) \
+X(a, STATIC,   REQUIRED, BYTES,    basis_window_sha256,  16) \
+X(a, STATIC,   REQUIRED, UINT64,   basis_window_revision,  17) \
+X(a, STATIC,   REQUIRED, BYTES,    exit_space_sha256,  18) \
+X(a, STATIC,   REQUIRED, BYTES,    phase_state_message_id,  19) \
+X(a, STATIC,   REQUIRED, UINT64,   plan_revision,    20) \
+X(a, STATIC,   REQUIRED, UINT64,   calculation_sequence,  21) \
+X(a, STATIC,   REQUIRED, UINT64,   began_guest_us,   22) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_started_guest_us,  23) \
+X(a, STATIC,   REQUIRED, BYTES,    control_facts_sha256,  24) \
+X(a, STATIC,   REQUIRED, MESSAGE,  extent,           25)
+#define xenova_drive_RouteCandidate_CALLBACK NULL
+#define xenova_drive_RouteCandidate_DEFAULT NULL
+#define xenova_drive_RouteCandidate_owner_MSGTYPE xenova_drive_RouteOwnerContext
+#define xenova_drive_RouteCandidate_witness_MSGTYPE xenova_drive_RouteCurrentWitness
+#define xenova_drive_RouteCandidate_core_MSGTYPE xenova_drive_RouteCore
+#define xenova_drive_RouteCandidate_progress_MSGTYPE xenova_drive_RouteProgress
+#define xenova_drive_RouteCandidate_extent_MSGTYPE xenova_drive_RouteExtentProof
+
+#define xenova_drive_RouteReceipt_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    request_sha256,    3) \
+X(a, STATIC,   REQUIRED, UINT32,   result,            4) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,            5) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  snapshot,          6) \
+X(a, STATIC,   REQUIRED, UINT64,   request_sequence,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    query_id,          8) \
+X(a, STATIC,   REQUIRED, BYTES,    query_sha256,      9) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  initial_target_context,  10)
+#define xenova_drive_RouteReceipt_CALLBACK NULL
+#define xenova_drive_RouteReceipt_DEFAULT NULL
+#define xenova_drive_RouteReceipt_snapshot_MSGTYPE xenova_drive_RouteSnapshot
+#define xenova_drive_RouteReceipt_initial_target_context_MSGTYPE xenova_drive_RouteOwnerContext
+
+#define xenova_drive_RoadWindow_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    window_id,         2) \
+X(a, STATIC,   REQUIRED, UINT64,   revision,          3) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,   4) \
+X(a, STATIC,   REQUIRED, BYTES,    topology_sha256,   5) \
+X(a, STATIC,   REPEATED, BYTES,    section_sha256,    6) \
+X(a, STATIC,   REQUIRED, MESSAGE,  origin,            7) \
+X(a, STATIC,   REQUIRED, MESSAGE,  road,              8) \
+X(a, STATIC,   REPEATED, MESSAGE,  reference,         9) \
+X(a, STATIC,   REPEATED, MESSAGE,  left_boundary,    10) \
+X(a, STATIC,   REPEATED, MESSAGE,  right_boundary,   11) \
+X(a, STATIC,   REPEATED, FLOAT,    point_error_m,    12) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_error_rad,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    from_window_id,   14) \
+X(a, STATIC,   REQUIRED, BYTES,    from_window_sha256,  15) \
+X(a, STATIC,   REQUIRED, BYTES,    overlap_prefix_sha256,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    transition_id,    17) \
+X(a, STATIC,   REQUIRED, UINT32,   overlap_point_count,  18)
+#define xenova_drive_RoadWindow_CALLBACK NULL
+#define xenova_drive_RoadWindow_DEFAULT NULL
+#define xenova_drive_RoadWindow_origin_MSGTYPE xenova_drive_RoadObservationOrigin
+#define xenova_drive_RoadWindow_road_MSGTYPE xenova_drive_LaneModel
+#define xenova_drive_RoadWindow_reference_MSGTYPE xenova_drive_Point
+#define xenova_drive_RoadWindow_left_boundary_MSGTYPE xenova_drive_Point
+#define xenova_drive_RoadWindow_right_boundary_MSGTYPE xenova_drive_Point
+
+#define xenova_drive_RoadGeometryScope_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    dataset_uuid,      2) \
+X(a, STATIC,   REQUIRED, BYTES,    map_epoch,         3) \
+X(a, STATIC,   REQUIRED, BYTES,    frame_epoch,       4) \
+X(a, STATIC,   REQUIRED, STRING,   vehicle,           5) \
+X(a, STATIC,   REQUIRED, STRING,   configuration,     6) \
+X(a, STATIC,   REQUIRED, STRING,   calibration,       7) \
+X(a, STATIC,   REQUIRED, BYTES,    primitive,         8) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_pi_host_boot,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_gateway_instance,  10) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_pi_session,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_device_session,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_odom_epoch,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    alignment_frame_sha256,  14) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_policy_sha256,  15) \
+X(a, STATIC,   REQUIRED, UINT32,   coordinate_policy,  16) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_storage_context_sha256,  17)
+#define xenova_drive_RoadGeometryScope_CALLBACK NULL
+#define xenova_drive_RoadGeometryScope_DEFAULT NULL
+
+#define xenova_drive_RoadDurableRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    database_uuid,     1) \
+X(a, STATIC,   REQUIRED, BYTES,    job_id,            2) \
+X(a, STATIC,   REQUIRED, BYTES,    job_digest,        3) \
+X(a, STATIC,   REQUIRED, UINT32,   status,            4) \
+X(a, STATIC,   REQUIRED, UINT64,   durable_revision,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   committed_mapper_us,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_context_sha256,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    record_sha256,     8) \
+X(a, STATIC,   REQUIRED, BYTES,    original_receipt_sha256,   9)
+#define xenova_drive_RoadDurableRef_CALLBACK NULL
+#define xenova_drive_RoadDurableRef_DEFAULT NULL
+
+#define xenova_drive_RoadObservationOrigin_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    mapper_boot,       2) \
+X(a, STATIC,   REQUIRED, BYTES,    mapper_instance,   3) \
+X(a, STATIC,   REQUIRED, BYTES,    clock_epoch,       4) \
+X(a, STATIC,   REQUIRED, UINT64,   observation_sequence,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   frame_source_sequence,   6) \
+X(a, STATIC,   REQUIRED, UINT64,   capture_mapper_lower_us,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   capture_mapper_upper_us,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   completed_mapper_us,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    raw_binding_sha256,  10) \
+X(a, STATIC,   REQUIRED, BYTES,    frame_evidence_sha256,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    origin_context_sha256,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    alignment_raw_sha256,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    mapper_clock_reply_sha256,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,  15) \
+X(a, STATIC,   OPTIONAL, BYTES,    independent_world_sha256,  16)
+#define xenova_drive_RoadObservationOrigin_CALLBACK NULL
+#define xenova_drive_RoadObservationOrigin_DEFAULT NULL
+
+#define xenova_drive_MapperRouteWitness_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    mapper_boot,       1) \
+X(a, STATIC,   REQUIRED, BYTES,    mapper_instance,   2) \
+X(a, STATIC,   REQUIRED, BYTES,    clock_epoch,       3) \
+X(a, STATIC,   REQUIRED, BYTES,    pi_host_boot,      4) \
+X(a, STATIC,   REQUIRED, BYTES,    pi_client_instance,   5) \
+X(a, STATIC,   REQUIRED, UINT64,   clock_probe_sequence,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    clock_reply_sha256,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   checked_mapper_us,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   9) \
+X(a, STATIC,   REQUIRED, UINT64,   source_binding_revision,  10) \
+X(a, STATIC,   REQUIRED, BYTES,    raw_binding_sha256,  11) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,  12) \
+X(a, STATIC,   REQUIRED, UINT64,   observation_sequence,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    frame_evidence_sha256,  14) \
+X(a, STATIC,   REQUIRED, BYTES,    scene_admission_id,  15) \
+X(a, STATIC,   REQUIRED, UINT64,   scene_revision,   16)
+#define xenova_drive_MapperRouteWitness_CALLBACK NULL
+#define xenova_drive_MapperRouteWitness_DEFAULT NULL
+
+#define xenova_drive_RouteOwnerContext_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    vm,                1) \
+X(a, STATIC,   REQUIRED, BYTES,    execution,         2) \
+X(a, STATIC,   REQUIRED, BYTES,    app_instance,      3) \
+X(a, STATIC,   REQUIRED, UINT32,   control_generation,   4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  operation_binding,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    mission_id,        6) \
+X(a, STATIC,   REQUIRED, UINT64,   mission_revision,   7) \
+X(a, STATIC,   REQUIRED, UINT64,   grant_revision,    8) \
+X(a, STATIC,   REQUIRED, UINT64,   cancel_fence_revision,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    scene_admission_id,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   scene_revision,   11) \
+X(a, STATIC,   REQUIRED, BYTES,    source_key_sha256,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    geometry_scope_sha256,  13)
+#define xenova_drive_RouteOwnerContext_CALLBACK NULL
+#define xenova_drive_RouteOwnerContext_DEFAULT NULL
+#define xenova_drive_RouteOwnerContext_operation_binding_MSGTYPE xenova_drive_OperationBinding
+
+#define xenova_drive_RouteCurrentWitness_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, MESSAGE,  source,            1) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,   2) \
+X(a, STATIC,   REQUIRED, UINT64,   checked_guest_us,   3) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   4) \
+X(a, STATIC,   REQUIRED, UINT64,   clock_probe_sequence,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    clock_reply_sha256,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    world_raw_sha256,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    vehicle_raw_sha256,   8)
+#define xenova_drive_RouteCurrentWitness_CALLBACK NULL
+#define xenova_drive_RouteCurrentWitness_DEFAULT NULL
+#define xenova_drive_RouteCurrentWitness_source_MSGTYPE xenova_drive_EpisodeSourceContext
+
+#define xenova_drive_RouteExtentProof_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   mode,              1) \
+X(a, STATIC,   REQUIRED, BYTES,    window_sha256,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    exit_space_sha256,   3) \
+X(a, STATIC,   REQUIRED, FLOAT,    available_forward_m,   4) \
+X(a, STATIC,   REQUIRED, FLOAT,    available_backward_m,   5) \
+X(a, STATIC,   REQUIRED, FLOAT,    required_forward_m,   6) \
+X(a, STATIC,   REQUIRED, FLOAT,    required_backward_m,   7) \
+X(a, STATIC,   REQUIRED, FLOAT,    braking_distance_m,   8) \
+X(a, STATIC,   REQUIRED, FLOAT,    body_radius_m,     9) \
+X(a, STATIC,   REQUIRED, FLOAT,    position_bound_m,  10) \
+X(a, STATIC,   REQUIRED, FLOAT,    heading_bound_rad,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    cusp_sweep_sha256,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    s19_sweep_sha256,  13) \
+X(a, STATIC,   REQUIRED, UINT64,   vehicle_sequence,  14)
+#define xenova_drive_RouteExtentProof_CALLBACK NULL
+#define xenova_drive_RouteExtentProof_DEFAULT NULL
+
+#define xenova_drive_RouteEligibility_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    eligibility_id,    2) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,           3) \
+X(a, STATIC,   REQUIRED, MESSAGE,  owner,             4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  witness,           5) \
+X(a, STATIC,   REQUIRED, UINT32,   task_space_kind,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    goal_sha256,       7) \
+X(a, STATIC,   REQUIRED, BYTES,    exit_space_sha256,   8) \
+X(a, STATIC,   REQUIRED, BYTES,    topology_sha256,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    window_sha256,    10) \
+X(a, STATIC,   REQUIRED, BYTES,    global_plan_sha256,  11) \
+X(a, STATIC,   REQUIRED, BOOL,     eligible,         12) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,           13) \
+X(a, STATIC,   REQUIRED, MESSAGE,  extent,           14)
+#define xenova_drive_RouteEligibility_CALLBACK NULL
+#define xenova_drive_RouteEligibility_DEFAULT NULL
+#define xenova_drive_RouteEligibility_owner_MSGTYPE xenova_drive_RouteOwnerContext
+#define xenova_drive_RouteEligibility_witness_MSGTYPE xenova_drive_RouteCurrentWitness
+#define xenova_drive_RouteEligibility_extent_MSGTYPE xenova_drive_RouteExtentProof
+
+#define xenova_drive_RouteEligibilityRef_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, BYTES,    eligibility_id,    1) \
+X(a, STATIC,   REQUIRED, BYTES,    body_sha256,       2) \
+X(a, STATIC,   REQUIRED, UINT32,   purpose,           3) \
+X(a, STATIC,   REQUIRED, UINT64,   ready_revision,    4) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   5) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,            6) \
+X(a, STATIC,   REQUIRED, UINT32,   task_space_kind,   7) \
+X(a, STATIC,   REQUIRED, BOOL,     eligible,          8)
+#define xenova_drive_RouteEligibilityRef_CALLBACK NULL
+#define xenova_drive_RouteEligibilityRef_DEFAULT NULL
+
+#define xenova_drive_MapperWorldWitness_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, MESSAGE,  mapper,            2) \
+X(a, STATIC,   REQUIRED, MESSAGE,  source,            3) \
+X(a, STATIC,   REQUIRED, BYTES,    world_raw_sha256,   4)
+#define xenova_drive_MapperWorldWitness_CALLBACK NULL
+#define xenova_drive_MapperWorldWitness_DEFAULT NULL
+#define xenova_drive_MapperWorldWitness_mapper_MSGTYPE xenova_drive_MapperRouteWitness
+#define xenova_drive_MapperWorldWitness_source_MSGTYPE xenova_drive_EpisodeSourceContext
+
+#define xenova_drive_WindowTransitionRequest_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, UINT32,   action,            3) \
+X(a, STATIC,   REQUIRED, MESSAGE,  owner,             4) \
+X(a, STATIC,   REQUIRED, BYTES,    query_id,          5) \
+X(a, STATIC,   REQUIRED, BYTES,    query_sha256,      6) \
+X(a, STATIC,   REQUIRED, BYTES,    route_id,          7) \
+X(a, STATIC,   REQUIRED, BYTES,    expected_registry_epoch,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_registry_revision,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    transition_id,    10) \
+X(a, STATIC,   REQUIRED, BYTES,    from_window_sha256,  11) \
+X(a, STATIC,   REQUIRED, BYTES,    to_window_sha256,  12) \
+X(a, STATIC,   REQUIRED, BYTES,    from_world_sha256,  13) \
+X(a, STATIC,   REQUIRED, BYTES,    candidate_local_path_sha256,  14) \
+X(a, STATIC,   REQUIRED, MESSAGE,  witness,          15) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_source_binding_revision,  16) \
+X(a, STATIC,   REQUIRED, UINT64,   phase_revision,   17) \
+X(a, STATIC,   REQUIRED, MESSAGE,  extent,           18)
+#define xenova_drive_WindowTransitionRequest_CALLBACK NULL
+#define xenova_drive_WindowTransitionRequest_DEFAULT NULL
+#define xenova_drive_WindowTransitionRequest_owner_MSGTYPE xenova_drive_RouteOwnerContext
+#define xenova_drive_WindowTransitionRequest_witness_MSGTYPE xenova_drive_RouteCurrentWitness
+#define xenova_drive_WindowTransitionRequest_extent_MSGTYPE xenova_drive_RouteExtentProof
+
+#define xenova_drive_WindowTransitionReceipt_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, BYTES,    request_sha256,    3) \
+X(a, STATIC,   REQUIRED, BYTES,    transition_id,     4) \
+X(a, STATIC,   REQUIRED, UINT32,   state,             5) \
+X(a, STATIC,   REQUIRED, BYTES,    from_window_sha256,   6) \
+X(a, STATIC,   REQUIRED, BYTES,    to_window_sha256,   7) \
+X(a, STATIC,   REQUIRED, BYTES,    active_window_sha256,   8) \
+X(a, STATIC,   REQUIRED, UINT64,   source_binding_revision,   9) \
+X(a, STATIC,   REQUIRED, BYTES,    activated_world_sha256,  10) \
+X(a, STATIC,   REQUIRED, UINT64,   activated_world_sequence,  11) \
+X(a, STATIC,   REQUIRED, MESSAGE,  mapper,           12) \
+X(a, STATIC,   REQUIRED, UINT32,   reason,           13) \
+X(a, STATIC,   REQUIRED, UINT64,   transition_generation,  14) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  15)
+#define xenova_drive_WindowTransitionReceipt_CALLBACK NULL
+#define xenova_drive_WindowTransitionReceipt_DEFAULT NULL
+#define xenova_drive_WindowTransitionReceipt_mapper_MSGTYPE xenova_drive_MapperRouteWitness
+
+#define xenova_drive_RoadDataRequest_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, UINT32,   record_kind,       3) \
+X(a, STATIC,   REQUIRED, BYTES,    record_sha256,     4) \
+X(a, STATIC,   REQUIRED, MESSAGE,  owner,             5) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,   6)
+#define xenova_drive_RoadDataRequest_CALLBACK NULL
+#define xenova_drive_RoadDataRequest_DEFAULT NULL
+#define xenova_drive_RoadDataRequest_owner_MSGTYPE xenova_drive_RouteOwnerContext
+
+#define xenova_drive_RoadRegistrationRequest_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, BYTES,    request_nonce,     2) \
+X(a, STATIC,   REQUIRED, MESSAGE,  owner,             3) \
+X(a, STATIC,   REQUIRED, UINT64,   expected_goal_revision,   4) \
+X(a, STATIC,   REQUIRED, BYTES,    expected_goal_sha256,   5) \
+X(a, STATIC,   REQUIRED, BYTES,    world_raw_sha256,   6) \
+X(a, STATIC,   REQUIRED, MESSAGE,  vehicle,           7) \
+X(a, STATIC,   REQUIRED, MESSAGE,  facts,             8) \
+X(a, STATIC,   REQUIRED, UINT64,   issued_pi_us,      9) \
+X(a, STATIC,   REQUIRED, UINT64,   valid_until_pi_us,  10)
+#define xenova_drive_RoadRegistrationRequest_CALLBACK NULL
+#define xenova_drive_RoadRegistrationRequest_DEFAULT NULL
+#define xenova_drive_RoadRegistrationRequest_owner_MSGTYPE xenova_drive_RouteOwnerContext
+#define xenova_drive_RoadRegistrationRequest_vehicle_MSGTYPE xenova_drive_VehicleSample
+#define xenova_drive_RoadRegistrationRequest_facts_MSGTYPE xenova_drive_DriveControlFacts
+
+#define xenova_drive_RoadData_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   REQUIRED, UINT32,   publisher_kind,    2) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  mapper,            3) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  guest_owner,       4) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  guest_witness,     5) \
+X(a, STATIC,   REQUIRED, BYTES,    record_sha256,     6) \
+X(a, STATIC,   OPTIONAL, MESSAGE,  durable,           7) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,start_goal,payload.start_goal),  10) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_topology,payload.road_topology),  11) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_section,payload.road_section),  12) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_connection,payload.road_connection),  13) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_window,payload.road_window),  14) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,exit_space,payload.exit_space),  15) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,route_plan,payload.route_plan),  16) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_geometry_scope,payload.road_geometry_scope),  17)
+#define xenova_drive_RoadData_CALLBACK NULL
+#define xenova_drive_RoadData_DEFAULT NULL
+#define xenova_drive_RoadData_mapper_MSGTYPE xenova_drive_MapperRouteWitness
+#define xenova_drive_RoadData_guest_owner_MSGTYPE xenova_drive_RouteOwnerContext
+#define xenova_drive_RoadData_guest_witness_MSGTYPE xenova_drive_RouteCurrentWitness
+#define xenova_drive_RoadData_durable_MSGTYPE xenova_drive_RoadDurableRef
+#define xenova_drive_RoadData_payload_start_goal_MSGTYPE xenova_drive_StartGoal
+#define xenova_drive_RoadData_payload_road_topology_MSGTYPE xenova_drive_RoadTopology
+#define xenova_drive_RoadData_payload_road_section_MSGTYPE xenova_drive_RoadSection
+#define xenova_drive_RoadData_payload_road_connection_MSGTYPE xenova_drive_RoadConnection
+#define xenova_drive_RoadData_payload_road_window_MSGTYPE xenova_drive_RoadWindow
+#define xenova_drive_RoadData_payload_exit_space_MSGTYPE xenova_drive_ExitSpace
+#define xenova_drive_RoadData_payload_route_plan_MSGTYPE xenova_drive_RoutePlan
+#define xenova_drive_RoadData_payload_road_geometry_scope_MSGTYPE xenova_drive_RoadGeometryScope
+
+#define xenova_drive_RouteExchange_FIELDLIST(X, a) \
+X(a, STATIC,   REQUIRED, UINT32,   major,             1) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,route_query,payload.route_query),   2) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,route_eligibility,payload.route_eligibility),   3) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,route_candidate,payload.route_candidate),   4) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,route_receipt,payload.route_receipt),   5) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,window_transition_request,payload.window_transition_request),   6) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,window_transition_receipt,payload.window_transition_receipt),   7) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_data_request,payload.road_data_request),   8) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,mapper_world_witness,payload.mapper_world_witness),   9) \
+X(a, STATIC,   ONEOF,    MESSAGE,  (payload,road_registration_request,payload.road_registration_request),  10)
+#define xenova_drive_RouteExchange_CALLBACK NULL
+#define xenova_drive_RouteExchange_DEFAULT NULL
+#define xenova_drive_RouteExchange_payload_route_query_MSGTYPE xenova_drive_RouteQuery
+#define xenova_drive_RouteExchange_payload_route_eligibility_MSGTYPE xenova_drive_RouteEligibility
+#define xenova_drive_RouteExchange_payload_route_candidate_MSGTYPE xenova_drive_RouteCandidate
+#define xenova_drive_RouteExchange_payload_route_receipt_MSGTYPE xenova_drive_RouteReceipt
+#define xenova_drive_RouteExchange_payload_window_transition_request_MSGTYPE xenova_drive_WindowTransitionRequest
+#define xenova_drive_RouteExchange_payload_window_transition_receipt_MSGTYPE xenova_drive_WindowTransitionReceipt
+#define xenova_drive_RouteExchange_payload_road_data_request_MSGTYPE xenova_drive_RoadDataRequest
+#define xenova_drive_RouteExchange_payload_mapper_world_witness_MSGTYPE xenova_drive_MapperWorldWitness
+#define xenova_drive_RouteExchange_payload_road_registration_request_MSGTYPE xenova_drive_RoadRegistrationRequest
 
 extern const pb_msgdesc_t xenova_drive_Pose_msg;
 extern const pb_msgdesc_t xenova_drive_Point_msg;
@@ -636,12 +4762,83 @@ extern const pb_msgdesc_t xenova_drive_PathPoint_msg;
 extern const pb_msgdesc_t xenova_drive_WorldSnapshot_msg;
 extern const pb_msgdesc_t xenova_drive_VehicleSample_msg;
 extern const pb_msgdesc_t xenova_drive_DriveState_msg;
+extern const pb_msgdesc_t xenova_drive_TaskReferenceState_msg;
 extern const pb_msgdesc_t xenova_drive_ClockProbe_msg;
+extern const pb_msgdesc_t xenova_drive_GuestClockReceipt_msg;
 extern const pb_msgdesc_t xenova_drive_WorldTrust_msg;
 extern const pb_msgdesc_t xenova_drive_ClockReply_msg;
+extern const pb_msgdesc_t xenova_drive_OperationBinding_msg;
+extern const pb_msgdesc_t xenova_drive_OperationStatus_msg;
+extern const pb_msgdesc_t xenova_drive_AutoInputPreflight_msg;
+extern const pb_msgdesc_t xenova_drive_PiOperationGate_msg;
 extern const pb_msgdesc_t xenova_drive_AcceptedState_msg;
 extern const pb_msgdesc_t xenova_drive_AppliedState_msg;
 extern const pb_msgdesc_t xenova_drive_DriveLink_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeCore_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeProgress_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeAcceptanceRef_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeSnapshot_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeSourceContext_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeRequest_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeReceipt_msg;
+extern const pb_msgdesc_t xenova_drive_EpisodeStatus_msg;
+extern const pb_msgdesc_t xenova_drive_PiAbsoluteMeter_msg;
+extern const pb_msgdesc_t xenova_drive_StopFacts_msg;
+extern const pb_msgdesc_t xenova_drive_DriveControlFacts_msg;
+extern const pb_msgdesc_t xenova_drive_LaneGeometry_msg;
+extern const pb_msgdesc_t xenova_drive_LaneModel_msg;
+extern const pb_msgdesc_t xenova_drive_ParkingSlot_msg;
+extern const pb_msgdesc_t xenova_drive_ParkingSetMeta_msg;
+extern const pb_msgdesc_t xenova_drive_MapLocalization_msg;
+extern const pb_msgdesc_t xenova_drive_SceneAdmissionRef_msg;
+extern const pb_msgdesc_t xenova_drive_MissionExecution_msg;
+extern const pb_msgdesc_t xenova_drive_GearSegment_msg;
+extern const pb_msgdesc_t xenova_drive_DirectionGateRef_msg;
+extern const pb_msgdesc_t xenova_drive_DirectionGateWitness_msg;
+extern const pb_msgdesc_t xenova_drive_MissionGrant_msg;
+extern const pb_msgdesc_t xenova_drive_MissionBudgetRequest_msg;
+extern const pb_msgdesc_t xenova_drive_MissionBudgetReply_msg;
+extern const pb_msgdesc_t xenova_drive_MapperClockProbe_msg;
+extern const pb_msgdesc_t xenova_drive_MapperClockReply_msg;
+extern const pb_msgdesc_t xenova_drive_SceneGrant_msg;
+extern const pb_msgdesc_t xenova_drive_SurveySummary_msg;
+extern const pb_msgdesc_t xenova_drive_TofObservation_msg;
+extern const pb_msgdesc_t xenova_drive_RouteBinding_msg;
+extern const pb_msgdesc_t xenova_drive_StartGoal_msg;
+extern const pb_msgdesc_t xenova_drive_RoadSectionRef_msg;
+extern const pb_msgdesc_t xenova_drive_RoadEdge_msg;
+extern const pb_msgdesc_t xenova_drive_RoadTopology_msg;
+extern const pb_msgdesc_t xenova_drive_RoadSection_msg;
+extern const pb_msgdesc_t xenova_drive_RoadConnection_msg;
+extern const pb_msgdesc_t xenova_drive_ExitSpace_msg;
+extern const pb_msgdesc_t xenova_drive_RouteOccurrence_msg;
+extern const pb_msgdesc_t xenova_drive_RoutePlan_msg;
+extern const pb_msgdesc_t xenova_drive_RouteCore_msg;
+extern const pb_msgdesc_t xenova_drive_RouteProgress_msg;
+extern const pb_msgdesc_t xenova_drive_RouteAcceptanceRef_msg;
+extern const pb_msgdesc_t xenova_drive_RouteSnapshot_msg;
+extern const pb_msgdesc_t xenova_drive_WorldRouteView_msg;
+extern const pb_msgdesc_t xenova_drive_RouteStatus_msg;
+extern const pb_msgdesc_t xenova_drive_RouteQuery_msg;
+extern const pb_msgdesc_t xenova_drive_RouteCandidate_msg;
+extern const pb_msgdesc_t xenova_drive_RouteReceipt_msg;
+extern const pb_msgdesc_t xenova_drive_RoadWindow_msg;
+extern const pb_msgdesc_t xenova_drive_RoadGeometryScope_msg;
+extern const pb_msgdesc_t xenova_drive_RoadDurableRef_msg;
+extern const pb_msgdesc_t xenova_drive_RoadObservationOrigin_msg;
+extern const pb_msgdesc_t xenova_drive_MapperRouteWitness_msg;
+extern const pb_msgdesc_t xenova_drive_RouteOwnerContext_msg;
+extern const pb_msgdesc_t xenova_drive_RouteCurrentWitness_msg;
+extern const pb_msgdesc_t xenova_drive_RouteExtentProof_msg;
+extern const pb_msgdesc_t xenova_drive_RouteEligibility_msg;
+extern const pb_msgdesc_t xenova_drive_RouteEligibilityRef_msg;
+extern const pb_msgdesc_t xenova_drive_MapperWorldWitness_msg;
+extern const pb_msgdesc_t xenova_drive_WindowTransitionRequest_msg;
+extern const pb_msgdesc_t xenova_drive_WindowTransitionReceipt_msg;
+extern const pb_msgdesc_t xenova_drive_RoadDataRequest_msg;
+extern const pb_msgdesc_t xenova_drive_RoadRegistrationRequest_msg;
+extern const pb_msgdesc_t xenova_drive_RoadData_msg;
+extern const pb_msgdesc_t xenova_drive_RouteExchange_msg;
 
 /* Defines for backwards compatibility with code written before nanopb-0.4.0 */
 #define xenova_drive_Pose_fields &xenova_drive_Pose_msg
@@ -650,26 +4847,168 @@ extern const pb_msgdesc_t xenova_drive_DriveLink_msg;
 #define xenova_drive_WorldSnapshot_fields &xenova_drive_WorldSnapshot_msg
 #define xenova_drive_VehicleSample_fields &xenova_drive_VehicleSample_msg
 #define xenova_drive_DriveState_fields &xenova_drive_DriveState_msg
+#define xenova_drive_TaskReferenceState_fields &xenova_drive_TaskReferenceState_msg
 #define xenova_drive_ClockProbe_fields &xenova_drive_ClockProbe_msg
+#define xenova_drive_GuestClockReceipt_fields &xenova_drive_GuestClockReceipt_msg
 #define xenova_drive_WorldTrust_fields &xenova_drive_WorldTrust_msg
 #define xenova_drive_ClockReply_fields &xenova_drive_ClockReply_msg
+#define xenova_drive_OperationBinding_fields &xenova_drive_OperationBinding_msg
+#define xenova_drive_OperationStatus_fields &xenova_drive_OperationStatus_msg
+#define xenova_drive_AutoInputPreflight_fields &xenova_drive_AutoInputPreflight_msg
+#define xenova_drive_PiOperationGate_fields &xenova_drive_PiOperationGate_msg
 #define xenova_drive_AcceptedState_fields &xenova_drive_AcceptedState_msg
 #define xenova_drive_AppliedState_fields &xenova_drive_AppliedState_msg
 #define xenova_drive_DriveLink_fields &xenova_drive_DriveLink_msg
+#define xenova_drive_EpisodeCore_fields &xenova_drive_EpisodeCore_msg
+#define xenova_drive_EpisodeProgress_fields &xenova_drive_EpisodeProgress_msg
+#define xenova_drive_EpisodeAcceptanceRef_fields &xenova_drive_EpisodeAcceptanceRef_msg
+#define xenova_drive_EpisodeSnapshot_fields &xenova_drive_EpisodeSnapshot_msg
+#define xenova_drive_EpisodeSourceContext_fields &xenova_drive_EpisodeSourceContext_msg
+#define xenova_drive_EpisodeRequest_fields &xenova_drive_EpisodeRequest_msg
+#define xenova_drive_EpisodeReceipt_fields &xenova_drive_EpisodeReceipt_msg
+#define xenova_drive_EpisodeStatus_fields &xenova_drive_EpisodeStatus_msg
+#define xenova_drive_PiAbsoluteMeter_fields &xenova_drive_PiAbsoluteMeter_msg
+#define xenova_drive_StopFacts_fields &xenova_drive_StopFacts_msg
+#define xenova_drive_DriveControlFacts_fields &xenova_drive_DriveControlFacts_msg
+#define xenova_drive_LaneGeometry_fields &xenova_drive_LaneGeometry_msg
+#define xenova_drive_LaneModel_fields &xenova_drive_LaneModel_msg
+#define xenova_drive_ParkingSlot_fields &xenova_drive_ParkingSlot_msg
+#define xenova_drive_ParkingSetMeta_fields &xenova_drive_ParkingSetMeta_msg
+#define xenova_drive_MapLocalization_fields &xenova_drive_MapLocalization_msg
+#define xenova_drive_SceneAdmissionRef_fields &xenova_drive_SceneAdmissionRef_msg
+#define xenova_drive_MissionExecution_fields &xenova_drive_MissionExecution_msg
+#define xenova_drive_GearSegment_fields &xenova_drive_GearSegment_msg
+#define xenova_drive_DirectionGateRef_fields &xenova_drive_DirectionGateRef_msg
+#define xenova_drive_DirectionGateWitness_fields &xenova_drive_DirectionGateWitness_msg
+#define xenova_drive_MissionGrant_fields &xenova_drive_MissionGrant_msg
+#define xenova_drive_MissionBudgetRequest_fields &xenova_drive_MissionBudgetRequest_msg
+#define xenova_drive_MissionBudgetReply_fields &xenova_drive_MissionBudgetReply_msg
+#define xenova_drive_MapperClockProbe_fields &xenova_drive_MapperClockProbe_msg
+#define xenova_drive_MapperClockReply_fields &xenova_drive_MapperClockReply_msg
+#define xenova_drive_SceneGrant_fields &xenova_drive_SceneGrant_msg
+#define xenova_drive_SurveySummary_fields &xenova_drive_SurveySummary_msg
+#define xenova_drive_TofObservation_fields &xenova_drive_TofObservation_msg
+#define xenova_drive_RouteBinding_fields &xenova_drive_RouteBinding_msg
+#define xenova_drive_StartGoal_fields &xenova_drive_StartGoal_msg
+#define xenova_drive_RoadSectionRef_fields &xenova_drive_RoadSectionRef_msg
+#define xenova_drive_RoadEdge_fields &xenova_drive_RoadEdge_msg
+#define xenova_drive_RoadTopology_fields &xenova_drive_RoadTopology_msg
+#define xenova_drive_RoadSection_fields &xenova_drive_RoadSection_msg
+#define xenova_drive_RoadConnection_fields &xenova_drive_RoadConnection_msg
+#define xenova_drive_ExitSpace_fields &xenova_drive_ExitSpace_msg
+#define xenova_drive_RouteOccurrence_fields &xenova_drive_RouteOccurrence_msg
+#define xenova_drive_RoutePlan_fields &xenova_drive_RoutePlan_msg
+#define xenova_drive_RouteCore_fields &xenova_drive_RouteCore_msg
+#define xenova_drive_RouteProgress_fields &xenova_drive_RouteProgress_msg
+#define xenova_drive_RouteAcceptanceRef_fields &xenova_drive_RouteAcceptanceRef_msg
+#define xenova_drive_RouteSnapshot_fields &xenova_drive_RouteSnapshot_msg
+#define xenova_drive_WorldRouteView_fields &xenova_drive_WorldRouteView_msg
+#define xenova_drive_RouteStatus_fields &xenova_drive_RouteStatus_msg
+#define xenova_drive_RouteQuery_fields &xenova_drive_RouteQuery_msg
+#define xenova_drive_RouteCandidate_fields &xenova_drive_RouteCandidate_msg
+#define xenova_drive_RouteReceipt_fields &xenova_drive_RouteReceipt_msg
+#define xenova_drive_RoadWindow_fields &xenova_drive_RoadWindow_msg
+#define xenova_drive_RoadGeometryScope_fields &xenova_drive_RoadGeometryScope_msg
+#define xenova_drive_RoadDurableRef_fields &xenova_drive_RoadDurableRef_msg
+#define xenova_drive_RoadObservationOrigin_fields &xenova_drive_RoadObservationOrigin_msg
+#define xenova_drive_MapperRouteWitness_fields &xenova_drive_MapperRouteWitness_msg
+#define xenova_drive_RouteOwnerContext_fields &xenova_drive_RouteOwnerContext_msg
+#define xenova_drive_RouteCurrentWitness_fields &xenova_drive_RouteCurrentWitness_msg
+#define xenova_drive_RouteExtentProof_fields &xenova_drive_RouteExtentProof_msg
+#define xenova_drive_RouteEligibility_fields &xenova_drive_RouteEligibility_msg
+#define xenova_drive_RouteEligibilityRef_fields &xenova_drive_RouteEligibilityRef_msg
+#define xenova_drive_MapperWorldWitness_fields &xenova_drive_MapperWorldWitness_msg
+#define xenova_drive_WindowTransitionRequest_fields &xenova_drive_WindowTransitionRequest_msg
+#define xenova_drive_WindowTransitionReceipt_fields &xenova_drive_WindowTransitionReceipt_msg
+#define xenova_drive_RoadDataRequest_fields &xenova_drive_RoadDataRequest_msg
+#define xenova_drive_RoadRegistrationRequest_fields &xenova_drive_RoadRegistrationRequest_msg
+#define xenova_drive_RoadData_fields &xenova_drive_RoadData_msg
+#define xenova_drive_RouteExchange_fields &xenova_drive_RouteExchange_msg
 
 /* Maximum encoded size of messages (where known) */
 #define XENOVA_DRIVE_WORLD_PB_H_MAX_SIZE         xenova_drive_WorldSnapshot_size
-#define xenova_drive_AcceptedState_size          16124
+#define xenova_drive_AcceptedState_size          19445
 #define xenova_drive_AppliedState_size           722
-#define xenova_drive_ClockProbe_size             136
-#define xenova_drive_ClockReply_size             1235
-#define xenova_drive_DriveLink_size              16133
-#define xenova_drive_DriveState_size             16045
+#define xenova_drive_AutoInputPreflight_size     652
+#define xenova_drive_ClockProbe_size             855
+#define xenova_drive_ClockReply_size             5348
+#define xenova_drive_DirectionGateRef_size       34
+#define xenova_drive_DirectionGateWitness_size   274
+#define xenova_drive_DriveControlFacts_size      497
+#define xenova_drive_DriveLink_size              19455
+#define xenova_drive_DriveState_size             19365
+#define xenova_drive_EpisodeAcceptanceRef_size   197
+#define xenova_drive_EpisodeCore_size            457
+#define xenova_drive_EpisodeProgress_size        54
+#define xenova_drive_EpisodeReceipt_size         829
+#define xenova_drive_EpisodeRequest_size         1592
+#define xenova_drive_EpisodeSnapshot_size        716
+#define xenova_drive_EpisodeSourceContext_size   559
+#define xenova_drive_EpisodeStatus_size          1062
+#define xenova_drive_ExitSpace_size              636
+#define xenova_drive_GearSegment_size            18
+#define xenova_drive_GuestClockReceipt_size      56
+#define xenova_drive_LaneGeometry_size           455
+#define xenova_drive_LaneModel_size              1388
+#define xenova_drive_MapLocalization_size        70
+#define xenova_drive_MapperClockProbe_size       993
+#define xenova_drive_MapperClockReply_size       921
+#define xenova_drive_MapperRouteWitness_size     288
+#define xenova_drive_MapperWorldWitness_size     893
+#define xenova_drive_MissionBudgetReply_size     843
+#define xenova_drive_MissionBudgetRequest_size   235
+#define xenova_drive_MissionExecution_size       493
+#define xenova_drive_MissionGrant_size           770
+#define xenova_drive_OperationBinding_size       60
+#define xenova_drive_OperationStatus_size        139
+#define xenova_drive_ParkingSetMeta_size         38
+#define xenova_drive_ParkingSlot_size            201
 #define xenova_drive_PathPoint_size              27
+#define xenova_drive_PiAbsoluteMeter_size        62
+#define xenova_drive_PiOperationGate_size        78
 #define xenova_drive_Point_size                  10
 #define xenova_drive_Pose_size                   15
+#define xenova_drive_RoadConnection_size         877
+#define xenova_drive_RoadDataRequest_size        348
+#define xenova_drive_RoadData_size               11328
+#define xenova_drive_RoadDurableRef_size         200
+#define xenova_drive_RoadEdge_size               74
+#define xenova_drive_RoadGeometryScope_size      492
+#define xenova_drive_RoadObservationOrigin_size  331
+#define xenova_drive_RoadRegistrationRequest_size 1362
+#define xenova_drive_RoadSectionRef_size         73
+#define xenova_drive_RoadSection_size            3179
+#define xenova_drive_RoadTopology_size           9801
+#define xenova_drive_RoadWindow_size             3326
+#define xenova_drive_RouteAcceptanceRef_size     178
+#define xenova_drive_RouteBinding_size           137
+#define xenova_drive_RouteCandidate_size         2210
+#define xenova_drive_RouteCore_size              563
+#define xenova_drive_RouteCurrentWitness_size    708
+#define xenova_drive_RouteEligibilityRef_size    94
+#define xenova_drive_RouteEligibility_size       1394
+#define xenova_drive_RouteExchange_size          2219
+#define xenova_drive_RouteExtentProof_size       193
+#define xenova_drive_RouteOccurrence_size        27
+#define xenova_drive_RouteOwnerContext_size      270
+#define xenova_drive_RoutePlan_size              3087
+#define xenova_drive_RouteProgress_size          104
+#define xenova_drive_RouteQuery_size             377
+#define xenova_drive_RouteReceipt_size           1421
+#define xenova_drive_RouteSnapshot_size          1012
+#define xenova_drive_RouteStatus_size            565
+#define xenova_drive_SceneAdmissionRef_size      100
+#define xenova_drive_SceneGrant_size             819
+#define xenova_drive_StartGoal_size              677
+#define xenova_drive_StopFacts_size              413
+#define xenova_drive_SurveySummary_size          271
+#define xenova_drive_TaskReferenceState_size     976
+#define xenova_drive_TofObservation_size         719
 #define xenova_drive_VehicleSample_size          461
-#define xenova_drive_WorldSnapshot_size          27813
+#define xenova_drive_WindowTransitionReceipt_size 559
+#define xenova_drive_WindowTransitionRequest_size 1488
+#define xenova_drive_WorldRouteView_size         288
+#define xenova_drive_WorldSnapshot_size          31870
 #define xenova_drive_WorldTrust_size             531
 
 #ifdef __cplusplus

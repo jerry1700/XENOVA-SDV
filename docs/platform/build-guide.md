@@ -16,7 +16,7 @@
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
 | 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.5, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
+| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu 1.0.5·Debian 1.0.6, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
@@ -153,11 +153,16 @@ cp -a "$REPO/frontend" "$RUN/frontend-build"
 mkdir "$RUN/display-web-input"
 cp -a "$RUN/frontend-build/apps/vm-screens/dist" "$RUN/display-web-input/display-web"
 export XENOVA_DISPLAY_WEB_ASSETS="$RUN/display-web-input"
+DISPLAY_WEB_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
 printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$XENOVA_DISPLAY_WEB_ASSETS" \
   >> "$YOCTO_BUILD_DIR/conf/local.conf"
 ```
 
 원본·lockfile·완성 자산 해시를 보관하고, 생성한 dist는 Git에 넣지 않는다.
+같은 dist를 Debian Interaction 템플릿에 넣을 때는 템플릿 생성 명령에
+`--display-web-assets "$RUN/display-web-input/display-web"`와
+`--display-web-revision "$DISPLAY_WEB_REVISION"`을 함께 전달한다. 템플릿 manifest에는
+프론트 커밋, 파일별 SHA-256과 전체 트리 SHA-256이 기록된다.
 xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 user unit을 설치한다.
 피드는 /etc/xenova/display-bindings.json과 root 전용 display.env를 준비한 경우에만
 시작한다. 실제 UUID·EDID·좌표·X11 인증·비-root 그래픽 세션을 설정한 뒤

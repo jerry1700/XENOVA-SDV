@@ -15,7 +15,8 @@ SRC_URI += " file://xenova_drive_binding.py file://provision-xenova-telemetry.py
 SRC_URI += " file://xenova_telemetry_support.py file://xenova_telemetry_evidence.py file://xenova-telemetry-support file://xenova-telemetry-clock.service file://xenova-telemetry-clock.timer"
 SRC_URI += "file://xenova-console-evidence.conf file://xenova-telemetry-evidence.service file://xenova-telemetry-evidence.timer"
 SRC_URI += " file://xenova_domain_identity_native.c"
-SRC_URI += " file://xenova_guest_profile.py file://xenova_provisioning.py file://xenova_registration.py file://xenova_registration_hook.py file://xenova-world-install"
+SRC_URI += " file://xenova_domain_identities_native.c"
+SRC_URI += " file://xenova_guest_profile.py file://xenova_provisioning.py file://xenova_registration.py file://xenova_registration_hook.py file://xenova_display_sync.py file://xenova-world-install"
 inherit systemd
 
 # 기존 이미지의 Python 코어에 사용자 승인한 표준 JSON 패키지를 추가한다.
@@ -32,17 +33,20 @@ SYSTEMD_SERVICE:${PN} += "xenova-telemetry-evidence.timer"
 do_compile() {
     ${CC} ${CFLAGS} ${LDFLAGS} -std=c11 -Wall -Wextra \
         "${S}/xenova_domain_identity_native.c" -o "${B}/xenova-domain-identity-native" -ldl
+    ${CC} ${CFLAGS} ${LDFLAGS} -std=c11 -Wall -Wextra \
+        "${S}/xenova_domain_identities_native.c" -o "${B}/xenova-domain-identities-native" -ldl
 }
 
 do_install() {
     install -d "${D}${libexecdir}"
     install -m 0755 "${B}/xenova-domain-identity-native" "${D}${libexecdir}/xenova-domain-identity-native"
+    install -m 0755 "${B}/xenova-domain-identities-native" "${D}${libexecdir}/xenova-domain-identities-native"
     install -d "${D}${sbindir}" "${D}${libdir}/xenova" "${D}${sysconfdir}/xenova" \
         "${D}${sysconfdir}/ssh" "${D}${systemd_system_unitdir}" "${D}/srv/xenova"
     install -m 0755 "${S}/verify-xenova-runtime-artifacts.py" "${D}${sbindir}/xenova-verify-artifacts"
     install -m 0755 "${S}/xenova-vm" "${D}${sbindir}/xenova-vm"
     install -m 0755 "${S}/xenova-world-install" "${D}${sbindir}/xenova-world-install"
-    for module in xenova_guest_profile.py xenova_provisioning.py xenova_registration.py xenova_registration_hook.py; do
+    for module in xenova_guest_profile.py xenova_provisioning.py xenova_registration.py xenova_registration_hook.py xenova_display_sync.py; do
         install -m 0644 "${S}/$module" "${D}${libdir}/xenova/$module"
     done
     install -m 0755 "${S}/xenova-domain-identity" "${D}${sbindir}/xenova-domain-identity"
