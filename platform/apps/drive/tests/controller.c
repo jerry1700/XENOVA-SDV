@@ -17,6 +17,26 @@ static int replacement(void *context,struct xm_span control,struct xm_span input
 static const char *replacement_qualify(const void *context,struct xm_span input,int64_t age){
  (void)context;(void)input;(void)age;return NULL;
 }
+struct rejection {const char *result,*qualification;};
+static int rejected_result(void *context,struct xm_span control,struct xm_span input,int64_t age,struct drive_sample *out){
+ (void)control;(void)input;(void)age;out->reason=((struct rejection *)context)->result;out->v_mps=.3f;return 0;
+}
+static const char *rejected_qualification(const void *context,struct xm_span input,int64_t age){
+ (void)input;(void)age;return ((const struct rejection *)context)->qualification;
+}
+static bool rejected_state_usable(const void *context){(void)context;return true;}
+static void rejection_tests(void){
+ struct rejection cases[]={{"CALCULATION_FAILED","STATE_PREPARING"},{"SEARCH_NOT_FOUND","STATE_PREPARING"},
+  {"POSE_UNAVAILABLE","CALCULATION_FAILED"},{NULL,"CALCULATION_FAILED"}};
+ for(unsigned k=0;k<sizeof(cases)/sizeof(*cases);k++){
+  struct drive_adapter a={.calculate=rejected_result,.context=&cases[k],.requires_state_sync=true,
+   .state_ready=true,.state_usable=rejected_state_usable,.qualify=rejected_qualification};struct drive_sample result;
+  assert(!drive_adapter_run(&a,(struct xm_span){0},(struct xm_span){0},0,&result));
+  assert(!result.v_mps&&!result.steer_rad&&a.progress==1);
+  assert(!strcmp(result.reason,cases[k].result?cases[k].result:cases[k].qualification));
+ }
+ puts("adapter rejection: planner fault, normal no-path, common input precedence PASS");
+}
 static uint64_t clock_values[4];static unsigned clock_index;
 static int health_clock(uint64_t *out){assert(clock_index<4);*out=clock_values[clock_index++];return 0;}
 static int no_memory(void *context,struct xm_span control,struct xm_span input,int64_t age,struct drive_sample *out){
@@ -130,6 +150,7 @@ static void health_tests(void){
 }
 int main(void){
  command_attempt_tests();
+ rejection_tests();
  health_tests();
  for(int swapped=0;swapped<2;swapped++){
   const char *own=swapped?B:A,*other=swapped?A:B;
