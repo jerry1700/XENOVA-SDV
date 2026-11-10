@@ -154,7 +154,7 @@ def test_actual_new_mapper_extensions_fit_original_caps(operations_probe,kind):
     value=mapper_probe() if kind=='mapper-probe' else mapper_reply()
     assert len(encode(value))<=1024 and operations_probe(value,kind)=='OK'
     if kind=='mapper-probe':value.operation_gate.valid_until_pi_us=value.pi_send_us
-    else:value.supported_mapper_features=2
+    else:value.supported_mapper_features=4  # 2 is the supported route capability.
     with pytest.raises(ValueError):validate(value)
     assert operations_probe(value,kind)=='REJECT'
 
