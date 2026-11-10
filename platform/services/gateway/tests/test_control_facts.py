@@ -15,7 +15,7 @@ def runtime(owner):
     runner=SimpleNamespace(_sink=owner,_clock=time.monotonic,authority=SimpleNamespace(host=HOST),
         machine=SimpleNamespace(generation=7),drive_link=SimpleNamespace(instance=GATEWAY),
         device_view=owner.device_view)
-    runner.matched_stop=lambda:VerifiedGatewayRunner.matched_stop(runner)
+    runner.matched_stop=lambda **kwargs:VerifiedGatewayRunner.matched_stop(runner,**kwargs)
     return runner
 
 
@@ -51,7 +51,7 @@ def test_speed_zero_without_current_matched_stop_is_not_stationary(link):
     owner,_,_=link;runner=runtime(owner)
     owner.write(StopFrame(7,0,1,witness=source()),time.monotonic())
     wait(lambda:stationary(runner) is not None)
-    runner.matched_stop=lambda:None  # Explicit missing input, not a replacement proof.
+    runner.matched_stop=lambda **kwargs:None  # Explicit missing input, not a replacement proof.
     value=build_control_facts(runner);validate(value)
     assert value.stop.state==2 and not value.stop.stationary_first_sequence
     assert value.stop.applied_report_sequence>0
@@ -85,3 +85,28 @@ def test_clock_facts_use_captured_parent_snapshot_without_reading_new_vehicle():
     assert value is not None
     validate(value)
     assert value.meter.vehicle_sequence==captured['vehicle_sample']['sequence']
+
+
+def test_matched_stop_uses_parent_snapshot_even_when_serial_owner_advanced():
+    """새 표본의 STOP window가 과거 ClockReply 부모에 붙지 않아야 한다."""
+    from unittest.mock import Mock
+    captured_stop=Mock()
+    captured=dict(vehicle_sample=dict(vehicle='car',calibration='cal',odom_epoch='odom'),
+        pi_session='pi',device_session='device',stop_facts_source=dict(matched=captured_stop))
+    device=SimpleNamespace(stationary_policy=object(),matched_stop=Mock())
+    runner=SimpleNamespace(_sink=SimpleNamespace(device=device),machine=SimpleNamespace(generation=7),
+        authority=SimpleNamespace(host=HOST),drive_link=SimpleNamespace(instance=GATEWAY),_clock=lambda:1.2,
+        device_view=Mock(side_effect=AssertionError('must not read a newer snapshot')))
+    assert VerifiedGatewayRunner.matched_stop(runner,view=captured) is captured_stop
+    captured_stop.check.assert_called_once_with(dict(vehicle='car',calibration='cal',odom_epoch='odom'),
+        HOST,GATEWAY,7,'pi','device',device.stationary_policy,1200000)
+    device.matched_stop.check.assert_not_called()
+
+
+def test_matched_stop_missing_from_parent_cannot_use_newer_serial_owner():
+    from unittest.mock import Mock
+    device=SimpleNamespace(stationary_policy=object(),matched_stop=Mock())
+    runner=SimpleNamespace(_sink=SimpleNamespace(device=device),machine=SimpleNamespace(generation=7),
+        device_view=lambda:dict(vehicle_sample=dict(vehicle='car'),stop_facts_source=None))
+    assert VerifiedGatewayRunner.matched_stop(runner) is None
+    device.matched_stop.check.assert_not_called()

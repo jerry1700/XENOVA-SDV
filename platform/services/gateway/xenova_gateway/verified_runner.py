@@ -567,17 +567,19 @@ class VerifiedGatewayRunner(GatewayRunner):
         if self.operator is None:raise ValueError('operator profile not configured')
         return self.operator.submit(call)
 
-    def matched_stop(self):
+    def matched_stop(self, *, view=None):
         """feedback3 원 ingress만 stationary 증거가 된다. feedback2/write ACK는 변환하지 않는다."""
         device=getattr(self._sink,'device',None)
-        value=getattr(device,'matched_stop',None)
         policy=getattr(device,'stationary_policy',None)
-        sample=self.device_view().get('vehicle_sample')
+        if view is None:view=self.device_view()
+        source=view.get('stop_facts_source')
+        value=None if source is None else source.get('matched')
+        sample=view.get('vehicle_sample')
         if value is None or policy is None or sample is None or self.machine is None:return None
         try:
             value.check(dict(vehicle=sample['vehicle'],calibration=sample['calibration'],odom_epoch=sample['odom_epoch']),
                 self.authority.host,self.drive_link.instance if self.drive_link else self._client.identity.agent_instance_id,
-                self.machine.generation,self.device_view()['pi_session'],self.device_view()['device_session'],policy,int(self._clock()*1e6))
+                self.machine.generation,view['pi_session'],view['device_session'],policy,int(self._clock()*1e6))
         except ValueError:return None
         return value
 

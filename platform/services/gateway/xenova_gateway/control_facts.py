@@ -67,7 +67,7 @@ def build_control_facts(runner, *, view=None):
         else:return value
     if now<facts.valid_until_pi_us:value.stop.CopyFrom(facts)
     # 원 pin의 APPLIED와 현재 실측 window. 속도0/arrival/cusp READY를 사용하지 않는다.
-    matched=runner.matched_stop()
+    matched=runner.matched_stop(view=view)
     if matched is not None and matched.command_payload==pin['command']:
         device=getattr(runner._sink,'device',None);policy=getattr(device,'stationary_policy',None)
         if policy is not None:
