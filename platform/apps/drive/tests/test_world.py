@@ -373,7 +373,7 @@ def test_scene_and_tof_standalone_shapes_do_not_imply_admission():
         gateway_instance=fixture.INSTANCE,pi_session=fixture.MAP,device_session=fixture.FRAME,
         sensor_id=0,source_sample=1,source_us=1000000,pi_sample_us=1001000,
         clock_error_us=1000,sensor_time_error_us=1000,calibration='0'*64,sensor_config_revision=1,
-        rows=8,cols=8,distance_mm_le=b'\xe8\x03'*64,status=bytes([1])*64,quality=bytes([1])*64,
+        rows=1,cols=1,distance_mm_le=b'\xe8\x03',status=bytes([1]),quality=bytes([1]),
         frame_status=3,source_crc32=0,clock_epoch=fixture.CLOCK,clock_seq=1,complete=True,
         sensor_instance=bytes([5])*16,sensor_generation=1)
     assert decode(encode(value),schema.TofObservation)==value

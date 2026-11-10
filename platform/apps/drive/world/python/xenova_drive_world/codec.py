@@ -57,7 +57,7 @@ def _bytes_bound(field):
     if name.endswith('_sha256') or name=='primitive':return 32,True
     return {'occupancy':(4096,False),'cell_flags':(4096,False),'age_le32':(16384,False),
         'point_state':(32,False),'crossing':(31,False),'divider_state':(32,False),
-        'distance_mm_le':(128,True),'status':(64,True),'quality':(64,True),
+        'distance_mm_le':(2,True),'status':(1,True),'quality':(1,True),
         'drivable_permission':(512,False)}.get(name,(MAX_BYTES,False))
 
 def _repeated(field):
@@ -546,11 +546,15 @@ def _validate_one(message):
             raise ValueError('scene frozen/restore evidence presence')
     elif name=='TofObservation':
         _positive(message,'source_sample','source_us','pi_sample_us','sensor_config_revision','clock_seq','sensor_generation')
-        if (not message.complete or message.sensor_id not in (0,1) or message.rows!=8 or message.cols!=8
+        if (not message.complete or message.sensor_id not in (0,1) or message.rows!=1 or message.cols!=1
                 or message.frame_status&~7 or any(value>7 for value in message.status)
                 or any(value&~31 for value in message.quality)
                 or len(message.calibration)!=64 or any(c not in '0123456789abcdefABCDEF' for c in message.calibration)):
             raise ValueError('ToF bounded frame semantics')
+        distance=int.from_bytes(message.distance_mm_le,'little')
+        if (message.status[0]==1 and distance in (0,65535)
+                or message.quality[0]&1 and message.status[0]!=1):
+            raise ValueError('ToF single valid-distance/status consistency')
     elif name in ('EpisodeCore','EpisodeProgress','EpisodeAcceptanceRef','EpisodeSnapshot','EpisodeSourceContext',
                   'EpisodeRequest','EpisodeReceipt','EpisodeStatus','PiAbsoluteMeter','StopFacts','DriveControlFacts'):
         from .episodes import validate_one
