@@ -20,7 +20,7 @@ def setup():
     rig=RouteRig();rig.begin();rig.register();assert rig.admit() is not None
     o=rig.operator;r=o.runner;current=dict(id=str(UUID(bytes=rig.grant.mission_id)),revision=rig.grant.mission_revision,
         kind=3,admitted=True,phase='FOLLOW');old=dict(current,id=str(uuid4()),kind=1)
-    o.missions.current=lambda:old
+    o.missions.current=lambda:old;o.missions.execution=None
     episode=EpisodeOwner(o);episode.mission_key=(old['id'],old['revision']);episode.failed=True
     prior=none_snapshot(uuid4().bytes,1)
     episode.registry=dict(snapshot=prior)
@@ -32,7 +32,7 @@ def setup():
     # 원 서비스에서 수락한 이전 FOLLOW/EP NONE라는 typed source leaf다. current grant로 재포장하지 않는다.
     state=deepcopy(rig.state);state.ClearField('route');state.state_features&=~64
     state.episode.CopyFrom(prior);state.state_features|=16
-    state.mission.ClearField('route_binding');state.mission.kind=1;state.mission.phase=1
+    state.mission.ClearField('route_binding');state.mission.kind=1;state.mission.phase=10
     state.mission.mission_id=UUID(old['id']).bytes;state.mission.mission_deadline_pi_us=0
     original=schema.DriveLink(major=2)
     original.accepted.CopyFrom(schema.AcceptedState(host_boot=rig.vehicle.host_boot,gateway_instance=o.instance,state=state))
