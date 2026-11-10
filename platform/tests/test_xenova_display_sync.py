@@ -30,6 +30,8 @@ class DisplaySyncTest(unittest.TestCase):
                          'edid_sha256': EDID, 'x': 0, 'y': 0,
                          'width': 1920, 'height': 1080, 'page': '/display/mobile'}]}))
         self.runtime.chmod(0o644)
+        # 설정 파일을 지우는 테스트도 있으므로 소유자는 파일이 있을 때 한 번만 읽어 둔다.
+        self.owner_uid = self.runtime.stat().st_uid
         self.mobile.write_text(json.dumps({
             'schema_version': 1, 'usb_interface': 'usb0',
             'phone_ipv4': '10.104.83.148', 'port': 8084}))
@@ -37,7 +39,7 @@ class DisplaySyncTest(unittest.TestCase):
 
     def sync(self, address='192.168.77.6'):
         return display.sync_interaction_ui(address, runtime_path=self.runtime,
-                    mobile_path=self.mobile, owner_uid=self.runtime.stat().st_uid)
+                    mobile_path=self.mobile, owner_uid=self.owner_uid)
 
     def test_updates_only_dynamic_origin_and_combined_page(self):
         result = self.sync()
