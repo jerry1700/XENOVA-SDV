@@ -37,7 +37,7 @@ Production deployment Job:
 - Backend: Maven tests and backend runtime image build.
 - Frontend: install, lint, typecheck, tests, both production builds, and both frontend image builds.
 - Platform: dom0-manager and vm-agent Python tests.
-- Vehicle: simulator, perception, and manual app Python tests; xenova-mqtt-c, manual, and autonomous C host tests (CMake, ASan/UBSan).
+- Vehicle: simulator, perception, and manual app Python tests; xenova-mqtt-c, manual, autonomous, and ESP32 feedback-3 C host tests (CMake, ASan/UBSan).
 - Develop/Master check: all checks above (including vehicle), Compose validation, and all application image builds.
 - Master deploy: all checks, production image build, EC2 deployment, Nginx restart, and public health checks.
 
