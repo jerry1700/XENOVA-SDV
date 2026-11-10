@@ -8,12 +8,13 @@ import {
   interfaceFlagOf,
   ZEPHYR_CARRIER_METRIC,
 } from '../domain/networkMetrics';
-import { buildZephyrHeapSeries } from '../domain/vmMetrics';
+import { buildZephyrHeapSeries, cpuPercentOf } from '../domain/vmMetrics';
 import { VM_IDS } from './data';
 import {
   mockAppMemorySamples,
   mockKernelHeapSamples,
   mockMemoryPoolSamples,
+  mockZephyrCpuSamples,
   mockZephyrNetworkSamples,
 } from './memoryMetrics';
 
@@ -97,5 +98,22 @@ describe('App memory mock samples', () => {
     expect(b.manual_input.current.buffer?.input_status).toBe('expired');
     expect(b.manual_pending.current.buffer?.phase).toBe('empty');
     expect(mockAppMemorySamples(VM_IDS.interaction, now)).toEqual([]);
+  });
+});
+
+describe('Zephyr CPU mock samples', () => {
+  it('최근 5분 cpu.system.percent 와 스레드별 cpu.thread.percent 를 제공하고, 메모리 계산에 섞이지 않는다', () => {
+    const now = 1_000_000;
+    const busy = mockZephyrCpuSamples(VM_IDS.autonomous, now);
+    const idle = mockZephyrCpuSamples(VM_IDS.manual, now);
+    expect(busy).toHaveLength(30);
+    expect(Date.parse(busy.at(-1)!.observed_at)).toBe(now - 2_000);
+    const values = busy.map(cpuPercentOf);
+    expect(values.every((value) => value != null && value >= 0 && value <= 100)).toBe(true);
+    expect(cpuPercentOf(busy.at(-1)!)!).toBeGreaterThan(cpuPercentOf(idle.at(-1)!)!);
+    const threads = busy[0]!.values.filter((value) => value.name === 'cpu.thread.percent');
+    expect(threads.map((value) => value.labels?.thread_name)).toContain('drive_worker');
+    expect(buildZephyrHeapSeries(busy).points).toHaveLength(0);
+    expect(buildMemoryPoolSeries(busy).rx.state).toBe('missing');
   });
 });
