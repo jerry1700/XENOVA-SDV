@@ -23,7 +23,8 @@ class ManualProfile:
 
 class DriverRegistry:
     def __init__(self,operator,profile=None):
-        self.operator=operator;self.runner=operator.runner;self.profile=profile
+        # Keep the owner reference separate from the operator(call) input port.
+        self._operator=operator;self.runner=operator.runner;self.profile=profile
         self.sid=str(uuid4());self.kind='NEUTRAL_ONLY';self.epoch=str(uuid4());self.grant=1
         self.source=self.device=self.channel=self.link=None;self.alias=None
         self.state='ARMED_NEUTRAL';self.reason='NEUTRAL';self.sample=self.action=self.sequence=0
@@ -35,7 +36,7 @@ class DriverRegistry:
         self.neutral_anchor=None;self.neutral_floor=0
 
     @property
-    def now(self):return self.operator.now
+    def now(self):return self._operator.now
 
     @property
     def moving(self):return bool(self.valid and self.keys and self.now<self.expires and not self.blocked)
@@ -49,7 +50,7 @@ class DriverRegistry:
         current=getattr(self,name)
         if current>=2**64-1:
             self.keys=[];self.valid=False;self.blocked=True;self.armed=False
-            self.neutral_anchor=None;self.operator._stop_driver()
+            self.neutral_anchor=None;self._operator._stop_driver()
             raise OperatorError('COUNTER_EXHAUSTED')
         setattr(self,name,current+1);return current+1
 
@@ -126,12 +127,12 @@ class DriverRegistry:
             if self.kind!='PULSE':raise OperatorError('DRIVER_BUSY')
             if self.profile is None:raise OperatorError('UNSUPPORTED_PROFILE')
             if self.runner.machine.mode.value not in ('MANUAL','AUTO_READY'):raise OperatorError('WRONG_MODE')
-            if self.operator.hold or not self.runner.machine.output_permitted:raise OperatorError('NOT_READY')
+            if self._operator.hold or not self.runner.machine.output_permitted:raise OperatorError('NOT_READY')
             if decimal(args['expected_action_seq'])!=self.action:raise OperatorError('CONTEXT_CHANGED')
-            if self.current_anchor() is None and self.operator.direction_witness(self.runner.machine.active_vm,'manual') is None:
+            if self.current_anchor() is None and self._operator.direction_witness(self.runner.machine.active_vm,'manual') is None:
                 raise OperatorError('STOP_REQUIRED')
             direction=1 if args['direction']=='FORWARD' else -1
-            if (self.stop_required or self.last_direction not in (0,direction)) and not self.operator.stationary():
+            if (self.stop_required or self.last_direction not in (0,direction)) and not self._operator.stationary():
                 self.fence('STOP_REQUIRED');raise OperatorError('STOP_REQUIRED')
             issued=int(call['request_id'].split(':')[2])*1000;expires=issued+args['duration_ms']*1000
             if self.now>=expires:raise OperatorError('DEADLINE_EXCEEDED')
@@ -149,12 +150,12 @@ class DriverRegistry:
         now=self.now
         if self.kind=='HELD':
             if self.valid and self.keys and now>=self.expires:
-                self.fence('INPUT_EXPIRED');self.operator._stop_driver()
+                self.fence('INPUT_EXPIRED');self._operator._stop_driver()
             return
         if self.keys and now>=self.expires:
             self.invalidate_anchor()
             self.keys=[];self.state='ARMED_NEUTRAL';self.stop_required=True;self.reason='LEASE_EXPIRED'
-            self._publish('LEASE_EXPIRED');self.operator._stop_driver()
+            self._publish('LEASE_EXPIRED');self._operator._stop_driver()
         elif now-self.last_publish>=50000:
             if not self.keys:self.source_us=now;self._next('sample')
             self._publish('NEUTRAL' if not self.keys else 'USER_NUDGE')

@@ -14,6 +14,10 @@ from .ipc_contract import ENDPOINT, HEADER, MAX_BYTES, VERSION, decode, encode, 
 
 CONNECTION_LIMIT = 16
 IO_BUDGET_S = 1.0
+# Open connections poll actor results and deadlines every POLL_WAIT_S. With none
+# open only accept() and stop matter; close() waits 0.5 s for this loop to end.
+POLL_WAIT_S = .01
+IDLE_WAIT_S = .1
 
 
 class GatewayServer:
@@ -92,7 +96,7 @@ class GatewayServer:
                 select.modify(stream, selectors.EVENT_WRITE)
             try:
                 while not self.stop.is_set():
-                    for key, mask in select.select(.01):
+                    for key, mask in select.select(POLL_WAIT_S if connections else IDLE_WAIT_S):
                         stream = key.fileobj
                         if stream is self.listener:
                             stream, _ = self.listener.accept(); stream.setblocking(False)

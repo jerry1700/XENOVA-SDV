@@ -70,7 +70,9 @@ class LogStore:
         finally:
             db.close()
 
-    def append(self, *, source_id, vm_id, component, boot_id, observed_at, level, message, native_id):
+    @staticmethod
+    def prepare(*, source_id, vm_id, component, boot_id, observed_at, level, message, native_id):
+        """One validated, scrubbed row for insert(). ValueError rejects only this record."""
         for value in (source_id, component, boot_id):
             if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
                 raise ValueError("invalid log identity")
@@ -83,28 +85,53 @@ class LogStore:
         if not isinstance(observed_at, str) or len(observed_at) > 64:
             raise ValueError("invalid log timestamp")
         event_id = hashlib.sha256(json.dumps([source_id, boot_id, native_id]).encode()).hexdigest()
+        return event_id, source_id, vm_id, component, boot_id, observed_at, level, scrub(message)
+
+    def append(self, *, source_id, vm_id, component, boot_id, observed_at, level, message, native_id):
+        row = self.prepare(source_id=source_id, vm_id=vm_id, component=component, boot_id=boot_id,
+                           observed_at=observed_at, level=level, message=message, native_id=native_id)
+        return self.insert([row]) == 1
+
+    def insert(self, rows, *, source=None):
+        """Insert prepared rows, apply retention once and update an optional source in one transaction.
+
+        source holds source() keyword arguments. A checkpoint saved here commits together with the rows it
+        covers, so a crash before commit re-reads them and event_id deduplicates the replay.
+        """
+        if source is not None and source.get("state", "connected") not in {"connected", "disconnected", "unavailable"}:
+            raise ValueError("invalid source state")
         now = self.clock()
+        inserted = 0
         with self.connect() as db:
-            inserted = db.execute(
-                "INSERT OR IGNORE INTO logs(event_id,source_id,vm_id,component,boot_id,observed_at,received_at,level,message) VALUES(?,?,?,?,?,?,?,?,?)",
-                (event_id, source_id, vm_id, component, boot_id, observed_at, now, level, scrub(message)),
-            ).rowcount
-            # The monotonic integer cursor is not reused after retention removes older rows.
-            db.execute("DELETE FROM logs WHERE received_at < ?", (now - self.max_age_s,))
-            db.execute("DELETE FROM logs WHERE id <= COALESCE((SELECT id FROM logs ORDER BY id DESC LIMIT 1 OFFSET ?),0)", (self.max_rows,))
-        return bool(inserted)
+            for event_id, source_id, vm_id, component, boot_id, observed_at, level, message in rows:
+                inserted += db.execute(
+                    "INSERT OR IGNORE INTO logs(event_id,source_id,vm_id,component,boot_id,observed_at,received_at,level,message) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (event_id, source_id, vm_id, component, boot_id, observed_at, now, level, message),
+                ).rowcount
+            if rows:
+                # The monotonic integer cursor is not reused after retention removes older rows.
+                db.execute("DELETE FROM logs WHERE received_at < ?", (now - self.max_age_s,))
+                db.execute("DELETE FROM logs WHERE id <= COALESCE((SELECT id FROM logs ORDER BY id DESC LIMIT 1 OFFSET ?),0)", (self.max_rows,))
+            if source is not None:
+                self._upsert_source(db, now, **source)
+        return inserted
 
     def source(self, source_id, components, *, vm_id=None, state="connected", checkpoint=None, recorded=False):
         if state not in {"connected", "disconnected", "unavailable"}:
             raise ValueError("invalid source state")
         now = self.clock()
         with self.connect() as db:
-            db.execute("""INSERT INTO sources VALUES(?,?,?,?,?,?,?)
-                ON CONFLICT(source_id) DO UPDATE SET vm_id=excluded.vm_id,components=excluded.components,
-                state=excluded.state,updated_at=excluded.updated_at,
-                last_record_at=COALESCE(excluded.last_record_at,sources.last_record_at),
-                checkpoint=COALESCE(excluded.checkpoint,sources.checkpoint)""",
-                (source_id, vm_id, json.dumps(components), state, now, now if recorded else None, checkpoint))
+            self._upsert_source(db, now, source_id=source_id, components=components, vm_id=vm_id, state=state,
+                                checkpoint=checkpoint, recorded=recorded)
+
+    @staticmethod
+    def _upsert_source(db, now, *, source_id, components, vm_id=None, state="connected", checkpoint=None, recorded=False):
+        db.execute("""INSERT INTO sources VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(source_id) DO UPDATE SET vm_id=excluded.vm_id,components=excluded.components,
+            state=excluded.state,updated_at=excluded.updated_at,
+            last_record_at=COALESCE(excluded.last_record_at,sources.last_record_at),
+            checkpoint=COALESCE(excluded.checkpoint,sources.checkpoint)""",
+            (source_id, vm_id, json.dumps(components), state, now, now if recorded else None, checkpoint))
 
     def checkpoint(self, source_id):
         with self.connect() as db:

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Shared provider profiles: legacy drive-world-1 and drive-parking-2.
-// World remains major1/minor2 with features11/15 for drive-parking-2.
+// World remains major1/minor2: features11/15 for parking, 27/31 for route view.
 // DriveState/DriveLink use major2; nested major1 messages retain their versions.
 // Required presence is deliberate; zero is not omission or motion authority.
 syntax = "proto2";
@@ -60,6 +60,7 @@ message WorldSnapshot {
   optional MapLocalization localization = 39;
   optional SceneAdmissionRef scene = 40;
   optional ParkingSetMeta parking_set = 41;
+  optional WorldRouteView route_view = 42;
 }
 message VehicleSample {
   required uint32 major = 1;
@@ -125,6 +126,7 @@ message DriveState {
   optional TaskReferenceState task_reference = 33;
   // Feature16 is opt-in; absence is not an authoritative NONE episode.
   optional EpisodeSnapshot episode = 34;
+  optional RouteSnapshot route = 35;
 }
 // Presence means both native intent.active and basis.bound. Parent reference/source
 // fields retain their existing meanings; basis_revision is the original prefix's.
@@ -149,9 +151,11 @@ message ClockProbe {
   required uint64 sequence = 4;
   required uint64 guest_send_us = 5;
   optional GuestClockReceipt receipt = 6;
-  // Capability only, not the presence mask of a particular DriveState.
+  // Capability only (bits7/8/16/32/64), not one DriveState presence mask.
   // Absence is legacy; authenticated peer and approved profile are also required.
   optional uint32 supported_state_features = 7;
+  // Non-authoritative current input check. Absence/expiry never blocks clock bootstrap.
+  optional AutoInputPreflight auto_input_preflight = 8;
 }
 // Receipt of one exact original stamped Reply; arrival does not renew its lease.
 message GuestClockReceipt {
@@ -192,6 +196,51 @@ message ClockReply {
   optional uint64 guest_clock_valid_until_pi_us = 11;
   optional EpisodeStatus episode_status = 12;
   optional DriveControlFacts control_facts = 13;
+  optional OperationStatus operation_status = 14;
+  optional RouteStatus route_status = 15;
+}
+// Setting/explicit-departure binding, separate from output permission and path geometry.
+message OperationBinding {
+  required bytes service_epoch = 1; // Existing Gateway instance UUID.
+  required uint64 operation_revision = 2;
+  required bytes departure_nonce = 3; // NIL only while no departure is active.
+  required uint64 permission_revision = 4;
+  required bool parking_enabled = 5;
+}
+message OperationStatus {
+  required uint32 major = 1;
+  required OperationBinding binding = 2;
+  required uint32 vehicle_phase = 3; // 1STOPPING,2WAIT,3COUNTDOWN,4APPLYING,5ACTIVE.
+  required uint64 ready_revision = 4;
+  required bool auto_ready = 5; // Input preflight for accepting a request, not DRIVE readiness.
+  required uint32 blocked_reason = 6; // 0ready,1..31 registered blocked reasons.
+  required uint64 valid_until_pi_us = 7;
+  required bytes active_request_nonce = 8;
+  required uint64 countdown_until_pi_us = 9;
+  required uint32 desired_mode = 10; // 0none,1AUTO,2MANUAL.
+}
+// Historical source-context shape reused without episode/authority semantics.
+message AutoInputPreflight {
+  required uint32 major = 1;
+  required EpisodeSourceContext source = 2;
+  required uint64 vehicle_sequence = 3;
+  required uint32 control_generation = 4;
+  required uint64 checked_guest_us = 5;
+  required uint64 valid_until_pi_us = 6;
+  required uint64 clock_probe_sequence = 7; // A prior actually confirmed P4 clock.
+  required bytes clock_reply_sha256 = 8;
+}
+// Pi's current restriction on an explicit Jetson STANDBY request, never movement permission.
+message PiOperationGate {
+  required bytes gateway_instance = 1;
+  required uint32 control_generation = 2;
+  required uint64 operation_revision = 3;
+  required uint32 mode = 4; // 0SAFE_STOP,1AUTO,2MANUAL.
+  required bool wait_confirmed = 5;
+  required bool manual_local_admitted = 6;
+  required uint64 vehicle_sequence = 7; // Exact original Vehicle carries device/session/source.
+  required uint64 stop_command_sequence = 8; // Positive for a confirmed WAIT.
+  required uint64 valid_until_pi_us = 9;
 }
 message AcceptedState {
   required string host_boot = 1;
@@ -236,6 +285,8 @@ message DriveLink {
     // The original Pi SceneGrant, including revocation and original expiry.
     SceneGrant scene_grant = 10;
     EpisodeRequest episode_request = 11;
+    RoadData road_data = 12;
+    RouteExchange route_exchange = 13;
   }
 }
 
@@ -535,6 +586,9 @@ message MissionExecution {
   required uint64 grant_revision = 23;
   required float search_travel_m = 24;
   required uint64 search_deadline_pi_us = 25;
+  // State feature32 exactly matches this presence; legacy fields keep their meaning.
+  optional OperationBinding operation_binding = 26;
+  optional RouteBinding route_binding = 27;
 }
 message GearSegment {
   required uint32 first_index = 1;
@@ -602,6 +656,8 @@ message MissionGrant {
   required float search_travel_m = 29;
   required float max_search_travel_m = 30;
   optional bytes locked_goal_sha256 = 31;
+  optional OperationBinding operation_binding = 32;
+  optional RouteBinding route_binding = 33;
 }
 message MissionBudgetRequest {
   required uint32 major = 1;
@@ -646,6 +702,7 @@ message MapperClockProbe {
   // Pi clock owner returns a previously accepted immutable J/Pi lease.
   // This is absent during initial probes; it does not report the current P4.
   optional WorldTrust mapper_trust = 13;
+  optional PiOperationGate operation_gate = 14;
 }
 message MapperClockReply {
   required uint32 major = 1;
@@ -667,6 +724,7 @@ message MapperClockReply {
   required uint64 j2 = 17;
   required uint64 j3 = 18;
   optional SurveySummary survey_summary = 19;
+  optional uint32 supported_mapper_features = 20; // bit1 operation gate, bit2 route management; absent is legacy.
 }
 message SceneGrant {
   required uint32 major = 1;
@@ -749,4 +807,550 @@ message TofObservation {
   required bool complete = 24;
   required bytes sensor_instance = 25;
   required uint32 sensor_generation = 26;
+}
+
+// drive-route-1 is an explicitly approved opt-in profile. Records/queries/facts
+// are not motion authority. Legacy fields/domains retain their meanings.
+message RouteBinding {
+  required bytes route_id = 1;
+  required uint64 revision = 2;
+  required uint32 purpose = 3;
+  required bytes core_sha256 = 4;
+  required bytes global_plan_sha256 = 5;
+  required bytes goal_sha256 = 6;
+}
+message StartGoal {
+  required uint32 major = 1;
+  required bytes goal_id = 2;
+  required uint64 revision = 3;
+  required bytes geometry_scope_sha256 = 4;
+  required Pose rear_axle_pose = 5;
+  required float position_error_m = 6;
+  required float heading_error_rad = 7;
+  required bytes section_id = 8;
+  required fixed32 lane_id = 9;
+  required float station_m = 10;
+  required RoadObservationOrigin origin = 11;
+  required bytes vehicle_raw_sha256 = 12;
+  required bytes alignment_raw_sha256 = 13;
+  required bytes world_raw_sha256 = 14;
+  required bytes terminal_profile_sha256 = 15;
+  required uint64 origin_vehicle_sequence = 16;
+  required uint64 registered_pi_us = 17;
+  required uint64 stop_command_sequence = 18;
+  required uint64 stop_report_sequence = 19;
+  required bytes stop_facts_sha256 = 20;
+}
+message RoadSectionRef {
+  required bytes section_id = 1;
+  required bytes section_sha256 = 2;
+  required fixed32 left_lane_id = 3;
+  required fixed32 right_lane_id = 4;
+  required float length_m = 5;
+  required uint32 order = 6;
+}
+message RoadEdge {
+  required uint32 from_section_index = 1;
+  required uint32 to_section_index = 2;
+  required fixed32 from_lane_id = 3;
+  required fixed32 to_lane_id = 4;
+  required uint32 kind = 5;
+  required float from_station_m = 6;
+  required float to_station_m = 7;
+  required bytes connection_sha256 = 8;
+  required bool closes_circuit = 9;
+}
+message RoadTopology {
+  required uint32 major = 1;
+  required bytes topology_id = 2;
+  required uint64 revision = 3;
+  required bytes geometry_scope_sha256 = 4;
+  repeated RoadSectionRef sections = 5;
+  repeated RoadEdge edges = 6;
+  required bool closed_observed = 7;
+  required bytes origin_roots_sha256 = 8;
+}
+message RoadSection {
+  required uint32 major = 1;
+  required bytes section_id = 2;
+  required uint64 revision = 3;
+  required bytes geometry_scope_sha256 = 4;
+  required RoadObservationOrigin origin = 5;
+  required LaneModel road = 6;
+  repeated Point reference = 7;
+  repeated Point left_boundary = 8;
+  repeated Point right_boundary = 9;
+  repeated float point_error_m = 10 [packed=true];
+  required float heading_error_rad = 11;
+  required bytes alignment_raw_sha256 = 12;
+  required bytes observation_evidence_sha256 = 13;
+}
+message RoadConnection {
+  required uint32 major = 1;
+  required bytes connection_id = 2;
+  required uint64 revision = 3;
+  required bytes geometry_scope_sha256 = 4;
+  required RoadObservationOrigin origin = 5;
+  required bytes from_section_sha256 = 6;
+  required bytes to_section_sha256 = 7;
+  required fixed32 from_lane_id = 8;
+  required fixed32 to_lane_id = 9;
+  required uint32 from_point_index = 10;
+  required uint32 to_point_index = 11;
+  repeated Point overlap_reference = 12;
+  repeated float overlap_error_m = 13 [packed=true];
+  repeated Point connector_polygon = 14;
+  required float heading_error_rad = 15;
+  required uint32 kind = 16;
+  repeated bytes evidence_roots_sha256 = 17;
+}
+message ExitSpace {
+  required uint32 major = 1;
+  required bytes space_id = 2;
+  required uint64 revision = 3;
+  required bytes geometry_scope_sha256 = 4;
+  required RoadObservationOrigin origin = 5;
+  required bytes parking_attempt_id = 6;
+  required bytes parking_goal_sha256 = 7;
+  required fixed32 slot_id = 8;
+  required uint64 slot_revision = 9;
+  repeated Point selected_slot_polygon = 10;
+  required fixed32 aisle_lane_id = 11;
+  required bytes road_section_sha256 = 12;
+  repeated bytes connection_sha256 = 13;
+  required float position_error_m = 14;
+  required float heading_error_rad = 15;
+}
+message RouteOccurrence {
+  required uint32 section_index = 1;
+  required fixed32 lane_id = 2;
+  required float entry_station_m = 3;
+  required float exit_station_m = 4;
+  required uint32 edge_index = 5;
+}
+message RoutePlan {
+  required uint32 major = 1;
+  required bytes route_id = 2;
+  required uint64 revision = 3;
+  required uint32 purpose = 4;
+  required bytes goal_sha256 = 5;
+  required bytes topology_sha256 = 6;
+  required bytes geometry_scope_sha256 = 7;
+  repeated RouteOccurrence occurrences = 8;
+  required uint32 max_laps = 9;
+  required bytes exit_space_sha256 = 10;
+  required bytes origin_guest_witness_sha256 = 11;
+  required bytes merge_section_id = 12;
+  required fixed32 merge_lane_id = 13;
+  required float merge_station_lower_m = 14;
+  required float merge_station_upper_m = 15;
+  required Pose merge_seed_pose = 16;
+  required bytes terminal_profile_sha256 = 17;
+}
+message RouteCore {
+  required bytes route_id = 1;
+  required uint64 revision = 2;
+  required uint32 purpose = 3;
+  required bytes goal_sha256 = 4;
+  required bytes topology_sha256 = 5;
+  required bytes global_plan_sha256 = 6;
+  required bytes geometry_scope_sha256 = 7;
+  required uint64 started_pi_us = 8;
+  required uint64 deadline_pi_us = 9;
+  required bytes meter_epoch = 10;
+  required uint64 meter_baseline_total_ticks = 11;
+  required double max_travel_m = 12;
+  required uint32 phase = 13;
+  required uint64 phase_revision = 14;
+  required uint64 phase_started_pi_us = 15;
+  required uint64 phase_expires_pi_us = 16;
+  required bytes parking_attempt_id = 17;
+  required bytes parking_goal_sha256 = 18;
+  required bytes predecessor_episode_sha256 = 19;
+  required bytes budget_profile_sha256 = 20;
+  required fixed32 target_lane_id = 21;
+  required uint32 max_laps = 22;
+  required uint64 stop_wait_command_sequence = 23;
+  required bytes local_path_sha256 = 24;
+  required uint64 meter_gap_revision = 25;
+  required double metres_per_tick_upper = 26;
+  required uint32 progress_mode = 27;
+  required Pose phase_goal = 28;
+  required bytes stop_wait_facts_sha256 = 29;
+  required uint64 stop_wait_started_pi_us = 30;
+  required uint32 terminal_result = 31;
+  required uint32 terminal_reason = 32;
+}
+message RouteProgress {
+  required uint32 occurrence_index = 1;
+  required float station_lower_m = 2;
+  required float station_upper_m = 3;
+  required uint64 used_travel_ticks = 4;
+  required uint64 last_progress_pi_us = 5;
+  required uint64 vehicle_sequence = 6;
+  required uint64 calculation_sequence = 7;
+  required uint64 revision = 8;
+  required uint32 completed_laps = 9;
+  required uint64 confirmed_stop_wait_us = 10;
+  required float remaining_upper_m = 11;
+  required uint64 stop_wait_hwm_pi_us = 12;
+}
+message RouteAcceptanceRef {
+  required bytes registry_epoch = 1;
+  required uint64 registry_revision = 2;
+  required bytes acceptance_nonce = 3;
+  required bytes request_nonce = 4;
+  required bytes request_sha256 = 5;
+  required bytes accepted_core_sha256 = 6;
+  required uint64 request_sequence = 7;
+  required bytes origin_owner_sha256 = 8;
+}
+message RouteSnapshot {
+  required RouteCore core = 1;
+  required RouteProgress progress = 2;
+  required RouteAcceptanceRef acceptance = 3;
+  required bytes current_window_sha256 = 4;
+  required uint32 state = 5;
+  required uint32 task_space_kind = 6;
+  required bytes exit_space_sha256 = 7;
+  required bytes basis_window_sha256 = 8;
+  required uint64 basis_window_revision = 9;
+  required bytes current_world_sha256 = 10;
+}
+message WorldRouteView {
+  required uint32 major = 1;
+  required bytes geometry_scope_sha256 = 2;
+  required bytes topology_sha256 = 3;
+  required bytes window_id = 4;
+  required uint64 window_revision = 5;
+  required bytes window_sha256 = 6;
+  required bytes from_window_id = 7;
+  required bytes from_window_sha256 = 8;
+  required bytes transition_id = 9;
+  required bytes first_section_id = 10;
+  required bytes last_section_id = 11;
+  required bytes overlap_prefix_sha256 = 12;
+  required uint64 geometry_revision = 13;
+}
+message RouteStatus {
+  required uint32 major = 1;
+  required bytes registry_epoch = 2;
+  required uint64 registry_revision = 3;
+  required bytes route_id = 4;
+  required bytes accepted_core_sha256 = 5;
+  required bytes global_plan_sha256 = 6;
+  required bytes local_path_sha256 = 7;
+  required uint32 route_state = 8;
+  required uint32 commit_state = 9;
+  required uint32 reason = 10;
+  required uint64 valid_until_pi_us = 11;
+  required bytes state_message_id = 12;
+  required bytes state_sha256 = 13;
+  required uint64 state_revision = 14;
+  required uint64 plan_revision = 15;
+  required uint64 phase_revision = 16;
+  required uint64 calculation_hwm = 17;
+  required uint64 vehicle_hwm = 18;
+  required bytes current_permission_sha256 = 19;
+  required bytes current_window_sha256 = 20;
+  repeated RouteEligibilityRef eligibility = 21;
+  required uint32 terminal_result = 22;
+}
+message RouteQuery {
+  required uint32 major = 1;
+  required bytes query_id = 2;
+  required uint32 purpose = 3;
+  required bytes goal_sha256 = 4;
+  required RouteOwnerContext owner = 5;
+  required uint64 issued_pi_us = 6;
+  required uint64 valid_until_pi_us = 7;
+  required bytes operator_request_nonce = 8;
+}
+message RouteCandidate {
+  required uint32 major = 1;
+  required bytes request_nonce = 2;
+  required uint64 request_sequence = 3;
+  required uint32 action = 4;
+  required bytes query_id = 5;
+  required bytes query_sha256 = 6;
+  required RouteOwnerContext owner = 7;
+  required RouteCurrentWitness witness = 8;
+  required bytes expected_registry_epoch = 9;
+  required uint64 expected_registry_revision = 10;
+  required uint64 expected_route_revision = 11;
+  required RouteCore core = 12;
+  required RouteProgress progress = 13;
+  required uint32 task_space_kind = 14;
+  required bytes current_window_sha256 = 15;
+  required bytes basis_window_sha256 = 16;
+  required uint64 basis_window_revision = 17;
+  required bytes exit_space_sha256 = 18;
+  required bytes phase_state_message_id = 19;
+  required uint64 plan_revision = 20;
+  required uint64 calculation_sequence = 21;
+  required uint64 began_guest_us = 22;
+  required uint64 phase_started_guest_us = 23;
+  required bytes control_facts_sha256 = 24;
+  required RouteExtentProof extent = 25;
+}
+message RouteReceipt {
+  required uint32 major = 1;
+  required bytes request_nonce = 2;
+  required bytes request_sha256 = 3;
+  required uint32 result = 4;
+  required uint32 reason = 5;
+  optional RouteSnapshot snapshot = 6;
+  required uint64 request_sequence = 7;
+  required bytes query_id = 8;
+  required bytes query_sha256 = 9;
+  optional RouteOwnerContext initial_target_context = 10;
+}
+message RoadWindow {
+  required uint32 major = 1;
+  required bytes window_id = 2;
+  required uint64 revision = 3;
+  required bytes geometry_scope_sha256 = 4;
+  required bytes topology_sha256 = 5;
+  repeated bytes section_sha256 = 6;
+  required RoadObservationOrigin origin = 7;
+  required LaneModel road = 8;
+  repeated Point reference = 9;
+  repeated Point left_boundary = 10;
+  repeated Point right_boundary = 11;
+  repeated float point_error_m = 12 [packed=true];
+  required float heading_error_rad = 13;
+  required bytes from_window_id = 14;
+  required bytes from_window_sha256 = 15;
+  required bytes overlap_prefix_sha256 = 16;
+  required bytes transition_id = 17;
+  required uint32 overlap_point_count = 18;
+}
+message RoadGeometryScope {
+  required uint32 major = 1;
+  required bytes dataset_uuid = 2;
+  required bytes map_epoch = 3;
+  required bytes frame_epoch = 4;
+  required string vehicle = 5;
+  required string configuration = 6;
+  required string calibration = 7;
+  required bytes primitive = 8;
+  required bytes origin_pi_host_boot = 9;
+  required bytes origin_gateway_instance = 10;
+  required bytes origin_pi_session = 11;
+  required bytes origin_device_session = 12;
+  required bytes origin_odom_epoch = 13;
+  required bytes alignment_frame_sha256 = 14;
+  required bytes geometry_policy_sha256 = 15;
+  required uint32 coordinate_policy = 16;
+  required bytes origin_storage_context_sha256 = 17;
+}
+message RoadDurableRef {
+  required bytes database_uuid = 1;
+  required bytes job_id = 2;
+  required bytes job_digest = 3;
+  required uint32 status = 4;
+  required uint64 durable_revision = 5;
+  required uint64 committed_mapper_us = 6;
+  required bytes origin_context_sha256 = 7;
+  required bytes record_sha256 = 8;
+  required bytes original_receipt_sha256 = 9;
+}
+message RoadObservationOrigin {
+  required uint32 major = 1;
+  required bytes mapper_boot = 2;
+  required bytes mapper_instance = 3;
+  required bytes clock_epoch = 4;
+  required uint64 observation_sequence = 5;
+  required uint64 frame_source_sequence = 6;
+  required uint64 capture_mapper_lower_us = 7;
+  required uint64 capture_mapper_upper_us = 8;
+  required uint64 completed_mapper_us = 9;
+  required bytes raw_binding_sha256 = 10;
+  required bytes frame_evidence_sha256 = 11;
+  required bytes origin_context_sha256 = 12;
+  required bytes alignment_raw_sha256 = 13;
+  required bytes mapper_clock_reply_sha256 = 14;
+  required uint64 vehicle_sequence = 15;
+  optional bytes independent_world_sha256 = 16;
+}
+message MapperRouteWitness {
+  required bytes mapper_boot = 1;
+  required bytes mapper_instance = 2;
+  required bytes clock_epoch = 3;
+  required bytes pi_host_boot = 4;
+  required bytes pi_client_instance = 5;
+  required uint64 clock_probe_sequence = 6;
+  required bytes clock_reply_sha256 = 7;
+  required uint64 checked_mapper_us = 8;
+  required uint64 valid_until_pi_us = 9;
+  required uint64 source_binding_revision = 10;
+  required bytes raw_binding_sha256 = 11;
+  required uint64 vehicle_sequence = 12;
+  required uint64 observation_sequence = 13;
+  required bytes frame_evidence_sha256 = 14;
+  required bytes scene_admission_id = 15;
+  required uint64 scene_revision = 16;
+}
+message RouteOwnerContext {
+  required bytes vm = 1;
+  required bytes execution = 2;
+  required bytes app_instance = 3;
+  required uint32 control_generation = 4;
+  required OperationBinding operation_binding = 5;
+  required bytes mission_id = 6;
+  required uint64 mission_revision = 7;
+  required uint64 grant_revision = 8;
+  required uint64 cancel_fence_revision = 9;
+  required bytes scene_admission_id = 10;
+  required uint64 scene_revision = 11;
+  required bytes source_key_sha256 = 12;
+  required bytes geometry_scope_sha256 = 13;
+}
+message RouteCurrentWitness {
+  required EpisodeSourceContext source = 1;
+  required uint64 vehicle_sequence = 2;
+  required uint64 checked_guest_us = 3;
+  required uint64 valid_until_pi_us = 4;
+  required uint64 clock_probe_sequence = 5;
+  required bytes clock_reply_sha256 = 6;
+  required bytes world_raw_sha256 = 7;
+  required bytes vehicle_raw_sha256 = 8;
+}
+message RouteExtentProof {
+  required uint32 mode = 1;
+  required bytes window_sha256 = 2;
+  required bytes exit_space_sha256 = 3;
+  required float available_forward_m = 4;
+  required float available_backward_m = 5;
+  required float required_forward_m = 6;
+  required float required_backward_m = 7;
+  required float braking_distance_m = 8;
+  required float body_radius_m = 9;
+  required float position_bound_m = 10;
+  required float heading_bound_rad = 11;
+  required bytes cusp_sweep_sha256 = 12;
+  required bytes s19_sweep_sha256 = 13;
+  required uint64 vehicle_sequence = 14;
+}
+message RouteEligibility {
+  required uint32 major = 1;
+  required bytes eligibility_id = 2;
+  required uint32 purpose = 3;
+  required RouteOwnerContext owner = 4;
+  required RouteCurrentWitness witness = 5;
+  required uint32 task_space_kind = 6;
+  required bytes goal_sha256 = 7;
+  required bytes exit_space_sha256 = 8;
+  required bytes topology_sha256 = 9;
+  required bytes window_sha256 = 10;
+  required bytes global_plan_sha256 = 11;
+  required bool eligible = 12;
+  required uint32 reason = 13;
+  required RouteExtentProof extent = 14;
+}
+message RouteEligibilityRef {
+  required bytes eligibility_id = 1;
+  required bytes body_sha256 = 2;
+  required uint32 purpose = 3;
+  required uint64 ready_revision = 4;
+  required uint64 valid_until_pi_us = 5;
+  required uint32 reason = 6;
+  required uint32 task_space_kind = 7;
+  required bool eligible = 8;
+}
+message MapperWorldWitness {
+  required uint32 major = 1;
+  required MapperRouteWitness mapper = 2;
+  required EpisodeSourceContext source = 3;
+  required bytes world_raw_sha256 = 4;
+}
+message WindowTransitionRequest {
+  required uint32 major = 1;
+  required bytes request_nonce = 2;
+  required uint32 action = 3;
+  required RouteOwnerContext owner = 4;
+  required bytes query_id = 5;
+  required bytes query_sha256 = 6;
+  required bytes route_id = 7;
+  required bytes expected_registry_epoch = 8;
+  required uint64 expected_registry_revision = 9;
+  required bytes transition_id = 10;
+  required bytes from_window_sha256 = 11;
+  required bytes to_window_sha256 = 12;
+  required bytes from_world_sha256 = 13;
+  required bytes candidate_local_path_sha256 = 14;
+  required RouteCurrentWitness witness = 15;
+  required uint64 expected_source_binding_revision = 16;
+  required uint64 phase_revision = 17;
+  required RouteExtentProof extent = 18;
+}
+message WindowTransitionReceipt {
+  required uint32 major = 1;
+  required bytes request_nonce = 2;
+  required bytes request_sha256 = 3;
+  required bytes transition_id = 4;
+  required uint32 state = 5;
+  required bytes from_window_sha256 = 6;
+  required bytes to_window_sha256 = 7;
+  required bytes active_window_sha256 = 8;
+  required uint64 source_binding_revision = 9;
+  required bytes activated_world_sha256 = 10;
+  required uint64 activated_world_sequence = 11;
+  required MapperRouteWitness mapper = 12;
+  required uint32 reason = 13;
+  required uint64 transition_generation = 14;
+  required uint64 valid_until_pi_us = 15;
+}
+message RoadDataRequest {
+  required uint32 major = 1;
+  required bytes request_nonce = 2;
+  required uint32 record_kind = 3;
+  required bytes record_sha256 = 4;
+  required RouteOwnerContext owner = 5;
+  required uint64 valid_until_pi_us = 6;
+}
+message RoadRegistrationRequest {
+  required uint32 major = 1;
+  required bytes request_nonce = 2;
+  required RouteOwnerContext owner = 3;
+  required uint64 expected_goal_revision = 4;
+  required bytes expected_goal_sha256 = 5;
+  required bytes world_raw_sha256 = 6;
+  required VehicleSample vehicle = 7;
+  required DriveControlFacts facts = 8;
+  required uint64 issued_pi_us = 9;
+  required uint64 valid_until_pi_us = 10;
+}
+message RoadData {
+  required uint32 major = 1;
+  required uint32 publisher_kind = 2;
+  optional MapperRouteWitness mapper = 3;
+  optional RouteOwnerContext guest_owner = 4;
+  optional RouteCurrentWitness guest_witness = 5;
+  required bytes record_sha256 = 6;
+  optional RoadDurableRef durable = 7;
+  oneof payload {
+    StartGoal start_goal = 10;
+    RoadTopology road_topology = 11;
+    RoadSection road_section = 12;
+    RoadConnection road_connection = 13;
+    RoadWindow road_window = 14;
+    ExitSpace exit_space = 15;
+    RoutePlan route_plan = 16;
+    RoadGeometryScope road_geometry_scope = 17;
+  }
+}
+message RouteExchange {
+  required uint32 major = 1;
+  oneof payload {
+    RouteQuery route_query = 2;
+    RouteEligibility route_eligibility = 3;
+    RouteCandidate route_candidate = 4;
+    RouteReceipt route_receipt = 5;
+    WindowTransitionRequest window_transition_request = 6;
+    WindowTransitionReceipt window_transition_receipt = 7;
+    RoadDataRequest road_data_request = 8;
+    MapperWorldWitness mapper_world_witness = 9;
+    RoadRegistrationRequest road_registration_request = 10;
+  }
 }
