@@ -106,7 +106,7 @@ STATIC `PC_NN_START`/`PC_SOURCE_STATE`도 실제 모델 start의 cold 90초 근�
 
 ## RPi 복구와의 경계
 
-단일 늦은 결과는 그 결과의 사용을 막는다. 확인된 반복 AUTO 기능 상실과 실제 process/binding 손실은 별도 복구 판단이다. 기존 readiness lease 300ms 안에서 마지막 실제 READY 계산/최초 거절 중 이른 시각을 기준으로 회복을 관찰하며, 새 거절·heartbeat가 이 창을 연장하지 않는다. 원 출력 수명은 마지막 실제 ForwardDrive의 원 수신시각/원 E로 계산하며 거절된 새 명령 수신이 연장하지 않는다. 임의의 연속 실패 횟수를 새로 만들지 않는다.
+단일 늦은 결과는 그 결과의 사용을 막는다. 확인된 반복 AUTO 기능 상실과 실제 process/binding 손실은 별도 복구 판단이다. warm AUTO의 일시적 거절은 서로 다른 실패 완료 5개 또는 기존 readiness lease 300ms 창 중 먼저 도달하는 조건으로 확인한다. 반복 보고·heartbeat는 실패 개수나 창을 갱신하지 않는다. 원 출력 수명은 마지막 실제 ForwardDrive의 원 수신시각/원 E로 계산하며 거절된 새 명령 수신이 연장하지 않는다. 구체적인 대상 사유, 현재 거절 중인 B의 제외, qualification hold 보존과 펌웨어의 순수 deadline 재시도는 [전체 파이프라인 지연 정책](../../../docs/platform/pipeline-latency-policy.md)을 따른다.
 
 READY와 실제 계산은 정상인데 command 전달만 비어 있는 경우에도 원 100ms 출력 만료와 300ms 기능 확인을 구분한다. 최초 command가 없는 경우와 정상 WAIT 뒤 복귀를 포함해 현재 연속 READY 구간의 고정 활성화 근거와 마지막 유효 ForwardDrive 중 늦은 시각을 사용한다. 반복 READY/progress가 이 창을 매번 다시 시작하지 않는다. 확인을 기다리는 동안 원 출력이 만료되면 STOP한다.
 

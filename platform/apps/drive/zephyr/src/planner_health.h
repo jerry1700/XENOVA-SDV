@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Planner-owner work evidence. Tracker callbacks and supervision readers never
- * renew it. In-flight work uses its original search/apply deadline; completed
- * work has the existing bounded supervision window. Neither is command E. */
+ * renew it. A pending job's original search/apply deadline and its bounded
+ * owner-response window are separate. Neither extends a plan or command E. */
 #ifndef XENOVA_DRIVE_PLANNER_HEALTH_H
 #define XENOVA_DRIVE_PLANNER_HEALTH_H
 #include <stdatomic.h>
@@ -24,12 +24,12 @@ static inline void drive_planner_health_complete(struct drive_planner_health *h,
 static inline void drive_planner_health_begin(struct drive_planner_health *h,uint64_t original_deadline){
  if(h->pending)return; /* repeated BUSY is still the first unresolved attempt */
  h->pending=true;
- atomic_store(&h->valid_until_us,original_deadline);
+ atomic_store(&h->valid_until_us,original_deadline?drive_planner_observe_until(original_deadline):0);
 }
 static inline void drive_planner_health_admitted(struct drive_planner_health *h,uint64_t original_deadline){
  /* Called once on actual admission, never at a later search slice. */
  h->pending=true;
- atomic_store(&h->valid_until_us,original_deadline);
+ atomic_store(&h->valid_until_us,original_deadline?drive_planner_observe_until(original_deadline):0);
 }
 static inline bool drive_planner_health_current(const struct drive_planner_health *h,uint64_t now){
  uint64_t until=atomic_load(&h->valid_until_us);

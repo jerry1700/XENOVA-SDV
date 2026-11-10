@@ -73,6 +73,7 @@ class VehicleOdometry:
         self.samples=deque(maxlen=128);self.pending={};self.last_probe=None
         self.errors={};self.first_error=None;self.latest=None
         self.travel=0.
+        self._source_payload=None
         self.absolute=AbsoluteWheelMeter(config,self.host_boot)
 
     def fail(self,code,*,invalidate_sample=True):
@@ -84,7 +85,7 @@ class VehicleOdometry:
 
     def device_session(self,session):
         if session==self.device:return
-        self.device=session;self.epoch=str(uuid4());self.previous=None
+        self.device=session;self.epoch=str(uuid4());self.previous=None;self._source_payload=None
         self.pose=(0.,0.,0.);self.sequence=0;self.samples.clear();self.pending.clear();self.latest=None
         self.travel=0.
         self.absolute.invalidate()
@@ -148,9 +149,16 @@ class VehicleOdometry:
             return self.fail('ODOM_COUNTER_RANGE')
         pi_us=(lower_pi_us+upper_pi_us)//2
         current=(sample,source_us,left,right,pi_us)
+        payload=(pi_session,sample,source_us,left,right,quality,steer_mrad,steer_error_mrad)
         x,y,yaw=self.pose;velocity=0.;steering=None
         if self.previous is not None:
             old=self.previous
+            # 늦은 정상 packet은 더 최신의 pose/meter를 철회할 근거가 아니다.
+            # 최신 ID의 내용 충돌과 시간/번호 모순은 아래 기존 fail 경로로 보낸다.
+            historical=(self._source_payload is not None and pi_session==self._source_payload[0]
+                and sample<old[0] and source_us<old[1])
+            if historical or payload==self._source_payload:
+                return self.fail('ODOM_SAMPLE_ORDER',invalidate_sample=False)
             if sample<=old[0] or source_us<=old[1] or pi_us<=old[4]:return self.fail('ODOM_SAMPLE_ORDER')
             if max(source_us-old[1],pi_us-old[4])>self.config.maximum_sample_age_us:
                 # Unknown motion through a long sensor gap cannot be integrated
@@ -160,7 +168,7 @@ class VehicleOdometry:
                 if self.first_error is None:self.first_error='ODOM_CONTINUITY_GAP'
                 self.epoch=str(uuid4());self.pose=(0.,0.,0.);self.travel=0.;self.sequence=1
                 self.absolute.invalidate()
-                self.previous=current;self.samples.clear();self.latest=None;return None
+                self.previous=current;self._source_payload=payload;self.samples.clear();self.latest=None;return None
             modulus=1<<self.config.encoder_bits
             delta=lambda a,b:((a-b+modulus//2)%modulus)-modulus//2
             dl=delta(left,old[2])*self.config.metres_per_tick
@@ -177,7 +185,7 @@ class VehicleOdometry:
             yaw=math.remainder(yaw+turn,2*math.pi);velocity=distance/dt
             self.travel+=abs(distance)
             if abs(distance)>1e-9:steering=math.atan(self.config.wheelbase_m*turn/distance)
-        self.previous=current;self.pose=x,y,yaw;self.sequence+=1
+        self.previous=current;self._source_payload=payload;self.pose=x,y,yaw;self.sequence+=1
         self.absolute.record(pi_session=pi_session,device_session=self.device,odom_epoch=self.epoch,
             sequence=self.sequence,source_sample=sample,source_us=source_us,left=left,right=right,
             pi_sample_us=pi_us,clock_error_us=error)
