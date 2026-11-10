@@ -176,6 +176,9 @@ xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 use
 ESP32 CP210x USB-UART 연결용 `usbserial`·`cp210x` 모듈도 이미지에 포함한다. 다음 패키지 manifest 검사에서 두 커널 버전별 패키지를 확인한다.
 실제 USB 인식·주소 확인 뒤 [휴대폰 접속 절차](../../platform/services/display/router/deploy/mobile-access/mobile-access.README.md)를 따른다.
 
+`20-xenova-usb-phone.network`는 RNDIS·CDC-NCM·CDC-ECM 링크에 먼저 적용한다. DHCP IPv4 주소와 직접 연결된 서브넷은 사용하지만, 휴대폰이 공급하는 기본 경로·추가 경로·DNS·NTP·도메인은 받지 않는다. IPv6 RA·link-local도 사용하지 않고 online 대기 대상에서 제외한다. Wi-Fi와 다른 Ethernet 드라이버의 규칙은 유지한다.
+같은 드라이버를 쓰는 USB Ethernet 동글도 이 주소 전용 정책의 대상이다. 동글을 외부 uplink로 운영하려면 해당 장치를 좁혀 매칭하는 더 이른 `.network` 규칙으로 명시적으로 구성한다. 이 파일은 `xen-tools-net-conf`의 설정 파일로 보존한다.
+
 HDMI는 `dtoverlay=vc4-kms-v3d-pi4,cma-64`를 사용한다. 고정 커널 소스의 Pi4 overlay를 기존 DTB 목록에 추가해 빌드하고, WIC의 `overlays/vc4-kms-v3d-pi4.dtbo`로 배포한다. 일반 overlay 이름의 `overlay_map` 변환에 의존하지 않는다.
 WIC 검사는 이 설정과 실제 overlay·deploy 해시를 함께 확인한다. DTB·Xen·`boot.scr`의 인자와 3GiB dom0 설정은 유지한다. HDMI KMS 지원이 Xen 아래 V3D 가속 성공을 뜻하지는 않는다.
 
@@ -689,6 +692,12 @@ try:
     installed = assemble.platform_root_ok(root)
     check(bool(installed), "actual dom0 source, units, cfg, Wi-Fi, identity")
     check((root/"usr/bin/systemd-run").is_file(), "per-execution scope tool systemd-run")
+    phone_policy = root/"etc/systemd/network/20-xenova-usb-phone.network"
+    check(phone_policy.is_file() and phone_policy.read_bytes() ==
+          (repo/"platform/yocto/meta-xenova/recipes-extended/xen/files/20-xenova-usb-phone.network").read_bytes(),
+          "installed USB phone address-only policy matches source")
+    check(phone_policy.stat().st_uid == 0 and phone_policy.stat().st_mode & 0o777 == 0o644,
+          "USB phone policy root ownership and mode 0644")
     broker_sources = {
         "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
         "platform/deploy/mosquitto/etc/policy.json": "usr/share/xenova/mqtt/policy.json",

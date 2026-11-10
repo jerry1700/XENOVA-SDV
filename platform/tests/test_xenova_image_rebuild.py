@@ -1,5 +1,6 @@
 """이미지 재빌드의 ACL·템플릿 라우팅·sparse 복사 경계를 실제 구현으로 검사한다."""
 import ast
+import configparser
 import copy
 import importlib.util
 import json
@@ -62,6 +63,20 @@ class ImageRebuildContractTest(unittest.TestCase):
                        expected + "\ndtoverlay=vc4-kms-v3d"):
             with self.subTest(config=config):
                 self.assertFalse(wic.pi4_kms_enabled(config))
+
+    def test_phone_dhcp_policy_preserves_management_uplink_and_boot_independence(self):
+        path = ROOT / "platform/yocto/meta-xenova/recipes-extended/xen/files/20-xenova-usb-phone.network"
+        policy = configparser.ConfigParser()
+        policy.read_string(path.read_text())
+        self.assertEqual(set(policy["Match"]["Driver"].split()), {"rndis_host", "cdc_ncm", "cdc_ether"})
+        self.assertEqual(policy["Link"]["RequiredForOnline"], "no")
+        self.assertEqual(policy["Network"]["DHCP"], "ipv4")
+        for key in ("LinkLocalAddressing", "IPv6AcceptRA"):
+            self.assertEqual(policy["Network"][key], "no")
+        for key in ("UseGateway", "UseRoutes", "UseDNS", "UseNTP", "UseDomains"):
+            self.assertEqual(policy["DHCPv4"][key], "no")
+        self.assertNotIn("Name", policy["Match"])
+        self.assertLess(path.name, "80-wired.network")
 
     def test_backend_can_read_all_v2_telemetry_but_has_no_v2_write_grant(self):
         rules = broker.policy(ROOT / "platform/deploy/mosquitto/etc/policy.json")

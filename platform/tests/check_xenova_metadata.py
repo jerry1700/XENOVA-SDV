@@ -26,6 +26,12 @@ assert boot['RPI_DOM0_MEM'] == '3072M'
 _, xen = load('xen-tools')
 assert '10-xenbr0.netdev' not in xen['VIRT_NETWORKING_FILES']
 assert 'file://10-xenbr0.netdev' not in xen['SRC_URI'].split()
+phone = '20-xenova-usb-phone.network'
+assert selected(xen, phone) == LAYER / 'recipes-extended/xen/files' / phone
+assert 'file://' + phone in xen['SRC_URI'].split()
+assert '/etc/systemd/network/' + phone in xen['CONFFILES:xen-tools-net-conf'].split()
+assert any(fnmatchcase('/etc/systemd/network/' + phone, pattern) for pattern in xen['FILES:xen-tools-net-conf'].split())
+assert any(Path(path).name == phone for path in xen['VIRT_NETWORKING_FILES'].split())
 for filename in ['10-ether.network', '10-xenbr0.network']:
     assert selected(xen, filename) == LAYER / 'recipes-extended/xen/files' / filename
 text, bringup = load('xenova-bringup')
