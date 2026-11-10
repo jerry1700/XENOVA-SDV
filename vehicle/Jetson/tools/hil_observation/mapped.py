@@ -143,10 +143,13 @@ class MappedPcOwner:
         return result
 
     def current_view(self, pc_frame, *, now_j_us):
-        self._current(now_j_us)
         _need(type(pc_frame) is PcFrameInput and pc_frame._issuer is self._issuer
             and pc_frame.binding.canonical_bytes == self.binding.canonical_bytes,
             'original issued PC frame required')
+        if now_j_us+1>=pc_frame.expires_j_us:
+            from xenova_vehicle.runtime.health_policy import FrameExpired
+            raise FrameExpired('original PC frame expired before mapping use')
+        self._current(now_j_us)
         evidence = pc_frame._lease_token
         _need(type(evidence) is ClockLeaseEvidence and evidence.lease.source == self._source
             and pc_frame._revision == (self._revision, self.clock_owner.fence_revision)

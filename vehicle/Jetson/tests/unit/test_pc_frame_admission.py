@@ -213,7 +213,8 @@ class PcFrameAdmissionTests(unittest.TestCase):
     def test_source_fence_endpoint_close_and_original_expiry_never_make_a_current_view(self):
         frame, _, _ = self.early()
         self.now = frame.expires_j_us
-        with self.assertRaises(PcFrameAdmissionError): self.owner.current_view(frame, now_us=self.now)
+        from xenova_vehicle.runtime.health_policy import FrameExpired
+        with self.assertRaises(FrameExpired): self.owner.current_view(frame, now_us=self.now)
         self.assertEqual(frame.expires_j_us, self.a_frame.expires_j_us)
         self.owner.fence('PC_SOURCE_DISCONNECTED')
         self.assertEqual(self.owner.fence_revision, 1)

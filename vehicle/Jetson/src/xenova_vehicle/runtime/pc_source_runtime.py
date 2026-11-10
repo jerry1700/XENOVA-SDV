@@ -71,7 +71,8 @@ class _PcIdentityFacade:
         if restore_material is not None:
             raise PcSourceNotReady('PC_COMPLETE_RESTORE_NOT_READY')
         if not packet.issued_us <= now_us < packet.expires_us:
-            raise TimeoutError('original PC source proposal expired')
+            from .health_policy import FrameExpired
+            raise FrameExpired('original PC source proposal expired')
         proposal = packet.header['metadata']
         expected = pc_proposal_metadata(binding=self.owner.binding, policy=self.policy,
             mapper_instance=self.mapper_instance, bootstrap=bootstrap, vehicle_wire=vehicle_wire,
@@ -133,8 +134,10 @@ class PcSupervisorSource(SupervisorSource):
                 self._pc_owner.admit(original[0], vehicle_received_j_us=original[1],
                     current_vehicle_wire=self.current_vehicle, now_us=self.clock())
             except PcSourceNotReady as error:
-                self.jio.fence_source()
-                raise SourceChanged('current PC source lifecycle/parser/Vehicle is unavailable') from error
+                self.jio.set_world_dispatch_enabled(False)
+                self.counts['wait_current_input']+=1
+                return
+            self.jio.set_world_dispatch_enabled(self.operation_owner.world_enabled)
 
 
 class PcMapperSource(MapperSource):
@@ -168,8 +171,9 @@ class PcMapperSource(MapperSource):
         self._pc_metadata.require_sent(sent)
         report = PcParserComplete(sent.packet, self.raw, self._pc_manifest)
         if len(self._pc_parsed) == REQUIRED_NN_PAIR_COUNT: return
-        if report.purpose != 'PARSER_WARMUP' or sent.completed_us >= report.expires_us:
-            raise ValueError('initial PC source needs five original in-time parser warmup sends')
+        if report.purpose != 'PARSER_WARMUP':
+            raise ValueError('initial PC source needs original parser warmup sends')
+        if sent.completed_us>=report.expires_us:return
         if self._pc_parsed:
             previous = self._pc_parsed[-1]
             if (report.nn_key[:3] != previous.nn_key[:3]
@@ -185,7 +189,9 @@ class PcMapperSource(MapperSource):
                 map_epoch=self.map_epoch, frame_epoch=self.frame_epoch)
             self._pc_identity_draft = (value, str(uuid4()), now, now + 5_000_000)
         proposal, request, issued, expires = self._pc_identity_draft
-        if now >= expires: raise TimeoutError('original PC identity draft expired while busy')
+        if now >= expires:
+            self._pc_identity_draft=None
+            return
         self._proposal = proposal
         self._proposal_packet = self.link.send('SOURCE_IDENTITY', proposal, request_id=request,
             issued_us=issued, expires_us=expires)

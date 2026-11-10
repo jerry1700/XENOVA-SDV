@@ -412,12 +412,35 @@ class HilObservationSessionTests(unittest.TestCase):
 
     def test_partial_prefix_keeps_first_deadline_and_times_out_without_resync(self):
         _, scope, _ = fixtures(); session, peer = self.pair(); peer.send(b'X')
-        result = run_pc_session(session, scope=scope, duration_s=1, next_frame=lambda: None, cancelled=lambda: False)
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with patch('tools.hil_observation.session.health_policy',return_value=SimpleNamespace(control_stall_us=IO_TIMEOUT_US)):
+            result = run_pc_session(session, scope=scope, duration_s=1, next_frame=lambda: None, cancelled=lambda: False)
         self.assertEqual(result.reason, 'TransportTimeout', result)
         self.assertGreaterEqual(result.finished_local_us - result.started_local_us, IO_TIMEOUT_US)
         self.assertEqual(result.counts['frames_sent'], 0)
         self.assertEqual(session.fileno(), -1)
         peer.settimeout(.3); self.assertEqual(peer.recv(1), b'')
+
+    def test_one_delayed_probe_recovers_clock_without_restarting_the_connection(self):
+        import time
+        binding, scope, policy = fixtures(); jetson, pc = self.pair(); stop=threading.Event()
+        first=[True]
+        def take():
+            if first[0]:
+                first[0]=False
+                time.sleep(.25)
+            return None
+        thread,state=self.start(lambda:run_pc_session(pc,scope=scope,duration_s=2,
+            next_frame=take,cancelled=stop.is_set),stop)
+        result=run_jetson_session(jetson,binding=binding,scope=scope,clock_policy=policy,
+            destination_clock_id=binding.clock_id,duration_s=1,probe_interval_us=100_000,
+            on_frame=lambda *_:True,cancelled=stop.is_set)
+        stop.set();thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertIsNone(result.failure,result)
+        self.assertGreaterEqual(result.counts['clock_rejected'],1)
+        self.assertGreaterEqual(result.counts['leases_issued'],1,(result,state))
 
     def test_hard_original_probe_conflict_is_not_a_transient_lease_branch(self):
         binding, scope, policy = fixtures(); jetson, peer = self.pair(); stop = threading.Event()
