@@ -12,6 +12,7 @@ from pathlib import Path
 import sys
 import time
 import uuid
+import hashlib
 
 from ..yolop_profile import YolopBenchProfile
 from .lifecycle_messages import LifecycleMessage, LifecyclePeer
@@ -26,6 +27,7 @@ from .resident_samples import CaptureAssembler, decode_sample_slot, encode_sampl
 from .resident_transport import ResidentLink, j_us
 from .slot_cleanup import CleanupTimeLimits, ReleaseMessage
 from .slot_messages import ReaderSlotContext, SlotMessage, SlotTimeLimits, WriterSlotContext
+from .health_policy import ConfigurationError, FrameExpired, health_policy
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ class WorkerBoot:
     startup_deadline_us: int
     diagnostic_directory: str
     writer_bind: RawBindMessage | None = None
-    slot_limits: SlotTimeLimits = SlotTimeLimits(150_000, 500_000, 150_000)
+    slot_limits: SlotTimeLimits = SlotTimeLimits(5_000_000, 500_000, 5_000_000)
     cleanup_limits: CleanupTimeLimits = CleanupTimeLimits(1_000_000)
     perception_profile_bytes: bytes | None = None
     copy_handles: tuple | None = None
@@ -105,11 +107,70 @@ def relay_publications(port, source, *, clock=j_us):
     return accepted_count
 
 
+def apply_compute_operation(compute, source, *, action, expires_us, gate_expires_us=None,
+                            publication_port=None, mapping_port=None, clock=j_us):
+    """원 M 채택 lock에서 설정/fence를 적용하고 미송신 World만 철회한다. active quiescence ACK는 아니다."""
+    from .operation_request import OperationRequestError
+    if action not in ('RUN','STANDBY'):raise ValueError('exact M operation action required')
+    # 이 condition은 원 mapping adoption lock으로 생성됐다. 없는 경우에도 같은 경계를 쓴다.
+    with compute.operation_lock:
+        checked=clock()
+        if type(checked) is not int or not 0<=checked<2**64 or checked>=expires_us:raise OperationRequestError('REQUEST_EXPIRED')
+        if gate_expires_us is not None and checked>=gate_expires_us:raise OperationRequestError('OPERATION_GATE_EXPIRED')
+        compute.set_operation_standby(action=='STANDBY')
+        if publication_port is not None:publication_port.discard_pending('WORLD_CANDIDATE')
+    if source is not None:source.discard_world()
+    return checked
+
+
+def mapper_sensor_owner(boot, binding):
+    """M-main에서 보정·센서 메타만 검산한다. CV core·DB·Device는 만들지 않는다."""
+    from .mapper_profile import MapperProfile
+    from .mapper_sensor_state import MapperSensorState
+    from ..perception.calibration import CalibrationProfile
+    config=MapperProfile.from_bytes(boot.mapper_profile_bytes)
+    calibration=CalibrationProfile.from_dict(json.loads(boot.perception_profile_bytes))
+    if calibration.kind=='SYNTHETIC' or binding.fields['calibration_bundle']!=calibration.sha256:
+        raise ValueError('live sensor owner requires the pinned physical/provisional calibration')
+    if boot.source_policy is None or boot.clock_policy is None:
+        raise ValueError('sensor owner requires the original source and clock policies')
+    boot.source_policy.check_profile(calibration)
+    config.check(calibration,vehicle_configuration=boot.source_policy.configuration,
+        vehicle_calibration=boot.source_policy.calibration)
+    limits=config.sensors
+    owner=MapperSensorState(calibration,binding,boot.clock_policy,
+        tof_leaves=limits.tof_leaves,vehicle_max_age_us=limits.vehicle_max_age_us,tof_max_age_us=limits.tof_max_age_us,
+        max_speed_mps=limits.max_speed_mps,max_yaw_rate_rps=limits.max_yaw_rate_rps,
+        max_gap_us=limits.max_gap_us,capacity=limits.capacity,mapper_worker=boot.peer.worker_instance,
+        mapper_instance=boot.mapper_instance)
+    return config,owner
+
+
+def attach_sensor_snapshot(item, owner, timing, *, now_us,clock_replies=()):
+    """원 RGB·depth capture hull만 계산해 결합한다. pixel/NN decode나 지연 수락은 없다."""
+    from dataclasses import replace
+    from ..perception.adapters import from_capture_sample
+    from .mapper_sensor_state import SensorSnapshotUnavailable
+    observation=from_capture_sample(item.sample,owner.raw.fields,owner.calibration,
+        timing=timing,include_nn=False)
+    available=max(observation.rgb.stamp.available_us,
+        observation.rgb.stamp.available_us if observation.depth is None else observation.depth.stamp.available_us)
+    hull=replace(observation.rgb.stamp,captured_us=observation.capture_interval,available_us=available)
+    try:
+        snapshot=owner.frame_snapshot(hull,now_us=now_us,expires_us=item.expires_us,job_id=item.job_id,
+            source_generation=item.source_generation,source_key=item.source_key,clock_replies=clock_replies)
+    except SensorSnapshotUnavailable:
+        # proof cap/원E 실패는 metric 미준비다. parser 입력과 원 capture를 다시 찍지 않는다.
+        return item
+    return item.with_sensor_snapshot(snapshot,now_us=now_us)
+
+
 def _exception_message(error, limit=1024):
     """원 args의 유한 텍스트만 남긴다. SDK payload repr/임의 __str__를 호출하지 않는다."""
     parts = []
-    truncated = len(error.args) > 4
-    for value in error.args[:4]:
+    args = BaseException.args.__get__(error, BaseException)
+    truncated = len(args) > 4
+    for value in args[:4]:
         if type(value) is str:
             text = value[:limit]
             truncated = truncated or len(value) > limit
@@ -118,11 +179,40 @@ def _exception_message(error, limit=1024):
         elif type(value) is int and value.bit_length() <= 128:
             text = str(value)
         else:
-            text = '<' + type(value).__name__[:64] + ' argument omitted>'
+            text = '<' + type.__getattribute__(type(value), '__name__')[:64] + ' argument omitted>'
             truncated = True
         parts.append(text)
     message = ' | '.join(parts)
     return message[:limit], truncated or len(message) > limit
+
+
+def _origin_label(value, limit):
+    if type(value) is not str:
+        return '<unknown>', True
+    selected = value[:limit]
+    safe = ''.join(char if char.isascii() and (char.isalnum() or char in '_.<>')
+                   else '_' for char in selected)
+    return safe, len(value) > limit or safe != selected
+
+
+def _exception_origin(error):
+    """최대 512개를 순회해 원 traceback 끝 12개만 남긴다. locals·소스·경로는 저장하지 않는다."""
+    frames = deque(maxlen=12)
+    truncated = False
+    visited = 0
+    traceback = BaseException.__traceback__.__get__(error, BaseException)
+    while traceback is not None:
+        if visited == 512:
+            # 끝에 도달하지 못한 앞부분을 실제 오류 원점으로 표시하지 않는다.
+            return [], True
+        frame = traceback.tb_frame
+        module, module_truncated = _origin_label(frame.f_globals.get('__name__'), 128)
+        function, function_truncated = _origin_label(frame.f_code.co_name, 96)
+        truncated = truncated or len(frames) == frames.maxlen or module_truncated or function_truncated
+        frames.append(dict(module=module, function=function, lineno=traceback.tb_lineno))
+        visited += 1
+        traceback = traceback.tb_next
+    return list(frames), truncated
 
 
 def _hold_device_lease(device_id):
@@ -189,7 +279,16 @@ class _Actor:
         self.last_actual_sent = None
         self.deferred = deque()
         self.sent_observer=None
+        self.idle_hook=None
+        self._idle_busy=False
         self._hello()
+
+    def service_idle(self):
+        """제어 송신 대기 중에도 main의 작은 수신·수락을 진행한다. STOP 뒤에는 호출하지 않는다."""
+        if self.stop is not None or self.idle_hook is None or self._idle_busy:return
+        self._idle_busy=True
+        try:self.idle_hook()
+        finally:self._idle_busy=False
 
     def _hello(self):
         p = self.boot.peer
@@ -264,6 +363,7 @@ class _Actor:
             self.deferred.extend(packets)
             if not allow_stop and self.stop is not None:
                 raise _StopWork()
+            self.service_idle()
             time.sleep(0.005)
 
     def poll(self):
@@ -279,7 +379,8 @@ class _Actor:
         if self.bind is not None:
             raise ValueError('resident source accepts one original RAW BIND')
         context = RawBindContext(self.boot.peer, self.boot.raw_scope.writer, self.boot.raw_profile)
-        bind = RawBindMessage(packet, context, cap_us=self.boot.startup_deadline_us)
+        bind = RawBindMessage(packet, context,
+            cap_us=self.boot.startup_deadline_us if self.boot.peer.role == 'A' else None)
         if not bind.issued_us <= j_us() < bind.expires_us:
             raise ValueError('BIND is outside its original lifetime')
         if bind.binding.sha256 != self.boot.raw_scope.raw_binding_sha256:
@@ -301,7 +402,7 @@ class _Actor:
                     raise ValueError('expected initial RAW BIND')
                 self.accept_bind(packet)
             now = j_us()
-            end = self.boot.startup_deadline_us if self.bind is None else self.bind.expires_us
+            end = (self.boot.startup_deadline_us if self.boot.peer.role == 'A' else 2**64-1) if self.bind is None else self.bind.expires_us
             if now >= end:
                 raise TimeoutError('original RAW BIND/ACK deadline elapsed')
             time.sleep(0.002)
@@ -311,18 +412,45 @@ class _Actor:
         return self.link.send('SLOT', payload, domain='RAW', revision=self.bind.binding_revision,
                               request_id=request_id, issued_us=issued, expires_us=expires)
 
+    def cancel_request(self, request):
+        """native 취득 전에만 호출한다. 같은 채널의 다음 REQUEST보다 먼저 취소를 보낸다."""
+        now = j_us()
+        packet = self.send_required('RAW_CONTROL', dict(op='CANCEL_REQUEST',
+            request_id=request.request_id, request_sha256=hashlib.sha256(request.raw).hexdigest(),
+            raw_binding_sha256=self.boot.raw_scope.raw_binding_sha256), domain='RAW',
+            revision=self.bind.binding_revision, request_id=request.request_id,
+            issued_us=now, expires_us=now + health_policy().control_stall_us)
+        self.await_sent(packet)
+        history = getattr(self, '_cancelled_raw', None)
+        if history is None:self._cancelled_raw = history = deque(maxlen=16)
+        history.append(request)
+        self.leases_released = True
+
+    def cancelled_grant(self, packet, context, limits, parser=SlotMessage):
+        """취소 전에 S가 이미 보낸 GRANT/ACQUIRED는 원 parent 검산 뒤 무효과로 버린다."""
+        if packet.kind != 'SLOT' or packet.payload.get('op') not in ('GRANT', 'ACQUIRED'):return False
+        for original in getattr(self, '_cancelled_raw', ()):
+            if original.request_id == packet.fields['request_id']:
+                parser(packet, original.context if context is None else context, original, limits=limits)
+                return True
+        return False
+
     def required_slot(self, payload, *, request_id, issued, expires):
         return self.send_required('SLOT', payload, domain='RAW', revision=self.bind.binding_revision,
                                   request_id=request_id, issued_us=issued, expires_us=expires)
 
-    def await_sent(self, packet, *, cap_us=None):
+    def await_sent(self, packet, *, cap_us=None, allow_stop=False):
         """원 packet의 실제 full-send를 기다린다. queue 수락이나 빈 pending을 완료로 보지 않는다.
 
         STOP/EOF는 CPU 진입을 막고, 다른 수신은 기존 유한 FIFO에 보존한다.
         cleanup과 active parser의 원 기한은 재시도/heartbeat로 갱신하지 않는다.
+        allow_stop=True는 view 반환 뒤 원 RELEASE cleanup에만 쓴다. 실제 STOP cap도
+        더 짧은 상한으로 적용하며 새 작업/기한을 만들지 않는다.
         """
         if type(packet) is not StructuralPacket:
             raise ValueError('actual send wait requires the original structural packet')
+        if type(allow_stop) is not bool or (allow_stop and (packet.kind != 'SLOT' or packet.payload.get('op') != 'RELEASE')):
+            raise ValueError('STOP exception is reserved for original slot RELEASE cleanup')
         deadline = int(packet.fields['expires_j_us'])
         if cap_us is not None:
             if type(cap_us) is not int or not 0 <= cap_us < 2**64:
@@ -334,11 +462,14 @@ class _Actor:
             if len(self.deferred) + len(packets) > 8:
                 raise RuntimeError('bounded worker control backlog is full during actual send wait')
             self.deferred.extend(packets)
-            if self.stop is not None:
+            if self.stop is not None and not allow_stop:
                 raise _StopWork()
+            if self.stop is not None:
+                deadline = min(deadline, self.stop.expires_us)
+            self.service_idle()
             actual = self.last_actual_sent
             if actual is not None and actual.packet is packet:
-                if actual.completed_us >= deadline:
+                if actual.completed_us >= deadline and not ResidentLink._cleanup(packet):
                     raise TimeoutError('required packet actual send missed its original deadline')
                 return actual
             if j_us() >= deadline:
@@ -358,19 +489,20 @@ class _Actor:
             target.write(raw)
 
     def fault(self, error):
-        configuration = (isinstance(error, ValueError) and self.state in
-                         ('STARTING', 'WAIT_INPUT', 'ASSET_CHECK', 'DEVICE_BOOT', 'PIPELINE_START'))
-        self.failure = type(error).__name__
-        message, truncated = _exception_message(error)
+        configuration = issubclass(type(error), ConfigurationError)
+        self.failure = type.__getattribute__(type(error), '__name__')
         try:
+            message, truncated = _exception_message(error)
+            origin, origin_truncated = _exception_origin(error)
             self.save('failure.json', dict(schema_version=1, role=self.boot.peer.role,
                 worker_instance=self.boot.peer.worker_instance, service_instance=self.boot.peer.service_instance,
                 raw_binding_sha256=self.boot.raw_scope.raw_binding_sha256, phase=self.state,
                 observed_j_us=str(j_us()), exception_type=self.failure[:96], message=message,
-                message_truncated=truncated, message_basis='bounded_exception_args_without_payload_repr'))
+                message_truncated=truncated, message_basis='bounded_exception_args_without_payload_repr',
+                origin_frames=origin, origin_truncated=origin_truncated))
         except Exception as diagnostic_error:
             # 진단 I/O 실패가 원 FAULT의 분류·전송을 대체하지 않게 한다.
-            self.failure_diagnostic_error = type(diagnostic_error).__name__[:96]
+            self.failure_diagnostic_error = type.__getattribute__(type(diagnostic_error), '__name__')[:96]
         self.state = 'FAILED'
         self.drain_sent()
         self.link.send('FAULT', dict(domain='RAW', code='CONFIG_INVALID' if configuration else 'RESIDENT_FAILED',
@@ -453,7 +585,7 @@ def acquisition_main(endpoint, boot):
 
         setup = source.start(stage)
         if setup['model_asset']['blob_sha256'] != boot.raw_profile.model_id:
-            raise ValueError('actual validated model differs from the accepted binding')
+            raise ConfigurationError('actual validated model differs from the accepted binding')
         actor.save('oak-setup.json', setup)
         queue_j = int(setup['queues_configured_j_us'])
         bridge = source.sample_clock()
@@ -463,7 +595,7 @@ def acquisition_main(endpoint, boot):
         scope = CaptureScope(bind.binding.sha256, boot.peer.worker_instance, streams['rgb_video'],
                              streams['depth_right'], streams.get('nn_input0'), streams.get('nn_output0'))
         deadline = AbsoluteDeadline.after(queue_j, 15_000_000, now_us=j_us(), cap_us=boot.startup_deadline_us)
-        warmup = CaptureWarmup(scope, queue_j, bridge['sdk_us'], deadline, now_us=j_us())
+        warmup = CaptureWarmup(scope, queue_j, bridge['sdk_us'], deadline, now_us=j_us(), enforce_deadline=False)
         actor.state = 'WARMUP'
         actor.progress('GRAPH_STARTED', completed=queue_j)
         next_clock = j_us() + 100_000
@@ -508,17 +640,15 @@ def acquisition_main(endpoint, boot):
             if video is not None:
                 video.step()
             now = j_us()
-            if not warmup.ready and warmup.poll(now):
-                raise TimeoutError('capture30 original warmup deadline elapsed')
             if warmup.ready and not capture_reported:
                 actor.state = 'STREAMING'
                 actor.progress('CAPTURE_READY', assembler.latest_capture.rgb.sequence, completed=warmup.ready_us)
                 capture_reported = True
-            if any(now - completed >= 500_000 for completed in last_raw.values()):
+            if capture_reported and any(now - completed >= health_policy().capture_stall_us for completed in last_raw.values()):
                 raise TimeoutError('active RGB/depth stream stalled')
-            if last_nn is not None and now - last_nn >= int(boot.profile.nn_stall_timeout_s * 1_000_000):
-                raise TimeoutError('actual NN output stream stalled')
+            # NN 입력/출력 부재는 readiness 제한이다. SDK 고장과 control 정체는 별도로 복구한다.
             for packet in incoming:
+                if actor.cancelled_grant(packet, context, boot.slot_limits):continue
                 if packet.kind == 'RAW_CONTROL':
                     op = packet.payload.get('op')
                     if op == 'PAUSE':
@@ -542,18 +672,23 @@ def acquisition_main(endpoint, boot):
                 if packet.kind != 'SLOT' or packet.payload.get('op') != 'GRANT' or request is None:
                     raise ValueError('unexpected A control statement')
                 grant = SlotMessage(packet, context, request, limits=boot.slot_limits)
-                request.record.check(j_us())
-                if pending_sample is None or not pending_sample.fresh(j_us()):
-                    raise TimeoutError('granted sample is no longer fresh')
+                if (j_us() >= request.expires_us or pending_sample is None or not pending_sample.fresh(j_us())):
+                    actor.cancel_request(request)
+                    request = pending_sample = None
+                    continue
                 encoding = encode_sample(pending_sample, grant.record.key, bind.binding)
                 actor.leases_released = False
-                info = writer.publish(grant.record, encoding)
+                try:info = writer.publish(grant.record, encoding)
+                except FrameExpired:
+                    actor.cancel_request(request)
+                    request = pending_sample = None
+                    continue
                 actor.leases_released = True
                 payload = grant.payload
                 payload.update(op='FILLED', payload_length=info.payload_length,
                                descriptor_sha256=info.descriptor_sha256)
                 out = actor.required_slot(payload, request_id=grant.request_id, issued=info.completed_us,
-                                 expires=grant.expires_us)
+                                  expires=info.completed_us + boot.cleanup_limits.transport_budget_us)
                 SlotMessage(out, context, grant, limits=boot.slot_limits)
                 last_filled = out
                 published += 1
@@ -569,7 +704,8 @@ def acquisition_main(endpoint, boot):
                     issued_us=complete, expires_us=pause.expires_us)
                 paused_ack = RawControlMessage(reply, bind, pause)
             if not write_paused and request is not None and j_us() >= request.expires_us:
-                raise TimeoutError('original copy request expired without GRANT')
+                actor.cancel_request(request)
+                request = pending_sample = None
             sample = assembler.latest(j_us())
             if (not write_paused and capture_reported and request is None
                     and sample is not None and sample.key != last_published):
@@ -639,6 +775,7 @@ def mapper_main(endpoint, boot):
     storage_client=storage_mailbox=None
     bootstrap=None;bootstrap_request=None
     mapping_port=publication_port=None;mapping_material=mapping_context=mapping_scene=None
+    sensor_config=sensor_owner=None;sensor_fence=0
     processor_ref=[None]
     failed = False
     try:
@@ -646,16 +783,16 @@ def mapper_main(endpoint, boot):
         context = ReaderSlotContext(WriterSlotContext(boot.writer_bind, boot.raw_scope), bind)
         from .native_resources import RawArenaReader
         from .mapper_compute import MapperCompute, MapperInput
+        from .mapper_operation import MapperOperationController
         from .mapper_control import MapperControl
         from .mapper_processor import ResidentMapperProcessor
 
         from .resident_profile import parser_manifest_sha256
         if parser_manifest_sha256() != boot.raw_profile.parser_id:
-            raise ValueError('actual local parser manifest differs from the accepted binding')
+            raise ConfigurationError('actual local parser manifest differs from the accepted binding')
         reader = RawArenaReader(boot.raw_scope, boot.raw_tokens)
         # S가 CAPTURE_READY 후 발급한 원 ACK 시각이다. 첫 NN 수신/heartbeat로 갱신하지 않는다.
-        parser_deadline = AbsoluteDeadline.after(actor.ack.issued_us, 15_000_000, now_us=j_us(),
-                                                cap_us=boot.startup_deadline_us)
+        parser_deadline = AbsoluteDeadline.after(actor.ack.issued_us, 15_000_000, now_us=j_us())
         actor.state = 'WARMUP'
         if boot.copy_handles is not None:
             from .mapper_storage import MapperStorageMailbox
@@ -674,8 +811,12 @@ def mapper_main(endpoint, boot):
             from .mapper_publication import MapperPublicationPort
             mapping_port=MappingContextPort()
             publication_port=MapperPublicationPort(mapping_port)
+            # 외부 capture/material 대기는 cold 기동 시간이 아니다. 각 실제 LOAD의 5초는 유지한다.
             bootstrap=MapperBootstrap(storage_mailbox,mapper_worker=boot.peer.worker_instance,
-                mapper_instance=boot.mapper_instance,cap_us=boot.startup_deadline_us,clock_us=j_us)
+                mapper_instance=boot.mapper_instance,cap_us=2**64-1,clock_us=j_us)
+        if boot.mapper_profile_bytes is not None:
+            if source is None:raise ValueError('operational sensors require the registered source channel')
+            sensor_config,sensor_owner=mapper_sensor_owner(boot,bind.binding)
         def processor_factory(generation):
             processor=ResidentMapperProcessor(boot.perception_profile_bytes,bind.binding,
                 mapper_profile_bytes=boot.mapper_profile_bytes,source_policy=boot.source_policy,clock_policy=boot.clock_policy,
@@ -697,22 +838,53 @@ def mapper_main(endpoint, boot):
         compute.start()
         control=MapperControl(actor,compute,parser_deadline,
             nn_stall_us=int(boot.profile.nn_stall_timeout_s*1_000_000))
+        def apply_operation_state(action,expires_us,gate_expires_us):
+            return apply_compute_operation(compute,source,action=action,expires_us=expires_us,
+                gate_expires_us=gate_expires_us,publication_port=publication_port,mapping_port=mapping_port,clock=j_us)
+        if source is not None:
+            source.install_operation(MapperOperationController(source.link.peer,apply=apply_operation_state,clock=j_us))
+        def publish_inputs():
+            nonlocal mapping_material,mapping_context,mapping_scene
+            if mapping_port is None:return
+            if source.material is not None and source.material is not mapping_material:
+                from .mapper_bootstrap import material_bytes
+                mapping_port.publish(source.storage_context,material=material_bytes(source.material))
+                mapping_material=source.material
+            elif source.storage_context is not mapping_context:
+                mapping_port.publish(source.storage_context)
+            mapping_context=source.storage_context
+            if source.scene is not mapping_scene:
+                from ..storage.contracts import canonical
+                mapping_port.publish_scene(None if source.scene is None else canonical(source.scene))
+                # 새 원 grant를 compute가 소비할 때까지 이전 미송신 보고는 다시 쓰지 않는다.
+                if publication_port is not None:publication_port.discard_pending()
+                source.discard_outputs()
+                mapping_scene=source.scene
+        def apply_sensor_fence():
+            nonlocal sensor_fence
+            if sensor_owner is None:return
+            revision=sensor_owner.fence_revision
+            if revision!=sensor_fence:
+                compute.fence_admission(revision)
+                if publication_port is not None:publication_port.fence_admission(revision)
+                source.discard_outputs()
+                sensor_fence=revision
+        def ingest_inputs():
+            # busy-idle도 새 publication을 즉시 게시해 old-context 최종 채택을 fence한다.
+            publish_inputs()
+            if actor.stop is not None:return
+            inputs=None
+            if sensor_owner is not None:
+                inputs=sensor_owner.ingest(source.context_bytes(),now_us=j_us())
+                apply_sensor_fence()
+            if source is not None:source.operation_step(inputs=inputs,sensor_state=sensor_owner,origin=source.origin)
+        def pump_inputs():
+            if source is not None and actor.stop is None:source.pump(before_outputs=ingest_inputs)
+        actor.idle_hook=pump_inputs
         acquire = None
         while True:
             incoming = actor.poll()
-            if source is not None:source.pump()
-            if mapping_port is not None:
-                if source.material is not None and source.material is not mapping_material:
-                    from .mapper_bootstrap import material_bytes
-                    mapping_port.publish(source.storage_context,material=material_bytes(source.material))
-                    mapping_material=source.material
-                elif source.storage_context is not mapping_context:
-                    mapping_port.publish(source.storage_context)
-                mapping_context=source.storage_context
-                if source.scene is not mapping_scene:
-                    from ..storage.contracts import canonical
-                    mapping_port.publish_scene(None if source.scene is None else canonical(source.scene))
-                    mapping_scene=source.scene
+            pump_inputs()
             if bootstrap is not None and source.publication is None and source.material is not None:
                 bootstrap.offer_material(source.material)
             if storage_client is not None:
@@ -733,6 +905,7 @@ def mapper_main(endpoint, boot):
             if publication_port is not None:
                 relay_publications(publication_port,source)
             for packet in incoming:
+                if actor.cancelled_grant(packet, context, boot.slot_limits):continue
                 if storage_client is not None and storage_client.receive(packet):continue
                 if packet.kind != 'SLOT':
                     raise ValueError('unexpected M control statement')
@@ -753,12 +926,19 @@ def mapper_main(endpoint, boot):
                     if acquire is None:
                         raise ValueError('ACQUIRED has no original read request')
                     acquired = SlotMessage(packet, context, acquire, limits=boot.slot_limits)
-                    acquired.record.read_request.request.check(j_us())
+                    if j_us() >= acquire.expires_us:
+                        actor.cancel_request(acquire)
+                        acquire = None
+                        continue
                     expected = ExpectedSlot(P0Context(acquired.record.key.write_key,
                         p0_stream_ids(bind.binding), boot.raw_profile.nn_enabled),
                         acquired.record.read_request.offer.content)
                     actor.leases_released = False
-                    owned, returned = reader.copy_owned(acquired.record, expected)
+                    try:owned, returned = reader.copy_owned(acquired.record, expected)
+                    except FrameExpired:
+                        actor.cancel_request(acquire)
+                        acquire = None
+                        continue
                     payload = acquired.payload
                     payload['op'] = 'RELEASE'
                     completed = returned.writable_posted_us
@@ -775,16 +955,23 @@ def mapper_main(endpoint, boot):
                     lower=min(int(clock['sdk_host_timestamp_j_bracket_us'][0])
                               for clock in sample.clocks.values())
                     expires=min(2**64-1,lower+500_000)
+                    pump_inputs()
                     item=MapperInput(str(uuid.uuid4()),bind.binding.sha256,sample,expires,
-                        parser_cap_us=None if control.ready else parser_deadline.expires_us,
+                        parser_cap_us=None,
                         context_bytes=b'' if source is None else source.context_bytes())
+                    if sensor_owner is not None:
+                        item=attach_sensor_snapshot(item,sensor_owner,sensor_config.capture_timing,now_us=j_us(),
+                            clock_replies=() if source is None else source.clock_replies)
+                        # query 도중 현재 clock/Vehicle이 만료돼도 같은 main revision으로 제출한다.
+                        apply_sensor_fence()
                     # 실제 native 반환과 RELEASE 송신이 끝난 owned bytes만 넘긴다.
                     compute.submit(item)
                     item=sample=None
                 else:
                     raise ValueError('unsupported M SLOT operation')
             if acquire is not None and j_us() >= acquire.expires_us:
-                raise TimeoutError('original read request expired without ACQUIRED')
+                actor.cancel_request(acquire)
+                acquire = None
             time.sleep(0.002)
     except _StopWork:
         pass
@@ -797,6 +984,7 @@ def mapper_main(endpoint, boot):
         except (EOFError, OSError):
             pass
     finally:
+        actor.idle_hook=None
         actor.state = 'QUIESCING'
         if bootstrap is not None:bootstrap.cancel('STOP')
         if compute is not None:

@@ -635,13 +635,30 @@ class RawLeaseLedger:
         self._open()
         if slot.state is not SlotState.WRITING or slot.write.key != info.key:
             _fail('FILLED does not match an outstanding write')
-        slot.write.request.check(now_us)
-        if not slot.write.granted_us <= info.completed_us < slot.write.request.expires_us:
-            _fail('FILLED completion is outside the original write operation')
+        if info.completed_us < slot.write.granted_us:
+            _fail('FILLED completion precedes the original write reservation')
         updated = replace(slot, state=SlotState.READY, filled=info)
         result = LeaseResult(LeaseStatus.APPLIED)
         self._commit_slot(info.key.slot, updated)
         return result
+
+    def cancel_unstarted_write(self, grant, *, now_us):
+        """현재 writer가 native 취득 전임을 선언한 예약만 취소한다. token은 건드리지 않는다."""
+        _exact(grant, WriteGrant)
+        slot = self._write_key(grant.key)
+        _event(grant.granted_us, now_us)
+        if slot.state is not SlotState.WRITING or slot.write != grant:
+            _fail('write cancellation requires the exact unfilled reservation')
+        self._commit_slot(grant.key.slot, SlotSnapshot(slot.generation, SlotState.FREE, cleanup=slot.cleanup))
+
+    def cancel_unstarted_read(self, lease, *, now_us):
+        """현재 reader의 native ready 취득 전 취소다. READY의 기존 token/content를 보존한다."""
+        _exact(lease, ReadLease)
+        slot = self._write_key(lease.key.write_key)
+        _event(lease.reserved_us, now_us)
+        if slot.state is not SlotState.IN_USE or slot.read != lease:
+            _fail('read cancellation requires the exact unconsumed reservation')
+        self._commit_slot(lease.key.write_key.slot, replace(slot, state=SlotState.READY, read=None))
 
     def offer(self, slot, *, now_us):
         _slot(slot)
@@ -659,10 +676,14 @@ class RawLeaseLedger:
         request.request.check(now_us)
         if request.purpose == 'METRIC_MAP':
             raise UnsupportedPurpose('METRIC_MAP requires a future exact pre-read metadata/full-job contract')
+        return self._acquire(request,read_token,now_us=now_us,publication_sha256=self._publication)
+
+    def _acquire(self,request,read_token,*,now_us,publication_sha256):
+        """원장 공통 예약 본문. 호출자는 원 purpose/metadata gate를 먼저 닫는다."""
         slot = self._write_key(request.offer.content.key)
         if request.reader != self._reader:
             _fail('read request is not for the registered current M')
-        if request.publication_sha256 is not None and request.publication_sha256 != self._publication:
+        if request.publication_sha256 is not None and request.publication_sha256 != publication_sha256:
             _fail('parser publication reference differs from the registered context')
         self._open()
         for existing in self._slots:

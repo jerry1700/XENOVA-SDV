@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "lattice.h"
 #include "parking.h"
+#include "route_exit.h"
 #include <math.h>
 #include <string.h>
 #include <float.h>
@@ -47,9 +48,11 @@ static bool blocked(const dw_world *w,size_t i,const struct lp_config *c) {
  return denied||!(flags&1)||(flags&4)||(!(flags&2)&&(double)age+c->live_age_us/1000>c->cell_age_ms)||w->occupancy.bytes[i]>=70;
 }
 void lp_state_import(struct lp_path *path,const dw_state *state){
+ memset(&path->space,0,sizeof(path->space));
  path->execution=(struct lp_execution){.present=true,.features=state->state_features,.mission=state->mission,
   .segments_count=state->segments_count,.has_direction_gate=state->has_direction_gate,.direction_gate=state->direction_gate};
  path->has_episode=state->has_episode;if(state->has_episode)path->episode=state->episode;
+ path->has_route=state->has_route;if(state->has_route)path->route=state->route;
  path->origin.retained=true;strcpy(path->origin.message_id,state->message_id);strcpy(path->origin.vm,state->source_vm);
  strcpy(path->origin.execution,state->source_execution);strcpy(path->origin.app_instance,state->source_app_instance);
  path->origin.generation=state->source_generation;path->origin.state_revision=state->state_revision;path->origin.mission=state->mission;
@@ -74,10 +77,30 @@ void lp_state_import(struct lp_path *path,const dw_state *state){
  }
 }
 bool lp_state_export(const struct lp_path *path,dw_state *state){
+ /* EXIT preparation is not legacy road Task33/NONE. Its geometry commitment
+  * has a separate API; registered route export is an integration boundary. */
  if(!path||!state||path->task.active!=path->basis.bound)return false;
+ bool route=path->has_route,route_mission=route&&path->execution.present&&path->execution.mission.kind==3;
+ bool exit=route_mission&&path->route.task_space_kind==DW_ROUTE_EXIT_SPACE;
+ if(path->space.exiting&&!exit)return false;
+ if(route){
+  if(dw_route_validate(&path->route,xenova_drive_RouteSnapshot_fields))return false;
+  if(!route_mission&&path->route.state!=3)return false;
+  if(route_mission){
+   const xenova_drive_RouteBinding *binding=&path->execution.mission.route_binding;
+   const xenova_drive_RouteCore *core=&path->route.core;
+   if(!path->execution.mission.has_route_binding||dw_route_mission_validate(&path->execution.mission)||
+      path->execution.mission.phase!=core->phase||memcmp(binding->route_id.bytes,core->route_id.bytes,16)||
+      binding->revision!=core->revision||binding->purpose!=core->purpose||
+      memcmp(binding->core_sha256.bytes,path->route.acceptance.accepted_core_sha256.bytes,32)||
+      memcmp(binding->global_plan_sha256.bytes,core->global_plan_sha256.bytes,32)||
+      memcmp(binding->goal_sha256.bytes,core->goal_sha256.bytes,32))return false;
+  }
+  if(exit&&path->has_episode&&(path->episode.core.state!=1||path->episode.core.phase!=5))return false;
+ }
  state->major=2;state->has_state_features=true;state->state_features=DW_STATE_FEATURES;state->has_mission=true;
- state->has_task_reference=path->task.active;
- if(path->task.active){
+ state->has_task_reference=path->task.active&&!exit;
+ if(state->has_task_reference){
   const struct tr_basis *basis=&path->basis;xenova_drive_TaskReferenceState *out=&state->task_reference;
   if(basis->count<2||basis->count>64||strcmp(basis->id,path->reference)||strcmp(basis->frame,path->frame)||
      strcmp(basis->odom,path->odom)||strcmp(basis->configuration,path->configuration))return false;
@@ -90,7 +113,10 @@ bool lp_state_export(const struct lp_path *path,dw_state *state){
  }
  state->has_episode=path->has_episode;
  if(path->has_episode){state->episode=path->episode;state->state_features|=DW_EPISODE;}
+ state->has_route=route;
+ if(route){state->route=path->route;state->state_features|=DW_ROUTE_STATE;}
  if(path->execution.present){
+  if(path->execution.mission.has_operation_binding)state->state_features|=DW_OPERATION;
   if(path->execution.features!=state->state_features)return false;
   state->mission=path->execution.mission;
   state->segments_count=path->execution.segments_count;
@@ -108,11 +134,17 @@ bool lp_state_export(const struct lp_path *path,dw_state *state){
  }
  return true;
 }
-bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGrant *g){
- const struct lp_execution *e=&path->execution;const xenova_drive_MissionExecution *m=&e->mission;
- uint32_t expected=DW_STATE_FEATURES|(path->task.active?DW_TASK_REFERENCE:0)|(path->has_episode?DW_EPISODE:0);
- bool matches=e->present&&e->features==expected&&g&&g->admitted&&g->kind==m->kind&&
-  ((g->kind==1&&m->phase==10)||(g->kind==2&&m->phase<=9&&m->mission_deadline_pi_us==g->mission_deadline_pi_us&&
+static bool route_binding_equal(const xenova_drive_RouteBinding *a,const xenova_drive_RouteBinding *b){
+ return a->revision==b->revision&&a->purpose==b->purpose&&!memcmp(a->route_id.bytes,b->route_id.bytes,16)&&
+  !memcmp(a->core_sha256.bytes,b->core_sha256.bytes,32)&&!memcmp(a->global_plan_sha256.bytes,b->global_plan_sha256.bytes,32)&&
+  !memcmp(a->goal_sha256.bytes,b->goal_sha256.bytes,32);
+}
+bool lp_execution_matches(const xenova_drive_MissionExecution *m,const xenova_drive_MissionGrant *g){
+ bool matches=m&&g&&g->admitted&&g->kind==m->kind&&m->has_operation_binding==g->has_operation_binding&&
+  (!m->has_operation_binding||dw_operation_binding_equal(&m->operation_binding,&g->operation_binding))&&
+  m->has_route_binding==g->has_route_binding&&(!m->has_route_binding||route_binding_equal(&m->route_binding,&g->route_binding))&&
+  ((g->kind==1&&m->phase==10)||(g->kind==3&&m->phase>=1&&m->phase<=6&&m->has_route_binding)||
+   (g->kind==2&&m->phase<=9&&m->mission_deadline_pi_us==g->mission_deadline_pi_us&&
    m->execution_deadline_pi_us==g->execution_deadline_pi_us&&m->search_deadline_pi_us==g->search_deadline_pi_us&&
    m->strategy==g->strategy&&m->correction_attempts_used==g->correction_attempts_used&&
    m->execution_travel_m==g->execution_travel_m&&m->search_travel_m==g->search_travel_m))&&
@@ -124,16 +156,29 @@ bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGra
   matches=dw_selected_goal_hash(m,hash)&&!memcmp(hash,g->locked_goal_sha256.bytes,32);}
  return matches;
 }
+bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGrant *g){
+ if(!path)return false;
+ const struct lp_execution *e=&path->execution;
+ bool exit=path->has_route&&e->mission.kind==3&&path->route.task_space_kind==DW_ROUTE_EXIT_SPACE;
+ if(e->mission.kind==3&&(!path->has_route||e->mission.phase!=path->route.core.phase))return false;
+ uint32_t expected=DW_STATE_FEATURES|(path->task.active&&!exit?DW_TASK_REFERENCE:0)|(path->has_episode?DW_EPISODE:0)|
+  (path->has_route?DW_ROUTE_STATE:0)|
+  (e->mission.has_operation_binding?DW_OPERATION:0);
+ return e->present&&e->features==expected&&lp_execution_matches(&e->mission,g);
+}
 bool lp_grant_revalidates(const struct lp_path *p,const xenova_drive_MissionGrant *g){
- if(!p||!g||!g->admitted||!p->origin.retained||!p->execution.present)return false;
+ /* Both an owned current path and an exact imported copy are geometry only.
+  * Callers must validate and calculate a new candidate before publication. */
+ if(!p||!g||!g->admitted||!p->execution.present)return false;
  const xenova_drive_MissionExecution *m=&p->execution.mission;
- if(m->kind!=g->kind||(g->kind!=1&&g->kind!=2)||m->mission_revision!=g->mission_revision||m->grant_revision>g->grant_revision||
+ if(m->kind!=g->kind||(g->kind!=1&&g->kind!=2&&g->kind!=3)||m->mission_revision!=g->mission_revision||m->grant_revision>g->grant_revision||
     m->cancel_fence_revision!=g->cancel_fence_revision||m->scene_admission_revision!=g->scene_revision||
     memcmp(m->mission_id.bytes,g->mission_id.bytes,16)||memcmp(m->operator_request_nonce.bytes,g->operator_request_nonce.bytes,16)||
     memcmp(m->scene_admission_id.bytes,g->scene_admission_id.bytes,16)||m->strategy!=g->strategy||
     m->mission_deadline_pi_us!=g->mission_deadline_pi_us||m->execution_deadline_pi_us!=g->execution_deadline_pi_us||
     m->search_deadline_pi_us!=g->search_deadline_pi_us||m->correction_attempts_used>g->correction_attempts_used||
     m->execution_travel_m>g->execution_travel_m||m->search_travel_m>g->search_travel_m)return false;
+ if(g->kind==3&&(!p->has_route||!m->has_route_binding||!g->has_route_binding||!route_binding_equal(&m->route_binding,&g->route_binding)))return false;
  if(g->kind==2&&g->has_locked_goal_sha256){uint8_t goal[32];
   if(!dw_selected_goal_hash(m,goal)||memcmp(goal,g->locked_goal_sha256.bytes,32))return false;
  }
@@ -143,6 +188,11 @@ void lp_bind_current_grant(struct lp_path *p,const xenova_drive_MissionGrant *g)
  xenova_drive_MissionExecution *m=&p->execution.mission;
  m->grant_revision=g->grant_revision;m->execution_travel_m=g->execution_travel_m;m->search_travel_m=g->search_travel_m;
  m->correction_attempts_used=g->correction_attempts_used;
+ m->has_operation_binding=g->has_operation_binding;
+ if(g->has_operation_binding){m->operation_binding=g->operation_binding;p->execution.features|=DW_OPERATION;}
+ else{memset(&m->operation_binding,0,sizeof(m->operation_binding));p->execution.features&=~DW_OPERATION;}
+ m->has_route_binding=g->has_route_binding;if(g->has_route_binding)m->route_binding=g->route_binding;
+ else memset(&m->route_binding,0,sizeof(m->route_binding));
 }
 void lp_index_build(struct lp_collision_index *index,const dw_world *w,const struct lp_config *c) {
  memset(index,0,sizeof(*index));index->world=w;index->sequence=w->sequence;
@@ -165,7 +215,8 @@ static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const
  if(!obstacle_evidence&&task&&task->active){struct tr_view view;
   extra+=task->vehicle_pad;
   if(!isfinite(extra)||!tr_open(w,task,&view))return LP_COLLISION;
-  bool contained=space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):tr_contains(&view,pose,extra,c);
+  bool contained=space&&space->exiting?dre_contains(&view,space,pose,extra,c):
+   space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):tr_contains(&view,pose,extra,c);
   if(!contained)return LP_COLLISION;
  }
  float half=(c->front+c->rear)*.5f+c->margin+extra,width=c->half_width+c->margin+extra;
@@ -476,12 +527,19 @@ static enum lp_result build_heuristic(struct lp_search *s) {
  s->heuristic_open_high_water=s->metrics.open_high_water;s->metrics.open_high_water=0;
  memset(&s->nodes[0],0,sizeof(s->nodes[0]));return LP_SEARCHING;
 }
+static bool space_terminal(const dw_world *w,const struct lp_space *space,const struct tr_intent *task,
+ dw_pose pose,float pad,const struct lp_config *c){
+ if(!space->parking)return true;
+ if(!space->exiting)return dp_goal_contains(space,pose,pad,c);
+ struct tr_view road;
+ return tr_open(w,task,&road)&&tr_contains(&road,pose,pad+space->uncertainty,c);
+}
 static bool reached(struct lp_search *s,const struct lp_node *n) {
  if(s->signed_search){
   if(n->gear!=s->goal_gear||fabsf(n->steer)>s->config->max_steer/(LP_STEERS/2))return false;
   for(unsigned k=0;k<s->goals.count;k++)if(distance(n->pose,s->goals.poses[k])<=s->goals.distance&&
       fabsf(dw_angle(n->pose.yaw-s->goals.poses[k].yaw))<=s->goals.heading&&
-      (!s->space.parking||dp_goal_contains(&s->space,n->pose,s->config->tracking_guard+s->task.vehicle_pad,s->config))){
+      space_terminal(s->world,&s->space,&s->task,n->pose,s->config->tracking_guard+s->task.vehicle_pad,s->config)){
        s->goal=s->goals.poses[k];s->selected_goal=k;return true;}
   return false;
  }
@@ -633,12 +691,36 @@ enum lp_result lp_start_task_goal(struct lp_search *s,const dw_world *w,dw_pose 
 enum lp_result lp_start_parking(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,
  const struct lp_goal_set *goals,int initial,unsigned cusps,const struct lp_space *space,
  const struct tr_intent *task,const struct tr_basis *basis,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
- if(!goals||!goals->count||goals->count>LP_GOALS||!space||!space->parking||!space->slot_id||!space->slot_revision||
+ if(!goals||!goals->count||goals->count>LP_GOALS||!space||!space->parking||space->exiting||!space->slot_id||!space->slot_revision||
     !c||!isfinite(goals->distance)||goals->distance<=0||goals->distance>c->goal_distance||
     !isfinite(goals->heading)||goals->heading<=0||goals->heading>c->goal_heading||
     (initial!=1&&initial!=-1)||(goals->final_gear!=1&&goals->final_gear!=-1)||cusps>2)return LP_INPUT;
  for(unsigned k=0;k<goals->count;k++)if(!dw_pose_finite(goals->poses[k]))return LP_INPUT;
  return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,goals->final_gear,cusps,goals,space);
+}
+enum lp_result lp_start_exit(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,
+ const struct lp_goal_set *goals,int initial,unsigned cusps,const struct dre_input *source,
+ const struct tr_intent *task,const struct tr_basis *basis,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
+ struct lp_space space;struct tr_view road;
+ if(!source||source->records.world!=w||pose.x!=source->current_map_pose.x||pose.y!=source->current_map_pose.y||
+    pose.yaw!=source->current_map_pose.yaw||!task||!c||!goals||!goals->count||goals->count>LP_GOALS||
+    (initial!=1&&initial!=-1)||goals->final_gear!=1||cusps>2||
+    !isfinite(goals->distance)||goals->distance<=0||goals->distance>c->goal_distance||
+    !isfinite(goals->heading)||goals->heading<=0||goals->heading>c->goal_heading||
+    dre_prepare(source,c,&space)!=DRP_OK||task->changing||task->from_lane_id!=source->records.space->aisle_lane_id||
+    task->selected_lane_id!=task->from_lane_id||task->home_lane_id!=task->selected_lane_id||!tr_open(w,task,&road))return LP_INPUT;
+ float measured=source->vehicle->has_measured_steering_rad?source->vehicle->measured_steering_rad:
+  source->vehicle->has_estimated_steering_rad?source->vehicle->estimated_steering_rad:NAN;
+ if(!isfinite(measured)||measured!=steer||!source->vehicle->has_steering_error_rad||
+    !isfinite(source->vehicle->steering_error_rad)||source->vehicle->steering_error_rad<0||
+    fabsf(measured)+source->vehicle->steering_error_rad>c->max_steer)return LP_INPUT;
+ for(unsigned k=0;k<goals->count;k++){
+  struct lp_road_state projection;
+  if(!dw_pose_finite(goals->poses[k])||!tr_contains(&road,goals->poses[k],c->tracking_guard+space.uncertainty+task->vehicle_pad,c)||
+     lp_task_project(w,task,goals->poses[k],&projection)!=LP_PATH_FOUND||
+     fabsf(dw_angle(goals->poses[k].yaw-projection.pose.yaw))>goals->heading)return LP_INPUT;
+ }
+ return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,1,cusps,goals,&space);
 }
 /* All ordinary edges use the generated control set. A measured root steering
  * between levels is connected by the same continuous ramp integration; it is
@@ -1034,6 +1116,10 @@ static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const stru
     vehicle->steering_error_rad>c->max_steering_error||
     vehicle->quality!=3||path->world_features!=w->required_features||strcmp(path->frame,w->frame_epoch)||strcmp(path->odom,w->odom_epoch)||
     strcmp(path->configuration,w->configuration)||strcmp(path->reference,w->reference_id))return LP_INPUT;
+ /* 호환 추종도 새 지도를 수신했다는 이유로 오래된 최초 대응을 재사용하지 않는다. */
+ uint64_t previous_sample=tracker->last_pi_us?tracker->last_pi_us:path->initial_pi_us;
+ if(vehicle->pi_sample_us&&previous_sample&&(vehicle->pi_sample_us<previous_sample||
+    vehicle->pi_sample_us-previous_sample>c->pose_age_us))return LP_INPUT;
  float actual_steer=vehicle->has_measured_steering_rad?vehicle->measured_steering_rad:
                     vehicle->has_estimated_steering_rad?vehicle->estimated_steering_rad:NAN;
  if(!isfinite(actual_steer)||fabsf(actual_steer)+vehicle->steering_error_rad>c->max_steer+.0001f)return LP_INPUT;
@@ -1051,9 +1137,9 @@ static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const stru
  dw_pose end=path->points[path->count-1].pose;
  float heading_error=fabsf(dw_angle(end.yaw-path->goal.yaw))+fabsf(dw_angle(pose.yaw-end.yaw))+vehicle->heading_error_rad;
  if(distance(pose,path->goal)<=c->goal_distance&&heading_error<=c->goal_heading) {
-  float known;enum lp_result stopped=project(w,pose,vehicle->velocity_mps,actual_steer,0,actual_steer,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL);
+  float known;enum lp_result stopped=project(w,pose,vehicle->velocity_mps,actual_steer,0,actual_steer,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL,NULL);
   out->steer=actual_steer;out->emergency=true;out->result=stopped==LP_PATH_FOUND?LP_STOP:stopped;
-  if(stopped==LP_PATH_FOUND)tracker->completed++;
+  if(stopped==LP_PATH_FOUND){tracker->last_pi_us=vehicle->pi_sample_us;tracker->completed++;}
   return out->result;
  }
  float lookahead=clamp(fabsf(vehicle->velocity_mps)*c->lookahead_time,c->lookahead_min,c->lookahead_max);
@@ -1073,7 +1159,7 @@ static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const stru
  speed=fminf(speed,sqrtf(2*c->max_brake*fmaxf(0,remaining)));
  /* Independent metric clearance: forward final-curvature probes, not a
   * planner cost->metres conversion. Bound candidate speed by a braking model. */
- float known=0;enum lp_result rc=project(w,pose,vehicle->velocity_mps,actual_steer,c->max_velocity,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL);
+ float known=0;enum lp_result rc=project(w,pose,vehicle->velocity_mps,actual_steer,c->max_velocity,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL,NULL);
  if(rc!=LP_PATH_FOUND&&rc!=LP_COLLISION)return out->result=rc;
  out->known_distance=known;
  if(rc==LP_COLLISION) {
@@ -1083,10 +1169,10 @@ static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const stru
  }
  float limited=vehicle->velocity_mps+clamp(speed-vehicle->velocity_mps,-c->max_brake*dt,c->max_accel*dt);
  if(speed<vehicle->velocity_mps-c->max_brake*dt){limited=0;out->emergency=true;}
- rc=project(w,pose,vehicle->velocity_mps,actual_steer,limited,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL);
+ rc=project(w,pose,vehicle->velocity_mps,actual_steer,limited,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL,NULL);
  if(rc!=LP_PATH_FOUND){out->velocity=0;out->steer=actual_steer;out->emergency=true;return out->result=rc;}
  out->velocity=limited;out->steer=delta;out->result=LP_PATH_FOUND;
- tracker->last_velocity=limited;tracker->last_steer=delta;tracker->completed++;
+ tracker->last_velocity=limited;tracker->last_steer=delta;tracker->last_pi_us=vehicle->pi_sample_us;tracker->completed++;
  return LP_PATH_FOUND;
 }
 
@@ -1102,6 +1188,8 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
     vehicle->steering_error_rad>c->max_steering_error||vehicle->quality!=3||path->world_features!=w->required_features||
     strcmp(path->frame,w->frame_epoch)||strcmp(path->odom,w->odom_epoch)||strcmp(path->configuration,w->configuration)||strcmp(path->reference,w->reference_id))return LP_INPUT;
  if((w->required_features&DW_LANE_MODEL)&&(!path->task.active||!tr_basis_compatible(&path->basis,w)))return LP_INPUT;
+ if(path->space.exiting&&(!path->execution.present||path->execution.mission.kind!=3||
+    !path->execution.mission.has_route_binding))return LP_INPUT;
  float steering=vehicle->has_measured_steering_rad?vehicle->measured_steering_rad:vehicle->has_estimated_steering_rad?vehicle->estimated_steering_rad:NAN;
  if(!isfinite(steering)||fabsf(steering)+vehicle->steering_error_rad>c->max_steer+.0001f)return LP_INPUT;
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
@@ -1128,14 +1216,15 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  enum lp_result stopped_result=project(w,pose,vehicle->velocity_mps,steering,0,steering,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,&stopped,&final_pad,&path->space);
  /* 종점에 가까운 입력도 같은 원 progress window를 통과해야 한다. 현재 pose만으로
   * 아직 도달할 수 없는 남은 arc를 지워 segment/cusp 완료를 만들지 않는다. */
+ bool exit_cusp=path->space.exiting&&tracker->segment+1<path_segments(path);
  bool captured=terminal_in_window&&stopped_result==LP_PATH_FOUND&&distance(pose,goal)+vehicle->position_error_m<=goal_distance&&
   distance(stopped,goal)+final_pad<=goal_distance&&fabsf(dw_angle(pose.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
   fabsf(dw_angle(stopped.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
-  (!path->space.parking||dp_goal_contains(&path->space,stopped,final_pad,c));
+  (exit_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
  /* Only the last selected parking segment has a region terminal. Its actual
   * correspondence must be in the same movement window; a clipped projection
   * cannot turn a teleport or an earlier cusp into completed progress. */
- bool parking_final=path->space.parking&&tracker->segment+1==path_segments(path);
+ bool parking_final=path->space.parking&&!path->space.exiting&&tracker->segment+1==path_segments(path);
  bool intended_gear=!path->execution.present||path->execution.mission.kind!=2||
   (path->execution.mission.strategy==1&&gear==-1)||(path->execution.mission.strategy==2&&gear==1);
  if(parking_final)captured=pose_in_window&&intended_gear&&stopped_result==LP_PATH_FOUND&&

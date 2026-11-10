@@ -57,8 +57,8 @@ class SlotMessageTimeTests(unittest.TestCase):
         self.assertEqual(acquired.record.reserved_us, _GR)
         self.assertEqual(acquired.record.key.write_key, grant.record.key)
 
-    def test_limits_are_mandatory_exact_positive_u64_with_read_maximum_150000(self):
-        for copy, offer, read in ((1, 1, 1), (1000, 500, 150000), (_MAX, _MAX, 150000)):
+    def test_limits_are_mandatory_exact_positive_u64_with_independent_read_budget(self):
+        for copy, offer, read in ((1, 1, 1), (1000, 500, 150000), (1000, 500, 5000000), (_MAX, _MAX, _MAX)):
             value = SlotTimeLimits(copy, offer, read)
             self.assertEqual((value.copy_budget_us, value.offer_budget_us, value.read_budget_us),
                              (copy, offer, read))
@@ -70,8 +70,6 @@ class SlotMessageTimeTests(unittest.TestCase):
                 original[field] = bad
                 with self.subTest(field=field, bad_type=type(bad).__name__), self.assertRaises(SlotMessageError):
                     SlotTimeLimits(**original)
-        with self.assertRaises(SlotMessageError):
-            SlotTimeLimits(1000, 500, 150001)
         ctx = writer_context()
         source = packet(slot_fields("REQUEST", ctx))
         for entry in (parse_slot_message, SlotMessage):
@@ -140,7 +138,7 @@ class SlotMessageTimeTests(unittest.TestCase):
             self.assert_rejected("GRANT", ctx, original, expires=expiry)
         self.assert_rejected("GRANT", ctx, original, request_number=999)
 
-    def test_filled_preserves_original_grant_and_cannot_rebase_completion_or_expiry(self):
+    def test_filled_preserves_grant_and_actual_completion_with_separate_cleanup_delivery(self):
         stages = chain()
         grant = stages["GRANT"]
         for stamp in (_G, _EW - 1):
@@ -148,10 +146,14 @@ class SlotMessageTimeTests(unittest.TestCase):
             self.assertEqual(result.record.key, grant.record.key)
             self.assertEqual(result.record.completed_us, stamp)
             self.assertEqual(result.request_id, grant.request_id)
-        for stamp in (_G - 1, _EW):
-            self.assert_rejected("FILLED", grant.context, grant, issued=stamp, expires=_EW)
+        self.assert_rejected("FILLED", grant.context, grant, issued=_G-1, expires=_EW)
+        late = make("FILLED", grant.context, grant, issued=_EW+10, expires=_EW+1010)
+        self.assertEqual(late.record.completed_us, _EW+10)
+        self.assertEqual(late.parent.expires_us, _EW)
         for expiry in (_EW - 1, _EW + 1):
-            self.assert_rejected("FILLED", grant.context, grant, expires=expiry)
+            delivery = make("FILLED", grant.context, grant, expires=expiry)
+            self.assertEqual(delivery.record, stages['FILLED'].record)
+        self.assert_rejected("FILLED", grant.context, grant, issued=_EW, expires=_EW)
         self.assert_rejected("FILLED", grant.context, grant, request_number=999)
 
     def test_offer_expiry_is_exact_original_completion_plus_pinned_budget(self):

@@ -48,6 +48,7 @@ class GatewaySettings:
     drive_link: bool = False
     mapper_uplink_profile: str | None = None
     operator_profile: str | None = None
+    route_profile: str | None = None
     feedback3_profile: str | None = None
     operator_socket: str = "/run/xenova-gateway/operator.sock"
     keyboard_socket: str = "/run/xenova-gateway/keyboard.sock"
@@ -92,6 +93,7 @@ def parse(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = Non
                    help='opt-in private J broker/approved mapper clock profile; requires warm feedback-2')
     p.add_argument('--feedback-timeout-ms',type=int,default=_env(env,'FEEDBACK_TIMEOUT_MS'))
     p.add_argument('--operator-profile',default=_env(env,'OPERATOR_PROFILE'),help='opt-in exact operator2/manual/guest clock installed policy')
+    p.add_argument('--route-profile',default=_env(env,'ROUTE_PROFILE'),help='opt-in private exact route budget; requires operation/episode and current peer/mapper support')
     p.add_argument('--feedback3-profile',default=_env(env,'FEEDBACK3_PROFILE'),help='explicit firmware/timing/stationary feedback3 policy')
     p.add_argument('--operator-socket',default=_env(env,'OPERATOR_SOCKET') or d.operator_socket)
     p.add_argument('--keyboard-socket',default=_env(env,'KEYBOARD_SOCKET') or d.keyboard_socket)
@@ -106,6 +108,7 @@ def parse(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = Non
     if (a.world_trust or a.drive_link or a.mapper_uplink_profile) and (a.profile!='warm' or a.serial_profile not in ('feedback-2','feedback-3')):p.error('binary app input requires warm feedback-2')
     if bool(a.feedback3_profile)!=(a.serial_profile=='feedback-3'):p.error('feedback-3 requires explicit --feedback3-profile and cannot be used by another serial profile')
     if a.operator_profile and (a.profile!='warm' or a.serial_profile!='feedback-3'):p.error('operator2 requires warm feedback-3')
+    if a.route_profile and (not a.operator_profile or not a.mapper_uplink_profile):p.error('route requires explicit operator and actual mapper profiles')
     if a.world_trust and a.mapper_uplink_profile:p.error('static world trust and actual mapper clock owner are separate profiles')
     if a.sink=='serial' and not a.vehicle_limits:p.error('serial output requires --vehicle-limits')
     if a.profile in ("verified","warm") and not (a.vm_a and a.vm_b):p.error("verified/warm profile requires --vm-a and --vm-b")
@@ -134,7 +137,7 @@ def parse(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = Non
         odometry_config=a.odometry_config,
         world_trust=a.world_trust,
         drive_link=a.drive_link or a.world_trust is not None or a.mapper_uplink_profile is not None or a.operator_profile is not None,
-        operator_profile=a.operator_profile,feedback3_profile=a.feedback3_profile,
+        operator_profile=a.operator_profile,route_profile=a.route_profile,feedback3_profile=a.feedback3_profile,
         operator_socket=a.operator_socket,keyboard_socket=a.keyboard_socket,
         mapper_uplink_profile=a.mapper_uplink_profile,
     )

@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace, TracebackType
 import unittest
 from unittest.mock import Mock, patch
 
@@ -192,6 +192,7 @@ class RawRecoveryTests(unittest.TestCase):
         actor = object.__new__(_Actor)
         actor.ack = None
         actor.last_filled_sent = None
+        actor.sent_observer = None
         actor.link = Mock()
         values = slot_fields('FILLED', self.writer)
         filled = packet(values)
@@ -203,7 +204,9 @@ class RawRecoveryTests(unittest.TestCase):
         self.assertIs(actor.last_filled_sent, filled)
 
     def test_fault_retry_scope_distinguishes_configuration_camera_and_mapper(self):
-        cases = [('A', 'ASSET_CHECK', ValueError(), 'NO_RETRY'),
+        from xenova_vehicle.runtime.health_policy import ConfigurationError
+        cases = [('A', 'ASSET_CHECK', ConfigurationError(), 'NO_RETRY'),
+                 ('A', 'ASSET_CHECK', ValueError(), 'RESTART_CAMERA'),
                  ('A', 'STREAMING', TimeoutError(), 'RESTART_CAMERA'),
                  ('M', 'WAIT_CLOCK', ValueError(), 'RESTART_MAPPER')]
         for role, state, error, retry in cases:
@@ -221,6 +224,15 @@ class RawRecoveryTests(unittest.TestCase):
                                                'retry_class', 'origin_context_sha256'})
                 self.assertEqual(payload['retry_class'], retry)
                 self.assertEqual(payload['origin_context_sha256'], self.writer.scope.raw_binding_sha256)
+
+    def test_known_actual_cleanup_send_is_not_reclassified_as_frame_failure(self):
+        actor = object.__new__(_Actor)
+        actor.stop = None;actor.deferred = [];actor.idle_hook = None;actor._idle_busy = False
+        actor.drain_sent = Mock();actor._receive = Mock(return_value=[])
+        filled = packet(slot_fields('FILLED', self.writer))
+        actual = SentPacket(filled, int(filled.fields['expires_j_us'])+1, 10000040)
+        actor.last_actual_sent = actual
+        self.assertIs(actor.await_sent(filled), actual)
 
     def test_worker_failure_file_preserves_original_message_and_phase_without_changing_fault_wire(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -265,6 +277,162 @@ class RawRecoveryTests(unittest.TestCase):
         self.assertEqual(actor.failure_diagnostic_error, 'OSError')
         self.assertEqual(actor.link.send.call_count, 1)
         self.assertEqual(actor.link.send.call_args.args[1]['retry_class'], 'RESTART_CAMERA')
+
+    def failure_actor(self):
+        actor = object.__new__(_Actor)
+        actor.boot = SimpleNamespace(peer=self.writer.bind.context.peer, raw_scope=self.writer.scope)
+        actor.state = 'WARMUP'
+        actor.link = Mock()
+        actor.drain_sent = Mock()
+        actor.save = Mock()
+        return actor
+
+    def test_original_lease_check_origin_distinguishes_call_sites_with_the_same_message(self):
+        request = LeaseRequest(identifier(901), 10, 20)
+
+        def before_copy():
+            request.check(20)
+
+        def after_copy():
+            request.check(20)
+
+        saved = []
+        for call in (before_copy, after_copy):
+            actor = self.failure_actor()
+            try:
+                call()
+            except LeaseLedgerError as error:
+                actor.fault(error)
+            value = actor.save.call_args.args[1]
+            saved.append(value)
+            tail = value['origin_frames'][-3:]
+            self.assertEqual([frame['function'] for frame in tail], [call.__name__, 'check', '_fail'])
+            self.assertEqual(tail[-1]['module'], 'xenova_vehicle.runtime.raw_leases')
+            self.assertTrue(all(type(frame['lineno']) is int and frame['lineno'] > 0 for frame in tail))
+            self.assertTrue(all(set(frame) == {'module', 'function', 'lineno'} for frame in tail))
+            self.assertFalse(value['origin_truncated'])
+        self.assertEqual(saved[0]['message'], saved[1]['message'])
+        self.assertNotEqual(saved[0]['origin_frames'][-3], saved[1]['origin_frames'][-3])
+
+    def test_deep_traceback_keeps_twelve_tail_frames_and_the_actual_lease_origin(self):
+        request = LeaseRequest(identifier(902), 10, 20)
+
+        def descend(depth):
+            if depth:
+                return descend(depth - 1)
+            request.check(20)
+
+        actor = self.failure_actor()
+        try:
+            descend(40)
+        except LeaseLedgerError as error:
+            actor.fault(error)
+        saved = actor.save.call_args.args[1]
+        frames = saved['origin_frames']
+        self.assertEqual(len(frames), 12)
+        self.assertTrue(saved['origin_truncated'])
+        self.assertEqual([frame['function'] for frame in frames[-2:]], ['check', '_fail'])
+        self.assertEqual([frame['function'] for frame in frames[:-2]], ['descend'] * 10)
+        self.assertLess(len(json.dumps(saved, ensure_ascii=True).encode('ascii')), 8192)
+
+    def test_no_traceback_and_hostile_exception_attributes_never_format_or_expose_payload(self):
+        accesses = []
+
+        class Payload:
+            def __str__(self):
+                raise AssertionError('payload formatting forbidden')
+
+            __repr__ = __str__
+
+        class HostileError(RuntimeError):
+            def __getattribute__(self, name):
+                accesses.append(name)
+                raise AssertionError('exception attribute dispatch forbidden')
+
+            def __str__(self):
+                raise AssertionError('exception formatting forbidden')
+
+            __repr__ = __str__
+
+        actor = self.failure_actor()
+        actor.fault(HostileError('safe message', Payload()))
+        saved = actor.save.call_args.args[1]
+        self.assertEqual(saved['origin_frames'], [])
+        self.assertFalse(saved['origin_truncated'])
+        self.assertEqual(saved['message'], 'safe message | <Payload argument omitted>')
+        self.assertTrue(saved['message_truncated'])
+
+        def raised():
+            private_payload = 'LOCAL_PAYLOAD_MUST_NOT_LEAK'
+            raise HostileError('safe raised message', Payload())
+
+        try:
+            raised()
+        except HostileError as error:
+            actor.fault(error)
+        saved = actor.save.call_args.args[1]
+        self.assertEqual(saved['origin_frames'][-1]['function'], 'raised')
+        self.assertNotIn('LOCAL_PAYLOAD_MUST_NOT_LEAK', json.dumps(saved))
+        self.assertEqual(accesses, [])
+        self.assertEqual(actor.link.send.call_count, 2)
+
+    def test_origin_labels_are_normalized_and_bounded_without_filename_or_source(self):
+        def leaf():
+            raise RuntimeError('safe message')
+
+        code = leaf.__code__.replace(co_name='leaf\n' + 'x' * 1000,
+                                     co_filename='/PRIVATE/PAYLOAD/source.py')
+        call = FunctionType(code, {'__name__': 'module\n' + 'y' * 1000, 'RuntimeError': RuntimeError})
+        actor = self.failure_actor()
+        try:
+            call()
+        except RuntimeError as error:
+            actor.fault(error)
+        saved = actor.save.call_args.args[1]
+        frame = saved['origin_frames'][-1]
+        self.assertEqual(len(frame['module']), 128)
+        self.assertEqual(len(frame['function']), 96)
+        self.assertRegex(frame['module'], r'^[A-Za-z0-9_.<>]+$')
+        self.assertRegex(frame['function'], r'^[A-Za-z0-9_.<>]+$')
+        self.assertTrue(saved['origin_truncated'])
+        self.assertNotIn('/PRIVATE/PAYLOAD/source.py', json.dumps(saved))
+
+    def test_origin_diagnostic_storage_failure_preserves_original_fault_payload(self):
+        actor = self.failure_actor()
+        actor.save = Mock(side_effect=OSError('diagnostic unavailable'))
+        try:
+            LeaseRequest(identifier(903), 10, 20).check(20)
+        except LeaseLedgerError as error:
+            actor.fault(error)
+        self.assertEqual(actor.save.call_args.args[1]['origin_frames'][-1]['function'], '_fail')
+        self.assertEqual(actor.failure, 'LeaseLedgerError')
+        self.assertEqual(actor.failure_diagnostic_error, 'OSError')
+        self.assertEqual(actor.state, 'FAILED')
+        actor.link.send.assert_called_once_with('FAULT', dict(domain='RAW', code='RESIDENT_FAILED',
+            last_source_sequence=None, retry_class='RESTART_CAMERA',
+            origin_context_sha256=self.writer.scope.raw_binding_sha256))
+        self.assertEqual(actor.drain_sent.call_count, 2)
+
+    def test_oversized_traceback_chain_has_no_claimed_origin_and_keeps_fault_wire(self):
+        try:
+            raise RuntimeError('original failure')
+        except RuntimeError as error:
+            original = BaseException.__traceback__.__get__(error, BaseException)
+            for count in (512, 513):
+                with self.subTest(frames=count):
+                    chain = None
+                    for _ in range(count):
+                        chain = TracebackType(chain, original.tb_frame, original.tb_lasti, original.tb_lineno)
+                    BaseException.__traceback__.__set__(error, chain)
+                    actor = self.failure_actor()
+                    actor.fault(error)
+                    saved = actor.save.call_args.args[1]
+                    self.assertEqual(len(saved['origin_frames']), 12 if count == 512 else 0)
+                    self.assertTrue(saved['origin_truncated'])
+                    self.assertEqual(saved['message'], 'original failure')
+                    actor.link.send.assert_called_once_with('FAULT', dict(domain='RAW', code='RESIDENT_FAILED',
+                        last_source_sequence=None, retry_class='RESTART_CAMERA',
+                        origin_context_sha256=self.writer.scope.raw_binding_sha256))
 
 
 if __name__ == '__main__':

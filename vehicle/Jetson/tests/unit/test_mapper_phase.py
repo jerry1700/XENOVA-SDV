@@ -41,7 +41,7 @@ class Actor:
     def progress(self,stage,sequence=None,**fields):
         self.progresses.append((stage,sequence,self.state,fields))
         return object()
-    def await_sent(self,original,*,cap_us):return original
+    def await_sent(self,original,*,cap_us=None):return original
 
 
 def controller():
@@ -140,7 +140,10 @@ class MapperCurrentPhaseTests(unittest.TestCase):
         # 폐기할 결과가 있어도 원 parser 무진전 감시를 건너뛰면 안 된다.
         now[0]=control.last_completion+control.nn_stall_us
         compute.result=replace(original,source_generation='b'*64)
-        with self.assertRaisesRegex(TimeoutError,'parser association stalled'):control.tick()
+        control.tick()
+        self.assertEqual(control.wait_reason,'NN_WAIT_INPUT')
+        self.assertEqual(actor.state,'WAIT_INPUT')
+        self.assertIs(control.latest_summary,accepted)
 
     def test_json_decode_time_consumes_original_result_lifetime(self):
         control,actor,compute,now=controller();warmup(control,compute,now)
@@ -162,8 +165,11 @@ class MapperCurrentPhaseTests(unittest.TestCase):
         control,actor,compute,now=controller()
         now[0]=control.deadline.expires_us
         offer(control,compute,now,metric(),expires=now[0])
-        with self.assertRaisesRegex(TimeoutError,'first-output deadline'):control.tick()
+        control.tick()
         self.assertFalse(control.ready)
+        self.assertEqual(control.wait_reason,'NN_WARMUP_WAIT_INPUT')
+        warmup(control,compute,now)
+        self.assertTrue(control.ready)
 
     def test_actual_cpu_progress_does_not_make_clock_or_world_current(self):
         control,actor,compute,now=controller();warmup(control,compute,now)

@@ -4,6 +4,7 @@ token은 호출을 기록하는 합성 대역이다. 실제 Linux semaphore/SHM 
 """
 
 from copy import deepcopy
+import hashlib
 import unittest
 from unittest.mock import patch
 
@@ -96,6 +97,53 @@ class ResidentBrokerTests(unittest.TestCase):
         self.pump(now + 1)
         self.fill(request, now + 10)
         return request
+
+    def cancellation(self, request, now, *, digest=None):
+        value=request.fields
+        value.update(kind='RAW_CONTROL',issued_j_us=str(now),expires_j_us=str(now+50),
+            payload=dict(op='CANCEL_REQUEST',request_id=request.request_id,
+                request_sha256=hashlib.sha256(request.raw).hexdigest() if digest is None else digest,
+                raw_binding_sha256=self.writer.scope.raw_binding_sha256))
+        return packet(value)
+
+    def test_selected_write_cancel_keeps_tokens_and_next_generation_can_run(self):
+        original=self.request(501,10000000);self.pump(10000001)
+        cancel=self.cancellation(original,10001001)
+        self.broker.cancel_request('A',cancel,now_us=10001001)
+        self.broker.cancel_request('A',cancel,now_us=10001002)
+        self.assertEqual(self.broker.snapshot()['slots'][0]['state'],'FREE')
+        self.request(502,10001003);self.pump(10001004)
+        grant=self.a.sent[-1]
+        self.assertEqual(grant.payload['generation'],'2')
+        for writable,ready in self.tokens:
+            self.assertEqual((writable.value,ready.value),(1,0))
+            self.assertEqual((writable.posts,ready.posts),(0,0))
+
+    def test_cancel_rejects_wrong_original_hash_and_already_published_write(self):
+        original=self.request(501,10000000);self.pump(10000001)
+        with self.assertRaises(BrokerError):
+            self.broker.cancel_request('A',self.cancellation(original,10000002,digest='f'*64),now_us=10000002)
+        self.assertEqual(self.broker.snapshot()['slots'][0]['state'],'WRITING')
+        self.fill(original,10000010)
+        with self.assertRaises(ValueError):
+            self.broker.cancel_request('A',self.cancellation(original,10000011),now_us=10000011)
+        self.assertEqual(self.broker.snapshot()['slots'][0]['state'],'READY')
+        self.assertEqual((self.tokens[0][0].value,self.tokens[0][1].value),(0,1))
+
+    def test_unconsumed_read_cancel_restores_ready_without_posting_any_token(self):
+        self.write(501,10000000);self.broker.bind_reader(self.reader.bind);self.pump(10000012)
+        offer=SlotMessage(self.m.sent[-1],self.reader,limits=self.selected_limits)
+        value=offer.fields
+        value.update(sender_instance=self.reader.reader.worker_instance,request_id=identifier(601),
+            message_sequence='600',issued_j_us='10000020',expires_j_us='10000170')
+        value['payload'].update(op='ACQUIRE',purpose='PARSER_WARMUP')
+        raw=packet(value);request=SlotMessage(raw,self.reader,offer,limits=self.selected_limits)
+        self.broker.receive('M',raw,now_us=10000021);self.pump(10000022)
+        before=tuple((w.value,r.value,w.posts,r.posts) for w,r in self.tokens)
+        self.broker.cancel_request('M',self.cancellation(request,10000171),now_us=10000171)
+        self.assertEqual(self.broker.snapshot()['slots'][0]['state'],'READY')
+        self.assertEqual(tuple((w.value,r.value,w.posts,r.posts) for w,r in self.tokens),before)
+        self.assertFalse(self.broker.snapshot()['fenced'])
 
     def test_busy_grant_keeps_original_reservation_and_request_expiry(self):
         request = self.request(501, 10000000)
@@ -200,17 +248,22 @@ class ResidentBrokerTests(unittest.TestCase):
         self.assertEqual(writable.posts, posts)
         self.assertEqual(self.pump(10000302), [])
 
-    def test_expired_reserved_draft_fences_without_renewing_or_selecting_a_sequence(self):
+    def test_unsent_expired_reservation_is_cancelled_and_next_request_can_proceed(self):
         self.request(501, 10000000)
         self.a.busy = True
         self.pump(10000001)
         original = deepcopy(self.a.attempts[-1])
-        with self.assertRaises(BrokerError):
-            self.pump(10001000)
-        self.assertTrue(self.broker.snapshot()['fenced'])
+        self.pump(10001000)
+        self.assertFalse(self.broker.snapshot()['fenced'])
         self.assertEqual(self.a.sent, [])
         self.assertEqual(self.a.attempts, [original])
-        self.assertEqual(self.broker.snapshot()['slots'][0]['state'], 'WRITING')
+        self.assertEqual(self.broker.snapshot()['slots'][0]['state'], 'FREE')
+        self.a.busy = False
+        self.request(502,10001001)
+        self.pump(10001002)
+        self.assertEqual(len(self.a.sent),1)
+        self.assertEqual(self.tokens[0][0].posts,0)
+        self.assertEqual(self.tokens[0][1].posts,0)
 
     def test_partial_token_replacement_fences_and_never_retries_the_post(self):
         self.write(501, 10000000)

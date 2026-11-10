@@ -27,6 +27,9 @@ int dl_manual_clock_get(struct dl_clock *out,uint64_t *now){
  strcpy(out->trust.odom_epoch,fixture_sid);strcpy(out->gateway,fixture_vm);*now=1000000;return 0;
 }
 int dl_clock_get(struct dl_clock *out,uint64_t *now){return dl_manual_clock_get(out,now);}
+/* Serializer fixtures carry no actual owned path. Local-grant admission is
+ * exercised through the persistent actual input bridge, never synthesized here. */
+int dl_mission_for_local(xenova_drive_MissionGrant *out,uint64_t now){(void)out;(void)now;return -EAGAIN;}
 static xenova_drive_DirectionGateWitness fixture_gate;static bool fixture_gate_available;
 int dl_direction_get(bool role,xenova_drive_DirectionGateWitness *out,uint64_t now){(void)role;(void)now;if(!fixture_gate_available)return -EAGAIN;*out=fixture_gate;return 0;}
 static uint64_t context_u64(const char *text){
@@ -156,7 +159,7 @@ def command_probe(tmp_path_factory):
         platform/'apps/manual/zephyr/src',platform/'guests/zephyr/diagnostics/include')
     command=['cc','-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-ffunction-sections','-fdata-sections',
         '-Wl,--gc-sections','-fsanitize=address,undefined','-include',str(include/'shim.h'),
-        *['-I'+str(p) for p in includes],str(source),*[str(HOME/'planner'/name) for name in ('task_reference.c','behavior.c','parking.c','lattice.c','engine.c','generated/primitives.c')],str(platform/'apps/manual/zephyr/src/manual.c'),
+        *['-I'+str(p) for p in includes],str(source),*[str(HOME/'planner'/name) for name in ('task_reference.c','behavior.c','parking.c','route_exit.c','lattice.c','engine.c','generated/primitives.c')],str(platform/'apps/manual/zephyr/src/manual.c'),
         str(world/'world.c'),str(world/'generated/world.pb.c'),*[str(world/'nanopb'/name) for name in ('pb_common.c','pb_decode.c','pb_encode.c')],
         *map(str,sorted((mqtt/'src').glob('*.c'))),'-lm' ,'-o',str(binary)]
     result=subprocess.run(command,capture_output=True,text=True,timeout=120)

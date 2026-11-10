@@ -22,6 +22,7 @@ def test_opt_in_loader_pins_compiled_clock_and_separate_endpoints(tmp_path):
         planner_manifest=str(manifest),planner_asset_sha256=body['asset_sha256'])
     path=tmp_path/'operator.json';path.write_text(json.dumps(value));path.chmod(0o600)
     loaded=OperatorProfile.load(path,uid=os.geteuid());assert loaded.planner_asset_sha256==body['asset_sha256']
+    assert not loaded.operation_support and loaded.operation_parking_strategy=='REVERSE'
     settings=parse(['--profile','warm','--vm-a',A,'--vm-b',B,'--sink','serial','--vehicle-limits','/cfg/limits.json',
         '--serial-profile','feedback-3','--feedback3-profile','/cfg/feedback.json','--feedback-timeout-ms','500',
         '--odometry-config','/cfg/odom.json','--operator-profile',str(path)],env={})

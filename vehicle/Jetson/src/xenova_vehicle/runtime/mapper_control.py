@@ -65,6 +65,7 @@ class MapperControl:
         self.latest_summary=None
         self.result_count=0
         self._result_phase=None
+        self.wait_reason=None
 
     def _refresh_phase(self, now):
         if not self.ready or self.actor.state not in _ACTIVE_STATES:return
@@ -97,10 +98,10 @@ class MapperControl:
         self.previous=stamp
         self.streak+=1
         self.last_completion=event.completed_us
+        self.wait_reason=None
         if not self.ready and self.streak>=5:
-            if self.deadline.expired(self.clock()) or self.deadline.expired(event.completed_us):
-                raise TimeoutError('parser completion missed original readiness deadline')
             self.ready=True
+            self.wait_reason=None
             self._refresh_phase(self.clock())
             self.actor.progress('NN_READY',stamp.sequence,completed=event.completed_us,
                                 reason='METRIC_NOT_READY')
@@ -128,7 +129,7 @@ class MapperControl:
                     raise RuntimeError('one compute owner cannot start two NN parsers')
                 packet=self.actor.progress('PARSER_STARTED',stamp.sequence,completed=event.started_us,
                                            request_id=event.job_id)
-                actual=self.actor.await_sent(packet,cap_us=event.parser_deadline_us)
+                actual=self.actor.await_sent(packet)
                 self._parser=(event.job_id,stamp,event.started_us)
                 if not self.compute.acknowledge_parser_start(event.job_id,actual):
                     # 원 시작 진술은 이미 전송됐다. 취소 terminal로만 닫는다.
@@ -148,7 +149,7 @@ class MapperControl:
                 if self._metric_job==event.job_id:
                     self._metric(event,'MAPPER_COMPLETED',event.reason)
                     self._metric_job=None
-                if event.kind=='FAILED' or event.reason=='PARSER_DEADLINE':
+                if event.kind=='FAILED':
                     raise RuntimeError('mapper computation failed: '+str(event.reason))
             elif event.kind!='NN_SKIPPED':
                 raise ValueError('unsupported compute lifecycle event')
@@ -170,6 +171,7 @@ class MapperControl:
         now=self.clock()
         self._refresh_phase(now)
         if not self.ready and self.deadline.expired(now):
-            raise TimeoutError('parser5 original first-output deadline elapsed')
+            self.wait_reason='NN_WARMUP_WAIT_INPUT'
         if self.ready and self.last_completion is not None and now-self.last_completion>=self.nn_stall_us:
-            raise TimeoutError('fresh NN parser association stalled')
+            self.wait_reason='NN_WAIT_INPUT'
+            if self.actor.state in _ACTIVE_STATES:self.actor.state='WAIT_INPUT'

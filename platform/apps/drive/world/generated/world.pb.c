@@ -27,7 +27,7 @@ PB_BIND(xenova_drive_DriveState, xenova_drive_DriveState, 4)
 PB_BIND(xenova_drive_TaskReferenceState, xenova_drive_TaskReferenceState, 2)
 
 
-PB_BIND(xenova_drive_ClockProbe, xenova_drive_ClockProbe, AUTO)
+PB_BIND(xenova_drive_ClockProbe, xenova_drive_ClockProbe, 2)
 
 
 PB_BIND(xenova_drive_GuestClockReceipt, xenova_drive_GuestClockReceipt, AUTO)
@@ -37,6 +37,18 @@ PB_BIND(xenova_drive_WorldTrust, xenova_drive_WorldTrust, 2)
 
 
 PB_BIND(xenova_drive_ClockReply, xenova_drive_ClockReply, 2)
+
+
+PB_BIND(xenova_drive_OperationBinding, xenova_drive_OperationBinding, AUTO)
+
+
+PB_BIND(xenova_drive_OperationStatus, xenova_drive_OperationStatus, AUTO)
+
+
+PB_BIND(xenova_drive_AutoInputPreflight, xenova_drive_AutoInputPreflight, 2)
+
+
+PB_BIND(xenova_drive_PiOperationGate, xenova_drive_PiOperationGate, AUTO)
 
 
 PB_BIND(xenova_drive_AcceptedState, xenova_drive_AcceptedState, 4)
@@ -133,6 +145,114 @@ PB_BIND(xenova_drive_SurveySummary, xenova_drive_SurveySummary, AUTO)
 
 
 PB_BIND(xenova_drive_TofObservation, xenova_drive_TofObservation, 2)
+
+
+PB_BIND(xenova_drive_RouteBinding, xenova_drive_RouteBinding, AUTO)
+
+
+PB_BIND(xenova_drive_StartGoal, xenova_drive_StartGoal, 2)
+
+
+PB_BIND(xenova_drive_RoadSectionRef, xenova_drive_RoadSectionRef, AUTO)
+
+
+PB_BIND(xenova_drive_RoadEdge, xenova_drive_RoadEdge, AUTO)
+
+
+PB_BIND(xenova_drive_RoadTopology, xenova_drive_RoadTopology, 4)
+
+
+PB_BIND(xenova_drive_RoadSection, xenova_drive_RoadSection, 2)
+
+
+PB_BIND(xenova_drive_RoadConnection, xenova_drive_RoadConnection, 2)
+
+
+PB_BIND(xenova_drive_ExitSpace, xenova_drive_ExitSpace, 2)
+
+
+PB_BIND(xenova_drive_RouteOccurrence, xenova_drive_RouteOccurrence, AUTO)
+
+
+PB_BIND(xenova_drive_RoutePlan, xenova_drive_RoutePlan, 2)
+
+
+PB_BIND(xenova_drive_RouteCore, xenova_drive_RouteCore, 2)
+
+
+PB_BIND(xenova_drive_RouteProgress, xenova_drive_RouteProgress, AUTO)
+
+
+PB_BIND(xenova_drive_RouteAcceptanceRef, xenova_drive_RouteAcceptanceRef, AUTO)
+
+
+PB_BIND(xenova_drive_RouteSnapshot, xenova_drive_RouteSnapshot, 2)
+
+
+PB_BIND(xenova_drive_WorldRouteView, xenova_drive_WorldRouteView, 2)
+
+
+PB_BIND(xenova_drive_RouteStatus, xenova_drive_RouteStatus, 2)
+
+
+PB_BIND(xenova_drive_RouteQuery, xenova_drive_RouteQuery, 2)
+
+
+PB_BIND(xenova_drive_RouteCandidate, xenova_drive_RouteCandidate, 2)
+
+
+PB_BIND(xenova_drive_RouteReceipt, xenova_drive_RouteReceipt, 2)
+
+
+PB_BIND(xenova_drive_RoadWindow, xenova_drive_RoadWindow, 2)
+
+
+PB_BIND(xenova_drive_RoadGeometryScope, xenova_drive_RoadGeometryScope, 2)
+
+
+PB_BIND(xenova_drive_RoadDurableRef, xenova_drive_RoadDurableRef, AUTO)
+
+
+PB_BIND(xenova_drive_RoadObservationOrigin, xenova_drive_RoadObservationOrigin, 2)
+
+
+PB_BIND(xenova_drive_MapperRouteWitness, xenova_drive_MapperRouteWitness, 2)
+
+
+PB_BIND(xenova_drive_RouteOwnerContext, xenova_drive_RouteOwnerContext, 2)
+
+
+PB_BIND(xenova_drive_RouteCurrentWitness, xenova_drive_RouteCurrentWitness, 2)
+
+
+PB_BIND(xenova_drive_RouteExtentProof, xenova_drive_RouteExtentProof, AUTO)
+
+
+PB_BIND(xenova_drive_RouteEligibility, xenova_drive_RouteEligibility, 2)
+
+
+PB_BIND(xenova_drive_RouteEligibilityRef, xenova_drive_RouteEligibilityRef, AUTO)
+
+
+PB_BIND(xenova_drive_MapperWorldWitness, xenova_drive_MapperWorldWitness, 2)
+
+
+PB_BIND(xenova_drive_WindowTransitionRequest, xenova_drive_WindowTransitionRequest, 2)
+
+
+PB_BIND(xenova_drive_WindowTransitionReceipt, xenova_drive_WindowTransitionReceipt, 2)
+
+
+PB_BIND(xenova_drive_RoadDataRequest, xenova_drive_RoadDataRequest, 2)
+
+
+PB_BIND(xenova_drive_RoadRegistrationRequest, xenova_drive_RoadRegistrationRequest, 2)
+
+
+PB_BIND(xenova_drive_RoadData, xenova_drive_RoadData, 4)
+
+
+PB_BIND(xenova_drive_RouteExchange, xenova_drive_RouteExchange, 2)
 
 
 

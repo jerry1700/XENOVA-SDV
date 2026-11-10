@@ -6,6 +6,7 @@ certificate 성공이 아니다. 필요한 영역을 원 TTL/처리 예산 안�
 """
 
 from dataclasses import dataclass
+from itertools import islice
 import math
 
 from .local_map import FREE, OCCUPIED, GridSpec
@@ -90,9 +91,9 @@ def stopping_region(spec,vehicle,pose,calibration,*,admission,frame_id,now_us,ma
     import numpy as np
     from .odometry import PoseEstimate
     from ..perception.calibration import CalibrationProfile
-    from ..transport.sensor_samples import SensorSamples,VehicleEvidence
+    from ..transport.sensor_samples import SensorSamples,FrozenSensorSamples,VehicleEvidence
     if type(spec) is not GridSpec or spec.width*spec.height>4096:raise ValueError('stopping region grid exceeds4096 cells')
-    if type(vehicle) is not VehicleEvidence or type(admission) is not SensorSamples or not admission.current_vehicle(vehicle,now_us):
+    if type(vehicle) is not VehicleEvidence or type(admission) not in (SensorSamples,FrozenSensorSamples) or not admission.current_vehicle(vehicle,now_us):
         raise ValueError('actual admitted current Vehicle evidence required')
     if type(calibration) is not CalibrationProfile or calibration.sha256!=admission.context.calibration.sha256:
         raise ValueError('stopping body/calibration differs from current source')
@@ -217,9 +218,11 @@ class FreeScheduler:
         second = sorted(np.flatnonzero(new_or_missing).tolist(), key=lambda i: (i - self._required_cursor) % count)
         excluded = urgent | new_or_missing
         third = sorted(np.flatnonzero(eligible & ~excluded).tolist(), key=lambda i: (i - self._surround_cursor) % count)
-        ordered = tuple((index, priority) for priority, group in
+        # 같은 정렬 순서의 실제 시도 prefix만 만든다. 전체 due 분모와 cursor는
+        # 아래 원 mask에서 그대로 계산하며 미선택 셀의 증거는 만들지 않는다.
+        ordered = ((index, priority) for priority, group in
             (('REQUIRED_EXPIRING', first), ('REQUIRED_NEW_OR_UNPROVEN', second), ('SURROUNDING', third)) for index in group)
-        selected = ordered[:cells] if rays else ()
+        selected = tuple(islice(ordered, cells)) if rays else ()
         self._cursor_before=(self._required_cursor,self._surround_cursor,self._previous_needed)
         required_selected = [index for index, _ in selected if needed[index]]
         surrounding_selected = [index for index, priority in selected if priority == 'SURROUNDING']

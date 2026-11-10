@@ -81,13 +81,13 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 if measured is not None:
                     pin['first_applied_pi_lower_us']=measured['pi_sample_us']-measured['clock_error_us']
                     pin['first_applied_pi_upper_us']=measured['pi_sample_us']+measured['clock_error_us']
+            lease=self._lease(int(self.clock()*1e6))
             self._direction_snapshot=None if pin is None else dict(pin=pin.copy(),
                 rows=tuple(dict(row) for row in self.odometry.samples),clock_ready=value['clock_ready'],
                 sample=value.get('vehicle_sample'),hold=None if self.hold_row is None else self.hold_row.copy(),
                 hold_start=self.hold_start,gate_revision=self.gate_revision,matched=self._matched_stop_snapshot,
-                moving=bool(self.last_motion),clock_end=0 if self._lease(int(self.clock()*1e6)) is None else self._lease(int(self.clock()*1e6))['expires'])
+                moving=bool(self.last_motion),clock_end=0 if lease is None else lease['expires'])
             value['stop_facts_source']=self._direction_snapshot
-            lease=self._lease(int(self.clock()*1e6))
             value['clock_valid_until_pi_us']=0 if lease is None else lease['expires']
             self._tof_context_snapshot=(UUID(self.pi_session).bytes,UUID(self.device_session).bytes,
                 UUID(self.clock_epoch).bytes,bool(self.ready and self._sensor_available()

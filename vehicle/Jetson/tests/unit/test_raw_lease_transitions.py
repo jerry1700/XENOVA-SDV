@@ -168,15 +168,16 @@ class LeaseTransitionsTests(unittest.TestCase):
                 self.assertIs(value.read_is_current(lease, now_us=now), expected)
         self.assertIs(value.snapshot.slots[0].state, raw.SlotState.IN_USE)
 
-    def test_first_late_filled_is_rejected_without_free_or_ready(self):
+    def test_late_delivery_records_original_completed_write_without_renewing_it(self):
         for now in (200, 201):
             with self.subTest(now=now):
                 value = ledger()
                 grant = value.reserve_write(0, request(), identifier(20), now_us=110).value
                 info = raw.FilledInfo(grant.key, 1, 'b' * 64, 120)
-                self.unchanged_error(value, lambda: value.filled(info, now_us=now))
-                self.assertIs(value.snapshot.slots[0].state, raw.SlotState.WRITING)
+                value.filled(info, now_us=now)
+                self.assertIs(value.snapshot.slots[0].state, raw.SlotState.READY)
                 self.assertEqual(value.snapshot.slots[0].write, grant)
+                self.assertEqual(value.snapshot.slots[0].filled.completed_us,120)
 
     def test_filled_uses_original_grant_lower_bound_and_rejects_future(self):
         value = ledger()

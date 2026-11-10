@@ -9,7 +9,8 @@ MAX_BYTES=8192
 SAFETY=frozenset(('stop','parking.cancel','scene.revoke','mode.manual'))
 VOLATILE=frozenset(('manual.nudge','manual.neutral'))
 ACTIONS=frozenset(('mode.manual','auto.resume','auto.cancel','parking.start','parking.cancel','stop',
-    'manual.nudge','manual.neutral','scene.survey.begin','scene.survey.commit','scene.revoke'))
+    'manual.nudge','manual.neutral','scene.survey.begin','scene.survey.commit','scene.revoke',
+    'parking.permission.set','drive.depart','home.set','home.return'))
 
 
 class OperatorError(ValueError):
@@ -33,7 +34,7 @@ def request(value):
     if type(value) is not dict or type(value.get('version')) is not int or value['version']!=2:
         raise OperatorError('INVALID_INPUT')
     action=value.get('action')
-    if action=='status':
+    if action in ('status','operation.status','home.status'):
         if set(value)!={'version','action'}:raise OperatorError('INVALID_INPUT')
         return value
     if action=='request.get':
@@ -48,12 +49,32 @@ def request(value):
     uuid(value['host_boot_id']);uuid(value['gateway_instance_id'])
     integer(value['expected_generation'],maximum=2**32-1)
     if value['expected_owner'] is not None:uuid(value['expected_owner'])
-    elif action!='mode.manual':raise OperatorError('INVALID_INPUT')
+    elif action not in ('mode.manual','parking.permission.set','home.set','home.return'):raise OperatorError('INVALID_INPUT')
     integer(value['deadline_pi_ms'],minimum=1,maximum=2**53-1)
     if not issued<value['deadline_pi_ms']<=issued+10000:raise OperatorError('INVALID_INPUT')
     args=value['args']
     if type(args) is not dict:raise OperatorError('INVALID_INPUT')
-    if action=='parking.start':
+    if action in ('home.set','home.return'):
+        fields={'expected_goal_revision','expected_goal_sha256','expected_operation_revision','expected_permission_revision'}
+        if action=='home.return':fields.add('ready_revision')
+        if set(args)!=fields:raise OperatorError('INVALID_INPUT')
+        for name in fields-{'expected_goal_sha256'}:decimal63(args[name])
+        digest=args['expected_goal_sha256']
+        if type(digest) is not str or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
+            raise OperatorError('INVALID_INPUT')
+        if (int(args['expected_goal_revision'])==0)!=(digest=='0'*64):raise OperatorError('INVALID_INPUT')
+    elif action=='parking.permission.set':
+        if set(args)!={'enabled','expected_permission_revision'} or type(args['enabled']) is not bool:
+            raise OperatorError('INVALID_INPUT')
+        decimal63(args['expected_permission_revision'])
+    elif action=='drive.depart':
+        if (set(args)!={'mode','expected_operation_revision','expected_permission_revision','ready_revision','trigger_sha256'}
+                or args['mode'] not in ('AUTO','MANUAL')):raise OperatorError('INVALID_INPUT')
+        for name in ('expected_operation_revision','expected_permission_revision','ready_revision'):decimal63(args[name])
+        digest=args['trigger_sha256']
+        if digest is not None and (type(digest) is not str or len(digest)!=64
+                or any(c not in '0123456789abcdef' for c in digest)):raise OperatorError('INVALID_INPUT')
+    elif action=='parking.start':
         if set(args)!={'strategy'} or args['strategy'] not in ('REVERSE','FORWARD'):raise OperatorError('INVALID_INPUT')
     elif action=='manual.nudge':
         if (set(args)!={'driver_session','expected_action_seq','direction','steer','duration_ms'}
@@ -81,6 +102,12 @@ def decimal(value):
     integer(int(value),maximum=2**64-1);return int(value)
 
 
+def decimal63(value):
+    number=decimal(value)
+    if number>2**63-1:raise OperatorError('INVALID_INPUT')
+    return number
+
+
 def fingerprint(call):return sha256(canonical({'domain':'operator.v2','request':call})).hexdigest()
 
 
@@ -104,6 +131,8 @@ def validate_store(value):
     if len(canonical(value.get('current_mission')))>4096:raise ValueError('mission record capacity')
     from .mission_authority import validate_record
     validate_record(value.get('current_mission'))
+    from .operation_owner import validate_operation
+    validate_operation(value.get('current_operation'))
 
 
 def conflict(store,key):
@@ -112,7 +141,9 @@ def conflict(store,key):
 
 def reserved_bytes(value):
     if 'operator_ledger' not in value:return 0
-    return (16-len(value['operator_ledger']))*1536+sum(4096-len(canonical(value.get(k))) for k in ('current_mission','current_scene'))
+    return ((16-len(value['operator_ledger']))*1536
+        +sum(4096-len(canonical(value.get(k))) for k in ('current_mission','current_scene'))
+        +(6144-len(canonical(value['current_operation'])) if 'current_operation' in value else 0))
 
 
 def capacity(value):
@@ -124,4 +155,5 @@ def capacity(value):
     for key in ('current_mission','current_scene'):
         size=len(canonical(value.get(key)))
         if size>4096:return False
+    if 'current_operation' in value and len(canonical(value['current_operation']))>6144:return False
     return len(canonical(value))+reserved<=65536

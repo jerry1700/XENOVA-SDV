@@ -30,6 +30,13 @@ def _http_host(value: str) -> str:
     return value
 
 
+def _operation_timeout(value: str) -> float:
+    seconds=_timeout(value)
+    if seconds>5:
+        raise argparse.ArgumentTypeError('operation timeout must be between 0.1 and 5 seconds')
+    return seconds
+
+
 def _http_port(value: str) -> int:
     if not value.isascii() or not value.isdecimal() or not 1 <= int(value) <= 65535:
         raise argparse.ArgumentTypeError('HTTP port must be in1..65535')
@@ -164,6 +171,25 @@ def _runtime_init_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _runtime_rearm_command(args: argparse.Namespace) -> int:
+    from .runtime.recovery_rearm import RearmRequest, apply_rearm, check_rearm, query_rearm
+
+    try:
+        if args.rearm_action == 'check':
+            report = check_rearm(args.state_dir)
+        elif args.rearm_action == 'query':
+            report = query_rearm(args.state_dir, args.request_id)
+        else:
+            request = RearmRequest(args.request_id, args.expected_manifest_sha256,
+                                   args.expected_episode_id, args.reason)
+            report = apply_rearm(args.state_dir, request)
+    except (OSError, ValueError, RuntimeError) as exc:
+        report = dict(contract='runtime-rearm-1', status='REJECTED', reason=str(exc)[:256],
+                      motion_authorized=False)
+    print(json.dumps(report, ensure_ascii=True, allow_nan=False))
+    return 0 if report['status'] in ('ELIGIBLE', 'DURABLE_ACK') else 3 if report['status'] == 'UNKNOWN' else 2
+
+
 def _perception_bench_command(args: argparse.Namespace) -> int:
     from .perception.bench import run_perception_bench
 
@@ -180,6 +206,20 @@ def _perception_bench_command(args: argparse.Namespace) -> int:
         print(f"Perception diagnostics {'completed' if report['complete'] else 'incomplete'}: {report['output']}")
         print('Diagnostic results only; metric/world/control authority remains false')
     return report['exit_code']
+
+
+def _operation_command(args: argparse.Namespace) -> int:
+    """현재 S에만 유한 운영 요청을 보낸다. RUN 결과는 pose/World 준비 승인이 아니다."""
+    from .runtime.operation_management import operation_command
+
+    try:
+        result=operation_command(args.state_dir,args.action,
+            request_id=args.request_id,timeout_s=args.timeout)
+    except (OSError,ValueError,RuntimeError,TimeoutError) as exc:
+        print(f"operation: {exc}",file=sys.stderr)
+        return 2
+    print(json.dumps(result,ensure_ascii=True,allow_nan=False,indent=None if args.json else 2))
+    return 0 if result.get('status') not in ('REJECTED','UNKNOWN','EXPIRED','FAILED') else 2
 
 
 def _runtime_command(args: argparse.Namespace) -> int:
@@ -273,6 +313,17 @@ def main(argv: list[str] | None = None) -> int:
     runtime_init = commands.add_parser("runtime-init", help="explicitly initialize a new protected runtime state directory")
     runtime_init.add_argument("--state-dir", type=Path, required=True, help="new directory; existing state is never overwritten")
     runtime_init.add_argument("--json", action="store_true", help="print the installation record")
+    rearm = commands.add_parser('runtime-rearm', help='offline explicit recovery-budget approval; never starts/stops resources')
+    rearm_actions = rearm.add_subparsers(dest='rearm_action', required=True)
+    for action in ('check', 'apply', 'query'):
+        command = rearm_actions.add_parser(action)
+        command.add_argument('--state-dir', type=Path, required=True)
+        if action in ('apply', 'query'):
+            command.add_argument('--request-id', required=True, help='original explicit canonical request UUID')
+        if action == 'apply':
+            command.add_argument('--expected-manifest-sha256', required=True, help='exact current original manifest SHA256')
+            command.add_argument('--expected-episode-id', required=True, help='original recovery episode UUID from check')
+            command.add_argument('--reason', required=True, help='explicit operator recovery reason, at most 512 UTF-8 bytes')
     runtime = commands.add_parser("runtime", help="run resident OAK acquisition, parser and storage; metric/world wait for external inputs")
     runtime.add_argument("--profile", type=Path, required=True, help="explicit REQUIRED YOLOP graph/asset profile")
     runtime.add_argument("--state-dir", type=Path, required=True, help="protected state created by runtime-init")
@@ -290,6 +341,12 @@ def main(argv: list[str] | None = None) -> int:
     runtime.add_argument('--mapper-profile',type=Path,help='optional explicit local mapper schema1 for capture timing, sensors, geometry and stopping bounds')
     runtime.add_argument('--http-host',type=_http_host,help='opt-in numeric IPv4 listen address for read-only OAK JPEG; default off')
     runtime.add_argument('--http-port',type=_http_port,default=None,help='HTTP port1..65535; requires --http-host, default8080')
+    operation=commands.add_parser('operation',help='query or explicitly set the current local Jetson RUN/STANDBY state')
+    operation.add_argument('action',choices=('status','run','standby','query'))
+    operation.add_argument('--state-dir',type=Path,required=True,help='protected state directory of the current resident service')
+    operation.add_argument('--request-id',help='original request UUID; required for query, never automatically retried with a new key')
+    operation.add_argument('--timeout',type=_operation_timeout,default=2.0,help='local transaction timeout0.1..5 seconds; default2')
+    operation.add_argument('--json',action='store_true',help='print one compact management result')
     perception=commands.add_parser('perception-bench',help='offline sensor-to-local-map diagnostics; no control authority')
     perception.add_argument('--source',choices=('synthetic','yolop-replay'),default='synthetic',help='explicit sensor provenance')
     perception.add_argument('--dataset',type=Path,help='existing paired synthetic or validated YOLOP diagnostic recording')
@@ -313,8 +370,12 @@ def main(argv: list[str] | None = None) -> int:
         return _yolop_replay_command(args)
     if args.command == "runtime-init":
         return _runtime_init_command(args)
+    if args.command == 'runtime-rearm':
+        return _runtime_rearm_command(args)
     if args.command == "runtime":
         return _runtime_command(args)
+    if args.command == 'operation':
+        return _operation_command(args)
     if args.command == 'perception-bench':
         return _perception_bench_command(args)
     parser.error("unsupported command")

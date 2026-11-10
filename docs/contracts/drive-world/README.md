@@ -1,5 +1,10 @@
 # 주행 입력과 실제 path 인계 — drive-world-1
 
+A1 공통 운영 확장은 [운영 진술·AUTO 입력 preflight](operation-and-input-preflight.md)를 따른다.
+이는 공통 계약 구현이며 operator/C producer/Jetson 운영·실차 수락의 완료 보고가 아니다.
+B1~B3 공통 확장은 [관측 도로·출차·시작점 복귀 계약](route-and-return.md)을 따른다.
+이는 새 codec/hash/관리 payload의 형식 구현이며 출차·복귀·HIL 완료 보고가 아니다.
+
 이 디렉터리의 `world.proto`가 Python/Gateway와 C/Zephyr의 공통 원본이다.
 Pi가 수락한 mapper 시계 구간의 반환과 S/M identity 제안은
 [mapper clock·source 계약](mapper-clock-and-source.md)을 따른다.
