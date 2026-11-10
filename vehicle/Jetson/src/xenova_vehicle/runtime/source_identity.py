@@ -273,9 +273,11 @@ class IdentityOwner:
                 self.peer.service_instance,self.peer.mapper_worker,self.peer.channel_epoch,'M'):
             raise ValueError('identity proposal belongs to another worker/channel')
         if (type(now_us) is not int or type(vehicle_received_us) is not int
-                or not packet.issued_us<=now_us<packet.expires_us
-                or not 0<=now_us-vehicle_received_us<1_000_000):
+                or now_us < packet.issued_us or now_us < vehicle_received_us):
             raise ValueError('identity proposal or original vehicle delivery is no longer current')
+        if now_us>=packet.expires_us or now_us-vehicle_received_us>=1_000_000:
+            from .health_policy import FrameExpired
+            raise FrameExpired('identity is waiting for a current Vehicle delivery')
         proposal=header['metadata']
         if set(proposal)!=PROPOSAL_FIELDS:
             raise ValueError('identity proposal has unsupported fields')
@@ -296,7 +298,6 @@ class IdentityOwner:
         if previous is not None:
             if previous!=original:raise ValueError('same identity nonce changed its original body')
             return self.binding
-        if len(self._nonces)>=16:raise ValueError('identity proposal registry full; no silent eviction')
         _uuid(proposal['map_epoch']);_uuid(proposal['frame_epoch'])
         for name in ('database_uuid','mapper_instance','odom_epoch','pi_host_boot','device_session','gateway_instance','pi_session'):_uuid(proposal[name])
         if proposal['mapper_instance']!=self.mapper_instance or proposal['raw_binding_sha256']!=self.raw.sha256:
@@ -328,4 +329,5 @@ class IdentityOwner:
             self._identity=stable
             self._origin_fields={key:proposal[key] for key in ('pi_host_boot','gateway_instance','device_session','pi_session')}
         self._nonces[nonce]=original
+        while len(self._nonces)>16:self._nonces.pop(next(iter(self._nonces)))
         return self.binding
