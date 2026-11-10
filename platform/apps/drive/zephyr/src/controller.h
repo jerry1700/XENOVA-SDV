@@ -44,6 +44,17 @@ struct drive_command_gate {
  char reason[65];
  bool restricted;
 };
+/* Provisional operating policy: drop four late AUTO results, attempt STOP on
+ * the fifth distinct completion. This never renews the prior command lease. */
+#define DRIVE_DEADLINE_RETRY_LIMIT 5U
+struct drive_deadline_gate {
+ struct drive_command_context context;
+ uint64_t sequence;
+ unsigned misses;
+ bool seen;
+};
+bool drive_deadline_attempt_due(struct drive_deadline_gate *,const struct drive_command_context *,
+ uint64_t completion_sequence,const char *reason);
 /* First restricted exact-zero result or changed context/reason is immediate.
  * Same restriction retries at each existing supervisor check. A true return
  * permits an attempt only: mailbox rejection/TX loss is not cached success.

@@ -400,16 +400,19 @@ class VerifiedDriveMachine(ControlMachine):
                 else:actions+=self._change(Mode.SAFE_STOP,self.active_vm,'no_fresh_standby',now);self._authorized=False
             elif self.mode is Mode.MANUAL and not self.authority.value.get('manual_hold',False) and self._qualified(self.active_vm,AUTONOMOUS,now,held=True):
                 actions=self._change(Mode.AUTO_READY,self.active_vm,'autonomous_ready',now,arm=True)
-            elif self.mode is Mode.AUTO_READY and not self._qualified(self.active_vm,AUTONOMOUS,now):
+            elif (self.mode is Mode.AUTO_READY and not self._qualified(self.active_vm,AUTONOMOUS,now)
+                    and self._function_failure_confirmed(self.active_vm,AUTONOMOUS,now)):
                 actions=self._change(Mode.MANUAL,self.active_vm,'autonomous_lost',now,arm=True)
         elif self.mode is Mode.SAFE_STOP and self.transport_ok and not self.failure:
             candidate=next((vm for vm in (self.active_vm,other) if self._qualified(vm,MANUAL_APP,now,held=True)),None)
             if candidate:actions=self._change(Mode.MANUAL,candidate,'manual_fresh',now,arm=False)
         if self._countdown:
             expected_app=AUTONOMOUS if self.mode is Mode.AUTO_READY or self._resume_auto else app or MANUAL_APP
-            if self._countdown.generation!=self.generation or not self._qualified(self._resume_vm,expected_app,now,held=True):
+            qualified=self._qualified(self._resume_vm,expected_app,now,held=True)
+            if (self._countdown.generation!=self.generation or not qualified and
+                    self._function_failure_confirmed(self._resume_vm,expected_app,now)):
                 actions+=self._cancel_countdown('readiness_lost',now)
-            elif now-self._countdown.start_t>=self.timing.resume_countdown_s:
+            elif qualified and now-self._countdown.start_t>=self.timing.resume_countdown_s:
                 self._authorized=True
                 target_mode=Mode.AUTO if self.mode is Mode.AUTO_READY or self._resume_auto else Mode.MANUAL if self.mode is Mode.SAFE_STOP else self.mode
                 actions=self._change(target_mode,self._resume_vm,'resume_requested',now,arm=True)

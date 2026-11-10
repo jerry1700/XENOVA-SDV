@@ -10,6 +10,10 @@ from .authority import AuthorityError
 
 # 결과의 부적합과 VM/앱 실행 고장을 구분한다. 아래 이유 자체는 새 READY나 명령을 만들지 않는다.
 _CALCULATION_REJECTIONS=frozenset(('CALCULATION_FAILED','DEADLINE'))
+_TRANSIENT_REJECTIONS=_CALCULATION_REJECTIONS|frozenset(('INPUT_UNAVAILABLE','INPUT_STALE',
+    'MAP_UNAVAILABLE','WORLD_UNAVAILABLE','POSE_UNAVAILABLE','OBSERVATION_EXPIRED',
+    'CLOCK_ERROR','STEERING_UNAVAILABLE'))
+_REJECTION_LIMIT=5  # 초기 운영값: 서로 다른 실패 완료 5개 또는 원 300ms 창 중 먼저 도달한 때
 _STATE_INVALIDATIONS=frozenset(('STATE_REJECTED','STATE_FRAME_CHANGED',
     'STATE_CONFIGURATION_CHANGED','STATE_REFERENCE_CHANGED'))
 _PLANNER_WAITS=frozenset(('PATH_UNAVAILABLE','PATH_INVALIDATED','SEARCH_NOT_FOUND','NODE_BUDGET',
@@ -184,35 +188,51 @@ class WarmDriveMachine(VerifiedDriveMachine):
         except (ValueError,TypeError):return False
         key=vm,app;old=self.checks.get(key);p=self.prepared[key]
         if (value.generation!=self.generation or (old and value.check<=old[0]) or value.progress<p.progress):return False
+        fresh_ready=value.readiness=='READY' and value.progress>p.progress
+        if value.readiness=='READY' and p.state!='READY' and not fresh_ready:return False
+        recovering=self._retrying_function(key,p.reason,self.execution_phases.get(key),t)
         self.checks[key]=(value.check,t)
         self.execution_phases[key]=value.phase
         if value.phase=='EXECUTING' and value.progress>0 and value.progress>p.progress:
             self.completed_work[key]=(self.generation,t)
             if value.readiness=='READY':self.last_ready_work[key]=(self.generation,t)
-        if value.readiness=='NOT_READY' and value.reason in _CALCULATION_REJECTIONS:
+        if app=='autonomous' and value.readiness=='NOT_READY' and value.reason in _TRANSIENT_REJECTIONS:
             previous_failure=self.function_rejections.get(key)
-            if previous_failure is None or previous_failure[0]!=self.generation:
-                self.function_rejections[key]=(self.generation,t)
+            count=int(value.phase=='EXECUTING' and value.progress>p.progress)
+            if previous_failure is not None and previous_failure[0]==self.generation:
+                self.function_rejections[key]=(self.generation,previous_failure[1],min(_REJECTION_LIMIT,previous_failure[2]+count))
+            else:self.function_rejections[key]=(self.generation,t,count)
         else:self.function_rejections.pop(key,None)
+        retrying=(value.readiness=='NOT_READY' and self._retrying_function(key,value.reason,value.phase,t))
         valid=value.readiness=='QUALIFIED' or (value.readiness=='READY' and
             (value.progress>p.progress or (p.observed is not None and 0<=t-p.observed<=self.readiness_lease_s)))
         previous=self.qualification.get(key)
         continuous=bool(valid and previous and previous[0]==self.generation and 0<=t-previous[1]<=self.readiness_lease_s)
-        self.qualification[key]=(self.generation,t,previous[2] if continuous else t) if valid else None
+        if valid:self.qualification[key]=(self.generation,t,previous[2] if continuous else t)
+        elif not (retrying and previous and previous[0]==self.generation and
+                0<=t-previous[1]<=self.readiness_lease_s):self.qualification[key]=None
         # Renew calculation evidence only after new completed work. Supervision
         # can revoke or qualify waiting; it cannot make a stalled calculation live.
         if value.readiness=='READY' and value.progress>p.progress:
-            continuous_ready=p.state=='READY' and p.generation==value.generation and p.observed is not None and 0<=t-p.observed<=self.readiness_lease_s
+            continuous_ready=(p.state=='READY' or recovering) and p.generation==value.generation and p.observed is not None and 0<=t-p.observed<=self.readiness_lease_s
             p.since=p.since if continuous_ready else t;p.observed=t
-        elif value.readiness!='READY':p.observed=None;p.since=None
+        elif value.readiness!='READY' and not retrying:p.observed=None;p.since=None
         p.progress=value.progress;p.generation=value.generation
         p.state='READY' if value.readiness=='READY' else 'NOT_READY';p.reason=value.reason
         # 준비/출력 제한은 즉시 적용하되, 유효 path/state 사본은 실제 불일치 때만 철회한다.
         if value.readiness=='NOT_READY' and value.reason in _STATE_INVALIDATIONS:self.states.invalidate(vm,app)
         return True
 
+    def _retrying_function(self,key,reason,phase,now):
+        """직전 양성 근거의 잔여 수명만 보존한다. READY·출력·새 TTL은 만들지 않는다."""
+        failure=self.function_rejections.get(key)
+        return bool(key[1]=='autonomous' and reason in _TRANSIENT_REJECTIONS and
+            phase not in ('STOPPING','RESIDUAL') and failure and failure[0]==self.generation and
+            failure[2]<_REJECTION_LIMIT and 0<=now-failure[1]<self.readiness_lease_s)
+
     def _function_failure_confirmed(self,vm,app,now):
         if app!='autonomous':return True
+        if not self._bound(vm,now,app):return True
         key=vm,app;p=self.prepared[key];check=self.checks.get(key)
         if self.execution_phases.get(key) in ('STOPPING','RESIDUAL'):return True
         if not check or not 0<=now-check[1]<=self.readiness_lease_s:return True
@@ -225,12 +245,12 @@ class WarmDriveMachine(VerifiedDriveMachine):
         if p.state=='NOT_READY' and p.reason in _PLANNER_WAITS:
             work=self.completed_work.get(key)
             return not (work and work[0]==self.generation and 0<=now-work[1]<=self.readiness_lease_s)
-        if p.state!='NOT_READY' or p.reason not in _CALCULATION_REJECTIONS:return True
+        if p.state!='NOT_READY' or p.reason not in _TRANSIENT_REJECTIONS:return True
         rejected=self.function_rejections.get(key)
         if rejected is None or rejected[0]!=self.generation:return True
         ready=self.last_ready_work.get(key)
         since=min(rejected[1],ready[1]) if ready and ready[0]==self.generation else rejected[1]
-        return now-since>=self.readiness_lease_s
+        return rejected[2]>=_REJECTION_LIMIT or now-since>=self.readiness_lease_s
 
     def _waiting_function_output(self,now):
         p=self.prepared[self.active_vm,self.active_app]
@@ -246,6 +266,10 @@ class WarmDriveMachine(VerifiedDriveMachine):
         return self._qualification_ready(vm,app,now,held)
 
     def _qualification_ready(self,vm,app,now,held=False):
+        # 보존한 hold 이력은 복귀 비용만 줄인다. 현재 거절 중인 B를 승계하거나
+        # 현재 거절 중인 AUTO를 새로 활성화할 근거로 쓰지 않는다.
+        observed=self.prepared.get((vm,app))
+        if app=='autonomous' and observed is not None and observed.reason in _TRANSIENT_REJECTIONS:return False
         binding=self.bindings.current(vm,self.clock())
         if (binding and binding.get('app_state_models',{}).get(app)=='stateful' and
                 self.states.evidence(vm,app) is None):return False

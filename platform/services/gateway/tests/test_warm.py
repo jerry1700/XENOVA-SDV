@@ -86,6 +86,8 @@ def test_one_vm_world_unavailable_prefers_other_current_auto(tmp_path):
     # Only the app-message boundary is a fixture; actor/Authority are product.
     w=WarmWorld(tmp_path/'authority');w.arm();generation=w.m.generation
     w.failures[A,'autonomous']='WORLD_UNAVAILABLE'
+    w.tick(.08)
+    assert w.m.active_vm==A and w.m.generation==generation
     w.tick(.02)
     assert w.m.active_vm==B and w.m.mode is Mode.AUTO and w.m.generation==generation+1
     assert isinstance(w.actions[0],ForwardStop) and not w.m.output_permitted
@@ -96,6 +98,8 @@ def test_one_vm_world_unavailable_prefers_other_current_auto(tmp_path):
 def test_both_world_inputs_unavailable_stop_then_manual_needs_explicit_resume(tmp_path):
     w=WarmWorld(tmp_path/'authority');w.arm();executions=dict(w.executions)
     for vm in (A,B):w.failures[vm,'autonomous']='WORLD_UNAVAILABLE'
+    w.tick(.08)
+    assert w.m.mode is Mode.AUTO
     w.tick(.02)
     assert w.m.mode is Mode.MANUAL and w.m.active_vm==A
     assert isinstance(w.actions[0],ForwardStop) and not w.m.output_permitted
@@ -172,6 +176,8 @@ def test_common_input_fallback_requires_current_neutral_then_new_action_and_resu
             keys=keys,valid=True,age_ms=0),w.t)
     assert source(5,['up'])
     for vm in (A,B):w.failures[vm,'autonomous']='WORLD_UNAVAILABLE'
+    w.tick(.08)
+    assert w.m.mode is Mode.AUTO
     w.tick(.02)
     assert w.m.mode is Mode.MANUAL and not w.m.output_permitted
     assert w.auth.value['pending']['manual_policy']=='NEUTRAL_THEN_ACTION'
