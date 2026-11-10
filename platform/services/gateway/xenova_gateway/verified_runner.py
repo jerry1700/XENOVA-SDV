@@ -571,9 +571,10 @@ class VerifiedGatewayRunner(GatewayRunner):
         """feedback3 원 ingress만 stationary 증거가 된다. feedback2/write ACK는 변환하지 않는다."""
         device=getattr(self._sink,'device',None)
         policy=getattr(device,'stationary_policy',None)
+        selected=view is not None
         if view is None:view=self.device_view()
         source=view.get('stop_facts_source')
-        value=None if source is None else source.get('matched')
+        value=(None if selected else getattr(device,'matched_stop',None)) if source is None else source.get('matched')
         sample=view.get('vehicle_sample')
         if value is None or policy is None or sample is None or self.machine is None:return None
         try:

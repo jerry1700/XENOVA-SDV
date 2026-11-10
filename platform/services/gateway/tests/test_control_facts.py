@@ -106,7 +106,21 @@ def test_matched_stop_uses_parent_snapshot_even_when_serial_owner_advanced():
 def test_matched_stop_missing_from_parent_cannot_use_newer_serial_owner():
     from unittest.mock import Mock
     device=SimpleNamespace(stationary_policy=object(),matched_stop=Mock())
+    captured=dict(vehicle_sample=dict(vehicle='car'),stop_facts_source=None)
     runner=SimpleNamespace(_sink=SimpleNamespace(device=device),machine=SimpleNamespace(generation=7),
-        device_view=lambda:dict(vehicle_sample=dict(vehicle='car'),stop_facts_source=None))
-    assert VerifiedGatewayRunner.matched_stop(runner) is None
+        device_view=lambda:captured)
+    assert VerifiedGatewayRunner.matched_stop(runner,view=captured) is None
     device.matched_stop.check.assert_not_called()
+
+
+def test_direct_matched_stop_preserves_existing_adapter_port_with_current_validation():
+    from unittest.mock import Mock
+    stop=Mock();device=SimpleNamespace(stationary_policy=object(),matched_stop=stop)
+    captured=dict(vehicle_sample=dict(vehicle='car',calibration='cal',odom_epoch='odom'),
+        pi_session='pi',device_session='device')
+    runner=SimpleNamespace(_sink=SimpleNamespace(device=device),machine=SimpleNamespace(generation=7),
+        authority=SimpleNamespace(host=HOST),drive_link=SimpleNamespace(instance=GATEWAY),
+        _clock=lambda:1.2,device_view=Mock(return_value=captured))
+    assert VerifiedGatewayRunner.matched_stop(runner) is stop
+    stop.check.assert_called_once()
+    runner.device_view.assert_called_once()
