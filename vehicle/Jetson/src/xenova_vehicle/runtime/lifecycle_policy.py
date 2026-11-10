@@ -94,7 +94,7 @@ class AbsoluteDeadline:
 
 
 class LocalSetupWatch:
-    """M/D spawn→HELLO의 원15초. HELLO 성공 뒤 외부 WAIT에는 적용하지 않는다."""
+    """M/D spawn→HELLO의 원90초. HELLO 성공 뒤 외부 WAIT에는 적용하지 않는다."""
 
     def __init__(self, role, worker_instance, spawn_us, *, now_us):
         if role not in ("M", "D"):
