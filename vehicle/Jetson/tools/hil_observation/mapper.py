@@ -474,6 +474,14 @@ class _MapperMain:
                     self.compute.request_stop()
                     remaining=2. if self.actor.stop is None else max(0.,min(2.,(self.actor.stop.expires_us-j_us())/1_000_000))
                     self.compute.join(remaining)
+                    # 실제 compute 종료 뒤 한 번만 저장한다. 원 종료·자원 반환은 진단 실패와 독립이다.
+                    try:
+                        import json
+                        diagnostic=dict(profile='pc-mapper-exit-diagnostic-1',compute=self.compute.snapshot(),
+                            parser_ready=getattr(self.control,'ready',False),parser_streak=getattr(self.control,'streak',0),
+                            wait_reason=getattr(self.control,'wait_reason',None))
+                        if len(json.dumps(diagnostic))<=16*1024:self.actor.save('pc-mapper-diagnostic.json',diagnostic)
+                    except BaseException:pass
             except BaseException as error:
                 self.actor.failure=type(error).__name__
                 raise
