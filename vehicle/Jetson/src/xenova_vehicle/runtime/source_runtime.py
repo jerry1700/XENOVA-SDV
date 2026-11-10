@@ -147,10 +147,13 @@ class SupervisorSource:
             sample=_sample(item.raw)
             if (sample.vehicle,sample.calibration)!=(self.policy.vehicle,self.policy.calibration):
                 raise ValueError('original vehicle differs from installed source policy')
-            if self.origin is not None and (_origin(sample)!=self.origin
-                    or sample.odom_epoch!=self.source['odom_epoch']):
-                self.jio.fence_source()
-                raise SourceChanged('actual Pi/Gateway/device/odom source changed')
+            if self.origin is not None:
+                origin=_origin(sample)
+                changed=[key for key in self.origin if origin[key]!=self.origin[key]]
+                if sample.odom_epoch!=self.source['odom_epoch']:changed.append('odom_epoch')
+                if changed:
+                    self.jio.fence_source()
+                    raise SourceChanged('actual Pi/Gateway/device/odom source changed: '+','.join(changed))
             if self.bootstrap.original is not None and self.owner.binding is None and self.current_vehicle is not None:
                 previous=_sample(self.current_vehicle)
                 if (_origin(sample),sample.odom_epoch,sample.calibration,sample.vehicle)!=(
