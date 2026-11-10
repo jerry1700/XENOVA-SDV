@@ -21,6 +21,7 @@ def load(name, path):
 
 resolver = load("image_rebuild_resolver", ROOT / "platform/scripts/resolve-xenova-templates.py")
 broker = load("image_rebuild_broker", ROOT / "platform/deploy/mosquitto/scripts/xenova_broker.py")
+wic = load("image_rebuild_wic", ROOT / "platform/scripts/check-xenova-wic.py")
 
 
 class ImageRebuildContractTest(unittest.TestCase):
@@ -50,6 +51,17 @@ class ImageRebuildContractTest(unittest.TestCase):
                         self.assertIn(f"Missing ESP32 module: {missing}", result.stderr)
                     else:
                         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wic_requires_one_explicit_pi4_kms_overlay_with_64mib_cma(self):
+        expected = "dtoverlay=vc4-kms-v3d-pi4,cma-64"
+        self.assertTrue(wic.pi4_kms_enabled("# display\n" + expected + "\nenable_uart=1\n"))
+        for config in ("dtoverlay=vc4-kms-v3d", "dtoverlay=vc4-kms-v3d,cma-64",
+                       "dtoverlay=vc4-kms-v3d-pi4", "dtoverlay=vc4-kms-v3d-pi4,cma-256",
+                       "dtoverlay=vc4-kms-v3d-pi5,cma-64", "# " + expected,
+                       expected + "\n" + expected,
+                       expected + "\ndtoverlay=vc4-kms-v3d"):
+            with self.subTest(config=config):
+                self.assertFalse(wic.pi4_kms_enabled(config))
 
     def test_backend_can_read_all_v2_telemetry_but_has_no_v2_write_grant(self):
         rules = broker.policy(ROOT / "platform/deploy/mosquitto/etc/policy.json")

@@ -71,6 +71,9 @@ missing = required - set(platform['RDEPENDS:xenova-platform'].split())
 assert not missing, f'Required runtime packages are undeclared: {sorted(missing)}'
 text, image = load('xenova-xen-bringup-image')
 assert 'xen-' + image['MACHINE'] + ';xen' in image['IMAGE_BOOT_FILES'].split()
+assert image['VC4DTBO'] == 'vc4-kms-v3d-pi4,cma-64'
+assert 'overlays/vc4-kms-v3d-pi4.dtbo' in image['KERNEL_DEVICETREE'].split()
+assert 'vc4-kms-v3d-pi4.dtbo;overlays/vc4-kms-v3d-pi4.dtbo' in image['IMAGE_BOOT_FILES'].split()
 assert 'xen:do_deploy' in (logs / 'wic-depends.txt').read_text().split()
 print('PASS WIC: Xen deploy file maps to xen, with explicit do_deploy dependency')
 assert not {'empty-root-password', 'allow-empty-password', 'debug-tweaks', 'serial-autologin-root'} & set(image['IMAGE_FEATURES'].split())

@@ -176,6 +176,9 @@ xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 use
 ESP32 CP210x USB-UART 연결용 `usbserial`·`cp210x` 모듈도 이미지에 포함한다. 다음 패키지 manifest 검사에서 두 커널 버전별 패키지를 확인한다.
 실제 USB 인식·주소 확인 뒤 [휴대폰 접속 절차](../../platform/services/display/router/deploy/mobile-access/mobile-access.README.md)를 따른다.
 
+HDMI는 `dtoverlay=vc4-kms-v3d-pi4,cma-64`를 사용한다. 고정 커널 소스의 Pi4 overlay를 기존 DTB 목록에 추가해 빌드하고, WIC의 `overlays/vc4-kms-v3d-pi4.dtbo`로 배포한다. 일반 overlay 이름의 `overlay_map` 변환에 의존하지 않는다.
+WIC 검사는 이 설정과 실제 overlay·deploy 해시를 함께 확인한다. DTB·Xen·`boot.scr`의 인자와 3GiB dom0 설정은 유지한다. HDMI KMS 지원이 Xen 아래 V3D 가속 성공을 뜻하지는 않는다.
+
 xenova-gateway는 기존 코드·pyserial·비활성 서비스 템플릿을 포함한다.
 A/B UUID·실행 바인딩·권한 원본·broker·시리얼 장치를 확인한 뒤
 [Gateway 운영 절차](../../platform/services/gateway/README.md#verified-프로필-운영)로 설정한다.
