@@ -1,6 +1,6 @@
-"""허용된 실패 private create의 일회 후속 처리. 기존 LinuxSlot과 원 reconciliation을 쓴다.
+"""실패 private create의 기본 유한 후속 처리. 기존 준비 슬롯과 원 reconciliation을 쓴다.
 
-시험 프로필의 명시 opt-in만 허용한다. polling·영구 queue·별도 daemon은 만들지 않는다.
+지원 OS에 같은 원칙을 적용한다. polling·영구 queue·별도 daemon은 만들지 않는다.
 """
 import json
 import os
@@ -10,10 +10,11 @@ import subprocess
 import sys
 import threading
 
-from xenova_preparation import LinuxSlot, request_output
+from xenova_preparation import ReconciliationSlot, request_output
 from xenova_runtime import operation_lock, PlatformError, OperationBusy
 
-PROFILE='trial-1-plus-1'
+PROFILE='bounded-1-plus-1'
+LEGACY_PROFILE='trial-1-plus-1'
 
 
 def private_json(path, maximum=8192):
@@ -27,28 +28,41 @@ def private_json(path, maximum=8192):
     return json.loads(raw)
 
 
-def enrollment(manager):
+def enrollment(manager,op,context):
     path=getattr(manager.p,'automatic_cleanup_policy_path',manager.defaults_path.with_name('creation-reconcile-policy.json'))
     try:
         value=private_json(path,2048)
-        if value!={'schema_version':'1.0','profile':PROFILE}:
-            raise ValueError('explicit trial-1-plus-1 automatic cleanup policy required')
-    except FileNotFoundError:return None
+        if value not in ({'schema_version':'1.0','profile':PROFILE},{'schema_version':'1.0','profile':LEGACY_PROFILE}):
+            raise ValueError('bounded automatic cleanup policy required')
+    except FileNotFoundError:pass
     except (OSError,ValueError) as error:
         from xenova_creation import fail
         fail('INVALID_SPEC','automatic cleanup policy cannot be verified; request not accepted',
              details={'accepted':False,'cause_type':type(error).__name__})
-    return {'version':1,'profile':PROFILE,'observations':0,'state':'enrolled',
+    # Linux는 원 cleanup 예산, 다른 어댑터는 기존 명시 수습의 호출 예산을 고정한다.
+    # 원 create 기한을 연장하거나 재전달 때 새 예산을 등록하지 않는다.
+    from xenova_creation import DEFAULT_RECONCILE_MS
+    cleanup_ms=(op['creation']['limits']['cleanup_ms'] if 'creation' in op else
+                min(context.get('budget_ms') or DEFAULT_RECONCILE_MS,DEFAULT_RECONCILE_MS))
+    return {'version':2,'profile':PROFILE,'cleanup_ms':cleanup_ms,'observations':0,'state':'enrolled',
             'last_condition':None,'first_error':None,'last_error':None}
 
 
 def validate(op):
     value=op['automatic_cleanup']
-    if (not isinstance(value,dict) or set(value)!={'version','profile','observations','state','last_condition','first_error','last_error'}
-            or type(value['version']) is not int or value['version']!=1 or value['profile']!=PROFILE or type(value['observations']) is not int
+    fields={'version','profile','observations','state','last_condition','first_error','last_error'}
+    version=value.get('version') if isinstance(value,dict) else None
+    if version==2:fields.add('cleanup_ms')
+    if (not isinstance(value,dict) or set(value)!=fields
+            or type(version) is not int or version not in (1,2)
+            or value['profile']!=(LEGACY_PROFILE if version==1 else PROFILE) or type(value['observations']) is not int
             or not 0<=value['observations']<=2 or value['state'] not in ('enrolled','pending','observing','deferred','complete')
-            or op.get('action')!='create' or op.get('template',{}).get('guest_kind')!='linux'):
+            or op.get('action')!='create'):
         raise ValueError('invalid automatic cleanup state')
+    if version==2 and (type(value['cleanup_ms']) is not int or not 0<value['cleanup_ms']<=60000):
+        raise ValueError('invalid automatic cleanup budget')
+    if version==1 and not isinstance(op.get('creation',{}).get('limits',{}).get('cleanup_ms'),int):
+        raise ValueError('legacy automatic cleanup lost its accepted budget')
     token=value['last_condition']
     if token is not None and (not isinstance(token,str) or len(token)!=64 or any(c not in '0123456789abcdef' for c in token)):
         raise ValueError('invalid automatic cleanup condition')
@@ -68,9 +82,21 @@ def validate(op):
         raise ValueError('automatic cleanup cannot release an unsettled create')
 
 
-def failed(op):
+def failed(manager,op):
     value=op.get('automatic_cleanup')
-    if value is not None and value['state']=='enrolled' and op.get('phase')=='preparing':value['state']='pending'
+    if value is not None and value['state']=='enrolled' and op.get('phase')=='preparing':
+        target=manager.data/'instances'/op['assigned']['internal_name']
+        try:target.lstat()
+        except FileNotFoundError:pass
+        except OSError:
+            value['state']='pending';return
+        else:return  # 이미 게시된 사본은 기존 등록 완료 경로에 남긴다.
+        # 자산 생성 전 실패는 같은 원 요청으로 재개하는 기존 계약을 유지한다.
+        root=manager.data/op['owned_workspace']
+        try:root.lstat()
+        except FileNotFoundError:return
+        except OSError:pass  # 후속 관측이 원 오류와 별개로 부재/실패를 확인한다.
+        value['state']='pending'
 
 
 def selected(manager, identity):
@@ -108,11 +134,12 @@ def condition(manager,op):
         info=root.lstat()
         if not stat.S_ISDIR(info.st_mode) or root.is_symlink() or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:
             raise ValueError('unsafe private cleanup workspace')
-        resources=private_json(root/'.preparation-resources.json')
-        if not isinstance(resources,dict):raise ValueError('invalid preparation resource receipt')
-        ready=(type(resources.get('schema')) is int and resources.get('schema')==1 and resources.get('workspace')==str(root) and
-               resources.get('clean') is True and resources.get('pending') is False and
-               resources.get('mounts')==[] and resources.get('loops')==[])
+        if op['template']['guest_kind']=='linux':
+            resources=private_json(root/'.preparation-resources.json')
+            if not isinstance(resources,dict):raise ValueError('invalid preparation resource receipt')
+            ready=(type(resources.get('schema')) is int and resources.get('schema')==1 and resources.get('workspace')==str(root) and
+                   resources.get('clean') is True and resources.get('pending') is False and
+                   resources.get('mounts')==[] and resources.get('loops')==[])
         inode=[info.st_dev,info.st_ino]
     else:inode=None
     resolution=op.get('reconciliation')
@@ -138,7 +165,7 @@ def start(manager, identity):
     try:
         op=selected(manager,identity)
         if not eligible(manager,op):return
-        with request_output(),LinuxSlot(manager.p) as slot:
+        with request_output(),ReconciliationSlot(manager.p,op) as slot:
             environment={k:v for k,v in os.environ.items() if k in (
                 'PATH','PYTHONPATH','PYTHONHOME','PYTHONNOUSERSITE','PYTHONDONTWRITEBYTECODE','LD_LIBRARY_PATH','LANG','TZ') or k.startswith('LC_')}
             child=subprocess.Popen([sys.executable,'-B',str(Path(__file__).resolve()),str(manager.data),
@@ -158,7 +185,8 @@ def run(manager, identity, inherited_fd):
     from xenova_creation import digest, diagnose, reconcile, save_owned
     from xenova_vm import storage_check
     with request_output() as output:
-        slot=LinuxSlot(manager.p).adopt(inherited_fd)
+        op=selected(manager,identity)
+        slot=ReconciliationSlot(manager.p,op).adopt(inherited_fd)
         output.stack.callback(slot.__exit__,None,None,None)
         storage_check(manager.data)
         with operation_lock(manager.p.runtime):
@@ -171,7 +199,8 @@ def run(manager, identity, inherited_fd):
                 token=digest(cause(failure));ready=False;error=failure
             value.update(observations=value['observations']+1,last_condition=token,state='observing')
             # 새로운 생성 기한이 아니다. 이미 수락한 cleanup 여유만 일회 후속 예산으로 사용한다.
-            deadline=manager.p.clock()+op['creation']['limits']['cleanup_ms']/1000
+            cleanup_ms=value.get('cleanup_ms',op.get('creation',{}).get('limits',{}).get('cleanup_ms'))
+            deadline=manager.p.clock()+cleanup_ms/1000
             manager.p.response_deadline=deadline
         save_owned(manager,op,deadline,previous)
         try:

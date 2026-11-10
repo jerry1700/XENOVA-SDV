@@ -1,7 +1,7 @@
 """UUID 기반 공통 VM 관리 계약. CLI/백엔드가 같은 잠금·작업 기록·생성 함수를 사용한다.
 
-동기 작업만 제공한다. Linux 준비는 원 실행 소유권을 유지하며 공통 잠금 밖에서 수행한다. 부분 준비 디스크는
-자동 재초기화/정리하지 않는다. root 권한의 외부 xl/파일 변경까지 원자적으로 통제하지 않는다.
+동기 작업만 제공한다. 준비는 원 실행 소유권을 유지하며 공통 잠금 밖에서 수행한다. 실패 private 자산은
+유한한 별도 수습으로만 폐기하며 재초기화하지 않는다. 외부 root의 xl/파일 변경까지 원자적으로 통제하지 않는다.
 """
 from argparse import Namespace
 from _thread import allocate_lock
@@ -1158,7 +1158,10 @@ class Manager:
 
     def _owner_state(self, op):
         try:
-            return owner_state(self.p,op)
+            state=owner_state(self.p,op)
+            if state=='absent' and op['action']=='create' and op['template']['guest_kind']=='zephyr':
+                return asset_state(self.p,{**op,'expected_generation':0})
+            return state
         except (PlatformError,OSError,ValueError,KeyError,TypeError) as error:
             fail('OBSERVATION_UNAVAILABLE','original preparation ownership cannot be verified',
                  details={'operation_id':op['operation_id'],'cause_type':type(error).__name__})
@@ -1177,7 +1180,7 @@ class Manager:
             except (PlatformError,OSError,ValueError,KeyError):
                 fail('OBSERVATION_UNAVAILABLE','original firmware preparation ownership cannot be verified')
         if (op['action']=='create' and op['status']!='SUCCEEDED' and effective!='FAILED'
-                and op['template']['guest_kind']=='linux' and self._owner_state(op)=='reconciling'):
+                and self._owner_state(op)=='reconciling'):
             effective='RECONCILING'
         if op['action'] in ('retire','restore','purge','update-resources','firmware-transition') and op['status']!='SUCCEEDED':
             try:
@@ -1274,17 +1277,19 @@ class Manager:
                 context['linux_barrier']=self.p.execution().barrier()
                 # workspace 전 실패의 명시적 재개다. 조회가 상태를 바꾸는 것은 아니다.
                 op['status']='RUNNING'
-            if private_zephyr:op['status']='RUNNING'
+            if private_zephyr:
+                # 수습이 같은 I/O 슬롯을 보유할 수 있다. 원 상태를 쓰기 전에 소유 구간을 확보한다.
+                context['asset_lease']=context['output_stack'].enter_context(
+                    AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
+                context['asset_lease'].bind({**op,'expected_generation':0})
+                context['output_stack'].enter_context(lifecycle_slot(self.p))
+                op['status']='RUNNING'
             self._save_op(op, 'preparing')
             if (op['template']['guest_kind']=='linux'
                     and getattr(self.preparer,'__func__',None) is type(self)._prepare):
                 return PrivateCreate(op)
             if (op['template']['guest_kind']=='zephyr'
                     and getattr(self.preparer,'__func__',None) is type(self)._prepare):
-                context['asset_lease']=context['output_stack'].enter_context(
-                    AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
-                context['asset_lease'].bind({**op,'expected_generation':0})
-                context['output_stack'].enter_context(lifecycle_slot(self.p))
                 return PrivateProvision(op,resume=resume)
             try:
                 with tool_output():
@@ -1574,7 +1579,7 @@ class Manager:
                 fail('IDEMPOTENCY_CONFLICT','same key has a different action or request')
             context['replayed']=True
             tomb = self._tombs().get(previous['vm_id'])
-            if (action=='create' and previous['template']['guest_kind']=='linux' and previous['status']!='SUCCEEDED'):
+            if action=='create' and previous['status']!='SUCCEEDED':
                 state=self._owner_state(previous)
                 if state in ('active','reconciling'):
                     return self._operation_view(previous)
@@ -1601,6 +1606,13 @@ class Manager:
             if action=='create' and previous['status']=='RECOVERY_REQUIRED':
                 target=self.data/'instances'/previous.get('assigned',{}).get('internal_name',previous['initial_spec']['name'])
                 workspace=self.data/previous['owned_workspace']
+                automatic=previous.get('automatic_cleanup',{})
+                if automatic.get('state','enrolled')!='enrolled':
+                    if not execute:return {'plan':True,'operation':previous}
+                    error=previous['error']
+                    fail(error['code'],error['message'],retryable=False,
+                         details={**error.get('details',{}),'operation_id':previous['operation_id'],
+                                  'replayed':True,'original_create_succeeded':False})
                 resumable_firmware=(previous['template']['guest_kind']=='zephyr'
                     and getattr(self.preparer,'__func__',None) is type(self)._prepare)
                 if (not resumable_firmware and not target.exists() and not target.is_symlink()
@@ -1712,6 +1724,8 @@ class Manager:
             op.update(template=selected,assigned={'internal_name':internal_name(identity), **({'mac':assigned_mac, 'ipv4':assigned_ip} if selected['capabilities'].get('dhcp') else {})},
                       owned_workspace='instances/.operation-'+opid)
             if selected['guest_kind']=='linux':creation.accept(self,op,context)
+            from xenova_creation_auto import enrollment
+            op['automatic_cleanup']=enrollment(self,op,context)
         else:
             op['expected_generation']=tomb['generation']
             op['source']=str((self.data/'instances'/tomb['name'] if action=='retire' else self._archive(tomb)).relative_to(self.data))
@@ -2240,7 +2254,7 @@ class Manager:
                         op.update(status='RECOVERY_REQUIRED',error=op.get('error') or response['error'])
                         if action=='create':
                             from xenova_creation_auto import failed as automatic_cleanup_failed
-                            automatic_cleanup_failed(op)
+                            automatic_cleanup_failed(self,op)
                         self._save_op(op)
             except (OSError,PlatformError,ValueError):
                 if action=='create':

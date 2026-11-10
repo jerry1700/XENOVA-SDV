@@ -472,7 +472,7 @@ class CPU:
         operations = manager._operations(deadline=deadline)
         pending = [op for op in operations if holds(manager, op)]
         # 정책 변경·미확정 실행·진행 중 수습까지 이 예외를 확대하지 않는다.
-        if not pending or any(op['action'] != 'create' or op['template']['guest_kind'] != 'linux' or
+        if not pending or any(op['action'] != 'create' or
                 op['status'] != 'RECOVERY_REQUIRED' or op.get('reconciliation') is not None for op in pending):
             return ()
         assets_quiet(self.p)
