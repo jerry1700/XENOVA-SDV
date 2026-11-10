@@ -284,3 +284,28 @@ def project_operator_status(status: dict | None, operation_status: dict | None =
                           operation_revision=None if type(binding) is not dict else binding.get('operation_revision'),
                           permission_revision=None if type(binding) is not dict else binding.get('permission_revision'))
     return dict(operation=operation, source=source)
+
+
+def project_gateway_context(record: dict) -> dict:
+    """기본 Gateway G1의 원 응답. 조회 관측 시각과 제품 상태의 시각을 구분한다."""
+    current=record['context'];observed=record['observation']
+    if type(current) is not dict or type(observed) is not dict:
+        raise SourceDecodeError('provider context observation required')
+    host=_uuid(current.get('host_boot_id'));observer=_uuid(observed.get('observer_epoch'))
+    sequence=_uint(observed.get('sequence'),positive=True)
+    received=_uint(observed.get('response_pi_us'))
+    mode=current.get('mode');owner=current.get('owner')
+    if mode not in ('SAFE_STOP','AUTO','AUTO_READY','MANUAL'):
+        raise SourceDecodeError('original provider mode required')
+    if owner is not None:_uuid(owner)
+    _uint(current.get('generation'))
+    if type(current.get('output_permitted')) is not bool:
+        raise SourceDecodeError('original provider output state required')
+    interface=record.get('operator_interface')
+    if interface not in ('ABSENT','UNREACHABLE'):raise SourceDecodeError('operator interface observation required')
+    return dict(operation=dict(mode=mode,active_vm=None if mode=='SAFE_STOP' else owner,
+        standby_vm=None,vehicle_phase='UNKNOWN',parking_enabled=None,auto_ready=None,blocked_reason=None),
+        source=dict(channel='G1_CONTEXT',observer_epoch=observer,sequence=sequence,
+            response_stamp=dict(domain='PI_OBSERVER_RESPONSE',epoch=observer,us=str(received)),
+            host_boot=host,selected_owner=owner,generation=current['generation'],phase=current.get('phase'),
+            output_permitted=current['output_permitted'],operator_interface=interface))

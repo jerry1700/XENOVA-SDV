@@ -138,6 +138,9 @@ def test_operator_worker_polls_at_most_once_per_second_with_no_commands(monkeypa
     module=importlib.import_module('xenova_gateway.operator_client');client=Operator();created=[]
     def factory(**kwargs):created.append(kwargs);return client
     monkeypatch.setattr(module,'OperatorClient',factory)
+    class Provider:
+        def context(self):raise RuntimeError('fixture provider unavailable')
+    monkeypatch.setattr(importlib.import_module('xenova_gateway.client'),'GatewayClient',lambda *a,**k:Provider())
     ticks=iter((100.,100.2));monkeypatch.setattr(remote.time,'monotonic',lambda:next(ticks))
     class Stop:
         def __init__(self):self.delays=[]
@@ -155,3 +158,40 @@ def test_source_namespace_compatibility_with_both_existing_tool_import_styles():
     for name in ('tools.live_observer.sources','live_observer.sources'):
         module=importlib.import_module(name)
         assert module.decode_mqtt('xenova/v1/vehicle/control',b'no command input') is None
+
+
+def test_basic_gateway_context_remains_visible_when_optional_operator_is_absent(monkeypatch):
+    class Provider:
+        def __init__(self):self.reads=0
+        def context(self):self.reads+=1;return dict(mode='SAFE_STOP',owner='original-owner',generation=1)
+    provider=Provider();outbox=remote.Outbox();original=dict(observer_epoch='diagnostic-observer',sequence=0)
+    monkeypatch.setattr(remote.os.path,'exists',lambda _:False)
+    remote._operator_once(Operator(),outbox,provider=provider,observation=original)
+    rows=take(outbox)
+    assert provider.reads==1 and len(rows)==1
+    assert rows[0]['kind']=='gateway_context' and rows[0]['operator_interface']=='ABSENT'
+    assert rows[0]['context']==dict(mode='SAFE_STOP',owner='original-owner',generation=1)
+    assert rows[0]['observation']['sequence']==1
+    assert 'pi_now_ms' not in rows[0]['context']
+
+
+def test_unreachable_operator_is_distinct_from_unreachable_gateway(monkeypatch):
+    class Broken:
+        def context(self):raise RuntimeError(SECRET)
+    outbox=remote.Outbox()
+    remote._operator_once(Operator(),outbox,provider=Broken(),observation=dict(observer_epoch='observer',sequence=0))
+    rows=take(outbox)
+    assert any(row.get('reason')=='GATEWAY_CONTEXT_UNAVAILABLE' for row in rows)
+    assert not any(row['kind']=='gateway_context' for row in rows)
+    assert SECRET not in json.dumps(rows)
+
+
+def test_available_operator_does_not_query_the_basic_context_fallback():
+    class Available:
+        def call(self,body):return dict(version=2,ok=True,data=dict(original_action=body['action']))
+    class Unused:
+        def context(self):raise AssertionError('operator response already available')
+    outbox=remote.Outbox()
+    remote._operator_once(Available(),outbox,provider=Unused(),observation={})
+    rows=take(outbox)
+    assert len(rows)==1 and rows[0]['kind']=='operator'

@@ -241,6 +241,26 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(body['payload']['reason'],'SECOND')
         self.assertEqual(body['write_errors'],1)
 
+    def test_basic_gateway_context_is_fresh_before_hil_but_cannot_arm_or_drive(self):
+        from tools.live_observer.sources import project_gateway_context
+        from uuid import UUID
+        uid=lambda n:str(UUID(int=n))
+        record=dict(kind='gateway_context',context=dict(host_boot_id=uid(1),owner=uid(2),generation=1,
+            mode='SAFE_STOP',phase='FAILED',output_permitted=False),operator_interface='ABSENT',
+            observation=dict(observer_epoch=uid(3),sequence=1,response_pi_us=3000))
+        directory=Path(self.directory.name)/'g1'
+        relay(io.BytesIO(packed(record)+b'\n'),directory)
+        for path in directory.glob('*.json'):
+            os.utime(path,ns=(self.owner.started_wall_ns+1_000_000,self.owner.started_wall_ns+1_000_000))
+        self.owner.poll_remote(directory);body=self.owner.publish();validate(body)
+        self.assertEqual(body['operation']['mode'],'SAFE_STOP')
+        self.assertIsNone(body['live']['run_id']);self.assertIsNone(body['operation']['active_vm'])
+        self.assertEqual(body['identities']['gateway']['selected_owner'],uid(2))
+        self.assertEqual(next(row for row in body['live']['streams'] if row['name']=='operation')['state'],'FRESH')
+        self.assertTrue(all(row['state']=='UNKNOWN' for row in body['live']['stages'].values()))
+        self.now+=4;self.owner.poll_remote(directory)
+        self.assertEqual(next(row for row in self.owner.publish()['live']['streams'] if row['name']=='operation')['state'],'STALE')
+
 
 if __name__ == '__main__':
     unittest.main()

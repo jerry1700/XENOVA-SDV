@@ -263,7 +263,14 @@ class ObservationCollector:
         if sequence is None:sequence = source.get('sequence')
         if sequence is None:raise ValueError('original Gateway status time missing')
         if self._receive('operation',identity,epoch,sequence):self.operation = projected['operation']
+        self.identities['gateway']=dict(channel='OPERATOR2',operator_interface='AVAILABLE',**source)
         if source.get('stop_reason'):self.stop_reason=source['stop_reason']
+
+    def ingest_gateway_context(self, projected):
+        source=projected['source'];observer=source['observer_epoch']
+        if self._receive('operation','g1-context-observer:'+observer,observer,source['sequence'],source['response_stamp']):
+            self.operation=projected['operation']
+            self.identities['gateway']=source
 
     def poll_pc(self, directory):
         path = Path(directory)/'pc.json'
@@ -278,7 +285,7 @@ class ObservationCollector:
 
     def poll_remote(self, directory):
         """별도 SSH relay의 최신 파일만 읽는다. 제품 MQTT·소켓을 열지 않는다."""
-        from .sources import decode_mqtt,project_operator_status
+        from .sources import decode_mqtt,project_operator_status,project_gateway_context
         for path in sorted(Path(directory).glob('remote-*.json'))[:8]:
             try:
                 info=path.stat();version=info.st_size,info.st_mtime_ns
@@ -298,6 +305,7 @@ class ObservationCollector:
                     if type(status) is dict and status.get('ok') is False:
                         self.error('operation','GATEWAY_STATUS_'+str((status.get('error') or {}).get('code','UNAVAILABLE')))
                     else:self.ingest_operator(project_operator_status(status,value.get('operation_status')))
+                elif value['kind']=='gateway_context':self.ingest_gateway_context(project_gateway_context(value))
                 elif value['kind']=='error':self.error(value.get('source','remote'),value.get('reason','REMOTE_OBSERVER_ERROR'))
                 self._remote_versions[path.name]=version
             except (OSError,ValueError,KeyError,TypeError):self.error('remote','REMOTE_OBSERVATION_INVALID')

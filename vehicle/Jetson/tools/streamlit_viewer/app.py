@@ -103,6 +103,11 @@ def observe():
         if live['last_error']!='UNKNOWN':st.warning('최근 수집 오류 · '+live['last_error'])
         st.caption('수신 age는 수집 당시 PC 수신 기준 보고입니다. collector가 멈추면 파일은 STALE이며 원 stream을 새 관측으로 갱신하지 않습니다.')
         st.subheader('운영 관측보고')
+        gateway=body.get('identities',{}).get('gateway') or {}
+        if gateway.get('channel')=='G1_CONTEXT':
+            st.caption('Gateway 기본 관리 채널 응답 · HIL 운영 인터페이스 '+str(gateway['operator_interface'])+
+                ' · 주차/출발 조작 준비는 별도입니다. 조회 시각은 원 제품 발행 시각이 아닙니다.')
+            st.caption('선택된 VM · '+value(gateway.get('selected_owner'))+' · 출력 허가 보고 · '+value(gateway.get('output_permitted')))
 
     cards=operation_cards(body,result_state=result.state,source_age_state=source_age['state'])
     for offset in (0,3):

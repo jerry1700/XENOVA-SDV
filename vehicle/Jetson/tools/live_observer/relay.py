@@ -24,9 +24,10 @@ def relay(source, output):
         else:
             try:
                 value = json.loads(raw)
-                if type(value) is not dict or value.get('kind') not in ('mqtt','operator','error'):continue
+                if type(value) is not dict or value.get('kind') not in ('mqtt','operator','gateway_context','error'):continue
             except (ValueError,UnicodeError):value=dict(kind='error',reason='REMOTE_LINE_INVALID')
         key = value.get('topic') if value['kind']=='mqtt' else value['kind']
+        if key=='gateway_context':key='operator'  # 두 상태 경로의 과거 파일이 동시에 선택되지 않게 한다.
         if type(key) is not str or len(key)>256:continue
         if key not in keys and len(keys)>=8:continue
         keys.add(key);sequence+=1

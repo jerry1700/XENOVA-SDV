@@ -40,7 +40,9 @@ PC의 새 브로커 계정·ACL·포트가 필요하지 않다. `remote.py`를 �
 실행하고 stdout만 PC `relay`에 연결할 수 있다. helper는 Pi의 기존 owner-only MQTT
 profile을 현장에서 읽고 **subscribe만** 한다. 인증 정보는 PC에 복사하거나 출력하지 않는다.
 `xenova-drive status`와 `operation status`에 해당하는 기존 UNIX socket 조회도 수행한다.
-Gateway 서비스가 없어도 `UNAVAILABLE` 진단을 보낸다. SSH 인증은 기존 터미널 방식이다.
+기본 warm/mock 기동에서는 HIL용 operator socket이 생성되지 않는다. 이때는 기존
+`GatewayClient.context()`의 G1 관리 채널로 기본 모드·선택 VM·출력 허가를 읽는다.
+기본 관리 채널까지 응답하지 않을 때 `UNAVAILABLE` 진단을 보낸다. SSH 인증은 기존 터미널 방식이다.
 
 ```text
 기존 SSH root@Pi: python3 -u -c '<remote.py의 원 코드>'
@@ -49,6 +51,12 @@ Gateway 서비스가 없어도 `UNAVAILABLE` 진단을 보낸다. SSH 인증은 
 
 `remote.py`는 PC 도구 패키지를 설치하지 않고 독립 실행할 수도 있다. 기본 profile은
 `/etc/xenova/hil01/uplink.json`, socket은 기존 `/run/xenova-gateway/operator.sock`이다.
+G1 기본 관리 socket은 `/run/xenova-gateway/control.sock`이고 `--provider-socket`으로
+선택한다. 응답은 `gateway_context` 진단 레코드에 원문으로 보존한다. 별도 helper의
+조회 순번·응답 수신 시각은 `observation`이며 Gateway의 원 발행 시각/순번을 대신하지 않는다.
+G1에는 주차/READY/차량 대기 상태가 없으므로 해당 카드는 UNKNOWN이다. SAFE_STOP에서
+선택된 VM을 실제 주행 담당으로 표시하지 않는다. operator 소켓 ABSENT/UNREACHABLE은
+Gateway 기본 상태 응답과 별개이며 HIL 설정을 자동 활성화하거나 조작을 허용하지 않는다.
 실제 설치 경로가 다르면 helper 인자로 지정한다. 코드/경로만 SSH 명령에 넣으며 비밀번호를
 스크립트·명령 인자·관측 파일에 넣지 않는다. helper/SSH가 종료돼도 주행 서비스를 건드리지 않는다.
 

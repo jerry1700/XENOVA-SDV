@@ -22,6 +22,7 @@ from uuid import uuid4
 
 DEFAULT_PROFILE = '/etc/xenova/hil01/uplink.json'
 DEFAULT_SOCKET = '/run/xenova-gateway/operator.sock'
+DEFAULT_PROVIDER_SOCKET = '/run/xenova-gateway/control.sock'
 TOPICS = ('xenova/v1/world/snapshot.pb', 'xenova/v1/vehicle/state.pb',
           'xenova/v1/vms/+/drive/link/out', 'xenova/v1/mapper/+/runtime')
 _PATH = re.compile(r'^xenova/v1/vms/[^/+#\s]+/drive/link/out$')
@@ -135,30 +136,48 @@ def start_mqtt(settings, outbox, stopped):
     return client
 
 
-def _operator_once(client, outbox):
-    values = []
+def _operator_once(client, outbox, *, provider=None, observation=None, socket_path=DEFAULT_SOCKET):
+    values = [];errors = []
     for action, source, reason in (('status', 'operation', 'GATEWAY_STATUS_UNAVAILABLE'),
                                    ('operation.status', 'operation_detail', 'GATEWAY_OPERATION_STATUS_UNAVAILABLE')):
         try:
             value = client.call(dict(version=2, action=action))
             if type(value) is not dict or value.get('ok') is not True:
-                outbox.error(source, reason)
+                errors.append((source,reason))
         except Exception:
-            value = None;outbox.error(source, reason)
+            value = None;errors.append((source,reason))
         values.append(value)
+    # 기본 warm/mock에는 operator2가 없다. 실제 G1 응답을 operator2 성공으로 바꾸지 않는다.
+    if provider is not None and (type(values[0]) is not dict or values[0].get('ok') is not True):
+        try:
+            context=provider.context()
+            if type(context) is not dict:raise ValueError('provider context object required')
+            observation['sequence']+=1
+            outbox.put(dict(kind='gateway_context',context=context,
+                observation=dict(observer_epoch=observation['observer_epoch'],sequence=observation['sequence'],
+                                 response_pi_us=time.monotonic_ns()//1000),
+                operator_interface='UNREACHABLE' if os.path.exists(socket_path) else 'ABSENT'))
+            return
+        except Exception:errors.append(('gateway','GATEWAY_CONTEXT_UNAVAILABLE'))
+    for source,reason in errors:outbox.error(source,reason)
     if any(value is not None for value in values):
         outbox.put(dict(kind='operator', status=values[0], operation_status=values[1]))
 
 
-def operator_worker(socket_path, outbox, stopped):
+def operator_worker(socket_path, outbox, stopped, provider_socket=DEFAULT_PROVIDER_SOCKET):
     try:
         from xenova_gateway.operator_client import OperatorClient
         client = OperatorClient(endpoint=socket_path, wait_ms=500, uid=os.geteuid())
     except Exception:
         outbox.error('operation', 'GATEWAY_STATUS_UNAVAILABLE');return
+    try:
+        from xenova_gateway.client import GatewayClient
+        provider=GatewayClient(provider_socket,budget_s=.5,uid=os.geteuid())
+    except Exception:provider=None
+    observation=dict(observer_epoch=str(uuid4()),sequence=0)
     while not stopped.is_set():
         due = time.monotonic() + 1.
-        _operator_once(client, outbox)
+        _operator_once(client,outbox,provider=provider,observation=observation,socket_path=socket_path)
         if stopped.wait(max(0., due - time.monotonic())):return
 
 
@@ -172,10 +191,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='Existing Pi sources to read-only NDJSON; no control output.')
     parser.add_argument('--mqtt-profile', default=DEFAULT_PROFILE)
     parser.add_argument('--socket', default=DEFAULT_SOCKET)
+    parser.add_argument('--provider-socket',default=DEFAULT_PROVIDER_SOCKET)
     args = parser.parse_args(argv)
     stopped = threading.Event();outbox = Outbox();client = None
     for number in (signal.SIGINT, signal.SIGTERM):signal.signal(number, lambda *_: stopped.set())
-    worker = threading.Thread(target=operator_worker, args=(args.socket, outbox, stopped),
+    worker = threading.Thread(target=operator_worker, args=(args.socket,outbox,stopped,args.provider_socket),
                               name='remote-observer-operator', daemon=True)
     worker.start()
     try:

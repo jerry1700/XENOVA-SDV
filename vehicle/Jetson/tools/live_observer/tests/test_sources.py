@@ -15,7 +15,7 @@ import pytest
 from xenova_drive_world import encode,schema
 from xenova_mqtt.envelope import Identity,build
 from live_observer.sources import (WORLD_TOPIC,VEHICLE_TOPIC,SourceDecodeError,
-                                  decode_mqtt,project_operator_status)
+                                  decode_mqtt,project_operator_status,project_gateway_context)
 
 ROOT=Path(__file__).resolve().parents[5]
 spec=importlib.util.spec_from_file_location('live_source_shared_wire_fixture',ROOT/'platform/apps/drive/tests/test_world.py')
@@ -204,3 +204,27 @@ def test_only_actual_active_hold_reason_is_reported_as_stop_reason():
     del current['hold']
     current['mission']=dict(phase='HOLD',result='UNREPORTED')
     assert project_operator_status(current)['source']['stop_reason'] is None
+
+
+def gateway_record(mode='SAFE_STOP'):
+    return dict(kind='gateway_context',context=dict(host_boot_id=wire.fixture.BOOT,owner=VM,
+        generation=7,mode=mode,phase='FAILED',output_permitted=False),operator_interface='ABSENT',
+        observation=dict(observer_epoch=wire.fixture.MAP,sequence=3,response_pi_us=99000))
+
+
+def test_provider_context_preserves_original_mode_and_does_not_invent_operator_fields():
+    record=gateway_record();before=deepcopy(record);result=project_gateway_context(record)
+    assert result['operation']['mode']=='SAFE_STOP' and result['operation']['active_vm'] is None
+    assert result['source']['selected_owner']==VM and result['source']['channel']=='G1_CONTEXT'
+    assert result['source']['operator_interface']=='ABSENT'
+    assert result['source']['response_stamp']==dict(domain='PI_OBSERVER_RESPONSE',epoch=wire.fixture.MAP,us='99000')
+    assert result['operation']['auto_ready'] is None and result['operation']['parking_enabled'] is None
+    assert result['operation']['vehicle_phase']=='UNKNOWN' and 'gateway_instance' not in result['source']
+    assert record==before
+    assert project_gateway_context(gateway_record('MANUAL'))['operation']['active_vm']==VM
+
+
+@pytest.mark.parametrize('field,value',[('mode','invented'),('generation',True),('output_permitted',None)])
+def test_invalid_basic_context_is_not_promoted_to_operator_status(field,value):
+    record=gateway_record();record['context'][field]=value
+    with pytest.raises(SourceDecodeError):project_gateway_context(record)
