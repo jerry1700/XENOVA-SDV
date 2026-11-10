@@ -1574,11 +1574,6 @@ class Manager:
                 fail('IDEMPOTENCY_CONFLICT','same key has a different action or request')
             context['replayed']=True
             tomb = self._tombs().get(previous['vm_id'])
-            if action=='create' and creation.released(self,previous,durable=True):
-                error=previous['error']
-                fail(error['code'],error['message'],retryable=False,
-                     details={**error.get('details',{}),'operation_id':previous['operation_id'],
-                              'replayed':True,'original_create_succeeded':False,'reconciliation':previous['reconciliation']})
             if (action=='create' and previous['template']['guest_kind']=='linux' and previous['status']!='SUCCEEDED'):
                 state=self._owner_state(previous)
                 if state in ('active','reconciling'):
@@ -1586,6 +1581,11 @@ class Manager:
                 if state=='residual':
                     fail('RECOVERY_REQUIRED','owned preparation child may remain; inspect the original operation',
                          details={'operation_id':previous['operation_id']})
+            if action=='create' and creation.released(self,previous,durable=True):
+                error=previous['error']
+                fail(error['code'],error['message'],retryable=False,
+                     details={**error.get('details',{}),'operation_id':previous['operation_id'],
+                              'replayed':True,'original_create_succeeded':False,'reconciliation':previous['reconciliation']})
             if previous['status']=='SUCCEEDED':
                 if action=='create' and tomb and tomb['lifecycle']!='REGISTERED':
                     fail('VM_PURGED' if tomb['lifecycle']=='PURGED' else 'TARGET_CHANGED',
@@ -1759,11 +1759,30 @@ class Manager:
                 if had_budget:self.p.response_deadline=previous_budget
                 else:self.p.__dict__.pop('response_deadline',None)
             self.last_output={'bytes':bytes(output.content),'dropped':output.dropped}
+        if action=='create' and execute and not response['ok'] and response['operation_id'] is not None:
+            from xenova_creation_auto import start as automatic_cleanup
+            warning=automatic_cleanup(self,response['operation_id'])
+            if warning:response['error']['details'].setdefault('diagnostic_warnings',[]).append(warning)
         # 원장 완료/관리·대상 FD 반환 뒤 공개 등록 자료만 넘긴다. HTTP를 기다리지 않는다.
         if self._registration_events:
             from xenova_registration_hook import automatic
             events,self._registration_events=self._registration_events,[]
             for record in events:automatic(self.data,self.p.runtime,record)
+            try:
+                from xenova_display_sync import (is_display_registration,
+                                                  restart_changed_services,
+                                                  sync_after_registration)
+                display_events=[record for record in events if is_display_registration(record)]
+                records=self.p.records(validate_assets=False) if display_events else None
+                updates=[sync_after_registration(records,record) for record in display_events]
+                for update in updates:update['services']=restart_changed_services(update)
+                if response['ok'] and updates:
+                    response['data']['display_sync']=updates[0] if len(updates)==1 else updates
+            except (OSError,ValueError,KeyError,TypeError) as error:
+                destination=response['data'] if response['ok'] else response['error']['details']
+                destination.setdefault('diagnostic_warnings',[]).append({
+                    'code':'DISPLAY_SYNC_DEFERRED','sink':'display-configuration',
+                    'cause_type':type(error).__name__})
         try:
             self.last_trace = trace.export()
             if self.trace_sink is not None:
@@ -2219,6 +2238,9 @@ class Manager:
                         self._writable()
                     if op['status']!='SUCCEEDED':
                         op.update(status='RECOVERY_REQUIRED',error=op.get('error') or response['error'])
+                        if action=='create':
+                            from xenova_creation_auto import failed as automatic_cleanup_failed
+                            automatic_cleanup_failed(op)
                         self._save_op(op)
             except (OSError,PlatformError,ValueError):
                 if action=='create':

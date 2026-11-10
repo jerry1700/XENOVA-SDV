@@ -1,8 +1,8 @@
 """zlib 없는 설치에서도 기존 binascii로 원 ToF CRC를 검사하는 배포 회귀.
 
-실제 모듈을 별도 Python 자식에서 import하고 정본393B와 조립 결과를 검사한다.
+실제 모듈을 별도 Python 자식에서 import하고 정본141B와 단일 관측 결과를 검사한다.
 가상 clock/profile은 codec 입력 leaf이며 실제 ACK·장치·물리 FREE 증거가 아니다.
-기존 pytest의 zlib 기반 독립 expected와 고정 vector는 변경하지 않는다.
+독립 고정 single-zone vector와 원 관측 CRC를 검산한다.
 """
 import json
 from pathlib import Path
@@ -42,22 +42,20 @@ else:
 from binascii import crc32
 from xenova_drive_world import schema,decode
 from xenova_gateway import tof_feedback3
-from xenova_gateway.tof_feedback3 import TOF_COMMON3,TOF_FRAGMENT3,TofSelection,TofClock,TofInbox,TofAssembler
+from xenova_gateway.tof_feedback3 import TOF_COMMON3,TOF_SAMPLE3,TofSelection,TofClock,TofInbox,TofReceiver
 assert tof_feedback3.crc32 is crc32
 assert crc32(b'123456789')==0xcbf43926
-vectors=json.loads((root/'docs/contracts/vectors/gateway-feedback-3.json').read_bytes())
-rows=[row for row in vectors['frames'] if row['name'].startswith('design_tof_fragment_')]
-parts=[bytes.fromhex(row['payload_hex']) for row in rows]
-first=TOF_FRAGMENT3.unpack(parts[0])
-body=TOF_COMMON3.pack(*first[:14],first[18])+b''.join(part[145:] for part in parts)
-expected=vectors['tof_design_only']
-assert len(parts)==4 and all(len(part)==209 for part in parts)
-assert len(body)==393 and body==bytes.fromhex(expected['whole_crc_body_hex'])
-assert crc32(body)&0xffffffff==expected['sample_crc32']==first[19]
-assert TOF_COMMON3.size==137 and TOF_FRAGMENT3.size==209
+vectors=json.loads((root/'docs/contracts/vectors/gateway-tof-single-1.json').read_bytes())
+expected=vectors['frames'][0]
+parts=[bytes.fromhex(expected['payload_hex'])]
+first=TOF_SAMPLE3.unpack(parts[0]);body=parts[0][:-4]
+assert len(parts)==1 and len(parts[0])==145
+assert len(body)==141 and body==bytes.fromhex(expected['source_crc_body_hex'])
+assert crc32(body)&0xffffffff==expected['source_crc32']==first[-1]
+assert TOF_COMMON3.size==137 and TOF_SAMPLE3.size==145
 selection=TofSelection(((first[7],first[11].hex(),first[10]),),500000,20000,'rc-test-1',
     '00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000004')
-owner=TofAssembler(selection)
+owner=TofReceiver(selection)
 inbox=TofInbox()
 received=first[3]+100000
 clock=TofClock(first[5],first[6],99000,100000,received-10000,received+1000000,0)
@@ -70,13 +68,13 @@ raw,revoked=owner.process(loss,items,(first[0],first[1],first[5],True),received)
 if case=='original':
     assert len(raw)==1
     value=decode(raw[0],schema.TofObservation)
-    assert value.source_crc32==expected['sample_crc32']
+    assert value.source_crc32==expected['source_crc32']
     assert value.source_sample==first[2] and value.source_us==first[3]
     assert owner.sensors[first[7]]['latest']['body']==body
     assert value.complete and value.sensor_instance==first[8] and value.sensor_generation==first[9]
 else:
     assert case=='whole-crc-corrupt' and raw==()
-    assert owner.sensors[first[7]]['partial'] is None and owner.sensors[first[7]]['latest'] is None
+    assert 'partial' not in owner.sensors[first[7]] and owner.sensors[first[7]]['latest'] is None
     assert owner.counts['rejected']==1 and owner.counts['completed']==0
 assert 'zlib' not in sys.modules
 assert blocked and blocked[0]=='zlib'
@@ -93,6 +91,6 @@ def test_original_tof_import_and_whole_sample_crc_work_without_optional_zlib(cas
         capture_output=True,text=True,timeout=30,check=False)
     assert child.returncode==0,child.stdout[-4096:]+'\n'+child.stderr[-8192:]
     value=json.loads(child.stdout)
-    assert value['case']==case and value['body_bytes']==393
+    assert value['case']==case and value['body_bytes']==141
     assert value['zlib_blocked'] and value['runtime_uses_existing_binascii']
     assert value['observations']==(1 if case=='original' else 0)

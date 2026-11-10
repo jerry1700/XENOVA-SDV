@@ -156,9 +156,9 @@ xenova.drive.TofObservation.gateway_instance max_size:37
 xenova.drive.TofObservation.pi_session max_size:37
 xenova.drive.TofObservation.device_session max_size:37
 xenova.drive.TofObservation.calibration max_size:65
-xenova.drive.TofObservation.distance_mm_le max_size:128
-xenova.drive.TofObservation.status max_size:64
-xenova.drive.TofObservation.quality max_size:64
+xenova.drive.TofObservation.distance_mm_le max_size:2
+xenova.drive.TofObservation.status max_size:1
+xenova.drive.TofObservation.quality max_size:1
 xenova.drive.TofObservation.clock_epoch max_size:37
 xenova.drive.TofObservation.sensor_instance max_size:16
 

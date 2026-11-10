@@ -24,6 +24,7 @@ static uint64_t assessed_revision[DRIVE_TASK_COUNT], assessed_connection[DRIVE_T
 static int64_t next_beat[DRIVE_TASK_COUNT], next_readiness[DRIVE_TASK_COUNT];
 #if defined(CONFIG_XENOVA_DRIVE_WARM) && defined(CONFIG_XENOVA_DRIVE_LATTICE)
 static struct drive_command_gate command_gate[DRIVE_TASK_COUNT];
+static struct drive_deadline_gate deadline_gate;
 #endif
 #if defined(CONFIG_XENOVA_DRIVE_WARM)
 struct app_lifecycle {
@@ -308,8 +309,9 @@ int main(void)
     .connection_revision=work->source.connection_revision,.lifetime=work->source.lifetime,
     .generation=selected.generation,.mode=selected.mode};
    strcpy(command_context.app_instance,work->source.app_instance);
-   command_due=drive_command_attempt_due(&command_gate[task],&command_context,lifecycle[task].check,
-    work->sample.reason,work->sample.v_mps,work->sample.steer_rad);
+    command_due=(!automatic||drive_deadline_attempt_due(&deadline_gate,&command_context,work->sequence,work->sample.reason))&&
+     drive_command_attempt_due(&command_gate[task],&command_context,lifecycle[task].check,
+      work->sample.reason,work->sample.v_mps,work->sample.steer_rad);
 #endif
    if(selected.mode!=DRIVE_STOP&&command_due){
     if((rc=xd_command_input(work->sample.binary_input?"world.track":automatic?"perception.result":"drive.input")))break;

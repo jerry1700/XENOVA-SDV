@@ -125,7 +125,7 @@ drive-state-1 공통 codec·적용/전환, 명시 feedback-1 serial 연결을 �
 | ESP32 | ESP32 DevKitC WROOM-32D V4 CP2102 개발보드 [CMODULE-40]. 모터·조향 제어와 로컬 차량 피드백 수집. IMU 미내장 |
 | 카메라 | Luxonis OAK-D-Lite (Fixed-Focus), DepthAI 3D Camera |
 | 카메라 내장 IMU | OAK-D-Lite의 BMI270 6축 IMU. 가속도 3축·각속도 3축 |
-| ToF 거리 센서 | 2개 |
+| ToF 거리 센서 | 앞 중앙0·뒤 중앙1의 단일존1×1 센서2개. ESP32→Pi feedback-3→Jetson; 미장착 빈 목록 허용 |
 | 차체·구동 | 애커만 섀시·전륜 조향 서보. 구매 키트의 Double layer Chassis 구성 |
 | 구동 모터 엔코더 | 키트의 듀얼 인코더 모터. 모터 회전을 수집해 차량 속도·이동거리를 계산하는 데 사용 |
 | 실제 조향각 피드백 | 외부에서 실제 각도를 읽는 센서·인터페이스는 미확인. 조향 서보와 구동 모터 엔코더를 구분 |
@@ -134,7 +134,7 @@ drive-state-1 공통 codec·적용/전환, 명시 feedback-1 serial 연결을 �
 
 차체 치수·조향 한계·엔코더 배율·제동 특성, 센서별 설치 위치·방향·품질·갱신 주기는 차량·센서 설정으로 관리한다. 차량 키트는 [듀얼 인코더 모터·전륜 서보 조향 애커만 섀시](https://ko.aliexpress.com/item/1005007778585588.html), ESP32는 [CMODULE-40 개발보드](https://www.devicemart.co.kr/goods/view?no=15313999)를 기준으로 한다.
 
-카메라는 [Luxonis OAK-D-Lite](https://docs.luxonis.com/hardware/products/OAK-D%20Lite)의 Fixed-Focus 구성을 사용한다. 공식 사양의 BMI270 IMU는 카메라에 내장되어 있으며, 일부 초기 Kickstarter 제품에는 없다. 현재 배치에서 카메라 IMU는 Jetson을 통해 사용하므로 Jetson 없이 동작해야 하는 MANUAL·Pi 내부 차량 피드백의 필수 입력으로 삼지 않는다. IMU의 차체 운동과 구동 엔코더의 모터 회전은 실제 전륜 조향각과 구분한다. [VL53L5CX](https://www.st.com/en/imaging-and-photonics-solutions/vl53l5cx.html)는 ToF 거리 센서다.
+카메라는 [Luxonis OAK-D-Lite](https://docs.luxonis.com/hardware/products/OAK-D%20Lite)의 Fixed-Focus 구성을 사용한다. 공식 사양의 BMI270 IMU는 카메라에 내장되어 있으며, 일부 초기 Kickstarter 제품에는 없다. 현재 배치에서 카메라 IMU는 Jetson을 통해 사용하므로 Jetson 없이 동작해야 하는 MANUAL·Pi 내부 차량 피드백의 필수 입력으로 삼지 않는다. IMU의 차체 운동과 구동 엔코더의 모터 회전은 실제 전륜 조향각과 구분한다. ToF의 실제 모델·FOV/ROI·거리 의미·측정 오차는 아직 확정하지 않는다. 현재 목표는 [feedback-3 단일존 계약](../contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)의 앞/뒤1×1·한 관측 한 패킷·근거리 HIT-only다. 구 다중존 센서의 성질을 현재 설치값으로 사용하지 않는다.
 
 Jetson 소프트웨어는 다음 기준을 사용해 설치 버전을 정한다.
 
@@ -1195,7 +1195,7 @@ encoder가 실제로 사용 가능하면 로컬 속도 폐루프 제어와 피�
 
 ### 14.4 독립성의 한계
 
-ToF를 모두 Jetson에 연결하면 ESP32가 Jetson과 무관하게 장애물을 인지한다고 주장할 수 없다. 별도 근거리 센서를 ESP32에 추가하는 것은 새 하드웨어 결정이며 이번 기준본에서 자동 채택하지 않는다.
+현재 ToF 계획은 앞/뒤 단일존 센서를 ESP32에서 취득해 Pi Gateway를 거쳐 Jetson에 전달하는 구성이다. 센서1개 관측은 패킷1개이며 근거리 HIT 근거만 제공한다. ESP32가 센서를 취득한다는 사실만으로 MCU 자체 장애물 회피나 독립 제동 알고리즘을 구현했다고 주장하지 않는다. ToF 부재·오류·out-of-range는 FREE가 아니며 설치 모델·범위·오차·지연과 실제 물리 동작은 공동 수락한다.
 
 Pi/dom0/Gateway가 사라지면 현재 장치 경로는 명령 상실에 따른 정지를 기대한다. 두 broker·A/B는 dom0·전원·하이퍼바이저 전체 실패에서 주행을 지속하는 보장이 아니다.
 

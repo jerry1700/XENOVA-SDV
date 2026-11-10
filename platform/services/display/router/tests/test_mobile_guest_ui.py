@@ -43,7 +43,8 @@ def guest_app(status=200, body=b"vm3", content_type="text/html"):
         thread.join(2)
 
 
-@pytest.mark.parametrize("path", ["/display/mobile", "/api/v1/display/presentation", "/assets/index-test.js"])
+@pytest.mark.parametrize("path", ["/display/mobile", "/api/v1/display/presentation", "/assets/index-test.js",
+                                  "/assets/track-01-a1b2.mp3"])
 def test_phone_reads_come_from_the_display_domu_without_a_dom0_token(path):
     ui = GuestUI.from_origin(f"http://{VM3}:8086")
     with guest_app() as (connect, calls, opened):
@@ -57,7 +58,8 @@ def test_phone_reads_come_from_the_display_domu_without_a_dom0_token(path):
 
 
 @pytest.mark.parametrize("path", ["/api/v1/display/session", "/api/v1/vms", "/display/monitor-1",
-                                  "http://outside.invalid/", "/assets/../secret.js", "/assets/x.js?x=1"])
+                                  "http://outside.invalid/", "/assets/../secret.js", "/assets/x.js?x=1",
+                                  "/assets/x.mp3?t=1", "/assets/x.wav", "/assets/x.mp4", "/assets/x.m4a"])
 def test_control_and_arbitrary_paths_never_reach_the_domu(path):
     def forbidden(*a, **k): raise AssertionError("network must not be opened")
     with pytest.raises(ValueError):

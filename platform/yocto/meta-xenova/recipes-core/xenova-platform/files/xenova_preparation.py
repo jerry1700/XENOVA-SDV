@@ -426,6 +426,16 @@ class LinuxSlot:
             raise
         return self
 
+    def adopt(self, fd):
+        """일회 후속 프로세스가 상속한 같은 Linux 슬롯만 인수한다. 새 잠금은 만들지 않는다."""
+        info=_plain(fd)
+        current=(_owners(self.p.runtime)/'linux-prepare.lock').stat(follow_symlinks=False)
+        if (info.st_dev,info.st_ino)!=(current.st_dev,current.st_ino):
+            raise PlatformError('inherited Linux preparation slot changed')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        self.fd=fd
+        return self
+
     def claim(self, op, *, role='create', reconciliation_id=None):
         directory=_owners(self.p.runtime)
         fd,name=tempfile.mkstemp(prefix='.linux-owner-',dir=directory)

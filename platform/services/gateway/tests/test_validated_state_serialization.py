@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from xenova_drive_world import encode,initial_none_snapshot,schema
+from xenova_drive_world import codec,encode,initial_none_snapshot,schema
 from xenova_gateway import drive_link
 from test_drive_link import snapshot
 from test_operator_runtime import world
@@ -50,6 +50,49 @@ def test_validated_subtree_has_exact_original_bytes_and_no_second_full_encode(wo
     assert seen==[expected] and value.snapshot.SerializeToString(deterministic=True)==expected
     assert w.o.episodes.registry['state']['sha256']==sha256(expected).digest()
     assert provider.copies[value.snapshot.message_id][0]==prepared
+
+
+def test_io_owned_snapshot_validates_once_and_keeps_exact_accepted_bytes(world,monkeypatch):
+    w=activate(world);provider=w.r.drive_link;value=state_case(w)
+    raw=encode(value);prepared=w.io.prepare_snapshot(value);calls=[]
+    original=codec.validate
+    def checked(message):
+        calls.append(message.DESCRIPTOR.name)
+        return original(message)
+    monkeypatch.setattr(codec,'validate',checked)
+    monkeypatch.setattr(drive_link,'validate',checked)
+    incoming=w.io._decode_incoming(w.peer[0],raw,w.w.t)
+    # 외부 protobuf 변경은 private decode 사본에 도달하지 않는다.
+    value.snapshot.ClearField('major')
+    w.io.incoming.put_nowait(incoming)
+    provider.tick()
+    assert calls.count('DriveLink')==1 and 'DriveState' not in calls
+    assert provider.copies[incoming.arguments[1].snapshot.message_id][0]==prepared
+
+
+def test_queued_validated_snapshot_still_requires_current_authority(world):
+    w=activate(world);provider=w.r.drive_link;value=state_case(w)
+    w.io.incoming.put_nowait(w.io._decode_incoming(w.peer[0],encode(value),w.w.t))
+    w.w.m.output_permitted=False
+    provider.tick()
+    assert provider.reasons['STATE_SOURCE_AUTHORITY']==1
+    assert not provider.copies
+
+
+def test_public_take_does_not_bypass_mutable_protobuf_validation(world):
+    w=activate(world);provider=w.r.drive_link;value=state_case(w)
+    w.io.incoming.put_nowait(w.io._decode_incoming(w.peer[0],encode(value),w.w.t))
+    item=w.io.take()
+    item[1].snapshot.ClearField('major')
+    assert not provider.receive(*item)
+    assert provider.reasons['LINK_WIRE_INVALID']==1
+
+
+def test_private_wrapper_still_checks_total_wire_size(world,monkeypatch):
+    w=activate(world);raw=encode(state_case(w))
+    monkeypatch.setattr(drive_link,'MAX_BYTES',len(raw)+1)
+    with pytest.raises(ValueError,match='wire size cap'):
+        w.io._decode_incoming(w.peer[0],raw,w.w.t)
 
 
 @pytest.mark.parametrize('invalid',['required','nan','oversize','path-cap','task-crossing'])

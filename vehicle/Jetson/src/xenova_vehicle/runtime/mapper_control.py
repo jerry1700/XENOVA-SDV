@@ -82,11 +82,12 @@ class MapperControl:
 
     def _complete_nn(self, event, *, fresh):
         if self._parser is None or self._parser[0]!=event.job_id:
-            raise RuntimeError('NN completion has no original sent parser start')
+            raise RuntimeError('NN completion has no original compute parser start')
         _,stamp,started=self._parser
         if not started<=event.completed_us<=self.clock():
             raise ValueError('NN completion changed original causal time')
         self._parser=None
+        fresh = fresh and self.clock()<event.expires_us
         if not fresh:
             if not self.ready:
                 self.streak=0
@@ -118,22 +119,13 @@ class MapperControl:
                     raise RuntimeError('mapper start replaced an active job')
                 self._metric_job=event.job_id
                 self._metric(event,'MAPPER_STARTED',str(event.expires_us))
-            elif event.kind=='PARSER_START_REQUIRED':
-                if self.clock()>=event.parser_deadline_us or self.clock()>=event.expires_us:
-                    continue
+            elif event.kind=='PARSER_STARTED':
                 stamp=SourceStamp(self.nn_stream,*event.nn_source_key)
-                if not stamp.advances(self.previous):
-                    self.compute.skip_parser(event.job_id)
-                    continue
                 if self._parser is not None:
                     raise RuntimeError('one compute owner cannot start two NN parsers')
-                packet=self.actor.progress('PARSER_STARTED',stamp.sequence,completed=event.started_us,
-                                           request_id=event.job_id)
-                actual=self.actor.await_sent(packet)
+                self.actor.progress('PARSER_STARTED',stamp.sequence,completed=event.started_us,
+                                    request_id=event.job_id)
                 self._parser=(event.job_id,stamp,event.started_us)
-                if not self.compute.acknowledge_parser_start(event.job_id,actual):
-                    # 원 시작 진술은 이미 전송됐다. 취소 terminal로만 닫는다.
-                    continue
             elif event.kind=='NN_COMPLETED':
                 self._complete_nn(event,fresh=event.accepted)
             elif event.kind=='PROGRESS':

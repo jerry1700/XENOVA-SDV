@@ -1,8 +1,7 @@
-"""정본 TOF_FRAGMENT3의 bounded RX handoff와 actor 조립·원 시각 mapping.
+"""선택형 1×1 ToF의 bounded RX 인계와 actor 원 시각 mapping.
 
-serial owner는 fixed209B만 queue8에 넘긴다. actor가 센서별 partial/latest393B를
-소유한다. encoder/명령/clock을 기다리거나 재설정하지 않으며 새 thread는 없다.
-관측의 TARGET_VALID는 FREE 허가가 아니다. native reducer/보정·coverage는 MCU/mapper 책임이다.
+관측 하나가 serial 패킷 하나이며 조립·부분 관측·조립 기한은 없다.
+센서별 원 source/reset/CRC/시각을 보존하고 FREE나 주행 권한은 만들지 않는다.
 """
 from dataclasses import dataclass
 from collections import Counter
@@ -15,11 +14,10 @@ from xenova_drive_world import schema,encode
 from xenova_drive_world.mapper_clock import drift_pad
 
 
-TOF_FRAGMENT=0x0f16
-TOF_CAPABILITY=0x0200
-TOF_FRAGMENT3=struct.Struct('<16s16sQQI16sQB16sII32sBBBBBBHI64s')
+TOF_SAMPLE=0x0f17
+TOF_CAPABILITY=0x0800
+TOF_SAMPLE3=struct.Struct('<16s16sQQI16sQB16sII32sBBHHBBI')
 TOF_COMMON3=struct.Struct('<16s16sQQI16sQB16sII32sBBH')
-REASSEMBLY_US=100000
 NIL=bytes(16)
 U63=(1<<63)-1
 
@@ -62,7 +60,7 @@ class TofClock:
 
 
 @dataclass(frozen=True)
-class FragmentReceipt:
+class TofReceipt:
     payload: bytes
     received_pi_us: int
     clock: TofClock
@@ -75,7 +73,7 @@ class TofInbox:
 
     @staticmethod
     def source(payload):
-        if type(payload) is not bytes or len(payload)!=TOF_FRAGMENT3.size:return None
+        if type(payload) is not bytes or len(payload)!=TOF_SAMPLE3.size:return None
         sensor=payload[76]
         if sensor not in (0,1):return None
         sample=struct.unpack_from('<Q',payload,32)[0];generation=struct.unpack_from('<I',payload,93)[0]
@@ -99,16 +97,16 @@ class TofInbox:
         self.loss=(revision+1,tuple(values));self.counts[reason]+=1
         if source is None:
             # An outer-frame/source loss has no trustworthy sensor key. Retire
-            # every already queued original sample as well as actor buffers.
+            # every already queued original sample as well as actor observations.
             for _ in range(8):
                 try:old=self.inputs.get_nowait()
                 except queue.Empty:break
                 self.reject(old.payload,reason)
 
     def offer(self,payload,received_pi_us,clock):
-        if type(payload) is not bytes or len(payload)!=TOF_FRAGMENT3.size or type(clock) is not TofClock:
+        if type(payload) is not bytes or len(payload)!=TOF_SAMPLE3.size or type(clock) is not TofClock:
             self.reject(payload);return False
-        try:self.inputs.put_nowait(FragmentReceipt(payload,received_pi_us,clock))
+        try:self.inputs.put_nowait(TofReceipt(payload,received_pi_us,clock))
         except queue.Full:
             # A saturated low-priority stream cannot reserve the serial owner.
             # Drop the whole queued batch and fence every affected source.
@@ -137,17 +135,17 @@ class TofInbox:
         return after,tuple(items)
 
 
-class TofAssembler:
-    """Gateway actor-only. raw partial/latest payload <=393B each/sensor, <=1572B total."""
+class TofReceiver:
+    """Gateway actor-only. 센서별 latest 원 관측141B 하나만 유지한다."""
     def __init__(self,selection):
         if type(selection) is not TofSelection:raise ValueError('TOF installed selection')
         self.selection=selection;self.scope=None;self.loss_revision=0;self.loss_seen=[0,0]
         self.sensors={row[0]:dict(profile=row,identity=None,blocked_generation=0,sample=0,stamp=0,
-            partial=None,latest=None,fence=None) for row in selection.profiles}
+            latest=None,fence=None) for row in selection.profiles}
         self.counts=Counter();self.revoked=set()
 
     def _clear(self,sensor,*,sample=0,latest=False,identity=None):
-        state=self.sensors[sensor];state['partial']=None
+        state=self.sensors[sensor]
         identity=state['identity'] if identity is None else identity
         if identity is not None and sample>0:
             state['fence']=TofInbox.merge_fence(state['fence'],(*identity,sample))
@@ -184,15 +182,12 @@ class TofAssembler:
         self.revoked.clear();self._loss(loss)
         current=self._context(context)
         for sensor,state in self.sensors.items():
-            partial=state['partial']
-            if partial is not None and now>=partial['deadline']:
-                self._clear(sensor,sample=state['sample']);self.counts['timeout']+=1
             latest=state['latest']
             if latest is not None and now>=latest.get('valid_until',1<<63):
                 state['latest']=None;self.revoked.add(sensor);self.counts['expired']+=1
         if current:
             for item in items:
-                try:self._fragment(item,now)
+                try:self._sample(item,now)
                 except (ValueError,struct.error):self.counts['rejected']+=1
         else:
             # Loss after RX admission also retires that original batch. A new
@@ -211,16 +206,20 @@ class TofAssembler:
             else:latest['published']=True;result.append(raw)
         return tuple(result),tuple(sorted(self.revoked))
 
-    def _fragment(self,item,now):
-        if type(item) is not FragmentReceipt or not 0<=item.received_pi_us<=now:raise ValueError('TOF receipt')
-        values=TOF_FRAGMENT3.unpack(item.payload)
-        pi,device,sample,stamp,error,epoch,seq,sensor,instance,generation,revision,calibration,rows,cols,index,count,first,zones,flags,crc,data=values
+    def _sample(self,item,now):
+        if type(item) is not TofReceipt or not 0<=item.received_pi_us<=now:raise ValueError('TOF receipt')
+        values=TOF_SAMPLE3.unpack(item.payload)
+        pi,device,sample,stamp,error,epoch,seq,sensor,instance,generation,revision,calibration,rows,cols,flags,distance,status,quality,crc=values
         state=self.sensors.get(sensor)
         if state is None:raise ValueError('TOF unselected')
         if ((pi,device,epoch)!=self.scope or not 0<sample<=U63 or not 0<stamp<=U63 or not 0<seq<=U63
-                or not 0<generation<1<<32 or instance==NIL or rows!=8 or cols!=8 or flags&~7
-                or not 0<=index<4 or count!=4 or first!=index*16 or zones!=16):
+                or not 0<generation<1<<32 or instance==NIL or rows!=1 or cols!=1 or flags&~7
+                or status>7 or quality&~31 or status==1 and distance in (0,65535)
+                or quality&1 and status!=1):
             self._clear(sensor,sample=sample if 0<sample<=U63 else state['sample']);raise ValueError('TOF shape/source')
+        body=item.payload[:-4]
+        if crc32(body)&0xffffffff!=crc:
+            self._clear(sensor,sample=sample);raise ValueError('TOF sample CRC32')
         identity=(device,generation,instance);previous=state['identity']
         if (calibration.hex(),revision)!=state['profile'][1:]:
             self._clear(sensor,sample=sample,latest=True,identity=identity);raise ValueError('TOF calibration')
@@ -240,42 +239,18 @@ class TofAssembler:
         clock=item.clock
         if clock.epoch!=epoch or clock.sequence!=seq or now>=clock.expires_pi_us or item.received_pi_us>=clock.expires_pi_us:
             self._clear(sensor,sample=sample);raise ValueError('TOF original installed clock')
-        common=item.payload[:135]+item.payload[139:141]
         latest=state['latest']
         if latest is not None and sample==latest['sample']:
-            offset=137+first*4
-            if latest['body'][:137]!=common or latest['crc']!=crc or latest['body'][offset:offset+64]!=data:
+            if latest['body']!=body or latest['crc']!=crc or latest['clock']!=clock:
                 self._clear(sensor,sample=sample,latest=True);raise ValueError('TOF completed conflict')
             self.counts['duplicate']+=1;return
-        partial=state['partial']
-        if sample>state['sample']:
-            if stamp<=state['stamp']:self._clear(sensor,sample=sample);raise ValueError('TOF source time regression')
-            self._clear(sensor,sample=state['sample'])
-            state.update(sample=sample,stamp=stamp)
-            partial=dict(body=bytearray(common+bytes(256)),crc=crc,mask=0,clock=clock,
-                first_received=item.received_pi_us,deadline=item.received_pi_us+REASSEMBLY_US)
-            state['partial']=partial
-        if sample!=state['sample'] or partial is None:raise ValueError('TOF old sample')
-        if now>=partial['deadline'] or item.received_pi_us>=partial['deadline']:
-            self._clear(sensor,sample=sample);raise ValueError('TOF original reassembly deadline')
-        if partial['body'][:137]!=common or partial['crc']!=crc or partial['clock']!=clock:
-            self._clear(sensor,sample=sample);raise ValueError('TOF fragment metadata conflict')
-        offset=137+first*4
-        if partial['mask']&(1<<index):
-            if partial['body'][offset:offset+64]!=data:
-                self._clear(sensor,sample=sample);raise ValueError('TOF fragment conflict')
-            self.counts['duplicate']+=1;return
-        partial['body'][offset:offset+64]=data;partial['mask']|=1<<index
-        if partial['mask']!=15:return
-        body=bytes(partial['body'])
-        if len(body)!=393 or crc32(body)&0xffffffff!=crc:
-            self._clear(sensor,sample=sample);raise ValueError('TOF whole CRC32')
-        for offset in range(137,393,4):
-            distance,status,quality=struct.unpack_from('<HBB',body,offset)
-            if status>7 or quality&~31 or quality&1 and (status!=1 or distance in (0,65535)):
-                self._clear(sensor,sample=sample);raise ValueError('TOF zone status/quality')
-        state['latest']=dict(body=body,crc=crc,clock=clock,received=partial['first_received'],sample=sample,published=False)
-        state['partial']=None;self.counts['completed']+=1
+        if sample<=state['sample']:raise ValueError('TOF old sample')
+        if stamp<=state['stamp']:
+            self._clear(sensor,sample=sample);raise ValueError('TOF source time regression')
+        self._clear(sensor,sample=state['sample'])
+        state.update(sample=sample,stamp=stamp)
+        state['latest']=dict(body=body,crc=crc,clock=clock,received=item.received_pi_us,sample=sample,published=False)
+        self.counts['completed']+=1
 
     def _mapped(self,latest,now):
         values=TOF_COMMON3.unpack(latest['body'][:137])
@@ -290,13 +265,12 @@ class TofAssembler:
         middle=(lo+hi)//2;uncertainty=(hi-lo+1)//2
         if (uncertainty>p.maximum_clock_error_us or middle-uncertainty-error<0
                 or now>=middle+p.maximum_age_us-uncertainty-error):raise ValueError('TOF original capture expiry')
-        zone=latest['body'][137:];distance=bytearray();status=bytearray();quality=bytearray()
-        for offset in range(0,256,4):distance.extend(zone[offset:offset+2]);status.append(zone[offset+2]);quality.append(zone[offset+3])
+        measurement=latest['body'][137:141]
         value=schema.TofObservation(major=1,vehicle=p.vehicle,host_boot=p.host_boot,gateway_instance=p.gateway_instance,
             pi_session=str(UUID(bytes=pi)),device_session=str(UUID(bytes=device)),sensor_id=sensor,source_sample=sample,
             source_us=stamp,pi_sample_us=middle,clock_error_us=uncertainty,sensor_time_error_us=error,
-            calibration=calibration.hex(),sensor_config_revision=revision,rows=rows,cols=cols,distance_mm_le=bytes(distance),
-            status=bytes(status),quality=bytes(quality),frame_status=flags,source_crc32=latest['crc'],clock_epoch=str(UUID(bytes=epoch)),
+            calibration=calibration.hex(),sensor_config_revision=revision,rows=rows,cols=cols,distance_mm_le=measurement[:2],
+            status=measurement[2:3],quality=measurement[3:4],frame_status=flags,source_crc32=latest['crc'],clock_epoch=str(UUID(bytes=epoch)),
             clock_seq=seq,complete=True,sensor_instance=instance,sensor_generation=generation)
         raw=encode(value)
         if len(raw)>1024:raise ValueError('TOF observation cap')
@@ -304,4 +278,4 @@ class TofAssembler:
         return raw
 
     def payload_bytes(self):
-        return sum(len(row[key]['body']) for row in self.sensors.values() for key in ('partial','latest') if row[key] is not None)
+        return sum(len(row['latest']['body']) for row in self.sensors.values() if row['latest'] is not None)

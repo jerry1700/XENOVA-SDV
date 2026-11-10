@@ -29,11 +29,12 @@ from .guest_sender import read_token
 
 PAGES = ("/display/monitor-1", "/display/monitor-2", "/display/combined", "/display/mobile")
 DATA_PATH = "/api/v1/display/presentation"
-ASSET = re.compile(r"/assets/([A-Za-z0-9][A-Za-z0-9_.-]{0,159}\.(?:js|css|png|jpg|jpeg|webp|svg|woff2?|ttf|ico))")
+# mp3 is the 350 music app's audio; the phone relay (mobile_upstream) allows the same list.
+ASSET = re.compile(r"/assets/([A-Za-z0-9][A-Za-z0-9_.-]{0,159}\.(?:js|css|png|jpg|jpeg|webp|svg|woff2?|ttf|ico|mp3))")
 MAX_BODY = 2 * 1024 * 1024
 TYPES = {".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2",
          ".woff": "font/woff", ".ttf": "font/ttf", ".ico": "image/x-icon", ".png": "image/png",
-         ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+         ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".mp3": "audio/mpeg"}
 
 
 def load_config(path, *, allow_loopback_data=False):

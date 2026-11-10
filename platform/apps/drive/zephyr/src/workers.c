@@ -90,10 +90,11 @@ static void run(void *argument, void *unused1, void *unused2)
 	if (t == &tasks[DRIVE_TASK_AUTO]) {
 		(void)drive_auto_delay_observe_deadline(result.end_us > t->running.deadline_us);
 	}
-  if (result.health.restrict_function) {
-   result.sample.v_mps = result.sample.steer_rad = 0;
-   if (!result.sample.reason || strcmp(result.sample.reason, "OUTPUT_INVALID")) result.sample.reason = "CALCULATION_FAILED";
-  }
+#if defined(CONFIG_XENOVA_DRIVE_WARM)
+  drive_completion_restrict(&result,true);
+#else
+  drive_completion_restrict(&result,false);
+#endif
   k_mutex_lock(&t->exchange, K_FOREVER);
   t->running_live=false;
   if(atomic_get(&stopping)||atomic_get(&t->cancelled)){

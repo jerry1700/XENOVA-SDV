@@ -2,6 +2,30 @@
 #include "controller.h"
 #include <string.h>
 
+static bool command_context_same(const struct drive_command_context *a,const struct drive_command_context *b)
+{
+ return a->control_revision==b->control_revision&&a->connection_revision==b->connection_revision&&
+  a->lifetime==b->lifetime&&a->generation==b->generation&&a->mode==b->mode&&
+  !strcmp(a->app_instance,b->app_instance);
+}
+bool drive_deadline_attempt_due(struct drive_deadline_gate *gate,const struct drive_command_context *context,
+ uint64_t sequence,const char *reason)
+{
+ if(!gate)return true;
+ if(!context||context->mode!=DRIVE_AUTO||!context->control_revision||!context->connection_revision||
+    !context->lifetime||!context->generation||!sequence||
+    strnlen(context->app_instance,sizeof(context->app_instance))!=XM_UUID_LEN){
+  gate->seen=false;gate->misses=0;return true;
+ }
+ bool same=gate->seen&&command_context_same(&gate->context,context);
+ if(same&&sequence<=gate->sequence)return false;
+ if(!same)gate->misses=0;
+ gate->context=*context;gate->sequence=sequence;gate->seen=true;
+ if(!reason||strcmp(reason,"DEADLINE")){gate->misses=0;return true;}
+ if(gate->misses<DRIVE_DEADLINE_RETRY_LIMIT)gate->misses++;
+ return gate->misses>=DRIVE_DEADLINE_RETRY_LIMIT;
+}
+
 bool drive_command_attempt_due(struct drive_command_gate *gate,const struct drive_command_context *context,
  uint64_t check,const char *reason,float v_mps,float steer_rad)
 {
@@ -15,10 +39,7 @@ bool drive_command_attempt_due(struct drive_command_gate *gate,const struct driv
     strnlen(context->app_instance,sizeof(context->app_instance))!=XM_UUID_LEN){
   gate->restricted=false;return true;
  }
- bool same=gate->restricted&&gate->context.control_revision==context->control_revision&&
-  gate->context.connection_revision==context->connection_revision&&gate->context.lifetime==context->lifetime&&
-  gate->context.generation==context->generation&&gate->context.mode==context->mode&&
-  !strcmp(gate->context.app_instance,context->app_instance)&&!strcmp(gate->reason,reason);
+ bool same=gate->restricted&&command_context_same(&gate->context,context)&&!strcmp(gate->reason,reason);
  if(same&&gate->check==check)return false;
  /* The check is a local supervisor observation, not a new command deadline.
   * Retain only the last attempted check; do not claim queue or device success. */

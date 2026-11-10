@@ -107,8 +107,9 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w = self.w
         generation = w.m.generation
         original_command = w.m.nodes[A]['autonomous'].last_command_t
-        w.tick(.12, reasons={(A, 'autonomous'): 'CALCULATION_FAILED'})
-        self.assertTrue(any(isinstance(action, ForwardStop) for action in w.actions))
+        before=len(w.actions_seen)
+        w.tick(.12, reasons={(A, 'autonomous'): 'CALCULATION_FAILED'},stagnant={(A,'autonomous')})
+        self.assertTrue(any(isinstance(action, ForwardStop) for action in w.actions_seen[before:]))
         self.assertEqual(w.m.nodes[A]['autonomous'].last_command_t, original_command)
         self.assertEqual((w.m.active_vm, w.m.generation), (A, generation))
 
@@ -199,7 +200,8 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w = self.w
         generation = w.m.generation
         before = len(w.actions_seen)
-        w.tick(.12, reasons={(A, 'autonomous'): 'CALCULATION_FAILED'}, bad_commands=True)
+        w.tick(.12, reasons={(A, 'autonomous'): 'CALCULATION_FAILED'},
+            stagnant={(A,'autonomous')},bad_commands=True)
         self.assertTrue(any(isinstance(action, ForwardStop) for action in w.actions_seen[before:]))
         self.assertFalse(any(isinstance(action, ForwardDrive) for action in w.actions_seen[before:]))
         self.assertEqual((w.m.active_vm, w.m.generation), (A, generation))
@@ -209,9 +211,9 @@ class FunctionFailureScopeTests(unittest.TestCase):
         generation = w.m.generation
         executions = dict(w.executions)
         reasons = {(A, 'autonomous'): 'CALCULATION_FAILED'}
-        w.tick(.26, reasons=reasons)
+        w.tick(.08, reasons=reasons)
         self.assertEqual((w.m.active_vm, w.m.generation), (A, generation))
-        w.tick(.06, reasons=reasons)
+        w.tick(.02, reasons=reasons)
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
         self.assertGreater(w.m.generation, generation)
         self.assertEqual(w.executions, executions)
@@ -258,14 +260,14 @@ class FunctionFailureScopeTests(unittest.TestCase):
                 if w.m.mode is not Mode.AUTO:
                     w = _World(Path(self.tmp.name) / ('authority-' + reason))
                     w.arm()
-                w.tick(reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
+                w.tick(.1,reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
                 self.assertEqual((w.m.mode, w.m.active_vm), (Mode.MANUAL, A))
                 w.tick(.2, reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
                 self.assertEqual((w.m.mode, w.m.active_vm), (Mode.MANUAL, A))
 
     def test_only_a_input_failure_does_not_disqualify_prepared_b(self):
         w = self.w
-        w.tick(reasons={(A, 'autonomous'): 'WORLD_UNAVAILABLE'})
+        w.tick(.1,reasons={(A, 'autonomous'): 'WORLD_UNAVAILABLE'})
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
 
     def test_real_binding_loss_still_selects_b_immediately(self):

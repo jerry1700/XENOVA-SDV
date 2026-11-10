@@ -65,7 +65,7 @@ class PcWorkerBoot:
     nn_manifest_bytes: bytes
     raw_tokens: tuple
     startup_deadline_us: int
-    diagnostic_directory: str
+    diagnostic_directory: str | None
     writer_bind_raw: bytes | None = None
 
     def __post_init__(self):
@@ -76,7 +76,8 @@ class PcWorkerBoot:
                 or type(self.arena_spec) is not ArenaSpec or type(self.raw_tokens) is not tuple
                 or len(self.raw_tokens) != 2 or any(type(pair) is not tuple or len(pair) != 2 for pair in self.raw_tokens)
                 or type(self.startup_deadline_us) is not int or not 0 < self.startup_deadline_us < 2**63
-                or type(self.diagnostic_directory) is not str or not self.diagnostic_directory):
+                or self.diagnostic_directory is not None and
+                    (type(self.diagnostic_directory) is not str or not self.diagnostic_directory)):
             raise ValueError('exact PC worker scope, NN profile, tokens and startup cap required')
         binding = PcSourceBinding.from_bytes(self.binding_bytes)
         manifest = SimNnManifest.from_bytes(self.nn_manifest_bytes)

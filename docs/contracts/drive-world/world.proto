@@ -780,6 +780,7 @@ message SurveySummary {
   required uint32 failure_flags = 23;
   required uint32 timestamp_error_us = 24;
 }
+// One selected front/rear single-zone observation; rows=cols=1, arrays=2/1/1 bytes.
 message TofObservation {
   required uint32 major = 1;
   required string vehicle = 2;
