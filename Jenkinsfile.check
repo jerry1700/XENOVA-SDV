@@ -128,7 +128,7 @@ pipeline {
         }
 
         stage('Vehicle C Host Test') {
-            // Jenkinsfile.vehicle 과 같은 시험. 공통 MQTT C 라이브러리와 Zephyr 앱 로직 (cmake·ctest, ASan·UBSan)
+            // Jenkinsfile.vehicle 과 같은 시험. 공통 MQTT C 라이브러리, Zephyr 앱 로직, ESP32 feedback-3 통신 처리 (cmake·ctest, ASan·UBSan)
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     script {
@@ -136,6 +136,7 @@ pipeline {
                             'mqtt-c'    : 'platform/apps/common/xenova-mqtt-c',
                             'manual'    : 'platform/apps/manual/zephyr/tests',
                             'autonomous': 'platform/apps/autonomous/zephyr/tests',
+                            'esp32'     : 'vehicle/ESP32/test/host',
                         ]
                         suites.each { name, source ->
                             sh """
