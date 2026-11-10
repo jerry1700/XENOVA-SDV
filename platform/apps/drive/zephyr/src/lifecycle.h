@@ -14,6 +14,7 @@ static inline struct drive_warm_view drive_warm_classify(const struct drive_adap
  const struct drive_result *selected,const struct drive_task_status *status,const struct drive_completion *work,
  bool chosen,struct xm_span input,int64_t input_age,uint64_t context_revision,uint64_t connection_revision,
  int64_t tick,uint64_t clock,bool clock_valid){
+ (void)clock;
  struct drive_warm_view v={chosen?"ACTIVATING":"WAITING","NOT_READY","CONTROL_UNAPPLIED",selected->control_valid?selected->generation:0};
  bool current=drive_warm_current(status,work,context_revision,connection_revision);
  if(selected->control_valid){
@@ -21,7 +22,9 @@ static inline struct drive_warm_view drive_warm_classify(const struct drive_adap
   if(!chosen){if(status->state==DRIVE_TASK_RUNNING||status->pending)v.reason="STATE_PREPARING";if(!v.reason)v.state="QUALIFIED";}
   else if(current){
    v.phase="EXECUTING";v.reason=work->sample.reason;
-   if(!clock_valid||tick-work->finished_ms>=300||(status->state==DRIVE_TASK_RUNNING&&clock>status->running_deadline_us))v.reason="CALCULATION_FAILED";
+   /* A newer running job has not replaced this completed fact. Its deadline
+    * miss cannot invalidate the previous completion before its own lease. */
+   if(!clock_valid||tick<work->finished_ms||tick-work->finished_ms>=300)v.reason="CALCULATION_FAILED";
    if(!v.reason)v.state="READY";
   }else if(!v.reason)v.reason="STATE_PREPARING";
  }
