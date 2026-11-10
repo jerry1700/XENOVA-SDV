@@ -17,7 +17,8 @@ from urllib.parse import urlparse
 # /display/combined is the integrated vehicle screen the phone shows; /display/mobile is kept
 # for the runtime readiness check (mobile_preflight). Both are the same built index.html.
 READ_PATHS = frozenset({"/display/mobile", "/display/combined", "/api/v1/display/presentation"})
-ASSET = re.compile(r"/assets/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\.(?:js|css|png|jpg|jpeg|webp|svg|woff2?|ttf|ico)")
+# mp3 (350 music app) is relayed whole like every other asset, so one file must fit MAX_BODY.
+ASSET = re.compile(r"/assets/[A-Za-z0-9][A-Za-z0-9_.-]{0,159}\.(?:js|css|png|jpg|jpeg|webp|svg|woff2?|ttf|ico|mp3)")
 MAX_BODY = 2 * 1024 * 1024
 
 
