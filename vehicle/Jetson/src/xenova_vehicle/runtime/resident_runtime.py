@@ -265,7 +265,7 @@ class _Runtime:
             self.native_started = True
         elif operation == 'CLEANUP':
             self.cleanup_attempted = True
-        self.log_pending = (request, operation, purpose, end)
+        self.log_pending = (request, operation, purpose, end, now)
         return True
 
     def _write(self, fields, purpose, *, cap_us=None):
@@ -289,17 +289,24 @@ class _Runtime:
         completion = self.log.poll()
         if completion is None:
             return
-        if self.log_pending is None or (completion.request_id, completion.operation) != self.log_pending[:2]:
+        if (self.log_pending is None
+                or (completion.request_id, completion.operation) != self.log_pending[:2]
+                or (completion.expires_us, completion.issued_us) != self.log_pending[3:]):
             raise RuntimeError('resource completion differs from the original outstanding request')
-        _, operation, purpose, _ = self.log_pending
+        _, operation, purpose, _, _ = self.log_pending
         self.log_pending = None
-        if not completion.timely(j_us()):
+        # 이미 끝난 자원 변경 사실은 S의 poll 지연으로 취소되지 않는다.
+        # 다음 작업·복구 단계는 각자의 현재 상태와 원 기한을 다시 검사한다.
+        if not completion.completed_in_time(j_us()):
             if purpose == 'NATIVE_CLOSE':
                 self.cleanup_failed = True
-            raise RuntimeError(completion.error or 'late resource completion is historical only')
+            raise RuntimeError(completion.error or 'resource operation did not complete within its original budget')
         if operation in ('BOOTSTRAP', 'WRITE'):
             if (completion.ack is None or completion.receipt is None
+                    or completion.ack.request_id != completion.request_id
+                    or completion.receipt.lock_nonce != completion.ack.lock_nonce
                     or completion.receipt.outcome.kind != 'VALID'
+                    or operation == 'WRITE' and completion.ack.expected_ref != self.manifest.ref
                     or completion.receipt.outcome.manifest.ref != completion.ack.target_ref):
                 raise RuntimeError('actual canonical durable target was not confirmed')
             self.manifest, self.latest_ack = completion.receipt.outcome.manifest, completion.ack
