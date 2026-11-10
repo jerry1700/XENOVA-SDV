@@ -29,8 +29,6 @@ class Compute:
     def take_result(self):
         result,self.result=self.result,None
         return result
-    def acknowledge_parser_start(self,job_id,actual):return True
-    def skip_parser(self,job_id):raise AssertionError('fixture sources must advance')
 
 
 class Actor:
@@ -53,7 +51,7 @@ def controller():
 def warmup(control,compute,now,count=5):
     for sequence in range(1,count+1):
         now[0]+=10;job=str(uuid4());started=now[0]-1
-        event=MapperEvent('PARSER_START_REQUIRED',job,control.generation,1,(sequence,sequence),
+        event=MapperEvent('PARSER_STARTED',job,control.generation,1,(sequence,sequence),
             sequence,started,now[0],now[0]+500_000,False,
             parser_deadline_us=now[0]+500_000,nn_source_key=(sequence,sequence,sequence,started))
         compute.events=[event,replace(event,kind='NN_COMPLETED',accepted=True)]
@@ -87,7 +85,7 @@ class MapperCurrentPhaseTests(unittest.TestCase):
         self.assertEqual(actor.state,'WARMUP')
         # 다섯째도 독립 원 source여야 하므로 앞 네 source를 이어서 보낸다.
         now[0]+=10;job=str(uuid4())
-        event=MapperEvent('PARSER_START_REQUIRED',job,control.generation,1,(5,5),5,
+        event=MapperEvent('PARSER_STARTED',job,control.generation,1,(5,5),5,
             now[0]-1,now[0],now[0]+500_000,False,
             parser_deadline_us=now[0]+500_000,nn_source_key=(5,5,5,now[0]-1))
         compute.events=[event,replace(event,kind='NN_COMPLETED',accepted=True)]

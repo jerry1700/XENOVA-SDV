@@ -135,6 +135,12 @@ class ResourceLogCompletion:
         return (self.error is None and self.issued_us <= self.completed_us < self.expires_us
                 and self.completed_us <= now_us < self.expires_us)
 
+    def completed_in_time(self, now_us):
+        """원 작업이 기한 내 끝났다는 사실. 수신 시점의 사용 권한·신선도와는 별개다."""
+        _time(now_us)
+        return (self.error is None and self.issued_us <= self.completed_us < self.expires_us
+                and self.completed_us <= now_us)
+
 
 class AsyncResourceLog:
     """queue1/completion1. 실행 중·미회수 완료가 있으면 submit은 False다.

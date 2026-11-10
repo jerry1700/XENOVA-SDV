@@ -717,10 +717,11 @@ typedef struct _xenova_drive_MapperClockReply {
     uint32_t supported_mapper_features; /* bit1 operation gate, bit2 route management; absent is legacy. */
 } xenova_drive_MapperClockReply;
 
-typedef PB_BYTES_ARRAY_T(128) xenova_drive_TofObservation_distance_mm_le_t;
-typedef PB_BYTES_ARRAY_T(64) xenova_drive_TofObservation_status_t;
-typedef PB_BYTES_ARRAY_T(64) xenova_drive_TofObservation_quality_t;
+typedef PB_BYTES_ARRAY_T(2) xenova_drive_TofObservation_distance_mm_le_t;
+typedef PB_BYTES_ARRAY_T(1) xenova_drive_TofObservation_status_t;
+typedef PB_BYTES_ARRAY_T(1) xenova_drive_TofObservation_quality_t;
 typedef PB_BYTES_ARRAY_T(16) xenova_drive_TofObservation_sensor_instance_t;
+/* One selected front/rear single-zone observation; rows=cols=1, arrays=2/1/1 bytes. */
 typedef struct _xenova_drive_TofObservation {
     uint32_t major;
     char vehicle[65];
@@ -5003,7 +5004,7 @@ extern const pb_msgdesc_t xenova_drive_RouteExchange_msg;
 #define xenova_drive_StopFacts_size              413
 #define xenova_drive_SurveySummary_size          271
 #define xenova_drive_TaskReferenceState_size     976
-#define xenova_drive_TofObservation_size         719
+#define xenova_drive_TofObservation_size         466
 #define xenova_drive_VehicleSample_size          461
 #define xenova_drive_WindowTransitionReceipt_size 559
 #define xenova_drive_WindowTransitionRequest_size 1488

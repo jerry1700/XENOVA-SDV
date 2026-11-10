@@ -16,6 +16,12 @@
 
 `FrameExpired`와 `ReservationExpired`는 정상 자료/예약 폐기다. `ConfigurationError`는 명시 설정 오류다. 예외가 `ValueError`라는 이유나 현재 worker 상태만으로 고장 종류를 추정하지 않는다. 실제 PC 단절 뒤 자동 hot reattach나 PC worker 부분복구를 지원한다는 뜻은 아니다.
 
+## 모델 상주 수명
+
+A 수집 owner는 기동 시 Device·pipeline·모델을 한 번 시작하고 정상 관측 루프 동안 유지한다. 프레임 만료, 빈 detection, fresh 준비 개수 부족, AUTO/MANUAL·주차 설정 전환은 모델 재적재 조건이 아니다. PC 관측 연결 단절도 source만 철회하고 같은 모델을 유지한다. 모델 적재 사실과 현재 관측·World의 사용 가능 여부는 별개다.
+
+M-only 복구는 기존 A·Device·모델을 보존한다. 실제 A 고장으로 A/M을 교체하거나 service를 명시 종료할 때는 원 owner의 실제 close·반환을 끝내며, 새 A를 기동하면 모델도 다시 적재한다. 카메라 전원이 켜져 있다는 사실만으로 종료된 host session의 모델이 계속 유지된다고 가정하지 않는다. 제한 시간 수집·추론 벤치의 매 실행 open/close는 상주 실행과 구분한다.
+
 ## 네 종류의 시간
 
 1. **관측·주행 결과의 수명:** 원 capture/입력 E를 지킨다. 초기 live frame 창은 500ms이며 지연된 결과에 새 시각을 붙이지 않는다. RPi 명령 E를 worker 고장 감시값으로 연장하지 않는다.
@@ -25,7 +31,62 @@
 
 고장 감시값은 운영 벤치 초깃값이며 Nano 부하 실측으로 조정한다. `XENOVA_JETSON_CONTROL_STALL_S`, `XENOVA_JETSON_CAPTURE_STALL_S`, `XENOVA_JETSON_COMPUTE_STALL_S`는 process 기동 때 한 번 읽고 유한한 양수·signed64 microseconds 범위를 검사한다. 이 값은 처리율 보증이나 RPi 출력 유예가 아니다.
 
+## 선택 진단과 실행 경로
+
+설정·모델·설치 원본의 검증은 필수다. `output`에 쓰는 설정 사본, Device/NN layout,
+실패 traceback, perception 요약과 최종 JSON 파일은 선택 진단이다. S/A/M/D는 필요한
+경우 프로세스마다 진단 daemon 하나를 만들며, 실행 루프에서 파일 쓰기 완료나 daemon
+종료를 기다리지 않는다. SDK의 내부 thread와 별개이며 doctor를 호출하지 않는다.
+
+대기열은 8개, 개별 JSON은 2MiB 이하이다. JSON은 제출할 때 immutable bytes로 고정한다.
+대기열 초과·쓰기 오류·daemon 생성 실패는 진단 손실이다. 원 모델·worker·지도 상태나
+복구 횟수를 바꾸지 않는다. 출력 디렉터리 확보가 늦으면 해당 worker의 파일 진단을
+생략할 수 있고, 프로세스 종료 시 남은 기록도 유실될 수 있다. 최종 결과의 반환 경로는
+stdout이다. 자원 manifest 원본의 DURABLE 확인과 지도 DB commit은 이 경로에 넣지 않는다.
+
+## 완료 통지와 계산 시작
+
+S-log 완료는 원 request/operation/issued/expiry와 실제 completed 시각을 대조한다.
+원 작업이 기한 안에 성공했고 원 ACK/receipt가 맞으면 S의 수신이 늦어도 완료 사실을
+반영한다. 실제 작업 완료가 늦었거나 결과가 불명인 경우는 성공으로 바꾸지 않는다.
+종료 중이면 확인된 사실만 반영하며 다음 기동 단계를 열지 않는다. 다음 자원 작업이나
+복구 단계는 자신의 원 기한·현재 단계 검사를 그대로 사용한다.
+
+M-compute는 파서를 바로 시작하고 `PARSER_STARTED → NN_COMPLETED → GEOMETRY_COMPLETED`
+사건을 M-main에 순서대로 보고한다. progress의 실제 송신 완료가 parser 시작 조건이
+아니다. 같은 NN stamp의 재해석 여부는 compute가 판단하고 준비 개수는 fresh 완료만 센다.
+원 RAW RELEASE·view 반환, 세대 fence, 채택 lock, 현재 자료·권한 검사는 유지한다.
+
+phase queue 8개에는 작업 시작 전 필수 사건 4개분을 예약한다. M-main이 늦으면 다음
+작업 선택을 보류하고 RAW/NN별 최신 입력만 유지한다. 진행 중인 파서에 송신 ACK를
+요구하거나 단순 queue 밀림을 worker 고장으로 바꾸지 않는다. 실제 제어 무응답과 계산
+취소 불응은 별도의 health 감시 대상이다.
+
+## Jetson–RPi 시간 예산
+
+| 경계 | 현재 값 | 기준과 만료 시 처리 |
+|---|---|---|
+| Jetson 입력·파서 | 최대 500ms | 원 SDK→J 시각 하한과 원 job E, 결과만 폐기 |
+| RPi live World | 300ms | 원 관측 시각과 Pi clock 변환, 현재 주행 입력으로 사용하지 않음 |
+| RPi pose | 200ms | 원 pose 시각, 오래된 위치로 제어하지 않음 |
+| Zephyr 제어 주기/기한 | 20ms | release 기준, tracker dt도 0.02s로 결합 |
+| Gateway 연속 명령 | 100ms | 마지막 명령 수신 기준, 기존 독립 출력 보호 적용 |
+| Gateway readiness / 적용 응답 | 300ms / 1s | 준비 증거와 control 적용 거래의 서로 다른 수명 |
+
+World/pose 값은 `course-development-1`과 `lattice-lab-1` 프로필 기준이다. 500ms 안에
+해석을 끝냈다는 사실이 300ms World 소비 자격을 보장하지 않는다. 촬영→OAK/USB→Jetson
+계산→송신→Gateway→domU 수신·제어까지 소요 시간을 원 관측 시각에서 합산해야 한다.
+수신·디코드·재전송 시각을 새 촬영 시각으로 쓰지 않는다.
+
+이 값들은 보드 부하 수락 시험을 대신하지 않는 초기 설정이다. 지연 분포는 런타임 밖의
+기록·replay/분석에서 수집한다. 구간별 p50/p95/p99, queue 폐기, 전체 관측 age, 실제 제어
+deadline miss를 함께 보고 최적화와 숫자 조정을 결정한다. 정상 결과 폐기율을 줄이려고
+장치 고장 한도나 출력 만료를 함께 늘리지 않는다. 20ms 주기를 바꾸려면 tracker dt와
+실제 제어 안정성도 검증해야 한다.
+
 capture 30쌍과 REQUIRED NN의 fresh 정상 parser 결과 5개 확인은 유지한다. 최초 15초 관찰 창에 근거가 부족하면 같은 모델에서 WAIT하며 나중의 fresh 자료로 검사를 계속한다. 빈 detection은 정상 결과이고, 오래된 결과는 준비 개수에 세지 않는다. 최초 형식·대응관계 검사가 현재 World·위치·점유의 신선도 검사를 대신하지 않는다.
+
+선택 복구의 완료는 실제 새 owner의 기동·설치·자원 교체 완료를 뜻한다. capture 30쌍·NN 5개의 준비를 기다리는 일과 분리하며, 복구 완료가 가짜 READY·World를 만들지 않는다. 입력에 종속된 준비 대기는 원 cold 기동 기한을 재사용하지 않는다. 실제 local setup·BIND/RESUME·owner 반환의 한도는 유지한다. 물리 A의 개별 RGB/depth 정체와 A/M의 제어 heartbeat는 준비 개수가 채워지기 전에도 독립적으로 확인한다.
 
 ## native 예약과 실제 메모리 반환
 
@@ -45,7 +106,7 @@ STATIC `PC_NN_START`/`PC_SOURCE_STATE`도 실제 모델 start의 cold 90초 근�
 
 ## RPi 복구와의 경계
 
-단일 늦은 결과는 그 결과의 사용을 막는다. 확인된 반복 AUTO 기능 상실과 실제 process/binding 손실은 별도 복구 판단이다. 기존 readiness lease 300ms 안에서 마지막 실제 READY 계산/최초 거절 중 이른 시각을 기준으로 회복을 관찰하며, 새 거절·heartbeat가 이 창을 연장하지 않는다. 원 출력 수명은 마지막 실제 ForwardDrive의 원 수신시각/원 E로 계산하며 거절된 새 명령 수신이 연장하지 않는다. 임의의 연속 실패 횟수를 새로 만들지 않는다.
+단일 늦은 결과는 그 결과의 사용을 막는다. 확인된 반복 AUTO 기능 상실과 실제 process/binding 손실은 별도 복구 판단이다. warm AUTO의 일시적 거절은 서로 다른 실패 완료 5개 또는 기존 readiness lease 300ms 창 중 먼저 도달하는 조건으로 확인한다. 반복 보고·heartbeat는 실패 개수나 창을 갱신하지 않는다. 원 출력 수명은 마지막 실제 ForwardDrive의 원 수신시각/원 E로 계산하며 거절된 새 명령 수신이 연장하지 않는다. 구체적인 대상 사유, 현재 거절 중인 B의 제외, qualification hold 보존과 펌웨어의 순수 deadline 재시도는 [전체 파이프라인 지연 정책](../../../docs/platform/pipeline-latency-policy.md)을 따른다.
 
 READY와 실제 계산은 정상인데 command 전달만 비어 있는 경우에도 원 100ms 출력 만료와 300ms 기능 확인을 구분한다. 최초 command가 없는 경우와 정상 WAIT 뒤 복귀를 포함해 현재 연속 READY 구간의 고정 활성화 근거와 마지막 유효 ForwardDrive 중 늦은 시각을 사용한다. 반복 READY/progress가 이 창을 매번 다시 시작하지 않는다. 확인을 기다리는 동안 원 출력이 만료되면 STOP한다.
 

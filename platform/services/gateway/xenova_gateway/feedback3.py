@@ -15,7 +15,7 @@ from .feedback import FeedbackSerialSink,FeedbackError,packet,HELLO,HELLO_ACK,ST
 from .frame import DriveFrame,StopFrame,encode as legacy_encode
 from .scene_authority import MatchedStop,StationaryPolicy,COMMAND3,FEEDBACK3,check_stationary_window
 from .sink import SinkError
-from .tof_feedback3 import TOF_FRAGMENT,TOF_FRAGMENT3,TOF_CAPABILITY,TofSelection,TofClock,TofInbox
+from .tof_feedback3 import TOF_SAMPLE,TOF_SAMPLE3,TOF_CAPABILITY,TofSelection,TofClock,TofInbox
 
 CLOCK_PROBE=0x0f10;CLOCK_REPLY=0x0f11;CLOCK_INSTALL=0x0f12;CLOCK_ACK=0x0f13
 COMMAND=0x0111;REPORT=0x0f14;SENSOR=0x0f15
@@ -153,13 +153,15 @@ class Feedback3SerialSink(FeedbackSerialSink):
             if self.device_session is not None and self.device_session!=session:
                 self._fail('DEVICE_RESTARTED');self.ready=False;return
             self.device_session=session;self.capabilities=caps;self.ready=True;self.odometry.device_session(session);return
-        if kind==TOF_FRAGMENT:
-            # No assembly/CRC32/protobuf/J work on the serial owner. Optional
+        if kind==0x0f16:
+            self.tof_inbox.reject(reason='unsupported_tof_layout');return
+        if kind==TOF_SAMPLE:
+            # No CRC32/protobuf/J work on the serial owner. Optional
             # source failure never calls _fail() or changes encoder/STOP state.
             selected=self._tof_selection
             if selected is None or not selected.profiles:return
             try:
-                if len(payload)!=TOF_FRAGMENT3.size or not self.ready or not self._sensor_available() or not self.capabilities&TOF_CAPABILITY:
+                if len(payload)!=TOF_SAMPLE3.size or not self.ready or not self._sensor_available() or not self.capabilities&TOF_CAPABILITY:
                     raise FeedbackError('ToF unready/unsupported')
                 pi,device=payload[:16],payload[16:32];self._session(pi,device)
                 if payload[76] not in {row[0] for row in selected.profiles}:return

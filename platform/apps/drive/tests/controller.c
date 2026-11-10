@@ -1,5 +1,6 @@
 /* Product controller + unchanged manual/auto calculations, host sanitizer test. */
 #include "controller.h"
+#include "lifecycle.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -46,6 +47,54 @@ static struct drive_command_context command_context(void){
  struct drive_command_context c={.control_revision=1,.connection_revision=2,.lifetime=3,
   .generation=4,.mode=DRIVE_AUTO};
  strcpy(c.app_instance,A);return c;
+}
+static void transient_deadline_tests(void){
+ struct drive_completion late={.health={.restrict_function=true,.failure=XDH_DEADLINE},
+  .sample={.v_mps=.3f}};
+ drive_completion_restrict(&late,true);
+ assert(!late.sample.v_mps&&!strcmp(late.sample.reason,"DEADLINE"));
+ late.sample=(struct drive_sample){0};drive_completion_restrict(&late,true);
+ assert(!strcmp(late.sample.reason,"CALCULATION_FAILED")); /* requested STOP */
+ late.sample=(struct drive_sample){.v_mps=.3f,.gate_required=true};drive_completion_restrict(&late,true);
+ assert(!strcmp(late.sample.reason,"CALCULATION_FAILED"));
+ late.sample=(struct drive_sample){.v_mps=.3f,.reason="COLLISION"};drive_completion_restrict(&late,true);
+ assert(!strcmp(late.sample.reason,"COLLISION"));
+ late.sample=(struct drive_sample){.v_mps=.3f};drive_completion_restrict(&late,false);
+ assert(!strcmp(late.sample.reason,"CALCULATION_FAILED")); /* legacy wire */
+ struct drive_command_context c=command_context();struct drive_deadline_gate gate={0};
+ assert(drive_deadline_attempt_due(&gate,&c,1,NULL));
+ for(uint64_t sequence=2;sequence<6;sequence++){
+  assert(!drive_deadline_attempt_due(&gate,&c,sequence,"DEADLINE"));
+  unsigned count=gate.misses;
+  for(unsigned duplicate=0;duplicate<10;duplicate++)
+   assert(!drive_deadline_attempt_due(&gate,&c,sequence,"DEADLINE"));
+  assert(gate.misses==count);
+ }
+ assert(drive_deadline_attempt_due(&gate,&c,6,"DEADLINE"));
+ assert(drive_deadline_attempt_due(&gate,&c,7,NULL));
+ assert(!drive_deadline_attempt_due(&gate,&c,8,"DEADLINE")&&gate.misses==1);
+ c.lifetime++;assert(!drive_deadline_attempt_due(&gate,&c,1,"DEADLINE")&&gate.misses==1);
+ const char *hard[]={"WORLD_UNAVAILABLE","COLLISION","OUTPUT_INVALID","APP_STOPPING"};
+ for(unsigned i=0;i<sizeof(hard)/sizeof(*hard);i++)
+  assert(drive_deadline_attempt_due(&gate,&c,2+i,hard[i])&&!gate.misses);
+ c.mode=DRIVE_MANUAL;assert(drive_deadline_attempt_due(&gate,&c,7,"DEADLINE"));
+
+ struct drive_adapter adapter={0};struct drive_result selected={.control_valid=true,.generation=42};
+ struct drive_task_status status={.state=DRIVE_TASK_RUNNING,.lifetime=3,.running_deadline_us=1};
+ struct drive_completion work={.performed=true,.context_revision=1,.finished_ms=1000,
+  .source={.lifetime=3,.connection_revision=2}};
+ struct drive_warm_view view=drive_warm_classify(&adapter,&selected,&status,&work,true,
+  (struct xm_span){0},0,1,2,1001,UINT64_C(9999999),true);
+ assert(!strcmp(view.state,"READY")&&!view.reason);
+ view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1300,0,true);
+ assert(!strcmp(view.state,"NOT_READY"));
+ work.sample.reason="DEADLINE";
+ view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1001,0,true);
+ assert(!strcmp(view.state,"NOT_READY")&&!strcmp(view.reason,"DEADLINE"));
+ status.revoked=true;status.state=DRIVE_TASK_STOPPING;
+ view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1001,0,true);
+ assert(!strcmp(view.phase,"STOPPING")&&!strcmp(view.reason,"APP_STOPPING"));
+ puts("transient deadlines: distinct completions, old READY lifetime, hard STOP PASS");
 }
 static void command_attempt_tests(void){
  struct drive_command_context c=command_context();struct drive_command_gate gate={0};
@@ -149,6 +198,7 @@ static void health_tests(void){
  puts("health adapter: actual algorithms, AUTO-only resource fault, serial deadline, fresh recovery PASS");
 }
 int main(void){
+ transient_deadline_tests();
  command_attempt_tests();
  rejection_tests();
  health_tests();

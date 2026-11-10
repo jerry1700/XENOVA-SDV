@@ -180,7 +180,7 @@ ESP32 CP210x USB-UART 연결용 `usbserial`·`cp210x` 모듈도 이미지에 포
 같은 드라이버를 쓰는 USB Ethernet 동글도 이 주소 전용 정책의 대상이다. 동글을 외부 uplink로 운영하려면 해당 장치를 좁혀 매칭하는 더 이른 `.network` 규칙으로 명시적으로 구성한다. 이 파일은 `xen-tools-net-conf`의 설정 파일로 보존한다.
 
 HDMI는 `dtoverlay=vc4-kms-v3d-pi4,cma-64`를 사용한다. 고정 커널 소스의 Pi4 overlay를 기존 DTB 목록에 추가해 빌드하고, WIC의 `overlays/vc4-kms-v3d-pi4.dtbo`로 배포한다. 일반 overlay 이름의 `overlay_map` 변환에 의존하지 않는다.
-WIC 검사는 이 설정과 실제 overlay·deploy 해시를 함께 확인한다. DTB·Xen·`boot.scr`의 인자와 3GiB dom0 설정은 유지한다. HDMI KMS 지원이 Xen 아래 V3D 가속 성공을 뜻하지는 않는다.
+WIC 검사는 이 설정과 실제 overlay·deploy 해시를 함께 확인한다. 기본 DTB와 Xen 바이너리, 3GiB dom0 메모리는 유지하며 vCPU·클럭은 아래 Pi 4 기본 부팅 프로필을 따른다. HDMI KMS 지원이 Xen 아래 V3D 가속 성공을 뜻하지는 않는다.
 
 xenova-gateway는 기존 코드·pyserial·비활성 서비스 템플릿을 포함한다.
 A/B UUID·실행 바인딩·권한 원본·broker·시리얼 장치를 확인한 뒤
@@ -562,12 +562,29 @@ bzcat "$WIC" >"$RUN/dom0.wic"
 
 빌드 진행은 다른 WSL 창에서 `tail -f "$RUN/logs/dom0-build.stdout"`로 확인한다. 같은 `RUN` 경로를 지정하면 전체 로그를 이어서 볼 수 있다.
 
-부분 패키징은 같은 빌드 환경에서 `bitbake xenova-platform xen-rpi-u-boot-scr`로
-실행할 수 있다. 플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
+부분 검증은 같은 빌드 환경에서 아래처럼 대상 task를 지정한다. 일반 `do_build`는
+runtime 의존성 전체의 QEMU·kernel 빌드까지 이어질 수 있다.
+
+```bash
+bitbake -c deploy rpi-config xen-rpi-u-boot-scr
+bitbake -c package_qa xenova-platform xenova-dom0-manager xenova-gateway
+bitbake -c package_write_rpm xenova-platform xenova-dom0-manager xenova-gateway
+```
+
+플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
 `xenova-boot-status.service`와 sysinit enablement를 확인한다. 기존 agetty의
 `/run/issue.d`·reload 기능을 사용하며 새 그래픽 런타임은 필요하지 않다.
 고정 이미지의 getty가 agetty인지도 패키지 manifest와 실제 unit에서 대조한다.
 다른 renderer를 쓰는 설치본의 화면 인계는 [부팅 표시](management-boot-boundaries.md#부팅-진행지연실패-표시)를 따른다.
+
+Pi 4의 기본 부팅 프로필은 Xen `dom0_max_vcpus=2`와 firmware `force_turbo=1`이다.
+전자는 `boot.cmd.xen.in`, 후자는 `recipes-bsp/bootfiles/rpi-config_%.bbappend`에서 공급한다.
+`dom0_vcpus_pin`은 추가하지 않으며 기존 CPU 정책의 dom0·Linux→{0,3}, Zephyr A→1/B→2를 유지한다.
+최대 ARM 주파수·전압·온도/저전압 보호는 firmware 기본값을 따른다. 보드별 CPUFreq 등록 여부와
+실제 클럭·온도·전원 상태는 실측으로 확인한다. `check-xenova-wic.py`는 최종 FAT에서 두 기본값의
+누락·충돌을 거절한다. `assemble.platform_root_ok()`는 API/MQTT뿐 아니라 Gateway/world의 전체
+Python 소스도 현재 빌드 소스와 대조한다. 따라서 rejoin·codec·drive_link 최적화가 빠진 오래된
+패키지를 재사용하면 조립이 실패한다. 원본 소스에서 세 모듈을 별도 patch 파일로 중복 공급하지 않는다.
 
 생성된 `boot.cmd`/`boot.scr`에서 dom0의 `console=hvc0 loglevel=4`,
 `systemd.show_status=error`와 journal target을 확인한다. Xen의 dtuart·메모리 인자는

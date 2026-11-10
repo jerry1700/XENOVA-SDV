@@ -4,6 +4,7 @@ Large complete paths use a separate bounded MQTT owner. That owner does no
 authority mutation or serial I/O; a blocked broker cannot hold the actor/STOP.
 """
 from collections import OrderedDict,deque
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,12 @@ from xenova_drive_world import schema,encode,decode,validate,MAX_BYTES,PreparedC
 from xenova_mqtt.drive_binding import app_instance
 from .planning import context
 from .mission_link import MissionLinkPort, BudgetEnvelope
+
+
+@dataclass(frozen=True)
+class _DecodedIncoming:
+    """I/O가 원 bytes를 검증하고 독점 소유한 한 번의 수신. 외부 typed API와 구분한다."""
+    arguments: tuple
 
 PREFIX='xenova/v1'
 VEHICLE_TOPIC=PREFIX+'/vehicle/state.pb'
@@ -257,10 +264,15 @@ class DriveLinkProvider:
         return True
 
     def receive(self,vm,link,received,accepted_wire=None,source_wire=None):
+        """외부 typed 호출은 mutable protobuf를 매번 검증한다."""
+        return self._receive(vm,link,received,accepted_wire,source_wire)
+
+    def _receive(self,vm,link,received,accepted_wire=None,source_wire=None,*,decoded=False):
         m=self.runner.machine;now=self.runner._clock();kind=link.WhichOneof('payload')
         if not m or vm not in m.vm_ids or not 0<=now-received<=.5:return self.reject('LINK_STALE')
-        try:validate(link)
-        except ValueError:return self.reject('LINK_WIRE_INVALID')
+        if not decoded:
+            try:validate(link)
+            except ValueError:return self.reject('LINK_WIRE_INVALID')
         if kind not in ('probe','snapshot','applied','budget_request','episode_request','road_data','route_exchange'):return self.reject('LINK_DIRECTION')
         binding=m.bindings.current(vm,now)
         modern=getattr(self.runner,'operator',None)
@@ -476,9 +488,11 @@ class DriveLinkProvider:
                 try:modern.clocks.sent_reply(completed)
                 except ValueError:self.reject('LINK_CLOCK_SENT_CONTEXT')
         for _ in range(2):
-            item=self.io.take()
+            item=self.io._take_owned()
             if item is None:break
-            self.receive(*item)
+            if type(item) is _DecodedIncoming:
+                self._receive(*item.arguments,decoded=True)
+            else:self.receive(*item)
         sample=self.runner.device_view().get('vehicle_sample')
         identity=None if sample is None else tuple(sample.get(k) for k in ('host_boot','device_session','odom_epoch','pi_session','sequence'))
         if sample and identity!=self.last_vehicle:
@@ -549,6 +563,34 @@ class DriveLinkIO:
         candidate.accepted.state.CopyFrom(value.snapshot)
         return encode(candidate)
 
+    def _prepare_decoded_snapshot(self,value):
+        """decode가 검증한 private subtree를 감싼다. 원 subtree를 다시 순회하지 않는다.
+
+        wrapper는 major=2, configure의 canonical UUID 두 개, 검증된 state로만
+        구성한다. 새 wrapper 규칙이 추가되면 이 구성과 동등성 시험도 갱신한다.
+        """
+        if self.host_boot is None or self.instance is None:raise ValueError('LINK_NOT_CONFIGURED')
+        candidate=schema.DriveLink(major=2)
+        candidate.accepted.host_boot=self.host_boot;candidate.accepted.gateway_instance=self.instance
+        candidate.accepted.state.CopyFrom(value.snapshot)
+        raw=candidate.SerializeToString(deterministic=True)
+        if len(raw)>MAX_BYTES:raise ValueError('wire size cap')
+        return raw
+
+    def _decode_incoming(self,vm,raw,received):
+        """수신 bytes 경계의 한 번 검증. mutable value는 외부 호출자에게 노출하지 않는다."""
+        value=decode(raw,schema.DriveLink)
+        kind=value.WhichOneof('payload')
+        if kind not in ('probe','snapshot','applied','budget_request','episode_request','road_data','route_exchange'):
+            raise ValueError('LINK_DIRECTION')
+        prepared=self._prepare_decoded_snapshot(value) if kind=='snapshot' else None
+        if kind in ('episode_request','budget_request'):
+            from xenova_drive_world import episode_request_body,budget_request_body
+            prepared=(episode_request_body if kind=='episode_request' else budget_request_body)(raw)
+        if kind in ('road_data','route_exchange'):
+            return _DecodedIncoming((vm,value,received,None,raw))
+        return _DecodedIncoming((vm,value,received,prepared))
+
     def offer(self,topic,data,kind):
         if len(data)>MAX_BYTES:raise ValueError('LINK_BYTES')
         # One clock/state/grant/budget/scene reply per VM and one vehicle sample.
@@ -583,6 +625,11 @@ class DriveLinkIO:
                 if key[1]=='scene':del self.pending[key]
 
     def take(self):
+        # typed 호환 API로 꺼낸 값은 독점 소유·검증 경로의 자격을 잃는다.
+        item=self._take_owned()
+        return item.arguments if type(item) is _DecodedIncoming else item
+
+    def _take_owned(self):
         try:return self.incoming.get_nowait()
         except queue.Empty:
             try:return self.route_incoming.get_nowait()
@@ -675,20 +722,15 @@ class DriveLinkIO:
             if len(msg.payload)>MAX_BYTES:self._drop('OVERSIZE');return
             try:
                 vm=next(vm for vm in self.vms if msg.topic==outbound(vm))
-                value=decode(bytes(msg.payload),schema.DriveLink)
-                kind=value.WhichOneof('payload')
-                if kind not in ('probe','snapshot','applied','budget_request','episode_request','road_data','route_exchange'):self._drop('DIRECTION');return
-                prepared=self.prepare_snapshot(value) if kind=='snapshot' else None
-                if kind in ('episode_request','budget_request'):
-                    from xenova_drive_world import episode_request_body,budget_request_body
-                    prepared=(episode_request_body if kind=='episode_request' else budget_request_body)(bytes(msg.payload))
-                if kind in ('road_data','route_exchange'):
-                    self.route_incoming.put_nowait((vm,value,received,None,bytes(msg.payload)))
-                else:self.incoming.put_nowait((vm,value,received,prepared))
+                item=self._decode_incoming(vm,bytes(msg.payload),received)
+                if len(item.arguments)==5:self.route_incoming.put_nowait(item)
+                else:self.incoming.put_nowait(item)
                 self.received+=1
             except StopIteration:self._drop('UNBOUND_TOPIC')
             except queue.Full:self._drop('INBOX_FULL')
-            except ValueError as error:self._drop('INVALID_WIRE',error)
+            except ValueError as error:
+                if error.args==('LINK_DIRECTION',):self._drop('DIRECTION')
+                else:self._drop('INVALID_WIRE',error)
         client.on_connect=connected;client.on_message=message
         try:
             reconnect=True

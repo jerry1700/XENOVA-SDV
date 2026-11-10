@@ -15,6 +15,13 @@
 
 ## 제공 수준
 
+2026-11-10 Pi 4의 승인된 부팅 기본값은 `dom0_max_vcpus=2`와 `force_turbo=1`이다.
+정적 CPU 배치와 guest 자원 수량은 유지한다. 최신 Manager/Gateway/world 소스는 기존
+recipe로 공급하며, 최종 조립의 Python 소스 일치 검사에 Gateway/world도 포함한다.
+정규 boot/config deploy·RPM QA/bytes 대조와 실보드 고정 2-vCPU 재부팅은
+[검증 기록](../verification/dom0-cpu-clock-defaults-20261110.md)에 분리해 기록했다.
+전체 이미지 재조립·실차 수락은 해당 기록의 완료 범위에 포함하지 않는다.
+
 2026-11-02 자격/등록/신호 후속은 `8a23b8a` + 현재 diff/새 파일 후보다.
 [제공자 계약](../contracts/vm-provisioning-v1.md)과 [검증 보고](../verification/recovery-scenario-closure-20261030.md#vm-provisioning-integration)를 따른다.
 `xenova-platform`의 provisioning/profile/registration·Bootstrap·first-boot와 broker provider를 같은 내부 후보로 설치한다.

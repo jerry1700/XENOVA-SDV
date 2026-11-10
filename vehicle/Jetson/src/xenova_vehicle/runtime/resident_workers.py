@@ -8,7 +8,6 @@ from collections import deque
 from dataclasses import dataclass
 import json
 import os
-from pathlib import Path
 import sys
 import time
 import uuid
@@ -40,7 +39,7 @@ class WorkerBoot:
     raw_profile: RawBindingProfile
     raw_tokens: tuple
     startup_deadline_us: int
-    diagnostic_directory: str
+    diagnostic_directory: str | None
     writer_bind: RawBindMessage | None = None
     slot_limits: SlotTimeLimits = SlotTimeLimits(5_000_000, 500_000, 5_000_000)
     cleanup_limits: CleanupTimeLimits = CleanupTimeLimits(1_000_000)
@@ -66,7 +65,9 @@ class WorkerBoot:
                 raise ValueError('worker boot requires exact registered values')
         if (self.peer.role not in ('A', 'M') or self.peer.service_instance != self.raw_scope.service_instance
                 or type(self.startup_deadline_us) is not int or not 0 < self.startup_deadline_us < 2**64
-                or type(self.diagnostic_directory) is not str or not self.raw_profile.nn_enabled):
+                or self.diagnostic_directory is not None and
+                    (type(self.diagnostic_directory) is not str or not self.diagnostic_directory)
+                or not self.raw_profile.nn_enabled):
             raise ValueError('invalid resident worker scope/deadline')
         if (self.peer.role == 'A' and self.raw_profile.jpeg_enabled != (self.jpeg_endpoint is not None)
                 or self.peer.role == 'M' and self.jpeg_endpoint is not None):
@@ -480,13 +481,15 @@ class _Actor:
                 time.sleep(0.002)
 
     def save(self, filename, value):
-        path = Path(self.boot.diagnostic_directory)
-        path.mkdir(parents=True, exist_ok=True)
-        raw = (json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii')
-        if len(raw) > 2 * 1024 * 1024:
-            raise ValueError('resident diagnostic exceeds its bound')
-        with (path / filename).open('xb') as target:
-            target.write(raw)
+        from .resident_diagnostics import DiagnosticWriter
+        if self.boot.diagnostic_directory is None:
+            return True
+        if not hasattr(self, '_diagnostics'):
+            try:self._diagnostics = DiagnosticWriter()
+            except Exception as error:
+                self.failure_diagnostic_error = type(error).__name__[:96]
+                return False
+        return self._diagnostics.save(self.boot.diagnostic_directory, filename, value)
 
     def fault(self, error):
         configuration = issubclass(type(error), ConfigurationError)
@@ -599,7 +602,7 @@ def acquisition_main(endpoint, boot):
         actor.state = 'WARMUP'
         actor.progress('GRAPH_STARTED', completed=queue_j)
         next_clock = j_us() + 100_000
-        last_raw = dict(rgb_video=j_us(), depth_right=j_us())
+        last_raw = dict(rgb_video=queue_j, depth_right=queue_j)
         last_nn = None
         request = pending_sample = None
         last_published = None
@@ -644,7 +647,8 @@ def acquisition_main(endpoint, boot):
                 actor.state = 'STREAMING'
                 actor.progress('CAPTURE_READY', assembler.latest_capture.rgb.sequence, completed=warmup.ready_us)
                 capture_reported = True
-            if capture_reported and any(now - completed >= health_policy().capture_stall_us for completed in last_raw.values()):
+            # 개별 실제 stream의 건강과 fresh pair 준비 개수는 다른 근거다.
+            if any(now - completed >= health_policy().capture_stall_us for completed in last_raw.values()):
                 raise TimeoutError('active RGB/depth stream stalled')
             # NN 입력/출력 부재는 readiness 제한이다. SDK 고장과 control 정체는 별도로 복구한다.
             for packet in incoming:

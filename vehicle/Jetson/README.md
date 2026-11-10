@@ -124,6 +124,10 @@ M의 계산 대기는 최신 RAW1개·NN1개, 활성 계산1개, phase 사건8�
 
 `--jio-profile /absolute/path/private-jio.json`을 선택하면 S-jio 하나가 Pi의 원 Vehicle·clock·ToF·Scene을 직접 수신한다. 파일은 실행 사용자 소유의 owner-only JSON이며 exact 설치 필드는 [mapper 계약](../../docs/contracts/drive-world/mapper-clock-and-source.md)과 `JetsonJioProfile`에 정의한다. `--perception-profile`의 local SHA와 명시한 전체 차량 bundle 관계가 맞아야 한다. profile을 생략하면 MQTT owner를 만들지 않는다. source identity와 시계 연결은 metric/주행 승인을 뜻하지 않는다.
 
+선택 ToF는 앞 중앙0·뒤 중앙1의 단일존1×1 관측이다. ESP32가 한 관측 한 `TOF_SAMPLE3` 패킷으로 보내고 Pi가 원 시각·순번·보정 leaf를 보존해 전달한다. Jetson은 근거리 장애물 HIT-only로 소비하며 정상 거리·반환 없음·오류를 FREE로 carve하지 않는다. `tof_sources: []`는 유효하다. 새 local ToF leaf는 schema2이며 `zone_bearings` 각 구간1개·외부보정/시간 자격과 명시한 AXIAL_Z/RADIAL을 사용한다. 실제 모델·FOV·측정 오차를 제공해 새 leaf SHA와 bundle 등록 관계를 맞춰야 한다. 구 schema1/8×8 자산을 자동 변환·재사용하지 않는다. [정확 wire·capability](../../docs/contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)는 feedback-3 계약을 따른다.
+
+M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사본에만 반영한다. 저장 지도·도로 형상·주차칸 경계는 바꾸지 않는다. HIT의 원 수명이 끝나면 그 자리는 UNKNOWN이며, 더 새로운 카메라 관측이 확인돼야 이전 FREE를 다시 사용할 수 있다. 미장착·무효 측정·pose 부족은 해당 관측만 생략한다. 정적 지도 조사에 ToF를 필수 센서로 지정할 수 없으며, AUTO/MANUAL·주차 전환이나 ToF 누락이 모델 재적재를 요구하지 않는다.
+
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
 
 선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": [0]}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 통로별 index는 관측 divider 방향의 왼쪽 차로0·오른쪽 차로1이며 `parking_aisles`와 같은 순서/개수다. 실제 lane ID는 D의 원 내구 예약 뒤 결박하므로 이 정책을 쓸 때 각 aisle의 `approach_lane_id`는0이어야 한다. 생략/null은 미설정이며 자동 횡단·주차 역할을 추정하지 않는다. 이 설정은 FREE/기하/센서 자격이나 추진 승인을 대신하지 않는다.
@@ -144,7 +148,7 @@ python -m xenova_vehicle runtime \
   --output /absolute/path/new-runtime-log --json
 ```
 
-`--duration-s 10`을 지정하면 capture·NN parser·DB의 로컬 준비 후 10초 상주하고 종료한다. 생략하면 SIGINT/SIGTERM까지 유지한다. 기존 DB의 기본 정책은 `EXISTING_ONLY`이며, `CREATE_IF_ABSENT`도 기존 DB를 덮어쓰지 않는다. SDK 로그는 stderr, 최종 결과는 stdout과 `output/runtime-result.json`에 기록한다.
+`--duration-s 10`을 지정하면 capture·NN parser·DB의 로컬 준비 후 10초 상주하고 종료한다. 생략하면 SIGINT/SIGTERM까지 유지한다. 기존 DB의 기본 정책은 `EXISTING_ONLY`이며, `CREATE_IF_ABSENT`도 기존 DB를 덮어쓰지 않는다. SDK 로그는 stderr, 최종 결과는 stdout으로 반환한다. `output`의 설정 사본·진단·`runtime-result.json`은 선택 저장이다. 프로세스별 진단 daemon이 최대 8개를 대기열에 보관하고, 대기열 초과·디스크 오류·종료 시 남은 기록은 버릴 수 있다. 실행·준비·STOP·장치 복구는 이 저장을 기다리지 않는다. 자원 manifest 원본과 지도 DB의 필수 영속화는 기존 소유자가 별도로 수행한다.
 
 capture 준비는 실제 RGB/depth 30쌍, NN 준비는 M의 fresh parser 결과 5회로 구별한다. Pi 시각·odom·차량 장착 보정·지도와 provenance가 준비되기 전 `metric_ready=false`, `world_valid=false`를 유지한다. 로컬 준비는 주행 허가가 아니다.
 

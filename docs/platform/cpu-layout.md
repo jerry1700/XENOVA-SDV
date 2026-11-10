@@ -20,7 +20,10 @@ hard affinity는 Xen이 **각 vCPU를 실행할 수 있는 pCPU 집합**이다.
 이 구현은 Xen 4.21의 `Affinity (Hard / Soft)` 중 Hard만 읽는다.
 
 기본 factory 프리셋은 Zephyr A→1, B→2, dom0·나머지 VM→{0,3}이다.
-각 VM의 기존 vCPU 수는 보존한다. Linux 4-vCPU VM이면 네 vCPU가 각각 {0,3}을 사용한다.
+Pi 4 Xen 부팅 기본값은 `dom0_max_vcpus=2`다. dom0의 두 vCPU가 {0,3}을 공유하며
+`dom0_vcpus_pin`을 추가하지 않는다. Raspberry Pi 설정은 `force_turbo=1`로 정규 최대
+클럭을 유지한다. 최대 주파수·전압·온도/저전압 보호는 firmware 기본값을 따른다.
+guest VM의 기존 vCPU 수는 보존한다. Linux 4-vCPU VM이면 네 vCPU가 각각 {0,3}을 사용한다.
 Xen cfg의 scalar `cpus = '0,3'`은 전체 vCPU에 같은 마스크를 적용한다.
 `cpus = ['0', '3']`처럼 vCPU별 매핑을 의미하는 문법으로 바꾸지 않는다.
 
