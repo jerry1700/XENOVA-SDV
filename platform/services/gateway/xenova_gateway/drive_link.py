@@ -23,6 +23,11 @@ from .mission_link import MissionLinkPort, BudgetEnvelope
 
 PREFIX='xenova/v1'
 VEHICLE_TOPIC=PREFIX+'/vehicle/state.pb'
+# I/O owner select bound. With replies pending it keeps the 2 ms pacing; with
+# nothing queued it sleeps until the socket, an offer() or close() wakes it.
+# Paho keepalive (10 s) still runs loop_misc() at least every IDLE_WAIT_S.
+BUSY_WAIT_S=.002
+IDLE_WAIT_S=.25
 
 
 def inbound(vm):return f'{PREFIX}/vms/{vm}/drive/link/in'
@@ -74,6 +79,9 @@ def state_context(value):
         # 원 phase 등록은 warm 준비를 결박한다. 매 pose의 mutable progress는
         # full copy 원문/HWM에 남기며 이 phase stamp를 바꾸지 않는다.
         metadata+=('episode',ref.registry_epoch.hex(),ref.registry_revision,ref.accepted_core_sha256.hex())
+    if hasattr(value,'route') and value.HasField('route'):
+        ref=value.route.acceptance
+        metadata+=('route',ref.registry_epoch.hex(),ref.registry_revision,ref.accepted_core_sha256.hex())
     return dict(frame=stamp(value.frame_epoch),configuration=stamp(value.configuration,value.calibration,value.primitive),
         maneuver=stamp(value.reference_id,value.maneuver_revision,*metadata),odom_epoch=value.odom_epoch,
         road_revision=str(value.reference_revision),route_revision=str(value.path_revision))
@@ -123,7 +131,11 @@ class DriveLinkProvider:
 
     def _pinned(self):
         self._prune()
-        return self.runner.machine.states.referenced()|{r['identity'] for r in self.inflight.values()}
+        result=self.runner.machine.states.referenced()|{r['identity'] for r in self.inflight.values()}
+        modern=getattr(self.runner,'operator',None)
+        routes=None if modern is None else getattr(modern,'routes',None)
+        if routes is not None:result|=routes.pinned_copies()
+        return result
 
     def _grant_context_matches(self,grant):
         m=self.runner.machine
@@ -143,6 +155,10 @@ class DriveLinkProvider:
         raw=self.missions.current_grant(vm)
         if raw is None:return None
         grant=decode(raw,schema.MissionGrant)
+        modern=getattr(self.runner,'operator',None)
+        if modern is not None and modern.operations.enabled and grant.admitted:
+            current=modern.missions.grant()
+            if current is None or encode(current)!=raw:return None
         return grant if self._grant_context_matches(grant) else None
 
     def clear_scene(self):
@@ -212,6 +228,9 @@ class DriveLinkProvider:
     def _state_mission_matches(state,grant):
         mission=state.mission
         return bool(grant.admitted and state.source_generation==grant.control_generation
+            and mission.HasField('operation_binding')==grant.HasField('operation_binding')
+            and (not grant.HasField('operation_binding') or
+                mission.operation_binding==grant.operation_binding)
             and all(getattr(mission,name)==getattr(grant,name) for name in
                 ('mission_id','mission_revision','kind','operator_request_nonce','strategy','grant_revision',
                  'mission_deadline_pi_us','execution_deadline_pi_us','correction_attempts_used',
@@ -237,16 +256,25 @@ class DriveLinkProvider:
         if reply.HasField('grant'):self.publish_mission(reply.grant)
         return True
 
-    def receive(self,vm,link,received,accepted_wire=None):
+    def receive(self,vm,link,received,accepted_wire=None,source_wire=None):
         m=self.runner.machine;now=self.runner._clock();kind=link.WhichOneof('payload')
         if not m or vm not in m.vm_ids or not 0<=now-received<=.5:return self.reject('LINK_STALE')
         try:validate(link)
         except ValueError:return self.reject('LINK_WIRE_INVALID')
-        if kind not in ('probe','snapshot','applied','budget_request','episode_request'):return self.reject('LINK_DIRECTION')
+        if kind not in ('probe','snapshot','applied','budget_request','episode_request','road_data','route_exchange'):return self.reject('LINK_DIRECTION')
         binding=m.bindings.current(vm,now)
         modern=getattr(self.runner,'operator',None)
+        routes=None if modern is None else getattr(modern,'routes',None)
         if not binding or (kind!='probe' or modern is None) and binding.get('app_state_models',{}).get('autonomous')!='stateful':
             return self.reject('LINK_BINDING')
+        if kind in ('road_data','route_exchange'):
+            if routes is None or type(source_wire) is not bytes:return self.reject('ROUTE_ORIGINAL_WIRE_REQUIRED')
+            try:
+                if encode(decode(source_wire,schema.DriveLink))!=encode(link):return self.reject('ROUTE_ORIGINAL_LINK_MISMATCH')
+                peer=(vm,binding['execution_id'],app_instance(binding,'autonomous'))
+                routes.receive_guest(source_wire,peer)
+            except ValueError as exc:return self.reject('ROUTE_'+str(getattr(exc,'reason','INVALID_CONTEXT')))
+            return True
         body=getattr(link,kind)
         role='autonomous'
         if kind=='probe' and modern is not None:
@@ -277,6 +305,7 @@ class DriveLinkProvider:
                 modern.episodes.declare(peer,body.supported_state_features if body.HasField('supported_state_features') else 0)
                 try:receipt,replay=modern.clocks.accept_probe(body,peer,m.generation,int(now*1e6))
                 except ValueError:return self.reject('LINK_CLOCK_RECEIPT')
+                if role=='autonomous':modern.operations.observe_probe(peer,body)
                 if receipt is not None:reply.clock.accepted_receipt.CopyFrom(receipt)
                 if modern.clocks.policy is not None:
                     reply.clock.guest_clock_valid_until_pi_us=int(received*1e6)+modern.clocks.policy.lease_us
@@ -297,6 +326,11 @@ class DriveLinkProvider:
                 if role=='autonomous':
                     status=modern.episodes.status(peer)
                     if status is not None:reply.clock.episode_status.CopyFrom(status)
+                    operation=modern.operations.clock_status(peer,body,
+                        reply.clock.guest_clock_valid_until_pi_us) if reply.clock.HasField('guest_clock_valid_until_pi_us') else None
+                    if operation is not None:reply.clock.operation_status.CopyFrom(operation)
+                    route=routes.clock_status(peer,reply.clock.guest_clock_valid_until_pi_us) if routes is not None and reply.clock.HasField('guest_clock_valid_until_pi_us') else None
+                    if route is not None:reply.clock.route_status.CopyFrom(route)
             # An unavailable/expired mapper clock blocks AUTO world adoption,
             # not the independent Pi vehicle clock or MANUAL input path.
             if modern is not None:
@@ -307,6 +341,7 @@ class DriveLinkProvider:
         elif kind=='snapshot':
             if self.trust is None:return self.reject('WORLD_PROFILE_UNAVAILABLE')
             peer=(vm,binding['execution_id'],app_instance(binding,'autonomous'))
+            if modern is not None and not modern.operations.state_allowed(body):return self.reject('STATE_OPERATION_CONTEXT')
             preparing=bool(modern is not None and modern.episodes.supported(peer) and m.phase=='PENDING')
             if (m.active_vm!=vm or m.active_app!='autonomous' or not (m.output_permitted or preparing) or
                     m.authority.protected(vm) or body.source_generation!=m.generation):return self.reject('STATE_SOURCE_AUTHORITY')
@@ -321,7 +356,17 @@ class DriveLinkProvider:
                 if (mission.scene_admission_id!=bytes(16) and
                         (runtime is None or not runtime.mission_allowed(mission,int(now*1e6)))):
                     return self.reject('STATE_SCENE_AUTHORITY')
-            episode_prepared=True if modern is None else modern.episodes.prepare_state(body,peer,encode(body))
+            state_wire=None
+            if modern is not None:
+                # The full parent validated this unchanged subtree. Both owners
+                # receive the same deterministic bytes and original size cap.
+                state_wire=body.SerializeToString(deterministic=True)
+                if len(state_wire)>MAX_BYTES:raise ValueError('wire size cap')
+            if routes is None and (body.HasField('route') or body.mission.kind==3):return self.reject('STATE_ROUTE_UNSUPPORTED')
+            route_prepared=True if routes is None else routes.prepare_state(body,peer,state_wire)
+            if route_prepared is None:return self.reject('STATE_ROUTE_CONTEXT')
+            independent_exit=bool(routes is not None and route_prepared is not True and routes.independent_exit())
+            episode_prepared=True if modern is None or independent_exit else modern.episodes.prepare_state(body,peer,state_wire)
             if episode_prepared is None:return self.reject('STATE_EPISODE_CONTEXT')
             parking_prepared=None
             if modern is not None and body.mission.kind==2:
@@ -349,6 +394,8 @@ class DriveLinkProvider:
                 state_context(body),dict(reference_id=body.reference_id))
             if parking_prepared is not None:modern.missions.commit_execution(parking_prepared)
             if modern is not None:modern.episodes.commit_state(episode_prepared)
+            if modern is not None:modern.operations.observe_state(body,accepted_wire)
+            if routes is not None:routes.commit_state(route_prepared)
             if removable is not None:del self.copies[removable];self.evicted+=1
             for target in m.vm_ids:
                 if target!=vm:self._send_copy(target)
@@ -406,7 +453,9 @@ class DriveLinkProvider:
                 preparation_sequence=body.calculation_sequence if body.HasField('calculation_sequence') else None,
                 received_monotonic=received)
             if modern is not None and body.applied and body.HasField('copy_message_id'):
-                modern.episodes.applied((vm,binding['execution_id'],app_instance(binding,'autonomous')),body.copy_message_id)
+                applied_peer=(vm,binding['execution_id'],app_instance(binding,'autonomous'))
+                modern.episodes.applied(applied_peer,body.copy_message_id)
+                if routes is not None:routes.applied(applied_peer,body.copy_message_id)
         elif kind=='episode_request':
             if modern is None or accepted_wire is None:return self.reject('EPISODE_UNSUPPORTED')
             peer=(vm,binding['execution_id'],app_instance(binding,'autonomous'))
@@ -464,7 +513,12 @@ class DriveLinkIO:
         if str(ipaddress.IPv4Address(host))!=host:raise ValueError('LINK_NUMERIC_ADDRESS')
         self.host,self.port,self.username,self.password=host,port,username,password
         self.vms=tuple(vms);self.clock=clock;self.incoming=queue.Queue(maxsize=4)
+        self.route_incoming=queue.Queue(maxsize=1)
         self.lock=threading.Lock();self.pending={};self.stop=threading.Event();self.thread=None
+        # The owner's own wake pair: offer()/close() wake an idle select. Paho's
+        # internal wake sockets stay unused; only the owner calls Paho. The lock
+        # keeps a send from racing the owner's close of the same descriptor.
+        self._wake_lock=threading.Lock();self._wake_read=self._wake_write=None
         self.received=self.dropped=self.sent=self.failed=self.high_water=self.oversize=0
         self.first_error=None;self.failure=None;self.first_transport=None;self.connected=False
         self.host_boot=None;self.instance=None
@@ -507,6 +561,20 @@ class DriveLinkIO:
         with self.lock:
             self.pending[topic,kind]=data if kind in ('clock','clock-manual') else bytes(data)
             self.high_water=max(self.high_water,len(self.pending))
+        self._wake()
+
+    def offer_route(self,topic,data):
+        """각 VM의 관리 원문 pending1. clock 우선순위와 기존 mailbox를 바꾸지 않는다."""
+        if type(data) is not bytes or len(data)>MAX_BYTES or topic not in tuple(map(inbound,self.vms)):
+            raise ValueError('LINK_ROUTE_OUTPUT')
+        value=decode(data,schema.DriveLink)
+        if value.WhichOneof('payload') not in ('road_data','route_exchange'):raise ValueError('LINK_ROUTE_UNION')
+        with self.lock:
+            key=(topic,'route');previous=self.pending.get(key)
+            if previous is not None:return previous==data
+            self.pending[key]=data;self.high_water=max(self.high_water,len(self.pending))
+        self._wake()
+        return True
 
     def clear_scene(self):
         """아직 선택되지 않은 scene mailbox만 비운다. I/O가 이미 고른 bytes의 기한은 불변이다."""
@@ -516,25 +584,58 @@ class DriveLinkIO:
 
     def take(self):
         try:return self.incoming.get_nowait()
-        except queue.Empty:return None
+        except queue.Empty:
+            try:return self.route_incoming.get_nowait()
+            except queue.Empty:return None
 
     def start(self):
         if self.thread:raise RuntimeError('LINK_OWNER_EXISTS')
-        self.thread=threading.Thread(target=self._run,name='gateway-drive-link',daemon=True);self.thread.start();return self
+        pair=socket.socketpair()
+        for end in pair:end.setblocking(False)
+        with self._wake_lock:self._wake_read,self._wake_write=pair
+        self.thread=threading.Thread(target=self._run,name='gateway-drive-link',daemon=True)
+        try:self.thread.start()
+        except BaseException:
+            self._close_wake();raise
+        return self
 
-    def _network_once(self,client,mqtt):
+    def _wake(self):
+        """Never blocks the caller. A full pair already carries a wakeup; a
+        stopped owner needs none."""
+        with self._wake_lock:
+            if self._wake_write is None:return
+            try:self._wake_write.send(b'\0')
+            except OSError:pass
+
+    def _close_wake(self):
+        with self._wake_lock:
+            pair,(self._wake_read,self._wake_write)=(self._wake_read,self._wake_write),(None,None)
+            for end in pair:
+                if end is not None:end.close()
+
+    def _select_wait(self):
+        # An offer() racing this check still finds its wake byte in select.
+        return BUSY_WAIT_S if self.pending else IDLE_WAIT_S
+
+    def _network_once(self,client,mqtt,wait=BUSY_WAIT_S):
         # All Paho calls belong to this owner. Its external-loop API avoids
         # creating a cross-thread wake socket for the same thread to signal.
         sock=client.socket()
         if sock is None:return mqtt.MQTT_ERR_NO_CONN
+        wake=self._wake_read
         try:
-            readable,writable,_=select.select([sock],[sock] if client.want_write() else [],[],.002)
+            readable,writable,_=select.select([sock] if wake is None else [sock,wake],
+                                              [sock] if client.want_write() else [],[],wait)
         except InterruptedError:
             readable=writable=[]
         except (OSError,ValueError) as error:
             if self.first_transport is None:self.first_transport=error
             return mqtt.MQTT_ERR_CONN_LOST
-        if readable:
+        if wake is not None and wake in readable:
+            try:
+                while wake.recv(4096):pass
+            except OSError:pass  # BlockingIOError: drained
+        if sock in readable:
             rc=client.loop_read()
             if rc not in (mqtt.MQTT_ERR_SUCCESS,mqtt.MQTT_ERR_AGAIN):return rc
         if writable and client.socket() is sock:
@@ -543,6 +644,10 @@ class DriveLinkIO:
         return client.loop_misc()
 
     def _run(self):
+        try:self._run_link()
+        finally:self._close_wake()
+
+    def _run_link(self):
         import paho.mqtt.client as mqtt
         import errno
         owner=self
@@ -572,12 +677,15 @@ class DriveLinkIO:
                 vm=next(vm for vm in self.vms if msg.topic==outbound(vm))
                 value=decode(bytes(msg.payload),schema.DriveLink)
                 kind=value.WhichOneof('payload')
-                if kind not in ('probe','snapshot','applied','budget_request','episode_request'):self._drop('DIRECTION');return
+                if kind not in ('probe','snapshot','applied','budget_request','episode_request','road_data','route_exchange'):self._drop('DIRECTION');return
                 prepared=self.prepare_snapshot(value) if kind=='snapshot' else None
                 if kind in ('episode_request','budget_request'):
                     from xenova_drive_world import episode_request_body,budget_request_body
                     prepared=(episode_request_body if kind=='episode_request' else budget_request_body)(bytes(msg.payload))
-                self.incoming.put_nowait((vm,value,received,prepared));self.received+=1
+                if kind in ('road_data','route_exchange'):
+                    self.route_incoming.put_nowait((vm,value,received,None,bytes(msg.payload)))
+                else:self.incoming.put_nowait((vm,value,received,prepared))
+                self.received+=1
             except StopIteration:self._drop('UNBOUND_TOPIC')
             except queue.Full:self._drop('INBOX_FULL')
             except ValueError as error:self._drop('INVALID_WIRE',error)
@@ -597,7 +705,7 @@ class DriveLinkIO:
                         self.failed+=1
                         if self.first_transport is None:self.first_transport=exc
                         self.stop.wait(.1);continue
-                rc=self._network_once(client,mqtt)
+                rc=self._network_once(client,mqtt,self._select_wait())
                 if rc not in (mqtt.MQTT_ERR_SUCCESS,mqtt.MQTT_ERR_AGAIN):
                     self.failed+=1;self.connected=False;reconnect=True
                     if self.stop.wait(.1):break
@@ -632,7 +740,7 @@ class DriveLinkIO:
         finally:client.disconnect()
 
     def close(self):
-        self.stop.set()
+        self.stop.set();self._wake()
         if self.thread:self.thread.join(1)
         if self.thread and self.thread.is_alive():raise RuntimeError('LINK_OWNER_TERMINATION_UNCONFIRMED')
         if self.failure is not None:raise RuntimeError('LINK_OWNER_FAILED') from self.failure

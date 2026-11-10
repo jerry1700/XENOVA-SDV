@@ -74,7 +74,7 @@ class TypedPhysical(MockSink):
 
 
 class OperatorWorld:
-    def __init__(self,path):
+    def __init__(self,path,*,operation_support=False):
         self.w=WarmWorld(path,mode='MANUAL');self.w.auth.update(manual_hold=True);self.w.arm()
         self.sink=TypedPhysical(self.w);self.client=Client();self.client.identity=SimpleNamespace(agent_instance_id=str(uuid4()))
         self.r=VerifiedGatewayRunner(self.client,self.sink,authority=self.w.auth,bindings=self.w.cache,vm_ids=(A,B),
@@ -83,6 +83,7 @@ class OperatorWorld:
         self.r.drive_link=DriveLinkProvider(self.r,self.io,trust(self.w),self.client.identity.agent_instance_id)
         self.sink.gateway=self.r.drive_link.instance
         self.r.manual_profile=ManualProfile(.1,.08,.3);self.r.guest_clock_policy=GuestClockPolicy(1000,100,1000000,20000,1000000)
+        self.r.operation_support=operation_support;self.r.episode_support=operation_support
         self.r.configure_operator();self.o=self.r.operator;self.w.m.manual_registry=self.o.sources
         self.w.m.durable_write_available=self.r._durable_available
         self.pump(lambda:self.o.ready)
@@ -98,8 +99,12 @@ class OperatorWorld:
         return value
     def tick(self):
         self.w.t+=.002;self.w.bind();self.sink.measure()
-        self.sink.device_view=lambda:dict(feedback_supported=True,ready=True,fault=None,pi_session=self.sink.pi,
-            device_session=self.sink.session,vehicle_sample=self.view(),accepted=None,applied=None,physical_stop=None)
+        def measured():
+            value=dict(feedback_supported=True,ready=True,fault=None,pi_session=self.sink.pi,
+                device_session=self.sink.session,vehicle_sample=self.view(),accepted=None,applied=None,physical_stop=None)
+            if hasattr(self,'meter_view'):value.update(self.meter_view())
+            return value
+        self.sink.device_view=measured
         self.o.tick()
     def pump(self,predicate):
         end=time.monotonic()+3
@@ -225,11 +230,14 @@ def test_parking_issuer_original_search_90s_survives_grant_and_owner_rebind(worl
     assert record['deadline']==issued+120_000_000
     assert record['search_deadline']==min(record['deadline'],issued+90_000_000)
     original=w.o.missions.grant(record)
+    assert original.kind==2 and original.mission_deadline_pi_us>original.issued_pi_us
+    assert decode(encode(original),schema.MissionGrant)==original
     assert original.mission_deadline_pi_us==record['deadline']
     assert original.search_deadline_pi_us==issued+90_000_000
     w.w.t+=.1;w.w.bind()
     rebound=w.o.missions.rebind(record,w.w.m.generation+1,B)
     grant=w.o.missions.grant(rebound)
+    assert grant.kind==2 and (grant.max_execution_travel_m,grant.max_search_travel_m)==(5.,10.)
     assert rebound['owner']==B and rebound['generation']==w.w.m.generation+1
     assert grant.owner_vm==UUID(B).bytes
     assert (rebound['issued'],grant.mission_deadline_pi_us,grant.search_deadline_pi_us)==(

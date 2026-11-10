@@ -2,13 +2,14 @@ import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ApiError } from '../api/client';
 import {
-  KEY_OF,
+  driveKeyOf,
   mockDemo,
   cancelResume,
   pressKey,
   requestResume,
   useManualInput,
   type DriveKey,
+  type DriveMode,
   type InputResult,
 } from '../api/drive';
 import { useDisplays, useRouteDisplay, useVms } from '../api/queries';
@@ -327,7 +328,7 @@ function ManualInput() {
       return;
     }
     const onKey = (down: boolean) => (event: KeyboardEvent) => {
-      const key = KEY_OF[event.key];
+      const key = driveKeyOf(event.key);
       if (!key || (event.target as HTMLElement | null)?.closest?.('input, textarea, select')) return;
       event.preventDefault(); // 화살표·스페이스로 페이지가 스크롤되지 않게
       press(key, down);
@@ -353,6 +354,7 @@ function ManualInput() {
       onPointerDown={() => press(key, true)}
       onPointerUp={() => press(key, false)}
       onPointerLeave={() => press(key, false)}
+      onPointerCancel={() => press(key, false)}
     >
       {text}
     </button>
@@ -396,19 +398,29 @@ function ManualInput() {
 }
 
 /**
- * [자율주행 재개] — AUTO_READY 에서만 활성. 누르면 POST /api/v1/drive/resume (MQTT-13).
- * 바로 바뀌지 않는다: 게이트웨이가 받아들이면 3·2·1 카운트다운 뒤 AUTO (계약 v1.2 §6, 화면 위 알림).
+ * [자율주행 재개]·[재무장] — 누르면 POST /api/v1/drive/resume (백엔드와 같은 허용 모드, 계약 mqtt 5.2 v1.8.3).
+ * - AUTO_READY: 게이트웨이가 받아들이면 3·2·1 카운트다운 뒤 AUTO (계약 v1.2 §6, 화면 위 알림).
+ *   카운트다운 중에는 [취소]로 멈출 수 있다 (DELETE, 계약 v1.7) — 모드는 그대로다.
+ * - MANUAL·AUTO: 출력 금지(disarmed)된 모드를 재무장. 화면은 출력 허가 여부를 모르므로 늘 누를 수 있고,
+ *   이미 출력 중이면 게이트웨이가 조용히 무시한다.
+ * - SAFE_STOP: 게이트웨이가 준비된 수동 VM 을 골라 MANUAL 로 재무장한다.
  */
-/** 재개 취소 API(DELETE /api/v1/drive/resume, S15P31E110-280)는 백엔드에 아직 없어 mock 에서만 보인다 */
-const CAN_CANCEL_RESUME = import.meta.env.VITE_MOCK === 'true';
+const RESUMABLE: readonly DriveMode[] = ['AUTO_READY', 'MANUAL', 'AUTO', 'SAFE_STOP'];
+
+function resumeLabel(mode: DriveMode | null | undefined) {
+  if (mode === 'SAFE_STOP') return '▶ 수동주행으로 재무장';
+  if (mode === 'MANUAL' || mode === 'AUTO') return `▶ ${mode} 재무장`;
+  return '▶ 자율주행 재개';
+}
 
 function Resume() {
   const { drive } = useDrive();
   const toast = useToast();
   const [sending, setSending] = useState(false);
-  const ready = drive?.control?.mode === 'AUTO_READY';
+  const mode = drive?.control?.mode;
+  const ready = mode != null && RESUMABLE.includes(mode);
   const counting = drive?.resume ?? null;
-  const auto = counting?.requested_by === 'auto';
+  const cancelledByOperator = drive?.resume_cancel?.reason === 'operator_cancelled';
   const send = async (job: () => Promise<void> = requestResume) => {
     setSending(true);
     try {
@@ -427,10 +439,10 @@ function Resume() {
         onClick={() => void send()}
       >
         {counting
-          ? `▶ ${Math.max(1, Math.ceil(counting.remaining_ms / 1000))}초 뒤 자율주행${auto ? ' (자동 복귀)' : ''}`
-          : '▶ 자율주행 재개'}
+          ? `▶ ${Math.max(1, Math.ceil(counting.remaining_ms / 1000))}초 뒤 자율주행`
+          : resumeLabel(mode)}
       </Button>
-      {counting && CAN_CANCEL_RESUME && (
+      {counting && (
         <Button
           variant="danger"
           style={{ width: '100%', marginTop: 'var(--x-space-2)' }}
@@ -442,14 +454,16 @@ function Resume() {
       )}
       <p className={styles.dim}>
         {counting
-          ? auto
-            ? CAN_CANCEL_RESUME
-              ? '자율주행이 복구돼 자동으로 돌아가는 중 — [취소]하면 수동주행이 계속 몰고, 그 뒤에는 [재개]로만 돌아간다.'
-              : '자율주행이 복구돼 자동으로 돌아가는 중.'
-            : '카운트다운 중 — 그 사이 자율주행이 다시 끊기면 취소되고 수동주행이 유지된다.'
-          : ready
-            ? '자동 복귀를 취소했다. 누르면 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
-            : '자율주행이 복구돼 3초 연속 정상이면(AUTO_READY) 자동으로 3·2·1 뒤 돌아간다.'}
+          ? '카운트다운 중 — [취소]하면 수동주행을 유지한다. 그 사이 자율주행이 다시 끊겨도 취소된다.'
+          : mode === 'SAFE_STOP'
+            ? '안전 정지 중 — 누르면 게이트웨이가 준비된 수동주행 VM 으로 재무장한다 (준비된 VM 이 없으면 무시).'
+            : mode === 'MANUAL' || mode === 'AUTO'
+              ? '출력이 금지된 상태라면 누르면 재무장한다. 이미 출력 중이면 게이트웨이가 무시한다.'
+              : ready
+                ? cancelledByOperator
+                  ? '재개를 취소했다. 수동주행 유지 중 — 누르면 다시 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
+                  : '자율주행이 준비됐다(AUTO_READY). 누르면 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
+                : '주행 상태를 받으면 [재개]·[재무장]을 누를 수 있다.'}
       </p>
     </div>
   );

@@ -1,4 +1,4 @@
-"""`python -m xenova_gateway`: 설정을 읽고 MQTT·ESP32 출력을 연 뒤 판정 루프를 돈다. SIGTERM·SIGINT 로 멈춘다."""
+"""설정·MQTT·ESP32 판정 루프. SIGTERM/SIGINT 종료 중 한 번의 내부 whitelist 진단을 남긴다."""
 
 from __future__ import annotations
 
@@ -149,6 +149,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 profile=OperatorProfile.load(settings.operator_profile)
                 runner.manual_profile=profile.manual;runner.guest_clock_policy=profile.guest_clock
                 runner.episode_support=profile.episode_support
+                runner.operation_support=profile.operation_support
+                runner.route_profile=None
+                if settings.route_profile:
+                    if not profile.operation_support or not profile.episode_support:
+                        raise ValueError('route requires explicitly installed operation and episode policies')
+                    from .route_profile import load_route
+                    runner.route_profile=load_route(settings.route_profile)
+                runner.operation_parking_strategy=profile.operation_parking_strategy
                 runner.planner_parameters=profile.planner_parameters
                 runner.keyboard_profile_directory=profile.keyboard_profile_directory
                 runner.configure_operator()
@@ -163,6 +171,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         active_failure=sys.exc_info()[1]
         stop.set()
+        def final_diagnostic():
+            try:diagnostics.emit_final(ipc=ipc,operator_ipc=operator_ipc,keyboard_ipc=keyboard_ipc,runner=runner,sink=sink)
+            except BaseException:pass  # 진단 누락은 완료 증거가 아니며 원 종료 결과를 덮지 않는다.
         # 한 보조 종료 실패가 나머지 소유 반환이나 최초 실행 오류를 덮지 않게 한다.
         for finish in (keyboard_ipc.close if keyboard_ipc else None,operator_ipc.close if operator_ipc else None,ipc.close if ipc else None,link.close if link else None,client.stop if client else None,
                        runner.shutdown if runner and not runner_started else None,
@@ -170,7 +181,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                        uplink.close if uplink else None,
                        (lambda:monitor.join(timeout=1)) if monitor else None,
                        (lambda:_release_lease(lease,sink,ipc,link,uplink,
-                           None if runner is None else getattr(runner,'scene_runtime',None),operator_ipc,keyboard_ipc)) if lease else None,diagnostics.close):
+                            None if runner is None else getattr(runner,'scene_runtime',None),operator_ipc,keyboard_ipc)) if lease else None,final_diagnostic,diagnostics.close):
             if finish is not None:
                 try:finish()
                 except Exception as error:cleanup_errors.append(error)

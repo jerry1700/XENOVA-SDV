@@ -32,7 +32,7 @@ class Endpoint:
 
 
 def resolve(config, *, sysfs=Path("/sys/class/net"), run=subprocess.run):
-    if (not isinstance(config, dict) or set(config) != {"schema_version", "usb_interface", "phone_ipv4", "port"}
+    if (not isinstance(config, dict) or set(config) - {"ui_origin"} != {"schema_version", "usb_interface", "phone_ipv4", "port"}
             or type(config["schema_version"]) is not int or config["schema_version"] != 1):
         raise ValueError("invalid mobile config")
     interface, port = config["usb_interface"], config["port"]

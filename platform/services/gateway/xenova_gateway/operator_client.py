@@ -83,13 +83,18 @@ def main(argv=None):
     commands.add_parser('status');commands.add_parser('stop')
     mode=commands.add_parser('mode');mode.add_argument('value',choices=('manual',))
     auto=commands.add_parser('auto');auto.add_argument('value',choices=('resume','cancel'))
-    parking=commands.add_parser('parking');parking.add_argument('value',choices=('start','cancel'))
+    parking=commands.add_parser('parking');parking.add_argument('value',choices=('start','cancel','permission'))
+    parking.add_argument('permission',nargs='?',choices=('on','off'))
     parking.add_argument('--strategy',choices=('reverse','forward'),default='reverse')
+    operation=commands.add_parser('operation');operation.add_argument('value',choices=('status',))
+    home=commands.add_parser('home');home.add_argument('value',choices=('set','status','return'))
+    drive=commands.add_parser('drive');drive.add_argument('value',choices=('depart',));drive.add_argument('mode',choices=('auto','manual'))
     lookup=commands.add_parser('request');lookup.add_argument('value',choices=('get',));lookup.add_argument('key')
     manual=commands.add_parser('manual');manual.add_argument('value',choices=('nudge','neutral','keyboard'))
     manual.add_argument('direction',nargs='?',choices=('forward','backward'))
     manual.add_argument('--duration-ms',type=int,default=100);manual.add_argument('--steer',choices=('left','center','right'),default='center')
     manual.add_argument('--device',default='control-keyboard')
+    manual.add_argument('--auto-enter',action='store_true')
     scene=commands.add_parser('scene');scene_actions=scene.add_subparsers(dest='scene_kind',required=True)
     survey=scene_actions.add_parser('survey');survey.add_argument('value',choices=('begin','commit'))
     survey.add_argument('--policy',choices=('static-flat-survey-1',),default='static-flat-survey-1')
@@ -99,10 +104,11 @@ def main(argv=None):
     if not 0<=args.wait_ms<=10000:parser.error('--wait-ms outside0..10000')
     if args.command=='manual' and args.value=='keyboard':
         from .keyboard_source import main as keyboard
-        return keyboard(['--device',args.device,'--operator-socket',args.socket])
+        return keyboard(['--device',args.device,'--operator-socket',args.socket]+(['--auto-enter'] if args.auto_enter else []))
     client=OperatorClient(args.socket,args.wait_ms)
     try:
-        if args.command=='status':body=dict(version=2,action='status')
+        if args.command in ('status','operation') or args.command=='home' and args.value=='status':
+            body=dict(version=2,action='home.status' if args.command=='home' else 'status' if args.command=='status' else 'operation.status')
         elif args.command=='request':body=dict(version=2,action='request.get',request_id=args.key)
         else:
             view=client.call(dict(version=2,action='status'))
@@ -110,12 +116,37 @@ def main(argv=None):
             current=view['data'];host=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
             if current['host_boot_id']!=host:raise ValueError('CLI must run on the current Pi host')
             key=new_request_id(host);issued=int(key.split(':')[2]);parameters={}
+            operating=None
+            if args.command in ('drive','home') or args.command=='parking' and args.value=='permission':
+                response=client.call(dict(version=2,action='operation.status'))
+                if not response['ok'] or not response['data'].get('supported'):raise ValueError('operation-status-1 unavailable')
+                operating=response['data'];binding=operating['binding']
+                if binding is None:raise ValueError('operation startup pending')
             if args.command=='mode':action='mode.manual'
             elif args.command=='stop':action='stop'
             elif args.command=='auto':action='auto.'+args.value
             elif args.command=='parking':
-                action='parking.'+args.value
-                if args.value=='start':parameters=dict(strategy=args.strategy.upper())
+                if args.value=='permission':
+                    if args.permission is None:parser.error('parking permission requires on or off')
+                    action='parking.permission.set';parameters=dict(enabled=args.permission=='on',
+                        expected_permission_revision=binding['permission_revision'])
+                else:
+                    action='parking.'+args.value
+                    if args.value=='start':parameters=dict(strategy=args.strategy.upper())
+            elif args.command=='drive':
+                action='drive.depart';parameters=dict(mode=args.mode.upper(),expected_operation_revision=binding['operation_revision'],
+                    expected_permission_revision=binding['permission_revision'],ready_revision=operating['ready_revision'],trigger_sha256=None)
+            elif args.command=='home':
+                response=client.call(dict(version=2,action='home.status'))
+                if not response['ok'] or not response['data'].get('supported'):raise ValueError('home-status-1 unavailable')
+                goal=response['data'];action='home.'+args.value
+                parameters=dict(expected_goal_revision=goal['goal_revision'],expected_goal_sha256=goal['goal_sha256'],
+                    expected_operation_revision=binding['operation_revision'],expected_permission_revision=binding['permission_revision'])
+                if args.value=='return':
+                    revision=goal.get('return_ready_revision')
+                    if revision is None:raise ValueError(goal.get('blocked_reason') or 'current RETURN_START eligibility unavailable')
+                    from .operator_contract import decimal63
+                    decimal63(revision);parameters['ready_revision']=revision
             elif args.command=='manual':
                 action='manual.'+args.value;driver=current['driver']
                 if driver is None:raise ValueError('current driver unavailable')
@@ -150,6 +181,7 @@ def main(argv=None):
         try:Attempts().observe(original,response)
         except (OSError,ValueError):pass  # cache status cannot replace a known Gateway result
         print(json.dumps(response,ensure_ascii=False,separators=(',',':')))
+        if response['ok'] and response.get('data',{}).get('phase')=='FAILED':return 2
         return 0 if response['ok'] else 3 if response['error']['outcome']=='UNKNOWN' else 2
     except (GatewayUnavailable,OSError,ValueError) as exc:
         print(json.dumps(dict(version=2,ok=False,error=dict(code=getattr(exc,'code','UNAVAILABLE'),request_id=locals().get('key'),

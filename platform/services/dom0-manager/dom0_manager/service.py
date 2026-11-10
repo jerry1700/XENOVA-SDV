@@ -30,7 +30,7 @@ from .errors import InsufficientResources, InvalidArgument, InvalidState, Operat
 from .models import ControlOperation, ControlStatus, CpuLayout, CreateVmRequest, ResourceUpdate, UpdateResourcesRequest, VmState
 
 
-DOM0_UUID = UUID(int=0)  # xl list -l 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
+DOM0_UUID = UUID(int=0)  # xl list -v 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
 
 
 def reject_dom0(vm_id: UUID) -> None:

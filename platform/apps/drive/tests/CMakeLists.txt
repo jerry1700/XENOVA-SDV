@@ -18,6 +18,11 @@ target_include_directories(test_health PRIVATE ../../../guests/zephyr/diagnostic
 target_compile_options(test_health PRIVATE -Wall -Wextra -Werror -fsanitize=address,undefined)
 target_link_options(test_health PRIVATE -fsanitize=address,undefined)
 add_test(NAME health-evidence COMMAND test_health)
+add_executable(test_planner_health planner_health.c)
+target_include_directories(test_planner_health PRIVATE ../zephyr/src)
+target_compile_options(test_planner_health PRIVATE -Wall -Wextra -Werror -fsanitize=address,undefined)
+target_link_options(test_planner_health PRIVATE -fsanitize=address,undefined)
+add_test(NAME planner-owner-evidence COMMAND test_planner_health)
 add_executable(test_preparation preparation.c ../zephyr/src/adapter.c ../zephyr/src/controller.c
   ../../../guests/zephyr/diagnostics/src/health.c
   ../../autonomous/zephyr/src/autonomous.c ../../manual/zephyr/src/manual.c)
