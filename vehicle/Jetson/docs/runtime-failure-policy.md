@@ -16,6 +16,12 @@
 
 `FrameExpired`와 `ReservationExpired`는 정상 자료/예약 폐기다. `ConfigurationError`는 명시 설정 오류다. 예외가 `ValueError`라는 이유나 현재 worker 상태만으로 고장 종류를 추정하지 않는다. 실제 PC 단절 뒤 자동 hot reattach나 PC worker 부분복구를 지원한다는 뜻은 아니다.
 
+## 모델 상주 수명
+
+A 수집 owner는 기동 시 Device·pipeline·모델을 한 번 시작하고 정상 관측 루프 동안 유지한다. 프레임 만료, 빈 detection, fresh 준비 개수 부족, AUTO/MANUAL·주차 설정 전환은 모델 재적재 조건이 아니다. PC 관측 연결 단절도 source만 철회하고 같은 모델을 유지한다. 모델 적재 사실과 현재 관측·World의 사용 가능 여부는 별개다.
+
+M-only 복구는 기존 A·Device·모델을 보존한다. 실제 A 고장으로 A/M을 교체하거나 service를 명시 종료할 때는 원 owner의 실제 close·반환을 끝내며, 새 A를 기동하면 모델도 다시 적재한다. 카메라 전원이 켜져 있다는 사실만으로 종료된 host session의 모델이 계속 유지된다고 가정하지 않는다. 제한 시간 수집·추론 벤치의 매 실행 open/close는 상주 실행과 구분한다.
+
 ## 네 종류의 시간
 
 1. **관측·주행 결과의 수명:** 원 capture/입력 E를 지킨다. 초기 live frame 창은 500ms이며 지연된 결과에 새 시각을 붙이지 않는다. RPi 명령 E를 worker 고장 감시값으로 연장하지 않는다.
@@ -26,6 +32,8 @@
 고장 감시값은 운영 벤치 초깃값이며 Nano 부하 실측으로 조정한다. `XENOVA_JETSON_CONTROL_STALL_S`, `XENOVA_JETSON_CAPTURE_STALL_S`, `XENOVA_JETSON_COMPUTE_STALL_S`는 process 기동 때 한 번 읽고 유한한 양수·signed64 microseconds 범위를 검사한다. 이 값은 처리율 보증이나 RPi 출력 유예가 아니다.
 
 capture 30쌍과 REQUIRED NN의 fresh 정상 parser 결과 5개 확인은 유지한다. 최초 15초 관찰 창에 근거가 부족하면 같은 모델에서 WAIT하며 나중의 fresh 자료로 검사를 계속한다. 빈 detection은 정상 결과이고, 오래된 결과는 준비 개수에 세지 않는다. 최초 형식·대응관계 검사가 현재 World·위치·점유의 신선도 검사를 대신하지 않는다.
+
+선택 복구의 완료는 실제 새 owner의 기동·설치·자원 교체 완료를 뜻한다. capture 30쌍·NN 5개의 준비를 기다리는 일과 분리하며, 복구 완료가 가짜 READY·World를 만들지 않는다. 입력에 종속된 준비 대기는 원 cold 기동 기한을 재사용하지 않는다. 실제 local setup·BIND/RESUME·owner 반환의 한도는 유지한다. 물리 A의 개별 RGB/depth 정체와 A/M의 제어 heartbeat는 준비 개수가 채워지기 전에도 독립적으로 확인한다.
 
 ## native 예약과 실제 메모리 반환
 

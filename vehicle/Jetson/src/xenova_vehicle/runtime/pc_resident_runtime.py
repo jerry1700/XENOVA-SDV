@@ -64,6 +64,13 @@ def _observation_scope(binding):
 class _PcRecovery(ResidentRecovery):
     """미구현 PC 복원을 physical recovery로 캐스팅하지 않는다. 원 STOP/reap는 재사용한다."""
 
+    @property
+    def operation_cap(self):
+        # 검증된 NN_START는 실제 설치 완료다. 외부 영상 대기를 cold cap으로 재단하지 않는다.
+        if self.active is None and self.r._pc_start is not None:
+            return 2**64-1
+        return super().operation_cap
+
     def fail(self, role, reason, retryable=True):
         if self.r.stopping:
             return False

@@ -1228,8 +1228,8 @@ class _Runtime:
             if role=='M' and host.compute_watch is not None and host.compute_watch.stalled(now):
                 self.recovery.fail('M', 'original mapper job expired without actual stage progress')
                 continue
-            idle_watch = (role == 'A' and self.capture_ready_us is not None
-                          or role == 'M' and host.bind_ack is not None
+            idle_watch = (role == 'A' and ('A','GRAPH_STARTED') in self.progress
+                          or role == 'M' and host.hello and host.admitted
                           or role == 'D' and self.storage_ready_us is not None)
             heartbeat_lower=host.last_heartbeat_us
             if role=='D' and self.db_last_progress_us is not None:

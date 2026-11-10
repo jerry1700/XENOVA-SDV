@@ -599,7 +599,7 @@ def acquisition_main(endpoint, boot):
         actor.state = 'WARMUP'
         actor.progress('GRAPH_STARTED', completed=queue_j)
         next_clock = j_us() + 100_000
-        last_raw = dict(rgb_video=j_us(), depth_right=j_us())
+        last_raw = dict(rgb_video=queue_j, depth_right=queue_j)
         last_nn = None
         request = pending_sample = None
         last_published = None
@@ -644,7 +644,8 @@ def acquisition_main(endpoint, boot):
                 actor.state = 'STREAMING'
                 actor.progress('CAPTURE_READY', assembler.latest_capture.rgb.sequence, completed=warmup.ready_us)
                 capture_reported = True
-            if capture_reported and any(now - completed >= health_policy().capture_stall_us for completed in last_raw.values()):
+            # 개별 실제 stream의 건강과 fresh pair 준비 개수는 다른 근거다.
+            if any(now - completed >= health_policy().capture_stall_us for completed in last_raw.values()):
                 raise TimeoutError('active RGB/depth stream stalled')
             # NN 입력/출력 부재는 readiness 제한이다. SDK 고장과 control 정체는 별도로 복구한다.
             for packet in incoming:
