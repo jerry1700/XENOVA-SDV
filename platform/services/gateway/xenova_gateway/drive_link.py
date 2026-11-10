@@ -332,7 +332,7 @@ class DriveLinkProvider:
             mission=self._current_mission(vm)
             if mission is not None and role=='autonomous':reply.clock.current_mission.CopyFrom(mission)
             if modern is not None:
-                witness=modern.direction_witness(vm,role)
+                witness=modern.direction_witness(vm,role,view=device_view)
                 if witness is not None:reply.clock.direction_gate.CopyFrom(witness)
                 facts=self.runner.control_facts(view=device_view) if modern.episodes.supported(peer) else None
                 if facts is not None:reply.clock.control_facts.CopyFrom(facts)

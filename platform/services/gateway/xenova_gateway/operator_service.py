@@ -659,7 +659,7 @@ class OperatorService:
             self._proposal('mission-binding:'+current['id'],{'current_mission':rebound},'mission_binding',self.now+10_000_000,
                 lambda ok,unknown:self.missions.publish() if ok else None)
 
-    def direction_witness(self,vm,role):
+    def direction_witness(self,vm,role,*,view=None):
         device=getattr(self.runner._sink,'device',None)
         producer=getattr(device,'direction_witness',None)
         if producer is None:return None
@@ -668,6 +668,7 @@ class OperatorService:
         from xenova_mqtt.drive_binding import app_instance
         peer=(vm,binding['execution_id'],app_instance(binding,role))
         if not any(value.peer==peer and self.now<value.expires for value in self.clocks.confirmed.values()):return None
-        return producer(vm,role,self.runner.machine,self.now,self.sources if role=='manual' else None)
+        arguments=(vm,role,self.runner.machine,self.now,self.sources if role=='manual' else None)
+        return producer(*arguments) if view is None else producer(*arguments,view=view)
 
     def close(self):self._stop('SHUTDOWN');self.worker.close()

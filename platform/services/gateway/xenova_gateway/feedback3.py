@@ -400,10 +400,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
             and all(a.get(k)==b.get(k) for k in keys) and b.get('segment_index')==a.get('segment_index',-2)+1
             and b.get('cusp_index')==a.get('cusp_index',-2)+1 and b.get('next_direction')==0)
 
-    def direction_witness(self,vm,role,machine,now,manual=None):
+    def direction_witness(self,vm,role,machine,now,manual=None,*,view=None):
         # The serial I/O owner publishes one immutable snapshot. Actor reads do
         # not traverse a concurrently mutating pending table/odometry deque.
-        snapshot=self._direction_snapshot
+        snapshot=self._direction_snapshot if view is None else view.get('stop_facts_source')
         if snapshot is None or not snapshot['clock_ready'] or snapshot['moving']:return None
         pin=snapshot['pin'];sample=snapshot['sample'];matched=snapshot['matched']
         if ((role!='manual' and now>=pin['phase_end']) or sample is None
@@ -426,12 +426,12 @@ class Feedback3SerialSink(FeedbackSerialSink):
                     while len(rows)>2 and rows[-1]['pi_sample_us']-rows[1]['pi_sample_us']>=self.stationary_policy.window_us+2*rows[1]['clock_error_us']:rows.pop(0)
                 window=tuple(encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':pin['gateway']})) for row in rows)
                 if len(window)<2:return None
-                check_stationary_window(window,current,self.odometry.host_boot,pin['gateway'],self.pi_session,
-                    self.device_session,self.stationary_policy,now,rows[-1]['source_sample'],rows[-1]['source_us'])
+                check_stationary_window(window,current,self.odometry.host_boot,pin['gateway'],sample['pi_session'],
+                    sample['device_session'],self.stationary_policy,now,rows[-1]['source_sample'],rows[-1]['source_us'])
             else:
                 if matched is None:return None
                 matched.check(current,self.odometry.host_boot,pin['gateway'],machine.generation,
-                    self.pi_session,self.device_session,self.stationary_policy,now)
+                    sample['pi_session'],sample['device_session'],self.stationary_policy,now)
         except ValueError:return None
         source=pin['witness'];command=source.get('command')
         if role=='manual' and manual is not None:
@@ -475,6 +475,6 @@ class Feedback3SerialSink(FeedbackSerialSink):
             mission_id=UUID(command['mission_id']).bytes,mission_revision=int(command['mission_revision']),grant_revision=int(command['grant_revision']),
             driver_session=UUID(command['driver_session']).bytes,driver_action_seq=int(command['driver_action_seq']),
             driver_state_seq=int(command['driver_state_seq']),vehicle_sequence=sample['sequence'],valid_until_pi_us=end,
-            pi_session=self.pi_session,device_session=self.device_session)
+            pi_session=sample['pi_session'],device_session=sample['device_session'])
         value.gate.CopyFrom(schema.DirectionGateRef(gate_revision=revision,stop_command_sequence=pin['sequence'],
             state=state,requested_direction=direction));return value
