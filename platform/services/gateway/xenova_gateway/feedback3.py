@@ -63,6 +63,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
         self.last_probe_us=0;self.previous_interval=None;self.streak=0;self.leases=OrderedDict();self.install=None
         self.stop_pin=None;self.report_hwm=0;self.gate_revision=0;self.last_motion=False
         self._matched_stop_snapshot=None;self._direction_snapshot=None;self.phase_key=None;self.phase_end=0
+        self._vehicle_wire_cache=OrderedDict()
         self.hold_row=None;self.hold_start=None
         self.tof_inbox=TofInbox();self._tof_selection=None;self._tof_context_snapshot=None
         super().__init__(*args,**kwargs)
@@ -292,9 +293,24 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 or self.odometry.latest['source_sample']!=sample):return None
         # Preserve the original report/sample relation; a newer odom packet does
         # not refresh an older STOP report's stationary evidence.
-        window=tuple(encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':pin['gateway']})) for row in rows)
+        window=tuple(self._vehicle_wire(row,pin['gateway']) for row in rows)
         if len(window)<2:return None
         return MatchedStop(pin['command'],pin['feedback'],window)
+
+    def _vehicle_wire(self,row,gateway):
+        """같은 원 표본의 wire만 재사용한다. 정지 수락·기한은 캐시하지 않는다."""
+        key=id(row)
+        cached=self._vehicle_wire_cache.get(key)
+        if cached is not None and cached[0] is row and cached[1]==row and cached[2]==gateway:
+            self._vehicle_wire_cache.move_to_end(key)
+            return cached[3]
+        wire=encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':gateway}))
+        # Pose까지 사본을 남겨 같은 dict가 변경돼도 옛 wire를 돌려주지 않는다.
+        original={**row,'odom_pose':dict(row['odom_pose'])}
+        self._vehicle_wire_cache[key]=(row,original,gateway,wire)
+        self._vehicle_wire_cache.move_to_end(key)
+        while len(self._vehicle_wire_cache)>128:self._vehicle_wire_cache.popitem(last=False)
+        return wire
 
     def write(self,frame,t):
         if not self.ready:raise SinkError('feedback3 handshake not ready')
