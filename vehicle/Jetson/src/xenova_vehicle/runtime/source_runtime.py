@@ -563,7 +563,8 @@ class MapperSource:
 
     def _discard_expired_delivery(self, original):
         self.link.discard_expired(original)
-        self.counts['expired_unsent']+=1
+        key='output_expired' if original.kind in ('WORLD_CANDIDATE','SURVEY_SUMMARY') else 'expired_unsent'
+        self.counts[key]+=1
         if original.kind=='SOURCE_BOOTSTRAP_COMPLETE':
             now=self.clock()
             self._bootstrap_stage(original.kind,original.body,original.header['request_id'],now,now+5_000_000)
