@@ -69,7 +69,7 @@ xenova:
         min-memory-mib: 512
         guest-kind: linux
       - template-id: debian-13-arm64
-        version: "1.0.6"
+        version: "1.0.7"
         display-name: Debian 13
         min-memory-mib: 256
         guest-kind: linux
