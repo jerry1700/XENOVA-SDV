@@ -322,7 +322,8 @@ class DriveLinkProvider:
                 if modern.clocks.policy is not None:
                     reply.clock.guest_clock_valid_until_pi_us=int(received*1e6)+modern.clocks.policy.lease_us
             if self.trust is not None and role=='autonomous':reply.clock.trust.CopyFrom(self.trust)
-            current=self.runner.device_view().get('vehicle_sample')
+            device_view=self.runner.device_view()
+            current=device_view.get('vehicle_sample')
             if not current:return self.reject('LINK_VEHICLE_UNAVAILABLE')
             reply.clock.vehicle.CopyFrom(schema.VehicleSample(major=1,**{**current,'gateway_instance':self.instance}))
             if self.trust is not None and role=='autonomous':
@@ -333,7 +334,7 @@ class DriveLinkProvider:
             if modern is not None:
                 witness=modern.direction_witness(vm,role)
                 if witness is not None:reply.clock.direction_gate.CopyFrom(witness)
-                facts=self.runner.control_facts() if modern.episodes.supported(peer) else None
+                facts=self.runner.control_facts(view=device_view) if modern.episodes.supported(peer) else None
                 if facts is not None:reply.clock.control_facts.CopyFrom(facts)
                 if role=='autonomous':
                     status=modern.episodes.status(peer)

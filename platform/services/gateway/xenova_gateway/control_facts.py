@@ -21,8 +21,10 @@ def float_upper(value):
     return rounded
 
 
-def build_control_facts(runner):
-    view=runner.device_view();sample=view.get('vehicle_sample');original=view.get('absolute_meter')
+def build_control_facts(runner, *, view=None):
+    """view를 지정하면 상위 Vehicle과 같은 원 스냅샷을 사용하며 다시 읽지 않는다."""
+    if view is None:view=runner.device_view()
+    sample=view.get('vehicle_sample');original=view.get('absolute_meter')
     if sample is None or original is None:return None
     anchor,_=original;now=int(runner._clock()*1000000)
     if (anchor.vehicle_sequence!=sample['sequence'] or anchor.host_boot!=runner.authority.host

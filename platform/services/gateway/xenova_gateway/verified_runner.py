@@ -581,10 +581,10 @@ class VerifiedGatewayRunner(GatewayRunner):
         except ValueError:return None
         return value
 
-    def control_facts(self):
+    def control_facts(self, *, view=None):
         """원 serial owner의 불변 meter/STOP 사실. current clock나 권위를 발급하지 않는다."""
         from .control_facts import build_control_facts
-        return build_control_facts(self)
+        return build_control_facts(self, view=view)
 
     def current_scene_gate(self):
         from .scene_authority import SceneGate

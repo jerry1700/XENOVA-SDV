@@ -63,3 +63,25 @@ def test_meter_is_bound_to_exact_parent_vehicle_sequence(link):
     view['vehicle_sample']['sequence']+=1
     runner.device_view=lambda:view
     assert build_control_facts(runner) is None
+
+
+def test_clock_facts_use_captured_parent_snapshot_without_reading_new_vehicle():
+    from uuid import uuid4
+    from test_odometry import config,observe
+    from xenova_gateway.odometry import VehicleOdometry
+    now=1200000;pi=str(uuid4());odom=VehicleOdometry(config(),HOST)
+    odom.device_session(str(uuid4()))
+    observe(odom,pi,1100000,1100000,1,0,0)
+    sample=observe(odom,pi,1199000,1199000,2,0,0)
+    captured=dict(vehicle_sample=sample,absolute_meter=odom.absolute.snapshot,
+        clock_valid_until_pi_us=now+1000000,stop_facts_source=None)
+    runner=SimpleNamespace(_sink=SimpleNamespace(_vehicle_maximum_age_us=200000),
+        _clock=lambda:now/1000000,authority=SimpleNamespace(host=HOST))
+    assert captured['vehicle_sample']['sequence']==captured['absolute_meter'][0].vehicle_sequence
+    def advanced():
+        raise AssertionError('clock reply must not read a newer device snapshot')
+    runner.device_view=advanced
+    value=VerifiedGatewayRunner.control_facts(runner,view=captured)
+    assert value is not None
+    validate(value)
+    assert value.meter.vehicle_sequence==captured['vehicle_sample']['sequence']
