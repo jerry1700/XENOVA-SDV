@@ -136,6 +136,10 @@ class _AcquisitionDiagnostic:
                 sender_stats=pump._session.sender.stats, receiver_stats=pump._session.receiver.stats)
             self.final = dict(source_fenced=source_fenced, actor_state=actor.state,
                 driver_phase=None if driver is None else driver.phase, leases_released=actor.leases_released,
+                driver_counts={} if driver is None else dict(getattr(driver,'counts',{})),
+                nn_counts=dict(getattr(getattr(actor,'nn_source',None),'counts',{})),
+                nn_last_unmatched=getattr(getattr(actor,'nn_source',None),'last_unmatched',None),
+                nn_last_submission_timing=getattr(getattr(actor,'nn_source',None),'last_submission_timing',None),
                 active_frame_expires_us=None if driver is None or driver.active is None else driver.active.expires_us,
                 copy_request=self.copy_request, request_draft_pending=request_draft is not None,
                 metadata_draft_pending=metadata_draft is not None, start_draft_pending=start_draft is not None,

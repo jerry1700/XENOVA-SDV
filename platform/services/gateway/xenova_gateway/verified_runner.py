@@ -7,7 +7,7 @@ from collections import deque
 from xenova_mqtt import topics
 from .authority import AuthorityError
 from .machine import DRIVE_APPS,ForwardDrive,ForwardStop,PublishControl,PublishEvent,Measure
-from .runner import GatewayRunner,CONSOLE_RESUME,RESUME_REQUESTED,RESUME_CANCEL_REQUESTED
+from .runner import GatewayRunner,CONSOLE_RESUME,RESUME_REQUESTED,RESUME_CANCEL_REQUESTED,log
 from .verified import VerifiedDriveMachine
 from .frame import encode,STOP_SAFE_STOP
 from .sink import SinkError
@@ -580,7 +580,12 @@ class VerifiedGatewayRunner(GatewayRunner):
             value.check(dict(vehicle=sample['vehicle'],calibration=sample['calibration'],odom_epoch=sample['odom_epoch']),
                 self.authority.host,self.drive_link.instance if self.drive_link else self._client.identity.agent_instance_id,
                 self.machine.generation,view['pi_session'],view['device_session'],policy,int(self._clock()*1e6))
-        except ValueError:return None
+        except ValueError as error:
+            # 최초 거부만 INFO로 남겨 반복 표본의 로그 비용을 제한한다.
+            reason=str(error)
+            if getattr(self,'_matched_stop_error',None) is None:log.info('STOP proof unavailable: %s',reason)
+            self._matched_stop_error=reason
+            return None
         return value
 
     def control_facts(self, *, view=None):
