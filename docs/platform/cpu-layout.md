@@ -225,6 +225,20 @@ Manager().call("cpu-host-prepare", {"timeout_ms":15000}, execute=True)
 준비는 별도 내부 action이며 공개 CPU 정책 변경 action은 cpu-policy-set 하나다.
 정책 파일 저장과 host.ready는 별개다. 사용자·unit 모두 Manager의 공통 잠금과 같은 준비 코드를 사용한다.
 
+이미 저장된 정책의 `cpu-host-prepare`는 실패한 Linux create의 private 자산만 남은 경우를
+별도로 확인한다. `RECOVERY_REQUIRED`이고 수습이 진행 중이지 않은 원 작업에 한해, 등록·공개 부재와
+현재 준비 소유자·Xen 연결·mount·loop·열린 inode의 사용 부재를 기존 수습 진단으로 확인한다.
+느린 관측은 공통 잠금 밖에서 수행하고, 잠금을 다시 얻은 뒤 원 작업·registry·부팅·종료 gate·CPU 정책과
+private 자산 신원을 재확인한다. 근거는 이번 준비 호출에서만 사용하며 저장하거나 재사용하지 않는다.
+
+이 경우에도 실패 자산·원 오류·기한·디스크/IP 예약은 그대로다. 폐기·예약 반환은 기존 명시
+`operation-reconcile` 절차로만 수행한다. 새 CPU 정책 변경에는 이 예외를 적용하지 않는다.
+실행 중 관리 VM·미확정 launch·진행 중 자산 작업·수습·불완전한 사용 관측의 차단도 유지한다.
+일반 create/delete/start/조회에 새 CPU 준비 관문을 넣지 않는다. 생성·삭제·수습의 긴 I/O와
+CPU 준비의 private 사용 관측 중에도 다른 VM의 조회·stop은 기존 경로로 진행한다.
+소스 후보·정상/실패 보호·동시성의 로컬 검증은
+[CPU 준비의 실패 자산 격리 검증](../verification/cpu-preparation-asset-isolation-20261110.md)을 참고한다.
+
 ### 저장 중단·부분 적용
 
 정책 publication journal: `/srv/xenova/cpu-policy-operations/<operation_id>.json`.
