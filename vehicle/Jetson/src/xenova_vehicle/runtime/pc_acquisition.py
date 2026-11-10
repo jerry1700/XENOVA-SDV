@@ -1,8 +1,9 @@
 """A main의 PC 관측 active1/latest1와 실제 HOST_SIM enqueue/result를 연결한다.
 
-수신 pump·S control·SHM grant의 실행 loop는 caller가 소유한다. 이 owner는 원 EARLY
-전달과 NN 후보 계산은 병행한다. 실제 M snapshot ACK 전에는 NN 결과를 게시하지 않는다. source/모드 변화는 모델을 닫지
-않으며, 원 NN ticket·frame E를 재발급하지 않는다. M은 YOLOP 해석을 담당한다.
+수신 pump·S control·SHM grant의 실행 loop는 caller가 소유한다. 원 EARLY 전달과
+NN 후보 계산을 병행하며 실제 M snapshot ACK 전에는 NN 결과를 게시하지 않는다.
+source/모드 변화는 모델을 닫지 않으며 원 NN ticket·frame E를 재발급하지 않는다.
+M은 YOLOP 해석을 담당한다.
 """
 
 from dataclasses import dataclass

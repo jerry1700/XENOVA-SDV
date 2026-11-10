@@ -1,6 +1,6 @@
 """등록된 PC M main의 slot/source/storage와 단일 compute owner를 연결한다.
 
-S가 만든 실제 연결과 boot만 받는다. EARLY pose는 NN 전에 한 번 고정하며 현재
+S가 만든 실제 연결과 boot만 받는다. EARLY pose는 NN 결과 채택 전에 한 번 고정하며 현재
 Vehicle/R1은 별도로 갱신한다. public physical 입력으로 cast하거나 SDK/GT/READY를
 만들지 않는다. Scene/COMPLETE 복원은 지원하지 않으며 A의 모델 수명은 건드리지 않는다.
 """
@@ -257,7 +257,9 @@ class _MapperMain:
 
     def _expire_heads(self):
         now=j_us()
-        if self.acquire is not None and now>=self.acquire.expires_us:
+        # copy 예약 E가 남아 있어도 해당 관측 E가 끝났다면 새 native 읽기를 시작하지 않는다.
+        if self.acquire is not None and (now>=self.acquire.expires_us
+                or self.meta is not None and now+1>=self.meta[1].expires_j_us):
             self.actor.cancel_request(self.acquire)
             self.offer=self.offer_typed=self.meta=self.acquire=self.acquire_draft=None
         if self.early is not None and now+1>=self.early['frame'].expires_j_us:
