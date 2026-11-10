@@ -124,7 +124,8 @@ class Feedback3SerialSink(FeedbackSerialSink):
         if self.started is None:
             self.started=now;self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
         invalid=self.framer.invalid+self.framer.oversize
-        super()._poll(now,owned_ready=owned_ready)
+        # feedback3의 시계 처리까지 끝난 최종 view 하나만 게시한다.
+        super()._poll(now,owned_ready=owned_ready,publish_view=False)
         if self.framer.invalid+self.framer.oversize!=invalid:self.tof_inbox.reject(reason='outer_frame_loss')
         at=int(self.clock()*1e6)
         if self.ready and self._sensor_available():
