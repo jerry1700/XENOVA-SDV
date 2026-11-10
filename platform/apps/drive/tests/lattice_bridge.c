@@ -161,10 +161,10 @@ int probe_valid(void *pointer) {
  struct lp_budget b={now+1000000,clock_us,NULL,NULL,&p->collision_index};
  return lp_validate_path(&p->path,&p->snapshot.world,&p->config,&m,&b);
 }
-/* One bounded test owner records only the Vehicle actually used by a successful
- * product calculation. Prepared geometry inspection has no completed calc. */
+/* One bounded test owner retains the Vehicle/path/World witness from the same
+ * successful calculation. Prepared geometry inspection has no completed calc. */
 struct engine_fixture {
- struct drive_engine core;dw_vehicle calculated_vehicle;uint32_t calculated_path;bool calculated;
+ struct drive_engine core;dw_vehicle calculated_vehicle;struct de_witness calculated_world;uint32_t calculated_path;bool calculated;
 };
 void *engine_new(void){
  struct engine_fixture *unit=calloc(1,sizeof(*unit));if(!unit)return NULL;
@@ -173,6 +173,7 @@ void *engine_new(void){
 }
 static void engine_calculated(void *pointer,const dw_vehicle *vehicle){
  struct engine_fixture *unit=pointer;unit->calculated_vehicle=*vehicle;
+ unit->calculated_world=unit->core.last_track_world;
  unit->calculated_path=unit->core.last_track_path.generation;unit->calculated=true;
 }
 void engine_free(void *e){free(e);}
@@ -280,7 +281,7 @@ int engine_state(void *pointer,uint8_t *out,size_t cap){
  struct engine_fixture *unit=pointer;struct drive_engine *e=&unit->core;struct de_reference h;const struct lp_path *p;
  if(de_path_acquire(e,&h,&p))return -1;
  bool completed=unit->calculated&&unit->calculated_path==h.generation;
- dw_vehicle source=unit->calculated_vehicle;struct de_witness witness=e->last_track_world;
+ dw_vehicle source=unit->calculated_vehicle;struct de_witness witness=unit->calculated_world;
  if(!completed){
   struct dw_handle mh;const struct dw_snapshot *map;
   if(dw_vehicle_latest(&e->odometry,&source)||dw_acquire(&e->maps,&mh,&map)){de_path_release(e,h);return -1;}

@@ -444,8 +444,10 @@ def _validate_one(message):
         if message.state and (not message.gate_revision or not message.stop_command_sequence):raise ValueError('direction gate provenance')
     elif name=='GuestClockReceipt':
         _positive(message,'probe_sequence','guest_receive_us')
-    elif name=='ClockProbe' and message.HasField('receipt'):
-        if (message.receipt.probe_sequence>=message.sequence
+    elif name=='ClockProbe':
+        if message.HasField('supported_state_features') and message.supported_state_features&~STATE_KNOWN_FEATURES:
+            raise ValueError('unsupported declared state capabilities')
+        if message.HasField('receipt') and (message.receipt.probe_sequence>=message.sequence
                 or message.receipt.guest_receive_us>message.guest_send_us):
             raise ValueError('clock receipt order')
     elif name=='DirectionGateWitness':
@@ -466,6 +468,7 @@ def _validate_one(message):
                 raise ValueError('MANUAL direction gate source')
         else:raise ValueError('direction gate producer role')
     elif name=='ClockReply':
+        if message.pi_receive_us>message.pi_send_us:raise ValueError('Pi clock order')
         from .episodes import validate_clock
         validate_clock(message)
         if message.HasField('guest_clock_valid_until_pi_us') and message.guest_clock_valid_until_pi_us<=message.pi_receive_us:
@@ -518,8 +521,6 @@ def _validate_one(message):
     elif name=='MapperClockReply':
         _positive(message,'probe_seq','pi_send_us','j2','j3')
         if message.j2>message.j3:raise ValueError('mapper clock order')
-    elif name=='ClockReply':
-        if message.pi_receive_us>message.pi_send_us:raise ValueError('Pi clock order')
     elif name=='SurveySummary':
         _nonnegative(message,'anchor_position_bound_m','anchor_heading_bound_rad')
         if (message.status>4 or message.observed_slot_count>64 or message.observation_station_count>24
@@ -550,9 +551,6 @@ def _validate_one(message):
                 or any(value&~31 for value in message.quality)
                 or len(message.calibration)!=64 or any(c not in '0123456789abcdefABCDEF' for c in message.calibration)):
             raise ValueError('ToF bounded frame semantics')
-    elif name=='ClockProbe':
-        if message.HasField('supported_state_features') and message.supported_state_features&~STATE_KNOWN_FEATURES:
-            raise ValueError('unsupported declared state capabilities')
     elif name in ('EpisodeCore','EpisodeProgress','EpisodeAcceptanceRef','EpisodeSnapshot','EpisodeSourceContext',
                   'EpisodeRequest','EpisodeReceipt','EpisodeStatus','PiAbsoluteMeter','StopFacts','DriveControlFacts'):
         from .episodes import validate_one
