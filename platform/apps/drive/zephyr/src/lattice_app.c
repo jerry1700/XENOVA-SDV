@@ -6,6 +6,7 @@
 #include "lattice_input.h"
 #include "lattice_memory.h"
 #include "preflight_cadence.h"
+#include "planner_health.h"
 #include <zephyr/random/random.h>
 #include <zephyr/sys/atomic.h>
 #include <errno.h>
@@ -18,6 +19,7 @@
 extern const struct lp_config lp_selected_config;
 extern const struct lp_assets lp_selected_assets;
 static struct drive_engine engine;
+static struct drive_planner_health planner_health;
 static struct manual_cfg manual_config;
 static struct k_thread planner_thread;
 K_THREAD_STACK_DEFINE(planner_stack,8192);
@@ -148,6 +150,12 @@ static void prep_diagnostic(unsigned phase,int rc,int returned,int why,const str
 #endif
 
 static int clock_us(void *unused,uint64_t *out){ARG_UNUSED(unused);return xdiag_clock_us(out);}
+static void planner_completed(void){
+ uint64_t now;if(!clock_us(NULL,&now))drive_planner_health_complete(&planner_health,now);
+}
+static bool planner_current(void){
+ uint64_t now;return !clock_us(NULL,&now)&&drive_planner_health_current(&planner_health,now);
+}
 static bool cancelled(void *unused){ARG_UNUSED(unused);return atomic_get(&stop)||atomic_get(&planner_stop)||xd_stopping();}
 static bool tracker_cancelled(void *unused){ARG_UNUSED(unused);return atomic_get(&stop)||drive_task_stopping(DRIVE_TASK_AUTO)||xd_stopping();}
 static int current_vehicle_role(bool manual,struct dl_clock *clock,uint64_t *now,dw_vehicle *vehicle){
@@ -258,6 +266,7 @@ static int mission_profile(bool *required){
 static const char *qualified(const void *unused,struct xm_span input,int64_t age){
  ARG_UNUSED(unused);ARG_UNUSED(input);ARG_UNUSED(age);
  if(engine.stopping)return "STATE_PREPARING";
+ if(!planner_current())return "CALCULATION_FAILED";
  if(engine.path_invalidated)return "PATH_INVALIDATED";
  struct dl_clock clock;uint64_t now;dw_vehicle vehicle;
  if(current_vehicle(&clock,&now,&vehicle))return "POSE_UNAVAILABLE";
@@ -310,7 +319,12 @@ static const char *manual_qualified(const void *unused,struct xm_span input,int6
  struct xm_manual_sample sample;uint32_t keys;
  if(xm_drive_input_parse(input,&keys))return "INPUT_INVALID";
  int rc=xm_manual_sample_parse(input,&sample);
- if(rc!=-ENOMSG&&(rc||!sample.valid||(uint64_t)age+sample.age_ms>(uint64_t)manual_config.input_timeout_ms))return "INPUT_INVALID";
+ /* adapter.c manual_qualify 와 같은 사유: 형식 오류 INVALID, 세션 무효 UNAVAILABLE, 원 나이 초과 STALE (계약 6.2) */
+ if(rc!=-ENOMSG){
+  if(rc)return "INPUT_INVALID";
+  if(!sample.valid)return "INPUT_UNAVAILABLE";
+  if((uint64_t)age+sample.age_ms>(uint64_t)manual_config.input_timeout_ms)return "INPUT_STALE";
+ }
  return current_vehicle(&clock,&now,&vehicle)?"POSE_UNAVAILABLE":NULL;
 }
 /* tracker owner만 실제 원 STOP witness를 현재 immutable path에 한 번 소비한다. */
@@ -363,6 +377,7 @@ static int automatic(void *unused,struct xm_span control,struct xm_span input,in
  if(current_vehicle(&clock,&now,&vehicle)){out->reason="POSE_UNAVAILABLE";return 0;}
  bool required;if(mission_profile(&required)){out->reason="WORLD_UNAVAILABLE";return 0;}
  out->modern_command=required;
+ if(!planner_current()){out->reason="CALCULATION_FAILED";return 0;}
  xenova_drive_MissionGrant mission={0};if(required&&(!clock.acknowledged||dl_mission_for_local(&mission,now))){out->reason="MISSION_UNAVAILABLE";return 0;}
  float hold_target=advance_direction(&clock,now,&vehicle);
  if(required&&!k_mutex_lock(&app_metadata,K_NO_WAIT)){
@@ -498,15 +513,17 @@ static int prepare_current(const dw_state *copy){
  uint64_t guest;PREP_REQUIRE(7,clock_us(NULL,&guest),-EIO);
  PREP_VALUE(2,guest,guest);
  struct lp_budget budget={guest+lp_selected_config.planner_budget_us,clock_us,cancelled,NULL,NULL};
+ drive_planner_health_begin(&planner_health,budget.deadline_us);
  struct de_reference proof;struct de_witness witness;dw_vehicle vehicle;
  enum de_result rc=de_prepare(&engine,now,&proof,&witness,&vehicle,budget);
- if(rc){PREP_DIAG(8,rc,-EAGAIN,0);return -EAGAIN;}
+ if(rc){if(rc!=DE_BUSY)planner_completed();PREP_DIAG(8,rc,-EAGAIN,0);return -EAGAIN;}
  PREP_VALUE(4,proof,proof.generation);
  struct xt_bootstrap boot;PREP_REQUIRE(9,xd_context_get(&boot),-EAGAIN);
- struct de_reference ph;const struct lp_path *path;PREP_REQUIRE(10,de_path_acquire(&engine,&ph,&path),-EAGAIN);
+ struct de_reference ph;const struct lp_path *path;rc=de_path_acquire(&engine,&ph,&path);
+ if(rc){if(rc!=DE_BUSY)planner_completed();PREP_DIAG(10,rc,-EAGAIN,0);return -EAGAIN;}
  bool required=(path->world_features&DW_LANE_MODEL)!=0;
  if(required&&(dl_mission_get(&preparation_mission,now)||!lp_mission_matches(path,&preparation_mission))){
-  (void)de_path_release(&engine,ph);return -EAGAIN;
+  (void)de_path_release(&engine,ph);planner_completed();return -EAGAIN;
  }
  PREP_VALUE(8,path,ph.generation);PREP_VALUE(8,rev,path->revision);
  xenova_drive_AppliedState result={0};
@@ -557,6 +574,7 @@ static int prepare_current(const dw_state *copy){
   k_mutex_unlock(&app_metadata);
  }
  (void)de_path_release(&engine,ph);
+ planner_completed();
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
  if(!result.calculation_sequence){PREP_DIAG(11,metadata_rc,-EAGAIN,0);return -EAGAIN;}
  PREP_VALUE(16,seq,result.application_sequence);
@@ -694,10 +712,10 @@ static int planner_step(void){
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
    if(!engine.planning)PREP_DIAG(rc==DE_OK?5:4,rc,rc,atomic_load(&engine.search_reason));
 #endif
-   if(!engine.planning&&rc==DE_OK)(void)prepare_current(NULL);
+   if(!engine.planning){planner_completed();if(rc==DE_OK)(void)prepare_current(NULL);}
   }else if(engine.apply_pending){
    enum de_result rc=de_apply_finish(&engine,now);
-    if(rc!=DE_BUSY){if(rc==DE_OK)(void)prepare_current(copy);else if(copy&&rejected(rc))reject_state(copy,rc);dl_state_release(slot);slot=-1;copy=NULL;applying=false;}
+    if(rc!=DE_BUSY){planner_completed();if(rc==DE_OK)(void)prepare_current(copy);else if(copy&&rejected(rc))reject_state(copy,rc);dl_state_release(slot);slot=-1;copy=NULL;applying=false;}
   }else{
    if(slot<0)slot=dl_state_take(&copy);
    if(slot>=0){
@@ -708,19 +726,24 @@ static int planner_step(void){
     }
     if(skip){dl_state_release(slot);planner_turn.slot=-1;planner_turn.copy=NULL;return 1;}
     struct lp_budget budget={guest+lp_selected_config.planner_budget_us,clock_us,cancelled,NULL,NULL};
+    drive_planner_health_begin(&planner_health,budget.deadline_us);
     enum de_result rc=de_apply(&engine,copy,now,budget);applying=engine.apply_pending;
-    if(!applying){if(rc==DE_OK)(void)prepare_current(copy);else if(rejected(rc))reject_state(copy,rc);dl_state_release(slot);slot=-1;copy=NULL;}
+    if(applying)drive_planner_health_admitted(&planner_health,engine.apply_budget.deadline_us);
+    if(!applying){if(rc!=DE_BUSY)planner_completed();if(rc==DE_OK)(void)prepare_current(copy);else if(rejected(rc))reject_state(copy,rc);dl_state_release(slot);slot=-1;copy=NULL;}
    }else{
     /* Reserve before any engine work can create a phase or be preempted by
      * newer I/O. This numeric proof is not a mission/output grant. */
     if(engine.behavior_enabled&&engine.local_owner&&(!engine.episode.active||!engine.episode_transition)&&dl_episode_event_prepare())return 1;
     struct lp_budget budget={guest+lp_selected_config.planner_budget_us,clock_us,cancelled,NULL,NULL};
+    drive_planner_health_begin(&planner_health,budget.deadline_us);
     enum de_result started=de_plan_start(&engine,now,budget);
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
     if(started==DE_OK)PREP_DIAG(3,started,started,atomic_load(&engine.search_reason));
     else if(started!=DE_WAITING&&started!=DE_BUSY)PREP_DIAG(2,started,started,atomic_load(&engine.search_reason));
 #endif
-    if(started==DE_OK&&!engine.planning)(void)prepare_current(NULL);
+    if(engine.planning)drive_planner_health_admitted(&planner_health,engine.budget.deadline_us);
+    else if(engine.apply_pending)drive_planner_health_admitted(&planner_health,engine.apply_budget.deadline_us);
+    else if(started!=DE_BUSY){planner_completed();if(started==DE_OK)(void)prepare_current(NULL);}
    }
   }
   /* Preserve the original search deadline. Active bounded slices need not
@@ -740,6 +763,8 @@ static void planner(void *a,void *b,void *c){
 }
 static int planner_start(void){
  planner_joined=false;atomic_set(&planner_stop,0);
+ uint64_t now=0;planner_health.pending=false;
+ atomic_store(&planner_health.valid_until_us,clock_us(NULL,&now)?0:drive_planner_observe_until(now));
  planner_started=k_thread_create(&planner_thread,planner_stack,K_THREAD_STACK_SIZEOF(planner_stack),planner,NULL,NULL,NULL,14,0,K_NO_WAIT)!=NULL;
  if(planner_started)k_thread_name_set(&planner_thread,"drive-planner");
  return planner_started?0:-ENOMEM;

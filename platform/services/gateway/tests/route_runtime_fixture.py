@@ -166,7 +166,6 @@ class RouteRig:
             started_pi_us=snapshot.core.started_pi_us,meter_epoch=snapshot.core.meter_epoch,
             meter_baseline_total_ticks=snapshot.core.meter_baseline_total_ticks,metres_per_tick_upper=snapshot.core.metres_per_tick_upper)
         grant=accepted['grant'];grant.route_binding.CopyFrom(decode(registration.route_binding_raw,schema.RouteBinding))
-        grant.mission_deadline_pi_us=snapshot.core.deadline_pi_us
         self.owner_context=deepcopy(accepted['target']);self.grant=grant
         # This leaf is the acknowledged Authority result. It is not a journal/fsync assertion.
         reply=self.route.commit_grant(value.request_nonce,encode(grant))
