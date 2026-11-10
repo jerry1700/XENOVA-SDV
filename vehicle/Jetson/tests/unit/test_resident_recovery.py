@@ -110,6 +110,67 @@ class Runtime:
 
 
 class ResidentRecoveryTests(unittest.TestCase):
+    def restored_attempt(self,kind='AM',*,capture=False):
+        r=Runtime();coordinator=recovery.ResidentRecovery(r)
+        roles=('A','M') if kind=='AM' else (kind,)
+        old={role:r.workers[role] for role in roles}
+        for index,role in enumerate(roles):
+            values=dict(vars(old[role]));values.update(pid=300+index,link=Link(),hello=True,admitted=True,
+                peer=SimpleNamespace(worker_instance=identifier(60+index),channel_epoch=identifier(70+index)))
+            if kind=='AM' and role=='M' and not capture:values['bind_ack']=None
+            r.workers[role]=SimpleNamespace(**values)
+        r.resident_started_us=None;r.nn_ready_us=None;r.capture_ready_us=10000 if capture else None
+        r.progress={('A','GRAPH_STARTED'):dict(completed_us=10000)}
+        coordinator.active=recovery.RecoveryAttempt(kind,roles,old,'WAIT_READY',1000,'fixture',
+            startup_deadline_us=91000,resume_sent_us=9000 if kind=='M' else None)
+        return r,coordinator
+
+    def test_replaced_owners_keep_warmup_after_original_cold_budget_without_fake_ready(self):
+        r,coordinator=self.restored_attempt()
+        current=dict(r.workers)
+        with patch.object(recovery,'j_us',return_value=100000):coordinator.step()
+        self.assertFalse(r.stopping);self.assertIsNone(coordinator.active)
+        self.assertTrue(coordinator.receipts[-1]['complete'])
+        self.assertIsNone(r.capture_ready_us);self.assertIsNone(r.nn_ready_us)
+        self.assertIsNone(r.workers['M'].bind_ack)
+        self.assertEqual(r.workers,current);self.assertEqual(r.spawns,[])
+        self.assertEqual(coordinator.operation_cap,recovery.U64_MAX)
+        event=next(fields for kind,fields in r.events if kind=='RECOVERY_COMPLETE')
+        self.assertTrue(event['waiting_for_input']);self.assertFalse(event['world_valid'])
+
+    def test_replaced_mapper_waits_for_nn_after_actual_resume_without_reloading_a(self):
+        r,coordinator=self.restored_attempt('M',capture=True);acquisition=r.workers['A']
+        with patch.object(recovery,'j_us',return_value=100000):coordinator.step()
+        self.assertFalse(r.stopping);self.assertIsNone(coordinator.active)
+        self.assertIs(r.workers['A'],acquisition);self.assertIsNone(r.nn_ready_us)
+        self.assertEqual(r.spawns,[])
+
+    def test_actual_local_setup_or_bind_failure_still_ends_at_original_cold_deadline(self):
+        for failure in ('graph','hello','bind'):
+            with self.subTest(failure=failure):
+                r,coordinator=self.restored_attempt(capture=failure=='bind')
+                if failure=='graph':r.progress.clear()
+                elif failure=='hello':r.workers['M'].hello=False
+                else:r.workers['M'].bind_ack=None
+                with patch.object(recovery,'j_us',return_value=100000):coordinator.step()
+                self.assertTrue(r.stopping);self.assertEqual(coordinator.active.phase,'FAILED')
+                self.assertIn('startup budget',str(r.failure[1]))
+
+    def test_late_actual_graph_completion_cannot_be_relabelled_as_timely_startup(self):
+        r,coordinator=self.restored_attempt()
+        r.progress['A','GRAPH_STARTED']['completed_us']=92000
+        with patch.object(recovery,'j_us',return_value=100000):coordinator.step()
+        self.assertTrue(r.stopping);self.assertIsNone(r.nn_ready_us)
+
+    def test_actual_new_owner_failure_is_detected_after_waiting_recovery_is_closed(self):
+        r,coordinator=self.restored_attempt();mapper=r.workers['M'];acquisition=r.workers['A']
+        with patch.object(recovery,'j_us',return_value=100000):
+            coordinator.step()
+            self.assertTrue(coordinator.fail('M','actual control stall after replacement'))
+        self.assertFalse(r.stopping);self.assertEqual(coordinator.active.kind,'M')
+        self.assertIs(coordinator.active.old['M'],mapper)
+        self.assertIs(r.workers['A'],acquisition);self.assertEqual(r.broker.pauses,1)
+
     def test_m_failure_revokes_old_parser_and_suppresses_only_original_host(self):
         r = Runtime()
         coordinator = recovery.ResidentRecovery(r)

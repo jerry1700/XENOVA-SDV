@@ -163,7 +163,11 @@ class StorageDiagnosticTests(unittest.TestCase):
                 self.fail('actual control packet was not received: ' + kind)
 
             worker = threading.Thread(target=run, daemon=True)
-            with patch('xenova_vehicle.runtime.resident_storage._diagnostic', side_effect=OSError('controlled diagnostic failure')) as diagnostic:
+            attempted = threading.Event()
+            def fail_diagnostic(*args):
+                attempted.set()
+                raise OSError('controlled diagnostic failure')
+            with patch('xenova_vehicle.runtime.resident_storage._diagnostic', side_effect=fail_diagnostic) as diagnostic:
                 worker.start()
                 try:
                     self.assertEqual(receive('HELLO').payload['worker_instance'], peer.worker_instance)
@@ -181,6 +185,7 @@ class StorageDiagnosticTests(unittest.TestCase):
                     worker.join(2)
                     self.assertFalse(worker.is_alive())
                     self.assertEqual(outcome, ['RETURNED'])
+                    self.assertTrue(attempted.wait(2))
                     diagnostic.assert_called_once()
                     report = diagnostic.call_args.args[1]
                     self.assertTrue(report['database_closed'] and report['owner_lock_closed'] and report['stopped_report_sent'])

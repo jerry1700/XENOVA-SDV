@@ -246,7 +246,7 @@ static size_t exact_bytes(const pb_msgdesc_t *desc,unsigned field){
  if(desc==xenova_drive_GuestClockReceipt_fields)return field==2?32:0;
  if(desc==xenova_drive_DirectionGateWitness_fields)return field==9||field==12?16:0;
  if(desc==xenova_drive_SurveySummary_fields)return field==2||field==3?16:field==15||field==16?32:0;
- if(desc==xenova_drive_TofObservation_fields)return field==25?16:field==17?128:field==18||field==19?64:0;
+ if(desc==xenova_drive_TofObservation_fields)return field==25?16:field==17?2:field==18||field==19?1:0;
  return 0;
 }
 static size_t message_cap(const pb_msgdesc_t *desc){

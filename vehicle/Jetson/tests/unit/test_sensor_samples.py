@@ -1,4 +1,4 @@
-"""원 wire/시계·센서 source와 연속 zone 기하 반례. 모든 보정/자격은 명시 software fixture다."""
+"""원 single-return wire/시계·sensor source와 HIT 기하 반례. 보정/자격은 software fixture다."""
 
 from dataclasses import replace
 import math
@@ -19,16 +19,16 @@ def identity():return str(uuid4())
 
 
 def source_crc(sample):
-    # 제품 Struct를 재사용하지 않는 원393B 순서 oracle.
+    # 제품 Struct를 재사용하지 않는 원141B 순서 oracle.
     data=UUID(sample.pi_session).bytes+UUID(sample.device_session).bytes
     for value,size in ((sample.source_sample,8),(sample.source_us,8),(sample.sensor_time_error_us,4)):
         data+=value.to_bytes(size,'little')
     data+=UUID(sample.clock_epoch).bytes+sample.clock_seq.to_bytes(8,'little')+bytes((sample.sensor_id,))+sample.sensor_instance
     data+=sample.sensor_generation.to_bytes(4,'little')+sample.sensor_config_revision.to_bytes(4,'little')+bytes.fromhex(sample.calibration)
     data+=bytes((sample.rows,sample.cols))+sample.frame_status.to_bytes(2,'little')
-    distances=struct.unpack('<64H',sample.distance_mm_le)
+    distances=struct.unpack('<H',sample.distance_mm_le)
     for distance,status,quality in zip(distances,sample.status,sample.quality):data+=distance.to_bytes(2,'little')+bytes((status,quality))
-    assert len(data)==393
+    assert len(data)==141
     return zlib.crc32(data)
 
 
@@ -36,8 +36,7 @@ class SensorSampleTests(unittest.TestCase):
     def setUp(self):
         self.now=1_050_000
         self.leaf=TofLeaf(0,1,'EXPLICIT_SOFTWARE_FIXTURE','f'*64,((0.,0.,1.),(-1.,0.,0.),(0.,-1.,0.)),(.15,0.,.1),
-            ((0.,0.,0.,0.),)*64,'AXIAL_Z',.1,3.,.001,extrinsics_qualified=True,first_surface_qualified=True,
-            coverage_qualified=True,time_qualified=True)
+            ((0.,0.,0.,0.),),'AXIAL_Z',.1,3.,.001,extrinsics_qualified=True,time_qualified=True)
         self.pi_boot,self.gateway,self.pi_session,self.device=identity(),identity(),identity(),identity()
         self.instance=UUID(identity()).bytes;self.sensor_clock=identity()
         self.source=dict(vehicle='rc-car',device='oak-front',mapper_boot=identity(),mapper_instance=identity(),clock_epoch=identity(),
@@ -73,8 +72,8 @@ class SensorSampleTests(unittest.TestCase):
     def tof(self,**changes):
         value=schema.TofObservation(major=1,vehicle=self.source['vehicle'],host_boot=self.pi_boot,gateway_instance=self.gateway,pi_session=self.pi_session,
             device_session=self.device,sensor_id=0,source_sample=7,source_us=400000,pi_sample_us=1_100_000,clock_error_us=200,sensor_time_error_us=100,
-            calibration=self.leaf.sha256,sensor_config_revision=1,rows=8,cols=8,distance_mm_le=struct.pack('<64H',1000,*([0]*63)),
-            status=bytes((1,))+bytes(63),quality=bytes((11,))+bytes(63),frame_status=7,source_crc32=0,clock_epoch=self.sensor_clock,clock_seq=5,
+            calibration=self.leaf.sha256,sensor_config_revision=1,rows=1,cols=1,distance_mm_le=struct.pack('<H',1000),
+            status=bytes((1,)),quality=bytes((11,)),frame_status=7,source_crc32=0,clock_epoch=self.sensor_clock,clock_seq=5,
             complete=True,sensor_instance=self.instance,sensor_generation=1)
         for key,value0 in changes.items():setattr(value,key,value0)
         value.source_crc32=source_crc(value)
@@ -126,16 +125,17 @@ class SensorSampleTests(unittest.TestCase):
                 self.tof(source_sample=1,sensor_instance=self.instance,sensor_generation=3)):
             with self.assertRaises(SampleRejected):self.owner.accept_tof(encode(invalid),self.lease,self.now)
 
-    def test_axial_sensor_z_accepts_horizontal_base_ray_with_actual_pose_bracket(self):
+    def test_axial_sensor_z_accepts_horizontal_base_hit_with_actual_pose_bracket(self):
         pose=self.pose();evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
         result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now,pose=pose,motion_qualified=True)
-        self.assertEqual(len(result.patches),1);self.assertTrue(result.patches[0].qualified);self.assertTrue(result.mapping_ready)
-        ray=result.patches[0];self.assertLess(ray.direction_lower[2],0.);self.assertGreater(ray.direction_upper[2],0.)
-        self.assertLess(ray.range_lower_m,1.);self.assertGreater(ray.range_upper_m,1.)
-        self.assertEqual(ray.source_key,evidence.stamp.key);self.assertFalse(result.world_valid)
+        self.assertEqual(len(result.patches),0);self.assertTrue(result.mapping_ready)
+        hit,=result.hit_boxes;self.assertTrue(hit.qualified)
+        self.assertLess(hit.lower[0],1.15);self.assertGreater(hit.upper[0],1.15)
+        self.assertLess(hit.lower[2],.1);self.assertGreater(hit.upper[2],.1)
+        self.assertEqual(result.status,'HIT_ONLY');self.assertFalse(result.world_valid)
 
     def test_zone_footprint_bounds_include_interior_and_radial_convention_is_not_double_converted(self):
-        self.leaf=replace(self.leaf,zone_bearings=((-0.2,.2,-.1,.1),)*64);self.prepare(self.leaf)
+        self.leaf=replace(self.leaf,zone_bearings=((-0.2,.2,-.1,.1),));self.prepare(self.leaf)
         evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
         result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now)
         hit=result.hit_boxes[0];self.assertFalse(hit.qualified)
@@ -147,19 +147,54 @@ class SensorSampleTests(unittest.TestCase):
         self.leaf=replace(self.leaf,distance_convention='RADIAL');self.prepare(self.leaf)
         evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
         result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now)
-        self.assertLess(result.patches[0].range_upper_m,1.01)
+        self.assertLess(result.hit_boxes[0].upper[0],1.16)
+        self.assertEqual(len(result.patches),0)
 
-    def test_invalid_zero_blocked_and_provisional_coverage_never_produce_free(self):
+    def test_all_valid_quality_bits_remain_hit_only_without_any_free_patch(self):
         pose=self.pose()
-        for index,changes in enumerate((dict(quality=bytes((27,))+bytes(63)),dict(distance_mm_le=bytes(128)),dict(status=bytes(64)))):
-            original=self.tof(**changes);original.source_sample+=index;original.source_us+=index*1000;original.source_crc32=source_crc(original)
+        for index,quality in enumerate(range(1,32,2)):
+            original=self.tof(quality=bytes((quality,)));original.source_sample+=index;original.source_us+=index*1000;original.source_crc32=source_crc(original)
             evidence=self.owner.accept_tof(encode(original),self.lease,self.now)
             result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now,pose=pose,motion_qualified=True)
-            self.assertFalse(any(result.patches.qualified))
-        self.leaf=replace(self.leaf,coverage_qualified=False);self.prepare(self.leaf);pose=self.pose()
-        evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
-        result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now,pose=pose,motion_qualified=True)
-        self.assertEqual(result.status,'HIT_ONLY');self.assertFalse(any(result.patches.qualified))
+            self.assertEqual(result.status,'HIT_ONLY');self.assertEqual(len(result.patches),0)
+
+    def test_no_target_and_invalid_new_measurement_revoke_only_the_sensor_input(self):
+        for changes in (dict(quality=b'\x00'),dict(status=b'\x00',quality=b'\x00'),
+                dict(distance_mm_le=b'\x00\x00',status=b'\x00',quality=b'\x00'),
+                dict(distance_mm_le=b'\xff\xff',status=b'\x00',quality=b'\x00')):
+            with self.subTest(changes=changes):
+                self.prepare(self.leaf)
+                vehicle=self.owner.accept_vehicle(encode(self.vehicle()),self.lease,self.now)
+                old=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
+                no_hit=self.tof(source_sample=8,source_us=401000,**changes)
+                with self.assertRaisesRegex(SampleRejected,'no valid single return'):
+                    self.owner.accept_tof(encode(no_hit),self.lease,self.now)
+                self.assertIsNone(self.owner.latest_tof(0));self.assertFalse(self.owner.current_tof(old,self.now))
+                self.assertIs(self.owner.latest_vehicle,vehicle)
+
+    def test_hit_requires_each_time_and_extrinsics_qualification(self):
+        original_leaf=self.leaf
+        for field in ('extrinsics_qualified','time_qualified'):
+            self.leaf=replace(original_leaf,**{field:False});self.prepare(self.leaf);pose=self.pose()
+            evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
+            result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now,pose=pose,motion_qualified=True)
+            self.assertFalse(result.mapping_ready);self.assertFalse(result.hit_boxes[0].qualified)
+            self.assertEqual(len(result.patches),0)
+
+    def test_single_leaf_roundtrip_rejects_legacy_grid_and_free_qualification_fields(self):
+        self.assertEqual(TofLeaf.from_dict(self.leaf.to_dict()),self.leaf)
+        self.assertEqual(self.leaf.to_dict()['schema_version'],2)
+        with self.assertRaises(ValueError):replace(self.leaf,zone_bearings=((0.,0.,0.,0.),)*64)
+        for fields in (dict(self.leaf.to_dict(),schema_version=1),
+                dict(self.leaf.to_dict(),first_surface_qualified=True)):
+            with self.assertRaises(ValueError):TofLeaf.from_dict(fields)
+
+    def test_crc_rejects_legacy_multizone_layout_instead_of_truncating_it(self):
+        legacy=self.tof();legacy.rows=legacy.cols=8
+        legacy.distance_mm_le=struct.pack('<64H',*([1000]*64))
+        legacy.status=b'\x01'*64;legacy.quality=b'\x0b'*64
+        with self.assertRaisesRegex(SampleRejected,'exact1x1'):tof_crc32(legacy)
+        with self.assertRaises(ValueError):self.owner.accept_tof(legacy.SerializeToString(),self.lease,self.now)
 
     def test_delayed_or_unbracketed_tof_cannot_become_free(self):
         evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
@@ -170,7 +205,7 @@ class SensorSampleTests(unittest.TestCase):
     def test_unsupported_leaf_crc_conflict_and_sensor_axial_zero_crossing(self):
         for changes in (dict(calibration='c'*64),dict(sensor_id=1),dict(sensor_config_revision=2)):
             with self.assertRaises(SampleRejected):self.owner.accept_tof(encode(self.tof(**changes)),self.lease,self.now)
-        self.leaf=replace(self.leaf,zone_bearings=((1.4,1.7,0.,0.),)*64);self.prepare(self.leaf)
+        self.leaf=replace(self.leaf,zone_bearings=((1.4,1.7,0.,0.),));self.prepare(self.leaf)
         evidence=self.owner.accept_tof(encode(self.tof()),self.lease,self.now)
         result=tof_evidence(evidence,self.leaf,self.calibration,admission=self.owner,now_us=self.now)
         self.assertEqual(len(result.patches),0);self.assertEqual(len(result.hit_boxes),0)

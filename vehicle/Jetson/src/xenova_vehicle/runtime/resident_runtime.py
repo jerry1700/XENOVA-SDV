@@ -210,8 +210,6 @@ class _Runtime:
         record_runtime_publication(store, ack, receipt, service_scope=self.service_scope)
 
     def _prepare(self):
-        self.output.mkdir(mode=0o700)
-        self.output_owned = True
         artifacts = runtime_artifacts(self.profile,self.perception_profile_bytes,self.mapper_profile_bytes,
             jpeg_enabled=self.http_address is not None)
         if self.mapper_profile_bytes is not None:
@@ -223,8 +221,30 @@ class _Runtime:
             MapperProfile.from_bytes(artifacts['manifests']['mapper-profile.json']).check(calibration,
                 vehicle_configuration=self.jio_profile.source_policy.configuration,
                 vehicle_calibration=self.jio_profile.source_policy.calibration)
-        artifacts['published'] = publish_runtime_artifacts(self.output / 'artifacts', artifacts)
+        self._publish_diagnostics(artifacts)
         return artifacts
+
+    def _publish_diagnostics(self, artifacts):
+        """설정 검증 후 선택 증거 사본을 저장한다. 원본 manifest는 메모리에 유지한다."""
+        from .resident_diagnostics import DiagnosticWriter
+        artifacts['published'] = {}
+        try:self._diagnostics = DiagnosticWriter()
+        except Exception as error:
+            self.event('DIAGNOSTIC_WRITE_FAILED', error=type(error).__name__)
+            return
+        manifests = dict(artifacts['manifests'])
+        def publish():
+            self.output.mkdir(mode=0o700)
+            self.output_owned = True
+            publish_runtime_artifacts(self.output / 'artifacts', {'manifests': manifests})
+        self._diagnostics.submit(publish)
+
+    def _diagnostic_directory(self, role, worker_id):
+        return str(self.output / role / worker_id) if self.output_owned else None
+
+    def save_result(self, result):
+        if hasattr(self, '_diagnostics'):
+            self._diagnostics.save(self.output if self.output_owned else None, 'runtime-result.json', result)
 
     def event(self, kind, **fields):
         self.events.append(dict(event=kind, observed_j_us=str(j_us()), **fields))
@@ -245,7 +265,7 @@ class _Runtime:
             self.native_started = True
         elif operation == 'CLEANUP':
             self.cleanup_attempted = True
-        self.log_pending = (request, operation, purpose, end)
+        self.log_pending = (request, operation, purpose, end, now)
         return True
 
     def _write(self, fields, purpose, *, cap_us=None):
@@ -269,17 +289,24 @@ class _Runtime:
         completion = self.log.poll()
         if completion is None:
             return
-        if self.log_pending is None or (completion.request_id, completion.operation) != self.log_pending[:2]:
+        if (self.log_pending is None
+                or (completion.request_id, completion.operation) != self.log_pending[:2]
+                or (completion.expires_us, completion.issued_us) != self.log_pending[3:]):
             raise RuntimeError('resource completion differs from the original outstanding request')
-        _, operation, purpose, _ = self.log_pending
+        _, operation, purpose, _, _ = self.log_pending
         self.log_pending = None
-        if not completion.timely(j_us()):
+        # 이미 끝난 자원 변경 사실은 S의 poll 지연으로 취소되지 않는다.
+        # 다음 작업·복구 단계는 각자의 현재 상태와 원 기한을 다시 검사한다.
+        if not completion.completed_in_time(j_us()):
             if purpose == 'NATIVE_CLOSE':
                 self.cleanup_failed = True
-            raise RuntimeError(completion.error or 'late resource completion is historical only')
+            raise RuntimeError(completion.error or 'resource operation did not complete within its original budget')
         if operation in ('BOOTSTRAP', 'WRITE'):
             if (completion.ack is None or completion.receipt is None
+                    or completion.ack.request_id != completion.request_id
+                    or completion.receipt.lock_nonce != completion.ack.lock_nonce
                     or completion.receipt.outcome.kind != 'VALID'
+                    or operation == 'WRITE' and completion.ack.expected_ref != self.manifest.ref
                     or completion.receipt.outcome.manifest.ref != completion.ack.target_ref):
                 raise RuntimeError('actual canonical durable target was not confirmed')
             self.manifest, self.latest_ack = completion.receipt.outcome.manifest, completion.ack
@@ -375,10 +402,10 @@ class _Runtime:
             if role=='D':
                 boot=StorageBoot(peer,deadline_us,self.storage_profile,
                     copy_handles=(self.handles.db_copy,self.handles.db_tokens),
-                    diagnostic_directory=str(self.output/role/worker_id),recovery=self.storage_recovery)
+                    diagnostic_directory=self._diagnostic_directory(role,worker_id),recovery=self.storage_recovery)
             else:
                 boot=WorkerBoot(peer,self.profile,self.scope,self.raw_profile,self.handles.raw_tokens,
-                    deadline_us,str(self.output/role/worker_id),
+                    deadline_us,self._diagnostic_directory(role,worker_id),
                     writer_bind=self.workers['A'].bind if role=='M' else None,
                     perception_profile_bytes=self.artifacts['manifests'].get('perception-calibration.json'),
                     copy_handles=(self.handles.db_copy,self.handles.db_tokens) if role=='M' else None,
@@ -1228,8 +1255,8 @@ class _Runtime:
             if role=='M' and host.compute_watch is not None and host.compute_watch.stalled(now):
                 self.recovery.fail('M', 'original mapper job expired without actual stage progress')
                 continue
-            idle_watch = (role == 'A' and self.capture_ready_us is not None
-                          or role == 'M' and host.bind_ack is not None
+            idle_watch = (role == 'A' and ('A','GRAPH_STARTED') in self.progress
+                          or role == 'M' and host.hello and host.admitted
                           or role == 'D' and self.storage_ready_us is not None)
             heartbeat_lower=host.last_heartbeat_us
             if role=='D' and self.db_last_progress_us is not None:
@@ -1401,7 +1428,5 @@ def run_runtime(profile, state_directory, storage_profile, output, *, duration_s
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-    if runtime.output_owned:
-        with (runtime.output / 'runtime-result.json').open('xb') as destination:
-            destination.write(canonical(result))
+    runtime.save_result(result)
     return result

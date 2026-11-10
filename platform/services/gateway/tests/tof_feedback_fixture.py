@@ -15,7 +15,7 @@ from xenova_gateway.feedback3 import (Feedback3SerialSink,Feedback3Profile,ACK3,
     CLOCK_INSTALL,CLOCK_ACK,PROBE3,CLOCK3,INSTALL3,CLOCK_ACK3,SENSOR,SENSOR3,REQUIRED_CAPS)
 from xenova_gateway.odometry import OdometryConfig,VehicleOdometry
 from xenova_gateway.scene_authority import StationaryPolicy
-from xenova_gateway.tof_feedback3 import TOF_FRAGMENT,TOF_FRAGMENT3,TOF_COMMON3,TofSelection
+from xenova_gateway.tof_feedback3 import TOF_SAMPLE,TOF_SAMPLE3,TOF_COMMON3,TofSelection
 from xenova_gateway.mapper_uplink import UplinkProfile,GatewayMapperUplink,_Link
 from xenova_gateway.verified_runner import VerifiedGatewayRunner
 
@@ -29,20 +29,20 @@ def selection(profiles=((0,'c'*64,4),(1,'d'*64,5))):
     return TofSelection(profiles,500000,20000,'rc-test-1',HOST,GATEWAY)
 
 
-def fragments(pi,device,epoch,clock_sequence,*,sensor=0,sample=1,stamp=1000000,generation=1,instance=None,
-              calibration=None,revision=None,error=1000,flags=7,zone_data=None):
+def sample_frames(pi,device,epoch,clock_sequence,*,sensor=0,sample=1,stamp=1000000,generation=1,instance=None,
+                  calibration=None,revision=None,error=1000,flags=7,measurement=None,rows=1,cols=1):
     instance=UUID(int=100+sensor).bytes if instance is None else instance
     calibration=('c' if sensor==0 else 'd')*64 if calibration is None else calibration
     revision=(4 if sensor==0 else 5) if revision is None else revision
-    zones=b''.join(struct.pack('<HBB',600+i,1,3) for i in range(64)) if zone_data is None else zone_data
-    fields=(pi,device,sample,stamp,error,epoch,clock_sequence,sensor,instance,generation,revision,bytes.fromhex(calibration),8,8)
-    body=TOF_COMMON3.pack(*fields,flags)+zones;assert len(body)==393
+    measured=struct.pack('<HBB',600+sensor*200,1,3) if measurement is None else measurement
+    fields=(pi,device,sample,stamp,error,epoch,clock_sequence,sensor,instance,generation,revision,bytes.fromhex(calibration),rows,cols)
+    body=TOF_COMMON3.pack(*fields,flags)+measured;assert len(body)==141
     crc=zlib.crc32(body)&0xffffffff
-    return tuple(TOF_FRAGMENT3.pack(*fields,index,4,index*16,16,flags,crc,zones[index*64:index*64+64]) for index in range(4)),body
+    return (body+struct.pack('<I',crc),),body
 
 
 class WireBench:
-    def __init__(self,*,profiles=((0,'c'*64,4),(1,'d'*64,5)),capabilities=REQUIRED_CAPS|0x200):
+    def __init__(self,*,profiles=((0,'c'*64,4),(1,'d'*64,5)),capabilities=REQUIRED_CAPS|0x800):
         self.now=1.;self.a,self.b=socket.socketpair(socket.AF_UNIX,socket.SOCK_STREAM)
         self.a.setblocking(False);self.b.setblocking(False);self.framer=Framer();self.clock_latch=0
         cfg=OdometryConfig('rc-test-1','encoder-tof-bench',.001,.2,.25,2.,20000,500000,20,32,
@@ -89,11 +89,11 @@ class WireBench:
 
     def frame(self,**kwargs):
         stamp=int(self.now*1e6)-102000
-        return fragments(UUID(self.sink.pi_session).bytes,UUID(DEVICE).bytes,
+        return sample_frames(UUID(self.sink.pi_session).bytes,UUID(DEVICE).bytes,
             UUID(self.sink.clock_epoch).bytes,getattr(self,'clock_sequence',1),stamp=stamp,**kwargs)
 
-    def feed_fragments(self,parts):
-        self.b.sendall(b''.join(packet(TOF_FRAGMENT,payload) for payload in parts));self.now+=.001;self.sink.poll(self.now)
+    def feed_frames(self,parts):
+        self.b.sendall(b''.join(packet(TOF_SAMPLE,payload) for payload in parts));self.now+=.001;self.sink.poll(self.now)
 
     def actor(self):
         client=SimpleNamespace(identity=SimpleNamespace(agent_instance_id=GATEWAY))

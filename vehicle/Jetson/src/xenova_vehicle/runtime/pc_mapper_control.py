@@ -2,7 +2,7 @@
 
 physical nn_input0 stream/SourceStamp를 만들지 않고 원 RGB4/NN8 key를 쓴다.
 NN_READY progress는 parser 준비 사실이며 Source/clock/metric/World/주행 권한이 아니다.
-무거운 해석·SDK·파일·DB는 호출하지 않는다. 원 PARSER_STARTED full-send 뒤만 decode를 연다.
+무거운 해석·SDK·파일·DB는 호출하지 않는다. 계산 사건을 송신 순서에 맞춰 보고한다.
 """
 
 import json
@@ -41,7 +41,7 @@ class PcMapperControl:
 
     def _nn_complete(self, event, *, fresh):
         if self._parser is None or self._parser[0] != event.job_id:
-            raise RuntimeError('PC NN completion has no original actual parser-start send')
+            raise RuntimeError('PC NN completion has no original compute parser start')
         _, key, began = self._parser
         self._parser = None
         now = self.clock()
@@ -64,8 +64,7 @@ class PcMapperControl:
         report = self.compute.take_parser_completion(event)
         if report is None:
             raise RuntimeError('accepted PC NN completion lost its original actual parser metadata')
-        if self._completion is not None:
-            raise RuntimeError('one actual PC parser completion is waiting for main transport selection')
+        # 송신 후보는 최신 하나만 유지한다. 이전 계산 완료의 유실은 owner 고장이 아니다.
         self._completion = report
         if not self.ready and self.streak >= REQUIRED_NN_PAIR_COUNT:
             self.ready = True
@@ -82,17 +81,14 @@ class PcMapperControl:
                 if self._metric_job is not None: raise RuntimeError('PC compute replaced its active original job')
                 self._metric_job = event.job_id
                 self._progress(event, 'MAPPER_STARTED', str(event.expires_us))
-            elif event.kind == 'PARSER_START_REQUIRED':
-                if self.clock() >= min(event.parser_deadline_us, event.expires_us): continue
+            elif event.kind == 'PARSER_STARTED':
                 key = event.nn_source_key
                 if type(key) is not tuple or len(key) != 8 or key[:4] != event.source_key:
                     raise ValueError('PC parser start lacks original full NN8 key')
                 if self._parser is not None: raise RuntimeError('one PC compute cannot open two NN parsers')
-                original = self.actor.progress('PARSER_STARTED', key[3], completed=event.started_us,
+                self.actor.progress('PARSER_STARTED', key[3], completed=event.started_us,
                     request_id=event.job_id)
-                actual = self.actor.await_sent(original)
                 self._parser = (event.job_id, key, event.started_us)
-                self.compute.acknowledge_parser_start(event.job_id, actual)
             elif event.kind == 'NN_COMPLETED':
                 self._nn_complete(event, fresh=event.accepted)
             elif event.kind == 'PROGRESS':

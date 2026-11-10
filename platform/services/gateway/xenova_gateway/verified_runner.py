@@ -49,7 +49,7 @@ class VerifiedGatewayRunner(GatewayRunner):
         self._provider_queues=[queue.Queue(maxsize=n) for n in (4,4,8)]
         self._provider_turn=0;self.provider_calls=0;self.provider_high_water=0
         self._state_messages=queue.Queue(maxsize=4);self.state_message_dropped=0
-        self._tof_assembler=None
+        self._tof_receiver=None
 
     def submit_provider(self,call):
         import queue
@@ -622,21 +622,21 @@ class VerifiedGatewayRunner(GatewayRunner):
 
     def configure_mapper_tof(self,profile):
         """명시 J 선택만 실제 feedback3 원천에 연결한다. 빈 목록은 독립적으로 정상이다."""
-        if self._tof_assembler is not None:raise ValueError('one ToF actor owner')
+        if self._tof_receiver is not None:raise ValueError('one ToF actor owner')
         device=getattr(self._sink,'device',None)
         if device is None or not callable(getattr(device,'configure_tof',None)):
             return not profile.tof_profiles
-        from .tof_feedback3 import TofSelection,TofAssembler
+        from .tof_feedback3 import TofSelection,TofReceiver
         config=device.odometry.config
         if config.vehicle!=profile.policy.vehicle:raise ValueError('ToF selected vehicle differs')
         selected=TofSelection(profile.tof_profiles,profile.tof_max_age_us,config.maximum_clock_error_us,
             config.vehicle,self.authority.host,self._client.identity.agent_instance_id)
         device.configure_tof(selected)
-        self._tof_assembler=TofAssembler(selected)
+        self._tof_receiver=TofReceiver(selected)
         return True
 
     def _mapper_tof_once(self):
-        owner=self._tof_assembler
+        owner=self._tof_receiver
         if owner is None:return
         source=getattr(self._sink,'device',None)
         if source is None:return
