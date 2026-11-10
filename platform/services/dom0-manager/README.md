@@ -281,7 +281,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 
 ## Xen 모드 현황
 
-`XENOVA_DRIVER=xen`에서 지금 되는 것은 `GET /healthz`, `GET /api/v1/vms`, `GET /api/v1/vms/{vm_id}`, `GET /api/v1/stats`입니다. `xl list`로 상태를, `xl list -l`의 `config.c_info.uuid`로 vm_id를 읽습니다(플랫폼 도구와 같은 방식). 생성·정지·삭제는 501이며 `XENOVA_DRIVER=platform`에서 지원합니다.
+`XENOVA_DRIVER=xen`에서 지금 되는 것은 `GET /healthz`, `GET /api/v1/vms`, `GET /api/v1/vms/{vm_id}`, `GET /api/v1/stats`입니다. `xl list -v` 한 번으로 상태와 UUID 열(vm_id)을 함께 읽습니다. 도메인마다 설정 JSON을 만드는 `xl list -l`은 부르지 않습니다. 생성·정지·삭제는 501이며 `XENOVA_DRIVER=platform`에서 지원합니다.
 
 실보드 대조는 보드에 아무것도 설치하지 않고 개발 PC에서 합니다. 보드 dom0에 PC 공개키를 넣은 뒤
 `XENOVA_DRIVER=xen XENOVA_XL_SSH=root@<dom0 주소> python -m dom0_manager`로 띄우면 세 조회 엔드포인트가 실제 `xl` 출력으로 동작합니다.
@@ -291,7 +291,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 
 ## 통계 (xentop)
 
-`GET /api/v1/stats`는 `xentop -b -i 1 -n -x -f` 한 번의 출력으로 실행 중 도메인 전부의 누적 카운터·현재값을 돌려줍니다(계약 2.4·4.6, S15P31E110-112). xen·platform 모드 모두 xl 과 같은 실행기(로컬 또는 `XENOVA_XL_SSH`)로 xentop 을 부르고, 이름을 `xl list -l`의 `c_info.uuid`와 대조해 `vm_id`를 붙입니다. 플랫폼 Manager 를 거치지 않아 잠금의 영향을 받지 않습니다.
+`GET /api/v1/stats`는 `xentop -b -i 1 -n -x -f` 한 번의 출력으로 실행 중 도메인 전부의 누적 카운터·현재값을 돌려줍니다(계약 2.4·4.6, S15P31E110-112). xen·platform 모드 모두 xl 과 같은 실행기(로컬 또는 `XENOVA_XL_SSH`)로 xentop 을 부르고, 이름을 `xl list -v`의 UUID 열과 대조해 `vm_id`를 붙입니다. 플랫폼 Manager 를 거치지 않아 잠금의 영향을 받지 않습니다.
 
 - 사용률(CPU %, bytes/s)은 싣지 않습니다. Spring 이 연속 표본의 차이로 계산하고, `domid`가 바뀌거나 누적값이 줄면 재시작으로 봅니다.
 - 측정하지 못한 필드는 0 이 아니라 `null`이고 `unavailable`에 사유가 있습니다. `NO_DEVICE`(NETS·VBDS 0, Zephyr), `DEVICE_ERROR`(xentop 이 `-`), `NOT_REPORTED`(`no limit`·`n/a`).
@@ -309,7 +309,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 | 입력 | 어디서 | 얼마나 자주 |
 | --- | --- | --- |
 | 의도 (`desired_state`, `intent_applicable`, `intent_revision`, `lifecycle`, `guest_kind`) | 플랫폼 `Manager intents` (S15P31E110-336) | 매 주기 읽습니다. 저장된 의도·등록만 읽고 Xen·공통 잠금을 쓰지 않습니다. **판정 직전에는 그 VM 만 `get`으로 재확인**합니다. 읽기에 실패하면 마지막으로 읽은 등록은 건강 보고 대상으로만 남기고(보관·삭제로 해석해 retained 를 지우지 않음) 오래된 의도로는 아무것도 판정하지 않습니다: crashed·absent 를 포함한 판정을 보류하고 건강은 `OBSERVATION_UNAVAILABLE`, 열린 복구 episode 도 닫지 않습니다. 다시 읽히면 자동으로 재개합니다. `intents` 를 모르는 옛 Manager(`INVALID_SPEC`)면 경고 뒤 `list`(플랫폼 잠금 + VM 마다 Xen 관측)를 `XENOVA_RECOVERY_INTENT_REFRESH`(기본 60초)마다 읽습니다 |
-| Xen 실행 상태 (도메인 유무·상태·domid) | `xl list` / `xl list -l` (잠금 없음) | 매 주기(5초) |
+| Xen 실행 상태 (도메인 유무·상태·domid) | `xl list -v` (잠금 없음, 주기마다 한 번) | 매 주기(5초) |
 | 생존 신호 | dom0 Mosquitto `xenova/v1/vms/+/heartbeat`(agent.heartbeat, Linux)와 `xenova/v1/apps/+/events` 중 `app.heartbeat`(Zephyr 주행 VM, 시나리오 D8) | 구독. 수신 단조 시각만 쓰고 `sent_at` 은 쓰지 않음. retain 플래그가 켜진 수신(구독 직후 브로커가 주는 옛 값)은 무시. agent.heartbeat 는 type·빈 payload·토픽-봉투 vm_id 일치, app.heartbeat 는 type·`state` 허용값·`uptime_s`(0 이상 유한)·app_id 일치를 검사해 맞는 것만 기록 |
 | Zephyr 앱 대상 여부 | 템플릿 카탈로그 capability `app_heartbeat`(Manager `templates`, 의도와 같이 캐시). `true` 앱 펌웨어, `false` starter(Xen 상태만). JSON boolean 만 믿고, 문자열 `"false"` 같은 값이면 그 템플릿의 VM 은 대상 여부 불명(OBSERVATION_UNAVAILABLE) | 선언이 없는 템플릿은 신호를 한 번 받은 뒤 armed 로 다루고, armed 는 `XENOVA_RECOVERY_STATE_DIR/armed.json`(`{"version":1,"armed":{vm_id: app_id},"history_lost":bool,"agent_delivered":[vm_id]}`) 에 남겨 Worker 재시작 뒤에도 유지. 플랫폼 카탈로그는 기존·네트워크 Starter에 `false`를 노출합니다. `true` 선언은 감시 대상이라는 뜻이고, 손실 판정은 아래 "VM 별 수신 이력"이 있어야 합니다 |
 | VM 별 수신 이력 | Worker 가 그 VM 의 신호를 실제로 받은 적이 있는가. Linux 는 `agent_delivered`, Zephyr 는 `armed`. 같은 `armed.json` 에 영속 | 그 VM 의 신호를 처음 받을 때 기록, 등록에서 사라지면 삭제. `agent_delivered` 가 없는 옛 파일은 이력이 비어 있는 것으로 읽음(손상 아님) |
