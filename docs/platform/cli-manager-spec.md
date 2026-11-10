@@ -908,8 +908,9 @@ reservation_released=false`를 반환한다. 실행자 active/residual·다른 �
 
 명시 수습은 기존 Linux 준비 슬롯 밖에서 대기열을 만들지 않는다. 슬롯을 확보하고 원 작업에
 `discard-private` 소유를 연결한 뒤 계획을 저장한다. 긴 열거/사용 검사/정리는 공통 잠금 밖이고
-각 삭제 직전에는 gate와 계획 inode를 재확인한다. 계획·기록·완료의 짧은 변경은 공통 잠금,
-실제 개별 unlink는 짧은 admission으로 gate와 직렬화한다. 안정 lock·원 journal·template·public
+각 삭제 직전에는 gate와 계획 inode를 재확인한다. 계획·기록·완료의 비교는 공통 잠금,
+필수 기록 fsync는 Linux 슬롯을 보유한 채 공통 잠금 밖에서 수행하고 다시 대조한다.
+실제 개별 unlink는 짧은 admission으로 gate와 직렬화하며, 삭제 뒤 디렉터리 fsync는 그 밖에서 수행한다. 안정 lock·원 journal·template·public
 VM·진단 원본은 삭제하지 않는다. 계획은 고정 private topology, 최대 128항목/직렬화 128KiB로 제한한다.
 
 적용 data는 원 `operation`, `effective_status=FAILED`, `recovery_required=false`,
@@ -950,6 +951,41 @@ create/retire/restore/purge의 같은 key 재전달도 완전하게 읽은 원�
 정리 기록의 별도 물리 공간 예약이 아니다. 외부 쓰기로 여유가 소진되거나 매체 EIO가 생기면
 계획/완료 저장을 실패로 반환하며, 저장소가 회복된 뒤 같은 수습을 명시 재전달한다.
 다른 VM·원장·로그를 지워 기록 공간을 자동 확보하지 않는다.
+
+<a id="automatic-private-cleanup"></a>
+#### 허용된 신규 Linux 생성의 자동 private 수습 — 시험 프로필
+
+`/etc/xenova/creation-reconcile-policy.json`에
+`{"schema_version":"1.0","profile":"trial-1-plus-1"}`을 명시 공급한 경우에만 신규 Linux create에
+자동 수습 허용을 기록한다. 정책은 소유자만 수정 가능해야 하며 0600 공급을 권장한다.
+recipe는 `/usr/share/xenova/creation-reconcile-policy.json.example`만 설치한다. 활성 정책을
+이미지에 넣거나 운영 횟수·시간을 확정하지 않는다. 기존 실패 기록은 소급해서 자동 폐기하지 않는다.
+
+실제 private 준비가 실패한 뒤 원 실패를 저장하고 준비 FD를 반환한 후, 기존 Linux 슬롯을
+상속하는 일회 Python 후속이 처리한다. create 응답은 정리 완료를 기다리지 않는다.
+별도 daemon·영구 큐·주기적인 전체 원장 scan은 없다. 슬롯이 busy면 대기하거나 새 관측을 소비하지 않는다.
+최초 실패와 이후 같은 원 create 재전달이 실행 기회이며, 조회는 후속을 시작하지 않는다.
+
+시험 프로필은 최초 수습 관측 기회 1회와, 현재 소유 상태·정리 receipt·host/gate·수습 진행의 변화가
+확인될 때 추가 최대 1회를 허용한다. 횟수는 원 operation에 먼저 내구 소비하고 재시작·새 boot에도
+초기화하지 않는다. 원 작업의 `cleanup_ms`를 후속 한 번의 유한 예산으로 사용하며 원 생성 기한을
+연장하거나 복사·게시·VM launch를 다시 실행하지 않는다. 자동 기회 2회와 삭제 직전의 필수 사용 검사는
+별개다. 파일별 Xen/mount/loop/FD 보호는 계속 수행하므로 전체 외부 조회가 2회라는 뜻은 아니다.
+
+정리 receipt가 clean이고 원 소유자가 없다는 조건과 기존 private 진단·삭제 guard를 모두 만족해야 한다.
+public/등록·사용 중·신원 미확정 자산은 남긴다. 원 생성 오류·key/UUID/spec·기한은 보존하며,
+자동 수습도 원 `operation-reconcile` 계획/결과를 쓴다. 자동 수습 ID는 원 operation ID로 고정한다.
+이미 수락된 계획은 같은 요청으로만 재개한다. 같은 원 key는 수습 뒤에도 원 실패를 반환한다.
+기존 `operation` 조회의 `effective_status`와 reconciliation으로 현재 종결을 확인하고, 새 생성은
+별도 VM 신원으로 요청한다. 일반 호출자에게 내부 journal 버전 선택이나 파일 편집을 요구하지 않는다.
+
+작은 `automatic_cleanup` metadata만 원 operation에 갱신한다. 변화 없는 재전달은 추가 관측·기록·자식을
+만들지 않고, 정상 종결 표시는 기존 최종 수습 저장에 합친다. 최초/마지막 후속 오류와 원 생성 오류는
+구분해 보존한다. 자식 실행 실패는 기존 `diagnostic_warnings`의
+`AUTOMATIC_CLEANUP_LAUNCH_UNCONFIRMED`로 표시하며 미실행·미수락·취소를 단정하지 않는다.
+관측/저장 예산 만료나 중단으로 최종 저장을 못한 경우 `observing`은 과거 시작 기록이며 현재 실행/완료
+증거가 아니다. 현재 owner와 기존 수습 결과를 함께 확인한다. 2회 소진·변화 근거 부재·미확정은 보존하고
+기존 명시 수습을 사용한다. 부팅 시 일괄 폐기나 완료 원장 보존 기간/삭제는 이번 기능에 포함하지 않는다.
 
 <a id="creation-deadline"></a>
 #### Linux 생성의 세 시간과 호환
@@ -3894,7 +3930,7 @@ cpu_policy의 policy_sha256은 key 정렬·공백 없는 UTF-8 JSON(ensure_ascii
 
 | 필드 | 값·의미 |
 |---|---|
-| `effective_status` | `SUCCEEDED`: 원 결과 내구 확정. `RUNNING`: 같은 원 Linux 준비 또는 lifecycle의 활성 실행 확인. `RECONCILING`: 원 작업에 결합된 명시 private 수습 실행 확인. `FAILED`: 원 생성 실패와 기록된 수습 완료. `RECOVERY_REQUIRED`: 미완료/미확정·실패의 재확인 필요 |
+| `effective_status` | `SUCCEEDED`: 원 결과 내구 확정. `RUNNING`: 같은 원 Linux 준비 또는 lifecycle의 활성 실행 확인. `RECONCILING`: 원 작업에 결합된 private 수습 실행 확인(명시 또는 허용된 자동 후속). `FAILED`: 원 생성 실패와 기록된 수습 완료. `RECOVERY_REQUIRED`: 미완료/미확정·실패의 재확인 필요 |
 | `recovery_required` | effective_status가 RECOVERY_REQUIRED이면 true, 나머지는 false. 자동 복구 이행·출력 허가·할당자의 내구 확인 완료를 뜻하지 않음 |
 
 RUNNING은 응답 시점의 관측이며 VM 실행·생성 완료·기한 연장이 아니다. 원 작업/host/프로세스

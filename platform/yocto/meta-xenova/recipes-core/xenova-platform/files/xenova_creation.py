@@ -1,6 +1,6 @@
-"""원 create의 유한 시간과 명시 private 폐기. 기존 operation/슬롯을 사용하며 자동 실행하지 않는다.
+"""원 create의 유한 시간과 소유 private 폐기. 명시 수습과 허용된 자동 후속이 같은 원장을 쓴다.
 
-진단은 읽기 전용이다. 삭제는 원 작업·고정 계획·현재 소유/사용 근거를 확인한 명시 호출만 수행한다.
+진단은 읽기 전용이다. 삭제는 원 작업·고정 계획·현재 소유/사용 근거를 확인한 수습만 수행한다.
 완료 JSON의 가독성은 내구 확인이 아니다. 예약 소비 writer가 파일/부모를 재동기화한다.
 """
 from contextlib import contextmanager
@@ -62,12 +62,19 @@ def accept(m,op,context):
     if op['schema_version']!='1.2':op['schema_version']='1.1'
     op['creation']={'version':1,'host_boot_id':host,
         'accepted_monotonic_ms':int(now*1000),'deadline_monotonic_ms':int(end*1000),'limits':limits}
+    if op['template']['guest_kind']=='linux':
+        from xenova_creation_auto import enrollment
+        automatic=enrollment(m)
+        if automatic is not None:op['automatic_cleanup']=automatic
     context['create_call_deadline']=call_end
 
 
 def validate(op):
     """알 수 없는 subtree/관계는 예약 0으로 해석하지 않는다."""
     source=op.get('template')
+    if 'automatic_cleanup' in op:
+        from xenova_creation_auto import validate as validate_automatic
+        validate_automatic(op)
     if op.get('schema_version')=='1.2' and (not isinstance(source,dict)
             or not isinstance(source.get('capabilities'),dict)):
         fail('RECOVERY_REQUIRED','creation stored default source is invalid')
@@ -153,7 +160,26 @@ def released(m,op,*,durable=False):
 
 
 def holds(m,op):
-    return op['status']!='SUCCEEDED' and not released(m,op,durable=True)
+    if op['status']=='SUCCEEDED':return False
+    # 완료 JSON이 보이는 동안에도 수습 writer의 내구 확정은 끝나지 않았을 수 있다.
+    # 다른 VM의 예약 계산이 그 writer의 느린 fsync를 대신 기다리지 않는다.
+    if op.get('reconciliation',{}).get('phase')=='complete' and m._owner_state(op)!='absent':return True
+    return not released(m,op,durable=True)
+
+
+def save_owned(m,op,deadline,expected):
+    """Linux 슬롯 소유자가 원장을 게시한다. 필수 fsync 동안 공통 잠금을 반환한다."""
+    # 진입에서 이미 유일성을 검증한 원 파일만 다시 대조한다. 항목마다 전체 이력을 훑지 않는다.
+    path=m.data/'operations'/(op['operation_id']+'.json')
+    with operation_lock(m.p.runtime) as common:
+        check(m,deadline)
+        if digest(m._read(path))!=expected:fail('TARGET_CHANGED','original changed before owned cleanup write')
+        validate(op)
+        m._writable()
+        with common.outside(m.p):m._save_op(op)
+        check(m,deadline)
+        if m._read(path)!=op:fail('TARGET_CHANGED','original changed during owned cleanup write')
+    return digest(op)
 
 
 def validate_request(m,spec,key):
@@ -261,7 +287,7 @@ def diagnose(m,op,deadline):
     return plan,digest({'original':binding,'host':m.p.boot_id_reader(),'plan':plan})
 
 
-def reconcile(m,spec,execute,context,deadline,output):
+def reconcile(m,spec,execute,context,deadline,output,*,_slot=None,_diagnosis=None):
     from xenova_vm import storage_check
     from xenova_execution import short_lock
     try:storage_check(m.data)
@@ -285,7 +311,7 @@ def reconcile(m,spec,execute,context,deadline,output):
     if (not UUID.fullmatch(spec.get('reconciliation_id','')) or len(spec.get('expected_context_sha256',''))!=64):
         fail('INVALID_SPEC','explicit reconciliation_id and diagnostic context hash required')
     request={k:spec[k] for k in request_fields}
-    try:slot=output.stack.enter_context(LinuxSlot(m.p))
+    try:slot=_slot if _slot is not None else output.stack.enter_context(LinuxSlot(m.p))
     except OperationBusy:
         fail('OPERATION_IN_PROGRESS','Linux preparation slot is busy; reconciliation not accepted',
              retryable=True,details={'accepted':False,'operation_id':op['operation_id']})
@@ -297,29 +323,42 @@ def reconcile(m,spec,execute,context,deadline,output):
             if m._owner_state(op)!='absent':fail('OPERATION_IN_PROGRESS','reconciliation owner remains')
             usage(m,op,plan,deadline)
         else:
-            plan,fingerprint=diagnose(m,op,deadline)
+            if _diagnosis is None:
+                plan,fingerprint=diagnose(m,op,deadline)
+            else:
+                expected,plan,fingerprint,host,gate=_diagnosis
+                if (_slot is None or _slot.p is not m.p or _slot.fd is None or digest(op)!=expected or
+                        m.p.boot_id_reader()!=host or call_gate!=gate or inventory(m,op,deadline)!=plan or
+                        m._owner_state(op)!='absent'):
+                    fail('TARGET_CHANGED','automatic diagnosis does not belong to this unchanged cleanup')
             if fingerprint!=request['expected_context_sha256']:fail('TARGET_CHANGED','private context changed; diagnose again')
         with operation_lock(m.p.runtime):
             current=original(m,spec,deadline)
             if current!=op:fail('TARGET_CHANGED','original create changed before reconciliation acceptance')
-            m._writable();slot.claim(op,role='discard-private',reconciliation_id=request['reconciliation_id'])
+            target=m.data/'instances'/op['assigned']['internal_name']
+            if target.exists() or target.is_symlink() or op['vm_id'] in m._tombs():
+                fail('TARGET_CHANGED','public creation appeared before cleanup acceptance')
+            m._writable()
+        # Linux 슬롯은 이미 독점 보유한다. 소유 receipt의 fsync도 다른 VM을 기다리게 하지 않는다.
+        slot.claim(op,role='discard-private',reconciliation_id=request['reconciliation_id'])
+        saved=digest(op)
+        with operation_lock(m.p.runtime):
+            if original(m,spec,deadline)!=op:fail('TARGET_CHANGED','original changed during cleanup owner claim')
             if resolution is None:
                 resolution={'version':1,'request':request,'context_sha256':request['expected_context_sha256'],
                     'plan':plan,'plan_sha256':digest(plan),'phase':'planned','remaining':list(plan['items']),
                     'deleting':None,'root_pending':False,'error':None,'release':False}
-                op['schema_version']='1.1';op['reconciliation']=resolution
+                if op['schema_version']=='1.0':op['schema_version']='1.1'
+                op['reconciliation']=resolution
                 if op['error'] is None:op['error']={'code':'RECOVERY_REQUIRED','message':'original create explicitly abandoned before completion','retryable':False,'details':{}}
                 op['status']='RECOVERY_REQUIRED'
-            # 이전 계획 저장의 fsync 효과 미확정도 재적용 전 같은 계획을 다시 내구 확정한다.
-            m._save_op(op)
-        root=m.data/op['owned_workspace'];saved=digest(op)
+        # 이전 계획 저장의 fsync 효과 미확정도 재적용 전 같은 계획을 다시 내구 확정한다.
+        saved=save_owned(m,op,deadline,saved)
+        root=m.data/op['owned_workspace']
         def save():
             nonlocal saved
             check(m,deadline)
-            with operation_lock(m.p.runtime):
-                if digest(original(m,spec,deadline))!=saved:fail('TARGET_CHANGED','original changed while reconciliation owns it')
-                m._save_op(op)
-                saved=digest(op)
+            saved=save_owned(m,op,deadline,saved)
         # root 밖 원 journal과 안정 lock은 지우지 않는다. unlink는 직전 저장한 계획에만 한정한다.
         for name in sorted(plan['items'],key=lambda n:(len(Path(n).parts),n),reverse=True):
             if name not in resolution['remaining']:continue
@@ -355,7 +394,8 @@ def reconcile(m,spec,execute,context,deadline,output):
                         check(m,deadline)
                         if plan['items'][name]['directory']:os.rmdir(Path(name).name,dir_fd=fd)
                         else:os.unlink(Path(name).name,dir_fd=fd)
-                        os.fsync(fd)
+                    # 삭제 진입만 admission으로 보호한다. 내구 확인은 Linux 소유 슬롯 아래 수행한다.
+                    os.fsync(fd)
                 finally:os.close(fd)
                 m.checkpoint('reconcile-after-delete',op)
             resolution['remaining'].remove(name);resolution['deleting']=None;save()
@@ -371,7 +411,8 @@ def reconcile(m,spec,execute,context,deadline,output):
                 if m.p.execution().barrier()!=call_gate:fail('TARGET_CHANGED','host gate changed before private root removal')
                 check(m,deadline)
                 if identity(root.lstat())!=plan['root']:fail('TARGET_CHANGED','private root changed before removal')
-                root.rmdir();sync_directory(root.parent)
+                root.rmdir()
+            sync_directory(root.parent)
         elif not plan['absent'] and (resolution['remaining'] or not resolution['root_pending']):
             fail('TARGET_CHANGED','private root disappeared before planned cleanup')
         sync_directory(root.parent)
@@ -384,17 +425,22 @@ def reconcile(m,spec,execute,context,deadline,output):
             target=m.data/'instances'/op['assigned']['internal_name']
             if target.exists() or target.is_symlink() or op['vm_id'] in m._tombs():fail('TARGET_CHANGED','public creation appeared during cleanup')
             resolution.update(phase='complete',release=True,root_pending=False,error=None)
-            m._save_op(op)
-            released(m,op,durable=True)
+            if _slot is not None:op['automatic_cleanup']['state']='complete'
+        saved=save_owned(m,op,deadline,saved)
+        released(m,op,durable=True)
         return {'operation':op,'effective_status':'FAILED','recovery_required':False,'reconciliation':resolution}
     except Exception as error:
         if resolution is not None:
             # 최초 create error는 불변이다. 완료 저장의 효과 미확정을 여기서 성공으로 만들지 않는다.
             resolution['error']={'cause_type':type(error).__name__}
             try:
-                with operation_lock(m.p.runtime):
-                    latest=original(m,spec,deadline)
-                    if latest.get('reconciliation',{}).get('request')==request and latest['reconciliation']['phase']!='complete':
-                        latest['reconciliation']['error']=resolution['error'];m._save_op(latest)
+                latest=original(m,spec,deadline)
+                if (latest.get('reconciliation',{}).get('request')==request and latest['reconciliation']['phase']!='complete'
+                        and latest['reconciliation'].get('error')!=resolution['error']):
+                    previous=digest(latest);latest['reconciliation']['error']=resolution['error']
+                    if _slot is not None:
+                        from xenova_creation_auto import deferred
+                        deferred(latest,error)
+                    save_owned(m,latest,deadline,previous)
             except Exception:pass
         raise
