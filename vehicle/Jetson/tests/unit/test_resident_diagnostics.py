@@ -1,6 +1,7 @@
 """선택 진단의 파일·직렬화 실패가 런타임 실패가 되지 않는 경계를 검증한다."""
 
 from collections import deque
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -11,9 +12,28 @@ from unittest.mock import patch
 from xenova_vehicle.runtime.resident_diagnostics import DiagnosticWriter
 from xenova_vehicle.runtime.resident_runtime import _Runtime
 from xenova_vehicle.runtime.resident_workers import _Actor
+from tools.hil_observation.resident import _save_final_failure
 
 
 class DiagnosticIsolationTests(unittest.TestCase):
+    def test_cli_failure_is_bounded_private_and_never_overwrites(self):
+        with TemporaryDirectory() as directory:
+            result = dict(reason='pc_worker_failed', error='original failure', error_trace='x' * 10000)
+            _save_final_failure(directory, result)
+            path = Path(directory) / 'cli-failure.json'
+            original = path.read_bytes()
+            self.assertEqual(json.loads(original)['error'], 'original failure')
+            self.assertEqual(len(json.loads(original)['error_trace']), 8192)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            _save_final_failure(directory, dict(result, error='later failure'))
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_cli_optional_file_failure_does_not_change_result(self):
+        result = dict(reason='pc_worker_failed', error='original failure')
+        with patch('os.open', side_effect=PermissionError()):
+            _save_final_failure('/unavailable', result)
+        self.assertEqual(result, dict(reason='pc_worker_failed', error='original failure'))
+
     def test_worker_disk_full_does_not_fault_or_change_state(self):
         actor = object.__new__(_Actor)
         actor.boot = SimpleNamespace(diagnostic_directory='/unavailable')
