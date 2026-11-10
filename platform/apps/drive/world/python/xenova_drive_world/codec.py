@@ -69,8 +69,9 @@ def _finite(message):
     cap=_MESSAGE_CAPS.get(message.DESCRIPTOR.name,MAX_BYTES)
     if message.ByteSize()>cap:raise ValueError('message size cap '+message.DESCRIPTOR.name)
     for field,value in message.ListFields():
-        values=value if _repeated(field) else (value,)
-        if _repeated(field) and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
+        repeated=_repeated(field)
+        values=value if repeated else (value,)
+        if repeated and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
             raise ValueError('repeated field cap '+field.name)
         if field.type in (field.TYPE_FLOAT,field.TYPE_DOUBLE):
             if not all(math.isfinite(item) for item in values):raise ValueError('nonfinite field '+field.name)
@@ -79,7 +80,9 @@ def _finite(message):
         elif field.type==field.TYPE_STRING:
             limit=64 if field.name in _STR64 else 36
             for item in values:
-                if not item or len(item.encode('utf-8'))>limit or any(ord(c)<33 or ord(c)>126 for c in item):raise ValueError('bounded identifier '+field.name)
+                # ASCII 33..126은 문자 수=byte 수다. 같은 범위를 C 문자열 검사로 검산한다.
+                if (not 0<len(item)<=limit or not item.isascii() or not item.isprintable() or ' ' in item):
+                    raise ValueError('bounded identifier '+field.name)
         elif field.type==field.TYPE_BYTES:
             limit,exact=_bytes_bound(field)
             if any(len(item)>limit or exact and len(item)!=limit for item in values):raise ValueError('bounded bytes '+field.name)
