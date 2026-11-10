@@ -133,11 +133,20 @@ def _arguments(argv):
     parser.add_argument('--bootstrap-receipt', required=True)
     parser.add_argument('--bootstrap-timeout-s', type=float, required=True)
     parser.add_argument('--join-timeout-s', type=float, required=True)
+    parser.add_argument('--observer-dir',default=os.environ.get('XENOVA_HIL_OBSERVER_DIR'),
+        help='선택 PC 관측 input 폴더. 생략하면 관측 worker를 만들지 않는다.')
+    parser.add_argument('--observer-run-id',help='선택 진단 run ID. 실제 source/session 식별자와 별개다.')
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = _arguments(argv)
+    feed=None
+    if args.observer_dir is not None:
+        try:
+            from tools.live_observer.feed import start_feed
+            feed=start_feed(args.observer_dir,run_id=args.observer_run_id)
+        except Exception:pass
     stopped = threading.Event()
     previous = {}
     connection = producer = feedback_connection = None
@@ -186,17 +195,21 @@ def main(argv=None):
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         connection.setblocking(False)
         print(json.dumps(dict(kind='pc-observation-connected-1', bootstrap_pending=True, authority=False)), flush=True)
+        if feed is not None:feed.offer_state('WAITING_BOOTSTRAP','WAITING')
         wait_bootstrap(args.bootstrap_receipt, args.bootstrap_timeout_s, stopped.is_set)
         binding, scope, bootstrap = load_bootstrap(args.bootstrap_receipt, motion)
+        if feed is not None:feed.bind(binding)
         print(json.dumps(dict(kind='pc-observation-bootstrap-read-1', **bootstrap)), flush=True)
         producer = PcObservationProducer(connection, binding=binding, scope=scope,
             motion_profile=motion, scene=scene, capture_epoch=args.capture_epoch,
             capture_clock_epoch=scope.fields['pc_clock_epoch'], duration_s=args.observation_duration_s,
             capture_lifetime_us=args.capture_lifetime_us, render_interval_us=args.render_interval_us,
-            join_timeout_s=args.join_timeout_s)
+            join_timeout_s=args.join_timeout_s,observer=feed)
+        if feed is not None:feed.attach(producer=producer)
         connection = None
         # Pi 서비스/accept를 기다리는 동안에도 원 A clock probe에 응답한다.
         producer.start_session()
+        if feed is not None:feed.offer_state('WAITING_FEEDBACK','WAITING')
         feedback_connection = accept_once(host=args.host, port=args.port, timeout_s=args.accept_timeout_s,
             ready=lambda row: print(json.dumps(row), flush=True))
         state = producer.snapshot()
@@ -207,23 +220,43 @@ def main(argv=None):
             state = producer.snapshot()
             return stopped.is_set() or state['session_done'] or state['failed']
         peer_running = True
+        def attach(plant,peer):
+            producer.attach(plant,peer)
+            if feed is not None:
+                feed.attach(producer=producer,plant=plant,peer=peer)
+                feed.offer_state('CAPTURING','RUNNING')
         result = run_peer_session(feedback_connection, plant, protocol, device_session=args.device_session,
             duration_s=args.duration_s, poll_interval_s=args.poll_interval_s, brake_drain_s=args.brake_drain_s,
-            on_session=producer.attach, cancelled=cancelled)
+            on_session=attach, cancelled=cancelled)
         feedback_connection = None
     except (OSError, ValueError, RuntimeError, TypeError, KeyError, ImportError) as error:
+        if feed is not None:feed.offer_state('FAILED','FAILED',error=type(error).__name__)
         print(json.dumps(dict(kind='pc-observation-run-failed-1', error=type(error).__name__, authority=False)), flush=True)
     finally:
         closing = True
-        if feedback_connection is not None:
-            feedback_connection.close()
-        if connection is not None:
-            connection.close()
-        if producer is not None:
-            state = producer.close()
-            print(json.dumps(dict(kind='pc-observation-producer-ended-1', **state)), flush=True)
-        for number, handler in previous.items():
-            signal.signal(number, handler)
+        owners_closed=False
+        try:
+            if feedback_connection is not None:
+                feedback_connection.close()
+            if connection is not None:
+                connection.close()
+            producer_closed=True
+            if producer is not None:
+                state = producer.close()
+                producer_closed=state['closed'] and not any(state['threads_alive'].values())
+                print(json.dumps(dict(kind='pc-observation-producer-ended-1', **state)), flush=True)
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+            owners_closed=producer_closed and (not peer_running or result is not None and result['peer']['closed'])
+        finally:
+            if feed is not None:
+                if result is not None:
+                    failed=bool(result['peer']['link_lost'] or result['peer']['failure'])
+                    feed.offer_state('FAILED' if failed else 'ENDED','FAILED' if failed else 'ENDED',
+                        stop_reason=result['peer']['failure'] or ('LINK_LOST' if result['peer']['link_lost'] else None))
+                feed.close()
+                # 운행/장치 owner의 원 정리가 끝난 CLI 종료에서만 최종 진단에 짧은 기회를 준다.
+                if owners_closed:feed.finish_terminal()
     if result is None:
         return 1
     print(json.dumps(result), flush=True)

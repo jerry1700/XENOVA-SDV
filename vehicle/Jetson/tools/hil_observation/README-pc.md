@@ -89,3 +89,37 @@ Feedback3 10ms cutoff를 만족하는지는 실행에서 확인한다. 부하 �
 출력의 `session_done`, `failed`, `closed`, `threads_alive`는 실제 sender 종료 진단이다.
 target0·peer FD close·renderer 종료가 실제 stationary나 STOP/APPLIED를 뜻하지 않는다.
 actual current Vehicle/clock/Source/World와 RPi의 제어·정지 수락은 각 실제 owner가 판단한다.
+
+## 선택 PC 실시간 관측 피드
+
+기존 PC 실행 인자에 `--observer-dir <명시 input 폴더>`를 더하면 별도 진단 collector가
+읽을 `pc.json`을 내보낸다. 환경변수 `XENOVA_HIL_OBSERVER_DIR`도 같은 선택이다.
+둘 다 없으면 관측 worker를 만들지 않으며 feed 모듈도 import하지 않는다.
+`--observer-run-id <진단 run ID>`는 collector와 맞추는 식별자다. 생략하면 별도의
+진단 UUID를 만들며 실제 source/session UUID를 대신하지 않는다. 폴더당 PC feed 하나만 쓴다.
+
+파일은 개발 도구용 `pc-live-source-1`이다. 기동 중에는 `CONNECTING_JETSON`,
+`WAITING_BOOTSTRAP`, `WAITING_FEEDBACK`와0프레임을 표시하고, 실제 attach 뒤에는
+`CAPTURING`을 표시한다. 원 bootstrap 확인 전 `binding`, `session_id`는 null이다.
+binding은 원 공개 metadata이며 자격정보가 아니다. `FAILED`/`ENDED`와 실제 원 session
+종료 사유를 내보낸다. 운행 owner가 실제 정리된 CLI 종료에서만 기본0.3초 동안
+최종 진단 전달을 기다리며, 디스크가 막히면 포기한다. 전달 완료는 운행 수락 조건이 아니다.
+
+daemon 하나가 최대0.5초 간격으로 최신 자료만 변환·원자 교체한다. 호출자는 try-lock으로
+작은 상태나 원 immutable frame 참조만 넘기며 운행 중 JSON/base64/hash/파일·join을 수행하지 않는다.
+운행 owner가 진단 파일 저장을 기다리지 않으며 관측 실패는 운행 실패나 모델 재시작을
+일으키지 않는다. 같은 PC에서 진단 변환이 소비하는 CPU와 실제 스케줄링 영향은 별도
+실행에서 측정해야 한다. 이 선택을 실시간성 수락으로 해석하지 않는다.
+
+`sequence`는 관측 heartbeat이고 `source_sequence`는 원 렌더 frame 순번이다. 같은 frame의
+재게시로 원 PC capture interval, 완료 시각, expiry를 바꾸지 않는다. RGB640×360 NV12와
+깊이640×480 RAW16_LE의 원 bytes는 worker에서 base64로 변환하며 전체 파일은2MiB 이하다.
+`media.original_stamp`는 원 frame scope/descriptor/시각을 보존한다. PC clock, collector
+수신 clock, Jetson clock을 epoch 대조 없이 빼지 않는다.
+
+`counters`는 renderer attempted/rendered/expired/replaced/taken 등이며 전송 완료 수가 아니다.
+`producer`에는 원 작은 전체 snapshot을 둔다. `peer.received`는 clock을 포함한 전체 packet 수,
+`command_hwm`은 가상 장치가 수락한 명령 순번, `applied`는 target 적용 횟수다.
+`plant`의 실제 적분 pose/속도·원 wheel feedback은 이동 관측이며 명령 수신·target 적용과 별개다.
+이 값과 영상은 모두 HIL SYNTHETIC이며 GT pose/scene을 Jetson 입력으로 보내지 않는다.
+이 feed만으로 YOLOP 결과·Jetson 지도·Pi 계획 경로가 생성됐다고 표시하지 않는다.
