@@ -74,6 +74,7 @@ class PcAcquisitionDriver:
         self._fenced = False
         self._retired = OrderedDict()
         self._parse_raw = None
+        self.last_enqueue_timing = None
         self.counts = dict(offered=0, replaced=0, expired=0, enqueued=0, completed=0, parsed=0, late=0)
 
     def _owned(self):
@@ -300,6 +301,11 @@ class PcAcquisitionDriver:
             and self._ack.packet.issued_us <= submission.clock_sample.j_before_us,
             'actual SDK enqueue changed original EARLY snapshot/frame/E')
         self._submission = submission
+        self.last_enqueue_timing=dict(captured_j_us=job.frame.observation.capture_interval,
+            frame_received_j_us=job.frame.frame_received_j_us,filled_completed_j_us=getattr(self._filled,'completed_us',None),
+            filled_sent_j_us=getattr(self._filled_sent,'completed_us',None),metadata_sent_j_us=getattr(self._meta_sent,'completed_us',None),
+            snapshot_issued_j_us=self._ack.packet.issued_us,enqueued_j_us=submission.clock_sample.j_after_us,
+            expires_j_us=job.expires_us)
         self._encoding = self._filled = self._filled_sent = self._meta_sent = None
         self._phase = 'NN_PENDING'; self.counts['enqueued'] += 1
         return submission

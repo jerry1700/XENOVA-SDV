@@ -137,6 +137,7 @@ class _AcquisitionDiagnostic:
             self.final = dict(source_fenced=source_fenced, actor_state=actor.state,
                 driver_phase=None if driver is None else driver.phase, leases_released=actor.leases_released,
                 driver_counts={} if driver is None else dict(getattr(driver,'counts',{})),
+                last_enqueue_timing=None if driver is None else getattr(driver,'last_enqueue_timing',None),
                 nn_counts=dict(getattr(getattr(actor,'nn_source',None),'counts',{})),
                 nn_last_unmatched=getattr(getattr(actor,'nn_source',None),'last_unmatched',None),
                 nn_last_submission_timing=getattr(getattr(actor,'nn_source',None),'last_submission_timing',None),
