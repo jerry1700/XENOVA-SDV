@@ -77,6 +77,7 @@ recipe do_install 재생·별도 설치 경로 import·기존 데이터 경로 �
 WSL2 Ubuntu 준비 호스트에서 공식 Debian 13 ARM64 입력의 SHA-512를 `sources.lock.json`과 대조한 뒤 새 템플릿을 생성했다. 기존 1.0.6은 수정하지 않았다.
 
 - template manifest SHA-256: `2fa9454b4a528a6b47e68179c0fe2ca6a63f8d3e6de7fd618549e3f8af5fa689`
+- transfer archive SHA-256: `e3c5e88767cb6d42da6cdfc96acdd339068582c12962ddc9e746c11c2fa8349a` (`debian-13-arm64-1.0.7.tar.zst`, 495 MiB)
 - root SHA-256: `667a94887874223edccba5f9791e4054e1ee8f37fe88589656000f8383aae594`
 - frontend revision: `b4f0d9a163fcaf94a08fa9b6e97986cc4bf69d5a`
 - frontend tree SHA-256: `1f4493c495b9286cacd83755408e762382ebe18924c339cefb8a8d7598ab06bf`
