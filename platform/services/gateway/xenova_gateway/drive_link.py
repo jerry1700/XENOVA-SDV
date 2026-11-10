@@ -23,6 +23,11 @@ from .mission_link import MissionLinkPort, BudgetEnvelope
 
 PREFIX='xenova/v1'
 VEHICLE_TOPIC=PREFIX+'/vehicle/state.pb'
+# I/O owner select bound. With replies pending it keeps the 2 ms pacing; with
+# nothing queued it sleeps until the socket, an offer() or close() wakes it.
+# Paho keepalive (10 s) still runs loop_misc() at least every IDLE_WAIT_S.
+BUSY_WAIT_S=.002
+IDLE_WAIT_S=.25
 
 
 def inbound(vm):return f'{PREFIX}/vms/{vm}/drive/link/in'
@@ -510,6 +515,10 @@ class DriveLinkIO:
         self.vms=tuple(vms);self.clock=clock;self.incoming=queue.Queue(maxsize=4)
         self.route_incoming=queue.Queue(maxsize=1)
         self.lock=threading.Lock();self.pending={};self.stop=threading.Event();self.thread=None
+        # The owner's own wake pair: offer()/close() wake an idle select. Paho's
+        # internal wake sockets stay unused; only the owner calls Paho. The lock
+        # keeps a send from racing the owner's close of the same descriptor.
+        self._wake_lock=threading.Lock();self._wake_read=self._wake_write=None
         self.received=self.dropped=self.sent=self.failed=self.high_water=self.oversize=0
         self.first_error=None;self.failure=None;self.first_transport=None;self.connected=False
         self.host_boot=None;self.instance=None
@@ -552,6 +561,7 @@ class DriveLinkIO:
         with self.lock:
             self.pending[topic,kind]=data if kind in ('clock','clock-manual') else bytes(data)
             self.high_water=max(self.high_water,len(self.pending))
+        self._wake()
 
     def offer_route(self,topic,data):
         """각 VM의 관리 원문 pending1. clock 우선순위와 기존 mailbox를 바꾸지 않는다."""
@@ -563,7 +573,8 @@ class DriveLinkIO:
             key=(topic,'route');previous=self.pending.get(key)
             if previous is not None:return previous==data
             self.pending[key]=data;self.high_water=max(self.high_water,len(self.pending))
-            return True
+        self._wake()
+        return True
 
     def clear_scene(self):
         """아직 선택되지 않은 scene mailbox만 비운다. I/O가 이미 고른 bytes의 기한은 불변이다."""
@@ -579,21 +590,52 @@ class DriveLinkIO:
 
     def start(self):
         if self.thread:raise RuntimeError('LINK_OWNER_EXISTS')
-        self.thread=threading.Thread(target=self._run,name='gateway-drive-link',daemon=True);self.thread.start();return self
+        pair=socket.socketpair()
+        for end in pair:end.setblocking(False)
+        with self._wake_lock:self._wake_read,self._wake_write=pair
+        self.thread=threading.Thread(target=self._run,name='gateway-drive-link',daemon=True)
+        try:self.thread.start()
+        except BaseException:
+            self._close_wake();raise
+        return self
 
-    def _network_once(self,client,mqtt):
+    def _wake(self):
+        """Never blocks the caller. A full pair already carries a wakeup; a
+        stopped owner needs none."""
+        with self._wake_lock:
+            if self._wake_write is None:return
+            try:self._wake_write.send(b'\0')
+            except OSError:pass
+
+    def _close_wake(self):
+        with self._wake_lock:
+            pair,(self._wake_read,self._wake_write)=(self._wake_read,self._wake_write),(None,None)
+            for end in pair:
+                if end is not None:end.close()
+
+    def _select_wait(self):
+        # An offer() racing this check still finds its wake byte in select.
+        return BUSY_WAIT_S if self.pending else IDLE_WAIT_S
+
+    def _network_once(self,client,mqtt,wait=BUSY_WAIT_S):
         # All Paho calls belong to this owner. Its external-loop API avoids
         # creating a cross-thread wake socket for the same thread to signal.
         sock=client.socket()
         if sock is None:return mqtt.MQTT_ERR_NO_CONN
+        wake=self._wake_read
         try:
-            readable,writable,_=select.select([sock],[sock] if client.want_write() else [],[],.002)
+            readable,writable,_=select.select([sock] if wake is None else [sock,wake],
+                                              [sock] if client.want_write() else [],[],wait)
         except InterruptedError:
             readable=writable=[]
         except (OSError,ValueError) as error:
             if self.first_transport is None:self.first_transport=error
             return mqtt.MQTT_ERR_CONN_LOST
-        if readable:
+        if wake is not None and wake in readable:
+            try:
+                while wake.recv(4096):pass
+            except OSError:pass  # BlockingIOError: drained
+        if sock in readable:
             rc=client.loop_read()
             if rc not in (mqtt.MQTT_ERR_SUCCESS,mqtt.MQTT_ERR_AGAIN):return rc
         if writable and client.socket() is sock:
@@ -602,6 +644,10 @@ class DriveLinkIO:
         return client.loop_misc()
 
     def _run(self):
+        try:self._run_link()
+        finally:self._close_wake()
+
+    def _run_link(self):
         import paho.mqtt.client as mqtt
         import errno
         owner=self
@@ -659,7 +705,7 @@ class DriveLinkIO:
                         self.failed+=1
                         if self.first_transport is None:self.first_transport=exc
                         self.stop.wait(.1);continue
-                rc=self._network_once(client,mqtt)
+                rc=self._network_once(client,mqtt,self._select_wait())
                 if rc not in (mqtt.MQTT_ERR_SUCCESS,mqtt.MQTT_ERR_AGAIN):
                     self.failed+=1;self.connected=False;reconnect=True
                     if self.stop.wait(.1):break
@@ -694,7 +740,7 @@ class DriveLinkIO:
         finally:client.disconnect()
 
     def close(self):
-        self.stop.set()
+        self.stop.set();self._wake()
         if self.thread:self.thread.join(1)
         if self.thread and self.thread.is_alive():raise RuntimeError('LINK_OWNER_TERMINATION_UNCONFIRMED')
         if self.failure is not None:raise RuntimeError('LINK_OWNER_FAILED') from self.failure

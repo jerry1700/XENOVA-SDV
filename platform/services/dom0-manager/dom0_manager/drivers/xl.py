@@ -99,6 +99,13 @@ class XlRow:
     flags: str
 
 
+@dataclass(frozen=True)
+class XlVerboseRow(XlRow):
+    """`xl list -v` 한 줄: `xl list` 열 뒤에 UUID Reason-Code Security-Label 이 붙는다. UUID 는 Xen 도메인 handle 이다."""
+
+    uuid: str
+
+
 # 계약 3.2 장. 열은 libxl list_domains 가 찍는 순서대로 고정이다 (xl.c, 저장소 픽스처 xl-list-source.txt):
 #   [0] r running  [1] b blocked  [2] p paused  [3] s shutdown  [4] shutdown reason  [5] d dying
 # 다섯째 열은 독립 crash 플래그가 아니라 shutdown reason 이다 ('-' 없음, 'r' reboot, 's' suspend,
@@ -138,6 +145,31 @@ def parse_xl_list(text: str) -> list[XlRow]:
             rows.append(XlRow(name=parts[0], domid=int(parts[1]), mem_mib=int(parts[2]), vcpus=int(parts[3]), flags=parts[4]))
         except ValueError as exc:
             raise DriverError("cannot parse xl list line", detail=line[:200]) from exc
+    return rows
+
+
+# `xl list -v` 는 도메인 목록 한 번(libxl_dominfo)으로 상태 열과 도메인 UUID 를 함께 찍는다(xl_list.c). `xl list -l` 은 도메인마다
+# 저장된 설정을 다시 읽어 JSON 으로 만드는 무거운 호출이라 주기 조회에 쓰지 않는다. 실보드(Xen 4.21)에서 이 UUID 열은 -l 의
+# config.c_info.uuid 와 같다(픽스처 xl-list-v.txt·xl-list-l.json). 열: Name ID Mem VCPUs State Time(s) UUID Reason-Code Security-Label
+_VERBOSE_COLUMNS = 9
+
+
+def parse_xl_list_verbose(text: str) -> list[XlVerboseRow]:
+    """한 번의 출력이라 `xl list` 와 `xl list -l` 을 따로 부를 때처럼 두 호출 사이에 생기거나 사라진 도메인이 어긋나지 않는다.
+    열 수가 다르거나 UUID 열이 없는 출력은 조용히 넘기지 않고 DriverError 다."""
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines or not lines[0].lstrip().startswith("Name") or "UUID" not in lines[0].split():
+        raise DriverError("xl list -v did not start with a header that has a UUID column", detail=(lines[0] if lines else "")[:200])
+    rows: list[XlVerboseRow] = []
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) != _VERBOSE_COLUMNS:
+            raise DriverError("unexpected xl list -v line", detail=line[:200])
+        try:
+            rows.append(XlVerboseRow(name=parts[0], domid=int(parts[1]), mem_mib=int(parts[2]), vcpus=int(parts[3]),
+                                     flags=parts[4], uuid=parts[6]))
+        except ValueError as exc:
+            raise DriverError("cannot parse xl list -v line", detail=line[:200]) from exc
     return rows
 
 
@@ -191,9 +223,9 @@ class Xl:
     def list(self) -> list[XlRow]:
         return parse_xl_list(self._run("list", timeout_s=self.query_timeout_s))
 
-    def list_long(self, *, timeout_s: float | None = None) -> list[dict[str, Any]]:
-        """timeout_s 는 상위 요청이 deadline 을 나눠 줄 때만 넘긴다(통계 수집)."""
-        return parse_xl_list_long(self._run("list", "-l", timeout_s=self.query_timeout_s if timeout_s is None else timeout_s))
+    def list_verbose(self, *, timeout_s: float | None = None) -> list[XlVerboseRow]:
+        """도메인 목록과 UUID 를 한 번에 읽는다. timeout_s 는 상위 요청이 deadline 을 나눠 줄 때만 넘긴다(통계 수집)."""
+        return parse_xl_list_verbose(self._run("list", "-v", timeout_s=self.query_timeout_s if timeout_s is None else timeout_s))
 
     def info(self) -> HostInfo:
         return parse_xl_info(self._run("info", timeout_s=self.query_timeout_s))

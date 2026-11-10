@@ -1,6 +1,5 @@
 """관측 어댑터·MQTT 연결·감시 루프 (S15P31E110-124). 실제 브로커·플랫폼은 없다."""
 
-import json
 import queue
 from types import SimpleNamespace
 from dataclasses import replace
@@ -37,19 +36,12 @@ ZEPHYR = UUID("0d950ea2-cc99-49df-9b60-a4ddf2c8e137")
 STOPPED = UUID("cd35a7fc-5f14-456a-a129-f0afc7d91d97")
 SETTINGS = RecoverySettings(interval_s=5, intent_refresh_s=60, heartbeat_lost_s=30, boot_grace_s=90, absent_grace_s=60, agent_sole_publisher="trust")
 
-XL_LIST = """\
-Name                                        ID   Mem VCPUs	State	Time(s)
-Domain-0                                     0  1024     4     r-----      30.1
-debian-dev                                   1   512     1     -b----      11.4
-zephyr-drive-a                               2    16     1     -b----       0.0
+XL_LIST_V = f"""\
+Name                                        ID   Mem VCPUs	State	Time(s)   UUID                            Reason-Code	Security Label
+Domain-0                                     0  1024     4     r-----      30.1 00000000-0000-0000-0000-000000000000        -                -
+debian-dev                                   1   512     1     -b----      11.4 {DEBIAN}        -                -
+zephyr-drive-a                               2    16     1     -b----       0.0 {ZEPHYR}        -                -
 """
-XL_LIST_LONG = json.dumps(
-    [
-        {"domid": 0, "config": {"c_info": {"name": "Domain-0"}}},
-        {"domid": 1, "config": {"c_info": {"name": "debian-dev", "uuid": str(DEBIAN)}}},
-        {"domid": 2, "config": {"c_info": {"name": "zephyr-drive-a", "uuid": str(ZEPHYR)}}},
-    ]
-)
 TEMPLATES = [
     {"template_id": "debian-13-arm64", "template_version": "1.0.1", "guest_kind": "linux", "capabilities": {"graceful_shutdown": True}},
     {"template_id": "zephyr-drive-arm64", "template_version": "1.0.0", "guest_kind": "zephyr", "capabilities": {"app_heartbeat": True}},
@@ -132,7 +124,7 @@ def _heartbeat(vm_id, **extra):
 
 
 def _runner():
-    return FakeRunner({("xl", "list"): XL_LIST, ("xl", "list", "-l"): XL_LIST_LONG})
+    return FakeRunner({("xl", "list", "-v"): XL_LIST_V})
 
 
 def _obs(vm_id=DEBIAN, state=VmState.running, kind="linux"):
@@ -161,7 +153,7 @@ def test_platform_observer_joins_cached_intent_with_fresh_xl_domains():
     observer()
     assert [c[0] for c in manager.calls] == ["intents", "templates", "intents"]  # 의도는 매 주기, capability 는 60초마다
     assert "list" not in [c[0] for c in manager.calls]  # 잠금·Xen 관측을 하는 list 는 부르지 않는다
-    assert [args[:2] for args, _ in runner.calls] == [("xl", "list"), ("xl", "list"), ("xl", "list"), ("xl", "list")]  # xl 은 매번
+    assert [args for args, _ in runner.calls] == [("xl", "list", "-v")] * 2  # xl 은 주기마다 한 번
     clock[0] += 30
     observer()
     assert [c[0] for c in manager.calls] == ["intents", "templates", "intents", "intents", "templates"]
