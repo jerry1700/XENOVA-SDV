@@ -3,6 +3,7 @@ from collections import OrderedDict
 from types import SimpleNamespace
 from uuid import UUID
 
+from xenova_gateway.feedback import FeedbackSerialSink
 from xenova_gateway.feedback3 import Feedback3SerialSink, CLOCK_REPLY, CLOCK3
 
 
@@ -15,6 +16,7 @@ def rig(*, remaining=800000, width=2000, acknowledged=True):
         max_offset_width_us=100000,lease_us=1000000,j_cutoff_us=100)
     sink.odometry=SimpleNamespace(config=SimpleNamespace(maximum_clock_error_us=20000))
     sink.ready=True;sink.clock_sequence=1;sink.outstanding=(3,1100000)
+    sink.clock = lambda: 1.12
     sink.previous_interval=(-1000,1000,1000000);sink.streak=2;sink.pending={}
     current=dict(sequence=1,probe=2,reference=1000000,lower=-width//2,upper=width//2,
         expires=1120000+remaining,cutoff=1120000+remaining-100,ack=acknowledged)
@@ -52,6 +54,52 @@ def test_clock_near_expiry_renews_without_extending_old_lease():
     sink._receive(CLOCK_REPLY,raw,1.12)
     assert sink.install is not current and sink.clock_sequence==2
     assert current['expires']==original_expiry
+
+
+def test_near_expiry_keeps_precise_ack_when_replacement_cannot_map_sensor():
+    sink, current, raw = rig(remaining=250000, width=20362)
+    original = current.copy()
+    # Request delay lowers the new bound. Even the earliest plausible
+    # capture under the old lease leaves more than 40 ms of uncertainty.
+    fields = list(CLOCK3.unpack(raw))
+    fields[4:7] = (1165000, 1166000, 1167000)
+    sink._receive(CLOCK_REPLY, CLOCK3.pack(*fields), 1.168)
+    assert sink.install is current and current == original
+    assert sink.clock_sequence == 1 and not sink.wires
+    assert sink.samples[-1][-2] is current
+    assert sink._lease(current['expires']) is None
+
+
+def test_near_expiry_can_renew_when_only_the_reply_widens_the_upper_bound():
+    sink, current, raw = rig(remaining=250000, width=20362)
+    sink.clock = lambda: 1.165
+    sink._receive(CLOCK_REPLY, raw, 1.165)
+    assert sink.install is not current and sink.clock_sequence == 2
+    assert sink.install['upper'] - sink.install['lower'] > 40000
+    assert len(sink.wires) == 1
+
+
+def test_install_waits_for_ack_before_retrying_original_bytes(monkeypatch):
+    sink, _, raw = rig(width=30000)
+    sink.started = 1.0
+    sink.framer = SimpleNamespace(invalid=0, oversize=0)
+    sink.last_probe_us = 1100000
+    sink._sensor_available = lambda: True
+    sink._view = lambda: {}
+    monkeypatch.setattr(FeedbackSerialSink, '_poll', lambda *args, **kwargs: None)
+    sink._receive(CLOCK_REPLY, raw, 1.12)
+    original, = sink.wires
+    expiry = sink.install['expires']
+
+    for now in (1.12, 1.169999):
+        sink.clock = lambda: now
+        sink._poll(now)
+        assert sink.wires == [original]
+
+    sink.clock = lambda: 1.17
+    sink._poll(1.17)
+    assert sink.wires == [original, original]
+    assert sink.install['expires'] == expiry
 
 
 def test_unacknowledged_clock_cannot_be_reused():

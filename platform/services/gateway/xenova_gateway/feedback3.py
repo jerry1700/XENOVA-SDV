@@ -25,6 +25,7 @@ INSTALL3=struct.Struct('<16s16s16sQQQqqQQ');CLOCK_ACK3=struct.Struct('<16s16s16s
 SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
 CLOCK_PROBE_INTERVAL_US=200000
+CLOCK_INSTALL_RETRY_US=50000
 
 
 @dataclass(frozen=True)
@@ -135,10 +136,15 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 if self.probe_sequence>=2**63-1:self._fail('DEVICE_COUNTER_EXHAUSTED');return
                 self.probe_sequence+=1;self.last_probe_us=at;self.outstanding=(self.probe_sequence,at)
                 self._send(packet(CLOCK_PROBE,PROBE3.pack(UUID(self.pi_session).bytes,UUID(self.device_session).bytes,self.probe_sequence,at)))
-            if self.install is not None and at<self.install['expires'] and not self.install['ack']:
-                if at-self.install.get('retry',0)>=50000:
-                    self.install['retry']=at;self._send(self.install['wire'])
+            if (self.install is not None and at < self.install['expires'] and not self.install['ack']
+                    and at - self.install['sent_us'] >= CLOCK_INSTALL_RETRY_US):
+                self._send_install(self.install)
         self.snapshot=self._view()
+
+    def _send_install(self, lease):
+        self._send(lease['wire'])
+        # The first submission and each retransmission start the same ACK wait.
+        lease['sent_us'] = int(self.clock() * 1e6)
 
     def _session(self,pi,device):
         if str(UUID(bytes=pi))!=self.pi_session or str(UUID(bytes=device))!=self.device_session:
@@ -196,10 +202,15 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 old_lower,old_upper=self._bounds(current,at)
                 if max(lower,old_lower)>min(upper,old_upper):
                     self._fail('DEVICE_CLOCK_DISCONTINUITY');self.leases.clear();return
-                # 새 왕복이 더 느렸다는 이유로 유효한 정밀 시계를 버리지 않는다.
-                # 원 ACK/만료는 유지하며 다음 probe+timeout 전에 갱신할 여유가 있어야 한다.
-                if (old_upper-old_lower<=min(upper-lower,2*self.odometry.config.maximum_clock_error_us)
-                        and at+CLOCK_PROBE_INTERVAL_US+p.probe_timeout_us<current['expires']):
+                max_sensor_width = 2 * self.odometry.config.maximum_clock_error_us
+                old_width = old_upper - old_lower
+                new_width = upper - lower
+                refresh_room = at + CLOCK_PROBE_INTERVAL_US + p.probe_timeout_us < current['expires']
+                # 도착시각으로 상한을 잘라도, 기존 구간의 가장 이른 시각보다 새
+                # 하한이 너무 낮으면 위치 표본의 허용 폭을 넘는다.
+                cannot_map_sensor = old_lower - lower > max_sensor_width
+                if old_width <= max_sensor_width and (
+                        cannot_map_sensor or (old_width <= new_width and refresh_room)):
                     self._sample(sample,latch,left,right,quality,steer,error,current,at)
                     return
             self.clock_sequence+=1
@@ -208,7 +219,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
             cutoff=expires-(upper+pad_end)-p.j_cutoff_us
             if cutoff<=d3:raise FeedbackError('clock3 cutoff')
             lease=dict(sequence=self.clock_sequence,probe=seq,reference=at,lower=lower,upper=upper,
-                expires=expires,cutoff=cutoff,ack=False)
+                expires=expires,cutoff=cutoff,ack=False,sent_us=at)
             lease['wire']=packet(CLOCK_INSTALL,INSTALL3.pack(pi,device,UUID(self.clock_epoch).bytes,
                 self.clock_sequence,seq,at,lower,upper,expires,cutoff))
             if len(self.leases)>=2:
@@ -216,7 +227,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 if any(row.get('clock')==oldest and row.get('expires',0)>at for row in self.pending.values()):
                     raise FeedbackError('clock3 live lease slot pinned')
                 del self.leases[oldest]
-            self.leases[self.clock_sequence]=lease;self.install=lease;self._send(lease['wire'])
+            self.leases[self.clock_sequence]=lease;self.install=lease;self._send_install(lease)
             # This probe's actual latch is an observation, never a cached sample.
             self._sample(sample,latch,left,right,quality,steer,error,lease,at);return
         if kind==CLOCK_ACK:
