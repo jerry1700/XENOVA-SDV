@@ -24,6 +24,7 @@ PROBE3=struct.Struct('<16s16sQQ');CLOCK3=struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3=struct.Struct('<16s16s16sQQQqqQQ');CLOCK_ACK3=struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
+CLOCK_PROBE_INTERVAL_US=200000
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
         if self.ready and self._sensor_available():
             if self.outstanding is not None and at>=self.outstanding[1]+self.profile.probe_timeout_us:
                 self.outstanding=None;self.streak=0
-            if self.outstanding is None and at-self.last_probe_us>=200000:
+            if self.outstanding is None and at-self.last_probe_us>=CLOCK_PROBE_INTERVAL_US:
                 if self.probe_sequence>=2**63-1:self._fail('DEVICE_COUNTER_EXHAUSTED');return
                 self.probe_sequence+=1;self.last_probe_us=at;self.outstanding=(self.probe_sequence,at)
                 self._send(packet(CLOCK_PROBE,PROBE3.pack(UUID(self.pi_session).bytes,UUID(self.device_session).bytes,self.probe_sequence,at)))
@@ -188,6 +189,17 @@ class Feedback3SerialSink(FeedbackSerialSink):
             else:self.streak=1
             self.previous_interval=lower,upper,at
             if self.streak<2:return
+            current=self._lease(at)
+            if current is self.install and current is not None:
+                old_lower,old_upper=self._bounds(current,at)
+                if max(lower,old_lower)>min(upper,old_upper):
+                    self._fail('DEVICE_CLOCK_DISCONTINUITY');self.leases.clear();return
+                # 새 왕복이 더 느렸다는 이유로 유효한 정밀 시계를 버리지 않는다.
+                # 원 ACK/만료는 유지하며 다음 probe+timeout 전에 갱신할 여유가 있어야 한다.
+                if (old_upper-old_lower<=min(upper-lower,2*self.odometry.config.maximum_clock_error_us)
+                        and at+CLOCK_PROBE_INTERVAL_US+p.probe_timeout_us<current['expires']):
+                    self._sample(sample,latch,left,right,quality,steer,error,current,at)
+                    return
             self.clock_sequence+=1
             if self.clock_sequence>=2**63:self._fail('DEVICE_COUNTER_EXHAUSTED');return
             expires=p1+p.lease_us;pad_end=drift_pad(p.drift_ppm,expires-at)
