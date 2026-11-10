@@ -1,5 +1,8 @@
 """Opt-in USB-only phone entry point. Existing feed stays on loopback.
 
+With "ui_origin" in the root config (Plan A, 349) the phone gets the web app and its
+presentation from the display domU (VM3 guest_app) instead; dom0 only relays them.
+
 Pairing uses a root-visible, single-use code (120s/5 attempts) and one read-only
 browser session (8h). No VM commands, new feed, HDMI, MQTT or Gateway ownership.
 """
@@ -24,7 +27,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .mobile_network import resolve, bind
-from .mobile_upstream import LocalFeed, FeedUnavailable, allowed_path
+from .mobile_upstream import GuestUI, LocalFeed, FeedUnavailable, allowed_path
 
 COOKIE = "xenova_mobile"
 RUNTIME = Path("/run/xenova-display-mobile")
@@ -185,6 +188,13 @@ def publish_code(code):
         temporary.unlink(missing_ok=True)
 
 
+def upstream_for(config, token):
+    """What the phone is relayed from: the display domU web app (Plan A) or the loopback feed."""
+    if "ui_origin" in config:
+        return GuestUI.from_origin(config["ui_origin"])
+    return LocalFeed(token)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("/etc/xenova/display-mobile.json"))
@@ -201,8 +211,9 @@ def main(argv=None):
             raise ValueError("private runtime directory required")
         lock = os.open(RUNTIME / "access.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        endpoint = resolve(root_config(args.config))
-        feed = LocalFeed(os.environ.get("XENOVA_DISPLAY_TOKEN", ""))
+        config = root_config(args.config)
+        endpoint = resolve(config)
+        feed = upstream_for(config, os.environ.get("XENOVA_DISPLAY_TOKEN", ""))
         sock = bind(endpoint)
         pairing = Pairing(publish=publish_code)
         signal.signal(signal.SIGUSR1, signal.SIG_IGN)
