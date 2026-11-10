@@ -19,8 +19,8 @@ from uuid import UUID
 U64_MAX = 2**64 - 1
 TIMING_US = MappingProxyType({"startup_total": 90_000_000, "asset_check": 15_000_000,
              "device_boot": 30_000_000, "pipeline_start": 30_000_000,
-             "warmup": 15_000_000, "mapper_local_setup": 15_000_000,
-             "storage_local_setup": 15_000_000, "binding_ack": 5_000_000,
+              "warmup": 15_000_000, "mapper_local_setup": 90_000_000,
+              "storage_local_setup": 90_000_000, "binding_ack": 5_000_000,
              "active_worker_progress_gap": 500_000})
 CAPTURE_PAIR_COUNT = 30
 REQUIRED_NN_PAIR_COUNT = 5
@@ -363,7 +363,7 @@ class CaptureWarmup:
     stamp를 count하지 않는다. source 교체는 새 scope/tracker, M-only 교체는 이 객체 유지다.
     """
 
-    def __init__(self, scope, queue_configured_us, queue_sdk_us, deadline, *, now_us):
+    def __init__(self, scope, queue_configured_us, queue_sdk_us, deadline, *, now_us, enforce_deadline=True):
         if type(scope) is not CaptureScope or type(deadline) is not AbsoluteDeadline:
             raise ValueError("invalid capture scope/deadline")
         _event(queue_configured_us, now_us)
@@ -373,6 +373,8 @@ class CaptureWarmup:
         self.scope = scope
         self.deadline = AbsoluteDeadline.after(deadline.started_us, TIMING_US["warmup"], now_us=now_us,
                                                cap_us=deadline.expires_us)
+        if type(enforce_deadline) is not bool:raise ValueError('exact deadline policy required')
+        self.enforce_deadline = enforce_deadline
         self.queue_configured_us, self.queue_sdk_us = queue_configured_us, queue_sdk_us
         self.count = 0
         self.ready_us = None
@@ -386,7 +388,7 @@ class CaptureWarmup:
 
     def poll(self, now_us):
         _event(self.queue_configured_us, now_us)
-        if not self.ready and self.deadline.expired(now_us):
+        if self.enforce_deadline and not self.ready and self.deadline.expired(now_us):
             self.failed = True
         return self.failed
 

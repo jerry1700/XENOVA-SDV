@@ -19,6 +19,7 @@ from xenova_vehicle.oak.yolop_asset import BLOB_SHA256, BLOB_SIZE, ValidatedYolo
 from xenova_vehicle.perception.inputs import FrameStamp, ImageFrame, PerceptionInput
 from xenova_vehicle.perception import yolop
 from xenova_vehicle.yolop_profile import YolopBenchProfile
+from xenova_vehicle.runtime.health_policy import ConfigurationError
 
 from test_yolop_asset import fake_sdk_blob, pinned_manifest
 from test_yolop_frames import FakeInput, FakeNN
@@ -354,9 +355,23 @@ class SimNnTests(unittest.TestCase):
             loader.assert_not_called()
         f = fixture()
         f.dai.__version__ = '3.0.0'
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ConfigurationError):
             self.start(f)
         f.dai.Device.assert_not_called()
+
+    def test_graph_configuration_is_permanent_but_native_device_failures_are_not(self):
+        f = fixture()
+        f.pipeline.getRequiredOpenVINOVersion.return_value = 'Version.VERSION_2022_1'
+        with self.assertRaises(ConfigurationError):
+            self.start(f)
+        f.dai.Device.assert_not_called()
+        for stage in ('Pipeline', 'Device'):
+            f = fixture()
+            failure = RuntimeError('native SDK failure')
+            getattr(f.dai, stage).side_effect = failure
+            with self.subTest(stage=stage), self.assertRaises(RuntimeError) as raised:
+                self.start(f)
+            self.assertIs(raised.exception, failure)
 
     def test_send_uncertainty_and_device_close_failure_retain_original_owner_and_deadline(self):
         f = self.start()

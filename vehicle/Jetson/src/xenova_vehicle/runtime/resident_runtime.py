@@ -38,6 +38,7 @@ from .resident_workers import WorkerBoot, acquisition_main, mapper_main
 from .resident_recovery import ResidentRecovery
 from .resource_manifest import ResourceManifest
 from .runtime_status import RuntimeStatus
+from .health_policy import health_policy
 
 
 def _identifier():
@@ -120,6 +121,7 @@ class _Worker:
 class _Runtime:
     def __init__(self, profile, state_directory, storage_profile, output, duration_s, service_scope=None, output_root=False,
                  perception_profile_bytes=None,jio_profile=None,mapper_profile_bytes=None,http_address=None):
+        health_policy()
         self.profile, self.state_directory = profile, str(Path(state_directory).expanduser().absolute())
         self.storage_profile, self.output, self.duration_s = storage_profile, Path(output).expanduser().absolute(), duration_s
         self.context = multiprocessing.get_context('spawn')
@@ -634,7 +636,9 @@ class _Runtime:
                 self._progress(role, packet, now)
             return
         if packet.kind == 'RAW_CONTROL':
-            self.recovery.receive_control(role, packet)
+            if packet.payload.get('op') == 'CANCEL_REQUEST' and self.broker is not None:
+                self.broker.cancel_request(role, packet, now_us=now)
+            else:self.recovery.receive_control(role, packet)
             return
         if not host.admitted:
             if len(host.held) == 8:
@@ -766,8 +770,8 @@ class _Runtime:
             self.capture_ready_us = completed
             self.event('CAPTURE_READY', completed_j_us=str(completed))
         elif key == ('M', 'NN_READY'):
-            if self.parser_deadline is None or now >= self.parser_deadline or completed >= self.parser_deadline:
-                raise TimeoutError('actual parser readiness missed the original deadline')
+            if self.parser_deadline is None:
+                raise ValueError('parser readiness has no original preparation context')
             self.nn_ready_us = completed
             self.event('NN_READY', completed_j_us=str(completed))
         if role == 'A':
@@ -780,13 +784,7 @@ class _Runtime:
             host.parser_fresh_observation=observation
 
     def _a_stage(self, state, event_us):
-        durations = {'ASSET_CHECK': 15_000_000, 'DEVICE_BOOT': 30_000_000,
-                     'PIPELINE_START': 30_000_000, 'WARMUP': 15_000_000}
-        if state in durations:
-            deadline = min(self.workers['A'].startup_deadline_us, event_us + durations[state])
-            self.a_phase_deadlines[state] = min(self.a_phase_deadlines.get(state, deadline), deadline)
-            self.a_phase = state
-        elif state == 'STREAMING':
+        if state in ('ASSET_CHECK','DEVICE_BOOT','PIPELINE_START','WARMUP','STREAMING','DEGRADED'):
             self.a_phase = state
 
     def _worker_phase(self, role, now):
@@ -976,12 +974,14 @@ class _Runtime:
             payload = (binding_payload(storage_binding(host.peer, self.storage_profile, host.bootstrap)) if role == 'D'
                 else dict(binding_revision='1', binding_sha256=self.binding.sha256, binding=self.binding.fields))
             host.bind_draft = dict(kind='BIND', payload=payload, domain='STORAGE' if role == 'D' else 'RAW',
-                revision=1, request_id=_identifier(), issued_us=now, expires_us=min(now + 5_000_000, host.startup_deadline_us))
+                revision=1, request_id=_identifier(), issued_us=now,
+                expires_us=min(now + 5_000_000, host.startup_deadline_us) if role != 'M' else now + 5_000_000)
         packet = host.link.send(**host.bind_draft)
         if packet is None:
             return
         host.bind = (packet if role == 'D' else RawBindMessage(packet,
-            RawBindContext(host.peer, self.scope.writer, self.raw_profile), cap_us=host.startup_deadline_us))
+            RawBindContext(host.peer, self.scope.writer, self.raw_profile),
+            cap_us=host.startup_deadline_us if role == 'A' else None))
         if role == 'A':
             self.broker = ResidentRawBroker(host.bind, self.scope,
                 Endpoint(self.identities['M'][1], self.identities['M'][0]), self.handles.raw_tokens)
@@ -1203,7 +1203,8 @@ class _Runtime:
             if now - self.stop_us >= 25_000_000:
                 raise TimeoutError('normal shutdown budget elapsed; owners are not confirmed reclaimed')
             return
-        if self.resident_started_us is None and self.recovery.active is None and now >= self.startup_deadline:
+        if (self.resident_started_us is None and self.recovery.active is None and now >= self.startup_deadline
+                and self.a_phase not in ('WARMUP', 'STREAMING', 'DEGRADED')):
             raise TimeoutError('original total startup budget elapsed')
         db_deadline=None if self.db_broker is None else self.db_broker.pending_deadline_us
         if db_deadline is not None and now>=db_deadline and self.recovery.active is None:
@@ -1216,16 +1217,13 @@ class _Runtime:
             if self.recovery.suppressed(role, host):
                 continue
             if host.local_watch is not None and host.local_watch.poll(now):
-                self.recovery.fail(role, role + ' original local setup budget elapsed', retryable=False)
+                self.recovery.fail(role, role + ' original local setup budget elapsed')
                 continue
             if host.bind_draft is not None and host.bind_ack is None and now >= host.bind_draft['expires_us']:
-                self.recovery.fail(role, role + ' original binding budget elapsed', retryable=False)
+                self.recovery.fail(role, role + ' original binding budget elapsed')
                 continue
             if role == 'D' and host.discovery is not None and host.bootstrap is None and now >= _decimal(host.discovery.fields['expires_j_us']):
                 self.recovery.fail('D', 'original D discovery budget elapsed')
-                continue
-            if host.parse_started_us is not None and now - host.parse_started_us >= 500_000:
-                self.recovery.fail('M', 'actual active parser job stalled')
                 continue
             if role=='M' and host.compute_watch is not None and host.compute_watch.stalled(now):
                 self.recovery.fail('M', 'original mapper job expired without actual stage progress')
@@ -1237,23 +1235,12 @@ class _Runtime:
             if role=='D' and self.db_last_progress_us is not None:
                 heartbeat_lower=max(heartbeat_lower or 0,self.db_last_progress_us)
             active_d=role=='D' and db_deadline is not None and now<db_deadline
-            if idle_watch and not active_d and heartbeat_lower is not None and now-heartbeat_lower>=1_000_000:
+            if idle_watch and not active_d and heartbeat_lower is not None and now-heartbeat_lower>=health_policy().control_stall_us:
                 self.recovery.fail(role, role + ' current control progress stalled')
         self._readiness_timers(now)
 
     def _readiness_timers(self, now):
         """기본 physical capture/NN 기한이다. 명시 입력 변형은 이 경계만 대체한다."""
-        if self.a_phase in self.a_phase_deadlines and now >= self.a_phase_deadlines[self.a_phase]:
-            self.recovery.fail('A', 'original A ' + self.a_phase + ' budget elapsed')
-        if self.capture_ready_us is not None and self.last_capture_us is not None and now - self.last_capture_us >= 500_000:
-            self.recovery.fail('A', 'actual capture pair progress stalled')
-        if self.parser_deadline is not None and self.nn_ready_us is None and now >= self.parser_deadline:
-            self.recovery.fail('M', 'original M parser readiness budget elapsed')
-        if (self.nn_ready_us is not None and self.last_fresh_parser_us is not None
-                and now - self.last_fresh_parser_us >= 5_000_000):
-            # A는 자신의 실제 NN output 정체를 별도로 감시한다. M 계산/해석 정체만으로
-            # 정상인 OAK 세션과 적재 모델을 다시 열지 않는다.
-            self.recovery.fail('M', 'required fresh NN parser completion stalled')
         if self.capture_ready_us is not None and self.nn_ready_us is not None and self.storage_ready_us is not None:
             if self.resident_started_us is None:
                 self.resident_started_us = now

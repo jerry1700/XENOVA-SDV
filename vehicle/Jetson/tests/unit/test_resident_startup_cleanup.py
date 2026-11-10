@@ -59,7 +59,7 @@ class ThreadOwner:
     """기동 오류 주입 때도 실제 thread 참조를 보유하는 작은 fixture다. MQTT owner가 아니다."""
     instances = []
     fail_after_start = False
-    def __init__(self, _, *, mapper_operation_installed=False):
+    def __init__(self, _, *, mapper_operation_installed=False, service_instance=None):
         self.event = threading.Event(); self.thread = None; self.stops = 0; self.joins = 0
         self.instances.append(self)
     def start(self):
@@ -182,6 +182,7 @@ class ResidentStartupCleanupTests(unittest.TestCase):
     def run_initial_failure(self, *, log_error=None, request_error=None, jio_start_error=False):
         runtime = resident_runtime._Runtime.__new__(resident_runtime._Runtime)
         runtime.jio_profile = object(); runtime.jio = None; runtime.workers = {}; runtime.failure = None
+        runtime.service = uid(100)
         runtime.mapper_profile_bytes = None
         runtime.operation_server = None
         runtime.http_address = None; runtime.http = None

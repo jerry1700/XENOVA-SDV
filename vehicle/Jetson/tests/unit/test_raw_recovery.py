@@ -204,7 +204,9 @@ class RawRecoveryTests(unittest.TestCase):
         self.assertIs(actor.last_filled_sent, filled)
 
     def test_fault_retry_scope_distinguishes_configuration_camera_and_mapper(self):
-        cases = [('A', 'ASSET_CHECK', ValueError(), 'NO_RETRY'),
+        from xenova_vehicle.runtime.health_policy import ConfigurationError
+        cases = [('A', 'ASSET_CHECK', ConfigurationError(), 'NO_RETRY'),
+                 ('A', 'ASSET_CHECK', ValueError(), 'RESTART_CAMERA'),
                  ('A', 'STREAMING', TimeoutError(), 'RESTART_CAMERA'),
                  ('M', 'WAIT_CLOCK', ValueError(), 'RESTART_MAPPER')]
         for role, state, error, retry in cases:
@@ -222,6 +224,15 @@ class RawRecoveryTests(unittest.TestCase):
                                                'retry_class', 'origin_context_sha256'})
                 self.assertEqual(payload['retry_class'], retry)
                 self.assertEqual(payload['origin_context_sha256'], self.writer.scope.raw_binding_sha256)
+
+    def test_known_actual_cleanup_send_is_not_reclassified_as_frame_failure(self):
+        actor = object.__new__(_Actor)
+        actor.stop = None;actor.deferred = [];actor.idle_hook = None;actor._idle_busy = False
+        actor.drain_sent = Mock();actor._receive = Mock(return_value=[])
+        filled = packet(slot_fields('FILLED', self.writer))
+        actual = SentPacket(filled, int(filled.fields['expires_j_us'])+1, 10000040)
+        actor.last_actual_sent = actual
+        self.assertIs(actor.await_sent(filled), actual)
 
     def test_worker_failure_file_preserves_original_message_and_phase_without_changing_fault_wire(self):
         with tempfile.TemporaryDirectory() as directory:
