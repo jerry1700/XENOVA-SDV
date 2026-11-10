@@ -7,6 +7,12 @@
 
 ## 현재 담당자에게 전달할 요청서
 
+2026-11-10 차량의 ToF 가 VL53L5CX(8×8) 2개에서 VL53L0X(단일 존) 앞·뒤 2개로 바뀌어, 근거리 제동 알림과 지도용 ToF 전송을 아래 요청서에서 정한다.
+
+| 요청서 | 담당 | 요청 | 상태 |
+| --- | --- | --- | --- |
+| [ToF 근거리 제동·지도 연결](2026-11-10-tof-vl53l0x-gateway-jetson.md) | 플랫폼·Gateway, Jetson(지도) | feedback-3 에 근거리 정지 알림, 단일 존 ToF 전송, 관련 문서 수정 | 요청 작성, 회신 전 |
+
 2026-11-02 자격 공급·등록-only 통지·현재 적용 프로필의 실제 제공물은
 [공통 계약](../contracts/vm-provisioning-v1.md)과 [후보별 결과](../verification/recovery-scenario-closure-20261030.md#vm-provisioning-integration)에 있다.
 등록 조회·통지는 [FastAPI 제공자 후속](../verification/vm-registration-api-20261102.md)이 현재 기준이다.
