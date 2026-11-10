@@ -38,6 +38,25 @@ describe('mock 시연 시나리오 (MQTT 계약 v1.2 §5.2·§6, v1.7 취소)', 
     expect(last.apps.manual?.command_fresh).toBe(true);
   });
 
+  it('VM별 주행 앱 보고(vm_apps): 운전 중인 앱은 실행 중, 다른 쪽은 대기, 죽은 앱은 관측 만료', () => {
+    expect(last.vm_apps?.[VM_IDS.autonomous]?.autonomous).toMatchObject({
+      lifecycle: { phase: 'EXECUTING', readiness: 'READY', reason: null },
+      lifecycle_source: { status: 'fresh' },
+      heartbeat: { state: 'active' },
+    });
+    expect(last.vm_apps?.[VM_IDS.manual]?.manual).toMatchObject({
+      lifecycle: { phase: 'WAITING', readiness: 'QUALIFIED', reason: null },
+      heartbeat: { state: 'standby' },
+    });
+    forceKill('autonomous');
+    expect(last.vm_apps?.[VM_IDS.autonomous]?.autonomous).toMatchObject({
+      lifecycle: null,
+      lifecycle_source: { status: 'stale' },
+      heartbeat: null,
+    });
+    expect(last.vm_apps?.[VM_IDS.manual]?.manual?.lifecycle?.phase).toBe('EXECUTING');
+  });
+
   it('강제 종료 → MANUAL 인계 → 복구 → AUTO_READY → [재개] 3·2·1 → AUTO, 매번 gen +1 (계약 v1.2)', () => {
     expect(resume()).toBe(false); // AUTO_READY 가 아니면 무시
     forceKill('autonomous');
