@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from test_mapped_pc_observation import make_pc_case
 from test_pc_slot import identifier
-from xenova_vehicle.oak.sim_nn import HostClockSample, SimNnSubmission
+from xenova_vehicle.oak.sim_nn import HostClockSample, SimNnSubmission, SimNnResult
+from xenova_vehicle.oak.yolop_frames import NNInputStamp
 from xenova_vehicle.runtime.lifecycle_messages import LifecyclePeer
 from xenova_vehicle.runtime.pc_acquisition import PcAcquisitionDriver
 from xenova_vehicle.runtime.pc_channel import PcActorLink, pc_actor_pair, forward_received
@@ -125,6 +126,33 @@ class PcAcquisitionAckTests(unittest.TestCase):
         self.assertEqual(submission.expires_j_us, case.job.expires_us)
         self.assertEqual(case.capture.calls, [(case.frame.observation, case.frame.observation.capture_interval, case.job.expires_us)])
         self.assertEqual((case.driver.phase, case.driver.counts['enqueued']), ('NN_PENDING', 1))
+
+    def test_nn_candidate_can_finish_before_ack_but_publication_still_waits(self):
+        from test_yolop_frames import packet
+        case=AckCase(self);case.driver._phase='EARLY'
+        with case.clock():submission=case.driver.enqueue()
+        self.assertEqual(case.driver.phase,'EARLY')
+        with case.clock(),self.assertRaises(ValueError):case.driver.enqueue()
+        sequence,device,sdk=submission.key
+        result=SimNnResult(submission,NNInputStamp('nn_input',sequence,device,sdk,case.now+1,
+            320,320,'BGR888p',submission.context_key),packet(sequence=sequence,device_us=device,sdk_us=sdk,
+            received_j_us=case.now+2,context_key=submission.context_key))
+        case.capture.poll=lambda:(result,);case.now+=3
+        with case.clock():case.driver.poll_nn()
+        self.assertEqual(case.driver.phase,'EARLY')
+        # 단위 fixture의 EARLY full-send가 끝난 뒤 원 ACK만 상태를 진행시킨다.
+        case.driver._phase='WAIT_SNAPSHOT'
+        selected=case.accept(case.ack())
+        self.assertIs(selected,submission);self.assertEqual(case.driver.phase,'NN')
+        self.assertIs(case.driver.result,result);self.assertEqual(len(case.capture.calls),1)
+
+    def test_early_enqueue_does_not_renew_frame_when_ack_is_late(self):
+        case=AckCase(self);case.driver._phase='EARLY'
+        with case.clock():submission=case.driver.enqueue()
+        case.driver._phase='WAIT_SNAPSHOT';received=case.ack();case.now=case.job.expires_us
+        self.assertIsNone(case.accept(received));self.assertEqual(case.driver.phase,'IDLE')
+        self.assertEqual(len(case.capture.calls),1)
+        self.assertEqual(submission.expires_j_us,case.job.expires_us)
 
     def test_expired_wrong_job_e_key_proof_and_purpose_still_raise(self):
         changes = [dict(expires=1_579_989),

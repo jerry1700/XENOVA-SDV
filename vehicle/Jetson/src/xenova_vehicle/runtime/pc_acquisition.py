@@ -1,7 +1,7 @@
 """A main의 PC 관측 active1/latest1와 실제 HOST_SIM enqueue/result를 연결한다.
 
 수신 pump·S control·SHM grant의 실행 loop는 caller가 소유한다. 이 owner는 원 EARLY
-게시와 실제 M snapshot ACK 전에는 NN을 넣지 않는다. source/모드 변화는 모델을 닫지
+전달과 NN 후보 계산은 병행한다. 실제 M snapshot ACK 전에는 NN 결과를 게시하지 않는다. source/모드 변화는 모델을 닫지
 않으며, 원 NN ticket·frame E를 재발급하지 않는다. M은 YOLOP 해석을 담당한다.
 """
 
@@ -108,7 +108,8 @@ class PcAcquisitionDriver:
     def result(self): return self._result
 
     @property
-    def waiting_enqueue(self): return self._phase == 'WAIT_SNAPSHOT' and self._ack is not None
+    def waiting_enqueue(self):
+        return self._active is not None and self._phase in ('EARLY','WAIT_SNAPSHOT') and self._submission is None
 
     def offer(self, frame, owner):
         """수신 callback의 latest1 교환이다. 영상 복사/SDK/대기/모델 호출은 없다."""
@@ -187,8 +188,8 @@ class PcAcquisitionDriver:
             job_id=job.job_id, expires_j_us=job.expires_us, full_key=job.full_key,
             pc_frame_proof=frame.proof_bytes, pc_packet_header=frame.packet_header_bytes,
             rgb=original.rgb.payload, depth=original.depth.payload,
-            nn_input=None if self._result is None else self._result.nn_input,
-            nn_output=None if self._result is None else self._result.nn_output)
+            nn_input=None if self._phase=='EARLY' or self._result is None else self._result.nn_input,
+            nn_output=None if self._phase=='EARLY' or self._result is None else self._result.nn_output)
         self.actor.leases_released = False
         filled = self.actor.arena.publish(grant, encoding)
         self.actor.leases_released = True
@@ -262,7 +263,7 @@ class PcAcquisitionDriver:
         self.counts['late'] += 1
 
     def snapshot_ack(self, received):
-        """원 M snapshot ACK의 실제 S relay 뒤에만 actual NN capture를 시도한다."""
+        """원 M snapshot ACK를 확인한 뒤에만 같은 frame의 NN 결과 게시로 진행한다."""
         self._open(); self.link.require_received(received)
         job = self._active
         forward = decode_forward(received.packet, self.mapper_peer, self.actor.binding)
@@ -280,13 +281,20 @@ class PcAcquisitionDriver:
         _need(self._ack is None or self._ack.packet.raw == ack.packet.raw, 'one original snapshot ACK per frame')
         self._ack = ack
         if self.expire(): return None
+        if self._submission is not None:
+            self._select_nn_phase()
+            return self._submission
         return self.enqueue()
 
+    def _select_nn_phase(self):
+        self._encoding = self._filled = self._filled_sent = self._meta_sent = None
+        self._phase = 'NN' if self._result is not None else 'NN_PENDING'
+
     def enqueue(self):
-        """SDK busy 때도 같은 ACK/job/E만 유지한다. host clock과 submission은 실제 source가 만든다."""
+        """NN 후보와 EARLY 전달을 병행한다. busy 때도 같은 job/E이며 제출은 한 번뿐이다."""
         self._open(); job = self._active
-        _need(job is not None and self._phase == 'WAIT_SNAPSHOT' and self._ack is not None,
-            'actual original snapshot ACK required before NN enqueue')
+        _need(job is not None and self._phase in ('EARLY','WAIT_SNAPSHOT') and self._submission is None,
+            'one original active EARLY frame required before NN enqueue')
         try:
             self._current(job.frame, j_us())
             submission = self.actor.nn_source.capture(job.frame.observation,
@@ -298,16 +306,17 @@ class PcAcquisitionDriver:
         if submission is None: return None
         _need(submission.observation is job.frame.observation
             and submission.expires_j_us == job.expires_us
-            and self._ack.packet.issued_us <= submission.clock_sample.j_before_us,
-            'actual SDK enqueue changed original EARLY snapshot/frame/E')
+            and job.frame.frame_received_j_us <= submission.clock_sample.j_before_us,
+            'actual SDK enqueue changed original received EARLY frame/E')
         self._submission = submission
         self.last_enqueue_timing=dict(captured_j_us=job.frame.observation.capture_interval,
             frame_received_j_us=job.frame.frame_received_j_us,filled_completed_j_us=getattr(self._filled,'completed_us',None),
             filled_sent_j_us=getattr(self._filled_sent,'completed_us',None),metadata_sent_j_us=getattr(self._meta_sent,'completed_us',None),
-            snapshot_issued_j_us=self._ack.packet.issued_us,enqueued_j_us=submission.clock_sample.j_after_us,
+            snapshot_issued_j_us=None if self._ack is None else self._ack.packet.issued_us,
+            enqueued_j_us=submission.clock_sample.j_after_us,
             expires_j_us=job.expires_us)
-        self._encoding = self._filled = self._filled_sent = self._meta_sent = None
-        self._phase = 'NN_PENDING'; self.counts['enqueued'] += 1
+        if self._ack is not None:self._select_nn_phase()
+        self.counts['enqueued'] += 1
         return submission
 
     def poll_nn(self):
@@ -318,7 +327,7 @@ class PcAcquisitionDriver:
             if j_us()+1 >= result.submission.expires_j_us:
                 self.counts['expired'] += 1
                 continue
-            _need(type(result) is SimNnResult and self._active is not None and self._phase == 'NN_PENDING'
+            _need(type(result) is SimNnResult and self._active is not None and self._phase in ('EARLY','WAIT_SNAPSHOT','NN_PENDING')
                 and result.submission is self._submission
                 and result.submission.observation is self._active.frame.observation,
                 'actual NN result differs from original active SDK submission')
@@ -327,7 +336,9 @@ class PcAcquisitionDriver:
                 self.counts['expired'] += 1
                 self._retire()
                 continue
-            self._result = result; self._phase = 'NN'; self.counts['completed'] += 1
+            self._result = result
+            if self._ack is not None:self._phase = 'NN'
+            self.counts['completed'] += 1
         return self._result
 
     def parser_complete(self, received, manifest):

@@ -324,6 +324,7 @@ def run_acquisition(actor, settings):
             if driver.waiting_enqueue: diagnostic.call('sdk_enqueue', driver.enqueue)
             diagnostic.call('sdk_poll', driver.poll_nn)
             driver.promote()
+            if driver.waiting_enqueue:diagnostic.call('sdk_enqueue',driver.enqueue)
             job = driver.active
             if job is not None and driver.phase in ('EARLY', 'NN'):
                 if request_draft is None:
