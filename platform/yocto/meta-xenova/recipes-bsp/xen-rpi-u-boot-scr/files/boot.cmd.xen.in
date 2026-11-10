@@ -31,7 +31,8 @@ setenv xen_loadaddr     "0x00200000"
 setenv kernel_loadaddr  "0x00400000"
 
 echo Add boot arguments for Xen
-fdt set /chosen xen,xen-bootargs "console=dtuart dtuart=/soc/serial@7e215040 dom0_mem=@@RPI_DOM0_MEM@@ @@RPI_DEBUG_XEN_ARGS@@" || exit 1
+# dom0의 두 vCPU는 CPU 정책에서 {0,3}을 공유한다. Zephyr 전용 {1,2}는 유지한다.
+fdt set /chosen xen,xen-bootargs "console=dtuart dtuart=/soc/serial@7e215040 dom0_max_vcpus=2 dom0_mem=@@RPI_DOM0_MEM@@ @@RPI_DEBUG_XEN_ARGS@@" || exit 1
 
 echo Add a dom0 node to chosen to put Linux boot information in
 fdt mknode /chosen dom0 || exit 1

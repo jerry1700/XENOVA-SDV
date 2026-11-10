@@ -32,7 +32,7 @@
 | ☐ | 설정 | `/etc/xenova/guest-display-domu.json` ← `domu/guest-display-domu.json.example` | 주소정 |
 | ☐ | unit·target | `xenova-guest-display-app.service`, `xenova-guest-display.target` enable | 박신영 |
 | ☐ | **guest data 토큰** | `/etc/xenova/guest-display/guest-data.token`, xenova-display 0600, **dom0와 같은 값**. 지금 Linux 게스트 자격 공급 채널은 agent만 지원 → 채널 추가 필요 | 박신영 |
-| ☐ | 템플릿 버전·lock·`defaults.json`·첫 설치 이미지 재생성 | Debian 1.0.6 재빌드·별도 catalog 게시 완료. lock/defaults/조립 예제는 1.0.6과 아래 manifest hash로 정합화. 기존 VM은 자산 유지한 화면 파일만 갱신. 전체 이미지 재조립은 별도 | 박신영 |
+| ☐ | 템플릿 버전·lock·`defaults.json`·첫 설치 이미지 재생성 | Debian 1.0.7 템플릿 생성·검증 완료. lock/defaults/조립 예제는 1.0.7과 §6 manifest hash로 정합화. 보드 catalog 게시와 실제 부팅 검증은 별도 | 박신영 |
 
 ## 3. 빌드 뒤 확인
 
@@ -71,3 +71,17 @@ Debian 첫 설치 선택은 `linux/debian-13-20261015/1.0.6`이다. manifest SHA
 서비스 restart 전후 토큰·활성 설정의 내용/inode/소유/권한, feed PID, HDMI 상태가 유지됐다. 8085 무인증 401, 인증 요청과 VM3 경유 presentation 200, VM3 UI 200을 확인했다. 최초 상태는 사용자 재부팅 뒤 relay 부재/VM3 presentation 503이었고, 설치 뒤 200으로 회복했다. 토큰 재발급·VM 재기동은 하지 않았다.
 
 recipe do_install 재생·별도 설치 경로 import·기존 데이터 경로 회귀 47개를 로컬에서 통과했다. 로컬 unit 로더는 systemd 255.4이며 실제 보드 PID1은 259.5다. **새 RPM/전체 이미지 빌드와 이 설치 이후의 실제 재부팅 시험은 미수행**이다. 결과 원본: `xenova-test-docs/2026-11-09-dom0-guest-relay/result.md`. 설치 receipt와 원상 복구 자료는 보드 `/root/xenova-updates/dom0-guest-relay-20261109/`에 보존한다.
+
+## 6. Debian Interaction 1.0.7 빌드
+
+WSL2 Ubuntu 준비 호스트에서 공식 Debian 13 ARM64 입력의 SHA-512를 `sources.lock.json`과 대조한 뒤 새 템플릿을 생성했다. 기존 1.0.6은 수정하지 않았다.
+
+- template manifest SHA-256: `2fa9454b4a528a6b47e68179c0fe2ca6a63f8d3e6de7fd618549e3f8af5fa689`
+- transfer archive SHA-256: `e3c5e88767cb6d42da6cdfc96acdd339068582c12962ddc9e746c11c2fa8349a` (`debian-13-arm64-1.0.7.tar.zst`, 495 MiB)
+- root SHA-256: `667a94887874223edccba5f9791e4054e1ee8f37fe88589656000f8383aae594`
+- frontend revision: `b4f0d9a163fcaf94a08fa9b6e97986cc4bf69d5a`
+- frontend tree SHA-256: `1f4493c495b9286cacd83755408e762382ebe18924c339cefb8a8d7598ab06bf`
+- frontend bytes: `932255`
+- `audio/interaction-theme.mp3`: 289226 bytes, SHA-256 `a5acc1edfd36502a024116fdff8b5b5877763563fb9c29ce172aa31dc662199c`
+
+`verify-xenova-template.py`의 전체 root 해시, read-only ext4 검사, Xenova 준비 상태와 공유 신원 제거 검사를 통과했다. MP3와 `xenova-guest-display.target`, `xenova-guest-display-app.service` enable 링크도 root.raw 내부에서 확인했다. 실제 보드 catalog 게시, VM 부팅, SSH listener와 HDMI 재생 검증은 아직 수행하지 않았다.

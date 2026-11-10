@@ -47,10 +47,10 @@ class DefaultDeploymentTest(unittest.TestCase):
     def test_debian_interaction_selection_matches_published_display_template(self):
         selected = json.loads((ROOT / "platform/guests/default-templates.lock.json").read_text())["templates"]
         entry = next(e for e in selected if e["template_id"] == "debian-13-arm64")
-        self.assertEqual(entry["version"], "1.0.6")
-        self.assertEqual(entry["directory"], "linux/debian-13-20261015/1.0.6")
+        self.assertEqual(entry["version"], "1.0.7")
+        self.assertEqual(entry["directory"], "linux/debian-13-20261015/1.0.7")
         self.assertEqual(entry["manifest_sha256"],
-                         "144ebb333832e2a3c56c08bdc0d178462160b532fae295bb0a900c9344a133e9")
+                         "2fa9454b4a528a6b47e68179c0fe2ca6a63f8d3e6de7fd618549e3f8af5fa689")
         example = json.loads((ROOT / "platform/first-install/example.config.json").read_text())
         supplied = next(e for e in example["linux_templates"] if e["template_id"] == entry["template_id"])
         self.assertEqual(supplied["template_version"], entry["version"])

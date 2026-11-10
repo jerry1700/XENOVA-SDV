@@ -30,9 +30,10 @@ warm profile은 기존 `xenova_mqtt.lifecycle.parse`가 설치되어 있어야 �
 
 ## 휴대폰 통합 표시 UI (350)
 
-빌드된 vm-screens의 `/display/mobile`은 기존 인증된 presentation API를 한 번 조회해
-계기판·인포테인먼트를 함께 렌더링한다. 모바일용 HDMI ACK나 세 번째 하드웨어 출력을
-만들지 않는다. 기존 주행·OS 표시 규칙과 알림을 재사용한다.
+빌드된 vm-screens의 `/display/mobile`은 HDMI와 같은 합친 차량 화면(`/display/combined`,
+`frontend/apps/vm-screens/src/display/CombinedPage`)을 그대로 그린다. 2026-11-10부터 휴대폰 전용 목업 화면은 없다.
+주소는 휴대폰 접속·VM3 기본 설정·이미지 점검이 쓰므로 유지하고, 화면 이동 없이 같은 화면을 렌더링한다.
+모바일용 HDMI ACK나 세 번째 하드웨어 출력을 만들지 않는다.
 USB 접근·초기 인증 연결은 349, HDMI/휴대폰 실행 전환은 351 범위이며 이 UI 추가만으로
 완료된 것이 아니다. [구현·로컬 검증과 실물 확인 항목](../../../../docs/verification/display-350-mobile-20261103.md)을 참조한다.
 

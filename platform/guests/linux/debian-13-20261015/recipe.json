@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source_id": "debian-13-20261015",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "files": [
     {
       "source": "files/motd",
