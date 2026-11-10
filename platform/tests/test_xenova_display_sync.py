@@ -230,5 +230,78 @@ class DisplayServiceRestartTest(unittest.TestCase):
                 'bindings': {'state': 'unchanged'}}, run=run)
 
 
+class DisplayRegistrationFlowTest(unittest.TestCase):
+    def test_new_interaction_registration_retargets_the_complete_display_flow(self):
+        with tempfile.TemporaryDirectory(prefix='xenova-display-flow-') as temporary:
+            root = Path(temporary)
+            runtime = root / 'display-runtime.json'
+            mobile = root / 'display-mobile.json'
+            bindings = root / 'display-bindings.json'
+            runtime.write_text(json.dumps({
+                'backend': 'x11', 'display': ':5',
+                'feed_origin': 'http://127.0.0.1:8082',
+                'ui_origin': 'http://192.168.77.6:8086',
+                'outputs': [{'output_id': 'monitor-1', 'connector': 'HDMI-1',
+                    'edid_sha256': EDID, 'x': 0, 'y': 0,
+                    'width': 1920, 'height': 1080, 'page': '/display/combined'}]}))
+            runtime.chmod(0o644)
+            mobile.write_text(json.dumps({
+                'schema_version': 1, 'usb_interface': 'usb0',
+                'phone_ipv4': '10.104.83.148', 'port': 8084,
+                'ui_origin': 'http://192.168.77.6:8086'}))
+            mobile.chmod(0o600)
+            records = {
+                'zephyr-drive-a': {'id': 'zephyr-drive-a', 'uuid': PRIMARY,
+                    'guest_kind': 'zephyr'},
+                'zephyr-drive-b': {'id': 'zephyr-drive-b', 'uuid': BACKUP,
+                    'guest_kind': 'zephyr'},
+                'new-interaction': {'id': 'new-interaction', 'uuid': INTERACTION,
+                    'guest_kind': 'linux', 'template_id': 'debian-13-arm64',
+                    'ipv4': '192.168.77.9'},
+            }
+            interaction = records['new-interaction']
+            sync = display.sync_after_registration(records, interaction,
+                runtime_path=runtime, mobile_path=mobile, bindings_path=bindings,
+                owner_uid=root.stat().st_uid)
+
+            calls = []
+            def run(arguments, **kwargs):
+                calls.append(arguments)
+                if arguments[1:3] == ['is-active', '--quiet']:
+                    return SimpleNamespace(returncode=3)
+                return SimpleNamespace(returncode=0)
+            services = display.restart_changed_services(sync, run=run)
+
+            runtime_value = json.loads(runtime.read_text())
+            mobile_value = json.loads(mobile.read_text())
+            binding_value = json.loads(bindings.read_text())
+            self.assertEqual(runtime_value['ui_origin'], 'http://192.168.77.9:8086')
+            self.assertEqual(runtime_value['outputs'][0]['page'], '/display/combined')
+            self.assertEqual(runtime_value['outputs'][0]['edid_sha256'], EDID)
+            self.assertEqual(mobile_value['ui_origin'], 'http://192.168.77.9:8086')
+            self.assertEqual([row['vm_id'] for row in binding_value['bindings']],
+                             [PRIMARY, BACKUP, INTERACTION])
+            self.assertEqual(services['restarted'], [
+                'xenova-display-feed.service', 'xenova-display-hdmi.service'])
+            self.assertEqual(services['skipped'], [
+                {'unit': 'xenova-display-mobile.service', 'reason': 'inactive'}])
+            self.assertEqual([call[1:] for call in calls], [
+                ['restart', 'xenova-display-feed.service'],
+                ['restart', 'xenova-display-hdmi.service'],
+                ['is-active', '--quiet', 'xenova-display-mobile.service']])
+
+            # 같은 등록 완료가 다시 전달되면 설정도 서비스도 흔들리지 않는다.
+            replay = display.sync_after_registration(records, interaction,
+                runtime_path=runtime, mobile_path=mobile, bindings_path=bindings,
+                owner_uid=root.stat().st_uid)
+            replay_calls = []
+            replay_services = display.restart_changed_services(replay,
+                run=lambda arguments, **kwargs: replay_calls.append(arguments))
+            self.assertEqual(replay['ui']['state'], 'unchanged')
+            self.assertEqual(replay['bindings']['state'], 'unchanged')
+            self.assertEqual(replay_services['state'], 'unchanged')
+            self.assertEqual(replay_calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()
