@@ -77,6 +77,10 @@ assert not {'empty-root-password', 'allow-empty-password', 'debug-tweaks', 'seri
 assert 'usermod -p' in image['EXTRA_USERS_PARAMS'] and 'perseus-dev' in image['EXTRA_USERS_PARAMS']
 assert 'xenova_platform_policy' in image['ROOTFS_POSTPROCESS_COMMAND']
 assert 'xenova-platform' in image['IMAGE_INSTALL'].split()
+usb_serial = {'kernel-module-usbserial', 'kernel-module-cp210x'}
+missing_usb_serial = usb_serial - set(image['IMAGE_INSTALL'].split())
+assert not missing_usb_serial, f'ESP32 USB serial modules missing from image: {sorted(missing_usb_serial)}'
+print('PASS ESP32 USB serial image dependencies: ' + ', '.join(sorted(usb_serial)))
 assert 'tzdata-asia' in image['IMAGE_INSTALL'].split()
 assert 'xenova_set_timezone' in image['ROOTFS_POSTPROCESS_COMMAND']
 assert re.search(r'^xenova_set_timezone\s*\(\)\s*\{', text, re.M)

@@ -173,6 +173,7 @@ xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 use
 휴대폰 USB 테더링 개발을 위해 이미지에 RNDIS·CDC-ECM·CDC-NCM 호스트 모듈을 포함한다.
 현재 고정 커널의 `CONFIG_USB_USBNET=y`와 해당 드라이버의 `=m` 설정을 사용한다.
 모듈 포함만으로 IP·DHCP·라우트·DNS를 설정하거나 휴대폰 접속 서비스를 활성화하지 않는다.
+ESP32 CP210x USB-UART 연결용 `usbserial`·`cp210x` 모듈도 이미지에 포함한다. 다음 패키지 manifest 검사에서 두 커널 버전별 패키지를 확인한다.
 실제 USB 인식·주소 확인 뒤 [휴대폰 접속 절차](../../platform/services/display/router/deploy/mobile-access/mobile-access.README.md)를 따른다.
 
 xenova-gateway는 기존 코드·pyserial·비활성 서비스 템플릿을 포함한다.
@@ -857,9 +858,11 @@ assert any(n.startswith("kernel-module-brcmfmac-cyw-") for n in names)
 assert any(n.startswith("kernel-module-v3d-") for n in names)
 assert any(n.startswith("kernel-module-tun-") for n in names)
 assert any(n.startswith("kernel-module-ipv6-") for n in names)
+for module in ("usbserial", "cp210x"):
+    assert any(n.startswith(f"kernel-module-{module}-") for n in names), f"Missing ESP32 module: {module}"
 assert "python3-fastapi-ptest" not in names
 print(path)
-print("PASS", len(required)+1, "required packages including kernel-versioned CYW module")
+print("PASS required packages including kernel-versioned Wi-Fi, graphics, TUN, IPv6 and ESP32 serial modules")
 PY
 ```
 

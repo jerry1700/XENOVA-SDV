@@ -8,6 +8,9 @@ IMAGE_INSTALL:append = " xenova-platform xenova-bringup xenova-dom0-manager xeno
 # Gateway is packaged but remains disabled until approved instance settings exist.
 IMAGE_INSTALL:append = " xenova-gateway"
 
+# ESP32 CP210x USB-UART runtime; keep both transport modules in the image.
+IMAGE_INSTALL:append = " kernel-module-usbserial kernel-module-cp210x"
+
 # USB tethering host drivers for Android phones; addressing and routes stay opt-in.
 IMAGE_INSTALL:append = " kernel-module-rndis-host kernel-module-cdc-ether kernel-module-cdc-ncm"
 

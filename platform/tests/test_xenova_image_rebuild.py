@@ -1,8 +1,13 @@
 """이미지 재빌드의 ACL·템플릿 라우팅·sparse 복사 경계를 실제 구현으로 검사한다."""
+import ast
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +24,33 @@ broker = load("image_rebuild_broker", ROOT / "platform/deploy/mosquitto/scripts/
 
 
 class ImageRebuildContractTest(unittest.TestCase):
+    def test_documented_manifest_check_rejects_missing_esp32_modules(self):
+        guide = (ROOT / "docs/platform/build-guide.md").read_text()
+        command = re.search(r"^run wic-packages python3 -B - <<'PY'\n(.*?)^PY$",
+                            guide, re.M | re.S).group(1)
+        required = next(ast.literal_eval(node.value) for node in ast.parse(command).body
+                        if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "required"
+                                for target in node.targets))
+        other_modules = {"brcmfmac-cyw", "v3d", "tun", "ipv6"}
+        names = required | {f"kernel-module-{name}-test-kernel"
+                            for name in other_modules | {"usbserial", "cp210x"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            deploy = Path(tmp)
+            manifest = deploy / "xenova-xen-bringup-image-raspberrypi4-64.rootfs.manifest"
+            for missing in (None, "usbserial", "cp210x"):
+                with self.subTest(missing=missing):
+                    supplied = names - ({f"kernel-module-{missing}-test-kernel"} if missing else set())
+                    manifest.write_text("".join(f"{name} test 1.0\n" for name in sorted(supplied)))
+                    result = subprocess.run([sys.executable, "-B", "-c", command],
+                                            env={**os.environ, "DEPLOY": str(deploy)},
+                                            capture_output=True, text=True)
+                    if missing:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(f"Missing ESP32 module: {missing}", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_backend_can_read_all_v2_telemetry_but_has_no_v2_write_grant(self):
         rules = broker.policy(ROOT / "platform/deploy/mosquitto/etc/policy.json")
         grants = broker.grants(broker.acl(broker.default_accounts(rules), rules))["backend"]
