@@ -47,6 +47,9 @@ DOCUMENTATION = (
     "platform/guests/zephyr/telemetry/contract/docs/CONSUMER_HANDOFF.md",
     "platform/scripts/provision-xenova-telemetry.py",
     "platform/services/display/router/README.md",
+    "platform/services/display/router/deploy/mobile-access/mobile-access.README.md",
+    "platform/deploy/mosquitto/README.md",
+    "docs/verification/recovery-scenario-closure-20261030.md",
     "platform/services/gateway/README.md")
 RUNBOOK = """# XenStore G1 인계물
 

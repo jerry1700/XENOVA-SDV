@@ -25,6 +25,21 @@ CHECK_DIR="$(mktemp -d /tmp/xenova-platform-static.XXXXXX)"
 printf 'Isolated metadata check: %s\n' "$CHECK_DIR"
 mkdir -p "$CHECK_DIR/logs"
 YOCTO_BUILD_DIR="$CHECK_DIR/build" bash platform/scripts/setup-yocto.sh > "$CHECK_DIR/logs/setup.log" 2>&1
+# 격리 metadata에도 실제 웹 입력을 전달한다. 가짜 UI를 대신 생성하지 않는다.
+python3 -B - "$CHECK_DIR/build/conf/local.conf" <<'PY'
+import json, os, sys
+from pathlib import Path
+value = os.environ.get("XENOVA_DISPLAY_WEB_ASSETS", "")
+if not value:
+    raise SystemExit("Set XENOVA_DISPLAY_WEB_ASSETS to the compiled display-web parent before --metadata")
+path = Path(value)
+if (not path.is_absolute() or path.is_symlink() or path.resolve() != path
+        or any(ch in value for ch in "\n\r\x00$")
+        or not (path/"display-web/index.html").is_file()):
+    raise SystemExit("Canonical compiled display-web input required for metadata")
+with Path(sys.argv[1]).open("a") as stream:
+    stream.write("\nXENOVA_DISPLAY_WEB_ASSETS = " + json.dumps(value) + "\n")
+PY
 cat >> "$CHECK_DIR/build/conf/local.conf" <<'CONF'
 TMPDIR = "${TOPDIR}/tmp"
 CACHE = "${TOPDIR}/cache"

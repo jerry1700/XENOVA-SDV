@@ -22,7 +22,7 @@ def selected(values, name, *, directory=False):
 _, boot = load('xen-rpi-u-boot-scr')
 assert selected(boot, 'boot.cmd.xen.in') == LAYER / 'recipes-bsp/xen-rpi-u-boot-scr/files/boot.cmd.xen.in'
 assert boot['S'] == boot['UNPACKDIR']
-assert boot['RPI_DOM0_MEM'] == '1024M'
+assert boot['RPI_DOM0_MEM'] == '3072M'
 _, xen = load('xen-tools')
 assert '10-xenbr0.netdev' not in xen['VIRT_NETWORKING_FILES']
 assert 'file://10-xenbr0.netdev' not in xen['SRC_URI'].split()
@@ -33,7 +33,10 @@ assert bringup['SYSTEMD_AUTO_ENABLE:xenova-bringup'] == 'enable'
 assert "sed -e 's|@BINDIR@|/usr/bin|g'" in text
 platform_text, platform = load('xenova-platform')
 assert platform['SYSTEMD_AUTO_ENABLE:xenova-platform'] == 'enable'
-assert set(platform['SYSTEMD_SERVICE:xenova-platform'].split()) == {'srv-xenova.mount', 'xenova-vm-shutdown.service', 'xenova-vms.service', 'xenova-first-boot.service', 'xenova-host-admission.service'}
+assert set(platform['SYSTEMD_SERVICE:xenova-platform'].split()) == {
+    'srv-xenova.mount', 'xenova-vm-shutdown.service', 'xenova-vms.service',
+    'xenova-first-boot.service', 'xenova-host-admission.service',
+    'xenova-boot-status.service', 'xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'}
 # package task는 실행하지 않는다. 실제 해석된 install 목록과 모든 패키지의 FILES를 대조한다.
 installed_units = re.search(r'for unit in ([^;]+); do', platform_text).group(1).split()
 for unit in installed_units:
