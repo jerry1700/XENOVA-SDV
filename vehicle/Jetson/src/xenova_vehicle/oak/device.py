@@ -175,13 +175,11 @@ class OakSource:
             raise RuntimeError("an OakSource cannot be started twice")
         self._started = True
         if sys.platform != "linux" or sys.byteorder != "little":
-            from ..runtime.health_policy import ConfigurationError
-            raise ConfigurationError("real OAK capture requires little-endian Linux")
+            raise RuntimeError("real OAK capture requires little-endian Linux")
         dai = importlib.import_module("depthai")
         self._dai = dai
         if dai.__version__ != "2.29.0.0":
-            from ..runtime.health_policy import ConfigurationError
-            raise ConfigurationError(f"DepthAI 2.29.0.0 required, found {dai.__version__}")
+            raise RuntimeError(f"DepthAI 2.29.0.0 required, found {dai.__version__}")
         pipeline = self._build_pipeline(dai)
         graph = self._graph_declaration(pipeline)
         self._lock = _DeviceLock(self.profile.device_mxid)

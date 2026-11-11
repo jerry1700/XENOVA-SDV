@@ -29,6 +29,8 @@ class Compute:
     def take_result(self):
         result,self.result=self.result,None
         return result
+    def acknowledge_parser_start(self,job_id,actual):return True
+    def skip_parser(self,job_id):raise AssertionError('fixture sources must advance')
 
 
 class Actor:
@@ -39,7 +41,7 @@ class Actor:
     def progress(self,stage,sequence=None,**fields):
         self.progresses.append((stage,sequence,self.state,fields))
         return object()
-    def await_sent(self,original,*,cap_us=None):return original
+    def await_sent(self,original,*,cap_us):return original
 
 
 def controller():
@@ -51,7 +53,7 @@ def controller():
 def warmup(control,compute,now,count=5):
     for sequence in range(1,count+1):
         now[0]+=10;job=str(uuid4());started=now[0]-1
-        event=MapperEvent('PARSER_STARTED',job,control.generation,1,(sequence,sequence),
+        event=MapperEvent('PARSER_START_REQUIRED',job,control.generation,1,(sequence,sequence),
             sequence,started,now[0],now[0]+500_000,False,
             parser_deadline_us=now[0]+500_000,nn_source_key=(sequence,sequence,sequence,started))
         compute.events=[event,replace(event,kind='NN_COMPLETED',accepted=True)]
@@ -85,7 +87,7 @@ class MapperCurrentPhaseTests(unittest.TestCase):
         self.assertEqual(actor.state,'WARMUP')
         # 다섯째도 독립 원 source여야 하므로 앞 네 source를 이어서 보낸다.
         now[0]+=10;job=str(uuid4())
-        event=MapperEvent('PARSER_STARTED',job,control.generation,1,(5,5),5,
+        event=MapperEvent('PARSER_START_REQUIRED',job,control.generation,1,(5,5),5,
             now[0]-1,now[0],now[0]+500_000,False,
             parser_deadline_us=now[0]+500_000,nn_source_key=(5,5,5,now[0]-1))
         compute.events=[event,replace(event,kind='NN_COMPLETED',accepted=True)]
@@ -138,10 +140,7 @@ class MapperCurrentPhaseTests(unittest.TestCase):
         # 폐기할 결과가 있어도 원 parser 무진전 감시를 건너뛰면 안 된다.
         now[0]=control.last_completion+control.nn_stall_us
         compute.result=replace(original,source_generation='b'*64)
-        control.tick()
-        self.assertEqual(control.wait_reason,'NN_WAIT_INPUT')
-        self.assertEqual(actor.state,'WAIT_INPUT')
-        self.assertIs(control.latest_summary,accepted)
+        with self.assertRaisesRegex(TimeoutError,'parser association stalled'):control.tick()
 
     def test_json_decode_time_consumes_original_result_lifetime(self):
         control,actor,compute,now=controller();warmup(control,compute,now)
@@ -163,11 +162,8 @@ class MapperCurrentPhaseTests(unittest.TestCase):
         control,actor,compute,now=controller()
         now[0]=control.deadline.expires_us
         offer(control,compute,now,metric(),expires=now[0])
-        control.tick()
+        with self.assertRaisesRegex(TimeoutError,'first-output deadline'):control.tick()
         self.assertFalse(control.ready)
-        self.assertEqual(control.wait_reason,'NN_WARMUP_WAIT_INPUT')
-        warmup(control,compute,now)
-        self.assertTrue(control.ready)
 
     def test_actual_cpu_progress_does_not_make_clock_or_world_current(self):
         control,actor,compute,now=controller();warmup(control,compute,now)

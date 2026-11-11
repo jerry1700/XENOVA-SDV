@@ -209,17 +209,6 @@ class DataLink:
         self._pending=None;self.counts['discarded_clock_reply']+=1
         return True
 
-    def discard_expired(self, original):
-        """아직 송신하지 않은 로컬 자료만 버린다. 채택/적용/자원 반환을 진술하지 않는다."""
-        self._check_owner()
-        if type(original) is not DataPacket or self._pending is not original:
-            raise ValueError('exact pending local packet required')
-        if self._send_unknown:raise RuntimeError('unknown binary send cannot be discarded')
-        if self.clock()<original.expires_us:raise ValueError('local packet has not expired')
-        self._pending=None
-        self.counts['discarded_expired']+=1
-        return True
-
     def send(self,kind,metadata,body=b'',*,request_id=None,issued_us=None,expires_us=None):
         self._check_owner()
         if self.closed:raise EOFError('binary data endpoint is closed')

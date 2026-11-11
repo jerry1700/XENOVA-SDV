@@ -127,15 +127,15 @@ class AbsoluteDeadlineTests(unittest.TestCase):
 
 
 class LocalSetupDeadlineTests(unittest.TestCase):
-    def test_m_and_d_local_setup_uses_shared_startup_budget(self):
+    def test_m_and_d_setup_deadline_has_exact_fifteen_second_boundary(self):
         for role, worker in (("M", M_WORKER), ("D", D_WORKER)):
             with self.subTest(role=role):
                 watch = LocalSetupWatch(role, worker, 100, now_us=100)
-                self.assertEqual(watch.deadline.expires_us, 100 + 90 * SECOND)
-                self.assertFalse(watch.poll(100 + 90 * SECOND - 1))
-                self.assertTrue(watch.poll(100 + 90 * SECOND))
-                self.assertFalse(watch.hello(worker, 100 + 90 * SECOND - 1,
-                                             now_us=100 + 90 * SECOND + 1))
+                self.assertEqual(watch.deadline.expires_us, 100 + 15 * SECOND)
+                self.assertFalse(watch.poll(100 + 15 * SECOND - 1))
+                self.assertTrue(watch.poll(100 + 15 * SECOND))
+                self.assertFalse(watch.hello(worker, 100 + 15 * SECOND - 1,
+                                             now_us=100 + 15 * SECOND + 1))
                 self.assertTrue(watch.failed)
 
     def test_hello_finishes_local_timer_before_unbounded_external_wait(self):
@@ -147,7 +147,7 @@ class LocalSetupDeadlineTests(unittest.TestCase):
                 self.assertFalse(watch.poll(100 + 600 * SECOND))
                 self.assertFalse(watch.hello(worker, event, now_us=100 + 600 * SECOND))
                 self.assertEqual(watch.hello_us, event)
-                self.assertEqual(watch.deadline.expires_us, 100 + 90 * SECOND)
+                self.assertEqual(watch.deadline.expires_us, 100 + 15 * SECOND)
 
     def test_foreign_or_prespawn_hello_does_not_finish_or_retime_setup(self):
         watch = LocalSetupWatch("M", M_WORKER, 100, now_us=100)

@@ -3,8 +3,7 @@
 이번 단계는 읽기 전용이다: list/get/host_info/health. create/shutdown/destroy 는 S15P31E110-115 에서 구현한다.
 
 vm_id ↔ Xen 도메인 매핑: 플랫폼 도구(xenova_vm.py)가 xl 설정에 `uuid = <vm_id>` 를 기록하고 `xl shutdown <uuid>` 로
-도메인을 지정하므로, 여기서도 도메인 UUID 를 vm_id 로 쓴다(계약 13장 1안). UUID 는 `xl list -v` 의 UUID 열에서 읽는다.
-Recovery Worker 가 주기마다 부르므로 도메인마다 설정 JSON 을 다시 만드는 `xl list -l` 은 쓰지 않는다.
+도메인을 지정하므로, 여기서도 `xl list -l` 의 config.c_info.uuid 를 vm_id 로 쓴다(계약 13장 1안).
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from pathlib import Path
 from uuid import UUID
 
 from .. import budget as request_budget
-from ..errors import DriverError, DriverTimeout, PlatformUnavailable
+from ..errors import DriverError, DriverTimeout
 from .base import CreateSpec, Domain, Driver, HostInfo, InstancePaths, Provisioner, StatsSample
 from .xentop import Xentop, collect_stats
 from .xl import Xl, map_state
@@ -32,14 +31,20 @@ class XenDriver(Driver):
     # ---- 조회 ----
 
     def list_domains(self) -> list[Domain]:
+        rows = self._xl.list()
+        long_by_domid = {entry.get("domid"): entry for entry in self._xl.list_long()}
         domains: list[Domain] = []
-        for row in self._xl.list_verbose():
+        for row in rows:
             if row.domid == DOM0_ID or row.name == DOM0_NAME:
                 continue  # Domain-0 은 관리 대상이 아니다. domid 0 또는 이름 Domain-0 둘 중 하나만 맞아도 뺀다
+            entry = long_by_domid.get(row.domid)
+            uuid_text = ((entry or {}).get("config") or {}).get("c_info", {}).get("uuid")
+            if not uuid_text:
+                raise DriverError(f"domain {row.name} (domid {row.domid}) has no uuid in xl list -l")
             try:
-                vm_id = UUID(row.uuid)
+                vm_id = UUID(uuid_text)
             except ValueError as exc:
-                raise DriverError(f"domain {row.name} has non-UUID uuid", detail=row.uuid[:80]) from exc
+                raise DriverError(f"domain {row.name} has non-UUID uuid", detail=uuid_text[:80]) from exc
             domains.append(
                 Domain(
                     vm_id=vm_id,
@@ -66,8 +71,7 @@ class XenDriver(Driver):
 
     def collect_stats(self) -> StatsSample:
         if self._xentop is None:
-            # 계약 4.6: xentop 을 실행할 수 없음은 501 이 아니라 503 PlatformUnavailable (platform 드라이버와 같은 처리)
-            raise PlatformUnavailable("xentop is not configured for stats")
+            raise NotImplementedError("collect_stats: xentop runner not configured")
         return collect_stats(self._xentop, self._xl, budget_s=request_budget.clamp(self._xentop.timeout_s, "stats"))
 
     # ---- 명령: S15P31E110-115 ----

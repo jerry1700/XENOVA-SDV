@@ -1,5 +1,6 @@
 """Domain-0 보호: 목록에서 빠지고, nil UUID 대상 호출은 어떤 엔드포인트·드라이버에서도 400 이다."""
 
+import json
 from uuid import UUID
 
 import pytest
@@ -17,18 +18,23 @@ from test_xl import FakeRunner, XL_INFO
 ALPINE = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 
 
-def _runner(xl_list_v: str):
-    return FakeRunner({("xl", "list", "-v"): xl_list_v, ("xl", "info"): XL_INFO})
+def _runner(xl_list: str, long_rows: list[dict]):
+    return FakeRunner({("xl", "list"): xl_list, ("xl", "list", "-l"): json.dumps(long_rows), ("xl", "info"): XL_INFO})
 
 
 def test_xen_driver_excludes_dom0_by_id_even_if_renamed_and_by_name_even_with_other_id():
-    xl_list_v = (
-        "Name ID Mem VCPUs State Time(s) UUID Reason-Code Security Label\n"
-        f"control 0 1024 4 r----- 0 {DOM0_UUID} - -\n"  # domid 0 인데 이름이 바뀐 경우
-        "Domain-0 7 512 1 -b---- 0 77777777-7777-4777-8777-777777777777 - -\n"  # 이름은 Domain-0 인데 domid 가 0 이 아닌 경우
-        f"alpine-drive 3 256 1 r----- 0 {ALPINE} - -\n"
+    xl_list = (
+        "Name ID Mem VCPUs State Time(s)\n"
+        "control 0 1024 4 r----- 0\n"  # domid 0 인데 이름이 바뀐 경우
+        "Domain-0 7 512 1 -b---- 0\n"  # 이름은 Domain-0 인데 domid 가 0 이 아닌 경우
+        "alpine-drive 3 256 1 r----- 0\n"
     )
-    driver = XenDriver(Xl(_runner(xl_list_v)))
+    long_rows = [
+        {"domid": 0, "config": {"c_info": {"name": "control", "uuid": str(DOM0_UUID)}}},
+        {"domid": 7, "config": {"c_info": {"name": "Domain-0", "uuid": "77777777-7777-4777-8777-777777777777"}}},
+        {"domid": 3, "config": {"c_info": {"name": "alpine-drive", "uuid": str(ALPINE)}}},
+    ]
+    driver = XenDriver(Xl(_runner(xl_list, long_rows)))
     assert [d.vm_id for d in driver.list_domains()] == [ALPINE]
     with pytest.raises(VMNotFound):
         driver.get_domain(DOM0_UUID)

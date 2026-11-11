@@ -159,7 +159,6 @@ class SupervisorOperation:
         if not callable(clock): raise ValueError('actual S monotonic clock required')
         self.clock = clock; self._thread = threading.get_ident()
         self._peer = self._world_dispatch = self._config = None
-        self._configs = OrderedDict()
         self._records = OrderedDict(); self._pending = None; self._uncertain = set()
         self._confirmed = self._desired = 'RUN'; self._revision = self._issued_revision = 0
         self._accepted_id = self._accepted_sha = None
@@ -198,7 +197,6 @@ class SupervisorOperation:
         self._peer, self._world_dispatch = peer, world_dispatch
         self._synchronized = False; self._reason = 'CONFIG_SYNC_PENDING'; self._desired = self._confirmed
         self._config = self._consumer_ready = None
-        self._configs.clear()
         self._world()
 
     def _new_config(self, now):
@@ -206,9 +204,7 @@ class SupervisorOperation:
             state=self._confirmed,accepted_request_id=self._accepted_id,accepted_request_sha256=self._accepted_sha)
         from uuid import uuid4
         self._config = dict(body=canonical(value),request_id=str(uuid4()),issued=now,
-            expires=min(2**64-1,now+TRANSACTION_US),selected=None,sent=None,result=None,peer=self._peer)
-        self._configs[self._config['request_id']]=self._config
-        while len(self._configs)>16:self._configs.popitem(last=False)
+            expires=min(2**64-1,now+TRANSACTION_US),selected=None,sent=None,result=None)
 
     def _expire(self, now):
         if not self._synchronized and self._config is not None and now>=self._config['expires']:
@@ -289,9 +285,8 @@ class SupervisorOperation:
         """source poll 뒤에만 원 CONFIG 실패를 종결한다. 조회/사용자 요청의 만료와 구분한다."""
         now = self._now()
         if not self._synchronized and self._config is not None and now >= self._config['expires']:
-            self._reason = 'CONFIG_RETRY_PENDING'
-            self._config = None
-            self._world()
+            self._reason = 'CONFIG_EXPIRED'
+            raise TimeoutError('original mapper operation CONFIG bootstrap expired')
 
     def selected(self, packet):
         from .data_channel import DataPacket
@@ -316,7 +311,7 @@ class SupervisorOperation:
         from .data_channel import DataSent
         self._owned()
         if type(event) is not DataSent:raise ValueError('actual operation full-send event required')
-        records = (*self._configs.values(),*self._records.values())
+        records = (self._config,*self._records.values())
         record = next((row for row in records if row is not None and row['selected'] is event.packet),None)
         if record is None or not event.packet.issued_us <= event.started_us <= event.completed_us:
             raise ValueError('operation actual full-send differs from original selection')
@@ -340,22 +335,23 @@ class SupervisorOperation:
             now = self._now()
             if now < packet.issued_us:
                 raise ValueError('consumer-installed marker has future original issue time')
+            if now >= packet.expires_us:
+                raise TimeoutError('original mapper operation consumer-installed marker expired')
             original=(packet.body,header['request_id'],packet.issued_us,packet.expires_us)
-            if self._consumer_ready is not None and self._consumer_ready[0]!=packet.body:
-                raise ValueError('consumer-installed capability changed on the same M channel')
+            if self._consumer_ready is not None and self._consumer_ready!=original:
+                raise ValueError('one original consumer-installed marker required per M channel')
             self._consumer_ready=original
             return
         value = operation_result(packet.body)
         if (peer != self._peer or value['service_instance'] != self.service_instance or packet.header['metadata'] != {}
-                or not int(value['completed_j_us']) <= packet.issued_us <= now
+                or packet.issued_us != int(value['completed_j_us']) or not packet.issued_us <= now < packet.expires_us
                 or (packet.header['service_instance'],packet.header['mapper_worker'],packet.header['channel_epoch'],packet.header['sender']) != (
                     peer.service_instance,peer.mapper_worker,peer.channel_epoch,'M')):
             raise ValueError('operation result differs from registered current M')
         config_ack = value['profile'] == CONFIG_ACK_PROFILE
-        record = self._configs.get(value['request_id']) if config_ack else self._records.get(value['request_id'])
+        record = self._config if config_ack else self._records.get(value['request_id'])
         if record is None or record['selected'] is None or record['sent'] is None:
             raise ValueError('operation result lacks original full-send')
-        if record['peer'] != peer:raise ValueError('operation result belongs to a previous M peer')
         original = record['selected']; body_sha = sha256(original.body).hexdigest()
         if (value['request_id'],value['request_sha256'],int(value['issued_j_us']),int(value['expires_j_us'])) != (
                 original.header['request_id'],body_sha,original.issued_us,original.expires_us):
@@ -370,9 +366,7 @@ class SupervisorOperation:
             if record['result'] is not None:
                 if record['result']!=value:raise ValueError('original CONFIG ACK changed')
                 return
-            if (value['status'] == 'APPLIED' and int(value['config_revision'])==self._revision
-                    and value['state']==self._confirmed):
-                # 늦은 설치 ACK는 역사 사실이다. 더 최신 설정을 되돌리지 않는다.
+            if value['status'] == 'APPLIED':
                 self._synchronized = True; self._reason = 'CONFIG_SYNCHRONIZED'; self._world()
             record['result']=value
             return
@@ -424,9 +418,8 @@ class MapperOperationController:
             if header['metadata'] != {}: raise ValueError('exact CONFIG metadata required')
             original = (packet.body,header['request_id'],packet.issued_us,packet.expires_us)
             if self._config_original is not None:
-                if self._config_original[0] == original:return self._config_original[1]
-                if self._config_original[0][0] != packet.body:
-                    raise ValueError('CONFIG retry changed confirmed state on the same M channel')
+                if self._config_original[0] != original: raise ValueError('initial CONFIG changed on the same M channel')
+                return self._config_original[1]
             value = configuration(packet.body)
             if header['metadata'] != {} or value['service_instance'] != self.peer.service_instance:
                 raise ValueError('foreign CONFIG transaction')

@@ -8,7 +8,6 @@ public record AgentStressCommand(
         String vmId,
         StressType type,
         int amount,
-        Integer loadPercent,
         int durationS,
         Instant submittedAt,
         Instant expiresAt) {

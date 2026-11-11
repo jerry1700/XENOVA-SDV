@@ -1,6 +1,6 @@
 """등록된 PC M main의 slot/source/storage와 단일 compute owner를 연결한다.
 
-S가 만든 실제 연결과 boot만 받는다. EARLY pose는 NN 결과 채택 전에 한 번 고정하며 현재
+S가 만든 실제 연결과 boot만 받는다. EARLY pose는 NN 전에 한 번 고정하며 현재
 Vehicle/R1은 별도로 갱신한다. public physical 입력으로 cast하거나 SDK/GT/READY를
 만들지 않는다. Scene/COMPLETE 복원은 지원하지 않으며 A의 모델 수명은 건드리지 않는다.
 """
@@ -146,7 +146,7 @@ class _MapperMain:
             pc_owner_token=self.admission.owner_token,manifest=manifest,clock=j_us,
             maintenance=maintenance,adoption_lock=self.context_port.adoption_lock)
         self.compute=compute;compute.start()
-        deadline=AbsoluteDeadline.after(actor.ack.issued_us,15_000_000,now_us=j_us())
+        deadline=AbsoluteDeadline.after(actor.ack.issued_us,15_000_000,now_us=j_us(),cap_us=boot.startup_deadline_us)
         self.control=PcMapperControl(actor,self.compute,deadline,clock=j_us,
             nn_stall_us=int(boot.profile.oak.nn_stall_timeout_s*1_000_000))
         def apply(action,expires_us,gate_expires_us):
@@ -203,7 +203,7 @@ class _MapperMain:
         try:self.source.pump(before_outputs=self._publish_inputs)
         except (SourceChanged,EOFError):
             self._fence('PC_SOURCE_CONTEXT_UNAVAILABLE')
-            return
+            raise
 
     def _refresh_current(self):
         if self.compute is None or self.fenced:return
@@ -257,11 +257,8 @@ class _MapperMain:
 
     def _expire_heads(self):
         now=j_us()
-        # copy 예약 E가 남아 있어도 해당 관측 E가 끝났다면 새 native 읽기를 시작하지 않는다.
-        if self.acquire is not None and (now>=self.acquire.expires_us
-                or self.meta is not None and now+1>=self.meta[1].expires_j_us):
-            self.actor.cancel_request(self.acquire)
-            self.offer=self.offer_typed=self.meta=self.acquire=self.acquire_draft=None
+        if self.acquire is not None and now>=self.acquire.expires_us:
+            raise TimeoutError('original PC read request expired without ACQUIRED')
         if self.early is not None and now+1>=self.early['frame'].expires_j_us:
             job=self.early['job_id'];self.early=None
             if self.outgoing is not None and self.outgoing['request_id']==job and self.link.pending is None:
@@ -294,7 +291,7 @@ class _MapperMain:
                 or offer.context.publication_sha256!=sha256(self.source.storage_context.source_binding).hexdigest()):
             self.offer=self.offer_typed=self.meta=self.acquire_draft=None;return
         if self.acquire_draft is None:
-            expires=now+self.settings.slot_limits.read_budget_us
+            expires=min(now+self.settings.slot_limits.read_budget_us,offer.expires_us,descriptor.expires_j_us)
             if now>=expires:return
             self.acquire_draft=dict(payload=pc_acquire_payload(offer),request_id=str(uuid4()),issued=now,expires=expires)
         out=self.actor.slot(**self.acquire_draft)
@@ -306,16 +303,8 @@ class _MapperMain:
         if self.acquire is None or self.offer is None or self.meta is None:
             raise ValueError('ACQUIRED has no exact original offer/metadata/read request')
         acquired=PcSlotMessage(packet,self.acquire.context,self.acquire,limits=self.settings.slot_limits)
-        from xenova_vehicle.runtime.health_policy import FrameExpired
-        if j_us()>=self.acquire.expires_us:
-            self.actor.cancel_request(self.acquire)
-            self.offer=self.offer_typed=self.meta=self.acquire=self.acquire_draft=None
-            return
-        try:owned,returned=self.actor.arena.copy_owned(acquired.record,expected_pc_slot(self.offer_typed))
-        except FrameExpired:
-            self.actor.cancel_request(self.acquire)
-            self.offer=self.offer_typed=self.meta=self.acquire=self.acquire_draft=None
-            return
+        acquired.record.read_request.request.check(j_us())
+        owned,returned=self.actor.arena.copy_owned(acquired.record,expected_pc_slot(self.offer_typed))
         payload=acquired.payload;payload['op']='RELEASE';completed=returned.writable_posted_us
         release=self.actor.send_required('SLOT',payload,domain='RAW',revision=self.actor.bind.binding_revision,
             request_id=acquired.request_id,issued_us=completed,
@@ -329,38 +318,27 @@ class _MapperMain:
         if self.fenced or j_us()+1>=owned.expires_j_us:return
         if descriptor.phase=='EARLY':
             if self.early is not None:raise RuntimeError('a previous original EARLY frame is still active')
-            try:frame=self.admission.admit_early(received,owned,now_us=j_us())
-            except FrameExpired:return
+            frame=self.admission.admit_early(received,owned,now_us=j_us())
             if frame is not None:self.early=dict(frame=frame,job_id=descriptor.job_id,purpose=purpose,snapshot=None,ack=None)
         else:
             early=self.early
             if early is None or early['ack'] is None:raise ValueError('NN has no original EARLY snapshot full-send')
-            try:admission=self.admission.admit_nn(early['frame'],received,owned,snapshot_ack_sent=early['ack'],now_us=j_us())
-            except FrameExpired:
-                self.early=None
-                return
+            admission=self.admission.admit_nn(early['frame'],received,owned,snapshot_ack_sent=early['ack'],now_us=j_us())
             if admission is None:return
-            try:
-                self._pump_inputs()
-                if self.fenced:return
-                now=j_us();snapshot=early['snapshot'];current=None
-                view=self.admission.current_view(early['frame'],now_us=now)
-                if snapshot is not None:
-                    try:
-                        current=PcCurrentSensors.from_owner(self.sensor_owner,snapshot,now_us=now,
-                            source_context_bytes=self.source_context,fence_revision=self.sensor_owner.fence_revision)
-                    except ValueError:
-                        # 원 NN parser 사실과 현재 geometry 자격은 다르다. None은 geometry 취소다.
-                        current=None
-                    self._apply_sensor_fence()
-                item=PcMapperInput(admission,source_generation=self.actor.binding.sha256,current_pc_view=view,
-                    pc_owner_token=self.admission.owner_token,now_us=j_us(),sensor_snapshot=snapshot,current_sensors=current,
-                    context_bytes=self.source_context,parser_cap_us=None)
-                self.compute.submit(item)
-            except FrameExpired:
-                pass
-            finally:
-                self.early=None
+            self._pump_inputs();now=j_us();snapshot=early['snapshot'];current=None
+            view=self.admission.current_view(early['frame'],now_us=now)
+            if snapshot is not None:
+                try:
+                    current=PcCurrentSensors.from_owner(self.sensor_owner,snapshot,now_us=now,
+                        source_context_bytes=self.source_context,fence_revision=self.sensor_owner.fence_revision)
+                except ValueError:
+                    # 원 NN parser 사실과 현재 geometry 자격은 다르다. None은 geometry 취소다.
+                    current=None
+                self._apply_sensor_fence()
+            item=PcMapperInput(admission,source_generation=self.actor.binding.sha256,current_pc_view=view,
+                pc_owner_token=self.admission.owner_token,now_us=j_us(),sensor_snapshot=snapshot,current_sensors=current,
+                context_bytes=self.source_context,parser_cap_us=None if self.control.ready else self.control.deadline.expires_us)
+            self.compute.submit(item);self.early=None
 
     def _snapshot_ack(self):
         early=self.early
@@ -449,11 +427,9 @@ class _MapperMain:
                 digest=self.source.context_sha256 if not self.fenced and self.source.context_sha256 is not None else self.actor.binding.sha256
                 self.mailbox.fence(digest,now_us=j_us());self.client.pump(current_context_sha256=digest)
                 self.control.tick()
-                if self.fenced:self.actor.state='DEGRADED'
                 if not self.fenced:relay_publications(self.publication_port,self.source)
                 if not self.fenced:self._flush_metadata()
                 for packet in incoming:
-                    if self.actor.cancelled_grant(packet,None,self.settings.slot_limits,PcSlotMessage):continue
                     if self.client.receive(packet):continue
                     if packet.kind!='SLOT':raise ValueError('unsupported PC M lifecycle/control statement')
                     if packet.payload.get('op')=='OFFER':self._offer(packet)
@@ -474,14 +450,6 @@ class _MapperMain:
                     self.compute.request_stop()
                     remaining=2. if self.actor.stop is None else max(0.,min(2.,(self.actor.stop.expires_us-j_us())/1_000_000))
                     self.compute.join(remaining)
-                    # 실제 compute 종료 뒤 한 번만 저장한다. 원 종료·자원 반환은 진단 실패와 독립이다.
-                    try:
-                        import json
-                        diagnostic=dict(profile='pc-mapper-exit-diagnostic-1',compute=self.compute.snapshot(),
-                            parser_ready=getattr(self.control,'ready',False),parser_streak=getattr(self.control,'streak',0),
-                            wait_reason=getattr(self.control,'wait_reason',None))
-                        if len(json.dumps(diagnostic))<=16*1024:self.actor.save('pc-mapper-diagnostic.json',diagnostic)
-                    except BaseException:pass
             except BaseException as error:
                 self.actor.failure=type(error).__name__
                 raise

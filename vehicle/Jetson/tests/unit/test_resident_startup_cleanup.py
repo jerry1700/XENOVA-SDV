@@ -42,7 +42,6 @@ def runtime_for_spawn(process, *, mapper=False, selector_fail=False):
     value.service = uid(1); value.identities = {'D': (uid(2), uid(3)), 'M': (uid(4), uid(5))}
     value.artifacts = dict(release_sha256='a' * 64, manifests={})
     value.output = Path('/unused-test-output')
-    value.output_owned = False
     value.storage_profile = value.storage_recovery = value.profile = value.scope = value.raw_profile = None
     value.handles = SimpleNamespace(db_copy=object(), db_tokens=(), raw_tokens=())
     value.jio_profile = SimpleNamespace(source_policy=object(), device='oak-test',clock_policy=object()) if mapper else None
@@ -60,7 +59,7 @@ class ThreadOwner:
     """기동 오류 주입 때도 실제 thread 참조를 보유하는 작은 fixture다. MQTT owner가 아니다."""
     instances = []
     fail_after_start = False
-    def __init__(self, _, *, mapper_operation_installed=False, service_instance=None):
+    def __init__(self, _, *, mapper_operation_installed=False):
         self.event = threading.Event(); self.thread = None; self.stops = 0; self.joins = 0
         self.instances.append(self)
     def start(self):
@@ -183,7 +182,6 @@ class ResidentStartupCleanupTests(unittest.TestCase):
     def run_initial_failure(self, *, log_error=None, request_error=None, jio_start_error=False):
         runtime = resident_runtime._Runtime.__new__(resident_runtime._Runtime)
         runtime.jio_profile = object(); runtime.jio = None; runtime.workers = {}; runtime.failure = None
-        runtime.service = uid(100)
         runtime.mapper_profile_bytes = None
         runtime.operation_server = None
         runtime.http_address = None; runtime.http = None

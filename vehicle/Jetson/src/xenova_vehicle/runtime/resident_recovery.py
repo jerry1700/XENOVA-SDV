@@ -77,9 +77,7 @@ class ResidentRecovery:
             return U64_MAX
         attempt = self.active
         if attempt is None:
-            # 실제 graph 설치 뒤의 capture/NN 준비 대기는 cold startup이 아니다.
-            return U64_MAX if (self.r.resident_started_us is not None
-                or ('A','GRAPH_STARTED') in self.r.progress) else self.r.startup_deadline
+            return U64_MAX if self.r.resident_started_us is not None else self.r.startup_deadline
         if attempt.phase in ('DRAIN', 'PAUSE'):
             return attempt.began_us + CLEANUP_US
         if attempt.startup_deadline_us is not None:
@@ -418,11 +416,16 @@ class ResidentRecovery:
             elif attempt.phase in ('WAIT_BIND', 'WAIT_RESUME'):
                 self._resume(attempt, now)
             elif attempt.phase == 'WAIT_READY':
-                if self._owners_restored(attempt):
+                required = ('D',) if attempt.kind == 'D' else ('M',) if attempt.kind == 'M' else ('A', 'M')
+                hosts = [self.r.workers.get(role) for role in required]
+                if any(host is None or host is attempt.old.get(role) or host.bind_ack is None
+                       or host.reaped or host.eof for role, host in zip(required, hosts)):
+                    return
+                ready = (self.r.storage_ready_us is not None if attempt.kind == 'D' else
+                         self.r.nn_ready_us is not None and (attempt.kind == 'M' or self.r.capture_ready_us is not None))
+                if ready:
                     self._receipt(True)
-                    self.r.event('RECOVERY_COMPLETE', recovery_kind=attempt.kind,
-                        waiting_for_input=attempt.kind!='D' and self.r.nn_ready_us is None,
-                        metric_ready=False, world_valid=False)
+                    self.r.event('RECOVERY_COMPLETE', recovery_kind=attempt.kind, metric_ready=False, world_valid=False)
                     self.active = None
                     self._healthy_since = None
             if (self.active is not None and attempt.startup_deadline_us is not None
@@ -430,22 +433,6 @@ class ResidentRecovery:
                 raise RecoveryError('new owner attempt missed its original startup budget')
         except Exception as error:
             self._terminal(str(error))
-
-    def _owners_restored(self,attempt):
-        """실제 교체/설치 완료만 판정한다. capture30·NN5나 World 준비를 발급하지 않는다."""
-        required=('D',) if attempt.kind=='D' else ('M',) if attempt.kind=='M' else ('A','M')
-        for role in required:
-            host=self.r.workers.get(role)
-            if (host is None or host is attempt.old.get(role) or not host.hello or not host.admitted
-                    or host.reaped or host.eof):return False
-            # M의 첫 RAW BIND는 capture30 뒤에만 발급된다. HELLO 완료 뒤 그 입력을
-            # 기다리는 것은 local startup hang이 아니며 S의 control 감시가 계속 맡는다.
-            waiting_bind=(attempt.kind=='AM' and role=='M' and self.r.capture_ready_us is None)
-            if host.bind_ack is None and not waiting_bind:return False
-        if attempt.kind=='D':return self.r.storage_ready_us is not None
-        if attempt.kind=='M':return attempt.resume_sent_us is not None
-        graph=self.r.progress.get(('A','GRAPH_STARTED'))
-        return graph is not None and graph['completed_us']<attempt.startup_deadline_us
 
     def _receipt(self, complete, reason=None):
         attempt = self.active

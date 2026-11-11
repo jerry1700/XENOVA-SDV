@@ -1,6 +1,5 @@
 /* Product controller + unchanged manual/auto calculations, host sanitizer test. */
 #include "controller.h"
-#include "lifecycle.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,153 +17,10 @@ static int replacement(void *context,struct xm_span control,struct xm_span input
 static const char *replacement_qualify(const void *context,struct xm_span input,int64_t age){
  (void)context;(void)input;(void)age;return NULL;
 }
-struct rejection {const char *result,*qualification;};
-static int rejected_result(void *context,struct xm_span control,struct xm_span input,int64_t age,struct drive_sample *out){
- (void)control;(void)input;(void)age;out->reason=((struct rejection *)context)->result;out->v_mps=.3f;return 0;
-}
-static const char *rejected_qualification(const void *context,struct xm_span input,int64_t age){
- (void)input;(void)age;return ((const struct rejection *)context)->qualification;
-}
-static bool rejected_state_usable(const void *context){(void)context;return true;}
-static void rejection_tests(void){
- struct rejection cases[]={{"CALCULATION_FAILED","STATE_PREPARING"},{"SEARCH_NOT_FOUND","STATE_PREPARING"},
-  {"POSE_UNAVAILABLE","CALCULATION_FAILED"},{NULL,"CALCULATION_FAILED"}};
- for(unsigned k=0;k<sizeof(cases)/sizeof(*cases);k++){
-  struct drive_adapter a={.calculate=rejected_result,.context=&cases[k],.requires_state_sync=true,
-   .state_ready=true,.state_usable=rejected_state_usable,.qualify=rejected_qualification};struct drive_sample result;
-  assert(!drive_adapter_run(&a,(struct xm_span){0},(struct xm_span){0},0,&result));
-  assert(!result.v_mps&&!result.steer_rad&&a.progress==1);
-  assert(!strcmp(result.reason,cases[k].result?cases[k].result:cases[k].qualification));
- }
- puts("adapter rejection: planner fault, normal no-path, common input precedence PASS");
-}
 static uint64_t clock_values[4];static unsigned clock_index;
 static int health_clock(uint64_t *out){assert(clock_index<4);*out=clock_values[clock_index++];return 0;}
 static int no_memory(void *context,struct xm_span control,struct xm_span input,int64_t age,struct drive_sample *out){
  (void)context;(void)control;(void)input;(void)age;(void)out;return -ENOMEM;
-}
-static struct drive_command_context command_context(void){
- struct drive_command_context c={.control_revision=1,.connection_revision=2,.lifetime=3,
-  .generation=4,.mode=DRIVE_AUTO};
- strcpy(c.app_instance,A);return c;
-}
-static void transient_deadline_tests(void){
- struct drive_completion late={.health={.restrict_function=true,.failure=XDH_DEADLINE},
-  .sample={.v_mps=.3f}};
- drive_completion_restrict(&late,true);
- assert(!late.sample.v_mps&&!strcmp(late.sample.reason,"DEADLINE"));
- late.sample=(struct drive_sample){0};drive_completion_restrict(&late,true);
- assert(!strcmp(late.sample.reason,"CALCULATION_FAILED")); /* requested STOP */
- late.sample=(struct drive_sample){.v_mps=.3f,.gate_required=true};drive_completion_restrict(&late,true);
- assert(!strcmp(late.sample.reason,"CALCULATION_FAILED"));
- late.sample=(struct drive_sample){.v_mps=.3f,.reason="COLLISION"};drive_completion_restrict(&late,true);
- assert(!strcmp(late.sample.reason,"COLLISION"));
- late.sample=(struct drive_sample){.v_mps=.3f};drive_completion_restrict(&late,false);
- assert(!strcmp(late.sample.reason,"CALCULATION_FAILED")); /* legacy wire */
- struct drive_command_context c=command_context();struct drive_deadline_gate gate={0};
- assert(drive_deadline_attempt_due(&gate,&c,1,NULL));
- for(uint64_t sequence=2;sequence<6;sequence++){
-  assert(!drive_deadline_attempt_due(&gate,&c,sequence,"DEADLINE"));
-  unsigned count=gate.misses;
-  for(unsigned duplicate=0;duplicate<10;duplicate++)
-   assert(!drive_deadline_attempt_due(&gate,&c,sequence,"DEADLINE"));
-  assert(gate.misses==count);
- }
- assert(drive_deadline_attempt_due(&gate,&c,6,"DEADLINE"));
- assert(drive_deadline_attempt_due(&gate,&c,7,NULL));
- assert(!drive_deadline_attempt_due(&gate,&c,8,"DEADLINE")&&gate.misses==1);
- c.lifetime++;assert(!drive_deadline_attempt_due(&gate,&c,1,"DEADLINE")&&gate.misses==1);
- const char *hard[]={"WORLD_UNAVAILABLE","COLLISION","OUTPUT_INVALID","APP_STOPPING"};
- for(unsigned i=0;i<sizeof(hard)/sizeof(*hard);i++)
-  assert(drive_deadline_attempt_due(&gate,&c,2+i,hard[i])&&!gate.misses);
- c.mode=DRIVE_MANUAL;assert(drive_deadline_attempt_due(&gate,&c,7,"DEADLINE"));
-
- struct drive_adapter adapter={0};struct drive_result selected={.control_valid=true,.generation=42};
- struct drive_task_status status={.state=DRIVE_TASK_RUNNING,.lifetime=3,.running_deadline_us=1};
- struct drive_completion work={.performed=true,.context_revision=1,.finished_ms=1000,
-  .source={.lifetime=3,.connection_revision=2}};
- struct drive_warm_view view=drive_warm_classify(&adapter,&selected,&status,&work,true,
-  (struct xm_span){0},0,1,2,1001,UINT64_C(9999999),true);
- assert(!strcmp(view.state,"READY")&&!view.reason);
- view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1300,0,true);
- assert(!strcmp(view.state,"NOT_READY"));
- work.sample.reason="DEADLINE";
- view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1001,0,true);
- assert(!strcmp(view.state,"NOT_READY")&&!strcmp(view.reason,"DEADLINE"));
- status.revoked=true;status.state=DRIVE_TASK_STOPPING;
- view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1001,0,true);
- assert(!strcmp(view.phase,"STOPPING")&&!strcmp(view.reason,"APP_STOPPING"));
- puts("transient deadlines: distinct completions, old READY lifetime, hard STOP PASS");
-}
-static void command_attempt_tests(void){
- struct drive_command_context c=command_context();struct drive_command_gate gate={0};
- /* The first stop is never delayed; rejection/later TX drop cannot suppress
-  * retries permanently. Existing supervision, not a new timer, advances it. */
- unsigned attempts=0,accepted=0,transmitted=0;
- for(unsigned release=0;release<50;release++){
-  if(!drive_command_attempt_due(&gate,&c,release/5,"STATE_PREPARING",0,0))continue;
-  attempts++;
-  if(attempts==1)continue; /* existing mailbox rejected this attempt */
-  accepted++;
-  if(attempts==2)continue; /* queued candidate later expired/dropped */
-  transmitted++;
- }
- assert(attempts==10&&accepted==9&&transmitted==8);
- assert(!drive_command_attempt_due(&gate,&c,9,"STATE_PREPARING",0,0));
- /* A healthy neutral result is real work, not an unready zero candidate. */
- for(unsigned i=0;i<50;i++)assert(drive_command_attempt_due(&gate,&c,9,NULL,0,0));
- assert(!gate.restricted);
- assert(drive_command_attempt_due(&gate,&c,9,"STATE_PREPARING",0,0));
- assert(!drive_command_attempt_due(&gate,&c,9,"STATE_PREPARING",0,0));
- assert(drive_command_attempt_due(&gate,&c,9,NULL,.3f,.1f));
- assert(drive_command_attempt_due(&gate,&c,9,"STATE_PREPARING",0,0));
- /* Every changed safety context/reason gets its immediate first stop. */
- assert(drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,0));
- assert(!drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,0));
-#define CHANGED(member,value) do {c.member=(value);assert(drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,0)); \
- assert(!drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,0));} while(0)
- CHANGED(control_revision,5);CHANGED(connection_revision,6);CHANGED(lifetime,7);
- CHANGED(generation,8);CHANGED(mode,DRIVE_MANUAL);
-#undef CHANGED
- strcpy(c.app_instance,B);
- assert(drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,0));
- assert(!drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,0));
- struct drive_command_gate other={0};
- assert(drive_command_attempt_due(&other,&c,9,"POSE_UNAVAILABLE",0,0));
- /* Preserve the original path for malformed/nonzero outputs or metadata;
-  * do not let throttling conceal an existing validator's first cause. */
- const float values[]={.1f,NAN,INFINITY,-INFINITY};
- for(size_t i=0;i<sizeof(values)/sizeof(values[0]);i++){
-  assert(drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",values[i],0));
-  assert(!gate.restricted);
-  assert(drive_command_attempt_due(&gate,&c,9,"POSE_UNAVAILABLE",0,values[i]));
-  assert(!gate.restricted);
- }
- char reason[66];memset(reason,'X',sizeof(reason));reason[65]=0;
- assert(drive_command_attempt_due(&gate,&c,9,reason,0,0)&&!gate.restricted);
- reason[64]=0;
- assert(drive_command_attempt_due(&gate,&c,9,reason,0,0));
- assert(!drive_command_attempt_due(&gate,&c,9,reason,0,0));
- assert(drive_command_attempt_due(&gate,&c,9,"",0,0)&&!gate.restricted);
- assert(drive_command_attempt_due(&gate,NULL,9,"POSE_UNAVAILABLE",0,0)&&!gate.restricted);
- assert(drive_command_attempt_due(NULL,&c,9,"POSE_UNAVAILABLE",0,0));
- struct drive_command_context bad=c;
-#define INVALID(member,value) do {bad=c;bad.member=(value); \
- assert(drive_command_attempt_due(&gate,&bad,9,"POSE_UNAVAILABLE",0,0)&&!gate.restricted);} while(0)
- INVALID(control_revision,0);INVALID(connection_revision,0);INVALID(lifetime,0);
- INVALID(generation,0);INVALID(mode,DRIVE_STOP);INVALID(mode,(enum drive_mode)99);
-#undef INVALID
- bad=c;memset(bad.app_instance,'X',sizeof(bad.app_instance));
- assert(drive_command_attempt_due(&gate,&bad,9,"POSE_UNAVAILABLE",0,0)&&!gate.restricted);
- bad=c;bad.app_instance[0]=0;
- assert(drive_command_attempt_due(&gate,&bad,9,"POSE_UNAVAILABLE",0,0)&&!gate.restricted);
- /* A new supervisor observation (including the first check0 -> check1) can
-  * retry the same restriction; neither timestamp nor command TTL is stored. */
- assert(drive_command_attempt_due(&gate,&c,0,"POSE_UNAVAILABLE",0,0));
- assert(!drive_command_attempt_due(&gate,&c,0,"POSE_UNAVAILABLE",0,0));
- assert(drive_command_attempt_due(&gate,&c,1,"POSE_UNAVAILABLE",0,0));
- printf("command attempts: restricted 50->10, neutral 50->50; first/retry/context/error passthrough PASS; gate=%zu pair=%zu bytes\n",
-  sizeof(gate),2*sizeof(gate));
 }
 static void health_tests(void){
  struct drive_controller c;struct drive_result r;
@@ -198,9 +54,6 @@ static void health_tests(void){
  puts("health adapter: actual algorithms, AUTO-only resource fault, serial deadline, fresh recovery PASS");
 }
 int main(void){
- transient_deadline_tests();
- command_attempt_tests();
- rejection_tests();
  health_tests();
  for(int swapped=0;swapped<2;swapped++){
   const char *own=swapped?B:A,*other=swapped?A:B;

@@ -58,8 +58,7 @@ def normalize(context, *, host_boot_id, drive_ids):
 
 class GatewayReader:
     def __init__(self, settings, *, client=None, clock=time.monotonic, host_boot_id=None):
-        # Lazy import: without the Gateway client package the feed still starts and
-        # main.poll_gateway reports driving state as unknown.
+        # Lazy import: default MQTT installations need no Gateway client package.
         if client is None:
             from xenova_gateway.client import GatewayClient
             client = GatewayClient(settings.gateway_socket, budget_s=settings.gateway_budget_s)

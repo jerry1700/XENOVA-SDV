@@ -7,7 +7,7 @@ from collections import deque
 from xenova_mqtt import topics
 from .authority import AuthorityError
 from .machine import DRIVE_APPS,ForwardDrive,ForwardStop,PublishControl,PublishEvent,Measure
-from .runner import GatewayRunner,CONSOLE_RESUME,RESUME_REQUESTED,RESUME_CANCEL_REQUESTED,log
+from .runner import GatewayRunner,CONSOLE_RESUME,RESUME_REQUESTED,RESUME_CANCEL_REQUESTED
 from .verified import VerifiedDriveMachine
 from .frame import encode,STOP_SAFE_STOP
 from .sink import SinkError
@@ -35,21 +35,13 @@ class VerifiedGatewayRunner(GatewayRunner):
         from .provider import GatewayProvider
         self.provider=GatewayProvider(self)
         self.drive_link=None
-        self.mapper_uplink=None
-        self.scene_runtime=None
-        self.operator=None;self._authority_worker=None
-        self._durable_events=deque(maxlen=8);self._durable_feedback=deque(maxlen=64)
-        self.durable_event_dropped=self.durable_feedback_dropped=0
         self._pending_stop = None
         self._deferred_drive=None;self.serial_deferred=0
         self._manual_activation=None;self.manual_withheld=0;self._manual_stop_try=0.
-        from .handover_evidence import HandoverEvidence
-        self.handover_evidence=HandoverEvidence()
         queue=__import__('queue')
         self._provider_queues=[queue.Queue(maxsize=n) for n in (4,4,8)]
         self._provider_turn=0;self.provider_calls=0;self.provider_high_water=0
         self._state_messages=queue.Queue(maxsize=4);self.state_message_dropped=0
-        self._tof_receiver=None
 
     def submit_provider(self,call):
         import queue
@@ -65,13 +57,7 @@ class VerifiedGatewayRunner(GatewayRunner):
         if callable(view):return view()
         return {'feedback_supported':False,'accepted':None,'applied':None,'physical_stop':None}
 
-    def mapper_operation_capability(self,now,source=None):
-        """설치된 운영 profile의 실제 J Reply 지원 진술. 숫자 clock/출력 권위와 별개다."""
-        if not getattr(self,'operation_support',False) or self.mapper_uplink is None:return None
-        return self.mapper_uplink.operation_capability(now,source)
-
     def _provider_once(self):
-        if not self._durable_available():return
         import queue
         from .provider import ProviderError
         from .ipc_contract import VERSION
@@ -109,7 +95,6 @@ class VerifiedGatewayRunner(GatewayRunner):
         return result
 
     def _transition_once(self):
-        if not self._durable_available():return
         import queue
         try:action,request_id,arguments,result=self._transitions.get_nowait()
         except queue.Empty:return
@@ -139,7 +124,7 @@ class VerifiedGatewayRunner(GatewayRunner):
 
     def _enqueue(self,message):
         info=topics.parse(message.topic)
-        if message.type in ('drive.command','app.heartbeat','app.readiness','app.lifecycle','app.state.snapshot','app.state.applied','vm.trust'):
+        if message.type in ('drive.command','app.heartbeat','app.readiness','app.lifecycle','app.state.snapshot','app.state.applied'):
             if (info.vm_id not in self.pair or info.app_id not in DRIVE_APPS or
                 info.vm_id!=message.envelope.get('vm_id') or info.app_id!=message.envelope.get('app_id') or
                 getattr(message,'retained',False)):return
@@ -163,7 +148,6 @@ class VerifiedGatewayRunner(GatewayRunner):
     def _feed(self,t,message):
         if getattr(message,'retained',False) and message.type!='vehicle.control':return
         if (self.readiness_profile=='warm-drive-1' and message.type=='drive.input' and message.topic==topics.manual_input()):
-            if self.operator is not None:return  # actual local registry already supplied its immutable source
             self.machine.on_manual_input(message.payload,message.received_monotonic);return
         if message.type=='vehicle.control':
             try:self.authority.reconcile(message.payload)
@@ -177,31 +161,15 @@ class VerifiedGatewayRunner(GatewayRunner):
             if message.type=='app.readiness':self.machine.on_readiness(app,vm,message.payload,t)
             elif message.type=='app.lifecycle' and self.readiness_profile=='warm-drive-1':self.machine.on_lifecycle(app,vm,message.payload,t)
             elif message.type=='app.heartbeat':self.machine.on_heartbeat(app,vm,message.payload,t)
-            elif message.type=='vm.trust':self._emit(self.machine.on_vm_untrusted(vm,app,message.payload,t))
             elif message.type=='drive.command':
                 binding=self.bindings.current(vm,trust_at)
                 if binding is None:return
                 ref={k:envelope.get(k) for k in ('message_id','boot_id','agent_instance_id','seq')}
                 ref.update(vm_id=vm,app_id=app,execution_id=binding['execution_id'],received_monotonic=t)
-                if self.operator is not None:
-                    try:ref=self.operator.admit_command(vm,app,message.payload,ref)
-                    except ValueError:return
-                    if ref is None:return
-                    if message.payload['command_kind']=='STOP':
-                        self.machine.on_command(app,vm,message.payload,t,ref)
-                        if vm==self.machine.active_vm and app==self.machine.active_app:
-                            self._submit(ForwardStop(self.machine.generation,ref),wait_for_stop=False)
-                        return
-                elif message.payload.get('profile') in ('drive-command-2','drive-command-3'):return
                 self.machine.on_command(app,vm,message.payload,t,ref)
         elif (message.type in (RESUME_REQUESTED,RESUME_CANCEL_REQUESTED) and message.topic in (CONSOLE_RESUME,topics.app_events('interaction'))
               and not self._output_broken and self._control_message_id is not None
               and envelope.get('causation_id')==self._control_message_id):
-            if self.operator is not None and self.operator.operations.enabled:return
-            if message.type==RESUME_REQUESTED and not self._durable_available():
-                if len(self._durable_events)==self._durable_events.maxlen:self.durable_event_dropped+=1
-                else:self._durable_events.append((t,message))
-                return
             handler=self.machine.on_resume if message.type==RESUME_REQUESTED else self.machine.on_cancel_resume
             requested_by=message.payload.get('requested_by')
             handler(t,requested_by if isinstance(requested_by,str) else None,
@@ -235,9 +203,6 @@ class VerifiedGatewayRunner(GatewayRunner):
         machine=WarmDriveMachine if self.readiness_profile=='warm-drive-1' else VerifiedDriveMachine
         self.machine=machine(vm_ids=self.pair,authority=self.authority,bindings=self.bindings,
             clock=self._clock,timing=self._timing)
-        self.machine.durable_write_available=self._durable_available
-        self.machine.manual_registry=None if self.operator is None else self.operator.sources
-        if self.operator is not None:self.machine.episode_prepare_allowed=self.operator.episodes.prepare_allowed
         self.machine.continuous_handoff=self.drive_link is not None
         retained=self._client.latest(topics.vehicle_control())
         if retained is not None:
@@ -314,13 +279,6 @@ class VerifiedGatewayRunner(GatewayRunner):
             if accepted.metadata:
                 record.update(accepted.metadata);record.setdefault('serial_profile','feedback-1')
         self.serial_accepted+=1;record['serial_result']='accepted';record['accepted_bytes']=accepted
-        record['output_kind']='DRIVE' if isinstance(action,ForwardDrive) else 'STOP'
-        if isinstance(action,ForwardDrive):
-            end=(action.source or {}).get('valid_until_pi_us')
-            if end is not None:
-                record['original_expires_pi_us']=min(end,record.get('device_deadline_pi_us',end),
-                    int((record['submitted_monotonic']+self.machine.timing.command_timeout_s)*1000000))
-        self.handover_evidence.submission(record)
         if (self.drive_link is not None and isinstance(action,ForwardStop) and action.generation==self.machine.generation and self.machine.active_app=='manual' and
             (self._manual_activation is None or self._manual_activation['generation']!=action.generation)):
             pending=self.authority.value.get('pending') or {}
@@ -367,7 +325,7 @@ class VerifiedGatewayRunner(GatewayRunner):
             # One original STOP remains owned. Do not resubmit it or allow
             # DRIVE to overtake its unresolved physical submission.
             return
-        now=self._clock();source=action.source
+        now=self._clock();source=action.source if isinstance(action,ForwardDrive) else None
         device=self.device_view()
         if device['feedback_supported'] and not device['ready']:
             self.submissions.append(dict(source=source,generation=action.generation,device_applied=None,
@@ -377,16 +335,6 @@ class VerifiedGatewayRunner(GatewayRunner):
             return
         if isinstance(action,ForwardDrive):
             if not self.machine.output_permitted or action.generation!=self.machine.generation or not source:return
-            if source.get('command',{}).get('command_kind')=='STOP':
-                self._submit(ForwardStop(action.generation,source),wait_for_stop=False);return
-            if self.operator is not None and not self.operator.output_allowed(source):
-                self._deferred_drive=None;self._submit(ForwardStop(action.generation),wait_for_stop=False);return
-            if source.get('valid_until_pi_us') is not None and int(now*1e6)>=source['valid_until_pi_us']:
-                self.serial_context_rejected+=1;return
-            if self.scene_runtime is not None and not self.scene_runtime.command_allowed(source,int(now*1e6)):
-                self.serial_context_rejected+=1;self._deferred_drive=None
-                self._submit(ForwardStop(action.generation),wait_for_stop=False)
-                return
             row=self.bindings.current(source['vm_id'],now)
             if (not row or row['execution_id']!=source['execution_id'] or
                 not self.bindings.accepts(source['vm_id'],source['boot_id'],source['agent_instance_id'],now,app=source['app_id']) or
@@ -395,9 +343,6 @@ class VerifiedGatewayRunner(GatewayRunner):
                 self.serial_context_rejected+=1;return
             if not self._manual_can_move(action,device,now):return
             frame=self._encoder.drive(action.generation,action.v_mps,action.steer_rad)
-            if source.get('valid_until_pi_us') is not None:
-                from dataclasses import replace
-                frame=replace(frame,issued_pi_us=source.get('issued_pi_us'),expires_pi_us=source['valid_until_pi_us'],witness=source)
             if self.drive_link is not None:
                 ready=getattr(self._sink,'drive_ready_at',lambda f:0.)(frame)
                 if ready>now:
@@ -409,12 +354,6 @@ class VerifiedGatewayRunner(GatewayRunner):
             self._deferred_drive=None
         else:
             self._deferred_drive=None;frame=self._encoder.stop(action.generation,STOP_SAFE_STOP)
-            if self.operator is not None or source is not None:
-                from dataclasses import replace
-                source={} if source is None else dict(source)
-                source.setdefault('generation',action.generation)
-                source.setdefault('gateway_instance',self.drive_link.instance if self.drive_link else self._client.identity.agent_instance_id)
-                frame=replace(frame,witness=source)
         data=encode(frame)
         record={'source':source,'frame_counter':frame.counter,'generation':frame.generation,
                 'encoded_hex':data.hex(),'submitted_monotonic':now,'device_applied':None}
@@ -456,7 +395,6 @@ class VerifiedGatewayRunner(GatewayRunner):
             self.machine._fail('OUTPUT_PATH_FAILED',now)
 
     def _emit(self,actions):
-        if self.machine is not None:self.handover_evidence.transition(self.machine,int(self._clock()*1000000))
         for action in actions:
             if isinstance(action,(ForwardDrive,ForwardStop)):self._submit(action,wait_for_stop=False)
             elif isinstance(action,PublishControl):self._publish_control(action.payload,self._clock())
@@ -502,12 +440,6 @@ class VerifiedGatewayRunner(GatewayRunner):
     def run_once(self,timeout_s=.005):
         self._finish_stop()
         if self.drive_link is not None:self.drive_link.tick()
-        if self.mapper_uplink is not None:self.mapper_uplink.tick(self.drive_link)
-        if self.operator is not None:self.operator.tick()
-        if self.scene_runtime is not None:self.scene_runtime.tick()
-        if self._durable_available():
-            for _ in range(len(self._durable_events)):
-                self._feed(*self._durable_events.popleft())
         import queue
         try:first=self._queue.get(timeout=timeout_s) if timeout_s>0 else self._queue.get_nowait()
         except queue.Empty:first=None
@@ -524,144 +456,11 @@ class VerifiedGatewayRunner(GatewayRunner):
         if held is not None and self._clock()>=held[1]:
             self._deferred_drive=None;self._submit(held[0])
         events=getattr(self._sink,'feedback_events',lambda:[])()
-        for event in events:self.handover_evidence.feedback(event,self.machine)
-        self.handover_evidence.tick(int(self._clock()*1000000))
         self._manual_observe(events)
-        self._mapper_tof_once()  # Optional observation work follows STOP/control/feedback handling.
-        if not self._durable_available():
-            for event in events:
-                if len(self._durable_feedback)==self._durable_feedback.maxlen:self.durable_feedback_dropped+=1
-                else:self._durable_feedback.append(dict(event))
-            return
-        events=[*self._durable_feedback,*events];self._durable_feedback.clear()
         try:self.provider.capture(events)
         except AuthorityError:
             self.machine.output_permitted=False;self.machine._authorized=False
             self._submit(ForwardStop(self.machine.generation))
-
-    def _durable_available(self):
-        # 새 Authority bytes가 저장됐어도 원 ACK를 actor가 소비하기 전에는
-        # old generation의 READY/delivery로 새 PENDING을 적용할 수 없다.
-        worker=self._authority_worker
-        return worker is None or not worker.busy and worker._results.empty()
-
-    def authority_worker(self):
-        """Scene/operator가 동일 Authority job1 owner를 공유한다."""
-        if self._authority_worker is None:
-            from .authority_journal import AuthorityJournalWorker
-            self._authority_worker=AuthorityJournalWorker(self.authority,lambda:int(self._clock()*1e6))
-        return self._authority_worker
-
-    def configure_operator(self):
-        if self.operator is not None or self.readiness_profile!='warm-drive-1':
-            raise ValueError('one operator owner requires warm profile')
-        from .operator_service import OperatorService
-        self.operator=OperatorService(self)
-        # __main__ configures owners before begin(); late configuration uses
-        # the same actual machine. Neither path creates readiness/authority.
-        if self.machine is not None:
-            self.machine.manual_registry=self.operator.sources
-            self.machine.episode_prepare_allowed=self.operator.episodes.prepare_allowed
-
-    def submit_operator(self,call):
-        if self.operator is None:raise ValueError('operator profile not configured')
-        return self.operator.submit(call)
-
-    def matched_stop(self, *, view=None):
-        """feedback3 원 ingress만 stationary 증거가 된다. feedback2/write ACK는 변환하지 않는다."""
-        device=getattr(self._sink,'device',None)
-        policy=getattr(device,'stationary_policy',None)
-        selected=view is not None
-        if view is None:view=self.device_view()
-        source=view.get('stop_facts_source')
-        value=(None if selected else getattr(device,'matched_stop',None)) if source is None else source.get('matched')
-        sample=view.get('vehicle_sample')
-        if value is None or policy is None or sample is None or self.machine is None:return None
-        try:
-            value.check(dict(vehicle=sample['vehicle'],calibration=sample['calibration'],odom_epoch=sample['odom_epoch']),
-                self.authority.host,self.drive_link.instance if self.drive_link else self._client.identity.agent_instance_id,
-                self.machine.generation,view['pi_session'],view['device_session'],policy,int(self._clock()*1e6))
-        except ValueError as error:
-            # 최초 거부만 INFO로 남겨 반복 표본의 로그 비용을 제한한다.
-            reason=str(error)
-            if getattr(self,'_matched_stop_error',None) is None:log.info('STOP proof unavailable: %s',reason)
-            self._matched_stop_error=reason
-            return None
-        return value
-
-    def control_facts(self, *, view=None):
-        """원 serial owner의 불변 meter/STOP 사실. current clock나 권위를 발급하지 않는다."""
-        from .control_facts import build_control_facts
-        return build_control_facts(self, view=view)
-
-    def current_scene_gate(self):
-        from .scene_authority import SceneGate
-        from .machine import Mode
-        m=self.machine;stop=self.matched_stop()
-        if m is None or stop is None or m.mode not in (Mode.MANUAL,Mode.SAFE_STOP):return None
-        device=self.device_view();operator=self.operator
-        mission=None if operator is None else operator.missions.current()
-        return SceneGate('MANUAL' if m.mode is Mode.MANUAL else 'HOLD',m.generation,
-            device['pi_session'],device['device_session'],0 if operator is None else operator.fence_revision,
-            stop,pulse_active=bool(operator and operator.sources and operator.sources.moving),
-            parking_active=bool(mission and mission['kind']==2 and mission['phase']!='HOLD'),countdown_active=bool(m._countdown))
-
-    def configure_scene(self,policy):
-        """명시 설치 profile의 actual owner를 연결한다. 기본은 기존 live-only 동작이다."""
-        if self.scene_runtime is not None or self.readiness_profile!='warm-drive-1' or self.drive_link is None or self.mapper_uplink is None:
-            raise ValueError('one warm scene runtime with actual mapper/state owners required')
-        from .scene_runtime import GatewaySceneRuntime
-        self.scene_runtime=GatewaySceneRuntime(self,policy)
-        self.mapper_uplink.scene_reply=self.scene_runtime.accept_reply
-
-    def submit_scene(self,submission):
-        """operator2 원 예약 결과와 feedback3 gate용 내부 포트. 공개 IPC가 아니다."""
-        if self.scene_runtime is None:raise ValueError('scene profile not configured')
-        return self.scene_runtime.submit(submission)
-
-    def update_scene_gate(self,gate):
-        """실제 feedback/operator owner가 만든 원 gate만 전달한다."""
-        if self.scene_runtime is None:raise ValueError('scene profile not configured')
-        self.scene_runtime.update_gate(gate)
-
-    def submit_mapper_tof(self,raw):
-        """실제 센서 owner의 원 bytes용 유한 입력. source/clock 승인은 actor 회차에서 한다."""
-        return False if self.mapper_uplink is None else self.mapper_uplink.submit_tof(raw)
-
-    def configure_mapper_tof(self,profile):
-        """명시 J 선택만 실제 feedback3 원천에 연결한다. 빈 목록은 독립적으로 정상이다."""
-        if self._tof_receiver is not None:raise ValueError('one ToF actor owner')
-        device=getattr(self._sink,'device',None)
-        if device is None or not callable(getattr(device,'configure_tof',None)):
-            return not profile.tof_profiles
-        from .tof_feedback3 import TofSelection,TofReceiver
-        config=device.odometry.config
-        if config.vehicle!=profile.policy.vehicle:raise ValueError('ToF selected vehicle differs')
-        selected=TofSelection(profile.tof_profiles,profile.tof_max_age_us,config.maximum_clock_error_us,
-            config.vehicle,self.authority.host,self._client.identity.agent_instance_id)
-        device.configure_tof(selected)
-        self._tof_receiver=TofReceiver(selected)
-        return True
-
-    def _mapper_tof_once(self):
-        owner=self._tof_receiver
-        if owner is None:return
-        source=getattr(self._sink,'device',None)
-        if source is None:return
-        loss,items,context=source.tof_inputs()
-        observations,revoked=owner.process(loss,items,context,int(self._clock()*1000000))
-        uplink=self.mapper_uplink
-        if uplink is None:return
-        for sensor in revoked:uplink.revoke_tof(sensor)
-        for raw in observations:self.submit_mapper_tof(raw)
-
-    def publish_mapper_scene_after_commit(self,raw):
-        """내구 scene owner의 완료 뒤 actor에서 호출한다. 여기서 scene 권한을 발급하지 않는다."""
-        return False if self.mapper_uplink is None else self.mapper_uplink.publish_scene_after_commit(raw)
-
-    def publish_mapper_scene_after_fence(self,raw):
-        """현재 Scene owner의 실제 negative event는 원 fsync 완료보다 먼저 전달할 수 있다."""
-        return False if self.mapper_uplink is None else self.mapper_uplink.publish_scene_after_fence(raw)
 
     def run(self,stop,*,connect_wait_s=5):
         try:
@@ -674,9 +473,5 @@ class VerifiedGatewayRunner(GatewayRunner):
         try:
             if self.machine:self._submit(ForwardStop(self.machine.generation))
         finally:
-            try:
-                self._sink.close()
-                self._finish_stop()
-            finally:
-                if self.scene_runtime is not None:self.scene_runtime.close()
-                if self._authority_worker is not None:self._authority_worker.close()
+            self._sink.close()
+            self._finish_stop()

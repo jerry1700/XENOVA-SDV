@@ -251,32 +251,16 @@ class MapperStorageClientTests(unittest.TestCase):
         self.assertFalse(delivery.current); self.assertEqual(delivery.request.job.expires_us, 1000)
         self.assertEqual(self.arena.posts, 1)
 
-    def test_late_original_db_abort_closes_only_safe_wait_and_preserves_history(self):
+    def test_original_db_abort_closes_only_safe_wait_and_preserves_history(self):
         self.mailbox.compute_offer(self.request, now_us=110); self.pump()
         body = self.actor.link.packets[0].payload['body']
         notice = DbAbort('CHECKPOINT', canonical(body), self.request.job.job_id, 100, 1000, 180,
             self.client.endpoint, self.context.sha256, 'D_OWNER_REBOUND_UNKNOWN')
-        self.clock.now = 1800; self.assertTrue(self.client.receive_abort(notice))
-        delivery = self.mailbox.compute_take(current_context_sha256=self.context.sha256, now_us=1900)
+        self.clock.now = 180; self.assertTrue(self.client.receive_abort(notice))
+        delivery = self.mailbox.compute_take(current_context_sha256=self.context.sha256, now_us=190)
         self.assertFalse(delivery.current); self.assertIs(delivery.result.original_notice, notice)
-        self.assertEqual((delivery.request.job.issued_us,delivery.request.job.expires_us),(100,1000))
         self.assertEqual((self.arena.publishes, self.arena.posts), (0, 0))
         self.pump(); self.assertEqual(self.client.state, 'IDLE')
-
-    def test_late_terminal_cannot_release_an_unconfirmed_native_owner(self):
-        self.mailbox.compute_offer(self.request,now_us=110);self.pump()
-        dispatch=self.client.dispatch;body=self.actor.link.packets[0].payload['body']
-        notice=DbAbort('CHECKPOINT',canonical(body),self.request.job.job_id,100,1000,180,
-            self.client.endpoint,self.context.sha256,'D_OWNER_REBOUND_UNKNOWN')
-        self.client._native();self.arena.held=True;self.clock.now=1800
-        try:
-            with self.assertRaises(MapperStorageClientError):self.client.receive_abort(notice)
-            self.assertIs(self.mailbox.main_peek(),dispatch)
-            self.assertIsNone(self.mailbox.compute_take(current_context_sha256=self.context.sha256,now_us=1800))
-            self.assertTrue(self.client.snapshot()['ownership_pinned'])
-            self.assertTrue(self.client.snapshot()['native_held'])
-            self.assertEqual((self.arena.posts,self.client.completed),(0,0))
-        finally:self.arena.held=False
 
 
 if __name__ == '__main__':

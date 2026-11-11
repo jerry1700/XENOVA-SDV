@@ -98,7 +98,8 @@ bool driveOutput(void *, int16_t velocityMmps, int16_t steeringMrad) {
   int32_t speed = forward ? velocityMmps : -static_cast<int32_t>(velocityMmps);
   uint32_t top = (1u << MOTOR_BITS) - 1;
   uint32_t duty = static_cast<uint32_t>(speed) * top / FULL_DUTY_MMPS;
-  int32_t pulseUs = SERVO_CENTER_US + steeringMrad * SERVO_US_PER_RAD / 1000;
+  // 조향은 왼쪽이 + 이고(MQTT 계약 v1), 이 차의 서보는 펄스가 짧을수록 왼쪽이다(조립 안내서 9.2)
+  int32_t pulseUs = SERVO_CENTER_US - steeringMrad * SERVO_US_PER_RAD / 1000;
   servoWantedUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
   digitalWrite(DIR1, forward ? LOW : HIGH);
   digitalWrite(DIR2, forward ? HIGH : LOW);  // 마주 보고 달린 모터라 반대다

@@ -16,7 +16,6 @@ import time
 
 from ..perception.inputs import PerceptionInput
 from ..yolop_profile import YolopBenchProfile
-from ..runtime.health_policy import ConfigurationError
 from .device import _DeviceLock, _json_copy, _us
 from .yolop_asset import ASSET_ID, load_yolop_asset, validated_sdk_blob
 from .yolop_frames import NNInputStamp, NNPacket, sdk_nn_input, sdk_nn_packet
@@ -210,7 +209,7 @@ def build_sim_pipeline(dai, asset):
         output.link(xout.input)
     if (str(pipeline.getRequiredOpenVINOVersion()) != asset.manifest['sdk_blob_metadata']['host_graph_required_version']
             or pipeline.getOpenVINOVersion() != dai.OpenVINO.Version.VERSION_2021_4):
-        raise ConfigurationError('SIM graph/blob OpenVINO mismatch')
+        raise ValueError('SIM graph/blob OpenVINO mismatch')
     return pipeline, blob, metadata
 
 
@@ -218,35 +217,35 @@ def sim_graph_declaration(pipeline, asset):
     """전체 graph/asset 직렬화 없이 실제 node/연결과 별도 SIM 설정을 명시한다."""
     native = pipeline.getAllNodes()
     if len(native) != 5:
-        raise ConfigurationError('host-only SIM graph must contain exactly5 nodes')
+        raise ValueError('host-only SIM graph must contain exactly5 nodes')
     nodes = []
     for node in native:
         if type(node.id) is not int or not 0 <= node.id < 2**63:
-            raise ConfigurationError('invalid SIM graph node ID')
+            raise ValueError('invalid SIM graph node ID')
         name = node.getName()
         if type(name) is not str or name not in ('XLinkIn', 'ImageManip', 'NeuralNetwork', 'XLinkOut'):
-            raise ConfigurationError('physical/unknown node cannot enter host-only SIM graph')
+            raise ValueError('physical/unknown node cannot enter host-only SIM graph')
         nodes.append(dict(id=node.id, name=name))
     ids = {node['id'] for node in nodes}
     if len(ids) != 5 or Counter(node['name'] for node in nodes) != Counter(XLinkIn=1, ImageManip=1, NeuralNetwork=1, XLinkOut=2):
-        raise ConfigurationError('invalid SIM node inventory')
+        raise ValueError('invalid SIM node inventory')
     connections = []
     groups = pipeline.getConnectionMap()
     if len(groups) > 5:
-        raise ConfigurationError('SIM connection-group budget exceeded')
+        raise ValueError('SIM connection-group budget exceeded')
     for group in groups.values():
         if len(group) + len(connections) > 4:
-            raise ConfigurationError('SIM connection budget exceeded')
+            raise ValueError('SIM connection budget exceeded')
         for link in group:
             if (type(link.outputId) is not int or type(link.inputId) is not int
                     or link.outputId not in ids or link.inputId not in ids):
-                raise ConfigurationError('foreign SIM graph connection')
+                raise ValueError('foreign SIM graph connection')
             if any(type(name) is not str or len(name) > 128 for name in (link.outputName, link.inputName)):
-                raise ConfigurationError('invalid SIM graph connection name')
+                raise ValueError('invalid SIM graph connection name')
             connections.append(dict(output_id=link.outputId, input_id=link.inputId,
                 output_name=link.outputName, input_name=link.inputName))
     if len(connections) != 4:
-        raise ConfigurationError('SIM graph must have exactly4 connections')
+        raise ValueError('SIM graph must have exactly4 connections')
     return _json_copy(dict(profile_id=PROFILE_ID, input_kind='SYNTHETIC', camera_nodes=0,
         scope='host_SIM_node_connection_declaration', device_config_readback=False,
         nodes=nodes, connections=connections, asset_storage_included=False,
@@ -278,8 +277,6 @@ class SimNnSource:
         self._pending = self._input = self._output = self._last = self._send_failure = None
         self._close_deadline = None
         self._counts = Counter(expired=0, unmatched=0, duplicate=0, completed=0)
-        self.last_unmatched = None
-        self.last_submission_timing = None
 
     @property
     def counts(self):
@@ -300,13 +297,13 @@ class SimNnSource:
         self._asset = load_yolop_asset(self.profile.oak.asset_dir, self.profile.oak.asset_manifest)
         self._check(deadline)
         if sys.platform != 'linux' or sys.byteorder != 'little':
-            raise ConfigurationError('SIM OAK NN requires little-endian Linux')
+            raise RuntimeError('SIM OAK NN requires little-endian Linux')
         # 첫 frame E 안에서 cold import를 지불하지 않고 A의 원 startup cap에 포함한다.
         self._np = importlib.import_module('numpy')
         self._check(deadline)
         self._dai = dai = importlib.import_module('depthai')
         if dai.__version__ != '2.29.0.0':
-            raise ConfigurationError('SIM NN requires DepthAI2.29.0.0')
+            raise RuntimeError('SIM NN requires DepthAI2.29.0.0')
         pipeline, self._blob, metadata = build_sim_pipeline(dai, self._asset)
         graph = sim_graph_declaration(pipeline, self._asset)
         self._check(deadline)
@@ -370,12 +367,8 @@ class SimNnSource:
         frame.setTimestamp(stamp)
         frame.setTimestampDevice(stamp)
         frame.setData(self._np.frombuffer(rgb.payload, dtype=self._np.uint8))
-        from ..runtime.health_policy import FrameExpired
-        if self.clock() >= expires_j_us:
-            raise FrameExpired('SIM frame expired before SDK send')
+        self._check(expires_j_us)
         self._pending, self._last = submission, current
-        self.last_submission_timing = dict(captured_j_us=captured_j_us,
-            enqueued_j_us=sample.j_after_us,expires_j_us=expires_j_us)
         try:
             self._input_queue.send(frame)
         except Exception as error:
@@ -402,13 +395,10 @@ class SimNnSource:
             pending = self._pending
             if pending is None:
                 self._counts['unmatched'] += 1
-                self.last_unmatched = dict(stream=stream,expected=None,
-                    observed=(message.getSequenceNum(),_us(message.getTimestampDevice()),_us(message.getTimestamp())))
                 continue
             key = message.getSequenceNum(), _us(message.getTimestampDevice()), _us(message.getTimestamp())
             if key != pending.key:
                 self._counts['unmatched'] += 1
-                self.last_unmatched = dict(stream=stream,expected=pending.key,observed=key)
                 continue
             if (self._input if stream == 'nn_input' else self._output) is not None:
                 self._counts['duplicate'] += 1

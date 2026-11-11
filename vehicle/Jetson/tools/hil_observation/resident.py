@@ -11,7 +11,6 @@ from hashlib import sha256
 import ipaddress
 import json
 import math
-import os
 from pathlib import Path
 import selectors
 import socket
@@ -316,24 +315,6 @@ def accept_once(host, port, timeout_s):
         raise
 
 
-def _save_final_failure(output, result):
-    """모든 owner 회수가 끝난 CLI 종료 지점에서만 작은 실패 원본을 보존한다.
-
-    선택 진단 daemon의 종료 경쟁을 피한다. 경로·오류 문자열은 owner-only 파일에만
-    기록하고, 파일 실패는 이미 정해진 실행 결과나 종료 코드를 바꾸지 않는다.
-    """
-    if result.get('error') is None:
-        return
-    try:
-        raw = _canonical(dict(reason=result['reason'], error=str(result['error'])[:512],
-            error_trace=str(result.get('error_trace') or '')[:8192]))
-        descriptor = os.open(Path(output) / 'cli-failure.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, 'wb') as stream:
-            stream.write(raw)
-    except (OSError, ValueError, TypeError):
-        pass
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description='명시 PC 관측 한 연결의 개발용 A/S/M/D 상주 실행')
     parser.add_argument('--installation', type=Path, required=True)
@@ -353,7 +334,6 @@ def main(argv=None):
     finally:
         if endpoint is not None:
             endpoint.close()
-    _save_final_failure(installation.output, result)
     print(_canonical(dict(scope=result['scope'], complete=result['complete'], exit_code=result['exit_code'],
         service_instance=result['service_instance'], reason=result['reason'],
         physical_admission=False)).decode('ascii'))

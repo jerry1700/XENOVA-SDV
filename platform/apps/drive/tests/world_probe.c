@@ -7,10 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-_Static_assert(sizeof(((xenova_drive_TofObservation *)0)->distance_mm_le.bytes)==2,"single ToF distance");
-_Static_assert(sizeof(((xenova_drive_TofObservation *)0)->status.bytes)==1,"single ToF status");
-_Static_assert(sizeof(((xenova_drive_TofObservation *)0)->quality.bytes)==1,"single ToF quality");
-
 static struct dw_snapshot sample;
 static struct dw_pool pool;
 static struct dw_odometry odom;

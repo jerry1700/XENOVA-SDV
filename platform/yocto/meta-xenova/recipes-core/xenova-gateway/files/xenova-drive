@@ -1,3 +1,0 @@
-#!/bin/sh
-# Yocto의 수동 module 설치에서도 기존 operator CLI를 그대로 호출한다.
-exec /usr/bin/python3 -m xenova_gateway.operator_client "$@"

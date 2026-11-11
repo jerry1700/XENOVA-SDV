@@ -8,7 +8,6 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
-from unittest.mock import patch
 
 from xenova_vehicle.perception.calibration import synthetic_calibration
 from xenova_vehicle.perception.geometry import camera_ray
@@ -32,31 +31,6 @@ class SyntheticCaptureTests(unittest.TestCase):
             x=self.snapshot.pose[0] + camera.translation[0] + ahead,
             y=self.snapshot.pose[1] + camera.translation[1], w=.06, h=.20)]
         return replace(self.snapshot, scene=Scene(canonical(fields)))
-
-    def test_static_deterministic_pixels_are_reused_with_new_original_capture_stamp(self):
-        camera=SyntheticCamera(self.calibration);first=camera.capture(self.snapshot)
-        next_snapshot=replace(self.snapshot,sequence=1,sim_time_us=200000)
-        with patch('xenova_vehicle.simulation.capture._first_surface',side_effect=AssertionError('static rerender')):
-            second=camera.capture(next_snapshot)
-        self.assertIsNot(second,first)
-        self.assertEqual(second.rgb.stamp.sequence,1)
-        self.assertEqual(second.rgb.stamp.captured_us,(200000,200000))
-        self.assertIs(second.rgb.payload,first.rgb.payload);self.assertIs(second.depth.payload,first.depth.payload)
-
-    def test_pose_and_scene_changes_invalidate_static_pixels(self):
-        camera=SyntheticCamera(self.calibration);first=camera.capture(self.snapshot)
-        moved=replace(self.snapshot,sequence=1,sim_time_us=200000,pose=(2.1,1.5,0.0))
-        changed=camera.capture(moved)
-        self.assertIsNot(changed.rgb.payload,first.rgb.payload)
-        boxed=replace(self.with_box(.4),sequence=2,sim_time_us=400000,pose=moved.pose)
-        third=camera.capture(boxed)
-        self.assertNotEqual(third.depth.sha256,changed.depth.sha256)
-
-    def test_seeded_effects_are_not_reused_across_new_capture_sequences(self):
-        camera=SyntheticCamera(self.calibration,DepthEffects(dropout_fraction=.2))
-        first=camera.capture(self.snapshot)
-        second=camera.capture(replace(self.snapshot,sequence=1,sim_time_us=200000))
-        self.assertNotEqual(first.depth.sha256,second.depth.sha256)
 
     def test_divider_splits_source_segment_at_exact_arc_on_off_boundary(self):
         from xenova_vehicle.simulation.capture import _ground_raster

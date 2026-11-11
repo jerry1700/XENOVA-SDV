@@ -1,109 +1,12 @@
-"""Gateway 부가 로그와 종료 시 한 번의 whitelist 관측만 전달한다.
-
-권위/원 요청/시리얼 출력은 큐에 넣지 않으며 종료 관측도 완료·freshness 증거가 아니다.
-"""
-import builtins
-from collections import deque
-import json
+"""Gateway 부가 로그만 유한하게 전달한다. 권위/원 요청/시리얼 출력은 큐에 넣지 않는다."""
 import logging
 import copy
-import re
 import sys
 from logging.handlers import QueueHandler
 import queue
 import threading
 
 _CONTROLS={i:'\\x'+format(i,'02x') for i in (*range(32),127)}
-_IPC_COUNTERS=('accepted','decoded','encoded','expired','busy','peer_denied','high_water','malformed')
-_DEVICE_COUNTERS=('parser_invalid','parser_oversize','stale_or_invalid','pending','command_sequence','clock_lease_revision')
-_FAULTS=frozenset(('DEVICE_LINK_UNAVAILABLE','DEVICE_HANDSHAKE_TIMEOUT','DEVICE_APPLY_TIMEOUT',
-    'DEVICE_CAPABILITY_UNSUPPORTED','DEVICE_RESTARTED','DEVICE_ODOMETRY_UNSUPPORTED','DEVICE_REJECTED',
-    'DEVICE_FAULT','DEVICE_EVIDENCE_OVERFLOW','DEVICE_COUNTER_EXHAUSTED','DEVICE_CLOCK_DISCONTINUITY'))
-_MODULES=frozenset(('ipc.py','operator_service.py','operator_client.py','output_owner.py','feedback.py',
-    'feedback3.py','authority.py','authority_journal.py','provider.py','guest_clock.py','episode.py',
-    'keyboard_server.py','keyboard_actor.py','scene_runtime.py','scene_authority.py','verified_runner.py',
-    'runner.py','drive_link.py','queue.py','threading.py','selectors.py','socket.py','ssl.py'))
-_EXCEPTIONS=frozenset(n for n,v in vars(builtins).items() if isinstance(v,type) and issubclass(v,BaseException)) | frozenset(
-    ('SinkError','AuthorityError','OperatorError','FeedbackError','SceneAuthorityError','GatewayUnavailable','ProviderError'))
-_FRAME=re.compile(r'^  File "([^"\r\n]{1,1024})", line ([0-9]{1,7}), in ([A-Za-z_][A-Za-z0-9_]{0,63}|<module>)$')
-
-
-def _attrs(value):
-    return vars(value) if value is not None and hasattr(value,'__dict__') else {}
-
-
-def _count(value):
-    return value if type(value) is int and 0<=value<2**63 else None
-
-
-def _alive(owner):
-    thread=_attrs(owner).get('thread')
-    return thread.is_alive() if isinstance(thread,threading.Thread) else None
-
-
-def _failure(value,budget):
-    result={'present':value is not None,'exception_type':None,'frames':[]}
-    if isinstance(value,BaseException):
-        name=type(value).__name__
-        result['exception_type']=name if name in _EXCEPTIONS else None
-        return result
-    if type(value) is not str:return result
-    result['present']=bool(value)
-    # 메시지·source code·locals는 해석/복사하지 않는다. 최초 예외 header 뒤는 읽지 않는다.
-    for line in value[:4096].splitlines()[:64]:
-        if line=='Traceback (most recent call last):':continue
-        matched=_FRAME.fullmatch(line)
-        if matched:
-            path,number,function=matched.groups();module=path.replace('\\','/').rsplit('/',1)[-1]
-            if module in _MODULES and budget[0] and 0<int(number)<=1000000:
-                result['frames'].append(dict(module=module,function=function,line=int(number)));budget[0]-=1
-        elif line and not line[0].isspace():
-            token=line.split(':',1)[0].rsplit('.',1)[-1]
-            result['exception_type']=token if token in _EXCEPTIONS else None
-            break
-    return result
-
-
-def _queue_depth(value):
-    if not isinstance(value,queue.Queue):return None
-    if not value.mutex.acquire(False):return None
-    try:
-        return len(value.queue) if type(value.queue) in (deque,list) else None
-    finally:value.mutex.release()
-
-
-def _final_snapshot(ipc,operator_ipc,keyboard_ipc,runner,sink):
-    """종료 중의 내부 관측만 구성한다. 추가 owner 호출·잠금 대기·상태 검산은 없다."""
-    servers={};budget=[4]
-    for name,owner in (('provider',ipc),('operator',operator_ipc),('keyboard',keyboard_ipc)):
-        fields=_attrs(owner);stats=fields.get('stats');stats=stats if type(stats) is dict else {}
-        servers[name]=dict(present=owner is not None,thread_alive=_alive(owner),
-            counters={key:_count(stats.get(key)) for key in _IPC_COUNTERS},failure=_failure(fields.get('failure'),budget))
-    runner_fields=_attrs(runner);actor=_attrs(runner_fields.get('operator'));lanes=actor.get('queues')
-    depths=[_queue_depth(q) for q in lanes[:3]] if type(lanes) in (list,tuple) else []
-    pending,waiting=actor.get('pending'),actor.get('_waiting');worker=_attrs(actor.get('worker'));busy=worker.get('_busy')
-    operator=dict(present=bool(actor),queue_depths=depths,
-        pending=len(pending) if type(pending) is dict else None,
-        waiting=len(waiting) if type(waiting) in (list,tuple,deque) else None,
-        job_present=actor.get('job') is not None,
-        worker_busy=busy.is_set() if isinstance(busy,threading.Event) else None,
-        worker_jobs_depth=_queue_depth(worker.get('_jobs')),worker_results_depth=_queue_depth(worker.get('_results')))
-    cached=_attrs(sink).get('_device_view');cached=cached if type(cached) is dict else None
-    device={'cached_view_available':cached is not None}
-    if cached is not None:
-        fault=cached.get('fault')
-        device.update(cached_fault_present=fault is not None,cached_fault=fault if type(fault) is str and fault in _FAULTS else None,
-            **{key:cached.get(key) if type(cached.get(key)) is bool else None for key in ('ready','clock_ready','report_is_latest')},
-            counters={key:_count(cached.get(key)) for key in _DEVICE_COUNTERS})
-    native=_attrs(_attrs(sink).get('device'))
-    for key in ('fault','_sensor_blocked_reason'):
-        value=native.get(key)
-        device['native_'+key.lstrip('_')]=value if type(value) is str and value in _FAULTS else None
-    ingress=dict(queue_depth=_queue_depth(runner_fields.get('_queue')),
-                 dropped_queue_full=_count(runner_fields.get('dropped_queue_full')),
-                 rejected_commands=_count(runner_fields.get('rejected_commands')))
-    return dict(contract='gateway-final-1',stage='before_diagnostics_close',completion_proven=False,
-                ipc=servers,operator=operator,ingress=ingress,device=device)
 
 class GatewayDiagnostics(QueueHandler):
     """표준 QueueHandler의 사본을 기존 handler로 전달한다. 종료는 유한 대기다.
@@ -188,28 +91,6 @@ class GatewayDiagnostics(QueueHandler):
                 'failed':self.failed,'first_failure':self.first_failure,'pending':self.queue.qsize(),
                 'first_sink_error':self.first_sink_error,'last_sink_error':self.last_sink_error,
                 'worker_alive':self.worker.is_alive(),'closing':self.closing}
-
-    def emit_final(self,*,ipc=None,operator_ipc=None,keyboard_ipc=None,runner=None,sink=None):
-        """종료 INFO 한 건을 비차단 best-effort로 기존 큐에 넣는다. 전달 성공을 보증하지 않는다."""
-        try:
-            raw=json.dumps(_final_snapshot(ipc,operator_ipc,keyboard_ipc,runner,sink),
-                           ensure_ascii=True,separators=(',',':'),allow_nan=False)
-            if len(raw)>3584:
-                raw='{"contract":"gateway-final-1","stage":"before_diagnostics_close","unavailable":true,"completion_proven":false}'
-            record=logging.LogRecord(self.logger.name,logging.INFO,'',0,'gateway.final '+raw,(),None)
-            # 일반 logger/handler lock이나 Queue.put_nowait의 mutex에서 기다리지 않는다.
-            if not self._admission.acquire(False):return False
-            try:
-                if self.closing or not self.queue.mutex.acquire(False):return False
-                try:
-                    if len(self.queue.queue)>=self.capacity:return False
-                    self.queue._put(record);self.queue.unfinished_tasks+=1
-                    self.queue.not_empty.notify();self.submitted+=1
-                finally:self.queue.mutex.release()
-            finally:self._admission.release()
-            return True
-        except BaseException:
-            return False  # 진단 오류는 원 cleanup/exit/최초 오류를 바꾸지 않는다.
 
     def close(self):
         if not getattr(self,'closing',True):
