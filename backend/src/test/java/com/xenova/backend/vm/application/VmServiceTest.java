@@ -15,6 +15,7 @@ import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
 import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
+import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.application.VmService.CreateResult;
@@ -97,6 +98,29 @@ class VmServiceTest {
         assertThat(vms.get(0).name()).isEqualTo("alpine-1");
         assertThat(vms.get(1).state()).isEqualTo(VmState.STOPPED);
         assertThat(vms.get(1).templateId()).isEqualTo("alpine");
+    }
+
+    @Test
+    void listOrdersByRoleThenDriveGuestsThenCreationWhateverFilledTheTable() {
+        // Creation order as a registry sync can leave it: the Linux VM was discovered a few ms first.
+        VmRecord interaction = new VmRecord("vm-d", new CreateVmCommand("debian", "alpine", "1.2.0", 1, 256),
+                GuestKind.LINUX, NOW);
+        VmRecord noRoleDrive = new VmRecord("vm-z", new CreateVmCommand("zephyr-c", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(1));
+        VmRecord backup = new VmRecord("vm-b", new CreateVmCommand("zephyr-b", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(2));
+        VmRecord primary = new VmRecord("vm-a", new CreateVmCommand("zephyr-a", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(3));
+        VmRecord unassignedLinux = new VmRecord("vm-l", new CreateVmCommand("web-test", "alpine", "1.2.0", 1, 256),
+                GuestKind.LINUX, NOW.plusMillis(4));
+        backup.changeRole(VmRole.BACKUP_DRIVE);
+        primary.changeRole(VmRole.PRIMARY_DRIVE);
+        interaction.changeRole(VmRole.INTERACTION);
+        when(vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
+                .thenReturn(List.of(interaction, noRoleDrive, backup, primary, unassignedLinux));
+        when(vmControlPort.list()).thenReturn(List.of());
+
+        assertThat(service.list()).extracting(Vm::vmId).containsExactly("vm-a", "vm-b", "vm-d", "vm-z", "vm-l");
     }
 
     @Test
@@ -344,6 +368,22 @@ class VmServiceTest {
 
         assertThatThrownBy(() -> service.destroy("vm-1")).isInstanceOf(ApiException.class);
         verify(inventoryCleaner, never()).vmDeleted(anyString());
+    }
+
+    @Test
+    void destroyOfAVmTheBoardNoLongerRegistersRetiresTheRow() {
+        VmRecord record = record("vm-1", "web-test");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        org.mockito.Mockito.doThrow(new ApiException(HttpStatus.NOT_FOUND, "VM_NOT_FOUND", "instance vm-1 not registered"))
+                .when(vmControlPort).destroy("vm-1");
+
+        service.destroy("vm-1");
+
+        assertThat(record.getLifecycle()).isEqualTo(VmLifecycle.RETIRED);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).forget("vm-1");
+        verify(eventRecorder).vmDeleted("vm-1", "web-test", "platform");
+        verify(inventoryCleaner).vmDeleted("vm-1");
     }
 
     @Test
