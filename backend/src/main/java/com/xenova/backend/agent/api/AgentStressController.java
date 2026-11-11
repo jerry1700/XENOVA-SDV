@@ -23,8 +23,7 @@ public class AgentStressController {
     @PostMapping("/cpu")
     public ResponseEntity<AgentStressCommand> cpu(
             @PathVariable String vmId, @Valid @RequestBody CpuStressRequest request) {
-        return ResponseEntity.accepted()
-                .body(service.cpu(vmId, request.workers(), request.loadPercent(), request.durationS()));
+        return ResponseEntity.accepted().body(service.cpu(vmId, request.workers(), request.durationS()));
     }
 
     @PostMapping("/memory")

@@ -171,7 +171,7 @@ dom0-manager가 `xentop -b -i 1 -n -x -f` 한 번의 출력에서 만드는 VM�
 
 | 필드 | xentop 원천 | 의미 |
 |---|---|---|
-| `vm_id` | `NAME` ↔ `xl list -v`의 `UUID` 열 | 같은 요청 안에서 이름으로 대조. `-f`가 없으면 이름이 10자로 잘려 대조가 깨지므로 항상 `-f` |
+| `vm_id` | `NAME` ↔ `xl list -l`의 `config.c_info.uuid` | 같은 호출 안에서 이름으로 대조. `-f`가 없으면 이름이 10자로 잘려 대조가 깨지므로 항상 `-f` |
 | `domid` | `NAME` ↔ `xl list` | 재실행마다 바뀐다. Spring이 누적값 초기화(재시작) 판정에 쓴다 |
 | `source` | 상수 `xen` | 에이전트 보고(`guest_agent`)와 구분. Spring 메트릭 조회(REST-12·WS-01)의 `source` 필터 허용값(`xen`, `guest_agent`)과 같은 문자열 |
 | `sampled_at` | dom0 시각, xentop 종료 시점 | 표본 시각. 단조 시계 간격은 Spring이 수신 시각으로 잰다 |
@@ -218,7 +218,7 @@ dom0-manager가 `xentop -b -i 1 -n -x -f` 한 번의 출력에서 만드는 VM�
 | `recovery_id` | 장애 한 건의 ID. 최초 판정(`detected_at`)부터 최종 성공 또는 포기(`final`)까지 같은 값. Worker가 재시작해도 dom0에 저장된 미완료 `recovery_id`를 이어 간다 |
 | `recovery_attempt_id` | 논리적 복구 시도마다 발급하는 UUID이자 플랫폼 `recover_once` journal 키. **같은 시도의 재전달(응답 유실·Worker 재시작 뒤 재확인)과 결과 조회(`recovery-operation`)에는 반드시 같은 값을 재사용한다.** 이전 시도가 `failed`로 확정되고 backoff 뒤 다음 시도를 시작할 때만 새 UUID를 발급한다. Spring 이벤트의 `operation_id`로 기록 |
 | `attempt` | 같은 `recovery_id` 안의 시도 번호(1부터). 새 `recovery_attempt_id`를 발급할 때만 1씩 증가하고 재전달·재확인에서는 그대로다. 새 `recovery_id`에서 1로 돌아간다. 재시도 한도·대기는 복구 정책(S15P31E110-125) |
-| `reason` | 판정 근거. `HEARTBEAT_LOST`(Linux VM, `agent.heartbeat` 30초 무수신) / `APP_HEARTBEAT_LOST`(Zephyr VM, `app.heartbeat` 15초 무수신, 시나리오 D8. 대상은 템플릿 capability `app_heartbeat` 가 `true` 이거나 신호를 한 번이라도 받은 VM) / `VM_UNTRUSTED`(binding이 검증된 현재 Zephyr 주행 execution에서 `vm.trust`가 발행되어 Gateway가 출력 신뢰를 철회함) / `DOMAIN_ABSENT`(의도 running인데 도메인 없음, 60초 유예 뒤) / `DOMAIN_CRASHED`(`crashed`) |
+| `reason` | 판정 근거. `HEARTBEAT_LOST`(Linux VM, `agent.heartbeat` 30초 무수신) / `APP_HEARTBEAT_LOST`(Zephyr VM, `app.heartbeat` 15초 무수신, 시나리오 D8. 대상은 템플릿 capability `app_heartbeat` 가 `true` 이거나 신호를 한 번이라도 받은 VM) / `DOMAIN_ABSENT`(의도 running인데 도메인 없음, 60초 유예 뒤) / `DOMAIN_CRASHED`(`crashed`) |
 | `mode` | 플랫폼 `recover_once`의 `mode`: `start-if-absent` / `graceful-restart` / `force-restart` |
 | `detected_at` | 장애 판정 시각 (dom0) |
 | `occurred_at` | 이 이벤트의 시각 (dom0) |
@@ -809,7 +809,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 
 dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포함한 내부 API에서 Bearer 서비스 토큰을 검사합니다. Spring은 `DOM0_MANAGER_BASE_URL`에 Tailscale 주소를 설정하고 `DOM0_MANAGER_SERVICE_TOKEN`을 `Authorization: Bearer`로 전송합니다. 연결 실패는 `503 VM_CONTROL_UNAVAILABLE`로 변환합니다.
 
-`vm_id`는 도메인 설정의 `uuid`에 기록하고 `xl list -v`의 `UUID` 열(도메인 handle, `xl list -l`의 `config.c_info.uuid`와 같은 값)로 역조회합니다. 동일 VM의 stop/start 및 retire/restore는 같은 UUID를 유지하며, 템플릿 생성·복제·purge 이후 신규 생성은 새 UUID를 사용합니다.
+`vm_id`는 도메인 설정의 `uuid`에 기록하고 `xl list -l`의 `config.c_info.uuid`로 역조회합니다. 동일 VM의 stop/start 및 retire/restore는 같은 UUID를 유지하며, 템플릿 생성·복제·purge 이후 신규 생성은 새 UUID를 사용합니다.
 
 ---
 

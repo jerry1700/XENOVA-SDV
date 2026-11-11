@@ -20,28 +20,6 @@ def digest(path):
     return value.hexdigest()
 
 
-def check_dom0_profile(config, script):
-    """실제 FAT의 값이 승인한 Pi 4 프로필과 일치하는지 검사한다."""
-    turbo = []
-    section = 'all'
-    for line in config.splitlines():
-        line = line.split('#', 1)[0].strip()
-        if line.startswith('[') and line.endswith(']'):
-            section = line[1:-1]
-        elif '=' in line:
-            key, value = line.split('=', 1)
-            if key.strip() == 'force_turbo':
-                turbo.append((section, value.strip()))
-    if turbo != [('all', '1')]:
-        raise ValueError('WIC config requires force_turbo=1 exactly once in [all]')
-    match = re.search(r'^fdt set /chosen xen,xen-bootargs "([^"]+)"', script, re.M)
-    args = match.group(1).split() if match else []
-    if [value for value in args if value.startswith('dom0_max_vcpus=')] != ['dom0_max_vcpus=2']:
-        raise ValueError('WIC Xen boot arguments require dom0_max_vcpus=2 exactly once')
-    if any(value.startswith('dom0_vcpus_pin') for value in args):
-        raise ValueError('WIC must preserve CPU-policy placement instead of dom0_vcpus_pin')
-
-
 def inspect(deploy, image, output):
     """일반 파일인 WIC/bz2만 읽고, 새 output 디렉터리에 추출 파일과 결과를 보존한다."""
     if not image.is_file():
@@ -120,8 +98,6 @@ def inspect(deploy, image, output):
         check(terminator == 0 and length <= len(payload) - 8, 'WIC boot.scr script length is valid')
         script = payload[8:8 + length].decode()
         (output / 'boot.cmd.extracted').write_text(script)
-        check_dom0_profile(config, script)
-        check(True, 'WIC uses force_turbo=1 and dom0_max_vcpus=2 with policy-owned affinity')
         for marker in ['setenv devnum 0', 'fdt move ${fdtcontroladdr} ${fdt_addr_r}',
                        'fatload mmc ${devnum}:1 ${xen_loadaddr} xen',
                        'fdt rm /soc/mmcnr@7e300000 dmas || exit 1',

@@ -50,7 +50,7 @@ class PcObservationProducer:
 
     def __init__(self,observation_endpoint,*,binding,scope,motion_profile,scene,capture_epoch,
                  capture_clock_epoch,duration_s,capture_lifetime_us,render_interval_us,join_timeout_s,
-                 clock=monotonic_us,observer=None):
+                 clock=monotonic_us):
         from xenova_vehicle.simulation.pc_input import PcSourceBinding
         from xenova_vehicle.simulation.motion_profile import DevelopmentMotionProfile
         from xenova_vehicle.simulation.scene import Scene
@@ -86,7 +86,6 @@ class PcObservationProducer:
         self._session_started=self._attached=self._session_done=self._closed=False
         self._close_started=False;self._close_deadline=None
         self._failure=None;self._latest=None;self._result=None
-        self._observer=observer
         self._started_us=self._deadline_us=None
         self._counts=dict(attempted=0,rendered=0,expired=0,quantization_future=0,replaced=0,taken=0)
 
@@ -215,9 +214,6 @@ class PcObservationProducer:
                     if not self._stop.is_set():
                         old=self._latest;self._latest=frame
                         if old is not None:self._count('replaced')
-                if self._observer is not None:
-                    try:self._observer.offer_frame(frame,binding=self._binding)
-                    except Exception:self._observer=None
                 # 큰 pixel 참조의 마지막 해제는 작은 mailbox lock 밖에서 일어난다.
                 old=frame=None
         except BaseException as error:self._failed('renderer',error)

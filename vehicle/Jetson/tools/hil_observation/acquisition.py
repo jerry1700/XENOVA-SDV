@@ -20,7 +20,6 @@ from xenova_vehicle.runtime.pc_slot_messages import (PcWriterSlotContext, PcSlot
 from xenova_vehicle.runtime.pc_workers import PcWorkerActor
 from xenova_vehicle.runtime.resident_transport import j_us
 from xenova_vehicle.runtime.slot_messages import SlotTimeLimits
-from xenova_vehicle.runtime.health_policy import FrameExpired
 from xenova_vehicle.oak.sim_nn_manifest import SimNnManifest
 
 from .clock import ClockPolicy
@@ -136,11 +135,6 @@ class _AcquisitionDiagnostic:
                 sender_stats=pump._session.sender.stats, receiver_stats=pump._session.receiver.stats)
             self.final = dict(source_fenced=source_fenced, actor_state=actor.state,
                 driver_phase=None if driver is None else driver.phase, leases_released=actor.leases_released,
-                driver_counts={} if driver is None else dict(getattr(driver,'counts',{})),
-                last_enqueue_timing=None if driver is None else getattr(driver,'last_enqueue_timing',None),
-                nn_counts=dict(getattr(getattr(actor,'nn_source',None),'counts',{})),
-                nn_last_unmatched=getattr(getattr(actor,'nn_source',None),'last_unmatched',None),
-                nn_last_submission_timing=getattr(getattr(actor,'nn_source',None),'last_submission_timing',None),
                 active_frame_expires_us=None if driver is None or driver.active is None else driver.active.expires_us,
                 copy_request=self.copy_request, request_draft_pending=request_draft is not None,
                 metadata_draft_pending=metadata_draft is not None, start_draft_pending=start_draft is not None,
@@ -196,16 +190,12 @@ def run_acquisition(actor, settings):
         now = j_us()
         start_draft = dict(kind='PC_NN_START', metadata=dict(nn_manifest_sha256=manifest.sha256),
             body=actor.model_start.canonical_receipt_bytes, request_id=str(uuid4()), issued_us=now,
-            expires_us=now + 5_000_000)
+            expires_us=min(now + 5_000_000, actor.boot.startup_deadline_us))
+        if start_draft['expires_us'] <= now:
+            raise TimeoutError('original actual NN start report cap expired')
 
         def flush_pc():
             nonlocal start_draft, metadata_draft
-            pending = link.pending
-            if pending is not None and pending.kind in ('PC_EARLY_META', 'PC_NN_RESULT_META') and j_us() >= pending.expires_us:
-                link.discard_expired_work(pending)
-                metadata_draft = None
-            if metadata_draft is not None and j_us() >= metadata_draft['expires_us']:
-                metadata_draft = None
             sent = link.flush()
             if sent is not None:
                 if sent.packet.kind == 'PC_NN_START': start_draft = None
@@ -222,30 +212,17 @@ def run_acquisition(actor, settings):
             time.sleep(.002)
             incoming = diagnostic.call('actor_poll', actor.poll)  # 원 STOP은 pc_worker_main에 전파한다.
             for packet in incoming:
-                if actor.cancelled_grant(packet, context, settings.slot_limits, PcSlotMessage):continue
                 if source_fenced or packet.kind != 'SLOT' or packet.payload.get('op') != 'GRANT' or request is None:
                     raise ValueError('unexpected PC A control statement or grant without original request')
                 grant = PcSlotMessage(packet, context, request, limits=settings.slot_limits)
-                if j_us() >= request.expires_us or driver.active is None or j_us()+1 >= driver.active.expires_us:
-                    actor.cancel_request(request)
-                    request = request_draft = None
-                    diagnostic.copy_request = None
-                    driver.expire()
-                    continue
-                try:encoding, filled = diagnostic.call('raw_publish', driver.publish, grant.record)
-                except FrameExpired:
-                    actor.cancel_request(request)
-                    request = request_draft = None
-                    diagnostic.copy_request = None
-                    driver.expire()
-                    continue
+                request.record.check(j_us())
+                encoding, filled = diagnostic.call('raw_publish', driver.publish, grant.record)
                 out = actor.required_slot(pc_filled_payload(grant, filled), request_id=grant.request_id,
-                    issued=filled.completed_us, expires=filled.completed_us + 1_000_000)
+                    issued=filled.completed_us, expires=grant.expires_us)
                 PcSlotMessage(out, context, grant, limits=settings.slot_limits)
-                driver.note_filled_sent(diagnostic.call('raw_await_sent', actor.await_sent, out))
-                if j_us()+1 >= driver.active.expires_us:
-                    metadata_draft = None
-                else:metadata_draft = dict(kind='PC_EARLY_META' if encoding.phase == 'EARLY' else 'PC_NN_RESULT_META',
+                driver.note_filled_sent(diagnostic.call('raw_await_sent', actor.await_sent,
+                    out, cap_us=driver.active.expires_us))
+                metadata_draft = dict(kind='PC_EARLY_META' if encoding.phase == 'EARLY' else 'PC_NN_RESULT_META',
                     metadata=pc_slot_meta_fields(encoding, purpose=driver.active.purpose), body=encoding.descriptor_bytes,
                     request_id=driver.active.job_id, issued_us=filled.completed_us,
                     expires_us=driver.active.expires_us)
@@ -285,46 +262,29 @@ def run_acquisition(actor, settings):
             if result is not None:
                 # 수신 owner는 pump가 이미 fence/close했다. S는 이 원 사건으로 Source를 철회한다.
                 driver.fence(); source_fenced = True; actor.state = 'DEGRADED'
-                if request is not None:
-                    actor.cancel_request(request)
-                    request = None
-                    diagnostic.copy_request = None
-                request_draft = metadata_draft = None
-                while link.pending is not None:
-                    if j_us()>=link.pending.expires_us and link.pending.kind in ('PC_EARLY_META','PC_NN_RESULT_META'):
-                        link.discard_expired_work(link.pending)
-                        break
-                    diagnostic.call('metadata_flush', link.flush)
-                    for message in diagnostic.call('actor_poll', actor.poll):
-                        if not actor.cancelled_grant(message,context,settings.slot_limits,PcSlotMessage):
-                            raise ValueError('unresolved control during source disconnect cleanup')
-                    time.sleep(.002)
+                if request is not None or request_draft is not None or metadata_draft is not None or link.pending is not None:
+                    raise RuntimeError('PC observation ended with an unresolved original copy/control transaction')
                 stamp = j_us()
                 link.send('PC_SOURCE_FENCE', dict(reason=result.reason, failure=result.failure),
                     request_id=str(uuid4()), issued_us=stamp, expires_us=stamp + 5_000_000)
                 # full-send는 이 호출의 실제 반환으로만 확인하며 다음 loop에서 draft를 재발급하지 않는다.
                 while link.pending is not None:
-                    for message in diagnostic.call('actor_poll', actor.poll):
-                        if not actor.cancelled_grant(message,context,settings.slot_limits,PcSlotMessage):
-                            raise ValueError('unresolved original control arrived after PC source fence')
+                    if diagnostic.call('actor_poll', actor.poll):
+                        raise ValueError('unresolved original control arrived after PC source fence')
                     diagnostic.call('metadata_flush', link.flush)
                     time.sleep(.002)
                 continue
 
             if start_draft is not None: continue
             if request is not None:
-                if j_us() >= request.expires_us:
-                    actor.cancel_request(request)
-                    request = None
-                    diagnostic.copy_request = None
+                request.record.check(j_us())
             elif request_draft is not None and j_us() >= request_draft['expires']:
-                request_draft = None
+                raise TimeoutError('original PC write request expired before actual selection')
             if request is not None or metadata_draft is not None or link.pending is not None: continue
             driver.expire()
             if driver.waiting_enqueue: diagnostic.call('sdk_enqueue', driver.enqueue)
             diagnostic.call('sdk_poll', driver.poll_nn)
             driver.promote()
-            if driver.waiting_enqueue:diagnostic.call('sdk_enqueue',driver.enqueue)
             job = driver.active
             if job is not None and driver.phase in ('EARLY', 'NN'):
                 if request_draft is None:
@@ -332,12 +292,12 @@ def run_acquisition(actor, settings):
                     request_draft = dict(payload=pc_write_request_payload(binding, actor.boot.raw_scope,
                         job_id=job.job_id, phase=driver.phase, expires_j_us=job.expires_us, full_key=job.full_key,
                         pc_frame_proof_sha256=job.proof_sha256, purpose=job.purpose), request_id=str(uuid4()),
-                        issued=issued, expires=issued + settings.slot_limits.copy_budget_us)
+                        issued=issued, expires=min(issued + settings.slot_limits.copy_budget_us, job.expires_us))
                     diagnostic.pending_copy(request_draft['issued'], request_draft['expires'],
                         driver.phase, job.expires_us, selected=False)
                 out = actor.slot(**request_draft)
                 if out is not None:
-                    request = PcSlotMessage(out, context, limits=settings.slot_limits)
+                    request = PcSlotMessage(out, context, limits=settings.slot_limits, cap_us=job.expires_us)
                     diagnostic.pending_copy(request.record.issued_us, request.record.expires_us,
                         driver.phase, job.expires_us, selected=True)
                     request_draft = None

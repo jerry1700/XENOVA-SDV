@@ -2,8 +2,7 @@
 
 관측 후보는 외부 요청을 내보내지 않는다. 최종 채택은 참조 교환이며 maintenance만
 원 request를 offer/소비한다. SQLite·native token·thread·scene/추진 권한은 소유하지 않는다.
-ToF는 여기서 source scope에만 보존한다. 발행용 근거리 HIT는 tof_obstacles가
-원 ToF 시각의 odom으로 덧씌우며, 이 owner의 저장 지도에는 쓰지 않는다.
+ToF는 source scope에만 보존한다. 실제 ToF 시각의 보간/융합은 별도 연결 전까지 수행하지 않는다.
 """
 
 from copy import copy
@@ -244,7 +243,8 @@ class MapperMapping:
             for evidence in inputs.tof:
                 item=self.profile.sensors.tof_leaves.get(evidence.sensor_id)
                 if (item is not None and sensors.sensors.current_tof(evidence,now_us)
-                        and item[1].extrinsics_qualified and item[1].time_qualified):
+                        and all((item[1].extrinsics_qualified,item[1].first_surface_qualified,
+                                 item[1].coverage_qualified,item[1].time_qualified))):
                     sources.append((item[0],item[1],evidence.sensor_instance,evidence.sensor_generation))
         old=() if self._scope is None else self._scope._historical
         if self._scope is not None and (self._scope._tof!=tuple(sources) or self._scope.context!=context):

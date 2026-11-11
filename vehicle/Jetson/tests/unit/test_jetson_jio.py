@@ -106,8 +106,8 @@ def tof(sensor, sequence=1, generation=1):
         pi_session=uid(5), device_session=uid(2), sensor_id=sensor, source_sample=sequence,
         source_us=1000 + sequence, pi_sample_us=1400000 + sequence, clock_error_us=10,
         sensor_time_error_us=100, calibration=('d' if sensor == 0 else 'e') * 64,
-        sensor_config_revision=1, rows=1, cols=1, distance_mm_le=struct.pack('<H', 500),
-        status=b'\x01', quality=b'\x03', frame_status=3, source_crc32=0,
+        sensor_config_revision=1, rows=8, cols=8, distance_mm_le=struct.pack('<64H', *([500] * 64)),
+        status=bytes(64), quality=bytes([3] * 64), frame_status=3, source_crc32=0,
         clock_epoch=uid(30 + sensor), clock_seq=sequence, complete=True,
         sensor_instance=UUID(uid(40 + sensor + generation * 10)).bytes, sensor_generation=generation)
     value.source_crc32 = tof_crc32(value)

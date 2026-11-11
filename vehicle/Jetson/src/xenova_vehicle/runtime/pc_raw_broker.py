@@ -44,7 +44,7 @@ class PcRawBroker(ResidentRawBroker):
     """
 
     def __init__(self,writer_bind,scope,reader,raw_tokens,*,
-                 limits=SlotTimeLimits(5_000_000,500_000,5_000_000),
+                 limits=SlotTimeLimits(150_000,500_000,150_000),
                  cleanup_limits=CleanupTimeLimits(1_000_000)):
         if (type(writer_bind) is not PcBindMessage or type(scope) is not RawScope
                 or type(reader) is not Endpoint or type(limits) is not SlotTimeLimits
@@ -58,7 +58,6 @@ class PcRawBroker(ResidentRawBroker):
         self._grants=[None,None];self._offers=[None,None];self._previous_offers=[None,None]
         self._active_offer=None;self._reads=[deque(maxlen=2),deque(maxlen=2)]
         self._counts=Counter();self._quiescing=False;self._paused=None;self._last_reader_recovery=None
-        self._cancelled_requests=deque(maxlen=16)
         self._metadata=[None,None];self._unjoined=None;self._publication=None;self._publication_bytes=None
         self._joined=deque()
         self._broker_token=object();self._thread=get_ident()
@@ -104,7 +103,7 @@ class PcRawBroker(ResidentRawBroker):
 
     def _join(self,meta,grant,info,now_us):
         if (info is not self._ledger.snapshot.slots[info.key.slot].filled or info.key!=grant.record.key
-                or info.completed_us<grant.issued_us
+                or not grant.issued_us<=info.completed_us<grant.expires_us
                 or not self._matches(meta,grant.payload) or info.payload_length!=meta.payload_length
                 or info.descriptor_sha256!=meta.descriptor_sha256
                 or not info.completed_us<=meta.received.packet.issued_us<=meta.received.received_j_us<=now_us<meta.expires_j_us):
@@ -156,29 +155,30 @@ class PcRawBroker(ResidentRawBroker):
             raise BrokerError('original same-broker PC FILLED metadata required')
         key=value.original_filled_info.key;state=self._ledger.snapshot;slot=state.slots[key.slot]
         if (state.fenced or self._metadata[key.slot] is not value or slot.filled is not value.original_filled_info
-                or self._grants[key.slot] is not value.original_grant):
+                or self._grants[key.slot] is not value.original_grant or now_us>=value.expires_j_us):
             raise BrokerError('original PC FILLED metadata is no longer current')
-        if now_us>=value.expires_j_us:
-            from .health_policy import FrameExpired
-            raise FrameExpired('original PC FILLED observation expired')
         return value
 
     def _expire_join(self,now_us):
         if self._unjoined is not None and now_us>=self._unjoined.expires_j_us:
-            self._counts['metadata_expired_without_filled']+=1;self._unjoined=None
+            self._counts['metadata_expired_without_filled']+=1;self.fence(now_us)
+            raise BrokerError('original PC metadata expired before matching FILLED')
+        for slot in self._ledger.snapshot.slots:
+            if slot.state is SlotState.READY and self.metadata_for(slot.filled.key) is None:
+                grant=self._grants[slot.filled.key.slot]
+                if grant is not None and now_us>=int(grant.payload['geometry_expires_j_us']):
+                    self._counts['filled_expired_without_metadata']+=1;self.fence(now_us)
+                    raise BrokerError('original PC FILLED expired before matching metadata')
 
     def receive(self,role,packet,*,now_us):
         self._owner();self._now(now_us)
-        self._expire_join(now_us)
         if type(packet) is not StructuralPacket or packet.kind!='SLOT' or role not in ('A','M'):
             raise BrokerError('actual registered PC SLOT packet required')
         p=packet.payload
         if type(p) is not dict or set(p)!=PAYLOAD_FIELDS:raise BrokerError('exact19 PC SLOT payload required')
         op=p['op']
         if role=='A' and op=='REQUEST':
-            m=PcSlotMessage(packet,self.writer,limits=self.limits)
-            if now_us>=m.expires_us:self._counts['expired_requests']+=1;return None
-            self._live(m,now_us)
+            m=PcSlotMessage(packet,self.writer,limits=self.limits);self._live(m,now_us)
             if self._quiescing:self._counts['requests_paused']+=1;return None
             if self._ledger.snapshot.fenced:raise BrokerError('PC write request after arena fence')
             retained=[self._request]+[g.parent for g in self._grants if g is not None]
@@ -193,7 +193,7 @@ class PcRawBroker(ResidentRawBroker):
             index=p['slot']
             if type(index) is not int or index not in (0,1) or self._grants[index] is None:
                 raise BrokerError('PC FILLED has no original selected grant')
-            m=PcSlotMessage(packet,self.writer,self._grants[index],limits=self.limits)
+            m=PcSlotMessage(packet,self.writer,self._grants[index],limits=self.limits);self._live(m,now_us)
             result=self._ledger.filled(m.record,now_us=now_us)
             if self._unjoined is not None and self._matches(self._unjoined,m.payload):
                 self._join(self._unjoined,self._grants[index],self._ledger.snapshot.slots[index].filled,now_us)
@@ -211,9 +211,7 @@ class PcRawBroker(ResidentRawBroker):
                     if all(type(p[k]) is type(expected[k]) and p[k]==expected[k] for k in PAYLOAD_FIELDS-{'op','read_token'}):
                         offer=candidate;break
             if offer is None:self._counts['stale_acquire']+=1;return None
-            m=PcSlotMessage(packet,offer.context,offer,limits=self.limits)
-            if now_us>=m.expires_us:self._counts['expired_acquires']+=1;return None
-            self._live(m,now_us)
+            m=PcSlotMessage(packet,offer.context,offer,limits=self.limits);self._live(m,now_us)
             for queue in self._reads:
                 for old in queue:
                     if old.request_id==m.request_id:
@@ -252,9 +250,7 @@ class PcRawBroker(ResidentRawBroker):
     def _reserve_writer(self,now_us):
         request=self._request
         if request is None or self._writer_draft is not None:return
-        if now_us>=request.expires_us:
-            self._request=None;self._counts['expired_requests']+=1;return
-        state=self._ledger.snapshot
+        self._live(request,now_us);state=self._ledger.snapshot
         if any(s.state is SlotState.WRITING for s in state.slots):return
         free=next((i for i,s in enumerate(state.slots) if s.state is SlotState.FREE),None)
         if free is not None:grant=self._ledger.reserve_write(free,request.record,str(uuid4()),now_us=now_us).value
@@ -272,7 +268,7 @@ class PcRawBroker(ResidentRawBroker):
     def _send(self,draft,link,context,now_us):
         if now_us>=draft.expires_us:
             if draft.op=='OFFER':self._counts['offer_expired_before_selection']+=1;return None,True
-            self._cancel_unselected(draft,now_us);return None,True
+            self.fence(now_us);raise BrokerError('original reserved PC statement expired before selection')
         try:
             packet=link.send('SLOT',draft.payload,domain='RAW',revision=self.writer.bind.binding_revision,
                 request_id=draft.request_id,issued_us=draft.issued_us,expires_us=draft.expires_us)
@@ -295,7 +291,8 @@ class PcRawBroker(ResidentRawBroker):
         if self._ledger.snapshot.fenced:return selected
         self._expire_join(now_us)
         if self._active_offer is not None and now_us>=self._active_offer.expires_us:self._active_offer=None
-        if not self._quiescing:self._reserve_writer(now_us)
+        if not self._quiescing and not any(s.state is SlotState.READY and self.metadata_for(s.filled.key) is None
+                for s in self._ledger.snapshot.slots):self._reserve_writer(now_us)
         if self._writer_draft is not None:
             packet,done=self._send(self._writer_draft,writer_link,self.writer,now_us)
             if packet is not None:selected.append(packet)

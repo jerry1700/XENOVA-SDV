@@ -87,7 +87,6 @@ class ForwardDrive:
 @dataclass(frozen=True)
 class ForwardStop:
     generation: int
-    source: dict[str,Any] | None = None
 
 
 @dataclass(frozen=True)

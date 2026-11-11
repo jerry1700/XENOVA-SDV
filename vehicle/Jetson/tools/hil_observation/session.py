@@ -8,14 +8,12 @@ clock/관측/반환 통계는 SDK, DB, Scene, World, READY 또는 실제 전송 
 """
 
 from dataclasses import dataclass
-from collections import deque
 from hashlib import sha256
 import math
 import select
 import socket
 import time
 from uuid import uuid4
-from xenova_vehicle.runtime.health_policy import health_policy
 
 from .clock import ClockSource, ClockPolicy, ClockProbe, ClockReply, HilObservationClock, HilClockError, MAX_PROBE_US
 from .mapped import MappedPcOwner, PcMappingError
@@ -28,7 +26,7 @@ _JETSON_READ_STEPS = 4
 U63_MAX = (1 << 63) - 1
 _COUNTERS = ('probes_sent', 'replies_sent', 'replies_accepted', 'leases_issued', 'clock_rejected',
     'frames_received', 'frames_sent', 'frames_mapped', 'frames_offered', 'frames_dropped')
-_TRANSIENT_CLOCK = frozenset(('CLOCK_RTT', 'CLOCK_OFFSET_WIDTH', 'CLOCK_PROBE_EXPIRED_OR_J_ORDER'))
+_TRANSIENT_CLOCK = frozenset(('CLOCK_RTT', 'CLOCK_OFFSET_WIDTH'))
 
 
 def monotonic_us():
@@ -98,8 +96,6 @@ class _Session:
         self.sender = PacketSender(endpoint, scope)
         self.receiver = PacketReceiver(endpoint, scope, completed_clock=self.now)
         self.waiting = self.control = self.frame = None
-        self.expired_probes = deque(maxlen=8)
-        self.transfer_us = health_policy().control_stall_us
         self.send_end = None
         self.next_probe = self.started
         self.sequence = 0
@@ -124,27 +120,15 @@ class _Session:
         packet = item.packet
         if self.role == 'PC':
             _need(type(packet) is ClockPacket and packet.kind == 'CLOCK_PROBE', 'PC_REQUIRES_ORIGINAL_CLOCK_PROBE')
-            if self.control is not None:self.count('clock_rejected')
-            pending=self.sender.pending
-            if type(pending) is ClockPacket and pending.kind=='CLOCK_REPLY':
-                self.sender.discard_pending(pending)
-                self.send_end=None
-                self.count('clock_rejected')
+            _need(self.control is None, 'OUTSTANDING_CLOCK_CONTROL_EXCEEDS_ONE')
             self.peer_started = True
             # P2는 transport의 완전수신 tick이다. P3는 실제 송신 준비까지 읽지 않는다.
             self.control = (ClockProbe.from_raw(packet.clock_raw_bytes), item.received_local_us,
                 min(item.received_local_us + IO_TIMEOUT_US, self.expires))
             return
         if type(packet) is ClockPacket:
-            _need(packet.kind == 'CLOCK_REPLY', 'JETSON_REQUIRES_MATCHED_CLOCK_REPLY')
+            _need(packet.kind == 'CLOCK_REPLY' and self.waiting is not None, 'JETSON_REQUIRES_MATCHED_CLOCK_REPLY')
             value = ClockReply.from_raw(packet.clock_raw_bytes)
-            if self.waiting is None or value.probe.sequence != self.waiting.sequence:
-                _need(value.probe.sequence <= self.sequence, 'FUTURE_CLOCK_REPLY_SEQUENCE')
-                for old in self.expired_probes:
-                    if old.sequence == value.probe.sequence:
-                        _need(old.raw_bytes == value.probe.raw_bytes, 'LATE_CLOCK_PROBE_CONFLICT')
-                self.count('clock_rejected')
-                return
             before = self.clock_owner.fence_revision
             original = self.waiting
             try:
@@ -175,21 +159,16 @@ class _Session:
         offered = self.on_frame(frame, self.pc_owner)
         _need(type(offered) is bool, 'ON_FRAME_MUST_RETURN_QUEUE_OFFER_BOOL')
         self.count('frames_offered' if offered else 'frames_dropped')
-        if self.now() + 1 >= frame.expires_j_us:self.count('frames_dropped')
+        _need(self.now() + 1 < frame.expires_j_us, 'QUEUE_CALLBACK_OVERRAN_ORIGINAL_FRAME')
 
     def schedule(self, now):
         if self.send_end is not None and now >= self.send_end:
-            # 내용의 E와 partial stream의 회수 한도는 별개다. 후자는 sender가 감시한다.
-            self.send_end = None
+            raise TransportTimeout('original packet send operation exceeded its fixed local deadline')
         idle = self.sender.active is None and self.sender.pending is None
         if self.role == 'JETSON':
             if self.waiting is not None:
-                if now + 1 >= self.waiting.expires_j_us:
-                    self.expired_probes.append(self.waiting)
-                    self.waiting = None
-                    self.next_probe = now
-                    self.count('clock_rejected')
-            if self.waiting is None and idle and now >= self.next_probe:
+                _need(now + 1 < self.waiting.expires_j_us, 'ORIGINAL_CLOCK_REPLY_TIMEOUT')
+            elif idle and now >= self.next_probe:
                 j1 = self.now()
                 if j1 + 1 >= self.expires: return
                 self.sequence += 1
@@ -202,14 +181,11 @@ class _Session:
             return
         if self.control is not None:
             probe, p2, local_end = self.control
-            if now >= local_end:
-                self.control = None
-                self.count('clock_rejected')
-                return
-            if self.sender.active is None and self.sender.pending is not None:
-                pending = self.sender.pending
-                if type(pending) is ObservationFrame:
-                    self.sender.discard_pending(pending)
+            _need(now < local_end, 'ORIGINAL_CLOCK_REPLY_SEND_TIMEOUT')
+            pending = self.sender.pending
+            if self.sender.active is None and type(pending) is ObservationFrame:
+                # 첫 byte 전 FRAME만 버린다. 이미 기록한 sequence/E는 환급하지 않는다.
+                if self.sender.discard_pending(pending):
                     self.count('frames_dropped')
                     idle = True
             if idle:
@@ -237,8 +213,8 @@ class _Session:
             if not self.sender.offer(packet, expires_us=packet.expires_pc_us, now_us=now):
                 self.count('frames_dropped')
             else:
-                # 원 FRAME E는 그대로 두고 local transfer 감시만 별도로 고정한다.
-                self.send_end = min(self.expires, now + self.transfer_us)
+                # 원 FRAME E는 그대로 두고 local transfer 시작보다 이른 offer에서 200ms를 고정한다.
+                self.send_end = min(packet.expires_pc_us, now + IO_TIMEOUT_US)
 
     def step(self, *, wait_cap_us=None):
         """원 session에서 유한 I/O 한 번을 진행한다. cap은 원 deadline을 줄이기만 한다."""
@@ -278,7 +254,7 @@ class _Session:
                 now = self.now()
                 if now >= self.expires: return 'DURATION'
                 if self.receiver.deadline_us is None:
-                    self.receiver.begin(expires_us=min(now + self.transfer_us, self.expires), now_us=now)
+                    self.receiver.begin(expires_us=min(now + IO_TIMEOUT_US, self.expires), now_us=now)
                 received_before = self.receiver.stats['received_bytes']
                 item = self.receiver.step(now)
                 if item is not None: self.received(item)

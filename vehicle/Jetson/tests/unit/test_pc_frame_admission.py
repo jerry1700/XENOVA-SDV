@@ -179,27 +179,6 @@ class PcFrameAdmissionTests(unittest.TestCase):
         frame.validate_current(self.owner.current_view(frame, now_us=self.now), self.now,
             binding=self.binding, owner_token=self.owner.owner_token)
 
-    def test_nn_before_snapshot_ack_is_only_candidate_until_actual_ack_and_later_filled(self):
-        frame,_,_=self.early();nn_received=self.now
-        self.now+=20;sent=self.ack(frame)
-        encoding,_=self.nn(received=nn_received)
-        owned=decode_owned(encoding.raw,slot_fixtures.expected(encoding,completed=self.now+1))
-        self.now+=2
-        received,_=self.forward(encoding)
-        with self.assertRaises(ValueError):
-            self.owner.admit_nn(frame,received,owned,snapshot_ack_sent=None,now_us=self.now)
-        result=self.owner.admit_nn(frame,received,owned,snapshot_ack_sent=sent,now_us=self.now)
-        self.assertLess(result.nn_input.received_j_us,sent.started_us)
-        self.assertIs(result.snapshot_ack_sent,sent)
-
-    def test_nn_raw_published_before_snapshot_ack_is_still_rejected(self):
-        frame,_,_=self.early();nn_received=self.now
-        self.now+=20;sent=self.ack(frame)
-        encoding,owned=self.nn(received=nn_received)
-        received,_=self.forward(encoding)
-        with self.assertRaisesRegex(ValueError,'SNAPSHOT_ACK_SEND'):
-            self.owner.admit_nn(frame,received,owned,snapshot_ack_sent=sent,now_us=self.now)
-
     def test_fresh_clock_renewal_and_early2_do_not_revoke_delayed_nn1(self):
         frame, _, _ = self.early(); sent = self.ack(frame)
         nn_encoding, nn_owned = self.nn()
@@ -234,8 +213,7 @@ class PcFrameAdmissionTests(unittest.TestCase):
     def test_source_fence_endpoint_close_and_original_expiry_never_make_a_current_view(self):
         frame, _, _ = self.early()
         self.now = frame.expires_j_us
-        from xenova_vehicle.runtime.health_policy import FrameExpired
-        with self.assertRaises(FrameExpired): self.owner.current_view(frame, now_us=self.now)
+        with self.assertRaises(PcFrameAdmissionError): self.owner.current_view(frame, now_us=self.now)
         self.assertEqual(frame.expires_j_us, self.a_frame.expires_j_us)
         self.owner.fence('PC_SOURCE_DISCONNECTED')
         self.assertEqual(self.owner.fence_revision, 1)

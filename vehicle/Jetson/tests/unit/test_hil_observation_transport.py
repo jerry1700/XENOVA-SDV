@@ -273,18 +273,14 @@ class HilObservationTransportTests(unittest.TestCase):
         with self.assertRaises(T.TransportError):
             T.ClockPacket(scope(), 'CLOCK_PROBE', b' ' + canonical(probe))
 
-    def test_frame_expiry_preserves_partial_framing_until_separate_transfer_budget(self):
+    def test_sender_partial_expiry_and_full_read_expiry_fence_without_closing_caller_socket(self):
         sender, receiver, clock, left, right = self.pair()
         original = frame()
         sender.offer(original, expires_us=original.expires_pc_us, now_us=clock.value)
         sender.step(clock.value)
         self.assertIs(sender.active, original)
-        sender.step(original.expires_pc_us)
-        self.assertFalse(sender.closed)
-        self.assertIs(sender.active,original)
-        from xenova_vehicle.runtime.health_policy import health_policy
         with self.assertRaises(T.TransportTimeout):
-            sender.step(original.expires_pc_us+health_policy().control_stall_us)
+            sender.step(original.expires_pc_us)
         self.assertTrue(sender.closed)
         self.assertIsNone(sender.active)
         self.assertIsNone(sender.pending)

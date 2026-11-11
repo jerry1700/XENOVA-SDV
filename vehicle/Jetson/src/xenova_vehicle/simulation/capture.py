@@ -208,11 +208,6 @@ class SyntheticCamera:
                 return self._last_input
             if snapshot.sequence < self._last.sequence or snapshot.sim_time_us <= self._last.sim_time_us:
                 raise ValueError('synthetic sequence/time regressed or repeated without the original capture ID')
-        if (self._last is not None and snapshot.epoch==self._last.epoch and snapshot.pose==self._last.pose
-                and snapshot.scene.sha256==self._last.scene.sha256
-                and not (self.effects.noise_std_mm or self.effects.noise_mm_per_m2 or self.effects.dropout_fraction)):
-            # 고정 장면·자세의 결정적 pixel만 재사용한다. 새 원 sample 시각·순번은 그대로 발급한다.
-            return self._owned_input(snapshot,self._last_input.rgb.payload,self._last_input.depth.payload)
         if self._ray_cache is None:
             self._ray_cache = tuple(_rays(camera) for camera in (self.calibration.rgb, self.calibration.right))
         if self._raster_cache is None or self._raster_cache[0] != snapshot.scene.sha256:
@@ -257,16 +252,13 @@ class SyntheticCamera:
         for u0, v0, u1, v1 in self.effects.hole_rects:
             valid[v0:v1, u0:u1] = False
         depth = np.where(valid, measured, 0).astype('<u2').tobytes()
-        return self._owned_input(snapshot,_nv12(image),depth)
-
-    def _owned_input(self,snapshot,rgb,depth):
         source = 'sim:' + snapshot.epoch + ':' + self.effects.sha256[:16]
         clock = 'simulation:' + snapshot.epoch
         def stamp(stream):
             return FrameStamp(source, stream, snapshot.sequence, clock,
                               (snapshot.sim_time_us, snapshot.sim_time_us), snapshot.sim_time_us)
         result = PerceptionInput('SYNTHETIC', self.calibration.sha256,
-            ImageFrame(stamp('rgb_video'), 640, 360, 'NV12', rgb, 0),
+            ImageFrame(stamp('rgb_video'), 640, 360, 'NV12', _nv12(image), 0),
             ImageFrame(stamp('depth_right'), 640, 480, 'RAW16_LE', depth, 0))
         self._last, self._last_input = snapshot, result
         return result

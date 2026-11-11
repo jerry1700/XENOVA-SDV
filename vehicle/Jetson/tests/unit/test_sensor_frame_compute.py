@@ -40,8 +40,7 @@ class FrameFixture:
         depth=replace(source.depth,received_j_us=self.f.now)
         original=None if source.nn_input is None else replace(source.nn_input,received_j_us=self.f.now)
         packet=None if source.nn_output is None else replace(source.nn_output,received_j_us=self.f.now)
-        clocks={name:dict(bridge_sample=dict(j_before_us=str(self.f.now),
-            sdk_us=source.clocks[name]['bridge_sample']['sdk_us'],j_after_us=str(self.f.now)),
+        clocks={name:dict(bridge_sample=dict(j_before_us=str(self.f.now),sdk_us='900',j_after_us=str(self.f.now)),
             sdk_host_timestamp_j_bracket_us=['1000000','1000000']) for name in source.clocks}
         return MapperInput(compute_fixtures.identifier(1000+number),self.generation if generation is None else generation,
             CaptureSample(rgb,depth,original,packet,clocks),self.f.now+200000 if expires is None else expires,
@@ -138,13 +137,7 @@ class SensorFrameComputeTests(unittest.TestCase):
                 original.with_sensor_snapshot(malformed,now_us=f.clock())
 
     def test_owned_budget_reserves_result_and_has_only_active_raw_nn_slots(self):
-        entered, gate = threading.Event(), threading.Event()
-        def parse(item, checkpoint):
-            entered.set()
-            if not gate.wait(2): raise AssertionError('bounded parser gate expired')
-            checkpoint()
-            return item.sample.nn_output
-        f=FrameFixture();processor=TrackingProcessor(parse=parse);owner=MapperCompute(lambda _:processor,
+        f=FrameFixture();processor=TrackingProcessor();owner=MapperCompute(lambda _:processor,
             source_generation=f.generation,clock=f.clock)
         active=f.bound(1,nn=True);raw=f.bound(2);nn=f.bound(3,nn=True);latest=f.bound(4)
         self.assertEqual(module.MAX_OWNED_BYTES,8*1024*1024)
@@ -152,7 +145,7 @@ class SensorFrameComputeTests(unittest.TestCase):
         limit=module.MAX_RESULT_BYTES+active.byte_length+raw.byte_length+nn.byte_length
         owner.start();seen=[]
         try:
-            self.assertTrue(owner.submit(active));self.assertTrue(entered.wait(2))
+            self.assertTrue(owner.submit(active));event(owner,'PARSER_START_REQUIRED',seen)
             self.assertTrue(owner.submit(raw))
             with patch.object(module,'MAX_OWNED_BYTES',limit-1):
                 self.assertFalse(owner.submit(nn))
@@ -168,7 +161,7 @@ class SensorFrameComputeTests(unittest.TestCase):
                 (active.job_id,True,True))
             self.assertEqual(state['counts']['pending_replaced'],1)
             self.assertEqual(processor.geometries,[])
-        finally:self.cleanup(owner,gate)
+        finally:self.cleanup(owner)
 
     def test_fence_during_parser_keeps_nn_phases_factory_and_old_accepted_map(self):
         f=FrameFixture();entered=threading.Event();gate=threading.Event();factories=[]
@@ -186,7 +179,8 @@ class SensorFrameComputeTests(unittest.TestCase):
             compute_fixtures.wait_until(lambda:owner.snapshot()['active'] is None)
             accepted=list(processor.accepted_jobs)
             active=f.bound(20,nn=True);pending=f.bound(30,nn=True)
-            owner.submit(active);start=event(owner,'PARSER_STARTED',seen,active.job_id)
+            owner.submit(active);start=event(owner,'PARSER_START_REQUIRED',seen,active.job_id)
+            owner.acknowledge_parser_start(active.job_id,compute_fixtures.sent(start))
             self.assertTrue(entered.wait(2))
             owner.submit(f.bound(25));owner.submit(pending)
             revision=f.revoke_and_renew()
@@ -201,7 +195,8 @@ class SensorFrameComputeTests(unittest.TestCase):
             cancelled=event(owner,'CANCELLED',seen,active.job_id)
             self.assertTrue(nn_done.accepted);self.assertEqual(cancelled.reason,'ADMISSION_FENCE')
             self.assertLess(seen.index(nn_done),seen.index(cancelled))
-            next_start=event(owner,'PARSER_STARTED',seen,pending.job_id)
+            next_start=event(owner,'PARSER_START_REQUIRED',seen,pending.job_id)
+            owner.acknowledge_parser_start(pending.job_id,compute_fixtures.sent(next_start))
             self.assertTrue(event(owner,'NN_COMPLETED',seen,pending.job_id).accepted)
             event(owner,'CANCELLED',seen,pending.job_id)
             self.assertEqual(processor.parsed,[active.job_id,pending.job_id])
@@ -282,6 +277,8 @@ class SensorFrameComputeTests(unittest.TestCase):
         owner.start();seen=[]
         try:
             original=f.bound(1,nn=True);owner.submit(original)
+            start=event(owner,'PARSER_START_REQUIRED',seen)
+            owner.acknowledge_parser_start(original.job_id,compute_fixtures.sent(start))
             compute_fixtures.wait_until(lambda:owner.snapshot()['result_pending'] and owner.snapshot()['active'] is None)
             original_ref=weakref.ref(original)
             original=None

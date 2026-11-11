@@ -109,7 +109,7 @@ class SceneTofInventoryTests(unittest.TestCase):
 
     def test_configured_unqualified_optional_leaf_does_not_block_rgb_only_scope(self):
         f = self.original
-        leaf = replace(self.assets[0][1], extrinsics_qualified=False)
+        leaf = replace(self.assets[0][1], first_surface_qualified=False)
         fields = f.calibration.to_dict()
         fields['external_leaves'] = {'front-test-leaf': leaf.sha256}
         calibration = CalibrationProfile.from_dict(fields)
@@ -121,7 +121,7 @@ class SceneTofInventoryTests(unittest.TestCase):
         assets = (('front-test-leaf', leaf),)
         current = SceneEvidenceScope(context, raw, calibration, 'e' * 64, approved_tof_assets=assets)
         self.assertIs(current.approved_tof_assets, assets)
-        self.assertFalse(current.approved_tof_assets[0][1].extrinsics_qualified)
+        self.assertFalse(current.approved_tof_assets[0][1].first_surface_qualified)
         self.assertEqual(current._tof, ())
         self.assertEqual(json_bytes(current.context_record('RAW').payload, 4096)['kind'], 'RAW')
         with self.assertRaises(SceneError): current.context_record('TOF', sensor_id=0)

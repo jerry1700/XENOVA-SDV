@@ -292,8 +292,7 @@ class PcSlotMessage:
         if reader and p['purpose']=='METRIC_MAP':_need(publication is not None,'metric read requires actual current publication')
         if reader and p['purpose']=='PARSER_WARMUP':_same(publication,None)
         issued,expires=(_decimal(h[k]) for k in ('issued_j_us','expires_j_us'))
-        _need(issued<expires,'PC statement has an empty transport lifetime')
-        if op=='OFFER':_need(expires<=geometry,'PC offer exceeds original geometry E')
+        _need(issued<expires<=geometry,'PC statement exceeds original geometry E')
         parents={'GRANT':'REQUEST','FILLED':'GRANT','ACQUIRE':'OFFER','ACQUIRED':'ACQUIRE'}
         if op in parents:
             _need(type(parent) is PcSlotMessage and parent.op==parents[op] and parent.context==context and parent.limits==limits,'original PC parent required')
@@ -318,7 +317,7 @@ class PcSlotMessage:
                 _same(p['read_token'],None);length=_uint(p['payload_length'],positive=True);_sha(p['descriptor_sha256'])
                 _need(length<=MAX_PAYLOAD_BYTES,'PC used length exceeds slot')
                 if op=='FILLED':
-                    _need(key==parent.record.key and h['request_id']==parent.request_id
+                    _need(key==parent.record.key and h['request_id']==parent.request_id and expires==parent.expires_us
                         and parent.issued_us<=issued,'original FILLED differs from grant')
                 else:_same(expires,min(issued+limits.offer_budget_us,geometry))
                 info=FilledInfo(key,length,p['descriptor_sha256'],issued)
@@ -330,7 +329,7 @@ class PcSlotMessage:
                 if op=='ACQUIRE':
                     _same(p['read_token'],None)
                     _need(h['request_id']!=parent.request_id and parent.issued_us<=issued<parent.expires_us
-                        and expires-issued<=limits.read_budget_us,'original read budget/order changed')
+                        and expires<=parent.expires_us and expires-issued<=limits.read_budget_us,'original read budget/order changed')
                     record=ReadRequest(parent.record,context.reader,LeaseRequest(h['request_id'],issued,expires,cap_us),
                         p['purpose'],publication)
                 else:

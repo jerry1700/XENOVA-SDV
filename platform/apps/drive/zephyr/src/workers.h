@@ -28,17 +28,6 @@ struct drive_completion {
  bool performed;
  int64_t finished_ms;
 };
-/* A late moving result may be dropped while the prior command is still live.
- * A requested STOP/cusp/HOLD, concrete fault or unverifiable output must never
- * acquire that grace merely because the same calculation was also late. */
-static inline void drive_completion_restrict(struct drive_completion *work,bool warm){
- if(!work->health.restrict_function)return;
- bool retry=warm&&work->health.failure==XDH_DEADLINE&&!work->sample.reason&&
-  work->sample.v_mps!=0&&__builtin_isfinite(work->sample.v_mps)&&__builtin_isfinite(work->sample.steer_rad)&&
-  !work->sample.gate_required&&!work->sample.hold_steer;
- work->sample.v_mps=work->sample.steer_rad=0;
- if(!work->sample.reason)work->sample.reason=retry?"DEADLINE":"CALCULATION_FAILED";
-}
 struct drive_task_status {
  enum drive_task_state state;
  uint64_t accepted_sequence, replaced, completed_sequence, lifetime;

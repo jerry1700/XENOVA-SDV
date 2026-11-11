@@ -6,7 +6,6 @@ The candidate's source digest includes common runtime/Diagnostics/Publisher code
 """
 from __future__ import annotations
 import argparse
-from contextlib import contextmanager, ExitStack
 import hashlib
 import importlib.util
 import json
@@ -19,68 +18,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = ROOT / "platform/guests/zephyr"
-LATTICE_PROFILES = ('warm-lattice-lab', 'warm-lattice-development')
 
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def lattice_inputs(name):
-    """선택한 C/config/generated asset과 원 development 입력의 지문을 검산한다."""
-    home = ROOT / 'platform/apps/drive'
-    development = name == 'warm-lattice-development'
-    folder = home / ('profiles/course-development-1' if development else 'planner/generated')
-    profile_path = folder / 'profile.json' if development else home / 'profiles/lattice-lab-1.json'
-    profile = json.loads(profile_path.read_text())
-    generated = json.loads((folder / 'primitive-manifest.json').read_text())
-    canonical = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
-    generator_sha = hashlib.sha256((home / 'tools/generate_primitives.py').read_text(encoding='utf-8').encode()).hexdigest()
-    if (generated['profile'] != profile or generated['profile_sha256'] != hashlib.sha256(canonical).hexdigest()
-            or generated['generator_sha256'] != generator_sha
-            or generated['asset_sha256'] != hashlib.sha256(canonical + b'\0' + generator_sha.encode()).hexdigest()
-            or generated['primitive_source_sha256'] != sha(folder / 'primitives.c')):
-        raise ValueError('selected vehicle profile/primitive generation differs; regenerate with the fixed tool')
-    provenance = None
-    if development:
-        provenance = json.loads((folder / 'source-receipt.json').read_text())
-        if (profile['kind'] != 'test' or provenance['scope'] != 'RPi_DEVELOPMENT_PRIMITIVE_INPUT_ONLY'
-                or provenance['physical_admission'] is not False):
-            raise ValueError('explicit development-only profile required')
-        if set(provenance['source_files']) != {'motion.canonical.json', 'development.canonical.json',
-                'calibration-bound.json', 'motion-metadata-receipt.json', 'grid.json', 'lattice-lab-policy.json'}:
-            raise ValueError('complete original development sources required')
-        for member, expected in provenance['source_files'].items():
-            if Path(member).name != member or member in ('.', '..'):
-                raise ValueError('bounded development source member required')
-            path = folder / 'sources' / member
-            if path.is_symlink() or expected != {'bytes': path.stat().st_size, 'sha256': sha(path)}:
-                raise ValueError('development source changed: ' + member)
-        spec = importlib.util.spec_from_file_location('development_profile_inputs', home / 'tools/prepare_development_profile.py')
-        tool = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tool)
-        if provenance['prepare_tool_sha256'] != hashlib.sha256((home / 'tools/prepare_development_profile.py').read_text(encoding='utf-8').encode()).hexdigest():
-            raise ValueError('development preparation tool changed; regenerate explicitly')
-        (_, _, _, _, grid, motion, development_model, motion_sha, calibration_sha) = tool.inputs(
-            folder / 'sources', folder / 'sources/grid.json', provenance['metadata_receipt_sha256'])
-        policy_raw, policy = tool.read(folder / 'sources/lattice-lab-policy.json')
-        expected, _ = tool.profile_values(motion, development_model, grid, policy, motion_sha)
-        if (expected != profile or provenance['motion_bundle_sha256'] != motion_sha
-                or provenance['local_calibration_sha256'] != calibration_sha
-                or provenance['grid'] != grid or provenance['policy_sha256'] != hashlib.sha256(policy_raw).hexdigest()
-                or policy != json.loads((home / 'profiles/lattice-lab-1.json').read_text())):
-            raise ValueError('selected development model/policy binding differs')
-    return profile, generated, provenance
-
-
-def selected_primitive_source(commands, home, profile):
-    """실제 ARM compile DB의 단 하나의 primitive TU가 선택한 profile과 일치해야 한다."""
-    expected = (home / ('../profiles/course-development-1/primitives.c'
-                       if profile == 'warm-lattice-development' else '../planner/generated/primitives.c')).resolve()
-    sources = [Path(row['file']).resolve() for row in commands if Path(row['file']).name == 'primitives.c']
-    if sources != [expected]:
-        raise ValueError('actual compiler primitive input differs from the selected profile')
-    return expected
 
 
 def fingerprint(app):
@@ -109,156 +50,28 @@ def fingerprint(app):
     return {str(p.relative_to(ROOT)): {"sha256": sha(p), "bytes": p.stat().st_size} for p in paths}
 
 
-def source_member(root, name):
-    """manifest 소유 member만 허용하며 symlink/상위 경로로 작업공간을 벗어나지 않는다."""
-    part = Path(name)
-    if (not isinstance(name, str) or not name.startswith(('platform/', 'docs/'))
-            or part.is_absolute() or '..' in part.parts or '\\' in name
-            or part.as_posix() != name):
-        raise ValueError('plain repository-relative source member required')
-    path = root / part
-    if path.resolve() != path or not path.is_relative_to(root):
-        raise ValueError('linked workspace source member rejected')
-    return path
-
-
-def verify_sources(root, source):
-    """수정·미등록 파일이 있는 mutable input은 채택하지 않고 원 소유 목록을 검산한다."""
-    actual = set()
-    for path in root.rglob('*'):
-        if path.is_symlink() or not (path.is_file() or path.is_dir()):
-            raise ValueError('plain owned workspace source tree required')
-        if path.is_file():
-            if path.stat().st_nlink != 1:
-                raise ValueError('linked workspace source file rejected')
-            actual.add(path.relative_to(root).as_posix())
-    if actual != set(source):
-        raise ValueError('workspace input contains missing or unowned files')
-    for name, expected in source.items():
-        path = source_member(root, name)
-        if expected != {'sha256': sha(path), 'bytes': path.stat().st_size}:
-            raise ValueError('workspace source differs from its last owned manifest: ' + name)
-
-
-@contextmanager
-def incremental_workspace(work, identity, snapshot, source):
-    """개발 전용 marker/동일 profile의 cache만 사용한다. 사용자/LAB 출력은 채택하지 않는다."""
-    import fcntl
-    marker = work / 'WORKSPACE.json'
-    if work.exists():
-        if (not work.is_dir() or marker.is_symlink() or not marker.is_file()
-                or marker.stat().st_nlink != 1 or json.loads(marker.read_text()) != identity):
-            raise ValueError('matching development workspace marker required; existing directories are not adopted')
-    else:
-        work.mkdir(mode=0o755)
-        with marker.open('x') as stream:
-            stream.write(json.dumps(identity, sort_keys=True, indent=2) + '\n')
-    allowed = {'WORKSPACE.json', '.build.lock', 'SOURCE_MANIFEST.json', 'input', 'build'}
-    if any(p.name not in allowed or p.is_symlink() for p in work.iterdir()):
-        raise ValueError('unowned or linked workspace entry rejected')
-    lock_path = work / '.build.lock'
-    if lock_path.exists() and (not lock_path.is_file() or lock_path.stat().st_nlink != 1):
-        raise ValueError('plain workspace lock required')
-    with lock_path.open('a+b') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise ValueError('development workspace already in use') from error
-        inputs, manifest = work / 'input', work / 'SOURCE_MANIFEST.json'
-        old = {}
-        if manifest.exists():
-            if not manifest.is_file() or manifest.stat().st_nlink != 1:
-                raise ValueError('plain owned source manifest required')
-            record = json.loads(manifest.read_text())
-            if set(record) != {'schema', 'files'} or record['schema'] != 1 or type(record['files']) is not dict:
-                raise ValueError('owned source manifest shape differs')
-            old = record['files']
-            if not inputs.is_dir():
-                raise ValueError('owned workspace input missing')
-            verify_sources(inputs, old)
-        elif inputs.exists() or (work / 'build').exists():
-            raise ValueError('workspace cache without owned source manifest rejected')
-        cache_file = work / 'build/CMakeCache.txt'
-        synchronization = dict(previous_source_manifest_sha256=sha(manifest) if manifest.exists() else None,
-            cache_was_configured=cache_file.exists(),
-            updated_source_members=sum(old.get(name) != expected for name, expected in source.items()),
-            removed_source_members=len(old.keys() - source.keys()))
-        if cache_file.exists():
-            if cache_file.is_symlink() or not cache_file.is_file():
-                raise ValueError('plain development CMake cache required')
-            cache = {line.partition('=')[0].partition(':')[0]: line.partition('=')[2]
-                     for line in cache_file.read_text().splitlines() if '=' in line and not line.startswith(('#', '//'))}
-            home = inputs / f"platform/apps/{identity['app']}/zephyr"
-            expected = dict(APPLICATION_SOURCE_DIR=str(home), ZEPHYR_BASE=identity['zephyr_source'],
-                BOARD='xenvm', CMAKE_C_COMPILER=str(Path(identity['tools']) / 'aarch64-zephyr-elf/bin/aarch64-zephyr-elf-gcc'),
-                EXTRA_CONF_FILE=str(home / 'profiles' / (identity['profile'] + '.conf')),
-                XENOVA_DRIVE_DEVELOPMENT_PROFILE='ON')
-            if any(cache.get(key) != value for key, value in expected.items()):
-                raise ValueError('existing CMake cache does not match development workspace identity')
-        verify_sources(snapshot, source)
-        for name, expected in source.items():
-            target = source_member(inputs, name)
-            if old.get(name) != expected:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source_member(snapshot, name), target)
-        # 재귀 삭제 없이 이전 manifest로 소유와 원 bytes를 검산한 stale member만 제거한다.
-        for name in old.keys() - source.keys():
-            source_member(inputs, name).unlink()
-        verify_sources(inputs, source)
-        temporary = work / 'SOURCE_MANIFEST.next'
-        with temporary.open('x') as stream:
-            stream.write(json.dumps({'schema': 1, 'files': source}, sort_keys=True, indent=2) + '\n')
-        temporary.replace(manifest)
-        yield inputs, work / 'build', synchronization
-
-
-def verify_compile_sources(commands, inputs, source, zephyr, build):
-    """실제 compile DB가 현재 manifest·Zephyr·해당 build의 원 파일만 가리켜야 한다."""
-    compiled = {}
-    for row in commands:
-        path = Path(row['file']).resolve()
-        if not Path(row['directory']).resolve().is_relative_to(build):
-            raise ValueError('compiler working directory differs from selected build')
-        if path.is_relative_to(inputs):
-            name = path.relative_to(inputs).as_posix()
-            actual = {'sha256': sha(path), 'bytes': path.stat().st_size}
-            if source.get(name) != actual:
-                raise ValueError('compiler source is not the current frozen input: ' + name)
-            compiled[name] = actual
-        elif not (path.is_relative_to(zephyr) or path.is_relative_to(build)):
-            raise ValueError('compiler source belongs to another input/cache: ' + str(path))
-    if not compiled:
-        raise ValueError('actual application compiler sources required')
-    return compiled
-
-
-def build_candidate(resources):
+def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--app", choices=("manual", "autonomous", "drive"), required=True)
-    p.add_argument("--profile", choices=("operations", "experiment", "warm-operations", "warm-experiment", *LATTICE_PROFILES), default="operations",
+    p.add_argument("--profile", choices=("operations", "experiment", "warm-operations", "warm-experiment", "warm-lattice-lab"), default="operations",
                    help="operations excludes raw capture; experiment explicitly includes it")
     p.add_argument("--zephyr-source", type=Path, required=True)
     p.add_argument("--tools", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument('--incremental-workspace', type=Path,
-                   help='optional owned stable workspace; only warm-lattice-development, every --output remains new')
     p.add_argument("--execute", action="store_true")
     args = p.parse_args()
-    if args.incremental_workspace is not None and (args.app, args.profile) != ('drive', 'warm-lattice-development'):
-        p.error('incremental workspace requires explicit drive/warm-lattice-development')
     if args.profile.startswith('warm-') and args.app!='drive':p.error('warm profiles require the common drive firmware')
-    is_lattice = args.profile in LATTICE_PROFILES
-    if is_lattice:
-        profile, generated, provenance = lattice_inputs(args.profile)
-    for path in (args.zephyr_source, args.tools, args.output, *([args.incremental_workspace] if args.incremental_workspace else [])):
+    if args.profile=='warm-lattice-lab':
+        home=ROOT/'platform/apps/drive'
+        profile=json.loads((home/'profiles/lattice-lab-1.json').read_text())
+        generated=json.loads((home/'planner/generated/primitive-manifest.json').read_text())
+        if generated['profile']!=profile or generated['primitive_source_sha256']!=sha(home/'planner/generated/primitives.c'):
+            raise ValueError('selected vehicle profile/primitive generation differs; regenerate with the fixed tool')
+    for path in (args.zephyr_source, args.tools, args.output):
         if not path.is_absolute() or path.resolve() != path or path.is_symlink():
             raise ValueError("canonical absolute paths required")
     if args.output.exists() or any(args.output.is_relative_to(path) for path in (ROOT, args.zephyr_source, args.tools)):
         raise ValueError("new output outside repository/source/toolchain required")
-    if args.incremental_workspace is not None and any(
-            args.incremental_workspace.is_relative_to(path) or path.is_relative_to(args.incremental_workspace)
-            for path in (ROOT, args.zephyr_source, args.tools, args.output)):
-        raise ValueError('workspace must be separate from repository/source/tools/output')
     lock = json.loads((BASE / "starter.lock.json").read_text())
     commit = subprocess.check_output(["git", "-C", str(args.zephyr_source), "rev-parse", "HEAD"], text=True).strip()
     if commit != lock["zephyr_commit"]:
@@ -275,12 +88,9 @@ def build_candidate(resources):
     source = fingerprint(args.app)
     digest = hashlib.sha256(json.dumps({"profile": args.profile, "files": source},
                                       sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    plan = {"action": "build-drive-candidate" if args.execute else "plan", "app": args.app,
+    print(json.dumps({"action": "build-drive-candidate" if args.execute else "plan", "app": args.app,
                       "source_sha256": digest, "profile": args.profile,
-                      "output": str(args.output), "board_tested": False}
-    if args.incremental_workspace is not None:
-        plan['incremental_workspace'] = str(args.incremental_workspace)
-    print(json.dumps(plan), flush=True)
+                      "output": str(args.output), "board_tested": False}), flush=True)
     if not args.execute:
         return
     args.output.mkdir(mode=0o755)
@@ -291,17 +101,8 @@ def build_candidate(resources):
         shutil.copyfile(ROOT / name, target)
         if sha(target) != source[name]["sha256"]:
             raise ValueError("source changed during snapshot: " + name)
-    frozen_home = snapshot / f"platform/apps/{args.app}/zephyr"
-    inputs, build = snapshot, args.output / 'build'
-    workspace_identity = None
-    if args.incremental_workspace is not None:
-        workspace_identity = dict(schema=1, purpose='xenova-drive-development-incremental-1',
-            app=args.app, profile=args.profile, repository=str(ROOT), board='xenvm',
-            zephyr_source=str(args.zephyr_source), zephyr_commit=commit, tools=str(args.tools),
-            sdk_version=lock['sdk_version'], compiler_sha256=sha(compiler), cmake_sha256=sha(cmake), ninja_sha256=sha(ninja))
-        inputs, build, synchronization = resources.enter_context(incremental_workspace(
-            args.incremental_workspace, workspace_identity, snapshot, source))
-    home = inputs / f'platform/apps/{args.app}/zephyr'
+    home = snapshot / f"platform/apps/{args.app}/zephyr"
+    build = args.output / "build"
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(args.tools / "python"),
                ZEPHYR_BASE=str(args.zephyr_source), ZEPHYR_TOOLCHAIN_VARIANT="cross-compile",
                CROSS_COMPILE=str(args.tools / "aarch64-zephyr-elf/bin/aarch64-zephyr-elf-"),
@@ -319,9 +120,7 @@ def build_candidate(resources):
                     "-DCONFIG_XENOVA_DIAGNOSTICS_THREADS=" + ("y" if args.profile == "experiment" else "n")]
     if args.app == "drive":
         profile_args = ["-DEXTRA_CONF_FILE=" + str(home / "profiles" / (args.profile + ".conf"))]
-    if args.profile=='warm-lattice-development':
-        profile_args+=['-DXENOVA_DRIVE_DEVELOPMENT_PROFILE=ON']
-    if is_lattice:
+    if args.profile=='warm-lattice-lab':
         # This frozen toolchain contains picolibc. Legacy cross-compile does not
         # advertise it without an explicit path/flag; do not change old profiles.
         header=args.tools/'aarch64-zephyr-elf/aarch64-zephyr-elf/include/picolibc.h'
@@ -337,8 +136,6 @@ def build_candidate(resources):
     stack_dir = args.output / "stack-audit"
     stack_dir.mkdir()
     commands = json.loads((build / "compile_commands.json").read_text())
-    compiled_sources = verify_compile_sources(commands, inputs, source, args.zephyr_source, build) if workspace_identity else None
-    selected_primitive = selected_primitive_source(commands, home, args.profile) if is_lattice else None
     command = next(v for v in commands if v["file"].endswith("/xen-runtime/src/netfront.c"))
     audit_args = shlex.split(command["command"])
     if set(audit_args) & {"-MF", "-MD", "-MMD"}:
@@ -351,14 +148,14 @@ def build_candidate(resources):
         raise ValueError("netfront send exceeds the direct 256-byte stack-frame budget")
     config = (build / "zephyr/.config").read_text()
     for name in ("XENOVA_DRIVE_RECORDER", "XENOVA_DIAGNOSTICS_THREADS"):
-        expected=args.profile.endswith("experiment") or (name=="XENOVA_DIAGNOSTICS_THREADS" and is_lattice)
+        expected=args.profile.endswith("experiment") or (name=="XENOVA_DIAGNOSTICS_THREADS" and args.profile=="warm-lattice-lab")
         if ("CONFIG_" + name + "=y\n" in config) != expected:
             raise ValueError("resolved configuration differs from selected profile: " + name)
     if ("CONFIG_XENOVA_DRIVE_WARM=y\n" in config)!=args.profile.startswith('warm-'):
         raise ValueError('resolved readiness profile differs from requested profile')
-    if is_lattice and 'CONFIG_PICOLIBC=y\n' not in config:
+    if args.profile=='warm-lattice-lab' and 'CONFIG_PICOLIBC=y\n' not in config:
         raise ValueError('actual target lacks the selected fixed math library')
-    if is_lattice and 'CONFIG_THREAD_LOCAL_STORAGE=y\n' not in config:
+    if args.profile=='warm-lattice-lab' and 'CONFIG_THREAD_LOCAL_STORAGE=y\n' not in config:
         raise ValueError('toolchain picolibc errno requires thread-local storage')
     if "CONFIG_STACK_SENTINEL=y\n" not in config:
         raise ValueError("drive target must retain stack boundary detection")
@@ -384,7 +181,7 @@ def build_candidate(resources):
         frames = {}
         basenames=["workers.c", "adapter.c", "autonomous.c", "manual.c", "xm_payload.c", "xm_json.c"]
         if args.profile.startswith('warm-'):basenames += ['context.c','runtime.c','main.c','xen_bootstrap.c','xm_zclient.c']
-        if is_lattice:basenames += ['lattice_app.c','lattice_input.c','lattice_memory.c','engine.c','lattice.c','world.c','pb_decode.c','pb_encode.c']
+        if args.profile=='warm-lattice-lab':basenames += ['lattice_app.c','lattice_input.c','lattice_memory.c','engine.c','lattice.c','world.c','pb_decode.c','pb_encode.c']
         for basename in basenames:
             item = next(v for v in commands if v["file"].endswith("/" + basename))
             argv = shlex.split(item["command"])
@@ -408,29 +205,16 @@ def build_candidate(resources):
     verifier.verify_event_irq(build / "zephyr/zephyr.dts")
     segments = verifier.verify_elf(build / "zephyr/zephyr.elf")
     license_file=args.zephyr_source/'LICENSE'
-    if is_lattice:
+    if args.profile=='warm-lattice-lab':
         license_file=args.output/'THIRD_PARTY_LICENSES.txt'
         nanopb=snapshot/'platform/apps/drive/world/nanopb/LICENSE.txt'
         license_file.write_text('Zephyr / Xenova application (Apache-2.0)\n\n'+
             (args.zephyr_source/'LICENSE').read_text()+'\n\nNanopb runtime (zlib)\n\n'+nanopb.read_text())
-    if workspace_identity is not None:
-        # packager는 실제 CMake home을 검사한다. 별도 불변 snapshot과 원 bytes는 여기서 대조한다.
-        verify_sources(inputs, source)
-        verify_sources(snapshot, source)
     run("package", [sys.executable, "-B", snapshot / "platform/scripts/package-xenova-firmware.py",
                     "--build-dir", build / "zephyr", "--license", license_file,
                     "--version", "0.1.0-drive-" + digest[:12], "--app", "xenova-" + args.app,
                     "--source-revision", "sha256:" + digest, "--build-id", args.output.name,
                     "--app-source", home, "--networked", "--output", args.output / "firmware", "--execute"])
-    if workspace_identity is not None:
-        verify_sources(inputs, source)
-        verify_sources(snapshot, source)
-        if fingerprint(args.app) != source:
-            raise ValueError('repository source changed during incremental build')
-        evidence = args.output / 'build-evidence'
-        evidence.mkdir()
-        for name in ('compile_commands.json', 'CMakeCache.txt'):
-            shutil.copyfile(build / name, evidence / name)
     receipt = {"netfront_stack_audit": netfront_stack_audit, "app": args.app, "profile": args.profile,
                "calculation_stack_audit": calculation_stack_audit,
                "tcp_workqueue_stack_audit": tcp_workqueue_stack_audit,
@@ -441,7 +225,7 @@ def build_candidate(resources):
                "files": {p.name: {"sha256": sha(p), "bytes": p.stat().st_size}
                          for p in sorted((args.output / "firmware").iterdir()) if p.is_file()},
                "acceptance": {"M1_arm_build": True, "M2_board": False, "M3_performance": False}}
-    if is_lattice:
+    if args.profile=='warm-lattice-lab':
         receipt['drive_contract']={'kind':'test','world_profile':profile['id'],
             'schema_sha256':sha(snapshot/'docs/contracts/drive-world/world.proto'),
             'primitive_sha256':generated['asset_sha256'],
@@ -449,27 +233,8 @@ def build_candidate(resources):
             'bootstrap_profile':'warm-drive-1','map_slots':3,'map_cells':4096,
             'odom_slots':128,'path_points':512,'node_limit':profile['node_limit'],
             'output_authority':'Gateway','operating_vehicle_limits_verified':False}
-        if provenance is not None:
-            receipt['drive_contract']['development_inputs']=provenance
-        receipt['drive_contract']['compiled_primitive_source']={
-            'path':str(selected_primitive.relative_to(inputs)).replace('\\','/'),
-            'sha256':sha(selected_primitive)}
-    if workspace_identity is not None:
-        receipt['incremental_workspace'] = dict(path=str(args.incremental_workspace), identity=workspace_identity,
-            synchronization=synchronization,
-            source_snapshot_binding=dict(actual_app_source=str(home), immutable_app_source=str(frozen_home),
-                verified_source_sha256=digest),
-            source_manifest_sha256=sha(args.incremental_workspace / 'SOURCE_MANIFEST.json'),
-            compiled_sources=compiled_sources, mutable_cache_is_not_release=True,
-            immutable_build_evidence={name:sha(args.output / 'build-evidence' / name)
-                for name in ('compile_commands.json', 'CMakeCache.txt')})
     (args.output / "BUILD_RECEIPT.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"candidate": str(args.output / "firmware"), "firmware_sha256": receipt["files"]["zephyr.bin"]["sha256"]}))
-
-
-def main():
-    with ExitStack() as resources:
-        build_candidate(resources)
 
 
 if __name__ == "__main__":
