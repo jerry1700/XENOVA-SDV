@@ -99,6 +99,14 @@ class VehicleOdometry:
         self.pending[now_us]=None;self.last_probe=now_us
         return PROBE.pack(UUID(pi_session).bytes,UUID(self.device).bytes,now_us)
 
+    def next_probe_us(self):
+        if getattr(self, 'clock_profile3', False) or not self.device:
+            return None
+        due = 0 if self.last_probe is None else self.last_probe + self.config.sample_period_ms * 1_000
+        if len(self.pending) >= 2:
+            due = max(due, min(self.pending) + self.config.maximum_sample_age_us + 1)
+        return due
+
     def mark_submitted(self,echo,sent_us):
         """Bind the original probe to its first pre-write time, not a send ACK.
 
