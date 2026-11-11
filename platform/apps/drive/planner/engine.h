@@ -11,7 +11,8 @@ enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
  DE_EXPIRED,DE_CHANGED,DE_STATE,DE_LIMIT,DE_CANCELLED,DE_CLOCK,DE_FRAME,DE_CONFIGURATION,DE_REFERENCE };
 /* Tracker, supervisor, state exporter and one planner preparation probe. */
 #define DE_READERS 4
-struct de_path_slot {struct lp_path path;atomic_uint generation,leases[DE_READERS];bool writing;uint64_t scene_generation;};
+struct de_path_slot {struct lp_path path;struct lp_tracking_geometry tracking_geometry;
+ atomic_uint generation,leases[DE_READERS];bool writing,tracking_prepared;uint64_t scene_generation;};
 struct de_reference {unsigned slot;uint32_t generation,lease;};
 /* Actual successful tracker sample, separate from immutable registered Core/ref.
  * Missing/exact-meter mismatch withholds a progress export, not numeric clock

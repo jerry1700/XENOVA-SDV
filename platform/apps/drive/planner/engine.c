@@ -32,6 +32,7 @@ static enum de_result reserve(struct drive_engine *e,struct de_reference *h,stru
  else if(e->next_generation==UINT32_MAX)rc=DE_LIMIT;
  else for(unsigned i=0;i<DE_PATH_SLOTS;i++)if((int)i!=e->current&&!readers(&e->paths[i])&&!e->paths[i].writing){
   struct de_path_slot *slot=&e->paths[i];slot->writing=true;slot->generation=++e->next_generation;slot->scene_generation=0;
+  slot->tracking_prepared=false;
   *h=(struct de_reference){i,slot->generation,0};*path=&slot->path;rc=DE_OK;
   unsigned used=0;
   for(unsigned j=0;j<DE_PATH_SLOTS;j++)if((int)j==e->current||e->paths[j].writing||readers(&e->paths[j]))used++;
@@ -41,7 +42,16 @@ static enum de_result reserve(struct drive_engine *e,struct de_reference *h,stru
  if(rc==DE_BUSY)e->path_exhausted++;
  give(e);return rc;
 }
+/* Only the reserving writer touches this slot until it becomes current. */
+static bool prepare_tracking(struct drive_engine *e,struct de_reference h){
+ if(h.slot>=DE_PATH_SLOTS)return false;
+ struct de_path_slot *slot=&e->paths[h.slot];
+ if(slot->generation!=h.generation||!slot->writing)return false;
+ if(!slot->tracking_prepared)slot->tracking_prepared=lp_prepare_tracking(&slot->path,&slot->tracking_geometry);
+ return slot->tracking_prepared;
+}
 static enum de_result publish(struct drive_engine *e,struct de_reference h,bool valid){
+ if(valid)valid=prepare_tracking(e,h);
  if(!take(e))return DE_BUSY;
  enum de_result rc=DE_CHANGED;
  if(h.slot<DE_PATH_SLOTS&&e->paths[h.slot].generation==h.generation&&e->paths[h.slot].writing){
@@ -324,6 +334,7 @@ static enum de_result initial_correspondence_unrun(struct drive_engine *e,const 
 /* Tracker math owns a path lease. Commit only in its absence, under the same
  * metadata lock that admits a new lease; no live tracker fields race this read. */
 static enum de_result initial_correspondence_publish(struct drive_engine *e,struct de_reference next,uint32_t original){
+ if(!prepare_tracking(e,next))return publish(e,next,false);
  if(!take(e))return DE_BUSY;
  for(unsigned i=0;i<DE_PATH_SLOTS;i++)if(readers(&e->paths[i])){give(e);return DE_BUSY;}
  bool valid=e->current>=0&&e->paths[e->current].generation==original&&!e->stopping&&
@@ -806,7 +817,7 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
      db_travel_upper(&facts,path->episode.core.meter_baseline_total_ticks,now,
       fmaxf(e->config->max_velocity,e->config->max_reverse_velocity))>=path->episode.core.max_travel_m))rc=DE_STATE;
   else{calculated=true;lp_tracker_begin(tracker,ph.generation);
-   tracked=lp_track(tracker,path,&map->world,pose,vehicle,e->config,dt,command,&measured,&budget);
+   tracked=lp_track_prepared(tracker,path,&e->paths[ph.slot].tracking_geometry,&map->world,pose,vehicle,e->config,dt,command,&measured,&budget);
    if(path->has_episode&&path->episode.core.state==1&&!path->episode.core.phase&&e->episode_status.commit_state<2){command->velocity=0;command->steer=0;command->emergency=true;}
    if(tracker==&e->tracker&&e->behavior_enabled&&path->execution.mission.kind==2&&path->execution.mission.phase!=DP_SEARCH){
     unsigned phase=path->execution.mission.phase;
@@ -1642,8 +1653,9 @@ enum de_result de_memory_read(struct drive_engine *e,unsigned region,struct dw_m
  if(atomic_flag_test_and_set_explicit(&e->lock,memory_order_acquire))return DE_BUSY;
  unsigned used=0;
  for(unsigned i=0;i<DE_PATH_SLOTS;i++)if((int)i==e->current||e->paths[i].writing||readers(&e->paths[i]))used++;
- *out=(struct dw_memory){.reserved=sizeof(e->paths),.capacity=DE_PATH_SLOTS*sizeof(struct lp_path),
-  .used=used*sizeof(struct lp_path),.peak=e->path_peak*sizeof(struct lp_path),
+ size_t path_bytes=sizeof(e->paths[0].path)+sizeof(e->paths[0].tracking_geometry);
+ *out=(struct dw_memory){.reserved=sizeof(e->paths),.capacity=DE_PATH_SLOTS*path_bytes,
+  .used=used*path_bytes,.peak=e->path_peak*path_bytes,
   .exhausted=e->path_exhausted,.contention=atomic_load(&e->resource_contention)};
  give(e);return DE_OK;
 }

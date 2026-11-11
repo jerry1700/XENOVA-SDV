@@ -63,22 +63,30 @@ def test_unknown_occupied_and_clear_region_have_distinct_actual_eligibility(libr
 def test_parking_cusp_outside_slot_requires_gate_before_entering(library, strategy, entry_gear):
     tracking_ports(library)
     library.probe_parking_cusp_fixture.argtypes = [C.c_void_p, C.c_uint]
+    library.probe_prepare_tracking.argtypes = [C.c_void_p]
+    library.probe_prepare_tracking.restype = C.c_bool
     world = placed_world()
     slot = world.parking_slots[0]
     slot.goal_mask = 3
     slot.forward_goal.CopyFrom(schema.Pose(x=1.5,y=.4,yaw=-math.pi/2))
-    product = Product(library,world)
-    try:
-        cusp = library.probe_parking_cusp_fixture(product.handle, strategy)
-        assert cusp > 0 and library.probe_valid(product.handle) == FOUND
-        rc, stopped = sample(library, product, cusp)
-        assert rc == STOP and stopped[:5] == [0., 0., 1., 0., entry_gear]
-        assert library.probe_gate(product.handle, 2) == 0  # No acknowledged serial STOP
-        assert library.probe_gate(product.handle, 0) == 1
-        rc, entering = sample(library, product, cusp+1, 1020000)
-        assert rc == FOUND and entering[0]*entry_gear > 0 and entering[2:4] == [0., 1.]
-    finally:
-        product.close()
+    traces = []
+    for prepared in (False, True):
+        product = Product(library,world)
+        try:
+            cusp = library.probe_parking_cusp_fixture(product.handle, strategy)
+            assert cusp > 0 and library.probe_valid(product.handle) == FOUND
+            if prepared:
+                assert library.probe_prepare_tracking(product.handle)
+            rc, stopped = sample(library, product, cusp)
+            assert rc == STOP and stopped[:5] == [0., 0., 1., 0., entry_gear]
+            assert library.probe_gate(product.handle, 2) == 0  # No acknowledged serial STOP
+            assert library.probe_gate(product.handle, 0) == 1
+            rc, entering = sample(library, product, cusp+1, 1020000)
+            assert rc == FOUND and entering[0]*entry_gear > 0 and entering[2:4] == [0., 1.]
+            traces.append(stopped + entering)
+        finally:
+            product.close()
+    assert traces[1] == pytest.approx(traces[0], abs=1e-6)
 
 
 def parking_trace(library,product,tmp_path,validation=None):

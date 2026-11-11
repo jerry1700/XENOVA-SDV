@@ -1122,6 +1122,23 @@ static bool path_shape(const struct lp_path *path){
  }
  return true;
 }
+bool lp_prepare_tracking(const struct lp_path *path,struct lp_tracking_geometry *geometry){
+ if(!path_shape(path))return false;
+ if(legacy_forward_path(path))return true;
+ for(unsigned part=0;part<path_segments(path);part++){
+  xenova_drive_GearSegment segment=path_segment(path,part);
+  geometry->arc[segment.first_index]=0;
+  geometry->max_steer_slope[part]=0;
+  for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
+   float ds=distance(path->points[i-1].pose,path->points[i].pose);
+   if(ds<=0)return false;
+   geometry->arc[i]=geometry->arc[i-1]+ds;
+   float slope=fabsf(path->points[i].steering_rad-path->points[i-1].steering_rad)/ds;
+   geometry->max_steer_slope[part]=fmaxf(geometry->max_steer_slope[part],slope);
+  }
+ }
+ return true;
+}
 enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
  struct lp_metrics *m,const struct lp_budget *b){
  if(!path_shape(p)||!c||!w)return LP_INPUT;
@@ -1229,6 +1246,15 @@ void lp_tracker_begin(struct lp_tracker *tracker,uint64_t token){
 static float arc_to(const struct lp_path *path,xenova_drive_GearSegment segment,size_t end){
  float arc=0;for(size_t i=segment.first_index+1;i<=end;i++)arc+=distance(path->points[i-1].pose,path->points[i].pose);return arc;
 }
+static size_t first_edge(const struct lp_tracking_geometry *geometry,xenova_drive_GearSegment segment,float station){
+ size_t first=segment.first_index,last=segment.last_index;
+ if(geometry)while(first<last){
+  size_t middle=first+(last-first)/2;
+  if(geometry->arc[middle+1]<station)first=middle+1;
+  else last=middle;
+ }
+ return first;
+}
 bool lp_tracker_next_segment(struct lp_tracker *tracker,const struct lp_path *path,uint64_t now,uint64_t original_stop,
  const struct lp_direction_fact *fact){
  if(!tracker||!path||!fact||!tracker->initialized||tracker->segment+1>=path_segments(path)||!original_stop||
@@ -1241,7 +1267,8 @@ bool lp_tracker_next_segment(struct lp_tracker *tracker,const struct lp_path *pa
  tracker->segment++;tracker->index=path_segment(path,tracker->segment).first_index;tracker->progress=0;
  tracker->gate_revision=fact->gate_revision;tracker->last_pi_us=0;tracker->last_velocity=0;return true;
 }
-static bool progress_project(struct lp_tracker *tracker,const struct lp_path *path,dw_pose pose,const dw_vehicle *vehicle,
+static bool progress_project(struct lp_tracker *tracker,const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ dw_pose pose,const dw_vehicle *vehicle,
  const struct lp_config *c,float dt,float *remaining,bool *terminal_in_window,bool *pose_in_window){
  if(!tracker->initialized){
   tracker->segment=path->execution.present?path->execution.mission.active_segment:0;
@@ -1249,9 +1276,11 @@ static bool progress_project(struct lp_tracker *tracker,const struct lp_path *pa
   xenova_drive_GearSegment segment=path_segment(path,tracker->segment);
   tracker->index=path->initial_tracker_index;
   if(tracker->index<segment.first_index||tracker->index>segment.last_index)return false;
-  tracker->progress=arc_to(path,segment,tracker->index);tracker->last_pi_us=path->initial_pi_us;
+  tracker->progress=geometry?geometry->arc[tracker->index]:arc_to(path,segment,tracker->index);
+  tracker->last_pi_us=path->initial_pi_us;
  }
- xenova_drive_GearSegment segment=path_segment(path,tracker->segment);float total=arc_to(path,segment,segment.last_index);
+ xenova_drive_GearSegment segment=path_segment(path,tracker->segment);
+ float total=geometry?geometry->arc[segment.last_index]:arc_to(path,segment,segment.last_index);
  float elapsed=dt;
  if(vehicle->pi_sample_us&&tracker->last_pi_us){
   if(vehicle->pi_sample_us<tracker->last_pi_us)return false;
@@ -1263,8 +1292,10 @@ static bool progress_project(struct lp_tracker *tracker,const struct lp_path *pa
   c->primitive_speed*c->primitive_duration/16;
  float low=fmaxf(0,tracker->progress-error),high=fminf(total,tracker->progress+fmaxf(c->max_velocity,c->max_reverse_velocity)*elapsed+.5f*c->max_accel*elapsed*elapsed+error);
  if(!tracker->initialized&&!path->initial_pi_us){low=0;high=total;} /* explicit software/new-plan first correspondence */
- float best=FLT_MAX,best_s=0,arc=0;size_t best_index=0;bool found=false,ambiguous=false;*pose_in_window=false;
- for(size_t i=segment.first_index;i<segment.last_index;i++){
+ size_t first=first_edge(geometry,segment,low);
+ float best=FLT_MAX,best_s=0,arc=geometry?geometry->arc[first]:0;
+ size_t best_index=0;bool found=false,ambiguous=false;*pose_in_window=false;
+ for(size_t i=first;i<segment.last_index&&(!geometry||arc<=high);i++){
   dw_pose a=path->points[i].pose,z=path->points[i+1].pose;float dx=z.x-a.x,dy=z.y-a.y,length=hypotf(dx,dy);
   if(length<=0||!isfinite(length))return false;
   float begin=fmaxf(low,arc),end=fminf(high,arc+length);
@@ -1286,9 +1317,11 @@ static bool progress_project(struct lp_tracker *tracker,const struct lp_path *pa
  tracker->initialized=true;if(vehicle->pi_sample_us)tracker->last_pi_us=vehicle->pi_sample_us;
  *remaining=fmaxf(0,total-tracker->progress);*terminal_in_window=high+1e-4f>=total;return true;
 }
-static dw_pose carrot(const struct lp_path *path,xenova_drive_GearSegment segment,float station){
- float arc=0;
- for(size_t i=segment.first_index;i<segment.last_index;i++){
+static dw_pose carrot(const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ xenova_drive_GearSegment segment,float station){
+ size_t first=first_edge(geometry,segment,station);
+ float arc=geometry?geometry->arc[first]:0;
+ for(size_t i=first;i<segment.last_index;i++){
   dw_pose a=path->points[i].pose,z=path->points[i+1].pose;float length=distance(a,z);
   if(station<=arc+length){float u=clamp((station-arc)/length,0,1);
    return (dw_pose){a.x+u*(z.x-a.x),a.y+u*(z.y-a.y),dw_angle(a.yaw+u*dw_angle(z.yaw-a.yaw))};}
@@ -1368,11 +1401,12 @@ static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const stru
  return LP_PATH_FOUND;
 }
 
-enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,const dw_world *w,dw_pose pose,
+static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ const dw_world *w,dw_pose pose,
  const dw_vehicle *vehicle,const struct lp_config *c,float dt,struct lp_command *out,struct lp_metrics *m,const struct lp_budget *b){
  if(legacy_forward_path(path))return track_legacy_forward(tracker,path,w,pose,vehicle,c,dt,out,m,b);
  memset(out,0,sizeof(*out));out->result=LP_INPUT;
- if(!path_shape(path)||!dw_pose_finite(pose)||!isfinite(dt)||dt<=0||dt>.1f||
+ if((!geometry&&!path_shape(path))||!dw_pose_finite(pose)||!isfinite(dt)||dt<=0||dt>.1f||
     !isfinite(vehicle->velocity_mps)||vehicle->velocity_mps< -c->max_reverse_velocity-.01f||vehicle->velocity_mps>c->max_velocity+.01f||
     !isfinite(vehicle->position_error_m)||vehicle->position_error_m<0||vehicle->position_error_m>c->max_position_error||
     !isfinite(vehicle->heading_error_rad)||vehicle->heading_error_rad<0||vehicle->heading_error_rad>c->max_heading_error||
@@ -1386,7 +1420,7 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  if(!isfinite(steering)||fabsf(steering)+vehicle->steering_error_rad>c->max_steer+.0001f)return LP_INPUT;
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
  float uncertainty=vehicle->position_error_m+radius*vehicle->heading_error_rad,remaining;bool terminal_in_window,pose_in_window;
- if(!progress_project(tracker,path,pose,vehicle,c,dt,&remaining,&terminal_in_window,&pose_in_window))return LP_INPUT;
+ if(!progress_project(tracker,path,geometry,pose,vehicle,c,dt,&remaining,&terminal_in_window,&pose_in_window))return LP_INPUT;
  xenova_drive_GearSegment segment=path_segment(path,tracker->segment);int gear=segment.signed_direction;
  if(vehicle->velocity_mps*gear< -.01f)return LP_INPUT;
  out->segment_index=tracker->segment;out->cusp_index=tracker->segment;out->requested_direction=gear;
@@ -1433,14 +1467,17 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  if(captured){
   /* Region completion keeps the actual correspondence for State/warm import.
    * Only point/cusp completion consumes the path endpoint. */
-  if(!parking_final){tracker->progress=arc_to(path,segment,segment.last_index);tracker->index=segment.last_index;}
+  if(!parking_final){
+   tracker->progress=geometry?geometry->arc[segment.last_index]:arc_to(path,segment,segment.last_index);
+   tracker->index=segment.last_index;
+  }
   out->steer=steering;out->emergency=true;out->known_distance=known;out->result=LP_STOP;
   if(has_next){out->gate_required=true;out->requested_direction=path_segment(path,tracker->segment+1).signed_direction;}
   tracker->completed++;return LP_STOP;
  }
  if(stopped_result!=LP_PATH_FOUND)return out->result=stopped_result;
  float lookahead=clamp(fabsf(vehicle->velocity_mps)*c->lookahead_time,c->lookahead_min,c->lookahead_max);
- dw_pose target=carrot(path,segment,tracker->progress+lookahead),local=dw_compose(dw_inverse(pose),target);
+ dw_pose target=carrot(path,geometry,segment,tracker->progress+lookahead),local=dw_compose(dw_inverse(pose),target);
  float chord2=local.x*local.x+local.y*local.y;
  if(chord2<1e-8f||gear*local.x<=0)return LP_INPUT;
  out->target_x=local.x;out->target_y=local.y;out->geometric_distance=sqrtf(chord2);out->curvature=2*local.y/chord2;
@@ -1452,7 +1489,7 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode||live_task.changing)&&
   !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,&narrow_view);
  if(narrow||parking_entry){
-  dw_pose reference_pose=carrot(path,segment,tracker->progress);
+  dw_pose reference_pose=carrot(path,geometry,segment,tracker->progress);
   dw_pose error=dw_compose(dw_inverse(reference_pose),pose);
   float response=parking_entry?LP_PARKING_TRACK_RESPONSE_M:c->lookahead_min*(.24f/.35f);
   float feed=tanf(path->points[tracker->index].steering_rad)/c->wheelbase;
@@ -1464,7 +1501,10 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  if(narrow)speed=fminf(speed,c->narrow_lane_speed_mps);
  if(parking_entry)speed=fminf(speed,LP_PARKING_TRACK_SPEED_MPS);
  if(fabsf(out->curvature)>1e-6f)speed=fminf(speed,sqrtf(c->max_lateral_accel/fabsf(out->curvature)));
- for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
+ if(geometry){
+  float slope=geometry->max_steer_slope[tracker->segment];
+  if(slope>1e-6f)speed=fminf(speed,c->steer_rate/slope);
+ }else for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
   float ds=distance(path->points[i-1].pose,path->points[i].pose),slope=fabsf(path->points[i].steering_rad-path->points[i-1].steering_rad)/ds;
   if(slope>1e-6f)speed=fminf(speed,c->steer_rate/slope);
  }
@@ -1497,6 +1537,15 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  if(rc!=LP_PATH_FOUND){out->steer=steering;out->emergency=true;return out->result=rc;}
  out->velocity=gear*limited;out->steer=delta;out->result=LP_PATH_FOUND;
  tracker->last_velocity=out->velocity;tracker->last_steer=delta;tracker->completed++;return LP_PATH_FOUND;
+}
+enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,const dw_world *w,dw_pose pose,
+ const dw_vehicle *vehicle,const struct lp_config *c,float dt,struct lp_command *out,struct lp_metrics *m,const struct lp_budget *b){
+ return track_path(tracker,path,NULL,w,pose,vehicle,c,dt,out,m,b);
+}
+enum lp_result lp_track_prepared(struct lp_tracker *tracker,const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ const dw_world *w,dw_pose pose,const dw_vehicle *vehicle,const struct lp_config *c,float dt,
+ struct lp_command *out,struct lp_metrics *m,const struct lp_budget *b){
+ return track_path(tracker,path,geometry,w,pose,vehicle,c,dt,out,m,b);
 }
 const char *lp_reason(enum lp_result result) {
  static const char *const names[]={"SEARCHING","PATH_FOUND","NORMAL_STOP","SEARCH_NOT_FOUND","NODE_BUDGET",

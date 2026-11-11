@@ -76,6 +76,9 @@ struct lp_search {
  struct lp_goal_set goals;struct lp_space space;unsigned selected_goal;
 };
 struct lp_road_state {dw_pose pose;float arc,offset,curvature,length;};
+/* Geometry of one immutable path, owned by its published slot. Each segment
+ * starts at arc zero. Live map and vehicle checks remain in the tracker. */
+struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3];};
 struct lp_tracker { size_t index;float last_velocity,last_steer;uint64_t completed;
  uint64_t path_token,last_pi_us,gate_revision;unsigned segment;float progress;bool initialized; };
 /* 실제 현재 owner의 STOP/APPLIED·정지/조향 확인을 소비하는 내부 사실이다.
@@ -127,6 +130,10 @@ enum lp_result lp_clearance_lower(const struct lp_path *,const dw_world *,const 
  struct lp_metrics *,const struct lp_budget *,float *);
 enum lp_result lp_track(struct lp_tracker *,const struct lp_path *,const dw_world *,dw_pose,const dw_vehicle *,
  const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,const struct lp_budget *);
+bool lp_prepare_tracking(const struct lp_path *,struct lp_tracking_geometry *);
+/* Only use geometry prepared for this exact, unmodified path. */
+enum lp_result lp_track_prepared(struct lp_tracker *,const struct lp_path *,const struct lp_tracking_geometry *,
+ const dw_world *,dw_pose,const dw_vehicle *,const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,const struct lp_budget *);
 /* tracker 단일 owner. 새 immutable path token만 progress를 초기화한다. */
 void lp_tracker_begin(struct lp_tracker *,uint64_t path_token);
 bool lp_tracker_next_segment(struct lp_tracker *,const struct lp_path *,uint64_t now_pi_us,
