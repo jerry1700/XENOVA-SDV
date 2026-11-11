@@ -366,6 +366,16 @@ registry의 신원/경로·디스크 alias 검사와 대상 원 create의 완료
 단건 부재는 `VM_NOT_FOUND`, 지속 변경은 `TARGET_CHANGED`, 예산 만료는 `DEADLINE_EXCEEDED`다.
 부분 실패를 빈 목록으로 바꾸지 않는다. 원 실행 제어의 현재 intent/신원/기한 guard는 그대로 필요하다.
 
+Worker 내부 조회는 `Manager.call('recovery-intents', {})`를 사용한다. 이 조회도 Xen·공통
+잠금·상태 쓰기 없이 등록 집합과 각 항목을 재대조한다. 원 create의 VM UUID·operation ID·원
+명세가 공개 instance와 일치하고 작업이 준비/게시/등록 단계에 남아 있으면 그 항목에만
+`registration_pending: true`를 붙인다. 해당 항목의 의도는 `unknown`, revision은 null,
+applicable은 false이며 Worker는 `intent_known=False`로 받아 건강 관측 불가와 판정 보류를
+유지한다. 목록에서 제거하거나 중지 의도로 바꾸지 않으므로 기존 건강·복구 기록도 유지한다.
+다른 VM의 현재 의도 판정은 계속한다. 원장이 없거나 신원이 다르거나 등록부가 손상된 경우는
+기존 조회 오류로 처리한다. 공개 CLI·HTTP의 `intents` 응답에는 이 예외를 적용하지 않는다.
+이 내부 조회는 필터·execute·idempotency key를 받지 않는다.
+
 <a id="cmd-status"></a>
 ### `xenova-vm status` — list 별칭
 
@@ -479,6 +489,13 @@ xenova-vm get "$VM_ID" --json
 `effective_status=RUNNING`을 반환한다. 이 `ok=true`는 원 작업 확인 성공이며 등록 완료나
 VM 실행 성공이 아니다. 완료 재전달에서 현재 관측만 실패하면 원 결과와
 `current=null`·`diagnostic_warnings`를 반환하고 원 성공을 유지한다.
+
+게시 후 등록의 첫 lifecycle 기록과 마지막 intent 초기화에서 `admission`이 경합하면,
+같은 호출·원 요청을 유지한 채 공통 잠금 밖에서 기다린다. 대상 lease는 유지하며 다시
+진입할 때 원장·host·instance·tombstone을 대조한다. 대기는 이번 호출 예산 안으로 제한하고,
+Linux에 아직 필요한 DHCP 효과는 원 생성 실행 기한과 정리 여유도 적용한다. 원 기한을
+연장하거나 재복사·새 요청 수락으로 바꾸지 않는다. 만료·다른 I/O 오류·신원 변경은 원
+실패와 게시 자산을 보존한다. 게시 자산을 게시 전 자동 수습 대상으로 넘기지 않는다.
 
 **오류 응답**
 

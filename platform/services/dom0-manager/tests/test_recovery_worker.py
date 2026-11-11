@@ -655,6 +655,64 @@ def test_worker_does_not_clear_health_on_a_partial_intent_response():
 
 
 
+def test_pending_registration_keeps_other_intents_eligible_and_recovers_on_refresh():
+    pending = _view(STOPPED, "pending", desired="unknown", applicable=False, revision=None)
+    manager = FakeManager([_view(DEBIAN, "debian-dev"),
+                           _view(ZEPHYR, "zephyr-drive-a", kind="zephyr"),
+                           {**pending, "registration_pending": True}])
+    observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents")
+
+    observations = {o.vm_id: o for o in observer()}
+    assert observer.intent_known
+    assert observations[DEBIAN].eligible and observations[ZEPHYR].eligible
+    assert not observations[STOPPED].intent_known and not observations[STOPPED].eligible
+
+    manager.views[2] = {**_view(STOPPED, "pending"), "registration_pending": True}
+    assert not any(o.intent_known for o in observer())
+    assert not observer.intent_known
+
+    manager.views[2] = _view(STOPPED, "pending", desired="stopped")
+    observations = {o.vm_id: o for o in observer()}
+    assert observer.intent_known and observations[STOPPED].intent_known
+    assert not observations[STOPPED].eligible
+
+
+def test_pending_registration_does_not_block_another_vm_crash_judgment():
+    clock = [1000.0]
+    pending = {**_view(STOPPED, "pending", desired="unknown", applicable=False, revision=None),
+               "registration_pending": True}
+    manager = FakeManager([_view(DEBIAN, "debian-dev", xen_state="crashed", domid=1), pending])
+    xl = FakeRunner({("xl", "list", "-v"): XL_LIST_V.replace("-b----", "---sc-", 1)})
+    observer = PlatformObserver(manager, Xl(xl), intent_action="recovery-intents", clock=lambda: clock[0])
+    watcher = Watcher(SETTINGS, HeartbeatTable(), AppHeartbeatTable(),
+                      confirm=observer.confirm, clock=lambda: clock[0])
+    client = FakeClient()
+    worker = RecoveryWorker(SETTINGS, observer, watcher, link=lambda: link_state(client),
+                            health_publisher=HealthPublisher(client), clock=lambda: clock[0])
+    judged = worker.run_once()
+    assert [(j.vm_id, j.reason) for j in judged] == [(DEBIAN, FailureReason.DOMAIN_CRASHED)]
+    assert watcher.health(STOPPED).state == HealthState.OBSERVATION_UNAVAILABLE
+    assert not watcher.health(STOPPED).intent_known and client.cleared == []
+    clock[0] += 5
+    worker.run_once()
+    assert client.cleared == []
+
+
+def test_recovery_intents_falls_back_once_to_the_existing_read_contract():
+    class OlderManager(FakeManager):
+        def call(self, action, spec=None, **kwargs):
+            if action == "recovery-intents":
+                self.calls.append((action, spec))
+                return {"ok": False, "error": {"code": "INVALID_SPEC", "message": "unsupported management action",
+                                               "retryable": False, "details": {}}}
+            return super().call(action, spec, **kwargs)
+
+    manager = OlderManager([_view(DEBIAN, "debian-dev")])
+    observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents")
+    assert observer()[0].intent_known and observer()[0].intent_known
+    assert [action for action, _ in manager.calls] == ["recovery-intents", "intents", "templates", "intents"]
+
+
 def test_intent_rows_without_an_applicable_intent_are_valid():
     """명시 의도가 없으면 desired_state=unknown·revision null·applicable=false 다(플랫폼 계약). 손상이 아니다."""
     manager = FakeManager([_view(DEBIAN, "debian-dev", desired="unknown", applicable=False, revision=None),
