@@ -184,8 +184,6 @@ class FrozenSensorConsumerTests(unittest.TestCase):
         leaf = f.fixture.leaves[evidence.sensor_id][1]
         result = tof_evidence(evidence, leaf, f.calibration, admission=view.sensors, now_us=f.now)
         self.assertIs(result.stamp, evidence.stamp)
-        self.assertEqual(len(result.hit_boxes),1)
-        self.assertEqual(len(result.patches),0)
         with self.assertRaises(ValueError):
             tof_evidence(replace(evidence), leaf, f.calibration, admission=view.sensors, now_us=f.now)
 

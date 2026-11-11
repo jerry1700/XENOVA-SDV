@@ -14,7 +14,6 @@ from test_oak_device import sdk_fixture
 from test_yolop_asset import fake_sdk_blob, pinned_manifest
 from xenova_vehicle.oak import device, yolop_device
 from xenova_vehicle.oak.yolop_asset import BLOB_SHA256, BLOB_SIZE, ValidatedYolopAsset
-from xenova_vehicle.runtime.health_policy import ConfigurationError
 
 
 CONTEXT = "1" * 64
@@ -153,18 +152,10 @@ class YolopDeviceTests(unittest.TestCase):
     def test_incompatible_graph_version_fails_before_device_open(self):
         f = yolop_fixture()
         f.pipeline.getRequiredOpenVINOVersion.return_value = "Version.VERSION_2022_1"
-        with self.assertRaisesRegex(ConfigurationError, "OpenVINO versions differ"):
+        with self.assertRaisesRegex(ValueError, "OpenVINO versions differ"):
             self.start_source(f)
         f.dai.Device.assert_not_called()
         f.owner.startPipeline.assert_not_called()
-
-    def test_native_device_failure_is_not_reclassified_as_asset_configuration(self):
-        f = yolop_fixture()
-        failure = RuntimeError('USB connection failed')
-        f.dai.Device.side_effect = failure
-        with self.assertRaises(RuntimeError) as raised:
-            self.start_source(f)
-        self.assertIs(raised.exception, failure)
 
     def test_context_is_explicit_and_not_fabricated_by_the_source(self):
         for context in ("", "a" * 63, "A" * 64, True):

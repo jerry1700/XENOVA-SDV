@@ -164,7 +164,7 @@ def _current(draft, state, basis, context, source, calibration, sensors, vehicle
 
 def build_mapping_world(draft, catalog_state, basis, *, context, source, calibration,
                         sensors, current_vehicle, clock_lease, sequence, completed_j_us, published_j_us,
-                        scene_draft=None,hazard_draft=None,atlas_owner=None,tof_overlay=None,sensor_snapshot=None):
+                        scene_draft=None,hazard_draft=None,atlas_owner=None):
     """원 채택 후보를 build_world에 전달한다. None은 원 자료/기한/표현의 NOT_READY다.
 
     sensors는 원 admission의 frozen read-view 또는 기존 owner다. 외부 source 교체 여부와
@@ -230,9 +230,6 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         bound = WorldSource.from_calibration('LIVE', snapshot['frame_id'], context.frame_epoch,
             snapshot['clock_id'], calibration, capture, snapshot_us, wire_clock_epoch=source['clock_epoch'])
         static=None if retained is None else retained.static_retained
-        if tof_overlay is not None:
-            snapshot, static = tof_overlay.apply(snapshot, sensor_snapshot=sensor_snapshot,
-                alignment=alignment, snapshot_us=snapshot_us, now_us=published_j_us, static_retained=static)
         built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         inventory = catalog_state.view.parking
         if inventory is not None:

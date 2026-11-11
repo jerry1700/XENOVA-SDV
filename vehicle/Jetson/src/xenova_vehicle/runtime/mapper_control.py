@@ -65,7 +65,6 @@ class MapperControl:
         self.latest_summary=None
         self.result_count=0
         self._result_phase=None
-        self.wait_reason=None
 
     def _refresh_phase(self, now):
         if not self.ready or self.actor.state not in _ACTIVE_STATES:return
@@ -82,12 +81,11 @@ class MapperControl:
 
     def _complete_nn(self, event, *, fresh):
         if self._parser is None or self._parser[0]!=event.job_id:
-            raise RuntimeError('NN completion has no original compute parser start')
+            raise RuntimeError('NN completion has no original sent parser start')
         _,stamp,started=self._parser
         if not started<=event.completed_us<=self.clock():
             raise ValueError('NN completion changed original causal time')
         self._parser=None
-        fresh = fresh and self.clock()<event.expires_us
         if not fresh:
             if not self.ready:
                 self.streak=0
@@ -99,10 +97,10 @@ class MapperControl:
         self.previous=stamp
         self.streak+=1
         self.last_completion=event.completed_us
-        self.wait_reason=None
         if not self.ready and self.streak>=5:
+            if self.deadline.expired(self.clock()) or self.deadline.expired(event.completed_us):
+                raise TimeoutError('parser completion missed original readiness deadline')
             self.ready=True
-            self.wait_reason=None
             self._refresh_phase(self.clock())
             self.actor.progress('NN_READY',stamp.sequence,completed=event.completed_us,
                                 reason='METRIC_NOT_READY')
@@ -119,13 +117,22 @@ class MapperControl:
                     raise RuntimeError('mapper start replaced an active job')
                 self._metric_job=event.job_id
                 self._metric(event,'MAPPER_STARTED',str(event.expires_us))
-            elif event.kind=='PARSER_STARTED':
+            elif event.kind=='PARSER_START_REQUIRED':
+                if self.clock()>=event.parser_deadline_us or self.clock()>=event.expires_us:
+                    continue
                 stamp=SourceStamp(self.nn_stream,*event.nn_source_key)
+                if not stamp.advances(self.previous):
+                    self.compute.skip_parser(event.job_id)
+                    continue
                 if self._parser is not None:
                     raise RuntimeError('one compute owner cannot start two NN parsers')
-                self.actor.progress('PARSER_STARTED',stamp.sequence,completed=event.started_us,
-                                    request_id=event.job_id)
+                packet=self.actor.progress('PARSER_STARTED',stamp.sequence,completed=event.started_us,
+                                           request_id=event.job_id)
+                actual=self.actor.await_sent(packet,cap_us=event.parser_deadline_us)
                 self._parser=(event.job_id,stamp,event.started_us)
+                if not self.compute.acknowledge_parser_start(event.job_id,actual):
+                    # 원 시작 진술은 이미 전송됐다. 취소 terminal로만 닫는다.
+                    continue
             elif event.kind=='NN_COMPLETED':
                 self._complete_nn(event,fresh=event.accepted)
             elif event.kind=='PROGRESS':
@@ -141,7 +148,7 @@ class MapperControl:
                 if self._metric_job==event.job_id:
                     self._metric(event,'MAPPER_COMPLETED',event.reason)
                     self._metric_job=None
-                if event.kind=='FAILED':
+                if event.kind=='FAILED' or event.reason=='PARSER_DEADLINE':
                     raise RuntimeError('mapper computation failed: '+str(event.reason))
             elif event.kind!='NN_SKIPPED':
                 raise ValueError('unsupported compute lifecycle event')
@@ -163,7 +170,6 @@ class MapperControl:
         now=self.clock()
         self._refresh_phase(now)
         if not self.ready and self.deadline.expired(now):
-            self.wait_reason='NN_WARMUP_WAIT_INPUT'
+            raise TimeoutError('parser5 original first-output deadline elapsed')
         if self.ready and self.last_completion is not None and now-self.last_completion>=self.nn_stall_us:
-            self.wait_reason='NN_WAIT_INPUT'
-            if self.actor.state in _ACTIVE_STATES:self.actor.state='WAIT_INPUT'
+            raise TimeoutError('fresh NN parser association stalled')

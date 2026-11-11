@@ -10,7 +10,7 @@
 - -n 은 "Net%d RX: ...bytes ... TX: ...bytes" 줄을, -x 는 "VBD <type> <dev> <details> OO: RD: WR: RSECT: WSECT:" 줄을 도메인 행 뒤에 붙인다.
   바이트는 장치 줄의 값이 정확하다(열의 NETTX(k)·NETRX(k) 는 KiB 로 잘린다). VBD 오류면 값이 '-' 다.
   Linux 의 <details> 는 "[%2x:%2x] " 라 minor 가 한 자리면 "[ca: 0]" 처럼 대괄호 안에 공백이 있다. 토큰 하나로 읽지 않고 OO: 앞까지 통째로 읽는다.
-- 두 명령(xentop, xl list -v)은 요청 전체 deadline 하나를 나눠 쓴다. xentop 이 쓴 시간을 뺀 나머지만 xl list -v 에 준다(계약 조회 한도 5초).
+- 두 명령(xentop, xl list -l)은 요청 전체 deadline 하나를 나눠 쓴다. xentop 이 쓴 시간을 뺀 나머지만 xl list -l 에 준다(계약 조회 한도 5초).
 - 이름은 -f 가 없으면 10자로 잘려 xl list 와 대조할 수 없다. 항상 -f 로 부른다.
 - 헤더는 반복마다 다시 찍힌다. -i 2 이상이면 마지막 반복만 쓴다.
 """
@@ -284,10 +284,10 @@ def collect_stats(
     budget_s: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> StatsSample:
-    """xentop 행을 `xl list -v` 의 이름→(domid, uuid) 로 대조해 vm_id 를 붙인다. Domain-0 과 uuid 가 UUID 가 아닌 도메인은 뺀다.
+    """xentop 행을 `xl list -l` 의 이름→(domid, uuid) 로 대조해 vm_id 를 붙인다. Domain-0 과 uuid 없는 도메인은 뺀다.
 
     allowed 가 있으면 그 vm_id 만 남긴다(platform 모드: registry 등록 여부). 없으면 uuid 가 있는 모든 도메인(xen 진단 모드).
-    budget_s(기본 xentop.timeout_s)는 요청 전체 deadline 이다. xentop 이 쓴 시간을 뺀 나머지를 xl list -v 에 준다.
+    budget_s(기본 xentop.timeout_s)는 요청 전체 deadline 이다. xentop 이 쓴 시간을 뺀 나머지를 xl list -l 에 준다.
     """
     budget = xentop.timeout_s if budget_s is None else budget_s
     if budget <= 0:
@@ -298,10 +298,12 @@ def collect_stats(
     if remaining <= 0:
         raise DriverTimeout(f"stats deadline of {budget:g}s exhausted by xentop")
     identities: dict[str, tuple[int, str | None]] = {}
-    for entry in xl.list_verbose(timeout_s=remaining):
-        if entry.domid == 0 or entry.name == DOM0_NAME:
+    for entry in xl.list_long(timeout_s=remaining):
+        c_info = ((entry.get("config") or {}).get("c_info") or {})
+        name, domid = c_info.get("name"), entry.get("domid")
+        if not name or domid == 0 or name == DOM0_NAME:
             continue
-        identities[entry.name] = (entry.domid, entry.uuid)
+        identities[name] = (int(domid), c_info.get("uuid"))
     domains: list[DomainStats] = []
     for row in rows:
         if row.name == DOM0_NAME:

@@ -18,7 +18,6 @@ from dom0_manager.drivers.xl import (
     parse_xl_info,
     parse_xl_list,
     parse_xl_list_long,
-    parse_xl_list_verbose,
 )
 from dom0_manager.errors import DriverError, DriverTimeout
 from dom0_manager.main import create_app
@@ -41,14 +40,6 @@ XL_LIST_LONG = json.dumps(
         {"domid": 4, "config": {"c_info": {"name": "debian-safety", "uuid": str(DEBIAN)}}},
     ]
 )
-
-# `xl list -v` 와 같은 열 배치(헤더의 탭 포함, 실보드 픽스처 xl-list-v.txt 참고)
-XL_LIST_V = f"""\
-Name                                        ID   Mem VCPUs\tState\tTime(s)   UUID                            Reason-Code\tSecurity Label
-Domain-0                                     0  1024     4     r-----     123.4 00000000-0000-0000-0000-000000000000        -                -
-alpine-drive                                 3   256     1     -b----      10.2 {ALPINE}        -                -
-debian-safety                                4   512     2     --p---       3.0 {DEBIAN}        -                -
-"""
 
 XL_INFO = """\
 host                   : xenova
@@ -77,7 +68,10 @@ class FakeRunner:
 
 
 def _healthy_runner(fail: dict[tuple[str, ...], Exception] | None = None):
-    return FakeRunner({("xl", "list", "-v"): XL_LIST_V, ("xl", "info"): XL_INFO}, fail=fail)
+    return FakeRunner(
+        {("xl", "list"): XL_LIST, ("xl", "list", "-l"): XL_LIST_LONG, ("xl", "info"): XL_INFO},
+        fail=fail,
+    )
 
 
 @pytest.mark.parametrize(
@@ -137,49 +131,6 @@ def test_xen_driver_lists_domains_without_dom0_and_uses_uuid_as_vm_id():
     ]
     assert driver.get_domain(DEBIAN).name == "debian-safety"
     assert all(timeout == 5 for _, timeout in runner.calls)
-
-
-def test_xen_driver_lists_with_one_verbose_call_and_never_reads_full_configs():
-    """목록 한 번에 xl 프로세스 하나다. 도메인마다 설정 JSON 을 만드는 `xl list -l` 은 부르지 않는다."""
-    runner = _healthy_runner()
-    XenDriver(Xl(runner, query_timeout_s=5)).list_domains()
-    assert [args for args, _ in runner.calls] == [("xl", "list", "-v")]
-
-
-def test_parse_xl_list_verbose_reads_uuid_and_shutdown_reason_columns():
-    text = XL_LIST_V + f"crashed-guest                                5   128     1     ---sc-       0.4 {UUID(int=7)}        3                -\n"
-    rows = parse_xl_list_verbose(text)
-    assert [(r.name, r.domid, r.mem_mib, r.vcpus, r.flags, r.uuid) for r in rows] == [
-        ("Domain-0", 0, 1024, 4, "r-----", "00000000-0000-0000-0000-000000000000"),
-        ("alpine-drive", 3, 256, 1, "-b----", str(ALPINE)),
-        ("debian-safety", 4, 512, 2, "--p---", str(DEBIAN)),
-        ("crashed-guest", 5, 128, 1, "---sc-", str(UUID(int=7))),
-    ]
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        XL_LIST,  # -v 가 아닌 출력: 헤더에 UUID 열이 없다
-        XL_LIST_V.split("\n", 1)[1],  # 헤더 없음
-        XL_LIST_V.replace(f"{DEBIAN}        -                -", f"{DEBIAN}        -"),  # 열이 빠짐
-        XL_LIST_V.replace("debian-safety                                4", "debian-safety                                x"),
-    ],
-)
-def test_parse_xl_list_verbose_rejects_unexpected_output(text):
-    with pytest.raises(DriverError):
-        parse_xl_list_verbose(text)
-
-
-def test_only_the_first_line_is_the_header_so_a_guest_named_name_is_listed():
-    text = XL_LIST_V + f"NameServer                                   6   128     1     -b----       0.1 {UUID(int=6)}        -                -\n"
-    assert [r.name for r in parse_xl_list_verbose(text)] == ["Domain-0", "alpine-drive", "debian-safety", "NameServer"]
-
-
-def test_xen_driver_rejects_a_guest_whose_uuid_column_is_not_a_uuid():
-    runner = FakeRunner({("xl", "list", "-v"): XL_LIST_V.replace(str(DEBIAN), "not-a-uuid")})
-    with pytest.raises(DriverError, match="non-UUID uuid"):
-        XenDriver(Xl(runner)).list_domains()
 
 
 def test_xen_driver_health_false_on_timeout_or_failure():
@@ -290,23 +241,18 @@ def _board_text(name: str) -> str:
     return (BOARD / name).read_text(encoding="utf-8")
 
 
-def _board_verbose(list_file: str) -> str:
-    """실보드 `xl list` 출력(list_file)에 같은 보드의 `xl list -v` 출력에서 domid 가 같은 줄의 UUID·Reason-Code·Label 열을 붙인다.
-    xl-list-v.txt 는 pause 전 표본이라, pause 한 상태의 -v 출력은 두 실측 출력을 합쳐 만든다."""
-    verbose = _board_text("xl-list-v.txt").splitlines()
-    tails = {int(line.split()[1]): line.split(None, 6)[6] for line in verbose[1:]}
-    lines = _board_text(list_file).splitlines()
-    rows = [f"{line} {tails[int(line.split()[1])]}" for line in lines[1:]]
-    return "\n".join([verbose[0], *rows]) + "\n"
-
-
 def _board_runner(list_file: str = "xl-list.txt") -> FakeRunner:
-    listing = _board_text("xl-list-v.txt") if list_file == "xl-list.txt" else _board_verbose(list_file)
-    return FakeRunner({("xl", "list", "-v"): listing, ("xl", "info"): _board_text("xl-info.txt")})
+    return FakeRunner(
+        {
+            ("xl", "list"): _board_text(list_file),
+            ("xl", "list", "-l"): _board_text("xl-list-l.json"),
+            ("xl", "info"): _board_text("xl-info.txt"),
+        }
+    )
 
 
-def test_board_xen_driver_lists_guests_and_skips_dom0():
-    """실보드 `xl list -v` 에서 Domain-0 의 UUID 는 모두 0 이다. 목록은 게스트 셋만 UUID 로 낸다."""
+def test_board_xen_driver_lists_guests_and_skips_dom0_without_uuid():
+    """실보드의 `xl list -l` 에서 Domain-0 은 c_info 에 uuid 가 없다. 목록은 그래도 게스트 셋만 UUID 로 낸다."""
     driver = XenDriver(Xl(_board_runner()))
     assert [(d.name, d.domid, d.vm_id, d.state, d.vcpus, d.memory_mib) for d in driver.list_domains()] == [
         ("debian-dev", 1, DEBIAN_DEV, VmState.running, 1, 512),

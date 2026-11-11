@@ -172,7 +172,8 @@ class MapperOperationComputeTests(unittest.TestCase):
         owner.start(); seen = []
         try:
             item = compute_fixtures.item(1, nn=True); owner.submit(item)
-            start = compute_fixtures.event_of(owner, 'PARSER_STARTED', seen)
+            start = compute_fixtures.event_of(owner, 'PARSER_START_REQUIRED', seen)
+            owner.acknowledge_parser_start(item.job_id, compute_fixtures.sent(start))
             self.assertTrue(entered.wait(2))
             owner.set_operation_standby(True); owner.set_operation_standby(False); gate.set()
             cancelled = compute_fixtures.event_of(owner, 'CANCELLED', seen)
@@ -189,6 +190,8 @@ class MapperOperationComputeTests(unittest.TestCase):
         owner.start()
         try:
             item = compute_fixtures.item(1, nn=True); owner.submit(item)
+            start = compute_fixtures.event_of(owner, 'PARSER_START_REQUIRED')
+            owner.acknowledge_parser_start(item.job_id, compute_fixtures.sent(start))
             compute_fixtures.wait_until(lambda: owner.snapshot()['result_pending'] and owner.snapshot()['active'] is None)
             owner.set_operation_standby(True)
             self.assertIsNone(owner.take_result())

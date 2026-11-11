@@ -22,7 +22,6 @@ from .raw_leases import (ARENA_BYTES, SLOT_BYTES, FilledInfo, RawScope, ReadLeas
 from .raw_slot import ExpectedSlot, SlotEncoding, decode_owned, prefix
 from .resource_manifest import ResourceManifest, ResourceRecord
 from .resource_store import StoreAck
-from .health_policy import ReservationExpired
 
 
 DB_COPY_BYTES = 13 * 1024 * 1024 + 20 * 1024
@@ -505,7 +504,6 @@ class RawArenaWriter(_RawAttachment):
             if grant.key.generation <= previous[0].key.generation:
                 raise NativeResourceError('write generation was already consumed')
         now = _now()
-        if now >= grant.request.expires_us:raise ReservationExpired('write reservation expired before token acquisition')
         grant.request.check(now)
         if now < grant.granted_us:
             raise NativeResourceError('write grant has not reached its reservation time')
@@ -518,11 +516,10 @@ class RawArenaWriter(_RawAttachment):
             view[:] = encoding.raw
         finally:
             view.release()
-        copied = _now()
-        if copied < now:raise NativeResourceError('write copy clock regressed')
+        grant.request.check(_now())
         ready.release()
         completed = _now()
-        if completed < copied:raise NativeResourceError('write post clock regressed')
+        grant.request.check(completed)
         info = FilledInfo(grant.key, encoding.payload_length, encoding.descriptor_sha256, completed)
         self._seen[slot] = (grant, digest, info)
         return info
@@ -544,7 +541,6 @@ class RawArenaReader(_RawAttachment):
         if previous is not None and key.generation <= previous.key.write_key.generation:
             raise NativeResourceError('read generation was already consumed')
         now = _now()
-        if now >= lease.read_request.request.expires_us:raise ReservationExpired('read reservation expired before token acquisition')
         lease.read_request.request.check(now)
         if now < lease.reserved_us:
             raise NativeResourceError('read lease has not reached its reservation time')
@@ -560,4 +556,5 @@ class RawArenaReader(_RawAttachment):
             views_ended = _now()
             writable.release()
             posted = _now()
+        lease.read_request.request.check(posted)
         return owned, ViewReturnFact(lease, views_ended, posted)

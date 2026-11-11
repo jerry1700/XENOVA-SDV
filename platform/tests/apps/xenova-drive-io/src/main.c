@@ -7,9 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-#include <xenova/auto_delay.h>
-#endif
 static const char *scenario;
 static struct xm_zclient client;
 static struct xd_inputs snapshot,previous;
@@ -24,48 +21,6 @@ K_SEM_DEFINE(entered,0,1);
 K_SEM_DEFINE(release,0,1);
 K_SEM_DEFINE(poll_entered,0,1);
 static bool is(const char *s){return scenario&&!strcmp(scenario,s);}
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-/* Command/owner boundary only. Real calculation health and pool exhaustion
- * are exercised separately by workers and memory-native product tests. */
-K_MUTEX_DEFINE(fault_results_lock);
-static unsigned trust_events,fault_results,fault_starts,fault_start_calls;
-static unsigned fault_publish_failures,fault_format_failures;
-static char fault_result[512],fault_status[12];
-static int64_t injected_until;
-static atomic_t fault_publish_fail,fault_format_fail;
-int drive_auto_delay_start(uint32_t delay,uint32_t duration){
- assert(delay==2&&duration==1);fault_start_calls++;
- if(k_uptime_get()<injected_until)return -EBUSY;
- fault_starts++;injected_until=k_uptime_get()+1000;return 0;
-}
-int drive_auto_delay_start_with_receipt(uint32_t delay,uint32_t duration,struct drive_auto_delay_receipt *out){
- int rc=drive_auto_delay_start(delay,duration);
- if(!rc&&out)*out=(struct drive_auto_delay_receipt){injected_until-1000,injected_until};
- return rc;
-}
-void drive_auto_delay_stop(void){injected_until=0;}
-void drive_auto_delay_status_get(struct drive_auto_delay_status *out){
- *out=(struct drive_auto_delay_status){.active=k_uptime_get()<injected_until,
-  .unhealthy=true,.consecutive_deadline_misses=5};
-}
-int __wrap_xm_zclient_publish(struct xm_zclient *c,const char *topic,const char *type,const char *json){
- ARG_UNUSED(c);ARG_UNUSED(topic);int rc=0;k_mutex_lock(&fault_results_lock,K_FOREVER);
- if(!strcmp(type,"vm.trust"))trust_events++;
- else {assert(!strcmp(type,"agent.command_result"));fault_results++;
-  assert(strlen(json)<sizeof(fault_result));strcpy(fault_result,json);
-  const char *states[]={"RUNNING","SUCCEEDED","FAILED","REJECTED"};
-  for(unsigned i=0;i<ARRAY_SIZE(states);i++)if(strstr(json,states[i]))strcpy(fault_status,states[i]);
-  if(atomic_cas(&fault_publish_fail,1,0)){fault_publish_failures++;rc=-EIO;}
- }
- k_mutex_unlock(&fault_results_lock);return rc;
-}
-int __real_xm_auto_delay_result_json(char *,size_t,const struct xm_auto_delay_command *,const char *,uint64_t,const char *);
-int __wrap_xm_auto_delay_result_json(char *out,size_t n,const struct xm_auto_delay_command *command,
- const char *status,uint64_t duration,const char *error){
- if(atomic_cas(&fault_format_fail,1,0)){fault_format_failures++;return -ENOSPC;}
- return __real_xm_auto_delay_result_json(out,n,command,status,duration,error);
-}
-#endif
 bool xd_owner_admit(void){return !atomic_get(&source_closed);}
 k_tid_t __real_z_impl_k_thread_create(struct k_thread *,k_thread_stack_t *,size_t,k_thread_entry_t,void *,void *,void *,int,uint32_t,k_timeout_t);
 k_tid_t __wrap_z_impl_k_thread_create(struct k_thread *t,k_thread_stack_t *stack,size_t size,k_thread_entry_t entry,void *a,void *b,void *c,int priority,uint32_t options,k_timeout_t delay) {
@@ -76,12 +31,7 @@ k_tid_t __wrap_z_impl_k_thread_create(struct k_thread *t,k_thread_stack_t *stack
 int xd_owner_prepare(struct xm_zclient *c,const char *control,const char *input) {
  assert(!strcmp(control,"control")&&!strcmp(input,"input"));
  if(atomic_get(&block_prepare)){k_sem_give(&entered);k_sem_take(&release,K_MSEC(500));}
- c->connected=connected;c->id.app_id="manual";
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
- c->id.vm_id="11111111-1111-4111-8111-111111111111";
- strcpy(c->id.boot_id,"22222222-2222-4222-8222-222222222222");
-#endif
- return 0;
+ c->connected=connected;c->id.app_id="manual";return 0;
 }
 int __wrap_xm_zclient_poll(struct xm_zclient *c,int32_t ms) {
  k_sem_give(&poll_entered);
@@ -91,13 +41,6 @@ int __wrap_xm_zclient_poll(struct xm_zclient *c,int32_t ms) {
  return 0;
 }
 int __wrap_xm_zclient_latest(struct xm_zclient *c,const char *topic,struct xm_envelope *e,int64_t *age) {
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
- if(strstr(topic,"/command")){
-  struct xm_zlatest *s=&c->latest[3];if(!s->len)return -ENODATA;
-  *e=(struct xm_envelope){.type={"agent.command",13},.payload={s->data,s->len}};
-  *age=k_uptime_get()-s->rx_ms;return 0;
- }
-#endif
  unsigned i=!strcmp(topic,"control")?0:!strcmp(topic,"perception")?2:1;
  struct xm_zlatest *s=&c->latest[i];
  *e=(struct xm_envelope){.type={!i?"vehicle.control":i==2?"perception.result":"drive.input",!i?15:i==2?17:11},
@@ -108,9 +51,6 @@ int __wrap_xm_zclient_latest(struct xm_zclient *c,const char *topic,struct xm_en
  *age=k_uptime_get()-s->rx_ms;return 0;
 }
 int __wrap_xm_zclient_subscribe(struct xm_zclient *c,const char *topic,uint8_t qos) {
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
- if(strstr(topic,"/command")){assert(qos==1);strcpy(c->latest[3].topic,topic);return 0;}
-#endif
  ARG_UNUSED(c);assert(!strcmp(topic,"perception")&&qos==0);subscriptions++;return 0;
 }
 int __wrap_xm_zclient_publish_until(struct xm_zclient *c,const char *topic,const char *type,const char *json,int64_t end) {
@@ -156,82 +96,6 @@ static void candidate(unsigned id) {
 }
 static void freeze(void){atomic_set(&block_poll,1);k_sem_reset(&poll_entered);assert(!k_sem_take(&poll_entered,K_SECONDS(1)));}
 static void unfreeze(void){atomic_set(&block_poll,0);k_sem_give(&release);}
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-static bool fault_replay_case(void){
- return is("fault-replay-success")||is("fault-replay-failed")||is("fault-replay-conflict")||
-  is("fault-replay-publish-fail")||is("fault-replay-format-fail");
-}
-static void fault_wait(unsigned expected){
- int64_t until=k_uptime_get()+1500;
- for(;;){
-  k_mutex_lock(&fault_results_lock,K_FOREVER);bool done=fault_results>=expected;k_mutex_unlock(&fault_results_lock);
-  if(done||k_uptime_get()>=until)break;
-  k_sleep(K_MSEC(1));
- }
- k_mutex_lock(&fault_results_lock,K_FOREVER);assert(fault_results==expected);k_mutex_unlock(&fault_results_lock);
-}
-static void fault_body(const char *body){
- assert(atomic_get(&block_poll));struct xm_zlatest *s=&client.latest[3];assert(s->topic[0]);
- size_t length=strlen(body);assert(length<sizeof(s->data));memcpy(s->data,body,length+1);s->len=length;
- /* 새 수신 사건만 전진한다. 원 명령/결과의 실행 기한은 재발급하지 않는다. */
- int64_t now=k_uptime_get(),until=now+20;
- while(now<=s->rx_ms&&now<until){k_sleep(K_MSEC(1));now=k_uptime_get();}
- assert(now>s->rx_ms);s->rx_ms=now;
-}
-static void fault_request(const char *id,unsigned delay){
- char body[384];int n=snprintf(body,sizeof(body),"{\"command_id\":\"%s\",\"operation_id\":\"op-replay\",\"expected_boot_id\":\"22222222-2222-4222-8222-222222222222\",\"expires_at\":\"2026-11-07T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":%u,\"duration_s\":1}}",id,delay);
- assert(n>0&&(size_t)n<sizeof(body));fault_body(body);
-}
-static void fault_copy(char out[512]){
- k_mutex_lock(&fault_results_lock,K_FOREVER);strcpy(out,fault_result);k_mutex_unlock(&fault_results_lock);
-}
-static void fault_no_result(unsigned expected){
- unfreeze();k_sleep(K_MSEC(30));freeze();assert(fault_results==expected);
-}
-static void fault_replay(void){
- unsigned expected=1;char original[512],running[512];
- freeze();fault_request("replay-1",2);unfreeze();fault_wait(expected);freeze();
- assert(fault_starts==1&&fault_start_calls==1&&!trust_events&&!strcmp(fault_status,"RUNNING"));fault_copy(running);
- if(is("fault-replay-conflict")){
-  fault_request("busy-other",2);unfreeze();fault_wait(++expected);freeze();
-  assert(fault_starts==1&&fault_start_calls==2&&strstr(fault_result,"\"code\":\"BUSY\""));
-  fault_request("replay-1",2);unfreeze();fault_wait(++expected);freeze();assert(!strcmp(fault_result,running));
- }
- if(is("fault-replay-failed")||is("fault-replay-format-fail"))injected_until=0;
- if(is("fault-replay-publish-fail"))atomic_set(&fault_publish_fail,1);
- if(is("fault-replay-format-fail")){
-  /* 종결 formatter 실패 뒤 RUNNING payload를 종결 결과인 것처럼 재생하지 않는다. */
-  atomic_set(&fault_format_fail,1);fault_no_result(expected);assert(fault_format_failures==1);
-  fault_request("replay-1",2);fault_no_result(expected);
-  assert(fault_starts==1&&fault_start_calls==1&&!strcmp(fault_result,running));
-  fault_request("replay-2",2);unfreeze();fault_wait(++expected);freeze();
-  assert(fault_starts==2&&!strcmp(fault_status,"RUNNING"));injected_until=0;
-  unfreeze();fault_wait(++expected);freeze();assert(!strcmp(fault_status,"FAILED"));fault_copy(original);
-  /* 구조 오류에는 상관 command_id가 없다. 응답도 원 cache 덮기도 없어야 한다. */
-  fault_body("{bad}");fault_no_result(expected);
-  fault_request("replay-2",2);unfreeze();fault_wait(++expected);freeze();assert(!strcmp(original,fault_result));
-  /* 새 start 성공의 formatter 실패가 이전 command의 terminal payload를 빌려주면 안 된다. */
-  atomic_set(&fault_format_fail,1);fault_request("replay-3",2);fault_no_result(expected);
-  assert(fault_starts==3&&fault_format_failures==2&&!strcmp(fault_result,original));
-  fault_request("replay-3",2);fault_no_result(expected);
-  assert(fault_start_calls==3&&!strcmp(fault_result,original));
- }else{
-  unfreeze();fault_wait(++expected);freeze();fault_copy(original);
-  assert(!strcmp(fault_status,is("fault-replay-failed")?"FAILED":"SUCCEEDED"));
-  if(is("fault-replay-failed"))assert(strstr(original,"\"code\":\"STRESS_FAILED\""));
-  if(is("fault-replay-publish-fail"))assert(fault_publish_failures==1);
-  unfreeze();k_sleep(K_MSEC(50));freeze();
-  if(is("fault-replay-conflict")){
-   fault_request("replay-1",3);unfreeze();fault_wait(++expected);freeze();
-   assert(strstr(fault_result,"\"code\":\"IDEMPOTENCY_CONFLICT\""));
-  }
-  fault_request("replay-1",2);unfreeze();fault_wait(++expected);freeze();
-  assert(!strcmp(fault_result,original)&&fault_starts==1);
-  assert(fault_start_calls==(is("fault-replay-conflict")?2U:1U));
- }
- assert(!trust_events);unfreeze();
-}
-#endif
 K_THREAD_STACK_DEFINE(stop_stack,2048);
 static struct k_thread stopper;
 static void stop_during_create(void *a,void *b,void *c) {
@@ -239,15 +103,7 @@ static void stop_during_create(void *a,void *b,void *c) {
  assert(!k_sem_take(&entered,K_SECONDS(1)));xd_io_stop_request();k_sem_give(&release);
 }
 int main(void) {
- scenario=getenv("XL_CASE");assert(scenario);
-#if defined(XL_FAULT_BOUNDARY)
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
- assert(is("fault-scope")||fault_replay_case());
-#else
- assert(false);
-#endif
-#endif
- update();
+ scenario=getenv("XL_CASE");assert(scenario);update();
  if(is("start-race"))k_thread_create(&stopper,stop_stack,K_THREAD_STACK_SIZEOF(stop_stack),stop_during_create,NULL,NULL,NULL,6,0,K_NO_WAIT);
  if(is("prepare-delay")||is("stop-prepare"))atomic_set(&block_prepare,1);
  int64_t begin=k_uptime_get();int rc=is("dual")?xd_io_start_dual(&client,"control","input","perception"):xd_io_start(&client,"control","input");
@@ -265,38 +121,7 @@ int main(void) {
   atomic_set(&block_prepare,0);k_sem_give(&release);
  } else {
   read_ready();previous=snapshot;
-  if(
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-   fault_replay_case()
-#else
-   false
-#endif
-  ) {
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-   fault_replay();
-#endif
-  } else if(is("fault-scope")) {
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-   freeze();struct xm_zlatest *s=&client.latest[3];assert(s->topic[0]);
-   snprintf(s->data,sizeof(s->data),"{\"command_id\":\"test-1\",\"operation_id\":\"op-1\",\"expected_boot_id\":\"22222222-2222-4222-8222-222222222222\",\"expires_at\":\"2026-11-07T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":2,\"duration_s\":1}}");
-   s->len=strlen(s->data);s->rx_ms=k_uptime_get();unfreeze();
-   int64_t until=k_uptime_get()+1500;
-   for(;;){
-    k_mutex_lock(&fault_results_lock,K_FOREVER);bool done=fault_results>=2;k_mutex_unlock(&fault_results_lock);
-    if(done||k_uptime_get()>=until)break;k_sleep(K_MSEC(10));
-   }
-   freeze();assert(fault_results==2&&fault_starts==1&&!trust_events);
-   assert(strstr(fault_result,"test-1")&&strstr(fault_result,"op-1"));
-   assert(!strcmp(fault_status,"SUCCEEDED"));
-   /* Same request replays the original result, never a second injection. */
-   s->rx_ms++;unfreeze();k_sleep(K_MSEC(30));freeze();
-   assert(fault_results==3&&fault_starts==1&&!trust_events);
-   assert(strstr(fault_result,"test-1")&&strstr(fault_result,"op-1"));
-   unfreeze();candidate(1);assert(!xd_io_command(&command));k_sleep(K_MSEC(30));assert(sends==1);
-#else
-   assert(false);
-#endif
-  } else if(is("dual")) {
+  if(is("dual")) {
    assert(snapshot.dual_mode&&!snapshot.perception.error&&snapshot.perception.length==2);
    assert(subscriptions==1);
    assert(xd_io_start(&client,"control","input")==-EINVAL);

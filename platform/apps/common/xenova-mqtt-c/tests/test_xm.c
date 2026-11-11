@@ -338,16 +338,6 @@ static void test_payloads(void)
 	CHECK(xm_drive_input_parse(sp("{\"keys\":[]}"), &keys) == 0 && keys == 0, "empty keys");
 	CHECK(xm_drive_input_parse(sp("{\"keys\":\"up\"}"), &keys) == -EINVAL, "keys not array");
 	CHECK(xm_drive_input_parse(sp("{}"), &keys) == -EINVAL, "keys missing");
-
-	struct xm_auto_delay_command command;
-	const char *delay="{\"command_id\":\"cmd-1\",\"operation_id\":\"op-1\",\"expected_boot_id\":\"boot\",\"expires_at\":\"2026-11-06T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30}}";
-	CHECK(xm_auto_delay_command_parse(sp(delay),&command)==0&&command.delay_ms==20&&command.duration_s==30,
-	      "auto delay command");
-	CHECK(xm_auto_delay_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":101,\"duration_s\":30}}"),&command)==-ERANGE,
-	      "auto delay bounds");
-	CHECK(xm_auto_delay_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30,\"extra\":1}}"),&command)==-ERANGE,
-	      "auto delay extra parameter");
-
 }
 
 static void test_uuid(void)
@@ -358,81 +348,6 @@ static void test_uuid(void)
 	xm_uuid4_format(out, r);
 	CHECK(strlen(out) == 36 && out[8] == '-' && out[14] == '4' && (out[19] == 'b' || out[19] == 'a' ||
 		      out[19] == '8' || out[19] == '9'), "uuid %s", out);
-}
-
-static void test_auto_delay_closed_keys(void)
-{
-	struct xm_auto_delay_command command;
-	const char *valid[]={
-		"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":1,\"duration_s\":120}}",
-		"{\"parameters\":{\"duration_s\":1,\"delay_ms\":100},\"action\":\"auto_delay\",\"expires_at\":\"2026-11-09T00:00:00.123Z\",\"expected_boot_id\":\"b\",\"operation_id\":\"op\",\"command_id\":\"c\"}"
-	};
-	for(size_t i=0;i<sizeof(valid)/sizeof(valid[0]);i++){
-		CHECK(xm_auto_delay_command_parse(sp(valid[i]),&command)==0,"auto delay literal keys %zu",i);
-		CHECK(!strcmp(command.command_id,"c")&&!strcmp(command.operation_id,i?"op":""),"auto delay original IDs %zu",i);
-	}
-	/* 필수 다섯 키 뒤의 여섯째 키를 개수만으로 허용하던 반례다. */
-	const char *unknown[]={
-		"\"extra\":true", "\"extra\":{\"operation_id\":\"nested\"}",
-		"\"\\u006fperation_id\":\"alias\"", "\"\\u0063ommand_id\":\"alias\""
-	};
-	char raw[1024];
-	for(size_t i=0;i<sizeof(unknown)/sizeof(unknown[0]);i++){
-		snprintf(raw,sizeof(raw),"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30},%s}",unknown[i]);
-		CHECK(xm_auto_delay_command_parse(sp(raw),&command)==-EINVAL,"auto delay unknown key %zu: %s",i,raw);
-		CHECK(!strcmp(command.command_id,"c"),"auto delay rejection preserves correlation %zu",i);
-	}
-	const char *duplicate[]={
-		"\"command_id\":\"other\"", "\"expected_boot_id\":\"other\"", "\"expires_at\":\"2026-11-09T00:00:01Z\"",
-		"\"action\":\"auto_delay\"", "\"parameters\":{\"delay_ms\":21,\"duration_s\":30}"
-	};
-	for(size_t i=0;i<sizeof(duplicate)/sizeof(duplicate[0]);i++){
-		snprintf(raw,sizeof(raw),"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30},%s}",duplicate[i]);
-		CHECK(xm_auto_delay_command_parse(sp(raw),&command)==-EINVAL,"auto delay duplicate key %zu: %s",i,raw);
-	}
-	CHECK(xm_auto_delay_command_parse(sp("{\"command_id\":\"c\",\"operation_id\":\"a\",\"operation_id\":\"b\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30}}"),&command)==-EINVAL,
-	      "auto delay duplicate optional key");
-	const char *parameters[]={
-		"{\"delay_ms\":20,\"duration_s\":30,\"extra\":1}",
-		"{\"delay_ms\":20,\"duration_s\":30,\"delay_ms\":21}",
-		"{\"delay_ms\":20,\"duration_s\":30,\"duration_s\":31}",
-		"{\"delay_ms\":20,\"other\":30}", "{\"delay_ms\":20,\"delay_ms\":21}",
-		"{\"\\u0064elay_ms\":20,\"duration_s\":30}",
-		"{\"delay_ms\":20,\"duration_s\":30,\"\\u0064elay_ms\":21}"
-	};
-	for(size_t i=0;i<sizeof(parameters)/sizeof(parameters[0]);i++){
-		snprintf(raw,sizeof(raw),"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":%s}",parameters[i]);
-		CHECK(xm_auto_delay_command_parse(sp(raw),&command)==-ERANGE,"auto delay parameter keys %zu: %s",i,raw);
-	}
-}
-
-static void test_auto_delay_pair_bounds(void)
-{
-	struct xm_auto_delay_command command;
-	unsigned char zero[sizeof(command)]={0};
-	const char *bad_root[]={
-		"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":}",
-		"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\" \"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30}}"
-	};
-	for(size_t i=0;i<sizeof(bad_root)/sizeof(bad_root[0]);i++){
-		memset(&command,0x5a,sizeof(command));
-		CHECK(xm_auto_delay_command_parse(sp(bad_root[i]),&command)==-EINVAL,"auto delay malformed root pair %zu",i);
-		CHECK(!memcmp(&command,zero,sizeof(command)),"auto delay malformed root has no safe correlation %zu",i);
-	}
-	CHECK(xm_auto_delay_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":}}"),&command)==-ERANGE,
-	      "auto delay missing parameter value");
-	/* 실제 tokenizer의 마지막 토큰이 value 없는 key일 때 get이 tok[count]를
-	 * 읽던 경계다. 큰 extra 배열은 제품의 토큰 상한에 정확히 맞춘다. */
-	char raw[2*XM_JSON_MAX_TOKENS+256];
-	size_t used=(size_t)snprintf(raw,sizeof(raw),"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"2026-11-09T00:00:00Z\",\"action\":\"auto_delay\",\"extra\":[");
-	for(int i=0;i<XM_JSON_MAX_TOKENS-12;i++)used+=(size_t)snprintf(raw+used,sizeof(raw)-used,"%s0",i?",":"");
-	(void)snprintf(raw+used,sizeof(raw)-used,"],\"parameters\":}");
-	jsmn_parser parser;jsmntok_t tokens[XM_JSON_MAX_TOKENS];jsmn_init(&parser);
-	int count=jsmn_parse(&parser,raw,strlen(raw),tokens,XM_JSON_MAX_TOKENS);
-	CHECK(count==XM_JSON_MAX_TOKENS,"auto delay dangling key fixture reaches token bound: %d",count);
-	memset(&command,0x5a,sizeof(command));
-	CHECK(xm_auto_delay_command_parse(sp(raw),&command)==-EINVAL,"auto delay dangling key at token bound");
-	CHECK(!memcmp(&command,zero,sizeof(command)),"auto delay token-bound rejection has no unsafe correlation");
 }
 
 static void test_lifecycle(void)
@@ -456,8 +371,6 @@ int main(int argc, char **argv)
 	vectors_seq(dir);
 	test_encode_roundtrip();
 	test_payloads();
-	test_auto_delay_closed_keys();
-	test_auto_delay_pair_bounds();
 	test_uuid();
 	test_lifecycle();
 	printf("%d checks, %d failures\n", checks, failures);

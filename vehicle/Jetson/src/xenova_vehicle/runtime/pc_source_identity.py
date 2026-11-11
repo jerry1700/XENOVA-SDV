@@ -191,7 +191,7 @@ class PcSourceIdentityOwner:
         _time(startup_deadline_us)
         _need(startup_deadline_us > 0, 'original positive startup deadline required')
         _need(parser_deadline is None or type(parser_deadline) is AbsoluteDeadline
-            and parser_deadline.started_us < parser_deadline.expires_us
+            and parser_deadline.started_us < parser_deadline.expires_us <= startup_deadline_us
             and parser_deadline.expires_us - parser_deadline.started_us <= TIMING_US['warmup'],
             'original bounded parser/boot deadlines required')
         _need(type(revision_floor) is int and 0 <= revision_floor < 2**64-1, 'original publication revision floor required')
@@ -257,8 +257,7 @@ class PcSourceIdentityOwner:
                 or snapshot.pending_stop is not None or snapshot.stopped_report is not None):
             raise PcSourceNotReady('PC_'+role+'_LIFECYCLE_NOT_CURRENT')
         message = parse_lifecycle(snapshot.last_packet, self._peers[role], 'S')
-        # 제어 채널 정체는 S의 단일 watchdog이 처리한다. 프레임마다 heartbeat E를 재검사하지 않는다.
-        if now < message.issued_us or message.kind not in ('HELLO', 'HEARTBEAT'):
+        if not message.issued_us <= now < message.expires_us or message.kind not in ('HELLO', 'HEARTBEAT'):
             raise PcSourceNotReady('PC_'+role+'_LIFECYCLE_NOT_CURRENT')
         active = POSITIVE_STATES[role] if role in ('A', 'M') else ('STARTING', 'IDLE', 'ACTIVE_JOB', 'RECOVERING')
         if message.kind == 'HEARTBEAT' and message.payload['worker_state'] not in active:
@@ -269,10 +268,8 @@ class PcSourceIdentityOwner:
     def _received(self, value, role, now, *, current=True):
         _need(type(value) is PcActorReceived, 'actual PC actor receive fact required')
         self._links[role].require_received(value)
-        _need(value.received_j_us <= now,'original PC actor event is in the future')
-        if current and now>=value.packet.expires_us:
-            from .health_policy import FrameExpired
-            raise FrameExpired('original PC actor frame event expired')
+        _need(value.received_j_us <= now and (not current or now < value.packet.expires_us),
+            'original PC actor event expired')
         self._registered(role, now)
         return value.packet
 
@@ -330,8 +327,8 @@ class PcSourceIdentityOwner:
             raise PcSourceNotReady('PC_ORIGINAL_START_AND_M_BIND_REQUIRED')
         anchor = max(start.packet.issued_us, mapper_ack.issued_us)
         _need(type(deadline) is AbsoluteDeadline and deadline.started_us == anchor
-            and anchor < deadline.expires_us <= anchor + TIMING_US['warmup'],
-            'parser diagnostic window must retain original A start/M ACK anchor')
+            and anchor < deadline.expires_us <= min(anchor + TIMING_US['warmup'], self._startup_deadline),
+            'parser phase must retain original A start/M ACK anchor and boot cap')
 
     def install_parser_deadline(self, original_deadline):
         """A cold start와 M ACK 뒤 원 phase timer를 한 번만 받는다. 새 E를 계산하지 않는다."""
@@ -339,6 +336,8 @@ class PcSourceIdentityOwner:
         if self._fenced is not None: raise PcSourceNotReady(self._fenced)
         _need(self._parser_deadline is None, 'original parser deadline is already installed')
         self._phase(original_deadline)
+        _need(self._last_now is not None and self._last_now < original_deadline.expires_us,
+            'original parser deadline expired before installation')
         self._parser_deadline = original_deadline
 
     def observe_bind(self, role, ack, sent, *, received_j_us, now_us):
@@ -400,7 +399,7 @@ class PcSourceIdentityOwner:
         packet = self._received(received, 'A', now_us, current=False)
         if 'A' not in self._binds: raise PcSourceNotReady('PC_A_BIND_REQUIRED')
         _need(packet.kind == 'PC_NN_START' and packet.metadata == dict(nn_manifest_sha256=self._manifest.sha256)
-            and self._binds['A'].ack.issued_us <= packet.issued_us,
+            and self._binds['A'].ack.issued_us <= packet.issued_us < self._startup_deadline,
             'original A NN start differs from its BIND/manifest/boot cap')
         if self._start_received is not None:
             _need(self._start_received is received, 'actual original A model start cannot be replaced')
@@ -408,8 +407,7 @@ class PcSourceIdentityOwner:
         receipt = json_bytes(packet.body, 32768)
         checked = validate_start_receipt(self._manifest, receipt, context_key=self._manifest.sha256,
             startup_deadline_us=self._startup_deadline)
-        # Device 기동의 원 cap은 실제 source.start가 지켰다. 이 packet은 현재 세션의
-        # 설치 완료 사실을 전달하며 늦은 전달 시각을 두 번째 cold-start 기한으로 쓰지 않는다.
+        _need(packet.issued_us < int(checked.fields['startup_deadline_us']), 'actual NN start missed original cap')
         if 'M' in self._binds and self._parser_deadline is not None:
             self._phase(self._parser_deadline, start=received)
         self._start, self._start_received = checked, received
@@ -463,8 +461,8 @@ class PcSourceIdentityOwner:
         if self._warmup_originals is None:
             if self._parser_deadline is None: raise PcSourceNotReady('PC_ORIGINAL_PARSER_DEADLINE_REQUIRED')
             self._phase(self._parser_deadline)
-            _need(self._parser_deadline.started_us <= complete.completed_j_us,
-                'initial parser precedes its preparation context')
+            _need(self._parser_deadline.started_us <= complete.completed_j_us < self._parser_deadline.expires_us
+                and now_us < self._parser_deadline.expires_us, 'initial parser missed its original warmup deadline')
             self._warmup.append(fact)
             if len(self._warmup) == REQUIRED_NN_PAIR_COUNT:
                 self._warmup_originals = tuple(self._warmup)
@@ -480,12 +478,11 @@ class PcSourceIdentityOwner:
         for role in ('A', 'M', 'D'): self._registered(role, now_us)
         if set(self._binds) != {'A', 'M'} or self._start is None or self._storage is None:
             raise PcSourceNotReady('PC_ORIGINAL_BIND_NN_START_D_REQUIRED')
-        if self._warmup_originals is None or self._last_completed is None:
+        if self._warmup_originals is None or self._last_completed is None or now_us-self._last_completed >= NN_STALL_US:
             raise PcSourceNotReady('PC_ACTUAL_PARSER_WARMUP_OR_PROGRESS_REQUIRED')
         _time(vehicle_received_j_us)
-        if now_us < vehicle_received_j_us:raise ValueError('Vehicle delivery is in the future')
-        if now_us-vehicle_received_j_us >= IDENTITY_VEHICLE_DELIVERY_US:
-            raise PcSourceNotReady('PC_WAIT_CURRENT_VEHICLE')
+        _need(0 <= now_us-vehicle_received_j_us < IDENTITY_VEHICLE_DELIVERY_US,
+            'original Vehicle delivery is no longer current for identity')
         original, current = _sample(vehicle_wire), _sample(current_vehicle_wire)
         identity = ('vehicle', 'host_boot', 'gateway_instance', 'device_session', 'pi_session', 'odom_epoch', 'calibration')
         _need(all(getattr(original, key) == getattr(current, key) for key in identity)
@@ -496,6 +493,7 @@ class PcSourceIdentityOwner:
             _need(self._admission.origin == _origin(current) and old_source['odom_epoch'] == current.odom_epoch,
                 'admitted PC source changed; explicit fence/new owner required')
             return self._admission
+        if now_us >= self._startup_deadline: raise PcSourceNotReady('PC_ORIGINAL_STARTUP_EXPIRED')
         material = json.loads(self._storage.material_bytes)
         publication = dict(service_instance=self._binding.fields['service_instance'],
             mapper_worker=self._peers['M'].worker_instance, mapper_instance=self._mapper_instance,

@@ -3,7 +3,7 @@
 from dataclasses import asdict,FrozenInstanceError
 import unittest
 
-from test_mapper_profile import profile_fields,calibration,tof_leaf
+from test_mapper_profile import profile_fields
 from xenova_vehicle.runtime.mapper_profile import MapperProfile,MapperProfileError
 from xenova_vehicle.runtime.scene import SurveyProfile
 
@@ -40,12 +40,3 @@ class MapperSurveyProfileTests(unittest.TestCase):
         for value in ({},[],{**survey(),'required_sensor_mask':True},{**survey(),'unknown':1}):
             fields=profile_fields();fields['survey']=value
             with self.subTest(value=value),self.assertRaises(MapperProfileError):MapperProfile(fields)
-
-    def test_installed_proximity_tof_is_not_a_static_survey_requirement(self):
-        leaf=tof_leaf();fields=profile_fields(calibration(leaf=leaf))
-        fields['sensors']['tof_sources']=[dict(external_leaf_name='front',leaf=leaf.to_dict())]
-        fields['survey']=survey()
-        self.assertTrue(MapperProfile(fields).sensors.tof_sources)
-        for mask in (4,7,8,15):
-            fields['survey']['required_sensor_mask']=mask
-            with self.subTest(mask=mask),self.assertRaises(MapperProfileError):MapperProfile(fields)

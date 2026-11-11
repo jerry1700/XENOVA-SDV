@@ -473,11 +473,6 @@ def storage_main(endpoint, boot):
                   profile_sha256=boot.storage_profile.sha256, sqlite_version=None, database_created=False,
                   database_closed=True, owner_lock_closed=True, error=None, discoveries=0, bound=False,
                   stopped_report_sent=False, copy_leases_acquired=0)
-    diagnostics = None
-    if boot.diagnostic_directory is not None:
-        from .resident_diagnostics import DiagnosticWriter
-        try:diagnostics = DiagnosticWriter()
-        except Exception:pass
     if boot.recovery is not None:
         report['recovery'] = dict(database_uuid=boot.recovery.database_uuid,
             minimum_allocator_highwater=boot.recovery.minimum_allocator_highwater,
@@ -678,8 +673,13 @@ def storage_main(endpoint, boot):
                 failure = failure or error
         report['transport_counts'] = dict(link.counts)
         link.close()
-        if diagnostics is not None:
-            saved_report = dict(report)
-            diagnostics.submit(lambda: _diagnostic(boot, saved_report))
+        try:
+            _diagnostic(boot, report)
+        except (OSError, ValueError) as error:
+            # 진단 저장 실패가 실제 DB/lock 정리와 STOPPED 성공을 뒤집지 않는다.
+            try:
+                os.write(2, ('D_DIAGNOSTIC_FAILED ' + type(error).__name__[:48] + '\n').encode('ascii', 'replace'))
+            except OSError:
+                pass
     if failure is not None:
         raise failure

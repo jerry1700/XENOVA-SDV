@@ -1,13 +1,12 @@
 """표시 전용 SVG/PNG. NN·깊이 추정·지도/경로 계산을 다시 수행하지 않는다."""
 from html import escape
-import math
 import struct
 import zlib
 
 from snapshot import SnapshotError,DISPLAY_CROPS
 
 
-COLORS={'GT':'#b08aff','ESTIMATE':'#5eb7ff','UNCERTAINTY':'#ffca6c','PATH':'#63e6b7','MODEL':'#b6c9dc'}
+COLORS={'GT':'#b08aff','ESTIMATE':'#5eb7ff','UNCERTAINTY':'#ffca6c','PATH':'#63e6b7'}
 
 
 def map_svg(body,*,show_gt=False):
@@ -16,8 +15,6 @@ def map_svg(body,*,show_gt=False):
     if len(frames)>1:raise SnapshotError('MAP_FRAME_MISMATCH: 서로 다른 frame을 겹치지 않습니다')
     points=[p for x in layers for p in x['points']]
     if not points:return None
-    pose=(body.get('live') or {}).get('pose')
-    if pose is not None and pose['frame'] in frames:points=points+[[pose['x'],pose['y']]]
     x0=min(p[0] for p in points);x1=max(p[0] for p in points);y0=min(p[1] for p in points);y1=max(p[1] for p in points)
     width=max(x1-x0,.1);height=max(y1-y0,.1);scale=min(720/width,420/height)
     def coord(p):return f'{40+(p[0]-x0)*scale:.3f},{460-(p[1]-y0)*scale:.3f}'
@@ -35,24 +32,9 @@ def map_svg(body,*,show_gt=False):
             x,y=coord(layer['points'][0]).split(',')
             svg.append(f'<circle cx="{x}" cy="{y}" r="5" fill="{COLORS[kind]}"><title>'
                        f'{kind} observation point</title></circle>')
-    if pose is not None and pose['frame'] in frames:
-        x,y=map(float,coord((pose['x'],pose['y'])).split(','))
-        dx,dy=22*math.cos(pose['yaw']),-22*math.sin(pose['yaw'])
-        svg.append(f'<line x1="{x}" y1="{y}" x2="{x+dx}" y2="{y+dy}" stroke="#f8fafc" '
-            'stroke-width="4"><title>reported yaw · direction only, no vehicle dimensions</title></line>')
     svg.append(f'<text x="20" y="25" fill="#cbd5e1" font-family="sans-serif" font-size="14">'
                f'{escape(next(iter(frames)))} · m · GT는 표시 전용</text></svg>')
     return ''.join(svg)
-
-
-def map_panels(body, *, show_gt=False):
-    """서로 다른 원 frame은 각 패널로 보낸다. 변환/정합을 만들지 않는다."""
-    groups={}
-    for layer in body.get('map',{}).get('layers',[]):
-        if layer['kind']=='GT' and not show_gt:continue
-        groups.setdefault(layer['frame'],[]).append(layer)
-    return tuple((frame,map_svg({**body,'map':dict(layers=layers)},show_gt=show_gt))
-                 for frame,layers in groups.items())
 
 
 def unknown_keys_svg():

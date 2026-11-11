@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 
 from xenova_vehicle.capture_profile import CaptureProfile
 from xenova_vehicle.oak import device
-from xenova_vehicle.runtime.health_policy import ConfigurationError
 
 
 def sdk_fixture():
@@ -146,7 +145,7 @@ class OakDeviceTests(unittest.TestCase):
         f.dai.__version__ = "3.0.0"
         with patch.object(device.sys, "platform", "linux"), \
                 patch.object(device.importlib, "import_module", return_value=f.dai):
-            with self.assertRaisesRegex(ConfigurationError, "2.29.0.0 required"):
+            with self.assertRaisesRegex(RuntimeError, "2.29.0.0 required"):
                 device.OakSource(CaptureProfile("OAK_TEST_1")).start(lambda stage: None)
         f.dai.Device.assert_not_called()
 
@@ -160,7 +159,7 @@ class OakDeviceTests(unittest.TestCase):
     def test_actual_source_rejects_non_linux_before_sdk_import(self):
         with patch.object(device.sys, "platform", "win32"), \
                 patch.object(device.importlib, "import_module") as importer:
-            with self.assertRaisesRegex(ConfigurationError, "Linux"):
+            with self.assertRaisesRegex(RuntimeError, "Linux"):
                 device.OakSource(CaptureProfile("OAK_TEST_1")).start(lambda stage: None)
         importer.assert_not_called()
 

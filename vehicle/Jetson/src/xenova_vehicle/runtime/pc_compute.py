@@ -158,7 +158,7 @@ class PcParserCompletion:
 
 
 class PcMapperCompute(MapperCompute):
-    """같은 scheduler/8MiB/operation 정책을 쓴다. PC 입력은 latest NN1만 차지한다.
+    """같은 scheduler/ACK/8MiB/operation 정책을 쓴다. PC 입력은 latest NN1만 차지한다.
 
     현재 facts는 원 input token과 작은 view/context만 보유해 끝난 frame을 숨은 네 번째
     입력으로 보관하지 않는다. main은 current_inputs()의 원 job만 갱신/철회할 수 있다.
@@ -170,7 +170,7 @@ class PcMapperCompute(MapperCompute):
                 or manifest.sha256!=binding.fields['nn_manifest_sha256'] or source_generation!=binding.sha256):
             raise MapperComputeError('registered PC descriptor/owner/pinned NN manifest required')
         self._pc_binding,self._pc_owner_token,self._pc_manifest=binding,pc_owner_token,manifest
-        self._current={};self._parser_completions={}
+        self._current={};self._parser_completion=None
         super().__init__(processor_factory,source_generation=source_generation,clock=clock,
             maintenance=maintenance,adoption_lock=adoption_lock)
 
@@ -278,16 +278,8 @@ class PcMapperCompute(MapperCompute):
             try:current.validate_current(snapshot,owner_token=self._pc_owner_token,fence_revision=facts.fence_revision,now_us=now)
             except ValueError as error:raise MapperCancelled('CURRENT_SENSORS_EXPIRED_OR_FENCED') from error
 
-    def _nn_advances(self, item, serial):
-        previous = self._last_parsed_source
-        if previous is None or previous[0] != serial:
-            return True
-        old, new = previous[1], item.nn_source_key
-        return (new[:3] == old[:3] and new[6] == old[6]
-            and all(new[index] > old[index] for index in (3, 4, 5)))
-
     def record_parser_completion(self,item,metadata):
-        """compute 실제 decode 뒤에만 호출한다. bounded 원 metadata이며 송신 성공은 아니다."""
+        """compute 실제 decode 뒤에만 호출한다. latest1 원 metadata이며 송신 성공은 아니다."""
         if threading.current_thread() is not self._thread:raise MapperComputeError('only actual compute records parser completion')
         self._validate_input(item)
         from .pc_job_messages import PARSE_FIELDS, parser_manifest_sha256
@@ -309,10 +301,8 @@ class PcMapperCompute(MapperCompute):
             self._check_current_input(active,now)
             if not active['decode_started']<=completed<=now<min(item.expires_us,active['parser_deadline']):
                 raise MapperCancelled('PARSER_COMPLETION_EXPIRED')
-            if len(self._parser_completions) >= 8:
-                self._parser_completions.pop(next(iter(self._parser_completions)))
-                self._counts['parser_completion_dropped'] += 1
-            self._parser_completions[item.job_id]=PcParserCompletion(item.job_id,item.source_generation,active['serial'],
+            self._counts['parser_completion_replaced']+=int(self._parser_completion is not None)
+            self._parser_completion=PcParserCompletion(item.job_id,item.source_generation,active['serial'],
                 item.source_key,item.nn_source_key,completed,item.expires_us,raw)
 
     def take_parser_completion(self,event):
@@ -320,8 +310,9 @@ class PcMapperCompute(MapperCompute):
         self._main()
         if type(event) is not MapperEvent or event.kind!='NN_COMPLETED':raise MapperComputeError('actual NN_COMPLETED event required')
         with self._condition:
-            value=self._parser_completions.pop(event.job_id,None)
-            if value is None:return None
+            value=self._parser_completion
+            if value is None or value.job_id!=event.job_id:return None
+            self._parser_completion=None
             if (not event.accepted or self._stopping or value.generation_serial!=self._serial
                     or value.generation_serial!=event.generation_serial or value.source_key!=event.source_key
                     or value.nn_source_key!=event.nn_source_key or value.expires_us!=event.expires_us
@@ -332,8 +323,8 @@ class PcMapperCompute(MapperCompute):
 
     def replace_source(self,source_generation):
         super().replace_source(source_generation)
-        with self._condition:self._current.clear();self._parser_completions.clear()
+        with self._condition:self._current.clear();self._parser_completion=None
 
     def request_stop(self):
         super().request_stop()
-        with self._condition:self._current.clear();self._parser_completions.clear()
+        with self._condition:self._current.clear();self._parser_completion=None

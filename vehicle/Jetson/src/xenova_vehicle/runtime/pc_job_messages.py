@@ -17,7 +17,6 @@ from .mapper_sensor_state import SensorFrameSnapshot
 from .pc_channel import PcActorPacket
 from .pc_slot import PcOwnedSlot
 from .resident_transport import j_us
-from .health_policy import FrameExpired
 
 
 PURPOSES = frozenset(('PARSER_WARMUP', 'METRIC_MAP'))
@@ -143,16 +142,9 @@ class PcSnapshotAck:
     def expires_us(self): return self.packet.expires_us
 
     def validate_original(self, *, job_id, expires_us, full_key, pc_frame_proof_sha256, purpose, now_us):
-        self.validate_identity(job_id=job_id, expires_us=expires_us, full_key=full_key,
-            pc_frame_proof_sha256=pc_frame_proof_sha256, purpose=purpose, now_us=now_us)
-        if now_us + 1 >= expires_us:
-            raise FrameExpired('snapshot ACK frame expired')
-        return self
-
-    def validate_identity(self, *, job_id, expires_us, full_key, pc_frame_proof_sha256, purpose, now_us):
         _need((self.job_id, self.expires_us, self.full_key, self.pc_frame_proof_sha256, self.purpose)
             == (job_id, expires_us, full_key, pc_frame_proof_sha256, purpose)
-            and self.packet.issued_us <= _uint(now_us),
+            and self.packet.issued_us <= _uint(now_us) and now_us + 1 < expires_us,
             'snapshot ACK changed original EARLY job/E/key/proof/purpose')
         return self
 
@@ -255,18 +247,9 @@ class PcParserComplete:
 
     def validate_original(self, *, job_id, expires_us, full_key, nn_key,
                           pc_frame_proof_sha256, slot_descriptor_sha256, purpose, now_us):
-        self.validate_identity(job_id=job_id, expires_us=expires_us, full_key=full_key, nn_key=nn_key,
-            pc_frame_proof_sha256=pc_frame_proof_sha256, slot_descriptor_sha256=slot_descriptor_sha256,
-            purpose=purpose, now_us=now_us)
-        if now_us >= expires_us:
-            raise FrameExpired('parser completion frame expired')
-        return self
-
-    def validate_identity(self, *, job_id, expires_us, full_key, nn_key,
-                          pc_frame_proof_sha256, slot_descriptor_sha256, purpose, now_us):
         _need((self.job_id, self.expires_us, self.full_key, self.nn_key, self.pc_frame_proof_sha256,
                 self.slot_descriptor_sha256, self.purpose) ==
             (job_id, expires_us, full_key, nn_key, pc_frame_proof_sha256, slot_descriptor_sha256, purpose)
-            and self.packet.issued_us <= _uint(now_us),
+            and self.packet.issued_us <= _uint(now_us) < expires_us,
             'parser completion changed original A NN job/E/key/proof/slot/purpose')
         return self

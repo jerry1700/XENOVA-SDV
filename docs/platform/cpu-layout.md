@@ -20,10 +20,7 @@ hard affinity는 Xen이 **각 vCPU를 실행할 수 있는 pCPU 집합**이다.
 이 구현은 Xen 4.21의 `Affinity (Hard / Soft)` 중 Hard만 읽는다.
 
 기본 factory 프리셋은 Zephyr A→1, B→2, dom0·나머지 VM→{0,3}이다.
-Pi 4 Xen 부팅 기본값은 `dom0_max_vcpus=2`다. dom0의 두 vCPU가 {0,3}을 공유하며
-`dom0_vcpus_pin`을 추가하지 않는다. Raspberry Pi 설정은 `force_turbo=1`로 정규 최대
-클럭을 유지한다. 최대 주파수·전압·온도/저전압 보호는 firmware 기본값을 따른다.
-guest VM의 기존 vCPU 수는 보존한다. Linux 4-vCPU VM이면 네 vCPU가 각각 {0,3}을 사용한다.
+각 VM의 기존 vCPU 수는 보존한다. Linux 4-vCPU VM이면 네 vCPU가 각각 {0,3}을 사용한다.
 Xen cfg의 scalar `cpus = '0,3'`은 전체 vCPU에 같은 마스크를 적용한다.
 `cpus = ['0', '3']`처럼 vCPU별 매핑을 의미하는 문법으로 바꾸지 않는다.
 
@@ -224,22 +221,6 @@ Manager().call("cpu-host-prepare", {"timeout_ms":15000}, execute=True)
 일반 사용자가 VM 시작 때마다 수행하는 명령이 아니다. 일반 조회/start가 dom0 affinity를 대신 변경하지 않는다.
 준비는 별도 내부 action이며 공개 CPU 정책 변경 action은 cpu-policy-set 하나다.
 정책 파일 저장과 host.ready는 별개다. 사용자·unit 모두 Manager의 공통 잠금과 같은 준비 코드를 사용한다.
-
-이미 저장된 정책의 `cpu-host-prepare`는 지원 VM의 실패 create private 자산만 남은 경우를
-별도로 확인한다. `RECOVERY_REQUIRED`이고 수습이 진행 중이지 않은 원 작업에 한해, 등록·공개 부재와
-현재 준비 소유자·Xen 연결·mount·loop·열린 inode의 사용 부재를 기존 수습 진단으로 확인한다.
-느린 관측은 공통 잠금 밖에서 수행하고, 잠금을 다시 얻은 뒤 원 작업·registry·부팅·종료 gate·CPU 정책과
-private 자산 신원을 재확인한다. 근거는 이번 준비 호출에서만 사용하며 저장하거나 재사용하지 않는다.
-
-이 경우에도 CPU 준비는 실패 자산·원 오류·기한·디스크/IP 예약을 바꾸지 않는다. 폐기·예약 반환은
-별도 `operation-reconcile` 절차가 수행한다. 명시 수습과
-[신규 생성에 허용한 자동 후속](cli-manager-spec.md#automatic-private-cleanup)이 같은 수습을 사용하며,
-CPU 준비 자체가 정리를 시작하거나 기다리지는 않는다. 새 CPU 정책 변경에는 이 예외를 적용하지 않는다.
-실행 중 관리 VM·미확정 launch·진행 중 자산 작업·수습·불완전한 사용 관측의 차단도 유지한다.
-일반 create/delete/start/조회에 새 CPU 준비 관문을 넣지 않는다. 생성·삭제·수습의 긴 I/O와
-CPU 준비의 private 사용 관측 중에도 다른 VM의 조회·stop은 기존 경로로 진행한다.
-소스 후보·정상/실패 보호·동시성의 로컬 검증은
-[CPU 준비의 실패 자산 격리 검증](../verification/cpu-preparation-asset-isolation-20261110.md)을 참고한다.
 
 ### 저장 중단·부분 적용
 

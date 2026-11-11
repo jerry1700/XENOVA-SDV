@@ -164,10 +164,9 @@ class SimTopics:
         return {
             "revision": self.revision,
             "track": sim.track.payload(),
-            # 원본 표의 메타데이터만 읽어 트랙별 벽 계산을 피한다.
+            # 목록에는 이름·길이만 필요하다. Track() 을 10개 다 만들면(벽 계산) 첫 발행 때 물리 스레드가 약 0.8 s 멈춘다
             "tracks": [{"id": t.id, "name": t.name, "real_m": t.real_m} for t in track_sources().values()],
-            "car": ({key: sim.track.layout["vehicle"][key] for key in ("length_m", "width_m")}
-                    if sim.track.layout else {"length_m": CAR_LENGTH_M, "width_m": CAR_WIDTH_M}),
+            "car": {"length_m": CAR_LENGTH_M, "width_m": CAR_WIDTH_M},
             "time_scale": 1.0,
             "obstacles": [{"id": o.id, "kind": o.kind, "x": round(o.x, 4), "y": round(o.y, 4), "w": round(o.w, 4)}
                           for o in sim.vehicle.obstacles],
@@ -181,7 +180,7 @@ class SimTopics:
         return {
             "x": round(v.x, 4), "y": round(v.y, 4), "yaw": round(v.heading_rad, 4),
             "v_mps": round(v.v_mps, 4), "steer_rad": round(v.steer_rad, 4),
-            "world_revision": self.revision, "surface": sim.track.surface_at(v.x, v.y, i),
+            "world_revision": self.revision, "surface": sim.track.surface(i, off),
             "race": sim.race.payload(),
         }
 

@@ -51,7 +51,7 @@ class ResidentLink:
 
     @staticmethod
     def _cleanup(packet):
-        return packet.kind == 'STOPPED' or packet.kind == 'SLOT' and packet.payload.get('op') in ('FILLED', 'RELEASE')
+        return packet.kind == 'STOPPED' or packet.kind == 'SLOT' and packet.payload.get('op') == 'RELEASE'
 
     def send(self, kind, payload, *, domain='LIFECYCLE', revision=0, request_id=None,
              issued_us=None, expires_us=None):
@@ -84,12 +84,8 @@ class ResidentLink:
             return
         packet = self._pending
         if not self._cleanup(packet) and j_us() >= int(packet.fields['expires_j_us']):
-            if packet.kind == 'SLOT' and packet.payload.get('op') in ('REQUEST', 'GRANT', 'OFFER', 'ACQUIRE', 'ACQUIRED'):
-                # seqpacket에서 아직 한 바이트도 전송하지 않은 예약이다. 원장은 caller의
-                # CANCEL_REQUEST로 종결한다. FILLED/RELEASE 같은 실제 token 전환은 버리지 않는다.
-                self._pending = None
-                self.counts['expired_unsent'] = self.counts.get('expired_unsent', 0) + 1
-                return
+            # 원 grant를 조용히 버리면 actor의 예약과 실제 송신 사실이 갈라진다.
+            # packet을 보존한 채 통로를 실패시켜 actor가 fence/정리를 수행한다.
             raise TransportError('original pending packet expired before actual send')
         if self._track_sent and len(self._sent) >= 32:
             raise TransportError('owner must consume actual send completions')

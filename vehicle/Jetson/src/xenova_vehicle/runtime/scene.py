@@ -187,7 +187,8 @@ class SceneEvidenceScope:
             if type(item) is not tuple or len(item)!=4: raise SceneError('exact ToF source inventory required')
             name,leaf,instance,generation=item
             if (type(name) is not str or type(leaf) is not TofLeaf or external.get(name)!=leaf.sha256
-                    or leaf.sensor_id in sensors or not (leaf.extrinsics_qualified and leaf.time_qualified)):
+                    or leaf.sensor_id in sensors or not all((leaf.extrinsics_qualified,leaf.first_surface_qualified,
+                                                           leaf.coverage_qualified,leaf.time_qualified))):
                 raise SceneError('actual approved ToF leaf/configuration required')
             if type(instance) is not str or str(UUID(instance))!=instance or not UUID(instance).int:
                 raise SceneError('actual sensor incarnation required')
