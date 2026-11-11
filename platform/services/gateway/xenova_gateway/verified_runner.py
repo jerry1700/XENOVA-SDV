@@ -65,6 +65,12 @@ class VerifiedGatewayRunner(GatewayRunner):
         if callable(view):return view()
         return {'feedback_supported':False,'accepted':None,'applied':None,'physical_stop':None}
 
+    def vehicle_sample(self):
+        read_sample = getattr(self._sink, 'vehicle_sample', None)
+        if callable(read_sample):
+            return read_sample()
+        return self.device_view().get('vehicle_sample')
+
     def mapper_operation_capability(self,now,source=None):
         """설치된 운영 profile의 실제 J Reply 지원 진술. 숫자 clock/출력 권위와 별개다."""
         if not getattr(self,'operation_support',False) or self.mapper_uplink is None:return None

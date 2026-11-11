@@ -108,6 +108,10 @@ class DriveLinkProvider:
         self._scene=None
         self.vehicle_history=OrderedDict();self.vehicle_origin=None
         io.configure(runner.authority.host,self.instance)
+        self._read_vehicle_sample = getattr(runner, 'vehicle_sample', self._vehicle_sample_from_view)
+
+    def _vehicle_sample_from_view(self):
+        return self.runner.device_view().get('vehicle_sample')
 
     def reject(self,reason):
         self.rejected+=1;self.reasons[reason]=self.reasons.get(reason,0)+1
@@ -494,7 +498,7 @@ class DriveLinkProvider:
             if type(item) is _DecodedIncoming:
                 self._receive(*item.arguments,decoded=True)
             else:self.receive(*item)
-        sample=self.runner.device_view().get('vehicle_sample')
+        sample=self._read_vehicle_sample()
         identity=None if sample is None else tuple(sample.get(k) for k in ('host_boot','device_session','odom_epoch','pi_session','sequence'))
         if sample and identity!=self.last_vehicle:
             body=schema.VehicleSample(major=1,**{**sample,'gateway_instance':self.instance})

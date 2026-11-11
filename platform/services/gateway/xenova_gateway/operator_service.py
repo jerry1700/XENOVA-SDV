@@ -435,7 +435,7 @@ class OperatorService:
         self.keyboard.tick()
         device=getattr(self.runner._sink,'device',None)
         config=getattr(getattr(device,'odometry',None),'config',None)
-        self.missions.observe_vehicle(self.runner.device_view().get('vehicle_sample'),
+        self.missions.observe_vehicle(self.runner.vehicle_sample(),
             getattr(config,'metres_per_tick',None),self.now)
         self._mission_tick()
         self.episodes.tick()

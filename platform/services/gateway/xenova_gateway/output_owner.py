@@ -119,12 +119,20 @@ class OutputOwner:
         if self._feedback_timeout is not None and observed is not None and not 0<=now-observed<=self._feedback_timeout:
             for key in ('accepted','applied','physical_stop','reported_velocity_mps','reported_steering_rad'):
                 view[key]=None
-        sample=view.get('vehicle_sample')
-        if sample is not None and self._vehicle_maximum_age_us is not None:
-            age=int(now*1000000)-sample['pi_sample_us']
-            if age<0 or age+sample['clock_error_us']>self._vehicle_maximum_age_us:
-                view['vehicle_sample']=None
+        if 'vehicle_sample' in view:
+            view['vehicle_sample'] = self._fresh_vehicle_sample(view['vehicle_sample'], now)
         return view
+
+    def _fresh_vehicle_sample(self, sample, now=None):
+        if sample is not None and self._vehicle_maximum_age_us is not None:
+            age = int((self.clock() if now is None else now) * 1_000_000) - sample['pi_sample_us']
+            if age < 0 or age + sample['clock_error_us'] > self._vehicle_maximum_age_us:
+                return None
+        return sample
+
+    def vehicle_sample(self):
+        """Read the published vehicle sample and check its age at this read."""
+        return self._fresh_vehicle_sample(self._device_view.get('vehicle_sample'))
 
     def drive_ready_at(self,frame):
         if self.first_failure is not None:return 0.
