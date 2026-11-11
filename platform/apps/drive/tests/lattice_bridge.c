@@ -429,6 +429,36 @@ void probe_signed_fixture(void *pointer,unsigned variant){
   for(unsigned i=0;i<=32;i++){path->points[path->count++]=(xenova_drive_PathPoint){.pose=pose,.steering_rad=delta,.velocity_mps=(i==0||i==32?0:gear*.2f)};pose=fixture_step(pose,gear*.4f,delta,.05f,p->config.wheelbase);}}
  path->goal=path->merge_goal=path->points[path->count-1].pose;lp_tracker_begin(&p->tracker,1);
 }
+int probe_parking_cusp_fixture(void *pointer,unsigned strategy){
+ struct probe *p=pointer;struct lp_path *path=&p->path;const dw_world *w=&p->snapshot.world;
+ const xenova_drive_ParkingSlot *slot=dp_slot(w,1);
+ struct dp_limits limits=parking_limits(&p->config);struct lp_goal_set goals;
+ memset(path,0,sizeof(*path));
+ if(!dp_goal_seeds(slot,strategy,&p->config,&limits,.01f,&goals,&path->space)||!tr_basis_accept(&path->basis,w))return -1;
+ path->world_features=w->required_features;
+ path->task=(struct tr_intent){true,false,slot->approach_lane_id,slot->approach_lane_id,slot->approach_lane_id,0};
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ int entry_gear=strategy==2?1:-1;
+ float yaw=-entry_gear*1.57079632679f;
+ const unsigned before=8,after=strategy==2?39:43;
+ for(unsigned i=0;i<=before;i++){
+  dw_pose pose={1.5f,1.2f-.015f*(before-i),yaw};
+  path->points[i]=(xenova_drive_PathPoint){.pose=pose,.velocity_mps=i==before?0:-entry_gear*.1f};
+ }
+ for(unsigned i=0;i<=after;i++){
+  dw_pose pose={1.5f,1.2f-.0185f*i,yaw};
+  path->points[before+1+i]=(xenova_drive_PathPoint){.pose=pose,.velocity_mps=i&&i<after?entry_gear*.1f:0};
+ }
+ path->count=before+after+2;path->goal=path->points[path->count-1].pose;
+ path->revision=19;path->maneuver_revision=23;path->execution.segments_count=2;
+ path->execution.segments[0]=(xenova_drive_GearSegment){0,before,-entry_gear};
+ path->execution.segments[1]=(xenova_drive_GearSegment){before+1,path->count-1,entry_gear};
+ path->initial_tracker_index=before;lp_tracker_begin(&p->tracker,1);
+ if(dp_goal_contains(&path->space,path->points[before].pose,0,&p->config)||
+    !dp_goal_contains(&path->space,path->goal,0,&p->config))return -1;
+ return before;
+}
 int probe_track_sample(void *pointer,unsigned index,uint64_t stamp,float velocity,float *out){
  struct probe *p=pointer;if(index>=p->path.count)return LP_INPUT;
  dw_vehicle vehicle={.quality=3,.pi_sample_us=stamp,.velocity_mps=velocity,.has_measured_steering_rad=true,

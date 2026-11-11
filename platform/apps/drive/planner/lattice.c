@@ -1408,11 +1408,14 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  enum lp_result stopped_result=project(w,pose,vehicle->velocity_mps,steering,0,steering,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,&stopped,&final_pad,&path->space);
  /* 종점에 가까운 입력도 같은 원 progress window를 통과해야 한다. 현재 pose만으로
   * 아직 도달할 수 없는 남은 arc를 지워 segment/cusp 완료를 만들지 않는다. */
- bool exit_cusp=path->space.exiting&&tracker->segment+1<path_segments(path);
+ bool has_next=tracker->segment+1<path_segments(path);
+ /* An intermediate parking stop is inside the checked maneuver space. The
+  * selected slot is the terminal only for the last entry segment. */
+ bool parking_cusp=has_next&&(path->space.parking||path->space.exiting);
  bool captured=terminal_in_window&&stopped_result==LP_PATH_FOUND&&distance(pose,goal)+vehicle->position_error_m<=goal_distance&&
   distance(stopped,goal)+final_pad<=goal_distance&&fabsf(dw_angle(pose.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
   fabsf(dw_angle(stopped.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
-  (exit_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
+  (parking_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
  /* Goal proximity is insufficient while the body still straddles the divider. */
  if(captured&&live_task.changing)
   captured=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==live_task.selected_lane_id&&
@@ -1421,7 +1424,7 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
   * correspondence must be in the same movement window; a clipped projection
   * cannot turn a teleport or an earlier cusp into completed progress. */
  bool parking_entry=path->space.parking&&!path->space.exiting;
- bool parking_final=parking_entry&&tracker->segment+1==path_segments(path);
+ bool parking_final=parking_entry&&!has_next;
  bool intended_gear=!path->execution.present||path->execution.mission.kind!=2||
   (path->execution.mission.strategy==1&&gear==-1)||(path->execution.mission.strategy==2&&gear==1);
  if(parking_final)captured=pose_in_window&&intended_gear&&stopped_result==LP_PATH_FOUND&&
@@ -1432,7 +1435,7 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
    * Only point/cusp completion consumes the path endpoint. */
   if(!parking_final){tracker->progress=arc_to(path,segment,segment.last_index);tracker->index=segment.last_index;}
   out->steer=steering;out->emergency=true;out->known_distance=known;out->result=LP_STOP;
-  if(tracker->segment+1<path_segments(path)){out->gate_required=true;out->requested_direction=path_segment(path,tracker->segment+1).signed_direction;}
+  if(has_next){out->gate_required=true;out->requested_direction=path_segment(path,tracker->segment+1).signed_direction;}
   tracker->completed++;return LP_STOP;
  }
  if(stopped_result!=LP_PATH_FOUND)return out->result=stopped_result;
