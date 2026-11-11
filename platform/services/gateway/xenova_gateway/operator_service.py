@@ -546,7 +546,7 @@ class OperatorService:
                 interval=self.clocks.interval((vm,reference['execution_id'],reference['agent_instance_id']),
                     int(command['clock_probe_sequence']),int(command['completed_guest_us']),now,m.generation)
                 raw=self.runner.drive_link.vehicle_history.get(int(command['vehicle_sequence']))
-                current=self.runner.device_view().get('vehicle_sample')
+                current=self.runner.vehicle_sample()
                 sample=None if raw is None else decode(raw,schema.VehicleSample)
                 registered=sample is not None and sample.quality==3 and current is not None and all(
                     getattr(sample,k)==current.get(k) for k in ('host_boot','device_session','odom_epoch','pi_session','calibration'))
@@ -566,7 +566,7 @@ class OperatorService:
         provider=self.runner.drive_link
         raw=None if provider is None else provider.vehicle_history.get(int(command['vehicle_sequence']))
         if raw is None:return None
-        sample=decode(raw,schema.VehicleSample);current=self.runner.device_view().get('vehicle_sample')
+        sample=decode(raw,schema.VehicleSample);current=self.runner.vehicle_sample()
         maximum=getattr(self.runner._sink,'_vehicle_maximum_age_us',None)
         if (current is None or maximum is None or sample.quality!=3 or any(getattr(sample,k)!=current.get(k)
                 for k in ('host_boot','device_session','odom_epoch','pi_session','calibration'))):return None

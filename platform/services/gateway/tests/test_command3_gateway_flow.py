@@ -107,7 +107,7 @@ def ingress_diagnostics(w,vm,owner):
 
 @pytest.mark.parametrize('negative',['expiry','fence'])
 def test_actual_c_command3_ingress_adoption_output_and_original_expiry_or_fence(
-        world, command_probe, tmp_path, negative):
+        world, command_probe, tmp_path, negative, monkeypatch):
     w=world
     assert w.apply(w.call('auto.resume'))['result']=='APPLIED'
     assert w.w.m.output_permitted and not w.o.hold
@@ -125,7 +125,12 @@ def test_actual_c_command3_ingress_adoption_output_and_original_expiry_or_fence(
     owner=OutputOwner(device,command_timeout_s=.1,clock=lambda:w.w.t)
     previous=w.r._sink;w.r._sink=owner
     try:
-        received=receive_original(w,vm,body,1,emit=True)
+        with monkeypatch.context() as patch:
+            def full_device_view():
+                raise AssertionError('command admission copied the full device view')
+            patch.setattr(owner,'device_view',full_device_view)
+            received=receive_original(w,vm,body,1,emit=False)
+        w.r._emit(w.w.m.step(w.w.t))
         diagnostic=ingress_diagnostics(w,vm,owner)
         (tmp_path/'ingress-diagnostics.json').write_text(json.dumps(diagnostic,indent=2,default=str))
         key=(vm,'autonomous',peer[1],peer[2],w.w.m.generation)

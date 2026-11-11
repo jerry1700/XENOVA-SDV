@@ -19,6 +19,7 @@ from xenova_drive_world.mapper_clock import ClockPolicy, build_probe, candidate_
 from xenova_mqtt.drive_binding import BindingCache
 from xenova_gateway.authority import AuthorityStore, AuthorityError
 from xenova_gateway.drive_link import DriveLinkIO, DriveLinkProvider, inbound
+from xenova_gateway import drive_link
 from xenova_gateway.machine import ForwardStop, Mode
 from xenova_gateway.mapper_uplink import GatewayMapperUplink, UplinkProfile
 from xenova_gateway.scene_authority import ScenePolicy, StationaryPolicy, SceneRequest, SceneAuthorityError, SceneJournalAck, MatchedStop, FEEDBACK3
@@ -225,6 +226,34 @@ def original_mission(w,scene):
     assert encode(decode(w.io.pending[inbound(vm),'grant'],schema.DriveLink).mission_grant)==original
     assert w.runtime.command_allowed({'app_id':'autonomous','vm_id':vm},w.now)
     return grant,original
+
+
+@pytest.mark.parametrize('failure',['expiry','revocation'])
+def test_scene_reply_reuses_original_wire_and_rechecks_current_authority(scene_world,monkeypatch,failure):
+    w=scene_world;_,admitted,_=w.admit()
+    provider=w.runner.drive_link
+    grant=decode(admitted,schema.DriveLink).scene_grant
+    assert grant.lifecycle_state==2
+    original=w.runtime.owner.grant_bytes
+    decoded=drive_link.decode
+    reads=[]
+    def count(raw,kind):
+        reads.append(kind)
+        return decoded(raw,kind)
+    monkeypatch.setattr(drive_link,'decode',count)
+    assert provider.publish_scene(original)
+    for _ in range(10):
+        provider._send_scene(uid(90))
+        assert w.io.pending[inbound(uid(90)),'scene']==admitted
+    assert reads==[schema.SceneGrant]
+    if failure=='expiry':
+        w.now=grant.valid_until_pi_us
+    else:
+        w.runtime.owner._ram_fence('MAPPER_INVALID')
+    provider._send_scene(uid(90))
+    assert provider._scene is None
+    assert all(kind!='scene' for _,kind in w.io.pending)
+    assert reads==[schema.SceneGrant]
 
 
 def test_original_mission_scene_pair_is_consumed_without_transport_rewrite(scene_world):
