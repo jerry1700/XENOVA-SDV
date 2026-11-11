@@ -79,8 +79,10 @@ VM 경로로 옮기지 않는다. 게시 직전 현재 원장·등록부·예약
 정확한 `effective_status`·미수락·조회 오류는 [원장 계약](cli-manager-spec.md#operation-fields)을 따른다.
 
 부분 실패의 원 기록·파일 보존과, 운영자의 명시 종결·정리·예약 해제는 다른 기능이다.
-[operation-reconcile](cli-manager-spec.md#cmd-operation-reconcile)은 미게시 Linux private만
-진단/폐기한다. 등록 VM retire/purge로 우회하거나 파일 삭제·원 ID 재발급·자동 force로
+[operation-reconcile](cli-manager-spec.md#cmd-operation-reconcile)은 지원 VM의 미게시 private 자산만
+진단/폐기한다. Linux 디스크와 Zephyr firmware는 각 자산 어댑터의 사용 부재·소유 보호를 적용한다.
+신규 생성의 [유한 자동 후속](cli-manager-spec.md#automatic-private-cleanup)도 같은 수습 경로를 사용한다.
+등록 VM retire/purge로 우회하거나 파일 삭제·원 ID 재발급·자동 force로
 보호를 해제하지 않는다. 실제 운영 적용과 제품 HTTP 연결은 별도 승인/수락이다.
 
 ### 원 생성 실패와 예약 반환
@@ -88,12 +90,13 @@ VM 경로로 옮기지 않는다. 게시 직전 현재 원장·등록부·예약
 원 생성의 host/기한은 최초 내구 수락에서 고정한다. 요청 진입·대기의 소비 시간을 제외하고
 정책의 종료 여유를 남기며 원본 복사와 guest 설정·게시 허가에 같은 기한을 전달한다.
 자기 실행의 자식/FD·mount/loop 정상 종료는 원 실행자의 책임이다. 실패 이미지 폐기는
-보존한 원 operation을 참조하는 별도 명시 수습이며 조회가 자동 이행하지 않는다.
+보존한 원 operation을 참조하는 별도 수습이며, 명시 호출이나 허용된 신규 생성의 유한 후속이 수행한다.
+조회는 자동 이행하지 않는다.
 
 | 경계 | 기존 보호와 5번의 연결 |
 |---|---|
-| 실행량/소유 | 기존 단일 Linux 슬롯을 공통 잠금 밖에서 확보. create와 discard-private 역할을 구별하고 실제 상속 FD/소유 수명 유지 |
-| 원 journal | 같은 operation의 schema 1.1, 버전형 creation/reconciliation. 고정 원 key/spec/hash/할당·최초 오류/원 결과 보존. 수습의 자기 진행은 새 요청으로 취급하지 않음 |
+| 실행량/소유 | Linux는 기존 linux-prepare, Zephyr는 기존 lifecycle-io 슬롯을 공통 잠금 밖에서 확보. create와 discard-private 역할을 구별하고 실제 상속 FD/소유 수명 유지 |
+| 원 journal | 같은 operation의 원 schema와 버전형 reconciliation 유지. 수락된 creation 기한·고정 원 key/spec/hash/할당·최초 오류/원 결과 보존. 수습의 자기 진행은 새 요청으로 취급하지 않음 |
 | 계획·개별 삭제 | 제한된 자기 private topology·inode 계획을 먼저 저장. 긴 사용 확인/열거/정리는 공통 잠금 밖. 삭제 직전 짧은 admission/gate·현재 inode 대조 |
 | 수습 완료·할당 | 원 계획의 자산/사용 해소와 완료 기록을 확인. 그 기록이 읽힌다는 사실만으로 fsync 성공을 추정하지 않음. 실제 예약 소비 writer가 파일/부모를 재확정하며 실패하면 소비 금지 |
 | 조회/다른 VM 제어 | 실패 대상의 원 기록을 조회하며 무관한 B의 정상 조회·실제 정지는 계속 진행. 공통 저장소 고장으로 근거 자체가 없으면 그 공통 범위는 명시 |
@@ -198,6 +201,12 @@ daemon은 없다. `control-operation`은 기록 조회이며 실행기가 아니
 이미 제출한 create의 효과가 있을 수 있으면 취소된 것으로 가정하지 않는다. 과거 host,
 lifecycle 변경, 후속 사용자 revision, 저장 불확실성, 모호한 실행 신원은 먼저 재확인한다.
 실제 force/destroy를 수락 의도의 자동 후속 동작으로 추가하지 않는다.
+
+만료된 사용자 start의 같은 key 재전달은 원 실행이 미결합 상태로 남은 경우에도 메타데이터만
+종결할 수 있다. 현재 host·의도·등록·구성·CPU 문맥과 원 실행 owner가 일치하고, 실제 Xen 부재와
+정확한 process scope의 관측 전용 종료 확인이 필요하다. 원 실패가 내구 저장되기 전에는 launch
+gate를 열지 않으며, 저장 중단은 같은 key로 이어서 수습한다. 결과는 원 실패이며 자동 재기동이 아니다.
+단순 부재, helper의 timeout 또는 호출자 종료만으로 종결하지 않는다. 원장 조회는 계속 읽기 전용이다.
 
 ## 시간 예산과 실제 반환
 

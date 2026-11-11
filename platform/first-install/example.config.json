@@ -24,10 +24,10 @@
       "template_version": "1.0.4"
     },
     {
-      "template_dir": "/absolute/xenova-template-releases/linux/debian-13-20261015/1.0.4",
-      "template_manifest_sha256": "REPLACE_WITH_SELECTED_TEMPLATE_JSON_SHA256",
+      "template_dir": "/absolute/xenova-template-releases/linux/debian-13-20261015/1.0.7",
+      "template_manifest_sha256": "2fa9454b4a528a6b47e68179c0fe2ca6a63f8d3e6de7fd618549e3f8af5fa689",
       "template_id": "debian-13-arm64",
-      "template_version": "1.0.4"
+      "template_version": "1.0.7"
     }
   ]
 }

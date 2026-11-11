@@ -1,6 +1,7 @@
 """정적 Xen hard affinity 정책·호스트 준비·시점 관측.
 
-호출자는 공통 operation_lock을 보유한다. 조회/일반 시작은 affinity를 변경하지 않는다.
+CPU 변경은 공통 operation_lock 안에서 수행한다. 느린 private 사용 관측 중에는 잠금을 반환한다.
+조회/일반 시작은 affinity를 변경하지 않는다.
 외부 root/xl과 원자적으로 직렬화하지 않으며 실행 신원과 CPU 준수는 별도 계약이다.
 """
 import json
@@ -459,7 +460,48 @@ class CPU:
         event('evidence.reused', phase='launch.prepare', policy_revision=context.get('policy_revision'))
         return context
 
-    def guard_stopped(self, records, sample, *, policy_operation=None):
+    def _isolated_creations(self, records, deadline, context, *, execute):
+        """이번 host 준비에서만 사용 부재를 확인한다. 원 작업/예약/수습 상태는 바꾸지 않는다."""
+        from xenova_management import Manager
+        from xenova_creation import diagnose, holds, inventory
+        from xenova_preparation import assets_quiet
+        common = (context or {}).get('common_fd')
+        if common is None:
+            return ()
+        manager = Manager(self.p)
+        operations = manager._operations(deadline=deadline)
+        pending = [op for op in operations if holds(manager, op)]
+        # 정책 변경·미확정 실행·진행 중 수습까지 이 예외를 확대하지 않는다.
+        if not pending or any(op['action'] != 'create' or
+                op['status'] != 'RECOVERY_REQUIRED' or op.get('reconciliation') is not None for op in pending):
+            return ()
+        assets_quiet(self.p)
+        host, gate, policy = self.p.boot_id_reader(), self.e.barrier(), self.policy()
+        plans = []
+        # Xen/mount/loop/FD 관측은 오래 걸릴 수 있다. B 조회·stop을 공통 잠금으로 붙잡지 않는다.
+        with common.outside(self.p):
+            for op in pending:
+                plan, _ = diagnose(manager, op, deadline)
+                plans.append(plan)
+        if self.p.clock() >= deadline:
+            refuse('DEADLINE_EXCEEDED', 'CPU preparation asset observation expired')
+        if self.p.boot_id_reader() != host or self.e.host != host or self.e.barrier() != gate:
+            refuse('TARGET_CHANGED', 'host context changed during CPU preparation asset observation')
+        if execute:
+            manager._writable()
+        if (manager._operations(deadline=deadline) != operations or
+                self.p.records(validate_assets=False) != records or self.policy() != policy):
+            refuse('TARGET_CHANGED', 'assets, registry or CPU policy changed during CPU preparation observation')
+        assets_quiet(self.p)
+        for op, plan in zip(pending, plans):
+            target = manager.data/'instances'/op['assigned']['internal_name']
+            if (manager._owner_state(op) != 'absent' or target.exists() or target.is_symlink() or
+                    op['vm_id'] in manager._tombs() or inventory(manager, op, deadline) != plan):
+                refuse('TARGET_CHANGED', 'private creation ownership changed before CPU preparation',
+                       details={'operation_id':op['operation_id']})
+        return pending
+
+    def guard_stopped(self, records, sample, *, policy_operation=None, isolated_creations=()):
         from xenova_preparation import assets_quiet
         assets_quiet(self.p)
         for record in records.values():
@@ -474,8 +516,10 @@ class CPU:
         from xenova_management import Manager
         from xenova_creation import holds
         manager=Manager(self.p)
-        if any(holds(manager,op) for op in manager._operations()):
-            refuse('OPERATION_IN_PROGRESS', 'unfinished asset operation blocks CPU policy', retryable=True)
+        for op in manager._operations():
+            if op not in isolated_creations and holds(manager,op):
+                refuse('OPERATION_IN_PROGRESS', 'unfinished asset operation blocks CPU policy', retryable=True,
+                       details={'operation_id':op['operation_id']})
         from xenova_recovery import Recovery
         for op in self.e.requests()+Recovery(Manager(self.p)).attempts():
             if op.get('host_boot_id') == self.e.host and op.get('phase') not in ('completed', 'failed'):
@@ -579,8 +623,9 @@ class CPU:
             if execute:
                 display('complete', configured=False)
             return {'configured':False, 'ready':False, 'legacy':True}
+        isolated = self._isolated_creations(records, deadline, context, execute=execute)
         sample = self.observe(deadline)
-        self.guard_stopped(records, sample)
+        self.guard_stopped(records, sample, isolated_creations=isolated)
         self.check_unknown(records, sample, policy['shared_pcpus'])
         if (sample['hardware']['pool_name'] != policy['pool_name'] or not
                 selected_cpus(policy) <= set(sample['hardware']['online_pcpus'])):
