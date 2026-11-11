@@ -12,7 +12,7 @@ enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
 /* Tracker, supervisor, state exporter and one planner preparation probe. */
 #define DE_READERS 4
 struct de_path_slot {struct lp_path path;struct lp_tracking_geometry tracking_geometry;
- atomic_uint generation,leases[DE_READERS];bool writing,tracking_prepared;uint64_t scene_generation;};
+ atomic_uint generation,leases[DE_READERS];atomic_bool writing;bool tracking_prepared;uint64_t scene_generation;};
 struct de_reference {unsigned slot;uint32_t generation,lease;};
 /* Actual successful tracker sample, separate from immutable registered Core/ref.
  * Missing/exact-meter mismatch withholds a progress export, not numeric clock
@@ -68,7 +68,8 @@ struct drive_engine {
  struct db_limits behavior_limits;struct dp_limits parking_limits;struct db_facts facts;
  struct db_episode episode,restore_episode;struct dp_state parking;
  struct lp_config parking_work_config;
- atomic_bool parking_stop_event,parking_boundary_pending;
+ atomic_uint parking_stop_generation;
+ atomic_bool parking_boundary_pending;
  atomic_uint snapshot_requested_generation;
  xenova_drive_DriveControlFacts control_facts;
  xenova_drive_EpisodeSnapshot episode_state,episode_candidate;

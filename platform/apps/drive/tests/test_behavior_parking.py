@@ -6,8 +6,9 @@ The app/actor bridge is a separate integration boundary in the same Nano cohort.
 import ctypes as C
 import json
 import math
+import subprocess
 import pytest
-from test_lattice import library, Product, CFG, FOUND, STOP, obstacle
+from test_lattice import HOME, library, Product, CFG, FOUND, STOP, obstacle
 from test_engine import modern_world
 from test_signed_lattice import ports as tracking_ports, sample
 from world_codec import schema
@@ -87,6 +88,26 @@ def test_parking_cusp_outside_slot_requires_gate_before_entering(library, strate
         finally:
             product.close()
     assert traces[1] == pytest.approx(traces[0], abs=1e-6)
+
+
+@pytest.fixture(scope='module')
+def parking_writer(library, tmp_path_factory):
+    world = HOME/'world'
+    executable = tmp_path_factory.mktemp('parking-writer')/'probe'
+    subprocess.run([
+        'cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=undefined',
+        *[f'-I{directory}' for directory in (HOME/'planner', world, world/'generated', world/'nanopb')],
+        *[f'-Wl,--wrap={symbol}' for symbol in (
+            'dw_acquire', 'dw_source_valid', 'dw_release', 'dw_current_pose', 'lp_validate_path',
+        )],
+        str(HOME/'tests/parking_writer_probe.c'), library._name, '-lm', '-o', str(executable),
+    ], check=True, capture_output=True, text=True)
+    return executable
+
+
+@pytest.mark.parametrize('case', ('writer', 'handoff', 'deadlines'))
+def test_parking_publication_and_phase_recovery(parking_writer, case):
+    subprocess.run([str(parking_writer), case], check=True)
 
 
 def parking_trace(library,product,tmp_path,validation=None):
