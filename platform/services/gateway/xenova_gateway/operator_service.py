@@ -417,12 +417,17 @@ class OperatorService:
             if self._proposal('startup',changes,'startup',self.now+10_000_000,started):self.started=True
         # Volatile result retention is exactly ring8; durable rows are queried
         # from their one owner rather than duplicated indefinitely in actor RAM.
-        saved={row['key'] for row in self._rows()}
-        for key,row in tuple(self.pending.items()):
-            if row['terminal'] and (key in saved or row['request']['action'] in VOLATILE and key not in self.sources.input_results):
+        saved = None
+        for key, row in tuple(self.pending.items()):
+            if not row['terminal']:
+                continue
+            if saved is None:
+                saved = {row['key'] for row in self._rows()}
+            if (key in saved or
+                    (row['request']['action'] in VOLATILE and key not in self.sources.input_results)):
                 del self.pending[key];self.runner.authority.operator_reservations.pop(key,None)
                 self._effects.pop(key,None);self.scene_requests.pop(key,None)
-            elif row['terminal'] and self.now//1000>=row['retain_until_ms']:
+            elif self.now//1000>=row['retain_until_ms']:
                 self.ram_floor=max(self.ram_floor,request_key(key)[1]);del self.pending[key]
                 self.runner.authority.operator_reservations.pop(key,None)
         self.runner.authority.operator_ram_floor=max(self.ram_floor,self.sources.retired_ms)
