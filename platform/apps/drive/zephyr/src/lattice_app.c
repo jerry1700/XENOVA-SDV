@@ -265,9 +265,22 @@ static int64_t valid_until(const struct dl_clock *clock,const dw_vehicle *vehicl
 }
 static int mission_profile(bool *required){
  struct dw_handle handle;const struct dw_snapshot *map;
- if(dw_acquire(&engine.maps,&handle,&map))return -EAGAIN;
+ enum dw_result result=dw_acquire(&engine.maps,&handle,&map);
+ if(result)return result==DW_BUSY?-EBUSY:-EAGAIN;
  *required=(map->world.required_features&DW_LANE_MODEL)!=0;
  return dw_release(&engine.maps,handle)?-EAGAIN:0;
+}
+static int planner_refresh_mission(uint64_t now){
+ xenova_drive_MissionGrant mission;
+ bool required=false;
+ int rc=mission_profile(&required);
+ if(!rc&&required)rc=dl_mission_get(&mission,now);
+ /* A failed try-lock supplies no evidence that the last grant was revoked. */
+ if(rc==-EBUSY)return rc;
+ const xenova_drive_MissionGrant *current=!rc&&required?&mission:NULL;
+ (void)de_mission(&engine,current,now);
+ prepared_revalidate(current);
+ return 0;
 }
 static const char *qualified(const void *unused,struct xm_span input,int64_t age){
  ARG_UNUSED(unused);ARG_UNUSED(input);ARG_UNUSED(age);
@@ -711,11 +724,8 @@ static int planner_step(void){
     return 2;
    }
   }
-  behavior_io(&mapping,now,guest);
-  xenova_drive_MissionGrant mission;bool required;
-  if(mission_profile(&required)||!required||dl_mission_get(&mission,now)){
-   (void)de_mission(&engine,NULL,now);prepared_revalidate(NULL);
-  }else{(void)de_mission(&engine,&mission,now);prepared_revalidate(&mission);}
+   if(planner_refresh_mission(now)==-EBUSY)return 1;
+   behavior_io(&mapping,now,guest);
   if(engine.planning){
    enum de_result rc=de_plan_slice(&engine,4,now);
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)

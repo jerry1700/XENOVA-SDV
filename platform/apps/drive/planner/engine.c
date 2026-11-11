@@ -469,7 +469,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
  if(stopped)return DE_CANCELLED;
  if(!request||request==e->started)return DE_WAITING;
  struct dw_handle h;const struct dw_snapshot *map;
- enum dw_result dr=dw_acquire(&e->maps,&h,&map);if(dr)return DE_MAP;
+ enum dw_result dr=dw_acquire(&e->maps,&h,&map);if(dr)return dr==DW_BUSY?DE_BUSY:DE_MAP;
  budget.collision_index=&e->map_indices[h.slot];
  if((map->world.required_features&DW_LANE_MODEL)&&e->has_grant&&(!e->grant.admitted||(e->grant.kind!=1&&e->grant.kind!=2))){
   (void)dw_release(&e->maps,h);return DE_WAITING;
@@ -553,9 +553,12 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
    float remaining=lp_path_remaining(old,pose,NULL);
    bool same_goal=hypotf(goal.x-old->goal.x,goal.y-old->goal.y)<e->config->goal_distance||remaining>replan_distance;
    uint64_t previous_scene=e->paths[previous.slot].scene_generation;
-   bool same_scene=(!scene_generation||previous_scene==scene_generation)&&
-    !dw_scene_generation(&e->maps,previous_scene,now,NULL);
-   enum lp_result usable=same_intent&&same_goal&&same_scene?lp_validate_path(old,&map->world,e->config,&checked,&budget):LP_INPUT;
+   bool same_scene=!scene_generation||previous_scene==scene_generation;
+   enum dw_result previous_gate=same_scene?dw_scene_generation(&e->maps,previous_scene,now,NULL):DW_SOURCE;
+   if(previous_gate==DW_BUSY){
+    (void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return DE_BUSY;
+   }
+   enum lp_result usable=same_intent&&same_goal&&!previous_gate?lp_validate_path(old,&map->world,e->config,&checked,&budget):LP_INPUT;
    if(same_intent&&same_goal&&(usable==LP_COLLISION||usable==LP_INPUT||usable==LP_NUMERIC))e->path_invalidated=true;
    if(usable==LP_PATH_FOUND){
     if(initial_correspondence_pending(e,old)&&initial_correspondence_stale(old,&vehicle,e->config)&&
@@ -785,7 +788,8 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
  if(witness)memset(witness,0,sizeof(*witness));
  struct de_episode_progress episode_progress={0};
  struct dw_handle mh;const struct dw_snapshot *map;
- if(dw_acquire(&e->maps,&mh,&map))return DE_MAP;
+ enum dw_result acquired=dw_acquire(&e->maps,&mh,&map);
+ if(acquired)return acquired==DW_BUSY?DE_BUSY:DE_MAP;
  budget.collision_index=&e->map_indices[mh.slot];
  dw_pose pose;uint64_t map_end=0;enum de_result rc=inputs(e,map,now,&pose,vehicle,&map_end);
  if(!rc&&enforce_mission_profile&&(map->world.required_features&DW_LANE_MODEL)&&!mission)rc=DE_STATE;
@@ -858,7 +862,10 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
    witness->valid_until_pi_us=command->valid_until_pi_us;strcpy(witness->map_epoch,map->world.map_epoch);}
   if(de_path_release(e,ph))rc=DE_BUSY;
  }
- if(!rc&&dw_source_valid(&e->maps,mh))rc=DE_CHANGED;
+ if(!rc){
+  enum dw_result source=dw_source_valid(&e->maps,mh);
+  if(source)rc=source==DW_BUSY?DE_BUSY:DE_CHANGED;
+ }
  if(dw_release(&e->maps,mh))rc=DE_BUSY;
  if(!rc&&episode_progress.valid&&take(e)){
   e->tracked_episode_progress=episode_progress;
