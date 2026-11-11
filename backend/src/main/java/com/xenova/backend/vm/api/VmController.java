@@ -8,6 +8,7 @@ import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmRole;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
 import jakarta.validation.Valid;
 import java.net.URI;
 import java.time.Clock;
@@ -18,6 +19,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -90,6 +92,14 @@ public class VmController {
             @PathVariable String vmId,
             @RequestParam(value = "request_key", required = false) String requestKey) {
         return vmService.controlOperation(vmId, requestKey);
+    }
+
+    @PutMapping("/{vmId}/resources")
+    public VmResourceUpdate updateResources(
+            @PathVariable String vmId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String requestKey,
+            @Valid @RequestBody UpdateVmResourcesRequest request) {
+        return vmService.updateResources(vmId, request.vcpus(), request.memoryMib(), requestKey);
     }
 
     @DeleteMapping("/{vmId}")

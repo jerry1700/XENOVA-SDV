@@ -27,6 +27,8 @@ import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResources;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
@@ -342,6 +344,47 @@ class VmServiceTest {
                     assertThat(exception.getCode()).isEqualTo("INVALID_ARGUMENT");
                 });
         verify(vmControlPort, never()).requestReboot(anyString(), anyString());
+    }
+
+    @Test
+    void linuxResourcesAreUpdatedOnThePlatformAndSavedForTheNextStart() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        VmResourceUpdate update = new VmResourceUpdate(
+                "vm-1", "operation-1", new VmResources(1, 256), new VmResources(2, 512), true);
+        when(vmControlPort.updateResources("vm-1", 2, 512, "resize-1")).thenReturn(update);
+
+        assertThat(service.updateResources("vm-1", 2, 512, "resize-1")).isEqualTo(update);
+
+        assertThat(record.getVcpus()).isEqualTo(2);
+        assertThat(record.getMemoryMib()).isEqualTo(512);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).beginOperation("vm-1");
+        verify(stateTracker).endOperation("vm-1");
+    }
+
+    @Test
+    void zephyrResourcesAreRejectedBeforeCallingThePlatform() {
+        VmRecord record = new VmRecord(
+                "vm-z", new CreateVmCommand("zephyr", "alpine", "1.2.0", 1, 256), GuestKind.ZEPHYR, NOW);
+        when(vmRecordRepository.findById("vm-z")).thenReturn(Optional.of(record));
+
+        assertThatThrownBy(() -> service.updateResources("vm-z", 2, 512, "resize-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getCode()).isEqualTo("RESOURCE_UPDATE_UNSUPPORTED");
+                });
+        verify(vmControlPort, never()).updateResources(anyString(), any(Integer.class), any(Integer.class), anyString());
+    }
+
+    @Test
+    void resourceUpdateRejectsMemoryBelowTheTemplateMinimum() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+
+        assertThatThrownBy(() -> service.updateResources("vm-1", 1, 127, "resize-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception ->
+                        assertThat(exception.getCode()).isEqualTo("VALIDATION_ERROR"));
+        verify(vmControlPort, never()).updateResources(anyString(), any(Integer.class), any(Integer.class), anyString());
     }
 
     @Test
