@@ -47,7 +47,8 @@ describe('execution logs beside the terminal', () => {
     });
     expect(screen.getByLabelText('수집된 로그')).toHaveTextContent('<script>plain log</script>');
     expect(document.querySelector('script')).toBeNull();
-    fireEvent.click(screen.getByLabelText('조회 일시정지'));
+    fireEvent.click(screen.getByLabelText('일시정지'));
+    expect(screen.getByRole('status')).toHaveTextContent('일시정지');
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
@@ -62,8 +63,36 @@ describe('execution logs beside the terminal', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
-    expect(screen.getByRole('status')).toHaveTextContent('연결 끊김 · 이전 기록');
+    expect(screen.getByRole('status')).toHaveTextContent('연결 끊김 · 마지막 기록 유지');
+    // 오류 메시지는 상태 문구와 섞지 않고 툴팁과 보조 줄로
+    expect(screen.getByRole('status')).not.toHaveTextContent('offline');
+    expect(screen.getByRole('status')).toHaveAttribute('title', 'offline');
+    expect(screen.getByText('오류: offline')).toBeInTheDocument();
     expect(screen.getByLabelText('수집된 로그')).toHaveTextContent('plain log');
+  });
+  it('shows each record in fixed columns and the collection sources as chips', async () => {
+    vi.mocked(fetchLogSources).mockResolvedValue({
+      epoch: 'one',
+      items: [
+        { source_id: 'dom0', vm_id: null, components: ['api.service'], state: 'connected' },
+        { source_id: 'vm-agent', vm_id: 'vm-3', components: [], state: 'disconnected' },
+      ],
+    });
+    await act(async () => {
+      render(<RuntimeLogsPanel />);
+    });
+    expect(screen.getByRole('status')).toHaveTextContent('수신 중 · 1초 간격');
+    const row = screen.getByLabelText('수집된 로그').querySelector('li')!;
+    const cells = [...row.children].map((cell) => cell.textContent);
+    expect(cells).toHaveLength(5);
+    expect(cells[0]).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3}$/);
+    expect(cells.slice(1)).toEqual(['INFO', 'dom0/api.service', '—', '<script>plain log</script>']);
+    expect(row.children[1]).toHaveAttribute('data-tone', 'ok');
+    const chips = screen.getByRole('list', { name: '수집 소스' }).querySelectorAll('li');
+    expect([...chips].map((chip) => [chip.textContent, chip.getAttribute('data-tone')])).toEqual([
+      ['dom0', 'ok'],
+      ['vm-agent', 'muted'],
+    ]);
   });
   it('resets the cursor after a replaced log store', async () => {
     await act(async () => {
