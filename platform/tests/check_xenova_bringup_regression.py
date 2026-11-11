@@ -45,6 +45,10 @@ for name, values, failure in [
         assert f'LOAD mmc {devnum}:1 0x00200000 xen' in result.stdout
         assert f'LOAD mmc {devnum}:1 0x00400000 Image' in result.stdout
         assert 'BOOT 0x00200000 - 0x05600000' in result.stdout
+        xen_args = next(line.split() for line in result.stdout.splitlines()
+                        if line.startswith('FDT set /chosen xen,xen-bootargs '))
+        assert [arg for arg in xen_args if arg.startswith('dom0_max_vcpus=')] == ['dom0_max_vcpus=2'], (name, xen_args)
+        assert not any(arg.startswith('dom0_vcpus_pin') for arg in xen_args), (name, xen_args)
         dom0_args = next(line.split() for line in result.stdout.splitlines()
                          if line.startswith('FDT set /chosen xen,dom0-bootargs '))
         debug = values.get('xenova_debug') == '1'

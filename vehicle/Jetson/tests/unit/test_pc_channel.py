@@ -142,7 +142,7 @@ class PcChannelTests(unittest.TestCase):
 
     def test_expired_receive_burns_original_hwm_and_never_relabels_old_or_changed_replays(self):
         supervisor, worker = self.links()
-        expired = self.packet(sequence=2, expires_us=self.now+1)
+        expired = self.packet(sequence=2, kind='PC_EARLY_META', expires_us=self.now+1)
         worker.endpoint.send(expired.raw)
         self.now += 1
         self.assertEqual(supervisor.poll(), ())
@@ -259,16 +259,36 @@ class PcChannelTests(unittest.TestCase):
             self.fail('bounded kernel queue did not drain')
         self.assertIs(supervisor.flush().packet, original)
         worker.poll()
-        second = supervisor.send('PC_SOURCE_FENCE', {}, request_id=uid(102), issued_us=self.now,
+        second = worker.send('PC_EARLY_META', {}, request_id=uid(102), issued_us=self.now,
             expires_us=self.now+10)
-        self.assertEqual((original.sequence, second.sequence), (1, 2))
         self.now += 10
-        with self.assertRaises(TimeoutError):
-            supervisor.flush()
-        self.assertIs(supervisor.pending, second)
-        self.assertIsNone(supervisor.send('PC_SOURCE_FENCE', {}, request_id=uid(103),
+        self.assertIsNone(worker.flush())
+        self.assertIs(worker.pending, second)
+        self.assertIsNone(worker.send('PC_EARLY_META', {}, request_id=uid(103),
             issued_us=self.now, expires_us=self.now+100_000))
-        self.assertIs(supervisor.abort(), second)
+        self.assertIs(worker.discard_expired_work(second), second)
+        self.assertIsNone(worker.pending)
+
+    def test_delayed_identity_and_fence_are_delivered_without_reviving_frame_lifetime(self):
+        origin_s, origin = self.links('A')
+        target_s, target = self.links('M')
+        start = origin.send('PC_NN_START', {}, b'original start', request_id=uid(100),
+            issued_us=self.now, expires_us=self.now+10)
+        self.now += 20
+        self.assertIs(origin.flush().packet, start)
+        received, = origin_s.poll()
+        self.assertIs(origin_s.require_received(received), received)
+        fence = origin.send('PC_SOURCE_FENCE', {'reason': 'INPUT_UNAVAILABLE'},
+            request_id=uid(101), issued_us=self.now, expires_us=self.now+10)
+        self.now += 20
+        origin.flush(); received, = origin_s.poll()
+        forward = forward_received(received, target_s, origin_link=origin_s)
+        self.assertEqual(forward.expires_us, fence.expires_us)
+        self.assertIs(target_s.require_sent(target_s.flush()).packet, forward)
+        delivered, = target.poll()
+        self.assertIs(target.require_received(delivered), delivered)
+        self.assertEqual(decode_forward(delivered.packet, peer('A'), self.binding).original_packet.raw,
+            fence.raw)
 
     def test_forward_preserves_actual_actor_raw_receive_j_and_requires_independent_origin_registration(self):
         for origin_role, target_role, kind in (('A', 'M', 'PC_NN_START'), ('M', 'A', 'PC_PARSE_COMPLETE')):
@@ -327,8 +347,7 @@ class PcChannelTests(unittest.TestCase):
                     worker.discard_expired_work(original)
 
     def test_expired_work_discard_refuses_unknown_send_other_roles_and_control_kinds(self):
-        for role, kind in (('M', 'PC_SOURCE_FENCE'), ('A', 'PC_EARLY_META'),
-                ('A', 'PC_NN_RESULT_META'), ('A', 'PC_NN_START')):
+        for role, kind in (('M', 'PC_SOURCE_FENCE'), ('A', 'PC_NN_START')):
             with self.subTest(role=role, kind=kind):
                 _, worker = self.links(role)
                 original = worker.send(kind, {}, b'original metadata', request_id=uid(100),

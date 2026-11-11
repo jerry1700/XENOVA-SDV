@@ -4,6 +4,87 @@
 
 #include "xm_internal.h"
 
+static int parse_object(struct xm_json *j, struct xm_span payload);
+
+/* keys가 NULL이면 get 이전의 pair 경계만 확인한다. 허용 키는 이후 별도
+ * 검산해 유일 command_id가 있는 미지 키 거절의 기존 상관관계를 보존한다.
+ * 공용 helper와 같이 escaped alias는 원 키 비교에서 미지 키로 거절한다. */
+static bool command_object(const struct xm_json *j,int obj,const char *const *keys,size_t count)
+{
+	if(obj<0||obj>=j->count||!xm_json_is_object(j,obj)||j->tok[obj].size<0||
+	   (keys&&j->tok[obj].size>(int)count))return false;
+	const jsmntok_t *object=&j->tok[obj];
+	if(object->start<0||object->end<=object->start)return false;
+	unsigned seen=0;int token=obj+1;
+	for(int pair=0;pair<object->size;pair++){
+		if(token+1>=j->count||!xm_json_is_string(j,token))return false;
+		const jsmntok_t *key=&j->tok[token],*value=&j->tok[token+1];
+		if(key->parent!=obj||key->size!=1||key->start<=object->start||key->end<key->start||key->end>=object->end||
+		   value->parent!=token||value->type<JSMN_OBJECT||value->type>JSMN_PRIMITIVE||
+		   value->start<=key->end||value->end<value->start||value->end>=object->end)return false;
+		if(keys){
+			size_t index=0;
+			for(;index<count;index++)if(xm_span_eq(xm_json_span(j,token),keys[index]))break;
+			if(index==count||(seen&(1U<<index)))return false;
+			seen|=1U<<index;
+		}
+		token=xm_json_skip(j,token+1);
+	}
+	return token==j->count||j->tok[token].start>=object->end;
+}
+
+static int command_text(const struct xm_json *j,int obj,const char *key,char *out,size_t n,bool optional)
+{
+	int token=xm_json_get(j,obj,key);
+	if(token<0)return optional?0:-EINVAL;
+	if(!xm_json_is_string(j,token)||xm_json_span(j,token).len==0||xm_span_copy(out,n,xm_json_span(j,token))<0)return -EINVAL;
+	return 0;
+}
+
+int xm_auto_delay_command_parse(struct xm_span payload,struct xm_auto_delay_command *out)
+{
+	static const char *const keys[]={"command_id","operation_id","expected_boot_id","expires_at","action","parameters"};
+	static const char *const parameter_keys[]={"delay_ms","duration_s"};
+	struct xm_json j;int64_t delay,duration;char expires[40],action[16];
+	if(!out||parse_object(&j,payload))return -EINVAL;
+	memset(out,0,sizeof(*out));
+	if(!command_object(&j,0,NULL,0))return -EINVAL;
+	/* command_id, expected_boot_id, expires_at, action, parameters plus the
+	 * optional operation_id are the only accepted fields. */
+	if(j.tok[0].size<5||j.tok[0].size>6||
+	   command_text(&j,0,"command_id",out->command_id,sizeof(out->command_id),false)||
+	   command_text(&j,0,"operation_id",out->operation_id,sizeof(out->operation_id),true)||
+	   command_text(&j,0,"expected_boot_id",out->expected_boot_id,sizeof(out->expected_boot_id),false)||
+	   command_text(&j,0,"expires_at",expires,sizeof(expires),false)||
+	   command_text(&j,0,"action",action,sizeof(action),false)||strcmp(action,"auto_delay"))return -EINVAL;
+	if(!command_object(&j,0,keys,sizeof(keys)/sizeof(keys[0])))return -EINVAL;
+	int parameters=xm_json_get(&j,0,"parameters");
+	if(!xm_json_is_object(&j,parameters)||j.tok[parameters].size!=2||
+	   !command_object(&j,parameters,parameter_keys,sizeof(parameter_keys)/sizeof(parameter_keys[0]))||
+	   xm_json_int(&j,xm_json_get(&j,parameters,"delay_ms"),&delay)||
+	   xm_json_int(&j,xm_json_get(&j,parameters,"duration_s"),&duration)||
+	   delay<1||delay>100||duration<1||duration>120)return -ERANGE;
+	out->delay_ms=(uint32_t)delay;out->duration_s=(uint32_t)duration;return 0;
+}
+
+int xm_auto_delay_result_json(char *out,size_t n,const struct xm_auto_delay_command *c,
+			      const char *status,uint64_t duration_ms,const char *error)
+{
+	if(!out||!c||!status)return -EINVAL;
+	size_t pos=0;int rc=0;
+	rc|=xm_put(out,n,&pos,"{\"command_id\":");rc|=xm_put_json_string(out,n,&pos,c->command_id);
+	rc|=xm_put(out,n,&pos,",\"operation_id\":");rc|=c->operation_id[0]?xm_put_json_string(out,n,&pos,c->operation_id):xm_put(out,n,&pos,"null");
+	rc|=xm_put(out,n,&pos,",\"status\":");rc|=xm_put_json_string(out,n,&pos,status);
+	rc|=xm_put(out,n,&pos,",\"started_at\":null,\"finished_at\":null,\"duration_ms\":");
+	rc|=duration_ms?xm_put_uint(out,n,&pos,duration_ms):xm_put(out,n,&pos,"null");
+	rc|=xm_put(out,n,&pos,",\"result\":{\"delay_ms\":");rc|=xm_put_uint(out,n,&pos,c->delay_ms);
+	rc|=xm_put(out,n,&pos,",\"duration_s\":");rc|=xm_put_uint(out,n,&pos,c->duration_s);
+	rc|=xm_put(out,n,&pos,"},\"error\":");
+	if(error){rc|=xm_put(out,n,&pos,"{\"code\":");rc|=xm_put_json_string(out,n,&pos,error);rc|=xm_put(out,n,&pos,",\"message\":");rc|=xm_put_json_string(out,n,&pos,error);rc|=xm_put(out,n,&pos,"}");}
+	else rc|=xm_put(out,n,&pos,"null");
+	rc|=xm_put(out,n,&pos,"}");return rc?-ENOSPC:(int)pos;
+}
+
 int xm_drive_command_json(char *out, size_t n, uint32_t generation, float v_mps, float steer_rad)
 {
 	size_t pos = 0;

@@ -1,0 +1,15 @@
+[Unit]
+Description=Check configured display feed relay and selected guest without changing VMs
+Wants=xenova-display-feed.service xenova-display-guest-relay.service
+After=xenova-first-boot.service xenova-vms.service xenova-display-feed.service xenova-display-guest-relay.service
+ConditionPathExists=/etc/xenova/guest-display.json
+RequiresMountsFor=/srv/xenova
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/xenova-display-setup check --live --record
+TimeoutStartSec=20
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

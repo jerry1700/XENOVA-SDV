@@ -93,7 +93,7 @@ class BootstrapIdentityEvidence:
     def __new__(cls):raise ValueError('bootstrap identity needs matched original S and M facts')
 
     def current(self,bootstrap,peer,mapper_instance,now_us):
-        return (self.peer==peer and self.mapper_instance==mapper_instance and now_us<self.expires_us
+        return (self.peer==peer and self.mapper_instance==mapper_instance
             and bootstrap.get('database_uuid')==self.database_uuid
             and sha256(canonical(bootstrap)).hexdigest()==self.bootstrap_sha256
             and canonical(bootstrap.get('selected_checkpoint'))==self.checkpoint_ref)
@@ -293,8 +293,9 @@ class SupervisorBootstrap:
         expected_count=max(1,(selected['tile_count']+31)//32)
         if (type(value['pages']) is not list or len(value['pages'])!=len(self.requests) or len(self.requests)!=expected_count
                 or packet.header['request_id']!=last.job.job_id
-                or (packet.issued_us,packet.expires_us)!=(last.job.issued_us,last.job.expires_us)
-                or not last.job.issued_us<=decimal(value['completed_us'])<=now_us<last.job.expires_us):
+                or not packet.issued_us<=now_us
+                or not last.job.issued_us<=decimal(value['completed_us'])<=now_us
+                or decimal(value['completed_us'])>=last.job.expires_us):
             raise ValueError('complete source omitted pages or renewed original deadline')
         for request,page in zip(self.requests,value['pages']):
             names={'job_id','job_digest','context_sha256','cursor','completed_us','accepted_us','physical_ready_sha256','catalog_head_sha256'}

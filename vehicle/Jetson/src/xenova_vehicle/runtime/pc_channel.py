@@ -136,7 +136,8 @@ def _decode(raw, *, allow_forward):
             and original['worker_instance'] != h['worker_instance']
             and original['channel_epoch'] != h['channel_epoch']
             and all(original[name] == h[name] for name in ('request_id', 'issued_j_us', 'expires_j_us'))
-            and issued <= received < expires, 'PC forward changed original actor/source/request/lifetime')
+            and issued <= received and (received < expires or original['kind'] == 'PC_SOURCE_FENCE'),
+            'PC forward changed original actor/source/request/lifetime')
     else:
         _need(h['forward_received_j_us'] is None, 'direct packet cannot claim forwarded receive time')
         allowed = ('PC_SOURCE_FENCE', 'PC_SOURCE_STATE') if h['sender'] == 'S' else ACTOR_KINDS[h['worker_role']]
@@ -277,6 +278,12 @@ def pc_actor_pair():
     return endpoints
 
 
+def _static_delivery(kind, body=b''):
+    # 신원·철회 통지는 주행 사용권이 아니다. 오래된 frame과 달리 반드시 전달한다.
+    return kind in ('PC_NN_START', 'PC_SOURCE_STATE', 'PC_SOURCE_FENCE') or (
+        kind == 'PC_FORWARD' and PcActorPacket(body).kind == 'PC_SOURCE_FENCE')
+
+
 class PcActorLink:
     """endpoint 한 끝의 단일 thread owner다. send는 예약, flush만 actual full-send다.
 
@@ -349,7 +356,9 @@ class PcActorLink:
         if self._next > U64_MAX:
             raise OverflowError('PC actor message sequence exhausted')
         now = self._now()
-        _need(_uint(issued_us) <= now < _uint(expires_us), 'outgoing original PC packet is not current')
+        _need(_uint(issued_us) <= now and issued_us < _uint(expires_us), 'outgoing original PC packet has invalid time order')
+        if now>=expires_us and not _static_delivery(kind,body):
+            return None
         packet = encode_pc_actor_packet(self._peer, self._binding, self._role, kind, metadata, body,
             sequence=self._next, request_id=request_id, issued_us=issued_us, expires_us=expires_us,
             forward_received_j_us=received)
@@ -375,6 +384,7 @@ class PcActorLink:
         _need(type(packet) is PcActorPacket and self._pending is packet,
             'exact original pending frame work required')
         local = self._role == 'M' and packet.kind in ('PC_SNAPSHOT_ACK', 'PC_PARSE_COMPLETE')
+        local = local or self._role == 'A' and packet.kind in ('PC_EARLY_META', 'PC_NN_RESULT_META')
         relay = (self._role == 'S' and packet.kind == 'PC_FORWARD'
             and PcActorPacket(packet.body).kind in ('PC_EARLY_META', 'PC_NN_RESULT_META',
                 'PC_SNAPSHOT_ACK', 'PC_PARSE_COMPLETE'))
@@ -393,8 +403,9 @@ class PcActorLink:
         if self._send_unknown:
             raise PcChannelError('PC actor send outcome is unknown')
         started = self._now()
-        if not packet.issued_us <= started < packet.expires_us:
-            raise TimeoutError('original pending PC packet expired before actual send')
+        _need(packet.issued_us<=started,'pending PC packet has a future issue time')
+        if started>=packet.expires_us and not _static_delivery(packet.kind,packet.body):
+            return None
         try:
             size = self._endpoint.send(packet.raw)
         except BlockingIOError:
@@ -449,7 +460,7 @@ class PcActorLink:
                     raise PcChannelError('PC actor sequence regressed or changed original bytes')
                 self._highwater, self._last = sequence, raw
                 _need(packet.issued_us <= completed, 'future PC packet issue time')
-                if completed >= packet.expires_us:
+                if completed >= packet.expires_us and not _static_delivery(packet.kind,packet.body):
                     self.counts['expired'] += 1
                     continue
                 self.counts['received'] += 1
@@ -470,7 +481,9 @@ class PcActorLink:
             'actual receive fact belongs to another PC endpoint')
         _scope(received.packet.header, self.peer, self.binding,
             sender=self.peer.role if self.owner_role == 'S' else 'S')
-        _need(received.packet.issued_us <= received.received_j_us < received.packet.expires_us,
+        _need(received.packet.issued_us <= received.received_j_us
+            and (received.received_j_us < received.packet.expires_us
+                or _static_delivery(received.packet.kind,received.packet.body)),
             'actual receive fact differs from its original lifetime')
         return received
 
@@ -485,7 +498,9 @@ class PcActorLink:
             'actual send fact belongs to another PC endpoint')
         _scope(sent.packet.header, self.peer, self.binding, sender=self.owner_role)
         _need(sent.packet.issued_us <= sent.started_us <= sent.completed_us
-            and sent.started_us < sent.packet.expires_us, 'actual send fact changed its original local bounds')
+            and (sent.started_us < sent.packet.expires_us
+                or _static_delivery(sent.packet.kind,sent.packet.body)),
+            'actual send fact changed its original local bounds')
         return sent
 
     def abort(self):

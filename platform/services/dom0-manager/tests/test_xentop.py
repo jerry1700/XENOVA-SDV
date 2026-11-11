@@ -1,6 +1,5 @@
 """xentop 배치 출력 파싱, 통계 수집, GET /api/v1/stats (S15P31E110-112). 실제 xentop 은 부르지 않는다."""
 
-import json
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import UUID
@@ -39,22 +38,23 @@ ghost-vm -----r             2    0.0      65536    0.8      65536       0.8     
 """
 GHOST = UUID("99999999-9999-4999-8999-999999999999")  # xl 로 직접 띄워 uuid 는 있지만 registry 에 없는 도메인
 
-XL_LIST_LONG = json.dumps(
-    [
-        {"domid": 0, "config": {"c_info": {"name": "Domain-0"}}},
-        {"domid": 1, "config": {"c_info": {"name": "debian-dev", "uuid": str(DEBIAN)}}},
-        {"domid": 2, "config": {"c_info": {"name": "zephyr-drive-a", "uuid": str(ZEPHYR)}}},
-        {"domid": 3, "config": {"c_info": {"name": "broken-disk", "uuid": str(BROKEN)}}},
-        {"domid": 4, "config": {"c_info": {"name": "manual-vm"}}},  # uuid 없음 (비정상 입력)
-        {"domid": 5, "config": {"c_info": {"name": "ghost-vm", "uuid": str(GHOST)}}},  # Xen 이 자동 발급한 uuid, registry 없음
-    ]
-)
+# `xl list -v`: UUID 열로 vm_id 를 붙인다. manual-vm 은 UUID 열이 UUID 가 아닌 비정상 입력이고,
+# ghost-vm 은 Xen 이 자동 발급한 uuid 는 있지만 registry 에 없는 도메인이다
+XL_LIST_V = f"""\
+Name ID Mem VCPUs State Time(s) UUID Reason-Code Security Label
+Domain-0 0 1024 4 r----- 123.0 00000000-0000-0000-0000-000000000000 - -
+debian-dev 1 512 1 -b---- 11.0 {DEBIAN} - -
+zephyr-drive-a 2 16 1 -b---- 0.0 {ZEPHYR} - -
+broken-disk 3 256 1 ---sc- 5.0 {BROKEN} 3 -
+manual-vm 4 64 1 r----- 1.0 - - -
+ghost-vm 5 64 1 r----- 2.0 {GHOST} - -
+"""
 XL_INFO = "host : x\nnr_cpus : 4\ntotal_memory : 8052\nfree_memory : 6347\n"
 
 
 def _runner(xentop_text: str = XENTOP, *, fail=None) -> FakeRunner:
     return FakeRunner(
-        {XENTOP_ARGS: xentop_text, ("xl", "list", "-l"): XL_LIST_LONG, ("xl", "info"): XL_INFO},
+        {XENTOP_ARGS: xentop_text, ("xl", "list", "-v"): XL_LIST_V, ("xl", "info"): XL_INFO},
         fail=fail,
     )
 
@@ -134,7 +134,7 @@ def test_collect_stats_maps_names_to_vm_ids_and_marks_unavailable():
     sample = collect_stats(Xentop(runner, clock=lambda: SAMPLED), Xl(runner))
     assert sample.sampled_at == SAMPLED
     by_id = {d.vm_id: d for d in sample.domains}
-    assert set(by_id) == {DEBIAN, ZEPHYR, BROKEN, GHOST}  # 진단 모드: uuid 있는 도메인 전부. Domain-0 과 uuid 없는 manual-vm 은 없다
+    assert set(by_id) == {DEBIAN, ZEPHYR, BROKEN, GHOST}  # 진단 모드: uuid 있는 도메인 전부. Domain-0 과 UUID 열이 UUID 가 아닌 manual-vm 은 없다
 
     debian = by_id[DEBIAN]
     assert (debian.domid, debian.state, debian.vcpus, debian.cpu_time_s, debian.memory_mib, debian.max_memory_mib) == (1, VmState.running, 1, 11, 512, 512)
@@ -219,7 +219,7 @@ def test_registry_rejected_by_platform_is_503_not_partial_200(failure, match):
 
 
 def test_platform_stats_deadline_includes_registry_scan():
-    """registry 조회가 2초 걸리면 xentop 과 xl list -l 에는 3초만 남는다. 5초를 다 쓰면 Xen 명령 없이 504 다."""
+    """registry 조회가 2초 걸리면 xentop 과 xl list -v 에는 3초만 남는다. 5초를 다 쓰면 Xen 명령 없이 504 다."""
     from dom0_manager.drivers.platform import PlatformDriver
 
     clock = [100.0]
@@ -235,7 +235,7 @@ def test_platform_stats_deadline_includes_registry_scan():
         monotonic=lambda: clock[0],
     )
     assert [d.vm_id for d in driver.collect_stats().domains] == [DEBIAN]
-    assert [(args, timeout) for args, timeout in runner.calls] == [(XENTOP_ARGS, 3.0), (("xl", "list", "-l"), 3.0)]
+    assert [(args, timeout) for args, timeout in runner.calls] == [(XENTOP_ARGS, 3.0), (("xl", "list", "-v"), 3.0)]
 
     scan_s[0] = 5.0
     slow = PlatformDriver(_Manager(), Xl(_runner()), xentop=Xentop(_runner(), timeout_s=5), records_loader=slow_loader, monotonic=lambda: clock[0])
@@ -265,12 +265,12 @@ def test_load_records_loader_calls_platform_library_read_only(monkeypatch):
 
 
 def test_stats_request_shares_one_deadline_between_xentop_and_xl():
-    """조회 한도 5초는 요청 전체다. xentop 이 3초 썼으면 xl list -l 에는 2초만 준다. 다 쓰면 xl 을 부르지 않고 504 다."""
+    """조회 한도 5초는 요청 전체다. xentop 이 3초 썼으면 xl list -v 에는 2초만 준다. 다 쓰면 xl 을 부르지 않고 504 다."""
     clock = [100.0]
 
     class SlowXentop(FakeRunner):
         def __init__(self, xentop_s: float):
-            super().__init__({XENTOP_ARGS: XENTOP, ("xl", "list", "-l"): XL_LIST_LONG})
+            super().__init__({XENTOP_ARGS: XENTOP, ("xl", "list", "-v"): XL_LIST_V})
             self.xentop_s = xentop_s
 
         def run(self, args, *, timeout_s):
@@ -280,11 +280,11 @@ def test_stats_request_shares_one_deadline_between_xentop_and_xl():
 
     runner = SlowXentop(3.0)
     collect_stats(Xentop(runner, timeout_s=5), Xl(runner), monotonic=lambda: clock[0])
-    assert [(args, timeout) for args, timeout in runner.calls] == [(XENTOP_ARGS, 5), (("xl", "list", "-l"), 2.0)]
+    assert [(args, timeout) for args, timeout in runner.calls] == [(XENTOP_ARGS, 5), (("xl", "list", "-v"), 2.0)]
 
     shorter = SlowXentop(1.0)  # 상위가 준 예산이 자체 시한보다 짧으면 xentop 도 그만큼만 기다린다
     collect_stats(Xentop(shorter, timeout_s=5), Xl(shorter), budget_s=3.0, monotonic=lambda: clock[0])
-    assert [(args, timeout) for args, timeout in shorter.calls] == [(XENTOP_ARGS, 3.0), (("xl", "list", "-l"), 2.0)]
+    assert [(args, timeout) for args, timeout in shorter.calls] == [(XENTOP_ARGS, 3.0), (("xl", "list", "-v"), 2.0)]
 
     exhausted = SlowXentop(5.0)
     with pytest.raises(DriverTimeout, match="deadline of 5s exhausted"):
@@ -332,9 +332,9 @@ def test_stats_endpoint_in_xen_mode():
     }
     assert vms[str(ZEPHYR)]["net_rx_bytes"] is None and vms[str(ZEPHYR)]["unavailable"]["net_rx_bytes"] == "NO_DEVICE"
     assert vms[str(BROKEN)]["state"] == "crashed" and vms[str(BROKEN)]["unavailable"]["disk_wr_bytes"] == "DEVICE_ERROR"
-    assert [args for args, _ in runner.calls] == [XENTOP_ARGS, ("xl", "list", "-l")]
+    assert [args for args, _ in runner.calls] == [XENTOP_ARGS, ("xl", "list", "-v")]
     (_, xentop_timeout), (_, xl_timeout) = runner.calls
-    assert xentop_timeout == 5 and 0 < xl_timeout <= 5  # xl list -l 은 xentop 이 쓰고 남은 시간만 받는다
+    assert xentop_timeout == 5 and 0 < xl_timeout <= 5  # xl list -v 은 xentop 이 쓰고 남은 시간만 받는다
 
 
 def test_stats_endpoint_in_mock_mode():
@@ -371,7 +371,7 @@ def test_xentop_nonzero_exit_is_503():
                 return CommandResult(1, "", "xentop: unable to initialize xenstat")
             return super().run(args, timeout_s=timeout_s)
 
-    runner = Failing({("xl", "list", "-l"): XL_LIST_LONG})
+    runner = Failing({("xl", "list", "-v"): XL_LIST_V})
     with pytest.raises(PlatformUnavailable, match="xentop failed \\(exit 1\\)"):
         collect_stats(Xentop(runner), Xl(runner))
 
@@ -402,3 +402,9 @@ def test_rpi4_board_capture_parses_every_domain_and_device_line():
     assert stats.unavailable == {}
     zephyr_stats = row_to_stats(zephyr, vm_id=ZEPHYR, domid=2, sampled_at=SAMPLED)
     assert (zephyr_stats.memory_mib, zephyr_stats.disk_rd_bytes, zephyr_stats.unavailable) == (16, None, {"disk_rd_bytes": "NO_DEVICE", "disk_wr_bytes": "NO_DEVICE"})
+
+
+def test_xen_driver_without_xentop_is_platform_unavailable_not_501():
+    """계약 4.6: xentop 을 실행할 수 없으면 503 PlatformUnavailable (platform 드라이버와 같은 의미)."""
+    with pytest.raises(PlatformUnavailable):
+        XenDriver(Xl(FakeRunner({}))).collect_stats()

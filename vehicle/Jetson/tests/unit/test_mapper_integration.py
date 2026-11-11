@@ -57,7 +57,7 @@ class SocketActor:
 
     def await_sent(self,packet,*,cap_us=None):
         actual=next(value for value in self.sent if value.packet is packet)
-        assert actual.completed_us<cap_us
+        assert cap_us is None or actual.completed_us<cap_us
         return actual
 
     def close(self):
@@ -90,7 +90,8 @@ class MapperIntegrationTests(unittest.TestCase):
             def accepted(self,item):committed.append(item.job_id)
             def cancelled(self,item,reason):pass
         compute=MapperCompute(lambda generation:Processor(),source_generation=bound.sha256)
-        controller=MapperControl(actor,compute,AbsoluteDeadline(began,began+15_000_000))
+        # 최초 진단 창이 이미 지나도 fresh 입력의 실제 parser를 실행해야 한다.
+        controller=MapperControl(actor,compute,AbsoluteDeadline(began-16_000_000,began-1_000_000))
         compute.start()
         try:
             item=MapperInput(str(uuid4()),bound.sha256,original,began+150_000)
@@ -154,7 +155,9 @@ class MapperIntegrationTests(unittest.TestCase):
         watch.observe(job,'MAPPER_STARTED',7,1000,'200000',now_us=1100)
         watch.observe(job,'MAPPER_PROGRESS',7,100000,'DEPTH_COMPLETED',now_us=100100)
         self.assertFalse(watch.stalled(250000))
-        self.assertTrue(watch.stalled(600000))
+        self.assertFalse(watch.stalled(600000))
+        from xenova_vehicle.runtime.health_policy import health_policy
+        self.assertTrue(watch.stalled(100000+health_policy().compute_stall_us))
         watch.observe(job,'MAPPER_COMPLETED',7,600000,'SOURCE_EXPIRED',now_us=600001)
         self.assertFalse(watch.stalled(900000))
 

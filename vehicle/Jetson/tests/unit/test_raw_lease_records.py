@@ -303,7 +303,7 @@ class RawLeaseRecordTests(unittest.TestCase):
         self.assertEqual(value.snapshot, before)
         self.assert_unchanged_error(value, lambda: value.reserve_write(1, request(11), identifier(21), now_us=112))
         self.assert_unchanged_error(value, lambda: value.filled(FilledInfo(grant.key, 960000, "b" * 64, 109), now_us=113))
-        self.assert_unchanged_error(value, lambda: value.filled(FilledInfo(grant.key, 960000, "b" * 64, 190), now_us=200))
+        self.assert_unchanged_error(value, lambda: value.filled(FilledInfo(grant.key, 960000, "b" * 64, 201), now_us=200))
         self.assertIs(value.snapshot.slots[0].state, SlotState.WRITING)
         value.filled(FilledInfo(grant.key, 960000, "b" * 64, 120), now_us=130)
         second = value.reserve_write(1, request(11), identifier(21), now_us=140)
