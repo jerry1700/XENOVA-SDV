@@ -195,12 +195,12 @@ def validate_manifest(manifest: dict) -> dict:
         profile = _object(manifest["profile"], "stored profile")
         fields = set(CaptureProfile.__dataclass_fields__) | {"asset_dir", "asset_manifest", "nn_first_timeout_s",
                   "nn_stall_timeout_s", "diagnostic_samples", "schema_version", "profile_id", "nn_requirement", "jpeg_enabled"}
-        if set(profile) != fields:
+        if set(profile) - {"rgb_sensor_mode"} != fields - {"rgb_sensor_mode"}:
             _fail("invalid stored YOLOP profile fields")
         for key, expected in (("schema_version", 1), ("profile_id", "oak-yolop-rgb-depth-bench-v1"),
                               ("nn_requirement", "REQUIRED"), ("jpeg_enabled", False)):
             _equal(profile[key], expected, "profile " + key)
-        CaptureProfile(**{key: profile[key] for key in CaptureProfile.__dataclass_fields__})
+        capture = CaptureProfile(**{key: profile[key] for key in CaptureProfile.__dataclass_fields__ if key in profile})
         for key in ("asset_dir", "asset_manifest"):
             if type(profile[key]) is not str or not 0 < len(profile[key]) <= 4096 or "\x00" in profile[key]:
                 _fail("invalid opaque model path")
@@ -230,7 +230,9 @@ def validate_manifest(manifest: dict) -> dict:
                        "device_readback_verified": False, "on_device_inference_verified": False}, "model provenance")
         _equal(setup.get("preprocessing"), _PREPROCESSING, "letterbox preprocessing")
         nn = _object(setup.get("nn"), "NN graph declaration")
-        for name, expected in (("input_source", "same_CAM_A_video_as_rgb_video"), ("input_type", "BGR888p"),
+        input_source = ("same_CAM_A_letterbox_as_rgb_video" if capture.rgb_sensor_mode == "full"
+                        else "same_CAM_A_video_as_rgb_video")
+        for name, expected in (("input_source", input_source), ("input_type", "BGR888p"),
                                ("input_size_wh", [320, 320]), ("passthrough_metadata_only", True),
                                ("pixel_equivalence_verified", False), ("inference_threads", 1),
                                ("sdk_layer_golden_policy", "first_valid_packet_only")):
@@ -239,7 +241,10 @@ def validate_manifest(manifest: dict) -> dict:
         _equal(graph.get("asset"), {"asset_id": ASSET_ID, "blob_bytes": BLOB_SIZE, "blob_sha256": BLOB_SHA256}, "graph asset")
         _equal(graph.get("openvino_version"), "Version.VERSION_2021_4", "graph OpenVINO")
         _equal(graph.get("device_config_readback"), False, "graph readback qualification")
-        _equal(graph.get("declared_settings"), _GRAPH_SETTINGS, "graph declared settings")
+        settings = deepcopy(_GRAPH_SETTINGS)
+        if capture.rgb_sensor_mode == "full":
+            settings['rgb'].update(sensor_mode='THE_13_MP', isp_scale=[1, 4], resize='letterbox')
+        _equal(graph.get("declared_settings"), settings, "graph declared settings")
         _equal(setup.get("sdk_blob_metadata"), _compiler_metadata(), "recorded compiler metadata")
         _nn_metadata(manifest["first_nn_layout_probe"], key)
         _golden(manifest["first_nn_layout_probe"]["golden"], required=True)

@@ -9,6 +9,7 @@ import re
 
 PROFILE_ID = "oak-rgb-depth-bench-v1"
 _GIB = 1024**3
+RGB_SENSOR_MODES = ("1080p", "full")
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class CaptureProfile:
     stall_timeout_s: float = 0.5
     close_timeout_s: float = 15
     sync_tolerance_us: int = 10_000
+    rgb_sensor_mode: str = "1080p"
 
     def __post_init__(self) -> None:
         if (type(self.device_mxid) is not str
@@ -31,6 +33,8 @@ class CaptureProfile:
             raise ValueError("device_mxid must explicitly identify the approved OAK; replace the example value")
         if type(self.fps) is not int or self.fps != 15:
             raise ValueError("this bench graph requires fps=15")
+        if self.rgb_sensor_mode not in RGB_SENSOR_MODES:
+            raise ValueError("rgb_sensor_mode must be 1080p or full")
         for name, lower, upper in (("max_bytes", 1024**2, 4 * _GIB),
                                    ("min_free_bytes", 8 * _GIB, 1024 * _GIB),
                                    ("sync_tolerance_us", 0, 10_000)):
@@ -45,8 +49,11 @@ class CaptureProfile:
                 raise ValueError(f"{name} must be finite and in {lower}..{upper}")
 
     def to_dict(self) -> dict:
+        fields = asdict(self)
+        if self.rgb_sensor_mode == "1080p":
+            del fields["rgb_sensor_mode"]
         return {"schema_version": 1, "profile_id": PROFILE_ID,
-                "nn_requirement": "ABSENT", "jpeg_enabled": False, **asdict(self)}
+                "nn_requirement": "ABSENT", "jpeg_enabled": False, **fields}
 
 
 def _unique(pairs: list[tuple[str, object]]) -> dict:

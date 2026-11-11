@@ -170,6 +170,8 @@ capture 준비는 실제 RGB/depth 30쌍, NN 준비는 M의 fresh parser 결과 
 
 `profiles/oak-rgb-depth-bench.example.json`을 저장소 밖에 복사하고 `device_mxid`를 실제 승인 장치 ID로 바꾼다. 예시의 `REPLACE_WITH_OAK_MXID`는 실행 시 거절한다. 프로필은 `schema_version=1`, `profile_id=oak-rgb-depth-bench-v1`, `nn_requirement=ABSENT`, `jpeg_enabled=false`인 수집 벤치 전용이다. NN 모델이나 JPEG encoder를 적재하는 운영 그래프와 구분한다.
 
+`rgb_sensor_mode: "full"`은 IMX214 센서 전체를 읽고 OAK 안에서 ISP 축소와 좌우 여백을 적용해 RGB NV12 640×360을 만든다. `"1080p"` 또는 키 생략은 기존 16:9 센서 모드를 선택한다. `full`의 수집 결과에는 EEPROM에서 변환한 RGB 내부 파라미터와 영상 영역 후보가 담긴다. 실물 지도 투영에는 해당 모드에서 확인한 보정값을 사용하고 좌우 여백을 유효 영상에서 제외한다.
+
 Jetson의 전용 환경에서 다음과 같이 실행한다. 출력 경로는 새 디렉터리여야 하며 기존 디렉터리는 비어 있어도 덮어쓰지 않는다.
 
 ```bash
@@ -199,7 +201,7 @@ bench-001/
 
 ## YOLOP·RGB·native depth 장치 벤치
 
-`yolop-bench`는 같은 CAM_A video에서 RGB NV12와 BGR letterbox→YOLOP를 만들고, native RIGHT depth도 함께 수신한다. 모델은 [고정 자산 명세](assets/yolop-320x320.md)의 로컬 blob만 사용한다. 자산 검사·원 기동 기한·Device owner·단일 graph 시작을 유지하며 부팅 중 다운로드하지 않는다.
+`yolop-bench`는 같은 CAM_A RGB 출력에서 RGB NV12와 320×320 BGR letterbox→YOLOP를 만들고, native RIGHT depth도 함께 수신한다. 모델은 [고정 자산 명세](assets/yolop-320x320.md)의 로컬 blob만 사용한다. 자산 검사·원 기동 기한·Device owner·단일 graph 시작을 유지하며 부팅 중 다운로드하지 않는다.
 
 `profiles/oak-yolop-rgb-depth-bench.example.json`을 저장소 밖에 복사하고 승인 MXID와 자산 디렉터리·manifest 경로를 채운다. 상대 경로는 profile 파일 기준이다. no-JPEG/REQUIRED 벤치 전용이며 기존 ABSENT 수집 profile과 섞지 않는다.
 
