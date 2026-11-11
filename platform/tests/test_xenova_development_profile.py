@@ -119,9 +119,11 @@ class DevelopmentPrimitiveInputsTest(unittest.TestCase):
             profile, asset, _ = self.builder.lattice_inputs('warm-lattice-development', bundle)
             self.assertEqual(profile, dict(original, margin=.002, tracking_guard=.0025,
                 primitive_duration=.30, primitive_speed=.25, avoid_policy=2,
-                assumptions=original['assumptions'] + ' Course tape width=0.012 m, narrow-lane speed=0.22 m/s.'))
-            self.assertIn(b' .lane_tape_half_width_m=6.000000000e-03f,\n',
-                          (bundle / 'primitives.c').read_bytes())
+                assumptions=original['assumptions'] + ' Course tape width=0.012 m, narrow-lane speed=0.22 m/s.'
+                ' Body overhang beyond tape=0.006 m.'))
+            compiled_source = (bundle / 'primitives.c').read_bytes()
+            self.assertIn(b' .lane_tape_half_width_m=6.000000000e-03f,\n', compiled_source)
+            self.assertIn(b' .lane_tape_overhang_m=6.000000000e-03f,\n', compiled_source)
             self.assertNotEqual(asset['asset_sha256'], original_asset['asset_sha256'])
             member = (self.builder.DEVELOPMENT_BUNDLE / 'primitives.c').as_posix()
             self.assertEqual(self.builder.source_paths('drive', bundle)[member], bundle / 'primitives.c')

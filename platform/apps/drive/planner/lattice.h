@@ -27,13 +27,16 @@ struct lp_config {
  deviation_cost,curvature_cost,switch_cost,plan_horizon,heuristic_weight,heading_weight,tracking_guard,goal_straight_m;
  float max_reverse_velocity;
  /* Zero tape allowance leaves the standard lane follower selected. */
- float lane_tape_half_width_m, narrow_lane_speed_mps;
+ float lane_tape_half_width_m,lane_tape_overhang_m,narrow_lane_speed_mps;
  float avoid_travel_m,avoid_progress_m,avoid_pass_margin_m,avoid_heading_rad,avoid_steering_rad;
  float parking_goal_distance,parking_goal_heading,parking_seed_inward_m,parking_yaw_seed_rad,min_control_speed;
  float parking_clearance_sufficient,parking_clearance_band,parking_stationary_speed,parking_yaw_rate;
  unsigned node_limit,expansion_limit,collision_limit,steering_levels,clock_error_us,clock_lease_us,planner_budget_us,state_period_us,direction_phase_us,guest_timestamp_error_us,guest_drift_ppm;
  unsigned avoid_episode_us,avoid_phase_us,avoid_progress_us,avoid_settle_us,avoid_policy,parking_final_window_us;
 };
+static inline float lp_lane_boundary_allowance_m(const struct lp_config *config){
+ return config->lane_tape_half_width_m+config->lane_tape_overhang_m;
+}
 struct lp_primitive_point { float x,y,yaw,steer; };
 struct lp_assets { const char *id,*sha256; float resolution,wheelbase,max_steer,steer_rate,speed,duration;
  struct lp_primitive_point motion[LP_STEERS][LP_STEERS][LP_PRIMITIVE_SAMPLES]; };

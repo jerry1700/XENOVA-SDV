@@ -10,26 +10,31 @@ import tempfile
 TUNING_FILE = 'course-clearance.json'
 REQUIRED = {'margin', 'tracking_guard', 'primitive_duration'}
 LANE_TUNING = {'tape_width_m', 'narrow_lane_speed_mps'}
+TAPE_OVERHANG = 'tape_overhang_m'
 
 
 def tuned_profile(profile, tuning):
     fields = set(tuning)
-    if not REQUIRED <= fields or fields - REQUIRED - LANE_TUNING - {'primitive_speed', 'avoid_policy'}:
+    if not REQUIRED <= fields or fields - REQUIRED - LANE_TUNING - {'primitive_speed', 'avoid_policy', TAPE_OVERHANG}:
         raise ValueError('course clearance requires margin, tracking_guard and primitive_duration')
-    if fields & LANE_TUNING and not LANE_TUNING <= fields:
+    if fields & (LANE_TUNING | {TAPE_OVERHANG}) and not LANE_TUNING <= fields:
         raise ValueError('tape width and narrow-lane speed must be specified together')
-    if any(type(value) not in (int, float) or not math.isfinite(value) or value <= 0 for value in tuning.values()):
-        raise ValueError('course clearance values must be positive and finite')
-    result = dict(profile, **{name: tuning[name] for name in fields - LANE_TUNING})
+    if any(type(value) not in (int, float) or not math.isfinite(value)
+            or value < 0 or (value == 0 and name != TAPE_OVERHANG) for name, value in tuning.items()):
+        raise ValueError('course clearance values must be positive and finite, except tape overhang may be zero')
+    result = dict(profile, **{name: tuning[name] for name in fields - LANE_TUNING - {TAPE_OVERHANG}})
     if 'avoid_policy' in tuning and (type(tuning['avoid_policy']) is not int or tuning['avoid_policy'] not in (1, 2)):
         raise ValueError('course avoidance policy must be return-home or keep-target')
     if LANE_TUNING <= fields:
         tape, speed = tuning['tape_width_m'], tuning['narrow_lane_speed_mps']
-        if tape > result['half_width'] or speed > result['max_velocity']:
-            raise ValueError('course tape or narrow-lane speed exceeds its vehicle bound')
+        overhang = tuning.get(TAPE_OVERHANG, 0)
+        if tape + 2 * overhang > result['half_width'] or speed > result['max_velocity']:
+            raise ValueError('course boundary allowance or narrow-lane speed exceeds its vehicle bound')
         # Keep the frozen primitive generator and its legacy asset identity.
         # Its canonical profile still binds the new compiled course settings.
         result['assumptions'] += f' Course tape width={tape:.9g} m, narrow-lane speed={speed:.9g} m/s.'
+        if overhang:
+            result['assumptions'] += f' Body overhang beyond tape={overhang:.9g} m.'
     spacing = min(result['resolution'] * .25, result['tracking_guard'] * .5)
     if result['primitive_speed'] * result['primitive_duration'] > 64 * spacing:
         raise ValueError('primitive exceeds the swept-check subdivisions; shorten primitive_duration')
@@ -40,8 +45,11 @@ def lane_source(tuning):
     """Initializers added to the development-only generated C input."""
     if not LANE_TUNING <= tuning.keys():
         return b''
-    return (f" .lane_tape_half_width_m={tuning['tape_width_m'] * .5:.9e}f,\n"
-            f" .narrow_lane_speed_mps={tuning['narrow_lane_speed_mps']:.9e}f,\n").encode()
+    source = (f" .lane_tape_half_width_m={tuning['tape_width_m'] * .5:.9e}f,\n"
+              f" .narrow_lane_speed_mps={tuning['narrow_lane_speed_mps']:.9e}f,\n")
+    if overhang := tuning.get(TAPE_OVERHANG, 0):
+        source += f" .lane_tape_overhang_m={overhang:.9e}f,\n"
+    return source.encode()
 
 
 def prepare(metadata, grid, output, *, receipt_sha256, clearance):

@@ -99,8 +99,8 @@ bool tr_contains(const struct tr_view *v,dw_pose pose,float extra,const struct l
  if(!isfinite(error)||error<0)return false;
  float half=(c->front+c->rear)*.5f+c->margin+extra+error,width=c->half_width+c->margin+extra+error;
  bool changing=v->selected!=v->from;
- float tape=c->lane_tape_half_width_m;
- /* The body may overlap the paint. Axle centres remain inside the corridor. */
+ float tape=lp_lane_boundary_allowance_m(c);
+ /* The body may use the boundary allowance. Axle centres stay inside the corridor. */
  if(tape>0&&(!inside(v,(dw_point){pose.x,pose.y})||
     !inside(v,(dw_point){pose.x+c->wheelbase*cosf(pose.yaw),pose.y+c->wheelbase*sinf(pose.yaw)})))return false;
  dw_pose center=pose;float shift=(c->front-c->rear)*.5f;

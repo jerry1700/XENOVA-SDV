@@ -248,7 +248,7 @@ static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const
  if(!obstacle_evidence&&!(space&&space->parking)){
  dw_point road[2*TR_BASIS_POINTS];
  unsigned vertices=2*w->left_boundary_count;
- float tape=task&&task->active&&!(space&&space->exiting)?c->lane_tape_half_width_m:0;
+ float tape=task&&task->active&&!(space&&space->exiting)?lp_lane_boundary_allowance_m(c):0;
  road_vertices(w,tape,road);
  for(unsigned i=0;i<4;i++) {
   float u=(i&1)?half:-half,v=(i&2)?width:-width;
@@ -710,7 +710,7 @@ static bool narrow_lane(const dw_world *w,const struct tr_intent *task,const str
  /* Use the arrival lane's width. Footprint still checks the full change corridor. */
  struct tr_intent selected=*task;
  selected.changing=false;selected.from_lane_id=selected.selected_lane_id;
- if(c->lane_tape_half_width_m<=0||!task->active||!tr_open(w,&selected,view))return false;
+ if(lp_lane_boundary_allowance_m(c)<=0||!task->active||!tr_open(w,&selected,view))return false;
  float half=FLT_MAX;
  for(unsigned i=0;i<view->count;i++){
   dw_point a=view->points[i],b=w->lane_model.divider[i];
