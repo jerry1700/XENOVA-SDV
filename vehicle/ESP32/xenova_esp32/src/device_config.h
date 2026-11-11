@@ -4,8 +4,8 @@
 
 #include "feedback3/codes.h"
 
-/* 구현한 기능만 알린다. 지금은 4시각 시계 응답과 실제 표본 latch 뿐이다 */
-#define XENOVA_CAPABILITIES FB3_CAP_CLOCK4_LATCH
+/* 구현한 기능만 알린다. 지금은 4시각 시계 응답과 실제 표본 latch, 엔코더 표본 주기 송신이다 */
+#define XENOVA_CAPABILITIES (FB3_CAP_CLOCK4_LATCH | FB3_CAP_ODOMETRY)
 
 /* 엔코더 누계 폭. Pi 의 OdometryConfig.encoder_bits 와 같아야 한다 */
 #define XENOVA_ENCODER_BITS 32

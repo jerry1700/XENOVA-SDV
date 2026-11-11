@@ -1,6 +1,7 @@
-/* feedback-3 세션과 시각 설치.
- * HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 를 처리한다.
- * 계약 docs/contracts/gateway-feedback-3.md §4·§5·§7·§8. COMMAND·REPORT·SENSOR 는 아직 다루지 않는다.
+/* feedback-3 세션, 시각 설치, 주기 표본.
+ * HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 를 처리하고,
+ * 살아 있는 lease 가 있는 동안 엔코더 표본을 SENSOR 로 보낸다.
+ * 계약 docs/contracts/gateway-feedback-3.md §3·§4·§5·§7·§8. COMMAND·REPORT 는 아직 다루지 않는다.
  * 시계·센서·타이머는 port 로 받아 PC 호스트 시험에서도 그대로 돈다. */
 #ifndef XENOVA_FB3_LINK_H
 #define XENOVA_FB3_LINK_H
@@ -21,6 +22,11 @@ extern "C" {
 /* INSTALL 이 가리킬 수 있게 기억해 두는 최근 CLOCK_REPLY 수.
  * Pi 는 200 ms 마다 probe 를 보내고 lease 는 길어야 1 s 다 */
 #define FB3_LINK_REPLIES 8u
+
+/* SENSOR 를 보내는 간격. 계약 §5 의 50 Hz */
+#define FB3_SENSOR_PERIOD_US 20000u
+/* 표본과 표본 사이를 적어도 이만큼 띄운다. CLOCK_PROBE 가 앞 표본에 바짝 붙어 오면 응답을 그때까지 미룬다 */
+#define FB3_SAMPLE_GAP_US 5000u
 
 /* 실제로 뜬 표본 하나. 양쪽 누계와 시각을 같은 순간에 읽은 값이어야 한다 */
 struct fb3_sample {
@@ -67,14 +73,18 @@ struct fb3_link {
 	bool open; /* HELLO 로 맺은 Pi session 이 있다 */
 	uint8_t pi_session[16];
 	uint64_t probe_fence; /* 이 session 에서 답한 가장 큰 probe_sequence */
+	bool probe_held;      /* 받았지만 표본 간격 때문에 아직 답하지 않은 CLOCK_PROBE 가 있다 */
+	struct fb3_clock_probe probe;
+	uint64_t probe_received_us;
 	struct fb3_reply_mark replies[FB3_LINK_REPLIES];
 	unsigned reply_next;
 	bool has_epoch;
 	uint8_t clock_epoch[16];
 	uint64_t clock_fence; /* 이 session 에서 설치한 가장 큰 clock_sequence */
 	struct fb3_lease leases[FB3_CUTOFF_SLOTS];
-	uint64_t sample_sequence; /* 부팅 뒤 내보낸 표본 순번. session 이 바뀌어도 이어진다 */
-	uint64_t sample_us;
+	uint64_t sample_sequence; /* 부팅 뒤 내보낸 표본 순번. CLOCK_REPLY 와 SENSOR 가 같이 쓰고 session 이 바뀌어도 이어진다 */
+	uint64_t sample_us;       /* 마지막으로 내보낸 표본의 시각 */
+	uint64_t sensor_due_us;   /* 다음 SENSOR 를 보낼 시각 */
 	uint32_t refused[FB3_REASON_COUNT]; /* 받아들이지 않은 프레임 수, 이유별 */
 };
 
@@ -85,6 +95,10 @@ void fb3_link_init(struct fb3_link *link, const struct fb3_link_config *config,
  * 보낼 응답이 있으면 wire 에 구분자까지 쓰고 그 길이를, 없으면 0 을 돌려준다 */
 size_t fb3_link_receive(struct fb3_link *link, const struct fb3_frame *frame, uint64_t received_us,
 			uint8_t *wire, size_t cap);
+
+/* 메인 루프가 돌 때마다 부른다. 미뤄 둔 CLOCK_REPLY 나 주기 표본 SENSOR 를 보낼 때가 됐으면
+ * wire 에 구분자까지 쓰고 그 길이를, 아니면 0 을 돌려준다. 한 번에 프레임 하나다 */
+size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap);
 
 /* 그 lease 가 설치돼 있고 아직 기한 전인지 */
 bool fb3_link_lease_live(struct fb3_link *link, const uint8_t clock_epoch[16], uint64_t clock_sequence);

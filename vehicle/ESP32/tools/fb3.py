@@ -1,6 +1,6 @@
-"""feedback-3 프레임과 세션·시각 payload 의 PC 쪽 구현, 그리고 시험 대상과 바이트를 주고받는 통로.
+"""feedback-3 프레임과 세션·시각·표본 payload 의 PC 쪽 구현, 그리고 시험 대상과 바이트를 주고받는 통로.
 
-펌웨어 점검 도구(link_bench.py, pi_link_check.py)가 쓴다. 표준 라이브러리만 쓰며
+펌웨어 점검 도구(link_bench.py, cutoff_stress.py, pi_link_check.py)가 쓴다. 표준 라이브러리만 쓰며
 시리얼 포트를 열 때만 pyserial 이 필요하다. 계약 docs/contracts/gateway-feedback-3.md §2·§3·§7.
 """
 import collections
@@ -12,12 +12,14 @@ import time
 
 HELLO, HELLO_ACK = 0x0f00, 0x0f01
 CLOCK_PROBE, CLOCK_REPLY, CLOCK_INSTALL, CLOCK_ACK = 0x0f10, 0x0f11, 0x0f12, 0x0f13
+SENSOR = 0x0f15
 HELLO3 = struct.Struct('<B16s32s')
 ACK3 = struct.Struct('<B16s16sH32s32sB')
 PROBE3 = struct.Struct('<16s16sQQ')
 CLOCK3 = struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3 = struct.Struct('<16s16s16sQQQqqQQ')
 CLOCK_ACK3 = struct.Struct('<16s16s16sQQBHQQ')
+SENSOR3 = struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS = 0x01f7  # Pi 가 ready 로 받는 최소 capability
 MAX_FRAME = 256
 REASONS = (
@@ -118,8 +120,8 @@ class Splitter:
 class Simulator:
     """호스트로 빌드한 통신 처리(test/host 의 sim_link)를 자식 프로세스로 띄운다."""
 
-    def __init__(self, executable):
-        self._process = subprocess.Popen([executable], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+    def __init__(self, executable, ticks_per_second=0):
+        self._process = subprocess.Popen([executable, str(ticks_per_second)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
         self._received = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
 
@@ -187,10 +189,12 @@ def add_device_arguments(parser):
     target.add_argument('--sim', metavar='실행파일', help='호스트로 빌드한 sim_link')
     target.add_argument('--port', help='실보드 시리얼 포트 (예: COM8, /dev/ttyUSB0)')
     parser.add_argument('--baud', type=int, default=115200)
+    parser.add_argument('--ticks-per-second', type=int, default=0,
+                        help='시뮬레이터의 양쪽 엔코더가 도는 속도 (기본 0, 멈춰 있음)')
 
 
 def open_device(args):
-    return Simulator(args.sim) if args.sim else SerialPort(args.port, args.baud)
+    return Simulator(args.sim, args.ticks_per_second) if args.sim else SerialPort(args.port, args.baud)
 
 
 class Peer:
