@@ -26,6 +26,8 @@ struct lp_config {
  primitive_speed,primitive_duration,pose_age_us,live_age_us,cell_age_ms,
  deviation_cost,curvature_cost,switch_cost,plan_horizon,heuristic_weight,heading_weight,tracking_guard,goal_straight_m;
  float max_reverse_velocity;
+ /* Zero tape allowance leaves the standard lane follower selected. */
+ float lane_tape_half_width_m, narrow_lane_speed_mps;
  float avoid_travel_m,avoid_progress_m,avoid_pass_margin_m,avoid_heading_rad,avoid_steering_rad;
  float parking_goal_distance,parking_goal_heading,parking_seed_inward_m,parking_yaw_seed_rad,min_control_speed;
  float parking_clearance_sufficient,parking_clearance_band,parking_stationary_speed,parking_yaw_rate;
@@ -35,7 +37,7 @@ struct lp_config {
 struct lp_primitive_point { float x,y,yaw,steer; };
 struct lp_assets { const char *id,*sha256; float resolution,wheelbase,max_steer,steer_rate,speed,duration;
  struct lp_primitive_point motion[LP_STEERS][LP_STEERS][LP_PRIMITIVE_SAMPLES]; };
-struct lp_collision_index { const dw_world *world;uint64_t sequence,rows[64],shoulder[64];float cell_age_ms,live_age_us; };
+struct lp_collision_index { const dw_world *world;uint64_t sequence,rows[64],shoulder[64];float cell_age_ms,live_age_us;bool lane_pair_simple; };
 struct lp_budget { uint64_t deadline_us; int (*clock)(void *,uint64_t *); bool (*cancelled)(void *);void *context;
  const struct lp_collision_index *collision_index; };
 struct lp_metrics { uint64_t expanded,primitives,footprints,cells,road_checks,cancel_checks,clock_checks;
@@ -108,6 +110,10 @@ enum lp_result lp_start_exit(struct lp_search *,const dw_world *,dw_pose,float,
 enum lp_result lp_task_obstructed(const dw_world *,const struct tr_intent *,dw_pose,dw_pose,
  const struct lp_config *,struct lp_budget,struct lp_metrics *,bool *);
 /* Build once per immutable map/configuration; 64 rows, no global cache. */
+/* Try a forward same-lane path whose body fits the observed bend. The caller
+ * retains the existing path admission and may run the lattice on NOT_FOUND. */
+enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,dw_pose,
+ const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *);
 void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp_config *);
 /* Maximum expansions per slice; collision and cancellation checks are also
  * bounded inside each primitive/footprint. SEARCHING is not completed progress. */

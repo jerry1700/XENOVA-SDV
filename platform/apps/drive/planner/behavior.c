@@ -13,40 +13,74 @@ bool db_limits_valid(const struct db_limits *l){
   isfinite(l->pass_margin_m)&&l->pass_margin_m>=0&&isfinite(l->heading_rad)&&l->heading_rad>0&&
   isfinite(l->steering_rad)&&l->steering_rad>0&&(l->policy==DB_RETURN_HOME||l->policy==DB_KEEP_TARGET);
 }
-static bool station(const struct tr_basis *b,dw_point p,float bound,float *value){
- if(!b||!b->bound||b->count<2)return false;
- float best=FLT_MAX,selected=0,arc=0;bool ambiguous=false;
+/* Adjacent projections describe one piece of road. Keep their whole station
+ * interval when the position bound cannot distinguish them. Disconnected
+ * candidates still indicate an ambiguous branch of the reference. */
+static bool station(const struct tr_basis *b,dw_point p,float pad,float begin,float end,float *lo,float *hi){
+ if(!b||!b->bound||b->count<2||b->count>TR_BASIS_POINTS||!isfinite(pad)||pad<0)return false;
+ float distances[TR_BASIS_POINTS],stations[TR_BASIS_POINTS],best=FLT_MAX,arc=0;
  for(unsigned i=1;i<b->count;i++){
   dw_point a=b->points[i-1],z=b->points[i];float dx=z.x-a.x,dy=z.y-a.y,len=hypotf(dx,dy);
   if(!isfinite(len)||len<1e-6f)return false;
-  float t=fmaxf(0,fminf(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(len*len)));
-  float d=hypotf(p.x-a.x-t*dx,p.y-a.y-t*dy),s=arc+t*len;
-  if(d+bound<best){best=d;selected=s;ambiguous=false;}
-  else if(fabsf(d-best)<=bound&&fabsf(s-selected)>2*bound+1e-4f)ambiguous=true;
+  float low=fmaxf(0,(begin-arc)/len),high=fminf(1,(end-arc)/len);
+  distances[i]=INFINITY;
+  if(low<=high){
+   float t=fmaxf(low,fminf(high,((p.x-a.x)*dx+(p.y-a.y)*dy)/(len*len)));
+   distances[i]=hypotf(p.x-a.x-t*dx,p.y-a.y-t*dy);stations[i]=arc+t*len;
+   best=fminf(best,distances[i]);
+  }
   arc+=len;
  }
- if(ambiguous||!isfinite(best))return false;
- *value=selected;return true;
+ if(best==FLT_MAX)return false;
+ unsigned last=0;*lo=FLT_MAX;*hi=-FLT_MAX;
+ /* Distance to either segment can change by pad, in opposite directions. */
+ for(unsigned i=1;i<b->count;i++)if(distances[i]<=best+2*pad){
+  if(last&&i!=last+1)return false;
+  last=i;*lo=fminf(*lo,stations[i]);*hi=fmaxf(*hi,stations[i]);
+ }
+ /* A corner may extend past a real endpoint of the open reference. A
+  * projection clipped by the artificial body search window proves nothing. */
+ return last&&!(begin>0&&*lo<=begin+1e-5f)&&!(end<arc&&*hi>=end-1e-5f);
 }
 bool db_station_bounds(const struct tr_basis *b,dw_pose pose,float pad,const struct lp_config *c,float *lo,float *hi){
  if(!c||!lo||!hi||!dw_pose_finite(pose)||!isfinite(pad)||pad<0)return false;
+ float anchor_lo,anchor_hi;
+ if(!station(b,(dw_point){pose.x,pose.y},pad,0,FLT_MAX,&anchor_lo,&anchor_hi))return false;
+ /* The rear axle fixes the local branch for the whole body, including a
+  * rear corner that lies just before the start of an open basis. */
+ float reach=2*(hypotf(fmaxf(c->front,c->rear),c->half_width)+pad);
+ float begin=fmaxf(0,anchor_lo-reach),end=anchor_hi+reach;
  *lo=FLT_MAX;*hi=-FLT_MAX;
  float cs=cosf(pose.yaw),sn=sinf(pose.yaw);
  for(unsigned i=0;i<4;i++){
-  float x=(i&1?c->front:-c->rear),y=(i&2?c->half_width:-c->half_width),s;
+  float x=(i&1?c->front:-c->rear),y=(i&2?c->half_width:-c->half_width),lower,upper;
   dw_point p={pose.x+cs*x-sn*y,pose.y+sn*x+cs*y};
-  if(!station(b,p,pad,&s))return false;
-  *lo=fminf(*lo,s-pad-c->margin);*hi=fmaxf(*hi,s+pad+c->margin);
+  if(!station(b,p,pad,begin,end,&lower,&upper))return false;
+  *lo=fminf(*lo,lower-pad-c->margin);*hi=fmaxf(*hi,upper+pad+c->margin);
  }
  return true;
 }
-bool db_station_point(const struct tr_basis *b,dw_point p,float pad,float *out){return station(b,p,pad,out);}
+bool db_station_point(const struct tr_basis *b,dw_point p,float pad,float *out){
+ float lo,hi;
+ if(!out||!station(b,p,pad,0,FLT_MAX,&lo,&hi))return false;
+ *out=.5f*(lo+hi);return true;
+}
+bool db_blocker_locate(const struct tr_basis *basis,struct db_blocker *blocker,float pad){
+ float lower=FLT_MAX,upper=-FLT_MAX;
+ for(unsigned i=0;i<4;i++){
+  dw_point corner={i&1?blocker->upper.x:blocker->lower.x,i&2?blocker->upper.y:blocker->lower.y};
+  float lo,hi;
+  if(!station(basis,corner,pad,0,FLT_MAX,&lo,&hi))return false;
+  lower=fminf(lower,lo-pad);upper=fmaxf(upper,hi+pad);
+ }
+ blocker->station_lower=lower;blocker->station_upper=upper;
+ return true;
+}
 bool db_blocker_observe(const dw_world *w,const struct tr_intent *task,dw_pose pose,float horizon,
  const struct lp_config *c,struct db_blocker *out){
  if(!w||!task||!c||!out||!isfinite(horizon)||horizon<=0||!w->has_drivable_permission||
     w->drivable_permission.size<((size_t)w->width*w->height+7)/8)return false;
  memset(out,0,sizeof(*out));out->lower=(dw_point){FLT_MAX,FLT_MAX};out->upper=(dw_point){-FLT_MAX,-FLT_MAX};
- out->station_lower=FLT_MAX;out->station_upper=-FLT_MAX;
  struct lp_road_state start;if(lp_task_project(w,task,pose,&start)!=LP_PATH_FOUND)return false;
  float cell=w->resolution_m,half=cell*.707106782f;
  for(unsigned y=0;y<w->height;y++)for(unsigned x=0;x<w->width;x++){
@@ -57,12 +91,13 @@ bool db_blocker_observe(const dw_world *w,const struct tr_intent *task,dw_pose p
   if(!occupied&&!denied)continue;
   dw_pose p=dw_compose(w->origin,(dw_pose){(x+.5f)*cell,(y+.5f)*cell,0});struct lp_road_state road;
   if(lp_task_project(w,task,p,&road)!=LP_PATH_FOUND)return false;
+  /* The nearest projection can clamp to an observed endpoint. The signed
+   * lateral offset alone would also accept cells far past that endpoint. */
   if(road.arc+half<start.arc-c->rear||road.arc-half>start.arc+horizon||
-     fabsf(road.offset)>c->half_width+c->margin+c->tracking_guard+task->vehicle_pad+half)continue;
+     hypotf(p.x-road.pose.x,p.y-road.pose.y)>c->half_width+c->margin+c->tracking_guard+task->vehicle_pad+half)continue;
   if(!occupied){out->unknown=true;continue;}
   out->present=true;out->lower.x=fminf(out->lower.x,p.x-half);out->lower.y=fminf(out->lower.y,p.y-half);
   out->upper.x=fmaxf(out->upper.x,p.x+half);out->upper.y=fmaxf(out->upper.y,p.y+half);
-  out->station_lower=fminf(out->station_lower,road.arc-half);out->station_upper=fmaxf(out->station_upper,road.arc+half);
  }
  if(out->present){strcpy(out->map,w->map_epoch);out->observation_sequence=w->observation_seq;}
  return true;

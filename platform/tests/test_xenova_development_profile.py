@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -103,6 +105,32 @@ class DevelopmentPrimitiveInputsTest(unittest.TestCase):
             name = 'platform/apps/drive/profiles/course-development-1/' + member
             self.assertEqual(inputs[name]['sha256'], hashlib.sha256((ROOT / name).read_bytes()).hexdigest())
         self.assertIn('platform/apps/drive/zephyr/profiles/warm-lattice-development.conf', inputs)
+
+    def test_explicit_clearance_profile_changes_the_compiled_input_and_keeps_default_immutable(self):
+        with tempfile.TemporaryDirectory(prefix='xenova-course-profile-') as temporary:
+            bundle = Path(temporary).resolve() / 'course'
+            subprocess.run([sys.executable, '-B', str(BUNDLE.parent.parent / 'tools/prepare_course_profile.py'),
+                '--metadata-root', str(BUNDLE / 'sources'),
+                '--metadata-receipt-sha256', self.provenance['metadata_receipt_sha256'],
+                '--grid', str(BUNDLE / 'sources/grid.json'),
+                '--clearance', str(BUNDLE.parent / 'course-clearance-narrow-test.json'),
+                '--output', str(bundle)], check=True, capture_output=True)
+            original, original_asset, _ = self.builder.lattice_inputs('warm-lattice-development')
+            profile, asset, _ = self.builder.lattice_inputs('warm-lattice-development', bundle)
+            self.assertEqual(profile, dict(original, margin=.002, tracking_guard=.0025,
+                primitive_duration=.30, primitive_speed=.25, avoid_policy=2,
+                assumptions=original['assumptions'] + ' Course tape width=0.012 m, narrow-lane speed=0.22 m/s.'))
+            self.assertIn(b' .lane_tape_half_width_m=6.000000000e-03f,\n',
+                          (bundle / 'primitives.c').read_bytes())
+            self.assertNotEqual(asset['asset_sha256'], original_asset['asset_sha256'])
+            member = (self.builder.DEVELOPMENT_BUNDLE / 'primitives.c').as_posix()
+            self.assertEqual(self.builder.source_paths('drive', bundle)[member], bundle / 'primitives.c')
+            self.assertEqual(self.builder.fingerprint('drive', bundle)[member]['sha256'],
+                             asset['primitive_source_sha256'])
+            tuning = bundle / 'sources/course-clearance.json'
+            tuning.write_bytes(tuning.read_bytes() + b' ')
+            with self.assertRaisesRegex(ValueError, 'development source changed'):
+                self.builder.lattice_inputs('warm-lattice-development', bundle)
 
     def test_actual_compiler_input_cannot_silently_select_legacy_or_both_assets(self):
         home = ROOT / 'platform/apps/drive/zephyr'

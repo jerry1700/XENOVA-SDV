@@ -100,6 +100,20 @@ int probe_behavior_step(void *pointer,void *behavior,uint64_t now,uint64_t ticks
 }
 uint64_t probe_behavior_deadline(void *behavior,int episode){struct behavior_probe *b=behavior;return episode?b->episode.deadline_pi_us:b->episode.phase_deadline_pi_us;}
 int probe_behavior_reenter(void *behavior,uint64_t now){struct behavior_probe *b=behavior;return db_episode_phase(&b->episode,DB_CHANGE_OUT,b->episode.phase_goal,now,&b->limits);}
+int probe_episode_station(int split,float bounds[2]){
+ struct tr_basis basis={.bound=true,.count=4,.points={{0,0},{.38f,0},{.6f,0},{1,0}}};
+ dw_pose pose={.09f,.24f,0};
+ if(split){
+  basis.points[1]=(dw_point){1,0};basis.points[2]=(dw_point){1,.08f};basis.points[3]=(dw_point){0,.08f};
+  pose=(dw_pose){.5f,.04f,0};
+ }
+ return db_station_bounds(&basis,pose,.0016f,&lp_selected_config,&bounds[0],&bounds[1]);
+}
+int probe_observed_blocker(void *pointer){
+ struct probe *p=pointer;struct db_blocker blocker;struct tr_intent task={true,false,1,1,1,0};
+ if(p->decoded||!db_blocker_observe(&p->snapshot.world,&task,(dw_pose){4.9f,1.2f,0},1.5f,&p->config,&blocker))return -1;
+ return blocker.present;
+}
 void probe_behavior_free(void *behavior){free(behavior);}
 uint32_t probe_round(void *pointer,void *behavior,int action,uint32_t id){
  struct probe *p=pointer;struct behavior_probe *b=behavior;
@@ -323,6 +337,9 @@ int engine_force_node_limit(void *pointer,uint64_t now){
 /* 새 내부 차로 소비 경계의 actual C 시험 ABI다. 운영 wire나 임무 발급이 아니다. */
 uint32_t probe_task_lane(void *pointer,float x,float y,float yaw,float error){
  struct probe *p=pointer;return tr_unique_lane(&p->snapshot.world,(dw_pose){x,y,yaw},error,&p->config);
+}
+void probe_task_tape(void *pointer,float half_width){
+ ((struct probe *)pointer)->config.lane_tape_half_width_m=half_width;
 }
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;

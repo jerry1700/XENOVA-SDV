@@ -14,7 +14,7 @@ static const xenova_drive_LaneGeometry *lane(const dw_world *w,uint32_t id){
  }
  return found;
 }
-bool tr_open(const dw_world *w,const struct tr_intent *intent,struct tr_view *out){
+static bool lane_view(const dw_world *w,const struct tr_intent *intent,struct tr_view *out){
  if(!w||!intent||!out||!intent->active||!(w->required_features&DW_LANE_MODEL)||!w->has_lane_model||
     w->lane_model.lanes_count!=2||w->lane_model.divider_count<2||w->lane_model.divider_count>32||
     !isfinite(intent->vehicle_pad)||intent->vehicle_pad<0)return false;
@@ -26,9 +26,27 @@ bool tr_open(const dw_world *w,const struct tr_intent *intent,struct tr_view *ou
     (intent->changing?(to==from||to->adjacent_lane_id!=from->lane_id||from->adjacent_lane_id!=to->lane_id):to!=from))return false;
  /* 이 첫 실행 profile은 관측한 공동 station만 사용한다. 추정 끝을 경계 승인으로 쓰지 않는다. */
  for(unsigned i=0;i<n;i++)if(to->point_state.bytes[i]||from->point_state.bytes[i]||w->lane_model.divider_state.bytes[i])return false;
- struct tr_view result={w,to,from,to->centerline,n};
- if(to!=from&&!corridor_simple(&result))return false;
- *out=result;return true;
+ *out=(struct tr_view){w,to,from,to->centerline,n,NULL};return true;
+}
+bool tr_open_indexed(const dw_world *w,const struct tr_intent *intent,const struct lp_collision_index *index,struct tr_view *out){
+ if(!lane_view(w,intent,out))return false;
+ bool cached=index&&index->world==w&&index->sequence==w->sequence;
+ if(cached)out->index=index;
+ return !intent->changing||(cached?index->lane_pair_simple:corridor_simple(out));
+}
+bool tr_open(const dw_world *w,const struct tr_intent *intent,struct tr_view *out){
+ return tr_open_indexed(w,intent,NULL,out);
+}
+bool tr_centerline(const dw_world *w,const struct tr_intent *intent,const dw_point **points,unsigned *count){
+ struct tr_view view;if(!lane_view(w,intent,&view))return false;
+ *points=view.points;*count=view.count;return true;
+}
+bool tr_lane_pair_simple(const dw_world *w){
+ if(!w->has_lane_model||w->lane_model.lanes_count!=2)return false;
+ uint32_t from=w->lane_model.lanes[0].lane_id,to=w->lane_model.lanes[1].lane_id;
+ struct tr_intent intent={true,true,to,from,from,0};
+ struct tr_view view;
+ return lane_view(w,&intent,&view)&&corridor_simple(&view);
 }
 static dw_point vertex(const struct tr_view *v,unsigned i){
  unsigned n=v->count;const xenova_drive_LaneModel *m=&v->world->lane_model;
@@ -37,14 +55,27 @@ static dw_point vertex(const struct tr_view *v,unsigned i){
  if(v->selected==v->from)return d;
  dw_point c=v->from->centerline[j];return (dw_point){2*c.x-d.x,2*c.y-d.y};
 }
-static bool inside(const struct tr_view *v,dw_point p){
+static dw_point tape_vertex(const struct tr_view *v,unsigned i,float tape){
+ unsigned n=v->count,j=i<n?i:2*n-1-i;
+ dw_point point=vertex(v,i);
+ bool changing=v->selected!=v->from;
+ /* A lane change may use both outer tapes within the observed corridor. */
+ if(tape>0&&(!changing||(j>0&&j+1<n))){
+  dw_point a=(i<n?v->selected:v->from)->centerline[j],b=v->world->lane_model.divider[j];
+  float x=a.x-b.x,y=a.y-b.y,length=hypotf(x,y);
+  if(length>1e-6f){float scale=(i<n||changing?tape:-tape)/length;point.x+=scale*x;point.y+=scale*y;}
+ }
+ return point;
+}
+static bool inside_with_tape(const struct tr_view *v,dw_point p,float tape){
  bool hit=false;unsigned n=2*v->count;
  for(unsigned i=0,j=n-1;i<n;j=i++){
-  dw_point a=vertex(v,i),b=vertex(v,j);
+  dw_point a=tape_vertex(v,i,tape),b=tape_vertex(v,j,tape);
   if(((a.y>p.y)!=(b.y>p.y))&&p.x<(b.x-a.x)*(p.y-a.y)/(b.y-a.y)+a.x)hit=!hit;
  }
  return hit;
 }
+static bool inside(const struct tr_view *v,dw_point p){return inside_with_tape(v,p,0);}
 static bool cuts(dw_point a,dw_point b,dw_pose center,float half,float width){
  float cs=cosf(center.yaw),sn=sinf(center.yaw);
  float ax=(a.x-center.x)*cs+(a.y-center.y)*sn,ay=-(a.x-center.x)*sn+(a.y-center.y)*cs;
@@ -67,17 +98,22 @@ bool tr_contains(const struct tr_view *v,dw_pose pose,float extra,const struct l
  float error=2*position+m->divider_position_bound_m+radius*(2*heading+m->divider_heading_bound_rad);
  if(!isfinite(error)||error<0)return false;
  float half=(c->front+c->rear)*.5f+c->margin+extra+error,width=c->half_width+c->margin+extra+error;
+ bool changing=v->selected!=v->from;
+ float tape=c->lane_tape_half_width_m;
+ /* The body may overlap the paint. Axle centres remain inside the corridor. */
+ if(tape>0&&(!inside(v,(dw_point){pose.x,pose.y})||
+    !inside(v,(dw_point){pose.x+c->wheelbase*cosf(pose.yaw),pose.y+c->wheelbase*sinf(pose.yaw)})))return false;
  dw_pose center=pose;float shift=(c->front-c->rear)*.5f;
  center.x+=shift*cosf(pose.yaw);center.y+=shift*sinf(pose.yaw);
  for(unsigned i=0;i<4;i++){
   float u=i&1?half:-half,z=i&2?width:-width;
-  if(!inside(v,(dw_point){center.x+cosf(pose.yaw)*u-sinf(pose.yaw)*z,
-                         center.y+sinf(pose.yaw)*u+cosf(pose.yaw)*z}))return false;
+  if(!inside_with_tape(v,(dw_point){center.x+cosf(pose.yaw)*u-sinf(pose.yaw)*z,
+                         center.y+sinf(pose.yaw)*u+cosf(pose.yaw)*z},tape))return false;
  }
- for(unsigned i=0;i<2*v->count;i++)if(cuts(vertex(v,i),vertex(v,(i+1)%(2*v->count)),center,half,width))return false;
- for(unsigned i=0;i+1<v->count;i++){
+ for(unsigned i=0;i<2*v->count;i++)if(cuts(tape_vertex(v,i,tape),tape_vertex(v,(i+1)%(2*v->count),tape),center,half,width))return false;
+ for(unsigned i=0;(changing||tape<=0)&&i+1<v->count;i++){
   if(cuts(m->divider[i],m->divider[i+1],center,half,width)&&
-     (v->selected==v->from||m->crossing.bytes[i]!=1||m->divider_state.bytes[i]||m->divider_state.bytes[i+1]))return false;
+     (!changing||m->crossing.bytes[i]!=1||m->divider_state.bytes[i]||m->divider_state.bytes[i+1]))return false;
  }
  return true;
 }
@@ -182,14 +218,14 @@ static bool union_edge(const struct tr_view *v,const dw_point slot[4],dw_point a
  }
  return true;
 }
-bool tr_parking_contains(const struct tr_view *v,const dw_point slot[4],float slot_pad,
+static bool parking_contains(const struct tr_view *v,const dw_point slot[4],float slot_pad,
  dw_pose pose,float extra,const struct lp_config *c){
- if(!v||!slot||!c||v->selected!=v->from||!dw_pose_finite(pose)||!isfinite(extra)||extra<0||
-    !isfinite(slot_pad)||slot_pad<0)return false;
  const xenova_drive_LaneModel *m=&v->world->lane_model;
+ float position=fmaxf(v->selected->position_bound_m,v->from->position_bound_m);
+ float heading=fmaxf(v->selected->heading_bound_rad,v->from->heading_bound_rad);
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
- float error=fmaxf(slot_pad,2*v->selected->position_bound_m+m->divider_position_bound_m+
-  radius*(2*v->selected->heading_bound_rad+m->divider_heading_bound_rad));
+ float error=fmaxf(slot_pad,2*position+m->divider_position_bound_m+
+  radius*(2*heading+m->divider_heading_bound_rad));
  float half=.5f*(c->front+c->rear)+c->margin+extra+error,width=c->half_width+c->margin+extra+error;
  dw_pose center=pose;center.x+=.5f*(c->front-c->rear)*cosf(pose.yaw);center.y+=.5f*(c->front-c->rear)*sinf(pose.yaw);
  for(unsigned k=0;k<4;k++){
@@ -199,5 +235,21 @@ bool tr_parking_contains(const struct tr_view *v,const dw_point slot[4],float sl
  }
  for(unsigned k=0;k<2*v->count;k++)if(!union_edge(v,slot,vertex(v,k),vertex(v,(k+1)%(2*v->count)),true,center,half,width))return false;
  for(unsigned k=0;k<4;k++)if(!union_edge(v,slot,slot[k],slot[(k+1)%4],false,center,half,width))return false;
+ if(v->selected!=v->from)for(unsigned k=0;k+1<v->count;k++){
+  if(m->crossing.bytes[k]!=1&&cuts(m->divider[k],m->divider[k+1],center,half,width))return false;
+ }
  return true;
+}
+
+bool tr_parking_contains(const struct tr_view *v,const dw_point slot[4],float slot_pad,
+ dw_pose pose,float extra,const struct lp_config *c){
+ if(!v||!slot||!c||v->selected!=v->from||!dw_pose_finite(pose)||!isfinite(extra)||extra<0||
+    !isfinite(slot_pad)||slot_pad<0)return false;
+ if(parking_contains(v,slot,slot_pad,pose,extra,c))return true;
+ /* A marked crossing in the current observed lane pair can supply room for
+  * parking. The same whole-cell and occupancy checks still cover each sweep. */
+ uint32_t aisle=v->selected->lane_id;
+ struct tr_intent intent={true,true,aisle,v->selected->adjacent_lane_id,aisle,0};
+ struct tr_view both;
+ return tr_open_indexed(v->world,&intent,v->index,&both)&&parking_contains(&both,slot,slot_pad,pose,extra,c);
 }
