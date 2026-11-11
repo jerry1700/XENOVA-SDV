@@ -14,6 +14,7 @@ import time
 from .device import OakSource, _pipeline, _us
 from .jpeg import MAX_JPEG_BYTES, sdk_jpeg
 from .yolop_asset import ASSET_ID, load_yolop_asset, validated_sdk_blob
+from ..runtime.health_policy import ConfigurationError
 
 
 def compact_yolop_graph(pipeline, asset_receipt: dict, fps: int, *, jpeg_enabled=False) -> dict:
@@ -23,33 +24,33 @@ def compact_yolop_graph(pipeline, asset_receipt: dict, fps: int, *, jpeg_enabled
     방식도 사용하지 않는다. 설정은 host 선언이며 device 설정 readback이 아니다.
     """
     if type(jpeg_enabled) is not bool:
-        raise ValueError('JPEG graph option must be an explicit bool')
+        raise ConfigurationError('JPEG graph option must be an explicit bool')
 
     def text(value, name):
         if type(value) is not str or len(value) > 128:
-            raise ValueError(f"invalid compact graph {name}")
+            raise ConfigurationError(f"invalid compact graph {name}")
         return value
 
     def node_id(value):
         if type(value) is not int or not 0 <= value < 2**63:
-            raise ValueError("invalid compact graph node ID")
+            raise ConfigurationError("invalid compact graph node ID")
         return value
 
     native_nodes = pipeline.getAllNodes()
     if not 1 <= len(native_nodes) <= 16:
-        raise ValueError("YOLOP graph exceeds its node bound")
+        raise ConfigurationError("YOLOP graph exceeds its node bound")
     nodes = [{"id": node_id(node.id), "name": text(node.getName(), "node name")}
              for node in native_nodes]
     ids = {node["id"] for node in nodes}
     if len(ids) != len(nodes):
-        raise ValueError("duplicate compact graph node IDs")
+        raise ConfigurationError("duplicate compact graph node IDs")
     groups = pipeline.getConnectionMap()
     if len(groups) > 16:
-        raise ValueError("YOLOP graph exceeds its connection-group bound")
+        raise ConfigurationError("YOLOP graph exceeds its connection-group bound")
     connections = []
     for group in groups.values():
         if len(group) > 32 or len(connections) + len(group) > 32:
-            raise ValueError("YOLOP graph exceeds its connection bound")
+            raise ConfigurationError("YOLOP graph exceeds its connection bound")
         for connection in group:
             item = {"output_id": node_id(connection.outputId),
                     "output_name": text(connection.outputName, "output name"),
@@ -58,7 +59,7 @@ def compact_yolop_graph(pipeline, asset_receipt: dict, fps: int, *, jpeg_enabled
                     "input_name": text(connection.inputName, "input name"),
                     "input_group": text(connection.inputGroup, "input group")}
             if item["output_id"] not in ids or item["input_id"] not in ids:
-                raise ValueError("compact graph connection references an absent node")
+                raise ConfigurationError("compact graph connection references an absent node")
             connections.append(item)
     result = {"scope": "compact_host_node_connection_declaration", "asset_storage_included": False,
             "device_config_readback": False,
@@ -268,7 +269,7 @@ class YolopOakSource(OakSource):
             required = str(pipeline.getRequiredOpenVINOVersion())
             expected = self._asset.manifest["sdk_blob_metadata"]["host_graph_required_version"]
             if required != expected or pipeline.getOpenVINOVersion() != dai.OpenVINO.Version.VERSION_2021_4:
-                raise ValueError("YOLOP graph and blob OpenVINO versions differ")
+                raise ConfigurationError("YOLOP graph and blob OpenVINO versions differ")
 
         return _pipeline(dai, self.profile.fps, graph_extension=extend)
 

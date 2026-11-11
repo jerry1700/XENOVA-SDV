@@ -4,7 +4,7 @@
 
 상단은 모드·A/B·주차·차량 상태·READY의 현재 판정과 원 보고를 나누어 표시합니다. 큰 지도/인지 영역 아래에는 입력→수락→APPLIED→이동, 성능/관측 오류가 있습니다. 원 hash·epoch·JSON은 접힌 상세에서 확인합니다. 없는 값은 UNKNOWN이며 파일 검사 통과는 현재 READY·권한·장치 적용 성공이라는 뜻이 아닙니다.
 
-snapshot-1에는 차체 yaw/치수·단계별 키 입력·APPLIED/encoder 전용 관측이 없습니다. XY 한 점은 관측점으로만 표시하고 차체·방향을 추정하지 않습니다. WASD/브레이크는 UNKNOWN 표시이며, 강조되지 않았다고 실제 해제/정지된 것은 아닙니다. 기존 SYNTHETIC/HISTORICAL 기록을 LIVE나 실제 NN/장치 적용의 대체 자료로 사용하지 않습니다.
+기존 snapshot-1/offline 입력의 XY 한 점은 관측점으로만 표시하며 방향을 추정하지 않습니다. 별도 PC collector의 선택형 `live` 확장은 현재 실험의 연결·원 보고·yaw를 제공할 수 있습니다. yaw가 있으면 같은 frame에 방향선만 표시하고 치수 없는 차체를 만들어내지 않습니다. WASD/브레이크는 별도 키 관측이 없어 UNKNOWN이며, 강조되지 않았다고 실제 해제/정지된 것은 아닙니다. 기존 SYNTHETIC/HISTORICAL 기록을 현재 실험이나 실제 NN/장치 적용의 대체 자료로 사용하지 않습니다.
 
 **터미널 명령 복사**에는 설치 parser에서 확인한 `xenova-drive status`, `operation status`, `mode manual`, `manual neutral`, `drive depart auto`, `parking permission on/off`, `stop`만 실행 위치 RPi dom0·전제와 함께 제공합니다. 복사한 명령은 기존 인증/소켓 환경의 터미널에서 직접 실행합니다. 화면은 명령을 실행하거나 세션을 만들지 않습니다. 부하 제어는 인증 Spring API 지원이 확인되지 않아 비활성입니다. 주차/모드/출발 버튼·브라우저 MQTT·refresh 자동 발행은 없습니다.
 
@@ -15,10 +15,10 @@ snapshot-1에는 차체 yaw/치수·단계별 키 입력·APPLIED/encoder 전용
 ```powershell
 python -m venv vehicle/Jetson/build/streamlit-viewer-env
 & ".\vehicle\Jetson\build\streamlit-viewer-env\Scripts\python.exe" -m pip install -r vehicle/Jetson/tools/streamlit_viewer/requirements.txt
-& ".\vehicle\Jetson\build\streamlit-viewer-env\Scripts\python.exe" -m streamlit run vehicle/Jetson/tools/streamlit_viewer/app.py --server.address 127.0.0.1 --server.port 18501
+& ".\vehicle\Jetson\build\streamlit-viewer-env\Scripts\python.exe" -m streamlit run vehicle/Jetson/tools/streamlit_viewer/app.py --server.address 127.0.0.1 --server.port 18502
 ```
 
-전용 requirements는 `streamlit==1.67.0` 하나입니다. Streamlit의 전이 의존성도 이 venv에만 설치합니다. 브라우저에서 `http://127.0.0.1:18501`을 열고 사이드바의 형식과 **PC 관측 폴더**를 선택합니다. 이미 같은 포트를 사용 중이면 별도 서버를 중복 실행하지 않습니다.
+전용 requirements는 `streamlit==1.67.0` 하나입니다. Streamlit의 전이 의존성도 이 venv에만 설치합니다. 브라우저에서 `http://127.0.0.1:18502`를 열고 사이드바의 형식과 **PC 관측 폴더**를 선택합니다. 이미 같은 포트를 사용 중이면 별도 서버를 중복 실행하지 않습니다. 실행 환경의 `XENOVA_VIEWER_OBSERVATION_DIR`를 설정하면 해당 폴더가 기본값이며, 미설정이면 기존처럼 빈칸입니다. 현재 실험은 별도 collector가 쓰는 고정 current 폴더의 `snapshot.json`을 선택합니다. 뷰어가 collector를 시작하거나 현재 run을 선택하는 명령을 보내지는 않습니다.
 
 - `snapshot.json`: 지정 폴더의 `snapshot.json`과 그 파일이 가리키는 media를 읽습니다.
 - `SyntheticDatasetWriter offline`: 기록 폴더와 ordinal을 선택합니다. `-1`은 마지막 기록입니다.
@@ -65,16 +65,45 @@ python -m venv vehicle/Jetson/build/streamlit-viewer-env
 }
 ```
 
-- source의 순번은 원 producer 순번이며 viewer 재조회 때 증가시키지 않습니다. kind는 DIAGNOSTIC 또는 OFFLINE_SYNTHETIC입니다. stamp가 있으면 `{domain, epoch, us}`이며 us/seq는 uint64 또는10진 문자열입니다. domain/epoch가 다르면 age는 UNMAPPED이고 임의 offset/현재시각으로 채우지 않습니다. 뷰어 최초 수신 후 경과와 원 입력 age는 따로 표시합니다.
+- source의 순번은 원 producer 순번이며 viewer 재조회 때 증가시키지 않습니다. kind는 DIAGNOSTIC/OFFLINE_SYNTHETIC 또는 아래 현재 실험 확장의 LIVE_HIL입니다. stamp가 있으면 `{domain, epoch, us}`이며 us/seq는 uint64 또는10진 문자열입니다. domain/epoch가 다르면 age는 UNMAPPED이고 임의 offset/현재시각으로 채우지 않습니다. 뷰어 최초 수신 후 경과와 원 입력 age는 따로 표시합니다.
 - viewer-local clock은 독립 monotonic/session UUID이며 외부 source와 공유되지 않습니다. 외부 source의 입력 age는 UNMAPPED로 표시합니다. PC collector의 수신 시각과 원 source clock을 연결할 때에도 두 시각의 의미를 분리해야 합니다. 원 운영 보고값은 그대로 표시합니다.
-- operation은 null 또는 mode/vehicle_phase/parking_enabled/active_vm/standby_vm/auto_ready/blocked_reason의 원 값입니다. 미제공 필드는 null/UNKNOWN입니다. DIAGNOSTIC 입력이 파일 검사와 clock mapping을 통과해도 현재 표시는 UNVERIFIED이며 주행권한·장치 적용 성공으로 승격하지 않습니다. OFFLINE_SYNTHETIC·STALE·UNMAPPED의 현재 운영 값은 UNKNOWN입니다. 옛 READY를 정상 상태로 표시하지 않습니다.
-- map.layers는 최대8개, kind=GT/ESTIMATE/UNCERTAINTY/PATH, frame, points=`[[x,y],...]`, 선택 closed=bool입니다. 층당2048/합계8192점, 단위m입니다. 서로 다른 frame은 겹치지 않습니다. GT는 기본 표시OFF이며 viewer 밖으로 전달하지 않습니다.
+- operation은 null 또는 mode/vehicle_phase/parking_enabled/active_vm/standby_vm/auto_ready/blocked_reason의 원 값입니다. 미제공 필드는 null/UNKNOWN입니다. 기존 DIAGNOSTIC 입력은 파일 검사와 clock mapping을 통과해도 현재 표시가 UNVERIFIED이며 주행권한·장치 적용 성공으로 승격하지 않습니다. OFFLINE_SYNTHETIC·STALE·UNMAPPED의 기존 현재 운영 값은 UNKNOWN입니다. 현재 실험 확장은 아래 operation stream 보고를 별도로 사용합니다.
+- map.layers는 최대8개, kind=GT/ESTIMATE/UNCERTAINTY/PATH/MODEL, frame, points=`[[x,y],...]`, 선택 closed=bool입니다. 층당2048/합계8192점, 단위m입니다. MODEL은 실제 Jetson 모델 보고이며 GT와 구분합니다. 서로 다른 MAP/ODOM/PLANT frame은 별도 패널로 나누고 정합·변환을 만들지 않습니다. GT는 기본 표시OFF이며 viewer 밖으로 전달하지 않습니다.
 - media는 rgb/yolop/depth/grid별 최대1개, 합계4개입니다. path(관측 폴더 내부 상대경로), sha256, byte_length, width/height, encoding=JPEG/PNG/NV12/RAW16_LE를 받습니다. stamp/source_sequence/original_stamp는 원 값입니다. RAW16의 단위가 알려진 경우에만 depth_unit="mm"를 씁니다.
 - raw_payload는 선택된 원 JSON/bytes 파일의 path/sha256/byte_length입니다. 재직렬화하지 않은 bytes를 그대로 보존·다운로드합니다. 별도 원본이 없으면 snapshot 원 bytes만 제공하며 원 wire를 복원했다고 하지 않습니다.
 
 snapshot 최대256KiB, media 각각1MiB/최대2097152픽셀, 원 payload256KiB입니다. 매 poll에서 파일 안정성/해시/길이를 재검사하며 절대경로·상위경로·symlink/reparse·비정규 파일·변하는 파일을 거절합니다. 부분 JSON/중복 키/비유한 수·동일seq 다른 bytes·같은source epoch의 seq 역전은 INVALID입니다. 같은 파일/mtime touch/오류 뒤 같은 원문 복구는 원 최초 수신 시각을 갱신하지 않습니다. 최신 snapshot1개/최신 오류 원문1개/identity HWM16개만 유지합니다. 최근 오류 metadata는 복구 후에도 남습니다.
 
 NV12는 화면용 BT.601 limited 변환/축소만 합니다. 원 프레임을 고치거나 추론을 재실행하지 않습니다. RAW16의0은 UNKNOWN(검정)이며 FREE가 아닙니다. mm가 선언되면 표시 범위0~3m, 아니면 단위 UNKNOWN/원 RAW16 범위입니다. native depth와 RGB는 해상도·픽셀 좌표가 달라 자동 정렬/겹침을 하지 않습니다.
+
+### 현재 실험의 선택형 live 확장
+
+schema는 기존 `jetson-viewer-snapshot-1`을 유지합니다. 기동 전에도 `source.kind=DIAGNOSTIC`과 아래 `live`를 게시할 수 있습니다. 원 실험이 확인된 뒤 `LIVE_HIL`은 **실물 보드 연산과 가상 센서·차량의 현재 실험**을 뜻하며, 실물 차량 이동을 뜻하지 않습니다. collector 게시 source 순번과 각 RGB/World/Vehicle의 원 순번은 서로 다릅니다. 같은 collector가 기동 대기에서 실제 run으로 전환해도 게시 순번은 계속 증가합니다. 실제 run/session을 모를 때는 null이며 가짜 식별자를 채우지 않습니다.
+
+```json
+{
+  "schema": "pc-live-observer-1",
+  "run_id": null,
+  "session_id": null,
+  "collector": {"id": "pc-observer", "epoch": "collector-session", "sequence": "1", "collected_stamp": null},
+  "connection": {"stage": "WAITING_FOR_RUN", "state": "WAITING", "stop_reason": "NO_RUN", "last_error": null},
+  "streams": [{"name": "rgb", "state": "WAITING", "received_count": 0,
+    "source_id": null, "source_epoch": null, "source_sequence": null,
+    "source_stamp": null, "pc_received_stamp": null, "received_age_s": null, "error": null}],
+  "stages": {"command": null, "applied": null, "movement": null},
+  "pose": null
+}
+```
+
+이 객체를 snapshot의 `live` 필드에 넣습니다. `collector`는 PC 수집기 식별자·epoch·게시 순번·수집 stamp이며 제품 clock과 분리합니다. `connection`은 연결 단계/상태·최근 정지/대기 이유·오류입니다. media가0개이고 수신 수가0이어도 먼저 표시합니다. `streams`는 최대16개이며 이름은 중복하지 않습니다. 실제 PC 입력·rgb/depth/world/vehicle/path/operation의 연결과 수신 수를 각각 보고하고, 없는 입력은 UNKNOWN/null로 남깁니다.
+
+stream의 state는 collector가 보고한 WAITING/FRESH/STALE/UNAVAILABLE/ERROR입니다. `received_age_s`는 collector가 같은 PC clock 안에서 계산한 **수집 당시** 수신 age입니다. 각 원 source clock과 PC clock을 빼거나 이 값으로 종단 지연을 만들지 않습니다. source_stamp/pc_received_stamp는 기존 `{domain,epoch,us}` 형식 또는 null입니다. collector 게시가 계속된다고 중단된 RGB·World가 fresh로 바뀌지 않습니다. collector가 멈추면 기존 파일은 STALE이 되고 같은 bytes/mtime touch가 최초 수신 시각을 갱신하지 않습니다. UI는 source별 새 timeout을 추가하지 않습니다.
+
+`stages.command/applied/movement`는 각각 `{state,source_id,source_sequence,source_stamp,pc_received_stamp,detail}` 또는 null입니다. 명령 송신·가상 장치 APPLIED·가상 차량 이동을 별도 원 보고로 표시하며, 앞 단계가 존재한다고 뒤 단계를 채우지 않습니다. 키 입력은 별도 관측이 없어 UNKNOWN입니다. 수집 시각을 원 APPLIED/encoder 시각으로 바꾸지 않습니다. 실제 보드·모의 구동·GT가 섞인 시험 범위를 상세와 로그에서 구분합니다.
+
+운영 카드의 live 값은 **관측보고**이며 READY/권한 판정이 아닙니다. 파일이 VALID이고 `operation` stream이 FRESH일 때만 원 mode/담당VM 등을 카드에 표시합니다. stream이 STALE/ERROR/UNAVAILABLE이거나 파일이 stale이면 현재값은 UNKNOWN이고 기존 원 보고는 caption에 남습니다. `pose`는 선택 `{frame,x,y,yaw}`이며 좌표m·yaw rad입니다. 원 layer와 같은 frame에서만 방향선을 표시하고, 다른 frame이나 GT를 자동 정렬·승격하지 않습니다. source clock/session·원 payload/hash와 live 원 객체는 접힌 상세에 보존합니다.
+
+뷰어는 로컬 파일을 읽는 소비자뿐입니다. collector의 네트워크 I/O·원 데이터 복사와 파일 게시를 별도 PC 프로세스가 담당하며 주행 핵심 경로의 동기 I/O로 넣지 않습니다. 뷰어/collector 종료·새로고침·느린 표시가 주행 제어·장치 cutoff에 영향을 주는 연결은 없습니다. collector 자체의 현재 run 수집·동작 확인은 화면의 AppTest 성공과 별도입니다.
 
 ## 입력2: 실제 offline 합성 기록
 

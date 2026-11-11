@@ -56,12 +56,32 @@ def claim_console(directory: str, vm_id: UUID):
         os.close(fd)
 
 
+LIVE_STATES = (VmState.running, VmState.paused)
+
+
 async def live_domain(service, vm_id: UUID):
     # xl/registry 처리는 동기식이므로 관리 이벤트 루프를 막지 않는다.
     domain = await asyncio.to_thread(service.get, vm_id)
-    if domain.domid is None or domain.domid <= 0 or domain.state not in (VmState.running, VmState.paused):
+    if domain.domid is None or domain.domid <= 0 or domain.state not in LIVE_STATES:
         raise EndRelay(4409, "VM has no usable live console")
     return domain
+
+
+async def shared_domain(service, vm_id: UUID):
+    """공유 VM 관측(같은 host boot, 3초 이내 검증본)에서 이 VM 행. 없거나 읽을 수 없으면 None.
+
+    관측 hub가 이미 약 1초마다 갱신하므로 플랫폼 조회를 새로 하지 않는다. None이면 호출자가
+    기존처럼 직접 조회한다. 관측 행의 observation_id는 `producer epoch:실행 식별자` 형식이라
+    드라이버 get()의 값과 직접 비교하지 않는다.
+    """
+    hub = getattr(service, 'observations', None)
+    if hub is None:
+        return None
+    try:
+        domains = await asyncio.to_thread(hub.list_domains)
+    except PlatformUnavailable:
+        return None
+    return next((d for d in domains if d.vm_id == vm_id), None)
 
 
 def retryable_console_busy(exc: PlatformUnavailable) -> bool:
@@ -109,9 +129,18 @@ async def relay(websocket: WebSocket, session, service, vm_id: UUID, domid: int,
             # 느린 수신자가 PTY reader를 영구 점유하지 않도록 전송에 시한을 둔다.
             await asyncio.wait_for(websocket.send_bytes(data), 5)
 
+    # 직접 조회가 이 실행을 확인한 순간에 같은 domid였던 공유 관측 행의 식별자.
+    # 직접 확인으로만 정하고, 공유 관측이 조금이라도 다르면 다시 직접 조회한다.
+    shared_identity = None
+
     async def watch_domain():
+        nonlocal shared_identity
         while True:
             await asyncio.sleep(WATCH_INTERVAL_SECONDS)
+            shared = await shared_domain(service, vm_id)
+            if (shared_identity is not None and shared is not None and shared.domid == domid
+                    and shared.state in LIVE_STATES and shared.observation_id == shared_identity):
+                continue  # 3초 이내 검증된 관측이 같은 실행을 가리킨다. 플랫폼 조회를 생략한다.
             rechecking = False
             try:
                 domain = await live_domain(service, vm_id)
@@ -136,6 +165,9 @@ async def relay(websocket: WebSocket, session, service, vm_id: UUID, domid: int,
             if (domain.vm_id != vm_id or domain.domid != domid
                     or getattr(domain, 'observation_id', None) != observation_id):
                 raise EndRelay(4409, "VM incarnation changed; reconnect required")
+            # 살아 있는 동안 domid는 다른 도메인에 다시 쓰이지 않으므로, 같은 domid의 관측 행은 방금 확인한 실행이다.
+            shared_identity = (shared.observation_id if shared is not None and shared.domid == domid
+                               and shared.state in LIVE_STATES else None)
             confirmed.set()
             if rechecking:
                 logger.info("console VM validation resumed for VM %s", vm_id)

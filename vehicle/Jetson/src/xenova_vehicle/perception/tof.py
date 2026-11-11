@@ -1,8 +1,8 @@
-"""명시 ToF leaf의 zone 전체를 연속 ray/hit bound로 옮긴다.
+"""단일 거리 ToF의 시야각·거리 오차를 HIT bound로 옮긴다.
 
 sensor optical RDF→후륜축 base FLU, 거리 m/각 rad다. AXIAL_Z는 sensor z로만
-radial 변환하며 base z로 나누지 않는다. 미수락 작은 표적/멀티 return/시간/pose는
-FREE가 아니다. 설치·후방 시야·물리 first-surface 수락은 이 모듈이 만들지 않는다.
+radial 변환하며 base z로 나누지 않는다. 미검출·오류·유효 HIT 어느 경우에도 FREE를
+만들지 않는다. 설치·후방 시야 수락과 실제 장애물 유지 수명은 이 모듈이 만들지 않는다.
 """
 
 from dataclasses import asdict,dataclass,field
@@ -10,7 +10,6 @@ from hashlib import sha256
 import math
 
 from .calibration import CalibrationProfile,canonical,matrix,number,vector
-from .free_space import RayBundle
 from .geometry import Interval,PointBounds
 from .inputs import FrameStamp
 from .motion import sin_cos_bounds
@@ -38,7 +37,7 @@ def _bound(value,maximum):
 class TofLeaf:
     """새 local asset schema. hash는 내용 식별이며 실제 센서 수락 증거를 대신하지 않는다.
 
-    zone_bearings는 row-major64개의 (az_lo,az_hi,el_lo,el_hi)다. sensor RDF에서
+    zone_bearings는 단일 (az_lo,az_hi,el_lo,el_hi) interval 하나다. sensor RDF에서
     az는 오른쪽+,el은 위쪽+이며 h=(cos(el)sin(az),-sin(el),cos(el)cos(az))다.
     near/far/measurement_error는 distance_convention의 native m 단위다.
     driver_profile_sha256는 native→wire status/reducer·적분시각 profile을 pin한다.
@@ -58,10 +57,7 @@ class TofLeaf:
     bearing_error_rad: float=0.
     rotation_error_rad: float=0.
     translation_error_m: float=0.
-    free_required_quality: int=11
     extrinsics_qualified: bool=False
-    first_surface_qualified: bool=False
-    coverage_qualified: bool=False
     time_qualified: bool=False
 
     def __post_init__(self):
@@ -69,7 +65,7 @@ class TofLeaf:
         if type(self.model) is not str or not 1<=len(self.model)<=64 or any(not 33<=ord(c)<=126 for c in self.model):raise ValueError('explicit ToF model required')
         if type(self.driver_profile_sha256) is not str or len(self.driver_profile_sha256)!=64 or any(c not in '0123456789abcdef' for c in self.driver_profile_sha256):raise ValueError('ToF driver profile SHA256 required')
         object.__setattr__(self,'rotation',matrix(self.rotation,rotation=True));object.__setattr__(self,'translation',vector(self.translation,3))
-        if type(self.zone_bearings) is not tuple or len(self.zone_bearings)!=64:raise ValueError('exact64 original zone angular intervals required')
+        if type(self.zone_bearings) is not tuple or len(self.zone_bearings)!=1:raise ValueError('exact1 original ToF angular interval required')
         zones=tuple(vector(zone,4) for zone in self.zone_bearings)
         if any(not -math.pi<=a<=b<=math.pi or not -math.pi/2<=c<=d<=math.pi/2 for a,b,c,d in zones):raise ValueError('invalid continuous zone bearings')
         object.__setattr__(self,'zone_bearings',zones)
@@ -80,15 +76,13 @@ class TofLeaf:
         for key,maximum in (('measurement_error_m',10.),('relative_error',1.),('bearing_error_rad',math.pi),
                 ('rotation_error_rad',math.pi),('translation_error_m',10.)):
             object.__setattr__(self,key,_bound(getattr(self,key),maximum))
-        _uint(self.free_required_quality,31)
-        if self.free_required_quality&11!=11 or self.free_required_quality&16:raise ValueError('free requires valid/native-quality/closest and excludes FREE_BLOCKED')
-        for key in ('extrinsics_qualified','first_surface_qualified','coverage_qualified','time_qualified'):_flag(getattr(self,key))
+        for key in ('extrinsics_qualified','time_qualified'):_flag(getattr(self,key))
 
-    def to_dict(self):return dict(schema_version=1,**asdict(self))
+    def to_dict(self):return dict(schema_version=2,**asdict(self))
 
     @classmethod
     def from_dict(cls,value):
-        if type(value) is not dict or set(value)!= {'schema_version'}|set(cls.__dataclass_fields__) or value['schema_version']!=1:raise ValueError('exact ToF leaf schema1 required')
+        if type(value) is not dict or set(value)!= {'schema_version'}|set(cls.__dataclass_fields__) or value['schema_version']!=2:raise ValueError('exact single-return ToF leaf schema2 required')
         fields=dict(value);fields.pop('schema_version');fields['zone_bearings']=tuple(tuple(zone) for zone in fields['zone_bearings'])
         return cls(**fields)
 
@@ -154,7 +148,7 @@ def _motion(origin,direction,pose):
 
 
 def tof_evidence(evidence,leaf,calibration,*,admission,now_us,pose=None,motion_qualified=False):
-    """검산된 원 complete frame을 처리한다. pose 부재는 frame-local 진단이며 지도/FREE 자격0이다."""
+    """원 단일 HIT만 경계 상자로 옮긴다. pose 부재는 frame-local 진단이며 FREE는 항상 없다."""
     from ..transport.sensor_samples import SensorSamples,FrozenSensorSamples,TofEvidence
     if type(evidence) is not TofEvidence or type(leaf) is not TofLeaf or type(calibration) is not CalibrationProfile:
         raise ValueError('exact admitted ToF evidence/leaf/local calibration required')
@@ -163,7 +157,7 @@ def tof_evidence(evidence,leaf,calibration,*,admission,now_us,pose=None,motion_q
     if (evidence.leaf_sha256,evidence.sensor_id,evidence.sensor_config_revision,evidence.calibration_profile_sha256)!=(
             leaf.sha256,leaf.sensor_id,leaf.sensor_config_revision,calibration.sha256):raise ValueError('ToF source/leaf differs from admitted original')
     bound=_pose(evidence,calibration,pose,motion_qualified)
-    rays=[];hits=[];accepted=[];rejected=[]
+    hits=[];accepted=[];rejected=[]
     for index,(distance,status,quality,zone) in enumerate(zip(evidence.distances_mm,evidence.status,evidence.quality,leaf.zone_bearings)):
         if status!=1 or not quality&1 or distance in (0,65535):
             rejected.append((index,'INVALID_OR_MISSING_RETURN'));continue
@@ -177,21 +171,13 @@ def tof_evidence(evidence,leaf,calibration,*,admission,now_us,pose=None,motion_q
             if sensor[2].lo<=0:
                 rejected.append((index,'AXIAL_SENSOR_Z_NOT_POSITIVE'));continue
             radial=native/sensor[2]
-            near=math.nextafter(leaf.near_m/sensor[2].lo,math.inf)
-            far=math.nextafter(leaf.far_m/sensor[2].hi,-math.inf)
-        else:radial=native;near=leaf.near_m;far=leaf.far_m
+        else:radial=native
         origin=tuple(Interval.around(value,leaf.translation_error_m) for value in leaf.translation)
         origin,direction=_motion(origin,direction,bound)
         hit=tuple(a+b*radial for a,b in zip(origin,direction))
         hit_qualified=bool(bound is not None and leaf.extrinsics_qualified and leaf.time_qualified)
         hits.append(PointBounds(tuple(v.lo for v in hit),tuple(v.hi for v in hit),hit_qualified));accepted.append(index)
-        if near>=far:
-            rejected.append((index,'NO_COMMON_RADIAL_SUPPORT'));continue
-        free=bool(hit_qualified and leaf.first_surface_qualified and leaf.coverage_qualified
-            and evidence.frame_status&7==7 and quality&leaf.free_required_quality==leaf.free_required_quality and not quality&16)
-        rays.append(RayBundle(tuple(v.lo for v in origin),tuple(v.hi for v in origin),tuple(v.lo for v in direction),tuple(v.hi for v in direction),
-            radial.lo,radial.hi,near,far,free,evidence.stamp.key,None))
-    patches=RayBundleBatch.from_rays(tuple(rays))
-    status='QUALIFIED_RAYS' if any(ray.qualified for ray in rays) else 'HIT_ONLY' if any(hit.qualified for hit in hits) else 'UNKNOWN'
+    patches=RayBundleBatch.from_rays(())
+    status='HIT_ONLY' if any(hit.qualified for hit in hits) else 'UNKNOWN'
     return TofResult(evidence.stamp,leaf.sha256,tuple(hits),patches,tuple(accepted),tuple(rejected),
-        bool(bound is not None and leaf.extrinsics_qualified and leaf.time_qualified),status)
+        any(hit.qualified for hit in hits),status)

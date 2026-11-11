@@ -1,11 +1,13 @@
 from dataclasses import replace
 import hashlib
 import json
+import os
 import sqlite3
 
 from fastapi.testclient import TestClient
 import pytest
 
+from dom0_manager import log_collector
 from dom0_manager.config import Settings
 from dom0_manager.main import create_app
 from dom0_manager.runtime_logs import LogStore, scrub
@@ -13,12 +15,68 @@ from dom0_manager.log_collector import journal_record
 from dom0_manager.journal_reader import JournalLines
 
 
-def record(store, n, **changes):
+def fields(n, **changes):
     value = dict(source_id="dom0", vm_id=None, component="xenova-dom0-manager.service",
                  boot_id="boot-1", observed_at="2026-10-28T00:00:00Z", level="INFO",
                  message=f"message {n}", native_id=str(n))
     value.update(changes)
-    return store.append(**value)
+    return value
+
+
+def record(store, n, **changes):
+    return store.append(**fields(n, **changes))
+
+
+def test_rows_retention_and_cursor_commit_in_one_transaction(tmp_path):
+    store = LogStore(tmp_path / "logs.db", max_rows=3)
+    opened = []
+    connect = store.connect
+    store.connect = lambda: (opened.append(1), connect())[1]
+    rows = [LogStore.prepare(**fields(n)) for n in range(5)]
+    source = dict(source_id="dom0", components=["app.service"], checkpoint="4", recorded=True)
+    assert store.insert(rows, source=source) == 5
+    assert len(opened) == 1
+    assert store.checkpoint("dom0") == "4"
+    assert sorted(r["message"] for r in store.query()["items"]) == ["message 2", "message 3", "message 4"]
+    assert store.insert(rows[2:]) == 0  # rows read again after a crash before the next commit are deduplicated
+    with pytest.raises(ValueError):
+        LogStore.prepare(**fields(9, level="TRACE"))
+    with pytest.raises(ValueError):
+        store.insert([], source=dict(source, state="gone"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the journal pipe is watched with select, which needs POSIX pipes")
+def test_collector_writes_one_transaction_per_read_with_the_last_valid_cursor(tmp_path, monkeypatch):
+    store = LogStore(tmp_path / "logs.db")
+    entry = lambda n, unit="app.service": json.dumps({"__CURSOR": f"c{n}", "_SYSTEMD_UNIT": unit, "_BOOT_ID": "boot1",
+                                                        "MESSAGE": f"m{n}", "__REALTIME_TIMESTAMP": "1000000", "PRIORITY": "6"})
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, "\n".join([entry(0), entry(1, "other.service"), "not json", entry(2), entry(3)]).encode() + b"\n")
+    os.close(write_fd)
+
+    class Journal:
+        stdout = os.fdopen(read_fd, "rb")
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(log_collector.subprocess, "Popen", lambda *args, **kwargs: Journal())
+    batches = []
+    insert = store.insert
+    monkeypatch.setattr(store, "insert", lambda rows, **kwargs: (batches.append((len(rows), kwargs["source"]["checkpoint"])),
+                                                                 insert(rows, **kwargs))[1])
+    loops = []
+    log_collector.follow(store, ["app.service"], stopped=lambda: loops.append(1) or len(loops) > 1)
+    assert batches == [(3, "c3")]
+    assert store.checkpoint("dom0") == "c3"
+    assert sorted(r["message"] for r in store.query()["items"]) == ["m0", "m2", "m3"]
+    assert store.sources()[0]["state"] == "disconnected"
 
 
 def test_retention_duplicate_replay_and_cursor_gap(tmp_path):
@@ -144,6 +202,16 @@ def test_producer_token_cannot_read_control_api_or_spoof_a_vm(tmp_path):
         assert client.post("/api/v1/logs/ingest", json={"records": [{**entry, "vm_id": "other-vm"}]}, headers=headers).status_code == 400
         assert client.post("/api/v1/logs/ingest", json={"records": [{**entry, "component": "other.service"}]}, headers=headers).status_code == 400
         assert len(db.query()["items"]) == 1
+
+
+def test_ingest_401_uses_the_error_schema(tmp_path):
+    client, db, entry, headers = producer_client(tmp_path)
+    with client:
+        wrong = client.post("/api/v1/logs/ingest", json={"records": [entry]},
+                            headers={**headers, "Authorization": "Bearer wrong"})
+        assert wrong.status_code == 401
+        assert wrong.json() == {"code": "Unauthorized", "message": "source authentication required"}
+        assert db.query()["items"] == []
 
 
 def test_batches_are_validated_before_writing_and_keys_stay_private(tmp_path):
