@@ -14,6 +14,7 @@ from time import perf_counter_ns
 from .inputs import PerceptionInput, FrameStamp
 from .tape import TapeProfile, extract_tape
 from .road import RoadProfile, infer_road
+from .lane_tracking import mapped_lane_ahead, track_lane
 from .depth import DepthConfig
 from ..mapping.local_map import EvidenceGrid, GridSpec, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
@@ -144,6 +145,7 @@ class PerceptionPipeline:
         self._restore_pending = False
         self._domain_cache = None
         self._last_tape = self._last_road = self._last_rgb = None
+        self._current_lane = None
         self._last_neural = None
         self._last_rgb_key = self._last_capture = self._last_now = self._last_clock = None
         self._free_cursor = 0
@@ -629,6 +631,20 @@ class PerceptionPipeline:
                     MapEvidenceUpdate(grid,delta,observation,evidence,raw_pose,pose,free_patches,certificate,bounds,self.targets))
                 applied_free+=grid.add_free((cell,),observation.depth.stamp,view_id=observation.depth.stamp.stream_id,
                     origin_xy=origin,certificate_complete=True,observer=free_observer)
+        lane_scope = None if raw_pose is None else (self.grid.frame_id, raw_pose.sample.context)
+        rgb_age = observation.rgb.stamp.age_us(now_us, observation.rgb.stamp.clock_id)
+        lane_pose = (pose if rgb_new and geometry_qualified and rgb_age is not None
+                     and rgb_age <= self.profile.max_observation_age_us
+                     and (not operational_localization or self._alignment is not None) else None)
+        if self._current_lane is not None and self._current_lane.scope[1][1] != observation.rgb.stamp.clock_id:
+            self._current_lane = None
+        self._current_lane, lane_status = track_lane(
+            self._current_lane, self._last_road, self._last_tape, lane_pose, lane_scope, self.profile.road)
+        lane_section = None
+        if lane_status == 'HELD' and lane_pose is not None:
+            lane_section = mapped_lane_ahead(self._current_lane, lane_pose, self.profile.road)
+            if lane_section is not None:
+                lane_status = 'MAPPED'
         snapshot=grid.snapshot(now_us,clock_id=observation.rgb.stamp.clock_id)
         schedule_summary=dict(status=scheduling_status,renewal_proven=False,necessary_capacity_ok=False,after_all_needed_live_fresh=False)
         if plan is not None:
@@ -668,6 +684,8 @@ class PerceptionPipeline:
             tape_reasons=[] if self._last_tape is None else list(self._last_tape.reasons),
             tape_work={} if self._last_tape is None else dict(self._last_tape.work),
             road_reasons=[] if self._last_road is None else list(self._last_road.reasons),
+            current_lane=(dict(status=lane_status) if self._current_lane is None
+                          else self._current_lane.summary(lane_status, lane_section)),
             road_semantic_scored=0 if self._last_road is None else self._last_road.semantic_scored,
             neural_layer=None if self._last_neural is None else self._last_neural.descriptor(),
             neural_matches_current_rgb=self._last_neural is not None and self._last_neural.rgb_source_key==self._last_rgb_key,

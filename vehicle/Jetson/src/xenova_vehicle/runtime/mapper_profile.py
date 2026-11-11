@@ -99,9 +99,12 @@ def _tuple(value):
 
 def _typed(cls,value):
     names={f.name for f in fields(cls) if f.init}
-    if type(value) is not dict or set(value)!=names: raise MapperProfileError('all '+cls.__name__+' fields must be explicit')
+    if type(value) is not dict: raise MapperProfileError('all '+cls.__name__+' fields must be explicit')
+    keys=set(value)
+    if keys!=names and not (cls is RoadProfile and keys==names-{'missing_outer_width_bounds_m'}):
+        raise MapperProfileError('all '+cls.__name__+' fields must be explicit')
     for field in fields(cls):
-        if not field.init: continue
+        if not field.init or field.name not in value: continue
         item=value[field.name]
         if field.type in (int,'int') and type(item) is not int: raise MapperProfileError('integer field: '+field.name)
         if field.type in (float,'float') and type(item) not in (int,float): raise MapperProfileError('numeric field: '+field.name)

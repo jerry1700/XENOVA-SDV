@@ -1227,6 +1227,7 @@ def restore_pipeline(pipeline,complete,current_scope):
         from ..mapping.rolling_grid import configure_grid
         configure_grid(grid,window)
     pipeline.grid=grid;pipeline.reference=reference;pipeline._alignment=None;pipeline._propagation_anchor=None;pipeline._free_scheduler=None
+    pipeline._current_lane=None
     pipeline._restore_pending=not identity
     pipeline._context=('LIVE',pipeline.calibration.sha256,grid.clock_id,grid.frame_id)
     pipeline._restored_checkpoint_ref=complete.checkpoint_ref
