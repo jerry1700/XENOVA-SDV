@@ -4,8 +4,21 @@
 
 #include "feedback3/codes.h"
 
-/* 구현한 기능만 알린다. 지금은 4시각 시계 응답과 실제 표본 latch 뿐이다 */
-#define XENOVA_CAPABILITIES FB3_CAP_CLOCK4_LATCH
+/* 구현한 기능만 알린다. Pi 가 요구하는 0x01f7 이다. 조향 측정(STEERING)과 정지 조향(STATIONARY_STEER), ToF 는 없다 */
+#define XENOVA_CAPABILITIES 	(FB3_CAP_ACCEPT | FB3_CAP_APPLY | FB3_CAP_VELOCITY | FB3_CAP_STATIONARY | FB3_CAP_ODOMETRY 	 | FB3_CAP_ABS_EXPIRY | FB3_CAP_CLOCK4_LATCH | FB3_CAP_DIRECTION_GATE)
+
+/* 시리얼 속도. 개발용 기본값이고, 게이트웨이와 PC 점검 도구도 같은 값을 쓴다 */
+#define XENOVA_SERIAL_BAUD 460800
+
+/* 엔코더 한 칸에 바퀴가 가는 거리(um). 바퀴 지름 69 mm 와 한 바퀴 1320칸에서 구했고 보정한 값이 아니다 */
+#define XENOVA_UM_PER_TICK 164
+
+/* 출력을 거는 데 걸리는 시간의 상한(us). 재기 전의 값이다 */
+#define XENOVA_J_APPLY_US 2000
+
+/* 받아들이는 속도(mm/s)와 조향(mrad)의 크기. 책상 시험용으로 낮게 잡은 값이다 */
+#define XENOVA_MAX_VELOCITY_MMPS 600
+#define XENOVA_MAX_STEERING_MRAD 500
 
 /* 엔코더 누계 폭. Pi 의 OdometryConfig.encoder_bits 와 같아야 한다 */
 #define XENOVA_ENCODER_BITS 32

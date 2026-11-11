@@ -27,6 +27,26 @@
 #define FB3_CLOCK_INSTALLED 1u
 #define FB3_CLOCK_REJECTED 3u
 
+/* COMMAND command_kind */
+#define FB3_COMMAND_DRIVE 1u
+#define FB3_COMMAND_STOP 2u
+#define FB3_COMMAND_HOLD_STEER 3u
+/* COMMAND reason 의 가장 큰 값 */
+#define FB3_COMMAND_REASON_MAX 10u
+/* DRIVE 의 expires_pi_us 는 issued_pi_us 에서 이 안이어야 한다 */
+#define FB3_COMMAND_LIFE_US 100000u
+
+/* REPORT status */
+#define FB3_REPORT_ACCEPTED 1u
+#define FB3_REPORT_APPLIED 2u
+#define FB3_REPORT_REJECTED 3u
+#define FB3_REPORT_FAULT 4u
+
+/* REPORT flags. 값이 실려 있는 측정 */
+#define FB3_REPORT_VELOCITY 0x01u
+#define FB3_REPORT_STEERING 0x02u
+#define FB3_REPORT_STATIONARY 0x04u
+
 /* CLOCK_REPLY·SENSOR quality. 조향은 측정과 추정 중 하나만 */
 #define FB3_QUALITY_ENCODER 0x01u
 #define FB3_QUALITY_STEERING_MEASURED 0x02u

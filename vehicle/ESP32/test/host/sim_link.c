@@ -1,18 +1,27 @@
-/* 펌웨어의 통신 처리(link·cutoff)를 PC 에서 돌리는 대역. stdin 으로 받은 바이트에 stdout 으로 답한다.
- * 시계는 PC 의 단조 시계이고 엔코더는 0 에 멈춰 있다. alarm 은 다음 입력을 처리하기 전에,
- * 맞춘 시각에 울린 것으로 순서대로 처리한다. 실제 ESP32·USB·타이머 시험이 아니다.
- * tools/link_bench.py 와 tools/pi_link_check.py 가 쓴다 */
+/* 펌웨어의 통신 처리(link·cutoff)를 PC 에서 돌리는 대역. stdin 으로 받은 바이트에 stdout 으로 답하고,
+ * 스케치의 loop 처럼 입력이 없을 때에도 1 ms 마다 돌면서 주기 표본을 보낸다.
+ * 시계는 PC 의 단조 시계다. 엔코더는 DRIVE 로 출력이 걸려 있는 동안 명령한 속도대로 돌고, 출력이 끊기면 그 자리에 선다.
+ * 인자로 초당 칸 수를 주면 명령과 상관없이 양쪽 바퀴가 그 속도로 더 돈다. 모터와 차체의 움직임을 흉내 낸 것이 아니다.
+ * alarm 은 맞춘 시각에 울린 것으로 순서대로 처리한다. 실제 ESP32·USB·타이머 시험이 아니다.
+ * Windows 에서는 stdin 이 pipe 여야 한다.
+ * tools/link_bench.py, tools/cutoff_stress.py, tools/pi_link_check.py 가 쓴다
+ *
+ *   sim_link [초당 칸 수] */
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#include <mmsystem.h>
 #else
+#include <poll.h>
 #include <time.h>
+#include <unistd.h>
 #endif
 
 #include "device_config.h"
@@ -27,6 +36,10 @@ struct sim {
 	uint64_t alarm_at;
 	bool in_alarm; /* alarm 을 처리하는 동안 시계는 울린 시각에 멈춘다 */
 	uint64_t frozen_us;
+	int64_t ticks_per_second; /* 명령과 상관없이 양쪽 엔코더가 도는 속도 */
+	int32_t drive_mmps;       /* 출력에 걸려 있는 속도. 끊겨 있으면 0 */
+	int64_t driven_um;        /* 출력으로 굴러간 거리 */
+	uint64_t driven_us;       /* 그 거리를 셈한 시각 */
 	struct fb3_cutoff cutoff;
 };
 
@@ -81,11 +94,49 @@ static void sim_unlock(void *ctx)
 	(void)ctx;
 }
 
+/* 출력이 걸려 있던 동안 굴러간 거리를 지금까지 셈한다 */
+static void sim_roll(struct sim *s, uint64_t now)
+{
+	s->driven_um += (int64_t)s->drive_mmps * (int64_t)(now - s->driven_us) / 1000;
+	s->driven_us = now;
+}
+
+static void sim_cut(void *ctx)
+{
+	struct sim *s = ctx;
+
+	sim_roll(s, sim_now(s));
+	s->drive_mmps = 0;
+}
+
+static bool sim_drive(void *ctx, int16_t velocity_mmps, int16_t steering_mrad)
+{
+	struct sim *s = ctx;
+
+	(void)steering_mrad;
+	sim_roll(s, sim_now(s));
+	s->drive_mmps = velocity_mmps;
+	return true;
+}
+
+static bool sim_estop(void *ctx)
+{
+	(void)ctx;
+	return false;
+}
+
 static bool sim_latch(void *ctx, struct fb3_sample *out)
 {
-	out->device_us = sim_now(ctx);
-	out->left_ticks = 0;
-	out->right_ticks = 0;
+	struct sim *s = ctx;
+	int64_t ticks;
+
+	out->device_us = sim_now(s);
+	sim_roll(s, out->device_us);
+	ticks = (int64_t)(out->device_us - SIM_BOOT_AGE_US) * s->ticks_per_second / 1000000
+		+ s->driven_um / XENOVA_UM_PER_TICK;
+	/* 펌웨어처럼 32비트 누계이고 넘치면 돌아간다 */
+	out->left_ticks = (int32_t)(uint32_t)ticks;
+	out->right_ticks = (int32_t)(uint32_t)ticks;
 	out->quality = FB3_QUALITY_ENCODER;
 	out->steering_mrad = 0;
 	out->steering_error_mrad = 0;
@@ -100,6 +151,44 @@ static void sim_run_alarms(struct sim *s)
 		s->in_alarm = true;
 		fb3_cutoff_on_alarm(&s->cutoff);
 		s->in_alarm = false;
+	}
+}
+
+/* 입력을 1 ms 까지 기다려 읽는다. 읽은 바이트 수, 그동안 온 것이 없으면 0, 입력이 닫혔으면 -1 */
+static int host_read(uint8_t *buffer, int cap)
+{
+#ifdef _WIN32
+	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+	DWORD waiting = 0, got = 0;
+
+	if (!PeekNamedPipe(input, NULL, 0, NULL, &waiting, NULL)) {
+		return -1;
+	}
+	if (waiting == 0) {
+		Sleep(1);
+		return 0;
+	}
+	if (!ReadFile(input, buffer, waiting < (DWORD)cap ? waiting : (DWORD)cap, &got, NULL) || got == 0) {
+		return -1;
+	}
+	return (int)got;
+#else
+	struct pollfd input = {0, POLLIN, 0};
+	ssize_t got;
+
+	if (poll(&input, 1, 1) <= 0) {
+		return 0;
+	}
+	got = read(0, buffer, (size_t)cap);
+	return got > 0 ? (int)got : -1;
+#endif
+}
+
+static void sim_send(const uint8_t *wire, size_t len)
+{
+	if (len > 0) {
+		fwrite(wire, 1, len, stdout);
+		fflush(stdout);
 	}
 }
 
@@ -121,7 +210,7 @@ static void make_session(uint8_t out[16])
 	out[8] = (uint8_t)((out[8] & 0x3f) | 0x80);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	static const uint8_t config_sha256[32] = XENOVA_VEHICLE_CONFIG_SHA256;
 	/* ASCII 문자열 "xenova-esp32-host-sim" 의 SHA-256. 실제 펌웨어의 digest 가 아니다 */
@@ -133,41 +222,45 @@ int main(void)
 	static struct fb3_link link;
 	static struct fb3_framer framer;
 	static struct fb3_frame frame;
-	struct fb3_cutoff_port cutoff_port = {&sim, sim_now, sim_set_alarm, sim_clear_alarm, sim_lock, sim_unlock};
-	struct fb3_link_port link_port = {&sim, sim_now, sim_latch};
+	struct fb3_cutoff_port cutoff_port = {&sim, sim_now, sim_set_alarm, sim_clear_alarm, sim_lock, sim_unlock,
+					      sim_cut};
+	struct fb3_link_port link_port = {&sim, sim_now, sim_latch, sim_drive, sim_estop};
 	struct fb3_link_config config;
-	uint8_t wire[FB3_MAX_WIRE];
-	int byte;
+	uint8_t wire[FB3_MAX_WIRE], input[256];
+	int got;
 
 #ifdef _WIN32
-	_setmode(_fileno(stdin), _O_BINARY);
 	_setmode(_fileno(stdout), _O_BINARY);
+	timeBeginPeriod(1); /* Sleep(1) 이 1 ms 언저리로 깨게 한다 */
 #endif
+	sim.ticks_per_second = argc > 1 ? strtoll(argv[1], NULL, 10) : 0;
 	sim.origin = host_us();
+	sim.driven_us = sim_now(&sim);
 	fb3_cutoff_init(&sim.cutoff, &cutoff_port);
 	make_session(config.device_boot_session);
 	config.capabilities = XENOVA_CAPABILITIES;
 	memcpy(config.vehicle_config_sha256, config_sha256, sizeof config_sha256);
 	memcpy(config.firmware_sha256, firmware_sha256, sizeof firmware_sha256);
 	config.encoder_bits = XENOVA_ENCODER_BITS;
+	config.um_per_tick = XENOVA_UM_PER_TICK;
+	config.j_apply_us = XENOVA_J_APPLY_US;
+	config.max_velocity_mmps = XENOVA_MAX_VELOCITY_MMPS;
+	config.max_steering_mrad = XENOVA_MAX_STEERING_MRAD;
 	fb3_link_init(&link, &config, &link_port, &sim.cutoff);
 	fb3_framer_init(&framer);
 	/* 스케치처럼 켜지면 구분자 하나를 먼저 보낸다 */
 	putchar(0);
 	fflush(stdout);
 
-	while ((byte = getchar()) != EOF) {
-		size_t len;
-
+	while ((got = host_read(input, (int)sizeof input)) >= 0) {
+		for (int i = 0; i < got; i++) {
+			sim_run_alarms(&sim);
+			if (fb3_framer_push(&framer, input[i], &frame)) {
+				sim_send(wire, fb3_link_receive(&link, &frame, sim_now(&sim), wire, sizeof wire));
+			}
+		}
 		sim_run_alarms(&sim);
-		if (!fb3_framer_push(&framer, (uint8_t)byte, &frame)) {
-			continue;
-		}
-		len = fb3_link_receive(&link, &frame, sim_now(&sim), wire, sizeof wire);
-		if (len > 0) {
-			fwrite(wire, 1, len, stdout);
-			fflush(stdout);
-		}
+		sim_send(wire, fb3_link_poll(&link, wire, sizeof wire));
 	}
 	return 0;
 }

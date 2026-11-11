@@ -4,7 +4,7 @@
       python3 gen_vectors.py --wires <gateway-feedback-3.json> <link_vectors.inc>
 
 제품 payload 9종의 프레임만 쓴다. 설계 전용 ToF 프레임은 건너뛴다.
---wires 는 세션·시각 설치 프레임 여섯 개의 wire 바이트만 이름으로 꺼낸다(test_link.c 용).
+--wires 는 세션·시각 설치 프레임 여섯 개와 SENSOR 프레임 네 개의 wire 바이트만 이름으로 꺼낸다(test_link.c 용).
 """
 import hashlib
 import json
@@ -23,8 +23,9 @@ NAMES = {
     'COMMAND3': 'command',
     'FEEDBACK3': 'report',
 }
-# 한 흐름으로 이어지는 세션·시각 설치 프레임 (vector 의 name)
-LINK_FRAMES = ('hello3', 'hello_ack3', 'clock_probe3', 'clock_reply3', 'clock_install3', 'clock_ack3')
+# 한 흐름으로 이어지는 세션·시각 설치 프레임과 그 lease 를 가리키는 SENSOR 프레임 (vector 의 name)
+LINK_FRAMES = ('hello3', 'hello_ack3', 'clock_probe3', 'clock_reply3', 'clock_install3', 'clock_ack3',
+               'sensor_measured', 'sensor_estimated', 'sensor_encoder_only', 'sensor_signed32_wrap')
 ERRORS = {
     'serial boundary/size': 'FB3_FRAME_BOUNDARY_SIZE',
     'serial COBS': 'FB3_FRAME_COBS',
