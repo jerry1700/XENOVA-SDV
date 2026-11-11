@@ -55,6 +55,19 @@ dom0 콘솔로 연결합니다. `DOM0_MANAGER_BASE_URL`과 `DOM0_MANAGER_SERVICE
 프론트엔드에 서비스 토큰을 전달하지 않습니다. 데이터·종료 규격은
 [웹 터미널 계약](../docs/contracts/browser-console-v1.md)을 참고하세요.
 
+### 보드 등록 동기화
+
+보드에서 콘솔·터미널로 만들거나 지운 VM도 웹에 반영되도록, 서버가 dom0-manager `GET /api/v1/vm-registrations`를
+주기적으로 읽어 VM 테이블을 맞춥니다. 보드에서 연속으로 사라진 VM은 RETIRED로 숨깁니다
+([VM 등록 계약](../docs/contracts/vm-provisioning-v1.md)).
+
+| 환경 변수 | 기본값 | 뜻 |
+| --- | --- | --- |
+| `VM_REGISTRATION_SYNC_ENABLED` | `true` | 주기 동기화 사용 |
+| `VM_REGISTRATION_SYNC_INTERVAL` | `30s` | 동기화 사이 간격 |
+| `VM_REGISTRATION_SYNC_MISSING_THRESHOLD` | `2` | 몇 번 연속 보드에 없으면 숨길지 |
+| `VM_REGISTRATION_SYNC_CREATION_GRACE` | `20m` | 생성 직후 숨기지 않는 시간 (dom0 명령 제한) |
+
 ```text
 POST /api/v1/auth/signup
 POST /api/v1/auth/login

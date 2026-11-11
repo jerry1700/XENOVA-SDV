@@ -99,12 +99,13 @@ class VmListApiIntegrationTest {
         String authorization = "Bearer " + login();
         mockMvc.perform(get("/api/v1/vms").header(HttpHeaders.AUTHORIZATION, authorization))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.items[0].guest_kind").value("linux"))
-                .andExpect(jsonPath("$.items[0].ipv4").value("192.168.77.20"))
-                .andExpect(jsonPath("$.items[0].assigned_ipv4").value("192.168.77.21"))
-                .andExpect(jsonPath("$.items[1].guest_kind").value("zephyr"))
-                .andExpect(jsonPath("$.items[1].assigned_ipv4").value("192.168.77.2"))
-                .andExpect(jsonPath("$.items[1].ipv4").doesNotExist());
+                // Neither VM has a role, so the drive (Zephyr) guest is listed first (VmService list order).
+                .andExpect(jsonPath("$.items[0].guest_kind").value("zephyr"))
+                .andExpect(jsonPath("$.items[0].assigned_ipv4").value("192.168.77.2"))
+                .andExpect(jsonPath("$.items[0].ipv4").doesNotExist())
+                .andExpect(jsonPath("$.items[1].guest_kind").value("linux"))
+                .andExpect(jsonPath("$.items[1].ipv4").value("192.168.77.20"))
+                .andExpect(jsonPath("$.items[1].assigned_ipv4").value("192.168.77.21"));
 
         mockMvc.perform(get("/api/v1/vms/vm-zephyr").header(HttpHeaders.AUTHORIZATION, authorization))
                 .andExpect(status().isOk())
