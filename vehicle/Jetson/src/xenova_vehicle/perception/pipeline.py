@@ -17,6 +17,7 @@ from .road import RoadProfile, infer_road
 from .lane_tracking import mapped_lane_ahead, track_lane
 from .registration_history import HISTORY_FRAMES, RegistrationObservation, combined_constraints
 from .temporal_road import MappedRoad, TemporalRoadMap
+from .parking_entrance import entrance_summary
 from .depth import DepthConfig
 from ..mapping.local_map import EvidenceGrid, GridSpec, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
@@ -913,6 +914,7 @@ class PerceptionPipeline:
             current_lane=(dict(status=lane_status) if self._current_lane is None
                           else self._current_lane.summary(lane_status, lane_section)),
             temporal_road_revision=self._temporal_road.revision,
+            parking_entrances=entrance_summary(self._temporal_road.parking_branches),
             road_semantic_scored=0 if self._last_road is None else self._last_road.semantic_scored,
             neural_layer=None if self._last_neural is None else self._last_neural.descriptor(),
             neural_matches_current_rgb=self._last_neural is not None and self._last_neural.rgb_source_key==self._last_rgb_key,

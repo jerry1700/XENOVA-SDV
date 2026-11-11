@@ -11,6 +11,7 @@ import math
 from statistics import median
 
 from .inputs import FrameStamp
+from .parking_entrance import observe_entrances
 from .road import LaneHypothesis, RoadResult
 from .road_normals import ReferenceObservations, heading_error, normal_samples
 from .tape import TapeStrip
@@ -27,6 +28,7 @@ _MARKING_LIMIT = 512
 _STATION_STEP_M = .05
 _BAND_SPREAD_M = .055
 _DIRECTION_MATCH_RAD = .30
+_ENTRANCE_RECHECK_FRAMES = 8
 
 
 @dataclass(frozen=True)
@@ -724,6 +726,8 @@ class TemporalRoadMap:
         self._roles = {}
         self._map_roles = {}
         self._last_source = None
+        self.parking_branches = ()
+        self._entrance_recheck = 0
         self.revision = 0
 
     def __deepcopy__(self, memo):
@@ -739,6 +743,8 @@ class TemporalRoadMap:
         clone._roles = {key:roles.copy() for key,roles in self._roles.items()}
         clone._map_roles = {key:roles.copy() for key,roles in self._map_roles.items()}
         clone._last_source = self._last_source
+        clone.parking_branches = self.parking_branches
+        clone._entrance_recheck = self._entrance_recheck
         clone.revision = self.revision
         return clone
 
@@ -906,6 +912,14 @@ class TemporalRoadMap:
                 run.append(link)
             previous = candidate
         self._retain(run,road_profile,graph.source_key,candidates,interpolated)
+        self.parking_branches = observe_entrances(self.parking_branches, projected, self.links)
+        if not self._entrance_recheck:
+            # 코너의 진입선이 먼저 보이고 차로 기준선이 뒤늦게 이어질 수 있다.
+            history = tuple(strip for frame in self._frames for strip in frame
+                            if strip.source in recent_sources)
+            self.parking_branches = observe_entrances(self.parking_branches, history,
+                (link for section in self.sections(road_profile) for link in section.links), followed=True)
+        self._entrance_recheck = (self._entrance_recheck+1) % _ENTRANCE_RECHECK_FRAMES
         candidates = candidates or interpolated
         if len(candidates) == 1:
             return candidates[0]
