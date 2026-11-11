@@ -60,6 +60,9 @@ add_test(NAME esp32_quadrature COMMAND test_quadrature)
 
 # PC 가 Pi 역할을 하는 점검 도구를 호스트로 빌드한 통신 처리에 돌린다. 실보드에서 쓰는 것과 같은 도구다
 fb3_host_executable(sim_link sim_link.c ${FB3_LINK})
+if(WIN32)
+  target_link_libraries(sim_link PRIVATE winmm)
+endif()
 add_test(NAME esp32_link_bench COMMAND ${Python3_EXECUTABLE} ${TOOLS}/link_bench.py --sim $<TARGET_FILE:sim_link>)
 
 # 점검 도구가 답이 끊기거나 검증한 것이 없을 때 통과로 끝나지 않는지 가짜 장치로 본다

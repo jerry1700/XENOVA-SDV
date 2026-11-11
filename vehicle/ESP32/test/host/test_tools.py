@@ -1,6 +1,7 @@
 """PC 점검 도구(tools/)의 판정을 장치 없이 시험한다.
 
-답이 끊기거나 검증한 것이 없는데도 통과로 끝나지 않는지 본다. 장치와 Pi 는 가짜다.
+답이 끊기거나 검증한 것이 없는데도 통과로 끝나지 않는지, 표본 흐름이 어긋난 것을 알아채는지 본다.
+장치와 Pi 는 가짜다.
 """
 import os
 import random
@@ -8,8 +9,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import cutoff_stress
+import link_bench
 import pi_link_check
 from cutoff_stress import FAR_FIRST, IN_TURN, ONE, TWINS
+from fb3 import ACK3, CLOCK3, CLOCK_REPLY, HELLO_ACK, SENSOR, SENSOR3
+from link_bench import SAMPLE_GAP_US, SENSOR_PERIOD_US, Sample
 
 checks = failures = 0
 
@@ -264,6 +268,99 @@ def test_pi_check_sees_silence():
     check(abs(dark - 30.0) < 0.01, f'lease 가 처음부터 없으면 구간 전체가 끊긴 시간 ({dark:.2f}초)')
 
 
+PI, DEVICE, EPOCH = b'p' * 16, b'd' * 16, b'e' * 16
+
+
+def sensor_fields(sample, stamp, lease=5, pi=PI, quality=1, steering=0, error=0, ticks=0):
+    return (pi, DEVICE, sample, stamp, ticks, ticks, quality, steering, error, EPOCH, lease)
+
+
+def lease_checked(sensors, start=1000000, cutoff=1500000, late=link_bench.BOARD_LATE_US):
+    return link_bench.lease_problems(sensors, PI, DEVICE, EPOCH, 5, start, cutoff, late, 32)
+
+
+def test_bench_sees_broken_sample_order():
+    problems = link_bench.stream_problems
+    period, half = SENSOR_PERIOD_US, SENSOR_PERIOD_US // 2
+    good = [Sample(CLOCK_REPLY, 1, 1000), Sample(SENSOR, 2, 1000 + half), Sample(SENSOR, 3, 1000 + half + period),
+            Sample(CLOCK_REPLY, 4, 1000 + half + period + SAMPLE_GAP_US),
+            Sample(SENSOR, 5, 1000 + 2 * half + period + SAMPLE_GAP_US)]
+    check(problems(good) == [], f'주기와 간격을 지킨 흐름에는 문제 없음 {problems(good)}')
+
+    def moved(index, **change):
+        return good[:index] + [good[index]._replace(**change)] + good[index + 1:]
+
+    check(len(problems(moved(2, sequence=4))) == 2, '순번을 건너뛰면 그 앞뒤가 모두 어긋남')
+    check(len(problems(moved(1, sequence=1))) == 2, '같은 순번이 다시 오면 어긋남')
+    check(len(problems(moved(2, device_us=good[1].device_us + period - 1))) == 1, 'SENSOR 가 한 주기보다 일찍 오면 어긋남')
+    check(len(problems(moved(1, device_us=good[0].device_us + half - 1))) == 1,
+          'CLOCK_REPLY 다음 SENSOR 가 반 주기보다 일찍 오면 어긋남')
+    check(len(problems(moved(3, device_us=good[2].device_us + SAMPLE_GAP_US - 1))) == 1,
+          'CLOCK_REPLY 의 표본이 앞 표본에 붙으면 어긋남')
+    check(problems(moved(3, device_us=good[2].device_us - 1)) != [], '표본 시각이 거꾸로 가면 어긋남')
+    check(problems(good[:1]) == [] and problems([]) == [], '표본이 하나 이하면 견줄 것이 없음')
+
+    late = link_bench.BOARD_LATE_US
+    check(problems(good, late) == [], '늦지 않은 흐름에는 늦음을 봐도 문제 없음')
+    slow = moved(2, device_us=good[1].device_us + period + late + 1)
+    check(problems(slow[:3]) == [] and len(problems(slow[:3], late)) == 1, 'SENSOR 가 한 주기보다 늦으면 lease 가 살아 있던 구간에서만 어긋남')
+    slow = moved(1, device_us=good[0].device_us + half + late + 1)
+    check(len(problems(slow[:2], late)) == 1, 'CLOCK_REPLY 다음 SENSOR 가 반 주기보다 늦어도 어긋남')
+    check(problems(moved(2, device_us=good[1].device_us + period + late)[:3], late) == [], '허용한 만큼 늦은 것은 문제 없음')
+    check(problems([good[2], good[3]._replace(device_us=good[2].device_us + 10 ** 6)], late) == [],
+          'CLOCK_REPLY 는 probe 가 올 때 나오므로 늦음을 보지 않음')
+
+
+def test_bench_needs_sensor_through_the_lease():
+    steady = [sensor_fields(2 + i, 1010000 + 20000 * i) for i in range(25)]
+    check(lease_checked(steady) == [], f'lease 가 살아 있는 동안 20 ms 마다 오면 문제 없음 {lease_checked(steady)}')
+    check(lease_checked([]) == ['SENSOR 가 하나도 오지 않음'], 'SENSOR 가 없으면 문제')
+    check(any('끊김' in text for text in lease_checked(steady[:5])), '초반에만 오고 끊기면 문제')
+    check(any('끊김' in text for text in lease_checked(steady[5:])), '늦게 시작하면 문제')
+    check(any('끊김' in text for text in lease_checked(steady[:8] + steady[10:])), '가운데 둘이 빠지면 문제')
+    check(any('끊김' in text for text in lease_checked(steady[:8] + steady[9:])), '하나만 빠져도 문제')
+    check(lease_checked(steady[:8] + steady[9:], late=link_bench.SIM_LATE_US) == [], '시뮬레이터에 허용한 늦음 안이면 문제 없음')
+    check(any('구간 밖' in text for text in lease_checked(steady + [sensor_fields(27, 1500000)])), 'cutoff 와 같은 시각의 표본은 문제')
+    check(any('구간 밖' in text for text in lease_checked([sensor_fields(1, 1000000)] + steady)), '설치 전 시각의 표본은 문제')
+    other = steady[:3] + [sensor_fields(5, 1070000, lease=6)] + steady[4:]
+    check(any('clock_sequence 6' in text for text in lease_checked(other)), '다른 lease 를 가리키면 문제')
+    stranger = steady[:3] + [sensor_fields(5, 1070000, pi=b'x' * 16)] + steady[4:]
+    check(any('session' in text for text in lease_checked(stranger)), '다른 session 이면 문제')
+    for name, bad in (('엔코더 bit 없음', dict(quality=0)), ('모르는 quality bit', dict(quality=9)),
+                      ('측정과 추정을 함께', dict(quality=7, error=3)), ('누계가 32비트 밖', dict(ticks=2 ** 31)),
+                      ('조향 값만 있음', dict(steering=10)), ('측정 조향에 오차 없음', dict(quality=3)),
+                      ('조향이 범위 밖', dict(quality=3, steering=1401, error=3))):
+        broken = steady[:3] + [sensor_fields(5, 1070000, **bad)] + steady[4:]
+        check(len(lease_checked(broken)) == 1, f'계약 밖 표본은 문제: {name}')
+    measured = steady[:3] + [sensor_fields(5, 1070000, quality=3, steering=-1400, error=1)] + steady[4:]
+    check(lease_checked(measured) == [], '오차가 있는 측정 조향은 문제 없음')
+
+
+class FakePeer:
+    """받을 프레임을 차례로 내주는 Peer 대역."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+
+    def receive(self, timeout=1.0):
+        return self.frames.pop(0) if self.frames else None
+
+
+def test_flow_sets_sensor_aside():
+    reply = CLOCK3.pack(PI, DEVICE, 1, 2, 3, 4000, 5, 7, 0, 0, 1, 0, 0)
+    ack = ACK3.pack(3, PI, DEVICE, 0xa0, bytes(32), bytes(32), 32)
+    flow = link_bench.Flow(FakePeer([
+        (SENSOR, SENSOR3.pack(*sensor_fields(6, 3000)), 10), (SENSOR, b'short', 11), (CLOCK_REPLY, reply, 12),
+        (SENSOR, SENSOR3.pack(*sensor_fields(8, 14000)), 13), (HELLO_ACK, ack, 14)]))
+    first = flow.answer(0.01)
+    check(first is not None and first[0] == CLOCK_REPLY, '기다리던 응답 앞의 SENSOR 는 건너뜀')
+    check(flow.samples == [Sample(SENSOR, 6, 3000), Sample(CLOCK_REPLY, 7, 4000)], f'표본은 받은 순서대로 적음 {flow.samples}')
+    check(flow.odd == 1 and len(flow.sensors) == 1, '크기가 틀린 SENSOR 는 따로 셈')
+    check(flow.listen(0.01) == 1 and len(flow.sensors) == 2 and len(flow.samples) == 3,
+          '듣는 동안 온 SENSOR 는 적고 다른 프레임은 수로 돌려줌')
+    check(flow.answer(0.01) is None, '더 오는 것이 없으면 None')
+
+
 def main():
     sys.stdout.reconfigure(errors='backslashreplace')  # 한글을 못 쓰는 콘솔에서도 멈추지 않게
     test_stress_counts_what_it_verified()
@@ -274,6 +371,9 @@ def main():
     test_stress_fails_on_wrong_answer()
     test_settle_tells_silence_from_a_stuck_lease()
     test_pi_check_sees_silence()
+    test_bench_sees_broken_sample_order()
+    test_bench_needs_sensor_through_the_lease()
+    test_flow_sets_sensor_aside()
     print(f'tools: {checks} checks, {failures} failures')
     return 1 if failures else 0
 

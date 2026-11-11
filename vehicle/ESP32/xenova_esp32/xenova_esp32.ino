@@ -1,6 +1,7 @@
 // Xenova ESP32 펌웨어 (Arduino-ESP32 3.x, 보드 ESP32 Dev Module).
 // 게이트웨이와 USB 시리얼(115200)로 feedback-3 프레임을 주고받는다.
-// 지금은 세션(HELLO)과 시각 설치(CLOCK)에 답하고 lease 기한을 타이머로 지킨다.
+// 지금은 세션(HELLO)과 시각 설치(CLOCK)에 답하고 lease 기한을 타이머로 지키며,
+// lease 가 살아 있는 동안 엔코더 표본(SENSOR)을 20 ms 마다 보낸다.
 // 명령 처리와 모터·서보 구동은 아직 없다.
 #include <driver/gptimer.h>
 #include <esp_app_desc.h>
@@ -124,6 +125,8 @@ void setup() {
   if (linkReady) startLink();
   fb3_framer_init(&framer);
   Serial.setRxBufferSize(1024);  // begin 전에 정해야 한다
+  // 송신 버퍼가 없으면 앞 프레임이 다 나가기 전의 write 가 그만큼 loop 를 세운다
+  Serial.setTxBufferSize(1024);
   Serial.begin(115200);
   // 같은 포트로 나간 부팅 문구가 첫 응답 프레임에 붙지 않게 구분자로 끊는다. 빈 조각은 프레임이 아니다
   Serial.write(static_cast<uint8_t>(0));
@@ -137,4 +140,8 @@ void loop() {
     size_t length = fb3_link_receive(&gatewayLink, &frame, receivedUs, txWire, sizeof txWire);
     if (length > 0) Serial.write(txWire, length);
   }
+  if (!linkReady) return;
+  // 미뤄 둔 CLOCK_REPLY 나 주기 표본을 보낼 때가 됐으면 보낸다
+  size_t length = fb3_link_poll(&gatewayLink, txWire, sizeof txWire);
+  if (length > 0) Serial.write(txWire, length);
 }

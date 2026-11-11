@@ -6,10 +6,11 @@ RC카의 모터·서보·엔코더를 맡는 ESP32 DevKitC V4 펌웨어다. 게�
 
 - feedback-3 프레임 층(CRC-16/CCITT-FALSE, COBS, 프레임 묶기·풀기, 수신 스트림 분리)과 payload 9종(HELLO, HELLO_ACK, CLOCK_PROBE, CLOCK_REPLY, CLOCK_INSTALL, CLOCK_ACK, SENSOR, COMMAND, REPORT)의 pack/unpack 이 있다.
 - 세션과 시각 설치에 답한다. HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 이고, 설치한 lease 의 기한(cutoff)은 하드웨어 타이머가 지킨다.
-- COMMAND·REPORT·SENSOR 주기 송신과 모터·서보 구동은 아직 없다. 그래서 기한이 지나도 끊을 출력이 없고 PWM1·PWM2 는 늘 Low 다.
-- 알리는 capability 는 `0x0080`(CLOCK4_LATCH) 하나다. Pi 는 `0x01f7` 을 모두 요구하므로 지금 펌웨어의 HELLO_ACK 를 받아들이지 않는다. 명령 처리가 들어가야 Pi 와 끝까지 연결된다.
-- ToF(`TOF_FRAGMENT3`)는 계약에서 설계 전용이라 넣지 않았다.
-- 실보드(ESP32 DevKitC, USB 시리얼)에서 세션·시각 설치, 기한 만료, 손으로 굴린 바퀴의 엔코더 누계, 전원을 다시 넣은 뒤의 새 `device_boot_session` 을 확인했다(아래 "확인 기록").
+- 설치한 lease 가 살아 있는 동안 엔코더 표본을 SENSOR 로 20 ms 마다 보낸다.
+- COMMAND·REPORT 와 모터·서보 구동은 아직 없다. 그래서 기한이 지나도 끊을 출력이 없고 PWM1·PWM2 는 늘 Low 다.
+- 알리는 capability 는 `0x00a0`(CLOCK4_LATCH, ODOMETRY)다. Pi 는 `0x01f7` 을 모두 요구하므로 지금 펌웨어의 HELLO_ACK 를 받아들이지 않는다. 명령 처리가 들어가야 Pi 와 끝까지 연결된다.
+- ToF 는 넣지 않았다. develop 의 계약은 단일 존 `TOF_SAMPLE3`(capability `0x0800`)으로 바뀌었고, 이 펌웨어의 payload 배치에는 아직 없다.
+- 실보드(ESP32 DevKitC, USB 시리얼)에서 세션·시각 설치, 기한 만료, SENSOR 흐름, 손으로 굴린 바퀴의 엔코더 누계, 전원을 다시 넣은 뒤의 새 `device_boot_session` 을 확인했다(아래 "확인 기록").
 
 ## 구조
 
@@ -21,12 +22,12 @@ xenova_esp32/                 Arduino 스케치 폴더 (폴더 이름과 .ino �
   src/feedback3/wire.*        프레임 층
   src/feedback3/payloads.*    payload 9종 배치
   src/feedback3/codes.h       계약이 정한 값 (capability bit, reason 등)
-  src/feedback3/link.*        세션과 시각 설치
+  src/feedback3/link.*        세션, 시각 설치, 주기 표본
   src/feedback3/cutoff.*      기한을 타이머 alarm 하나로 지키는 논리
 test/host/                    PC 호스트 시험 (ESP32 없이)
   CMakeLists.txt
   test_feedback3.c            프레임·payload 를 고정 vector 와 대조
-  test_link.c                 세션·시각 설치·cutoff (가짜 시계·엔코더·alarm)
+  test_link.c                 세션·시각 설치·주기 표본·cutoff (가짜 시계·엔코더·alarm)
   test_quadrature.c           엔코더 해석
   sim_link.c                  통신 처리를 PC 에서 돌리는 대역 (점검 도구용)
   test_tools.py               점검 도구의 판정을 가짜 장치로 시험
@@ -36,7 +37,7 @@ test/host/                    PC 호스트 시험 (ESP32 없이)
   gateway-feedback-3.json     계약 고정 vector 의 복사본
 tools/                        PC 쪽 점검 도구 (Python)
   fb3.py                      프레임·payload 와 시리얼·시뮬레이터 통로
-  link_bench.py               PC 가 Pi 역할을 하며 세션·시각 설치를 점검
+  link_bench.py               PC 가 Pi 역할을 하며 세션·시각 설치·주기 표본을 점검
   cutoff_stress.py            cutoff alarm 을 처리 순간에 붙인 기한으로 되풀이해 거는 시험
   pi_link_check.py            실제 Pi Gateway 코드와 맞물려 보는 시험
 ```
@@ -58,14 +59,14 @@ arduino-cli compile --fqbn esp32:esp32:esp32 vehicle/ESP32/xenova_esp32
 | 항목 | 값 |
 |---|---|
 | `device_boot_session` | 켤 때마다 `esp_fill_random` 16 B 로 만든 RFC 4122 version 4 UUID. version·variant bit 때문에 NIL 이 될 수 없다. 플래시에 저장하지 않는다. Wi-Fi·BT 를 켜지 않으므로 부트로더가 넣어 둔 entropy 에서 이어지는 난수다 |
-| `capabilities` | `0x0080`. 구현한 기능만 알린다 |
+| `capabilities` | `0x00a0`. 구현한 기능만 알린다 |
 | `encoder_bits` | 32. 누계는 부호 있는 32비트이고 넘치면 돌아간다. Pi 의 `OdometryConfig.encoder_bits` 도 32 여야 한다 |
 | `vehicle_config_sha256`, `firmware_sha256` | 아래 "digest 제안" |
 
 ### 프레임별 동작
 
 - **HELLO**: 버전 3 만 받는다. 등록 config digest 가 같아야 session 을 맺는다. 다르면 이쪽 digest 를 담은 HELLO_ACK 는 보내지만 session 은 맺지 않아서, 뒤따르는 프레임에 답하지 않는다. 같은 `pi_session` 의 HELLO 가 다시 오면 상태를 그대로 두고 같은 HELLO_ACK 를 보낸다. 새 `pi_session` 이면 앞 session 의 probe 기록과 lease 를 버리고 타이머도 푼다.
-- **CLOCK_PROBE**: 현재 session 의 것만 받는다. `probe_sequence` 는 앞서 답한 것보다 커야 한다. 프레임을 받은 뒤에 양쪽 엔코더 누계와 시각을 인터럽트를 막고 한 번에 읽어 그 표본으로 답한다. `d2` 는 프레임의 끝을 읽은 시각, `d3` 는 응답을 묶기 직전 시각이다. `source_sample` 은 부팅 뒤 1 부터 늘고 session 이 바뀌어도 이어진다. 엔코더 누계는 켜질 때 0 이고, 해석은 그때 읽은 A·B 상태에서 시작한다. 조향 센서가 없어 quality 는 1, 조향 값과 오차는 0 이다.
+- **CLOCK_PROBE**: 현재 session 의 것만 받는다. `probe_sequence` 는 앞서 답한 것보다 커야 한다. 프레임을 받은 뒤에 양쪽 엔코더 누계와 시각을 인터럽트를 막고 한 번에 읽어 그 표본으로 답한다. `d2` 는 프레임의 끝을 읽은 시각, `d3` 는 응답을 묶기 직전 시각이다. `source_sample` 은 부팅 뒤 1 부터 늘고 session 이 바뀌어도 이어진다. 엔코더 누계는 켜질 때 0 이고, 해석은 그때 읽은 A·B 상태에서 시작한다. 조향 센서가 없어 quality 는 1, 조향 값과 오차는 0 이다. 앞 표본을 뜬 지 5 ms 가 안 됐으면 5 ms 가 될 때까지 기다렸다가 표본을 떠서 답한다(아래 "표본 사이 간격"). 그사이 더 큰 `probe_sequence` 가 오면 앞의 것은 버리고 새 것에 답한다.
 - **CLOCK_INSTALL**: 아래 검사를 통과하고 기한을 타이머에 건 뒤에만 INSTALLED 로 답한다. 이미 설치한 lease 와 같은 바이트가 다시 오면 처음 보낸 CLOCK_ACK 를 그대로 다시 보내고 타이머는 건드리지 않는다.
 - lease 는 두 칸이다. 세 번째가 오면 `clock_sequence` 가 가장 작은 것을 밀어낸다. 명령이 쓰고 있는 lease 를 밀어내지 않는 규칙은 명령 처리와 함께 넣는다.
 - 다른 종류의 프레임에는 답하지 않는다.
@@ -103,6 +104,34 @@ CLOCK_INSTALL 을 거절할 때(status 3)의 reason 이다. session 이 다르�
 - `firmware_sha256`: 링크된 ELF 파일의 SHA-256. Arduino 빌드가 이미지를 만들 때(esptool `elf2image --elf-sha256-offset 0xb0`) app description 에 적어 넣고, 펌웨어는 그 값을 읽어 보낸다. ELF 안의 그 자리는 비어 있어서 자기 해시를 자기 안에 넣는 순환이 없다. 등록값은 빌드한 사람이 `sha256sum <빌드 폴더>/xenova_esp32.ino.elf` 로 구한다. Arduino 코어가 컴파일 시각을 이미지에 넣기 때문에 같은 소스를 다시 빌드해도 값이 달라진다. 보드에 올린 바로 그 빌드에서 구해야 하고, 다시 빌드해 올리면 등록값도 바꿔야 한다. 펌웨어가 플래시를 다시 읽어 검증하는 것은 아니므로 자기보고 값이다.
 - `vehicle_config_sha256`: Pi 설치 profile 과 MCU 가 함께 쓰는 설정 문서(엔코더 폭, `J_apply`·`J_cutoff`, 시각 오차 같은 실측값)를 정해진 바이트 표현으로 고정하고 그 SHA-256 을 쓰자는 제안이다. MCU 는 같은 문서에서 만든 헤더로 값을 빌드에 넣어 digest 와 실제 값이 어긋나지 않게 한다. 아직 MCU 에 넣을 실측값이 없어서, 정해질 때까지는 `src/device_config.h` 의 임시값(문자열 `xenova-esp32-config-dev-1` 의 SHA-256)을 쓴다.
 
+## 주기 표본 (SENSOR)
+
+설치한 lease 가 살아 있는 동안 엔코더 표본을 SENSOR(`0x0f15`)로 보낸다. Pi 는 이 표본으로 주행 거리와 속도를 만들고, STOP 을 적용했다는 보고가 가리키는 표본을 이 흐름에서 찾아 정지를 확인한다.
+
+- **보내는 때**: 현재 session 에 설치돼 있고 기한 전인 lease 가 있을 때만 보낸다. lease 가 모두 만료됐거나, 타이머가 고장으로 굳었거나, 새 `pi_session` 이 와서 lease 를 버렸으면 멈춘다. 새 lease 가 설치되면 20 ms 안에 다시 보낸다.
+- **가리키는 lease**: 살아 있는 lease 가운데 `clock_sequence` 가 가장 큰 것의 `clock_epoch`·`clock_sequence` 를 싣는다. Pi 는 가장 새 lease 둘만 들고 있어서, 장치가 아는 가장 새 lease 를 가리켜야 Pi 가 이미 버린 lease 에 걸리지 않는다. 표본 시각은 그 lease 의 cutoff 보다 앞이다. 표본을 먼저 뜨고 나서 lease 를 순번이 큰 것부터 조회해 고르며, 마지막으로 조회한 lease 만 쓴다. 조회는 걸려 있는 기한을 모두 검사하므로, 그 사이에 타이머 고장이 드러나면 앞서 살아 있다고 본 lease 로도 보내지 않는다.
+- **표본**: CLOCK_REPLY 와 같은 방법으로 그때 새로 뜬다. `source_sample` 은 CLOCK_REPLY 와 SENSOR 가 함께 쓰는 순번 하나이고, 보낸 표본마다 1 씩 는다. 같은 표본을 다른 순번이나 시각으로 다시 보내지 않는다.
+- **주기**: 앞 SENSOR 의 표본을 뜬 시각에서 20 ms 뒤에 다음 표본을 뜬다(장치 시계). 메인 루프가 늦게 돌면 그만큼 늦게 뜨고, 밀린 표본을 몰아서 보내지 않는다.
+- **건너뛰는 경우**: 센서를 읽지 못했거나 표본이 계약 범위 밖이면 그 주기는 보내지 않고 순번도 쓰지 않는다. 한 주기 뒤에 다시 본다.
+
+### 표본 사이 간격
+
+| 앞 표본 | 다음 표본 | 간격 |
+|---|---|---|
+| SENSOR | SENSOR | 20 ms |
+| CLOCK_REPLY | SENSOR | 10 ms |
+| SENSOR 나 CLOCK_REPLY | CLOCK_REPLY | 5 ms 이상. 그보다 일찍 온 CLOCK_PROBE 에는 5 ms 가 될 때 답한다 |
+
+Pi 의 odometry 는 이웃한 두 표본의 누계 차이를 표본 시각 차이로 나눠 속도 상한과 견준다. 또 lease 마다 따로 잡은 시각 구간의 가운데 값으로 표본의 Pi 시각을 정하고, 그 값이 표본 순서대로 늘어야 한다. CLOCK_REPLY 의 표본이 SENSOR 의 표본에 바짝 붙으면 엔코더 한 칸이 큰 속도로 보이거나 Pi 시각의 순서가 뒤집힌다. 그러면 Pi 는 그 표본을 버리면서 그때까지의 최신 표본과 누적 거리도 무효로 한다(`ODOM_ENCODER_DISCONTINUITY`, `ODOM_SAMPLE_ORDER`). 간격을 두지 않은 시험용 빌드로는 이 두 오류가 실제로 나왔고, 간격을 둔 뒤로는 나오지 않았다(확인 기록).
+
+Pi 는 CLOCK_PROBE 를 200 ms 마다 보낸다. CLOCK_REPLY 뒤 첫 SENSOR 를 10 ms 뒤에 두면 SENSOR 가 그 뒤 10, 30, 50 ms 식으로 나가서, 200 ms 뒤의 다음 probe 는 두 SENSOR 의 가운데에 닿고 기다리지 않고 답한다. probe 가 SENSOR 의 표본 뒤 5 ms 안에 닿으면 응답이 최대 5 ms 늦는다. 이때 `d2` 는 받은 시각 그대로이고 표본과 `d3` 가 함께 늦는다.
+
+### 시리얼 부하
+
+- SENSOR 한 프레임은 선 위에서 최대 102 B 이고 115200 bps 에서 8.9 ms 가 걸린다. 50 Hz 면 선의 44 % 를 쓴다.
+- 다음 작업의 REPORT 는 130 B 다. 명령이 50 Hz 로 오고 명령마다 ACCEPTED 와 APPLIED 를 보내면 그것만으로 115200 bps 를 넘는다. 명령 처리 작업에서 속도를 플랫폼 파트와 정해야 한다.
+- 스케치는 송신 버퍼를 1024 B 둔다. 송신 버퍼가 없으면 앞 프레임이 다 나가기 전에 쓴 프레임이 메인 루프를 세운다(확인 기록).
+
 ## 호스트 시험
 
 Jenkins 의 Vehicle C Host Test 와 같은 명령이다(gcc, ASan·UBSan).
@@ -118,19 +147,21 @@ ASan 을 쓸 수 없는 환경(Windows 등)에서는 configure 에 `-DFB3_SANITI
 시험하는 것:
 
 - `esp32_feedback3`: 고정 vector 의 제품 프레임 20개(payload·raw·wire 바이트, 묶기·풀기, 한 바이트씩 넣은 스트림 분리, 필드 값), 손상 프레임 6개의 거절 이유와 그 뒤 회복, CRC 기준값, COBS 경계, payload 240 B 상한
-- `esp32_link`: 세션·시각 설치의 정상 응답과 위 거절 경우, 같은 바이트 재전송, 새 `pi_session`, lease 두 칸, 기한에 맞춘 만료, 타이머 고장. 고정 vector 의 HELLO → CLOCK_PROBE → CLOCK_INSTALL 을 넣으면 vector 의 HELLO_ACK·CLOCK_REPLY·CLOCK_ACK 와 같은 바이트가 나오는지도 본다
+- `esp32_link`: 세션·시각 설치의 정상 응답과 위 거절 경우, 같은 바이트 재전송, 새 `pi_session`, lease 두 칸, 기한에 맞춘 만료, 타이머 고장. SENSOR 는 lease 가 있을 때만 나가는지, 주기와 표본 사이 간격, CLOCK_REPLY 와 이어지는 순번, 가리키는 lease, 만료·고장·새 session 에서 멈추는지, lease 를 고르는 사이에 드러난 타이머 고장으로도 멈추는지, 쓸 수 없는 표본을 건너뛰는지 본다. 고정 vector 의 HELLO → CLOCK_PROBE → CLOCK_INSTALL 을 넣으면 vector 의 HELLO_ACK·CLOCK_REPLY·CLOCK_ACK 와 같은 바이트가 나오고, 이어서 vector 의 표본을 뜨게 하면 vector 의 SENSOR 네 개와 같은 바이트가 나오는지도 본다
 - `esp32_quadrature`: 엔코더 해석이 조립 안내서 단계 K 의 bench 스케치와 같은지, 네 가지 A·B 상태 어디서 켜져도 첫 움직임의 방향이 맞는지
 - `esp32_link_bench`: 아래 `link_bench.py` 를 `sim_link` 에 돌린다. 실보드에서 쓰는 것과 같은 도구다
-- `esp32_tools`: `cutoff_stress.py` 와 `pi_link_check.py` 의 판정을 가짜 장치로 본다. 답이 끊기거나, 타이머에 걸린 기한이 하나도 없거나, 초반 lease 뒤로 새 lease 가 없을 때 통과로 끝나지 않는지 본다
+- `esp32_tools`: 점검 도구의 판정을 가짜 장치로 본다. `cutoff_stress.py` 와 `pi_link_check.py` 는 답이 끊기거나, 타이머에 걸린 기한이 하나도 없거나, 초반 lease 뒤로 새 lease 가 없을 때 통과로 끝나지 않는지 본다. `link_bench.py` 는 SENSOR 가 없거나 도중에 끊기거나, 순번·간격·가리키는 lease 가 어긋난 흐름을 알아채는지 본다
 - gcc 12 이상이면 `analyze_unpack.c` 를 `-fanalyzer` 로 컴파일해, 출력 구조체를 초기화하지 않고 unpack 해도 그 값을 읽지 않는지 본다
 
 호스트 시험의 시계·엔코더·alarm 은 가짜다. 실제 GPTimer 와 인터럽트는 실보드에서만 확인된다.
+
+`sim_link` 는 스케치의 loop 처럼 입력이 없을 때에도 1 ms 마다 돌면서 SENSOR 를 낸다. 인자로 초당 칸 수를 주면(`sim_link 3000`) 양쪽 엔코더가 그 속도로 돈다. 점검 도구에는 `--ticks-per-second` 로 준다.
 
 ## 점검 도구
 
 ### 실보드 점검 (`tools/link_bench.py`)
 
-PC 가 Pi 역할을 하며 HELLO, CLOCK_PROBE, CLOCK_INSTALL 을 보내고 응답을 계약과 대조한다. 모터·서보는 움직이지 않으니 XT60 은 연결하지 않아도 된다.
+PC 가 Pi 역할을 하며 HELLO, CLOCK_PROBE, CLOCK_INSTALL 을 보내고 응답을 계약과 대조한다. lease 를 설치한 뒤로는 SENSOR 도 본다. 모터·서보는 움직이지 않으니 XT60 은 연결하지 않아도 된다.
 
 ```sh
 pip install pyserial
@@ -140,6 +171,8 @@ python vehicle/ESP32/tools/link_bench.py --port COM8
 - 펌웨어를 올린 뒤 실행한다. PuTTY 같은 다른 시리얼 창은 닫는다.
 - 끝줄이 `link_bench: … checks, 0 failed` 이면 통과다.
 - `기한 뒤 재전송은 REJECTED CLOCK_EXPIRED` 가 `ok` 이면 타이머 인터럽트가 기한에 만료를 처리한 것이다. DEVICE_FAULT 로 나오면 alarm 이 울리지 않은 것이다.
+- SENSOR 는 lease 를 설치하기 전과 기한이 지난 뒤, 새 `pi_session` 이 온 뒤에는 오지 않아야 하고, lease 가 살아 있는 동안에는 그 lease 를 가리키며 끊기지 않고 와야 한다. 실보드에서는 한 주기보다 3 ms 넘게 늦은 표본을 끊긴 것으로 본다. 시뮬레이터는 PC 가 멈칫하는 만큼 늦으므로 80 ms 까지 봐 준다.
+- lease 가 살아 있는 동안 CLOCK_PROBE 24개를 SENSOR 주기의 여러 자리에 닿게 보낸다. 모두 답이 와야 하고, SENSOR 의 표본에 붙어 닿은 probe 의 응답이 간격을 채운 뒤에 온 것이 하나 이상 있어야 한다. 그동안의 표본은 순번이 1 씩 늘고 위 "표본 사이 간격"을 지켜야 한다.
 - EN 버튼으로 리셋하고 한 번 더 돌려 `device_boot_session` 이 달라지는지 본다.
 - `firmware_sha256` 이 `sha256sum <빌드 폴더>/xenova_esp32.ino.elf` 와 같은지 본다.
 - 도구는 포트를 열면 0x00 하나를 먼저 보낸다. 앞서 쓰던 프로그램이 프레임 중간에 끊겨 장치에 조각이 남아 있어도 첫 프레임이 버려지지 않는다.
@@ -167,7 +200,7 @@ python vehicle/ESP32/tools/cutoff_stress.py --port COM8 --trials 1000
 실제 `xenova_gateway.feedback3` 을 PC 에서 띄워 `socket://` 로 이 도구의 중계에 붙이고, 중계가 시뮬레이터나 실보드와 바이트를 주고받는다. 두 가지를 본다.
 
 1. 거절 확인: 펌웨어가 알리는 capability 그대로면 Pi 가 HELLO_ACK 를 받아들이지 않는다.
-2. 부분 호환성 시험: 중계가 HELLO_ACK 의 capability 에 Pi 필수 bit 를 채워 넣으면, Pi 가 CLOCK_PROBE 를 보내고 CLOCK_REPLY 로 lease 를 만들어 CLOCK_INSTALL 하고 CLOCK_ACK 를 받아들인다. 첫 lease 뒤로 `--seconds`(기본 3초, 최소 2초) 동안 계속 주고받게 두고, 그동안 INSTALLED 응답이 0.8초 넘게 끊기지 않는지, Pi 가 쓸 수 있는 lease 가 끊기지 않는지, 끝날 때에도 쓸 수 있는 lease 가 있는지 본다. 초반에만 성공하고 그 뒤 답이 끊기면 실패다. capability 를 고쳐 넣은 시험이므로 실제 펌웨어와 Pi 가 끝까지 연결됐다는 뜻이 아니다.
+2. 부분 호환성 시험: 중계가 HELLO_ACK 의 capability 에 Pi 필수 bit 를 채워 넣으면, Pi 가 CLOCK_PROBE 를 보내고 CLOCK_REPLY 로 lease 를 만들어 CLOCK_INSTALL 하고 CLOCK_ACK 를 받아들인다. 첫 lease 뒤로 `--seconds`(기본 3초, 최소 2초) 동안 계속 주고받게 두고, 그동안 INSTALLED 응답이 0.8초 넘게 끊기지 않는지, Pi 가 쓸 수 있는 lease 가 끊기지 않는지, 끝날 때에도 쓸 수 있는 lease 가 있는지 본다. 초반에만 성공하고 그 뒤 답이 끊기면 실패다. SENSOR 는 그동안 0.2초 넘게 끊기지 않아야 하고, Pi 의 odometry 가 오류를 하나도 내지 않고 그 표본들을 받아들여 끝날 때 쓸 수 있는 차량 표본이 있어야 한다. capability 를 고쳐 넣은 시험이므로 실제 펌웨어와 Pi 가 끝까지 연결됐다는 뜻이 아니다.
 
 ```sh
 python vehicle/ESP32/tools/pi_link_check.py --platform <platform 폴더> --sim <빌드 폴더>/sim_link
@@ -175,11 +208,13 @@ python vehicle/ESP32/tools/pi_link_check.py --platform <platform 폴더> --sim <
 
 `protobuf==6.33.6`, `paho-mqtt`, `pyserial` 이 필요하다. vehicle 브랜치에는 아직 feedback-3 게이트웨이 코드가 없어서 develop 을 따로 꺼낸 폴더의 `platform` 을 `--platform` 으로 준다. `--sim` 대신 `--port` 를 주면 실보드와 맞물린다. 오래 보려면 `--seconds 30` 처럼 준다.
 
+Pi odometry 에는 조립 안내서에서 잰 차체 치수 언저리의 값(칸당 0.164 mm, 속도 상한 1 m/s)을 준다. 보정한 값이 아니다. 시뮬레이터에 `--ticks-per-second 3000` 을 주면 바퀴가 도는 표본을 Pi 가 받는 것까지 보고, Pi 가 구한 속도가 그 속도와 10 % 안에서 같은지 본다. 실보드에서는 그동안 바퀴를 손으로 굴리면 Pi 가 본 속도와 누계가 끝줄 앞에 찍힌다.
+
 ## 확인 기록
 
 | 날짜 | 범위 | 결과 |
 |---|---|---|
-| 2026-11-11 | 호스트 시험(Windows, zig cc, UBSan) | `esp32_feedback3` 600 검사, `esp32_link` 720 검사, `esp32_quadrature` 43 검사, `esp32_link_bench` 35 검사, `esp32_tools` 41 검사 통과 |
+| 2026-11-11 | 호스트 시험(Windows, zig cc, UBSan) | `esp32_feedback3` 600 검사, `esp32_link` 1392 검사, `esp32_quadrature` 43 검사, `esp32_link_bench` 48 검사, `esp32_tools` 78 검사 통과 |
 | 2026-11-11 | 스케치 컴파일(Arduino-ESP32 3.3.12, 경고 모두 켬) | 경고 없음. 빌드한 bin 의 0xb0 값이 ELF 의 SHA-256 과 같음 |
 | 2026-11-10 | Pi 거절 확인(`sim_link`, develop `25c79b21` 의 게이트웨이 코드) | 펌웨어 capability `0x0080` 그대로면 Pi 가 ready 가 되지 않고 handshake 시간 초과로 끝남. CLOCK_PROBE 는 나가지 않음 |
 | 2026-11-10 | Pi 부분 호환성 시험(같은 구성, 중계가 capability 에 `0x0177` 을 채움) | CLOCK_PROBE 4·CLOCK_REPLY 4·CLOCK_INSTALL 6·CLOCK_ACK 6(모두 INSTALLED), Pi 가 lease 를 받아들임. 종단 연결 완료가 아니다 |
@@ -193,8 +228,16 @@ python vehicle/ESP32/tools/pi_link_check.py --platform <platform 폴더> --sim <
 | 2026-11-11 | 실보드 `pi_link_check.py --port --seconds 30`(develop `25c79b21` 의 게이트웨이 코드) | 거절 확인 통과. 부분 호환성 시험은 첫 lease 뒤 30초 동안 새 lease 148개가 이어졌고 INSTALLED 응답의 가장 긴 공백이 0.59초, Pi 에 쓸 수 있는 lease 가 끊긴 적이 없고 끝날 때에도 있음. CLOCK_PROBE 151·CLOCK_REPLY 150(하나는 PC 에 깨져 도착), CLOCK_INSTALL 296·CLOCK_ACK 296(모두 INSTALLED), Pi 가 버린 프레임 0. 종단 연결 완료가 아니다 |
 | 2026-11-11 | 실보드, 바퀴를 손으로 한 바퀴씩 | 오른쪽을 앞으로 굴리면 +1334, 왼쪽을 뒤로 굴리면 −1333. 그 전에 왼쪽만 한 바퀴 굴렸을 때는 왼쪽 +1334, 오른쪽 0. 조립 안내서 단계 K 기록의 1회전 1320 과 1 % 차이 |
 | 2026-11-11 | 실보드, USB 를 뺐다 꽂기 2번 | `device_boot_session` 이 그때마다 달랐고, 전원을 새로 넣은 두 번끼리도 달랐음. 누계는 0, 표본 순번은 1 부터 다시 시작 |
+| 2026-11-11 | 실보드 `link_bench.py --port`(SENSOR 를 넣은 빌드, lease 500 ms 와 3초) | 48 검사 통과. lease 가 살아 있는 동안 SENSOR 간격이 20003 us 에서 20013 us 였고, lease 3초 동안 146개가 23 ms 넘게 끊기지 않음. 설치 전과 기한 뒤, 새 `pi_session` 뒤에는 SENSOR 가 오지 않음. SENSOR 주기의 여러 자리에 닿게 보낸 CLOCK_PROBE 24개에 모두 답했고, 표본 뒤 5 ms 안에 닿은 5개는 간격을 채운 뒤에 답함 |
+| 2026-11-11 | 실보드 `pi_link_check.py --port --seconds 30`(develop `a9642deb` 의 게이트웨이 코드, 바퀴는 멈춘 채) | 통과. SENSOR 1495개를 Pi 가 odometry 오류 없이 받음(CLOCK_REPLY 의 표본까지 1644개), 새 lease 150개, Pi 가 버린 프레임 0, 끝날 때 쓸 수 있는 차량 표본이 있음. 종단 연결 완료가 아니다 |
+| 2026-11-11 | 실보드, 같은 구성으로 40초 동안 바퀴를 손으로 굴림 | SENSOR 1993개 가운데 1234개에서 누계가 바뀌었고(왼쪽 3081칸, 오른쪽 6848칸, 이웃한 표본 사이 최대 19칸으로 0.16 m/s 쯤), Pi 가 버린 프레임과 odometry 오류가 없음 |
+| 2026-11-11 | `pi_link_check.py --sim --ticks-per-second 3000` 과 `5500`(같은 게이트웨이 코드, 30초씩) | 통과. Pi 가 구한 속도 0.494 m/s 와 0.901 m/s 가 넣은 속도와 같고 odometry 오류 없음 |
+| 2026-11-11 | 같은 시험을 표본 사이 간격을 두지 않은 시험용 빌드로 | 0.49 m/s 에서 `ODOM_SAMPLE_ORDER` 3개와 `ODOM_ENCODER_DISCONTINUITY` 1개, 0.90 m/s 에서 6개와 4개. Pi 가 그 프레임을 버림 |
+| 2026-11-11 | 실보드 `cutoff_stress.py --trials 1000`(SENSOR 가 나가는 중) | 통과. 기한 하나 400번, 먼 기한 먼저·차례로·수십 us 차이로 각 200번(시도 1563번). 답을 받지 못한 프레임과 DEVICE_FAULT 없음. 그 자리에서 거절된 563번은 넣지 않았다 |
+| 2026-11-11 | 실보드, 100 B 를 네 번 이어 쓰는 시험용 스케치 | 송신 버퍼가 없으면 두 번째부터 write 가 11 ms 씩 걸림. 1024 B 를 두면 0.1 ms 미만 |
+| 2026-11-11 | develop 의 Pi odometry 에 좌 +1·우 −1 인 표본(게이트웨이 코드만 따로 돌림) | `ODOM_ACKERMANN_INCONSISTENT` 로 거절하고, 누계가 그대로인 그 뒤 표본도 계속 거절함. 펌웨어가 아니라 Pi 쪽 동작이다. 멈춘 차의 바퀴가 실제로 그렇게 떨리는지는 확인하지 못했다 |
 
-아직 확인하지 않은 것: 타이머 고장으로 굳는 경로(실보드에서는 일으키지 못해 호스트 시험만 있다), 모터로 빠르게 돌 때의 엔코더 누계, 켜진 직후 첫 움직임 한 칸의 방향(손으로 굴려서는 가릴 수 없어 호스트 시험만 있다), Pi(Linux)의 USB 시리얼, Linux gcc 와 ASan(Jenkins 에서 돈다).
+아직 확인하지 않은 것: 타이머 고장으로 굳는 경로(실보드에서는 일으키지 못해 호스트 시험만 있다), 모터로 빠르게 돌 때의 엔코더 누계, 모터로 도는 속도에서 SENSOR 를 Pi 가 받는 것(실보드에서는 손으로 0.16 m/s 쯤까지 굴려 봤고 그보다 빠른 경우는 시뮬레이터로만 봤다), 켜진 직후 첫 움직임 한 칸의 방향(손으로 굴려서는 가릴 수 없어 호스트 시험만 있다), Pi(Linux)의 USB 시리얼, Linux gcc 와 ASan(Jenkins 에서 돈다).
 
 ## 고정 vector 복사본
 

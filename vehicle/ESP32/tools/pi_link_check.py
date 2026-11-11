@@ -4,7 +4,8 @@
   2. 부분 호환성 시험: 시험용 중계가 HELLO_ACK 의 capability 에 Pi 필수 bit 를 채워 넣으면, Pi 가 CLOCK_PROBE 를
      보내고 펌웨어의 CLOCK_REPLY 로 lease 를 만들어 CLOCK_INSTALL 하고 CLOCK_ACK 를 받아들인다.
      첫 lease 뒤로 --seconds 동안 계속 주고받게 두고, 그동안 INSTALLED 응답과 Pi 가 쓸 수 있는 lease 가
-     끊기지 않는지, 끝날 때에도 쓸 수 있는 lease 가 있는지 본다.
+     끊기지 않는지, 끝날 때에도 쓸 수 있는 lease 가 있는지 본다. 그동안 장치가 보낸 SENSOR 를 Pi 가
+     오류 없이 받아 차량 표본을 만드는지도 본다.
      capability 를 고쳐 넣은 시험이므로 실제 펌웨어와 Pi 가 끝까지 연결됐다는 뜻이 아니다.
 
 Pi 쪽은 socket:// 로 이 도구의 중계에 붙고, 중계는 호스트 시뮬레이터나 실보드와 바이트를 주고받는다.
@@ -22,14 +23,18 @@ import time
 from uuid import uuid4
 
 from fb3 import (ACK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, HELLO, HELLO3, HELLO_ACK,
-                 REQUIRED_CAPS, Peer, Splitter, add_device_arguments, open_device, packet, unpack)
+                 REQUIRED_CAPS, SENSOR, SENSOR3, Peer, Splitter, add_device_arguments, open_device, packet, unpack)
 
 HANDSHAKE_TIMEOUT_MS = 1000
 LEASE_WAIT_S = 5.0
 LEASE_US = 1000000   # Pi 가 만드는 lease 의 길이
 MAX_SILENCE_S = 0.8  # INSTALLED 응답이 이보다 오래 끊기면 다음 lease 가 앞 lease 의 기한 안에 이어지지 못한다
+MAX_SENSOR_SILENCE_S = 0.2  # SENSOR 는 20 ms 마다 온다. PC 가 받는 시각으로 재므로 넉넉히 본다
+# Pi odometry 에 주는 차체 값. 조립 안내서에서 잰 치수 언저리이고 보정한 값이 아니다
+METRES_PER_TICK = .000164
+MAXIMUM_SPEED_MPS = 1.
 NAMES = {HELLO: 'HELLO', HELLO_ACK: 'HELLO_ACK', CLOCK_PROBE: 'CLOCK_PROBE', CLOCK_REPLY: 'CLOCK_REPLY',
-         CLOCK_INSTALL: 'CLOCK_INSTALL', CLOCK_ACK: 'CLOCK_ACK'}
+         CLOCK_INSTALL: 'CLOCK_INSTALL', CLOCK_ACK: 'CLOCK_ACK', SENSOR: 'SENSOR'}
 
 
 class Relay:
@@ -137,11 +142,11 @@ def make_sink(gateway, relay, config, firmware, encoder_bits):
     Feedback3Profile, Feedback3SerialSink, OdometryConfig, VehicleOdometry, StationaryPolicy = gateway
     # PC 에서 중계를 거치는 시험이라 시각 허용 폭을 넉넉히 둔다. 차량·센서 실측값이 아니다
     odometry = VehicleOdometry(OdometryConfig(
-        vehicle='esp32-link-check', calibration='not-measured', metres_per_tick=.001, track_width_m=.2,
-        wheelbase_m=.25, maximum_speed_mps=2., maximum_clock_error_us=100000, maximum_sample_age_us=400000,
-        sample_period_ms=20, encoder_bits=encoder_bits, position_error_m=.005, heading_error_rad=.01,
-        distance_error_ratio=.02, heading_error_per_m=.02), str(uuid4()))
-    policy = StationaryPolicy(30000, 100000, 200000, .001, .05, .1, 0., 0.)
+        vehicle='esp32-link-check', calibration='not-measured', metres_per_tick=METRES_PER_TICK, track_width_m=.174,
+        wheelbase_m=.167, maximum_speed_mps=MAXIMUM_SPEED_MPS, maximum_clock_error_us=100000,
+        maximum_sample_age_us=400000, sample_period_ms=20, encoder_bits=encoder_bits, position_error_m=.005,
+        heading_error_rad=.01, distance_error_ratio=.02, heading_error_per_m=.02), str(uuid4()))
+    policy = StationaryPolicy(30000, 100000, 200000, METRES_PER_TICK, .05, .1, 0., 0.)
     profile = Feedback3Profile(config, firmware, 100, 100, 200000, LEASE_US, 200000, 100, 100, policy, 10000000,
                                .02, 20000)
     return Feedback3SerialSink(f'socket://127.0.0.1:{relay.port}', timeout_ms=HANDSHAKE_TIMEOUT_MS,
@@ -237,8 +242,10 @@ def main():
         try:
             poll_until(sink, LEASE_WAIT_S, lambda: any(lease['ack'] for lease in sink.leases.values()))
             started = time.monotonic()
+            taken = sink.odometry.sequence
             dark = hold(sink, args.seconds)
             ended = time.monotonic()
+            taken = sink.odometry.sequence - taken
             usable = sink._lease(int(sink.clock() * 1e6)) is not None
             acks = [CLOCK_ACK3.unpack(row[1]) for row in relay.from_device if row[0] == CLOCK_ACK]
             installed = [(row[2], CLOCK_ACK3.unpack(row[1])[3]) for row in relay.from_device
@@ -257,6 +264,24 @@ def main():
                   f'(가장 긴 공백 {silence:.2f}초, 그동안 새 lease {renewed}개)')
             check(dark == 0, f'그동안 Pi 에 쓸 수 있는 lease 가 끊기지 않음 (없던 가장 긴 시간 {dark:.2f}초)')
             check(usable, '끝날 때 Pi 에 쓸 수 있는 lease 가 있음')
+            sensors = [row[2] for row in relay.from_device
+                       if row[0] == SENSOR and len(row[1]) == SENSOR3.size and started <= row[2] <= ended]
+            sensor_silence = longest_silence(sensors, started, ended)
+            errors = dict(sink.odometry.errors)
+            vehicle = sink.snapshot.get('vehicle_sample')
+            check(sensor_silence <= MAX_SENSOR_SILENCE_S,
+                  f'그동안 장치의 SENSOR 가 {MAX_SENSOR_SILENCE_S}초 넘게 끊기지 않음 '
+                  f'(가장 긴 공백 {sensor_silence:.2f}초, {len(sensors)}개)')
+            check(not errors, f'Pi 가 표본을 받다가 낸 odometry 오류 {errors or "없음"}')
+            check(taken >= len(sensors) * 9 // 10 > 0, f'Pi 가 그동안 표본 {taken}개를 받아들임')
+            check(vehicle is not None, '끝날 때 Pi 에 쓸 수 있는 차량 표본이 있음')
+            if vehicle is not None:
+                print(f"      Pi 가 본 속도 {vehicle['velocity_mps']:.3f} m/s, 누계 좌 {vehicle['left_ticks']}, "
+                      f"우 {vehicle['right_ticks']}, 시각 오차 {vehicle['clock_error_us']} us")
+                if args.sim and args.ticks_per_second:
+                    expected = args.ticks_per_second * METRES_PER_TICK
+                    check(abs(vehicle['velocity_mps'] - expected) <= abs(expected) / 10,
+                          f'그 속도가 시뮬레이터의 엔코더 속도 {expected:.3f} m/s 와 10 % 안에서 같음')
             print('      ' + transcript(relay))
         finally:
             sink.close()

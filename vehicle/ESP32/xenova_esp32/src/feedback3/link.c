@@ -35,6 +35,7 @@ static void close_session(struct fb3_link *link)
 {
 	link->open = false;
 	link->probe_fence = 0;
+	link->probe_held = false;
 	memset(link->replies, 0, sizeof link->replies);
 	link->reply_next = 0;
 	link->has_epoch = false;
@@ -104,14 +105,75 @@ static bool sample_valid(const struct fb3_link *link, const struct fb3_sample *s
 	return true;
 }
 
+/* 앞 표본에서 FB3_SAMPLE_GAP_US 가 지났는지 */
+static bool gap_passed(const struct fb3_link *link, uint64_t now)
+{
+	return link->sample_sequence == 0 || now >= link->sample_us + FB3_SAMPLE_GAP_US;
+}
+
+/* 받아 둔 CLOCK_PROBE 에 답한다. 앞 표본과 아직 가까우면 답하지 않고 0 을 돌려준다.
+ * 그때는 fb3_link_poll 이 간격이 찬 뒤에 답한다 */
+static size_t answer_probe(struct fb3_link *link, uint8_t *wire, size_t cap)
+{
+	const struct fb3_clock_probe *probe = &link->probe;
+	struct fb3_clock_reply reply;
+	struct fb3_sample sample;
+	uint8_t payload[FB3_CLOCK_REPLY_SIZE];
+	uint64_t d2 = link->probe_received_us;
+	uint64_t d3;
+	size_t len;
+
+	if (!gap_passed(link, link->port.now_us(link->port.ctx))) {
+		return 0;
+	}
+	link->probe_held = false;
+	if (link->sample_sequence >= FB3_U63_MAX) {
+		return refuse(link, FB3_REASON_COUNTER_EXHAUSTED);
+	}
+	/* 받은 뒤에 새로 뜬 표본만 싣는다. 미리 떠 둔 표본을 쓰지 않는다 */
+	if (!link->port.latch(link->port.ctx, &sample) || !sample_valid(link, &sample)) {
+		return refuse(link, FB3_REASON_SENSOR_UNAVAILABLE);
+	}
+	d3 = link->port.now_us(link->port.ctx);
+	if (d2 == 0 || sample.device_us < d2 || d3 < sample.device_us || d3 > FB3_U63_MAX
+			|| sample.device_us <= link->sample_us) {
+		return refuse(link, FB3_REASON_TIMESTAMP_ORDER);
+	}
+
+	memcpy(reply.pi_session, probe->pi_session, 16);
+	memcpy(reply.device_session, probe->device_session, 16);
+	reply.probe_sequence = probe->probe_sequence;
+	reply.p1_pi_send_us = probe->p1_pi_send_us;
+	reply.d2_device_receive_us = d2;
+	reply.latch_device_us = sample.device_us;
+	reply.d3_device_send_us = d3;
+	reply.source_sample = link->sample_sequence + 1;
+	reply.cumulative_left_ticks = sample.left_ticks;
+	reply.cumulative_right_ticks = sample.right_ticks;
+	reply.quality = sample.quality;
+	reply.steering_mrad = sample.steering_mrad;
+	reply.steering_error_mrad = sample.steering_error_mrad;
+	len = fb3_encode_frame(FB3_CLOCK_REPLY_ID, payload, fb3_pack_clock_reply(&reply, payload, sizeof payload),
+			       wire, cap);
+	if (len == 0) {
+		return 0;
+	}
+
+	link->sample_sequence = reply.source_sample;
+	link->sample_us = sample.device_us;
+	/* 다음 probe 는 200 ms 뒤에 온다. 그 앞뒤로 SENSOR 가 반 주기씩 떨어지게 한다 */
+	link->sensor_due_us = sample.device_us + FB3_SENSOR_PERIOD_US / 2;
+	link->probe_fence = probe->probe_sequence;
+	link->replies[link->reply_next].probe_sequence = probe->probe_sequence;
+	link->replies[link->reply_next].d3_us = d3;
+	link->reply_next = (link->reply_next + 1) % FB3_LINK_REPLIES;
+	return len;
+}
+
 static size_t on_clock_probe(struct fb3_link *link, const struct fb3_frame *frame, uint64_t received_us,
 			     uint8_t *wire, size_t cap)
 {
 	struct fb3_clock_probe probe;
-	struct fb3_clock_reply reply;
-	struct fb3_sample sample;
-	uint8_t payload[FB3_CLOCK_REPLY_SIZE];
-	uint64_t d3;
 
 	if (!fb3_unpack_clock_probe(frame->payload, frame->length, &probe)) {
 		return refuse(link, FB3_REASON_BAD_LENGTH);
@@ -122,44 +184,86 @@ static size_t on_clock_probe(struct fb3_link *link, const struct fb3_frame *fram
 	if (!in_range(probe.probe_sequence) || !in_range(probe.p1_pi_send_us)) {
 		return refuse(link, FB3_REASON_RANGE);
 	}
-	if (probe.probe_sequence <= link->probe_fence) {
+	if (probe.probe_sequence <= link->probe_fence
+			|| (link->probe_held && probe.probe_sequence <= link->probe.probe_sequence)) {
 		return refuse(link, FB3_REASON_SEQUENCE_REPLAY);
 	}
-	if (link->sample_sequence >= FB3_U63_MAX) {
-		return refuse(link, FB3_REASON_COUNTER_EXHAUSTED);
+	/* 답을 미뤄 둔 probe 가 있었다면 새 것이 그 자리를 차지한다. Pi 는 한 번에 하나만 기다린다 */
+	link->probe_held = true;
+	link->probe = probe;
+	link->probe_received_us = received_us;
+	return answer_probe(link, wire, cap);
+}
+
+/* 설치돼 있고 아직 기한 전인 lease 가운데 clock_sequence 가 가장 큰 것. 없으면 NULL.
+ * 순번이 큰 것부터 조회하고, 마지막으로 조회한 것만 돌려준다. 조회는 걸려 있는 기한을 모두 검사하므로,
+ * 뒤의 조회에서 타이머 고장이 드러나면 앞서 받은 답은 더는 맞지 않는다 */
+static const struct fb3_lease *newest_live_lease(struct fb3_link *link)
+{
+	uint64_t below = UINT64_MAX;
+
+	for (;;) {
+		unsigned pick = FB3_CUTOFF_SLOTS;
+
+		for (unsigned i = 0; i < FB3_CUTOFF_SLOTS; i++) {
+			const struct fb3_lease *lease = &link->leases[i];
+
+			if (lease->installed && lease->install.clock_sequence < below
+					&& (pick == FB3_CUTOFF_SLOTS
+					    || lease->install.clock_sequence > link->leases[pick].install.clock_sequence)) {
+				pick = i;
+			}
+		}
+		if (pick == FB3_CUTOFF_SLOTS) {
+			return NULL;
+		}
+		if (fb3_cutoff_query(link->cutoff, pick) == FB3_CUTOFF_LIVE) {
+			return &link->leases[pick];
+		}
+		below = link->leases[pick].install.clock_sequence;
 	}
-	/* 받은 뒤에 새로 뜬 표본만 싣는다. 미리 떠 둔 표본을 쓰지 않는다 */
-	if (!link->port.latch(link->port.ctx, &sample) || !sample_valid(link, &sample)) {
-		return refuse(link, FB3_REASON_SENSOR_UNAVAILABLE);
+}
+
+/* 지금 표본을 떠서 SENSOR 로 묶는다. 살아 있는 lease 가 없거나 표본을 쓸 수 없으면 한 주기 뒤에 다시 본다 */
+static size_t send_sensor(struct fb3_link *link, uint64_t now, uint8_t *wire, size_t cap)
+{
+	const struct fb3_lease *lease;
+	struct fb3_sensor sensor;
+	struct fb3_sample sample;
+	uint8_t payload[FB3_SENSOR_SIZE];
+	size_t len;
+
+	link->sensor_due_us = now + FB3_SENSOR_PERIOD_US;
+	if (link->sample_sequence >= FB3_U63_MAX || !link->port.latch(link->port.ctx, &sample)
+			|| !sample_valid(link, &sample) || sample.device_us <= link->sample_us) {
+		return 0;
 	}
-	d3 = link->port.now_us(link->port.ctx);
-	if (received_us == 0 || sample.device_us < received_us || d3 < sample.device_us || d3 > FB3_U63_MAX
-			|| sample.device_us <= link->sample_us) {
-		return refuse(link, FB3_REASON_TIMESTAMP_ORDER);
+	/* 표본을 뜬 뒤에 lease 를 고른다. 그래야 표본을 뜨는 사이에 기한이 지났거나 타이머 고장이 드러난 것을 놓치지 않는다 */
+	lease = newest_live_lease(link);
+	if (lease == NULL || sample.device_us >= lease->install.cutoff_device_us) {
+		return 0;
 	}
 
-	link->sample_sequence++;
+	memcpy(sensor.pi_session, link->pi_session, 16);
+	memcpy(sensor.device_session, link->config.device_boot_session, 16);
+	sensor.source_sample = link->sample_sequence + 1;
+	sensor.source_device_us = sample.device_us;
+	sensor.cumulative_left_ticks = sample.left_ticks;
+	sensor.cumulative_right_ticks = sample.right_ticks;
+	sensor.quality = sample.quality;
+	sensor.steering_mrad = sample.steering_mrad;
+	sensor.steering_error_mrad = sample.steering_error_mrad;
+	memcpy(sensor.clock_epoch, lease->install.clock_epoch, 16);
+	sensor.clock_sequence = lease->install.clock_sequence;
+	len = fb3_encode_frame(FB3_SENSOR_ID, payload, fb3_pack_sensor(&sensor, payload, sizeof payload), wire, cap);
+	if (len == 0) {
+		return 0;
+	}
+
+	link->sample_sequence = sensor.source_sample;
 	link->sample_us = sample.device_us;
-	link->probe_fence = probe.probe_sequence;
-	link->replies[link->reply_next].probe_sequence = probe.probe_sequence;
-	link->replies[link->reply_next].d3_us = d3;
-	link->reply_next = (link->reply_next + 1) % FB3_LINK_REPLIES;
-
-	memcpy(reply.pi_session, probe.pi_session, 16);
-	memcpy(reply.device_session, probe.device_session, 16);
-	reply.probe_sequence = probe.probe_sequence;
-	reply.p1_pi_send_us = probe.p1_pi_send_us;
-	reply.d2_device_receive_us = received_us;
-	reply.latch_device_us = sample.device_us;
-	reply.d3_device_send_us = d3;
-	reply.source_sample = link->sample_sequence;
-	reply.cumulative_left_ticks = sample.left_ticks;
-	reply.cumulative_right_ticks = sample.right_ticks;
-	reply.quality = sample.quality;
-	reply.steering_mrad = sample.steering_mrad;
-	reply.steering_error_mrad = sample.steering_error_mrad;
-	return fb3_encode_frame(FB3_CLOCK_REPLY_ID, payload, fb3_pack_clock_reply(&reply, payload, sizeof payload),
-				wire, cap);
+	link->sensor_due_us = sample.device_us + FB3_SENSOR_PERIOD_US;
+	return len;
 }
 
 static size_t clock_ack(struct fb3_link *link, const struct fb3_clock_install *install, uint8_t status,
@@ -324,6 +428,21 @@ size_t fb3_link_receive(struct fb3_link *link, const struct fb3_frame *frame, ui
 	default:
 		return refuse(link, FB3_REASON_UNSUPPORTED_PROFILE);
 	}
+}
+
+size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap)
+{
+	uint64_t now;
+
+	/* 답을 미뤄 둔 CLOCK_PROBE 가 있으면 간격이 찼는지 본다. 그 응답의 표본이 다음 표본이다 */
+	if (link->probe_held) {
+		return answer_probe(link, wire, cap);
+	}
+	now = link->port.now_us(link->port.ctx);
+	if (now < link->sensor_due_us) {
+		return 0;
+	}
+	return send_sensor(link, now, wire, cap);
 }
 
 bool fb3_link_lease_live(struct fb3_link *link, const uint8_t clock_epoch[16], uint64_t clock_sequence)
