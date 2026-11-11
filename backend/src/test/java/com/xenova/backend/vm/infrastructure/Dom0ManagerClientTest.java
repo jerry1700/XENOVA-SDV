@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmControlOperation;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import com.sun.net.httpserver.HttpExchange;
@@ -253,6 +254,37 @@ class Dom0ManagerClientTest {
 
         assertThat(query.get()).isEqualTo("request_key=reboot-1");
         assertThat(operation.status()).isEqualTo("completed");
+    }
+
+    @Test
+    void resourceUpdatePutsTheBodyAndIdempotencyKey() throws IOException {
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> requestKey = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/api/v1/vms/" + VM_ID + "/resources", exchange -> {
+            method.set(exchange.getRequestMethod());
+            requestKey.set(exchange.getRequestHeaders().getFirst("Idempotency-Key"));
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {
+                      "vm_id":"%s",
+                      "operation_id":"resize-operation",
+                      "before":{"vcpus":1,"memory_mib":256},
+                      "after":{"vcpus":2,"memory_mib":512},
+                      "applies_on_next_start":true
+                    }
+                    """.formatted(VM_ID));
+        });
+
+        VmResourceUpdate result = client.updateResources(VM_ID, 2, 512, "resize-1");
+
+        assertThat(method.get()).isEqualTo("PUT");
+        assertThat(requestKey.get()).isEqualTo("resize-1");
+        assertThat(objectMapper.readTree(body.get()).toString())
+                .isEqualTo("{\"vcpus\":2,\"memory_mib\":512}");
+        assertThat(result.after().vcpus()).isEqualTo(2);
+        assertThat(result.after().memoryMib()).isEqualTo(512);
+        assertThat(result.appliesOnNextStart()).isTrue();
     }
 
     // Visible ASCII keys may hold '+', '{' or '&': they must reach dom0-manager unchanged, not as a space,

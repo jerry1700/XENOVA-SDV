@@ -14,6 +14,8 @@ import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResources;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
@@ -208,6 +210,48 @@ public class VmService {
         String validatedKey = validateRequestKey(requestKey);
         findRecord(vmId);
         return vmControlPort.findControlOperation(vmId, validatedKey);
+    }
+
+    public VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey) {
+        String validatedKey = validateRequestKey(requestKey);
+        VmRecord record = findRecord(vmId);
+        if (record.getGuestKind() != GuestKind.LINUX) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "RESOURCE_UPDATE_UNSUPPORTED",
+                    "자원 변경은 Linux VM만 지원합니다.");
+        }
+        VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
+        if (memoryMib < template.minMemoryMib()) {
+            throw new ApiException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "VALIDATION_ERROR",
+                    "memory_mib는 이 템플릿의 최소값(" + template.minMemoryMib() + ") 이상이어야 합니다.");
+        }
+
+        return underOperation(vmId, () -> {
+            VmResourceUpdate result = vmControlPort.updateResources(vmId, vcpus, memoryMib, validatedKey);
+            validateResourceUpdateResponse(vmId, vcpus, memoryMib, result);
+            record.changeResources(result.after().vcpus(), result.after().memoryMib());
+            vmRecordRepository.save(record);
+            runtimeCache.remove(vmId);
+            return result;
+        });
+    }
+
+    private static void validateResourceUpdateResponse(
+            String vmId, int vcpus, int memoryMib, VmResourceUpdate result) {
+        VmResources after = result == null ? null : result.after();
+        if (result == null || !vmId.equals(result.vmId()) || after == null
+                || after.vcpus() != vcpus || after.memoryMib() != memoryMib
+                || !result.appliesOnNextStart()) {
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "VM_CONTROL_BAD_RESPONSE",
+                    "VM 제어 서비스가 올바른 자원 변경 결과를 반환하지 않았습니다.");
+        }
     }
 
     // The platform retires the disk instead of deleting it. Keep the specification and vm_id for a future restore,
