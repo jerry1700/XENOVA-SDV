@@ -556,12 +556,14 @@ class MapperMapping:
                     if result.registration is not None and result.registration.status=='BOUNDED':
                         fit=result.registration;pose=replace(pose,sample=replace(pose.sample,x=fit.representative[0],
                             y=fit.representative[1],yaw=fit.representative[2],position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
-                    elif draft.pipeline._alignment is not None:pose=draft.pipeline._alignment.apply(pose)
+                    elif draft.pipeline._alignment is not None:_,pose=draft.pipeline._propagate_odometry(pose)
                     if list((pose.sample.x,pose.sample.y,pose.sample.yaw))!=result.summary.get('mapped_pose'):
                         raise MappingNotReady('catalog pose differs from actual mapped result')
                     grid=draft.pipeline.grid;spec=grid.spec;x,y=spec.origin_xy
+                    alignment=draft.pipeline._alignment
                     catalog=self.catalogs.prepare(draft.original_job,result,context=draft.context,stamp=draft.frame.observation.rgb.stamp,
-                        capture_prior=pose,registration_revision=0 if draft.pipeline.reference is None else draft.pipeline.reference.revision,
+                        capture_prior=pose,registration_revision=0 if alignment is None or not alignment.has_metadata
+                            else alignment.registration_revision,
                         prior_qualified=result.summary.get('localization_qualified') is True,
                         metric_evidence=self.catalogs.metric_from_frame(draft.frame),lane_provenance_ids=(root,root),
                         base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m))

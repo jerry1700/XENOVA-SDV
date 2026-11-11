@@ -4,7 +4,7 @@
 representative/bound로만 변환을 교체하고, 상관된 오차를 표본 수로 나누지 않는다.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 
 from .odometry import PoseEstimate
@@ -22,6 +22,8 @@ class MapOdomAlignment:
     valid_for_us: int | None = None
     position_drift_mps: float | None = None
     yaw_drift_rps: float | None = None
+    _matched_poses: tuple[PoseEstimate, PoseEstimate] | None = field(
+        init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if (type(self.pose) is not tuple or len(self.pose)!=3 or type(self.context) is not tuple or len(self.context)!=4
@@ -84,8 +86,10 @@ class MapOdomAlignment:
         rotated=transform_point((raw.x,raw.y),(0.,0.,yaw))
         angle_error=min(math.pi,goal.yaw_error_rad+raw.yaw_error_rad)
         error=goal.position_error_m+raw.position_error_m+2*math.hypot(raw.x,raw.y)*math.sin(angle_error/2)
-        return cls((goal.x-rotated[0],goal.y-rotated[1],yaw),error,angle_error,raw.context,
+        alignment = cls((goal.x-rotated[0],goal.y-rotated[1],yaw),error,angle_error,raw.context,
             observed_j_interval,registration_revision,valid_for_us,position_drift_mps,yaw_drift_rps)
+        object.__setattr__(alignment, '_matched_poses', (odom, fitted))
+        return alignment
 
     def apply(self, odom):
         if type(odom) is not PoseEstimate or odom.sample.context!=self.context:
@@ -100,8 +104,16 @@ class MapOdomAlignment:
             yaw_drift=math.nextafter(self.yaw_drift_rps*seconds,math.inf) if self.yaw_drift_rps else 0.
             transform_angle=math.nextafter(transform_angle+yaw_drift,math.inf)
         x,y=transform_point((raw.x,raw.y),self.pose)
-        rotation=2*math.hypot(raw.x,raw.y)*math.sin(min(math.pi,transform_angle)/2)
+        rotation_scale=2*math.sin(min(math.pi,transform_angle)/2)
+        rotation=math.hypot(raw.x,raw.y)*rotation_scale
         error=self.position_error_m+raw.position_error_m+rotation+position_drift
+        if self._matched_poses is not None:
+            original, fitted = (pose.sample for pose in self._matched_poses)
+            distance = math.hypot(raw.x-original.x, raw.y-original.y)
+            # map 기준점 오차는 한 번 포함하고, yaw 오차는 기준점 이후 변위에 적용한다.
+            relative_error = (fitted.position_error_m + original.position_error_m + raw.position_error_m
+                              + distance*rotation_scale + position_drift)
+            error = min(error, relative_error)
         angle=transform_angle+raw.yaw_error_rad
         if angle>math.pi and not self.has_metadata:
             raise ValueError('alignment no longer bounds a usable heading')

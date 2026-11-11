@@ -446,7 +446,12 @@ class DevelopmentMapping:
             qualified = (config.motion_qualified and localization is not None and alignment is not None
                 and alignment.has_metadata and alignment.valid_at(self.clock())
                 and result.summary.get('quarantined') is False and result.summary.get('input_odom_origin') == 'SYNTHETIC_ODOMETRY')
-            mapped = alignment.apply(inputs.pose) if qualified else inputs.pose
+            mapped = inputs.pose
+            if qualified:
+                if result.registration is not None and result.registration.status == 'BOUNDED':
+                    mapped = alignment.apply(inputs.pose)
+                else:
+                    _, mapped = core._propagate_odometry(inputs.pose)
             source = LaneSource(observation.rgb.stamp, self.calibration.sha256, self.context.map_epoch,
                 grid.frame_id, self.context.odom_epoch, grid.revision,
                 0 if alignment is None else alignment.registration_revision,

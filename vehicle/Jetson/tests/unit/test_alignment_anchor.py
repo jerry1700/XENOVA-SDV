@@ -120,13 +120,14 @@ class AlignmentAnchorTests(unittest.TestCase):
         self.assertAlmostEqual(recovered.summary['mapped_pose'][0], .15, delta=.003)
         self.assertIs(pipeline._propagation_anchor, anchor)
 
-    def test_expiry_requires_a_fresh_match_and_profile_change_cannot_relabel_anchor(self):
+    def test_expiry_requires_a_fresh_match_for_qualification_and_profile_change_cannot_relabel_anchor(self):
         pipeline = self.pipeline()
         anchor = self.seed(pipeline)
         current = pipeline._alignment
         expired = self.execute(pipeline, 6, tape=False)
         self.assertFalse(expired.summary['localization_qualified'])
-        self.assertTrue(expired.summary['quarantined'])
+        self.assertFalse(expired.summary['quarantined'])
+        self.assertEqual(expired.summary['localization_status'], 'ODOMETRY_CONTINUED')
         self.assertIs(pipeline._alignment, current)
         self.assertIs(pipeline._propagation_anchor, anchor)
         fresh = self.execute(pipeline, 7)

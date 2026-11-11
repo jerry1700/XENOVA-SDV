@@ -173,7 +173,12 @@ class PcMapperCore:
                     and alignment.has_metadata and alignment.valid_at(now)
                     and result.summary.get('quarantined') is False
                     and result.summary.get('input_odom_origin')=='SYNTHETIC_ODOMETRY')
-                mapped=alignment.apply(inputs.pose) if qualified else inputs.pose
+                mapped=inputs.pose
+                if qualified:
+                    if result.registration is not None and result.registration.status=='BOUNDED':
+                        mapped=alignment.apply(inputs.pose)
+                    else:
+                        _,mapped=core._propagate_odometry(inputs.pose)
                 spec=core.grid.spec;low=spec.bounds(0,0);high=spec.bounds(spec.width-1,spec.height-1)
                 try:
                     if current_provider is not None:refresh()

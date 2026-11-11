@@ -468,8 +468,9 @@ class MapCheckpointCollector:
                 from ..storage.records import REGISTRATION
                 from ..mapping.registration import transform_point,wrap_yaw
                 reference=pipeline.reference
+                sources=set() if reference is None else {segment.capture_id for segment in reference.segments}
                 if (rgb_id is None or reference is None or reference.revision<=0 or not reference.segments
-                        or any(segment.capture_id!=capture for segment in reference.segments)
+                        or capture not in sources or not (sources-{capture}).issubset(self._reference_geometry)
                         or frame.reference_vehicle is None or frame.registration_valid_for_us is None
                         or type(raw_pose) is not PoseEstimate or alignment.context!=raw_pose.sample.context):
                     raise MapCheckpointNotReady('original accepted registration/reference Vehicle/config evidence missing')
@@ -496,7 +497,8 @@ class MapCheckpointCollector:
                     UUID(self.scope.context.origin_mapper_instance).bytes,*position32,*mapped32)
                 actual_parents=tuple(dict.fromkeys((*parents,rgb_id)));mask=0
                 anchors=tuple(dict.fromkeys(self._reference_geometry.values()))
-                while len(anchors)>1:
+                # 부모 슬롯에 들어가는 원 지도 근거는 별도 집계 레코드를 만들지 않는다.
+                while len(anchors)>4-len(actual_parents):
                     combined=[]
                     for at in range(0,len(anchors),4):
                         group=anchors[at:at+4];source_mask=0
@@ -698,7 +700,8 @@ class MapCheckpointCollector:
                 self._reference_geometry[capture]=self._record(frame,parents,mask,3,(frame.raw_keys[0],))
             if not needed.issubset(self._reference_geometry):raise MapCheckpointNotReady('original RGB reference source was not collected')
             self._reference_geometry={key:self._reference_geometry[key] for key in needed}
-            self._rgb_refs={key:value for key,value in self._rgb_refs.items() if key in needed}
+            # 정합 reference에 쓰이지 않은 새 RGB도 현재 지도 후보 채택에 필요하다.
+            self._rgb_refs={key:value for key,value in self._rgb_refs.items() if key in needed or key==capture}
         else:
             capture=sha256(canonical(frame.observation.rgb.stamp.key)).hexdigest()
             self._rgb_refs={capture:self._rgb_refs[capture]}

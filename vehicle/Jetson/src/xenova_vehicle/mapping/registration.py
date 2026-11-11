@@ -178,6 +178,59 @@ class RegistrationResult:
     complete: bool
 
 
+    def permits(self, pose):
+        """완료된 탐색에서 기존 위치가 배제되지 않았는지 확인한다."""
+        return self.complete and any(
+            box.x[0] <= pose[0] <= box.x[1] and box.y[0] <= pose[1] <= box.y[1]
+            and box.yaw[0] <= box.yaw[0] + (pose[2] - box.yaw[0]) % (2*math.pi) <= box.yaw[1]
+            for box in self.feasible)
+
+
+def overlapping_points(points, reference, prior, profile, *, lateral_m):
+    """공통 종방향 구간의 관측만 고른다. 횡방향 잔차의 수락은 register가 판정한다."""
+    if not reference.segments:
+        return ()
+    center = prior.center
+    x_span, y_span, yaw_span = prior.widths
+    translation = math.hypot(x_span, y_span) / 2
+    rotation = 2 * math.sin(yaw_span / 4)
+    first_points, directions = {}, {}
+    for point in points:
+        first = first_points.setdefault(point.component, point)
+        dx, dy = point.point[0] - first.point[0], point.point[1] - first.point[1]
+        length = math.hypot(dx, dy)
+        if length:
+            heading = math.atan2(dy, dx) + center[2]
+            error = math.asin(min(1., (point.error_m + first.error_m) / length))
+            limit = math.cos(min(math.pi / 2, .5 + error + yaw_span / 2))
+            directions[point.component] = (math.cos(heading), math.sin(heading), limit)
+    segments = []
+    for segment in reference.segments:
+        dx, dy = segment.b[0] - segment.a[0], segment.b[1] - segment.a[1]
+        length = math.hypot(dx, dy)
+        if length:
+            segments.append((segment, dx / length, dy / length, length))
+    observed = []
+    for point in points:
+        x, y = transform_point(point.point, center)
+        direction = directions.get(point.component)
+        uncertainty = (translation + rotation * math.hypot(*point.point) + point.error_m
+                       + reference.shared_error_m + profile.residual_m + profile.numeric_guard_m)
+        for segment, ux, uy, length in segments:
+            if point.compatible and segment.component not in point.compatible:
+                continue
+            # 횡단 표식과 차로 테이프의 가까운 투영을 같은 관측 구간으로 세지 않는다.
+            if direction is not None and abs(ux*direction[0] + uy*direction[1]) < direction[2]:
+                continue
+            dx, dy = x - segment.a[0], y - segment.a[1]
+            pad = uncertainty + segment.error_m
+            station = dx * ux + dy * uy
+            if -pad <= station <= length + pad and abs(dx * uy - dy * ux) <= lateral_m + pad:
+                observed.append(point)
+                break
+    return tuple(observed)
+
+
 def register(points, reference, prior, profile=RegistrationProfile(), *, calibration_id):
     """연속 prior의 conservative outer set과 유한 representative를 반환한다.
 

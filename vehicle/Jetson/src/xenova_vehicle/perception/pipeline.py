@@ -18,7 +18,7 @@ from .lane_tracking import mapped_lane_ahead, track_lane
 from .depth import DepthConfig
 from ..mapping.local_map import EvidenceGrid, GridSpec, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
-    RegistrationProfile,register,transform_point,segment_distance)
+    RegistrationProfile,RegistrationResult,overlapping_points,register,transform_point,segment_distance,wrap_yaw)
 from ..mapping.odometry import PoseEstimate
 from ..mapping.alignment import MapOdomAlignment
 from ..mapping.free_schedule import FreeScheduler,StoppingRegion
@@ -237,6 +237,35 @@ class PerceptionPipeline:
         return FrozenReference(revision,self.calibration.sha256,tuple(segments),
             feature_policy='PHYSICAL_STRIP_ENDPOINTS_V1')
 
+    def _extend_reference(self, graph, capture, pose):
+        previous = self.reference
+        revision = 0 if previous is None else previous.revision + 1
+        current = self._reference_from(graph, capture, pose, revision)
+        if previous is None:
+            return current
+        tolerance = self.profile.registration.residual_m
+        retained = tuple(old for old in previous.segments if not any(
+            new.error_m <= old.error_m and segment_distance(old.a, new.a, new.b) <= tolerance
+            and segment_distance(old.b, new.a, new.b) <= tolerance for new in current.segments))
+        return replace(current, segments=(*retained, *current.segments)[-64:], shared_error_m=previous.shared_error_m)
+
+    def _propagate_odometry(self, raw):
+        alignment = self._alignment
+        anchor = self._propagation_anchor or alignment
+        prior = anchor.apply(raw)
+        if anchor is alignment:
+            return prior, prior
+        latest = alignment.apply(raw)
+        # 약한 새 정합의 넓은 오차를 이전의 더 정밀한 오도메트리 전파에 누적하지 않는다.
+        earlier = prior.sample
+        current = latest.sample
+        if (earlier.position_error_m <= current.position_error_m
+                and earlier.yaw_error_rad <= current.yaw_error_rad
+                and math.hypot(earlier.x-current.x, earlier.y-current.y) <= earlier.position_error_m
+                and abs(wrap_yaw(earlier.yaw-current.yaw)) <= earlier.yaw_error_rad):
+            return prior, prior
+        return prior, latest
+
     def process(self, observation, *, now_us=None, pose=None, checkpoint=None, completed_clock=None,
                 motion_qualified=False,needed_mask=None,cycle_bound_us=None,completion_bound_us=None,diagnostics=None,
                 needed_region_factory=None,evidence_observer=None,localization_valid_for_us=None,
@@ -276,10 +305,11 @@ class PerceptionPipeline:
                     or any(type(value) not in (int,float) or not math.isfinite(value) or value<0 for value in limits[1:])):
                 raise ValueError('invalid explicit localization lifetime/drift')
         operational_localization=bool(localization_configured and observation.kind=='LIVE') if type(observation) is PerceptionInput else False
-        def alignment_current(at):
-            alignment=self._alignment
-            return bool(localization_configured and alignment is not None and alignment.has_metadata and alignment.valid_at(at)
+        def alignment_matches_policy(alignment):
+            return bool(localization_configured and alignment is not None and alignment.has_metadata
                 and (alignment.valid_for_us,alignment.position_drift_mps,alignment.yaw_drift_rps)==limits)
+        def alignment_current(at):
+            return alignment_matches_policy(self._alignment) and self._alignment.valid_at(at)
         if type(motion_qualified) is not bool:raise ValueError('motion qualification must be explicit bool')
         for value,positive in ((cycle_bound_us,True),(completion_bound_us,False)):
             if value is not None and (type(value) is not int or not int(positive)<=value<2**63):
@@ -336,6 +366,10 @@ class PerceptionPipeline:
         capture=_digest(observation.rgb.stamp.key)
         context=(observation.kind,self.calibration.sha256,observation.rgb.stamp.clock_id,
                  'frame:'+capture if pose is None else 'odom:'+pose.sample.epoch)
+        missing_map_pose = (pose is None and self._context is not None
+                            and context[:3] == self._context[:3] and self._context[-1].startswith('odom:'))
+        if missing_map_pose:
+            context = self._context
         if self._restore_pending:
             if (context[:3]!=self._context[:3] or pose is not None and context[-1]!=self._context[-1]):
                 raise ValueError('restored map cannot cross its admitted current source/clock/odom context')
@@ -359,12 +393,11 @@ class PerceptionPipeline:
         if pose is not None and self._alignment is not None:
             try:
                 anchor=self._propagation_anchor or self._alignment
-                if (localization_configured and (not anchor.has_metadata
+                if (localization_configured and (not alignment_matches_policy(self._alignment) or not anchor.has_metadata
                         or (anchor.position_drift_mps,anchor.yaw_drift_rps)
                             !=(localization_position_drift_mps,localization_yaw_drift_rps))):
                     raise ValueError('propagation anchor cannot adopt a different physical drift policy')
-                registration_pose=anchor.apply(raw_pose)
-                pose=self._alignment.apply(raw_pose)
+                registration_pose,pose=self._propagate_odometry(raw_pose)
             except ValueError:
                 alignment_invalid=True
                 pose=None
@@ -403,12 +436,21 @@ class PerceptionPipeline:
         unqualified_reference=(self.reference is not None
             and self.reference.feature_policy!='PHYSICAL_STRIP_ENDPOINTS_V1')
         # 옛 유한 segment의 끝점 의미를 새 영상으로 소급 승인하거나 같은 map을 재seed하지 않는다.
-        quarantined=unqualified_reference or alignment_invalid or pose is not None and not geometry_qualified
-        if operational_localization and self._alignment is not None and not alignment_current(now_us):quarantined=True
+        quarantined=(unqualified_reference or alignment_invalid or missing_map_pose
+                     or pose is not None and not geometry_qualified)
+        points=()
         if pose is not None and rgb_new and geometry_qualified and self._last_tape is not None and self._last_tape.status=='VALID':
             points=self._features(self._last_tape,capture)
             if points and self.reference is not None and self.reference.segments and not unqualified_reference:
-                registration=register(points,self.reference,registration_pose.prior,self.profile.registration,calibration_id=self.calibration.sha256)
+                prior = registration_pose.prior
+                profile = self.profile.registration
+                common = overlapping_points(points, self.reference, prior, profile,
+                    lateral_m=self.profile.road.missing_outer_width_m / 2)
+                if common:
+                    registration = register(common, self.reference, prior, profile, calibration_id=self.calibration.sha256)
+                else:
+                    registration = RegistrationResult('NO_OVERLAP', None, None, None, (prior,),
+                                                      self.reference.revision, 0, 0, True)
                 if registration.status=='BOUNDED':
                     x,y,yaw=registration.representative
                     fitted=replace(pose.sample,x=x,y=y,yaw=yaw,
@@ -428,19 +470,27 @@ class PerceptionPipeline:
                         pose=candidate_pose;self._alignment=candidate_alignment;self._restore_pending=False
                         if self._propagation_anchor is None:self._propagation_anchor=candidate_alignment
                         quarantined=False
-                else:
-                    quarantined=True
-            if (points and not quarantined
-                    and pose.sample.position_error_m<=self.profile.registration.max_position_error_m
-                    and pose.sample.yaw_error_rad<=self.profile.registration.max_yaw_error_rad
-                    and (self.reference is None or registration is not None and registration.status=='BOUNDED')):
-                # 이전 reference로 판정한 뒤에만 다음 revision을 만든다. 최초 seed는 명시 odom anchor다.
-                self.reference=self._reference_from(self._last_tape,capture,pose,0 if self.reference is None else self.reference.revision+1)
+                elif registration.status != 'NO_OVERLAP':
+                    estimate = (pose.sample.x, pose.sample.y, pose.sample.yaw)
+                    # 약한 관측은 위치를 보정하지 않는다. 기존 자세와 모순되면 격리한다.
+                    if (registration.status != 'AMBIGUOUS_OR_UNOBSERVABLE'
+                            or not registration.permits(estimate)):
+                        quarantined = True
+        odometry_rejection=None
         if pose is not None and (pose.sample.position_error_m>self.profile.registration.max_position_error_m
                 or pose.sample.yaw_error_rad>self.profile.registration.max_yaw_error_rad):
+            odometry_rejection='ODOMETRY_OUT_OF_BOUNDS'
+            quarantined=True
+        elif (operational_localization and pose is not None and self._alignment is not None
+                and not alignment_current(now_us)
+                and not pose.captured_us[1] <= now_us <= pose.captured_us[0]+self.profile.max_observation_age_us):
+            odometry_rejection='ODOMETRY_STALE'
             quarantined=True
         if self._restore_pending:quarantined=True
-        if operational_localization and self._alignment is not None and not alignment_current(now_us):quarantined=True
+        if (points and not quarantined and (self.reference is None or registration is not None
+                and registration.status in ('BOUNDED', 'NO_OVERLAP'))):
+            # 원 오도메트리 오차 안의 지도 갱신은 시각 정합의 만료를 갱신하지 않는다.
+            self.reference = self._extend_reference(self._last_tape, capture, pose)
         grid=self.grid
         if quarantined:
             # 기존 atlas/reference는 그대로 두고 새 관측은 별도 body-frame 진단으로만 처리한다.
@@ -655,17 +705,23 @@ class PerceptionPipeline:
                 and (region is None or region.complete and region.valid_at(now_us)) and not completion_exceeded)
         schedule_summary['attempted_cells']=tuple(attempted_cells)
         alignment=self._alignment
-        localization_status=('INITIAL_ANCHOR_UNQUALIFIED' if alignment is None else
+        visual_status=('INITIAL_ANCHOR_UNQUALIFIED' if alignment is None else
             'ALIGNMENT_LEGACY_DIAGNOSTIC' if not alignment.has_metadata else
             'LOCALIZATION_PROFILE_UNCONFIGURED' if not localization_configured else
-            'LOCALIZATION_PROFILE_CHANGED' if (alignment.valid_for_us,alignment.position_drift_mps,alignment.yaw_drift_rps)!=limits else
+            'LOCALIZATION_PROFILE_CHANGED' if not alignment_matches_policy(alignment) else
             'ALIGNMENT_EXPIRED' if not alignment.valid_at(now_us) else 'QUALIFIED')
+        localization_status=visual_status
+        if operational_localization:
+            if odometry_rejection is not None:
+                localization_status=odometry_rejection
+            elif pose is not None and visual_status=='ALIGNMENT_EXPIRED':
+                localization_status='ODOMETRY_CONTINUED'
         free_status=('NO_NEW_DEPTH_EVIDENCE' if evidence is None else
             'TARGET_PROFILE_UNQUALIFIED' if not self.targets or any(not target.qualified for target in self.targets) else
             'CALIBRATION_UNQUALIFIED' if not self.calibration.free_qualified else
             temporal_free_status if not temporal_bound else
             'REGISTRATION_QUARANTINED' if quarantined and not instantaneous_synthetic else
-            localization_status if localization_blocks_free or operational_localization and not alignment_current(now_us) else
+            visual_status if localization_blocks_free or operational_localization and not alignment_current(now_us) else
             'PERMISSION_POLICY_UNCONFIGURED' if not self.profile.permission_polygon else
             'OBSERVATION_EXPIRED' if actual_depth_age is None or actual_depth_age>min(self.profile.max_observation_age_us,self.profile.free_ttl_us) else
             scheduling_status if not final_free else 'QUALIFIED_CELL_ATTEMPTS')
@@ -702,6 +758,8 @@ class PerceptionPipeline:
             odom_origin=None if pose is None else pose.sample.origin,
             input_odom_origin=None if raw_pose is None else raw_pose.sample.origin,
             mapped_pose=None if pose is None else [pose.sample.x,pose.sample.y,pose.sample.yaw],
+            mapped_position_error_m=None if pose is None else pose.sample.position_error_m,
+            mapped_yaw_error_rad=None if pose is None else pose.sample.yaw_error_rad,
             map_from_odom=None if self._alignment is None else self._alignment.pose,
             alignment_metadata=None if alignment is None else alignment.fields(),
             localization_status=localization_status,

@@ -11,6 +11,7 @@ import unittest
 
 from xenova_vehicle.runtime.map_checkpoint import MapCheckpointCollector,MapCheckpointNotReady,CheckpointPages
 from xenova_vehicle.runtime.mapper_mapping import _fork_collector
+from xenova_vehicle.perception.tape import TapeGraph
 from xenova_vehicle.storage.contracts import LoadRequest,canonical,json_bytes
 from xenova_vehicle.storage.records import PROVENANCE
 
@@ -24,7 +25,7 @@ class AlignmentAnchorProvenanceTests(unittest.TestCase):
         self.fixture=checkpoint_fixture.MapCheckpointTests(methodName='runTest')
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.setUp()
-        limits=dict(localization_valid_for_us=800_000,localization_position_drift_mps=.001,
+        limits=dict(localization_valid_for_us=400_000,localization_position_drift_mps=.001,
             localization_yaw_drift_rps=.001)
         self.restored,self.pipeline,self.execute,self.next_frame=self.fixture._restored_nonidentity_fixture(
             raw_x=.11,position_error=.012,spacing_us=200_000,localization_limits=limits)
@@ -66,6 +67,22 @@ class AlignmentAnchorProvenanceTests(unittest.TestCase):
         self.assertIs(self.pipeline._propagation_anchor,anchor)
         self.assertIs(self.collector._records[pin[1]],original)
         self.assertTrue(all(len(record.parents)<=4 for record in self.collector._records.values()))
+
+    def test_current_rgb_root_survives_reference_pruning_during_odometry_continuation(self):
+        alignment=self.pipeline._alignment
+        sources=dict(self.collector._reference_geometry)
+        hidden=TapeGraph((),status='UNKNOWN',complete=False,calibration_qualified=True)
+        for sequence in range(3,6):
+            observation,pose,frame=self.next_frame(sequence,.003)
+            result=self.execute(self.pipeline,observation,pose,hidden)
+            self.assertTrue(self.collector.observe_result(frame,result,self.pipeline,raw_pose=pose))
+        capture=result.summary['capture_id']
+        self.assertEqual(result.summary['localization_status'],'ODOMETRY_CONTINUED')
+        self.assertIs(self.pipeline._alignment,alignment)
+        self.assertEqual(self.collector._reference_geometry,sources)
+        self.assertIn(capture,self.collector._rgb_refs)
+        self.assertNotIn(capture,sources)
+        self.assertLessEqual(len(self.collector._rgb_refs),len(sources)+1)
 
     def test_historical_missing_or_foreign_pin_cannot_mint_a_current_root(self):
         pin=self.collector._propagation_anchor_record

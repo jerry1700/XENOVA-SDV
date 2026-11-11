@@ -10,7 +10,7 @@ import itertools
 import unittest
 
 from xenova_vehicle.mapping.odometry import PoseEstimate, PoseSample
-from xenova_vehicle.mapping.registration import PoseBox, RegistrationProfile, register
+from xenova_vehicle.mapping.registration import PoseBox, RegistrationProfile, overlapping_points, register
 from xenova_vehicle.perception.calibration import synthetic_calibration
 from xenova_vehicle.perception.inputs import FrameStamp
 from xenova_vehicle.perception.pipeline import PerceptionPipeline
@@ -141,3 +141,15 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         self.assertEqual(fitted.status, 'BOUNDED', evidence)
         self.assertTrue(fitted.complete, evidence)
         self.assertTrue(self.contains(fitted), evidence)
+
+    def test_transverse_start_line_is_novel_but_an_overlapping_shifted_lane_is_compared(self):
+        finite = dict(start='observed_paint_end', end='observed_paint_end')
+        reference = self.reference(self.graph((self.strip(0, **finite),), self.a))
+        start_line = self.strip(1, points=((.7, -.12), (.7, .12)), **finite)
+        shifted_lane = self.strip(2, y=.08, **finite)
+        current = self.features(self.graph((start_line, shifted_lane), self.b))
+        prior = PoseBox((0., 0.), (0., 0.), (0., 0.))
+        shared = overlapping_points(current, reference, prior, self.profile, lateral_m=.1425)
+        self.assertEqual({point.component for point in shared}, {'strip:2'})
+        fit = register(shared, reference, prior, self.profile, calibration_id=self.calibration.sha256)
+        self.assertEqual(fit.status, 'INCONSISTENT')
