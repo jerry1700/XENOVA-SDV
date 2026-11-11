@@ -99,13 +99,24 @@ def _validate(value):
                 or row['sha256'] != digest):
             raise DevelopmentProfileError('simulator original file pin differs')
     scene = source['scene']
-    _keys(scene,'file size_bytes sha256 base_sha256 derived_from_profile_sha256 source_path source_sha256 track_id')
-    if (scene['file'] != 'jetson-demo.json' or type(scene['size_bytes']) is not int or not 0<scene['size_bytes']<=65536
-            or scene['base_sha256'] != SCENE_SHA256 or scene['source_path'] != SCENE_SOURCE_PATH
-            or scene['source_sha256'] != SCENE_SOURCE_SHA256 or scene['track_id'] != 'jetson-demo'):
+    keys = 'file size_bytes sha256 base_sha256 derived_from_profile_sha256 source_path source_sha256 track_id'
+    catalog_scene = type(scene) is dict and 'source_commit' in scene
+    _keys(scene, keys + (' source_commit' if catalog_scene else ''))
+    if (type(scene['size_bytes']) is not int or not 0 < scene['size_bytes'] <= 65536
+            or scene['source_path'] != SCENE_SOURCE_PATH):
         raise DevelopmentProfileError('selected original scene pin differs')
     _digest(scene['sha256'])
-    if scene['derived_from_profile_sha256'] is None:
+    if catalog_scene:
+        if (type(scene['source_commit']) is not str or re.fullmatch('[0-9a-f]{40}', scene['source_commit']) is None
+                or type(scene['track_id']) is not str or re.fullmatch(r'jetson-(demo|r[0-9]{2})', scene['track_id']) is None
+                or scene['file'] != scene['track_id'] + '.json'):
+            raise DevelopmentProfileError('selected catalog scene provenance differs')
+        for key in ('source_sha256', 'base_sha256', 'derived_from_profile_sha256'):
+            _digest(scene[key])
+    elif (scene['file'] != 'jetson-demo.json' or scene['base_sha256'] != SCENE_SHA256
+            or scene['source_sha256'] != SCENE_SOURCE_SHA256 or scene['track_id'] != 'jetson-demo'):
+        raise DevelopmentProfileError('selected original scene pin differs')
+    elif scene['derived_from_profile_sha256'] is None:
         if scene['sha256'] != SCENE_SHA256 or scene['size_bytes'] != 5137:
             raise DevelopmentProfileError('base profile must pin the original scene bytes')
     else:_digest(scene['derived_from_profile_sha256'])
@@ -214,7 +225,7 @@ class DevelopmentProfile:
         if type(scene) is not Scene:
             raise DevelopmentProfileError('original exact Scene required')
         value = self.fields;source = value['source']['scene'];fields = scene.fields
-        if (fields.get('source_commit') != value['source']['commit']
+        if (fields.get('source_commit') != source.get('source_commit', value['source']['commit'])
                 or fields.get('source_path') != source['source_path']
                 or fields.get('source_sha256') != source['source_sha256']):
             raise DevelopmentProfileError('actual original scene/source SHA differs')

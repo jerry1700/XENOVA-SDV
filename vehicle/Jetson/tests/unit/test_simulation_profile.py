@@ -9,7 +9,9 @@ from hashlib import sha256
 import json
 import math
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from xenova_vehicle.simulation.profile import DevelopmentProfile,DevelopmentProfileError,MAX_PROFILE_BYTES
 from xenova_vehicle.simulation.scene import Scene,canonical,demo_scene
@@ -189,3 +191,32 @@ class SimulationProfileTests(unittest.TestCase):
             bad=derived_scene.fields;bad['track']['layout'][group][key]=value
             with self.subTest(group=group),self.assertRaises(DevelopmentProfileError):
                 base.for_scene(Scene(canonical(bad)))
+
+    def test_hil_catalog_course_binds_scene_provenance_independently_of_motion(self):
+        from tools.hil_observation.prepare_course import prepare_course
+
+        track=demo_scene().fields['track']
+        track['id']='jetson-r55'
+        commit='b'*40
+        catalog=canonical([track])
+        with TemporaryDirectory() as directory:
+            with patch('tools.hil_observation.prepare_course.subprocess.check_output',
+                    side_effect=[commit+'\n',catalog]):
+                arguments=prepare_course(Path(directory),'platform','jetson-r55',
+                    self.profile,Path(directory)/'course')
+            scene=Scene(Path(arguments[5]).read_bytes())
+            imported=DevelopmentProfile.from_bytes(Path(arguments[1]).read_bytes())
+            self.assertEqual(scene.sha256,arguments[7])
+            self.assertEqual(imported.sha256,arguments[3])
+            self.assertEqual(scene.fields['source_commit'],commit)
+            self.assertEqual(scene.fields['source_sha256'],sha256(catalog).hexdigest())
+            self.assertEqual(imported.fields['source']['commit'],self.profile.fields['source']['commit'])
+            self.assertEqual(imported.calibration().sha256,self.profile.calibration().sha256)
+            self.assertIsNone(imported.check_scene(scene))
+            self.assertIs(imported.for_scene(scene),imported)
+            with self.assertRaises(DevelopmentProfileError):
+                self.profile.check_scene(scene)
+            altered=scene.fields
+            altered['track']['layout']['obstacle_seeds']=[]
+            with self.assertRaises(DevelopmentProfileError):
+                imported.check_scene(Scene(canonical(altered)))
