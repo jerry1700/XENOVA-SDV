@@ -13,24 +13,53 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TARGET = HERE.parents[3] / "frontend/packages/ui/src/sim/jetson-tracks.json"
+GEOMETRY = HERE / "jetson-course-geometry.json"
 VARIANTS = (("jetson-demo", .4625), ("jetson-r40", .40), ("jetson-r45", .45),
             ("jetson-r50", .50), ("jetson-r55", .55), ("jetson-r60", .60))
 ROAD_LENGTH_M = 3.15
 ROAD_HEIGHT_M = 2.07
-LANE_WIDTH_M = .285
 WORLD_MARGIN_M = .10
 SAMPLE_M = .05
+WHEELBASE_M = .20
+
+
+def read_geometry(path: Path) -> dict:
+    """코스 치수는 metre, 좌우 대칭 최대 조향은 degree로 읽는다."""
+    fields = {"lane_width_m", "vehicle_length_m", "vehicle_width_m", "camera_height_m"}
+    values = json.loads(path.read_text(encoding="utf-8"))
+    optional = {"wheelbase_m", "lane_width_tolerance_m", "max_steer_deg", "tape_width_m"}
+    if not isinstance(values, dict) or not fields <= values.keys() <= fields | optional:
+        raise ValueError("코스 설정에는 차로 폭, 차체 길이·폭, 카메라 높이가 필요합니다")
+    values.setdefault("wheelbase_m", WHEELBASE_M)
+    for key, value in values.items():
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{key}에는 양의 유한한 값을 사용하세요")
+    if values["vehicle_length_m"] <= values["wheelbase_m"]:
+        raise ValueError("차체 길이는 축간거리보다 길어야 합니다")
+    if values.get("max_steer_deg", 0) >= 90:
+        raise ValueError("최대 조향각은 90도보다 작아야 합니다")
+    if values.get("tape_width_m", 0) >= values["lane_width_m"]:
+        raise ValueError("테이프 폭은 한 차로 폭보다 작아야 합니다")
+    return values
 
 
 def _point(x: float, y: float) -> list[float]:
     return [round(x, 6), round(y, 6)]
 
 
-def generate(track_id: str, inner_radius: float) -> dict:
-    """도로 외곽 315×207 cm와 두 차로 폭을 고정한다."""
-    outer = inner_radius + 1.5 * LANE_WIDTH_M
-    inner_edge = inner_radius - LANE_WIDTH_M / 2
-    radius = inner_radius + LANE_WIDTH_M / 2
+def generate(track_id: str, inner_radius: float, geometry: dict | None = None) -> dict:
+    """고정 외곽 안에서 두 차로와 차량·카메라 layout을 생성한다."""
+    if geometry is None:
+        geometry = read_geometry(GEOMETRY)
+    lane_width = geometry["lane_width_m"]
+    wheelbase = geometry.get("wheelbase_m", WHEELBASE_M)
+    min_turn_radius = .55
+    if "max_steer_deg" in geometry:
+        min_turn_radius = wheelbase / math.tan(math.radians(geometry["max_steer_deg"]))
+    length = geometry["vehicle_length_m"]
+    outer = inner_radius + 1.5 * lane_width
+    inner_edge = inner_radius - lane_width / 2
+    radius = inner_radius + lane_width / 2
     horizontal = round(ROAD_LENGTH_M - 2 * outer, 9)
     vertical = round(ROAD_HEIGHT_M - 2 * outer, 9)
     if not math.isfinite(inner_radius) or inner_edge <= 0 or vertical < 0:
@@ -39,9 +68,9 @@ def generate(track_id: str, inner_radius: float) -> dict:
     rx, top_cy = tx + horizontal, cy + vertical
     # 여섯 코스의 하단 직선에 공통으로 들어오는 출발 위치다.
     start_x = WORLD_MARGIN_M + 2.04
-    divider_y = WORLD_MARGIN_M + LANE_WIDTH_M
-    inner_lane_y = WORLD_MARGIN_M + 1.5 * LANE_WIDTH_M
-    outer_lane_y = WORLD_MARGIN_M + LANE_WIDTH_M / 2
+    divider_y = WORLD_MARGIN_M + lane_width
+    inner_lane_y = WORLD_MARGIN_M + 1.5 * lane_width
+    outer_lane_y = WORLD_MARGIN_M + lane_width / 2
     points = [_point(start_x, divider_y)]
 
     def line(x: float, y: float) -> None:
@@ -93,7 +122,7 @@ def generate(track_id: str, inner_radius: float) -> dict:
     layout = {
         "bounds": [0, 0, *_point(ROAD_LENGTH_M + 2 * WORLD_MARGIN_M, ROAD_HEIGHT_M + 2 * WORLD_MARGIN_M)],
         "lane_count": 2,
-        "start_pose": [*_point(start_x + (.30 + .20) / 2, inner_lane_y), math.pi],
+        "start_pose": [*_point(start_x + (length + wheelbase) / 2, inner_lane_y), math.pi],
         "paved_areas": [apron, *[slot["outline"] for slot in slots]],
         "paint_lines": [*[slot["outline"] + [slot["outline"][0]] for slot in slots],
                         [_point(mouth, south), _point(inner_east(south), south)],
@@ -103,39 +132,50 @@ def generate(track_id: str, inner_radius: float) -> dict:
             {"id": "A", "kind": "cone", "x": 1.44, "y": round(inner_lane_y, 6), "w": .18, "h": .18},
             {"id": "B", "kind": "cone", "x": 1.05, "y": round(outer_lane_y, 6), "w": .18, "h": .18},
         ],
-        "vehicle": {"length_m": .30, "width_m": .22, "wheelbase_m": .20, "min_turn_radius_m": .55},
-        "camera": {"height_m": .12, "pitch_rad": math.pi / 12, "hfov_rad": 69 * math.pi / 180,
+        "vehicle": {"length_m": length, "width_m": geometry["vehicle_width_m"],
+                    "wheelbase_m": wheelbase, "min_turn_radius_m": min_turn_radius},
+        "camera": {"height_m": geometry["camera_height_m"], "pitch_rad": math.pi / 12, "hfov_rad": 69 * math.pi / 180,
                    "mount_x_m": .20},
-        "assumptions": (f"Measured road envelope 3.15 by 2.07 m; both lanes are 0.285 m wide and clockwise. "
+        "assumptions": (f"Measured road envelope 3.15 by 2.07 m; both lanes are {lane_width:g} m wide and clockwise. "
                         f"Inner lane centre radius {inner_radius:.4f} m; the default radius is estimated from the image. "
                         "Parking dimensions and positions, vehicle and camera values are provisional. "
                         "Symmetric front/rear overhang is assumed; "
                         "the rear-axle initial pose places the front bumper on the start line. "
                         "Parking bays move in x to stay inside the road loop as the radius changes."),
     }
+    if "tape_width_m" in geometry:
+        layout["tape_width_m"] = geometry["tape_width_m"]
     role = "기본" if track_id == "jetson-demo" else "비교"
     name = f"Jetson {role} 코스 (R{inner_radius * 100:g}cm)"
     return {"id": track_id, "name": name, "short": track_id,
             "real_m": round(lap), "centerline": points,
-            "lane_width_m": 2 * LANE_WIDTH_M, "curb_m": 0, "layout": layout}
+            "lane_width_m": 2 * lane_width, "curb_m": 0, "layout": layout}
 
 
-def generated_bytes() -> bytes:
-    return (json.dumps([generate(*variant) for variant in VARIANTS], ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+def generated_bytes(geometry: dict | None = None) -> bytes:
+    if geometry is None:
+        geometry = read_geometry(GEOMETRY)
+    tracks = [generate(track_id, radius, geometry) for track_id, radius in VARIANTS]
+    return (json.dumps(tracks, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="기존 생성 파일과 비교만 한다")
+    parser.add_argument("--geometry", type=Path, default=GEOMETRY, help="차로·차체·카메라 설정 JSON")
+    parser.add_argument("--output", type=Path, default=TARGET, help="생성할 코스 JSON")
     args = parser.parse_args()
-    content = generated_bytes()
+    try:
+        content = generated_bytes(read_geometry(args.geometry))
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     if args.check:
-        if not TARGET.exists() or TARGET.read_bytes() != content:
-            print(f"생성 파일이 최신이 아닙니다: {TARGET}")
+        if not args.output.exists() or args.output.read_bytes() != content:
+            print(f"생성 파일이 최신이 아닙니다: {args.output}")
             return 1
     else:
-        TARGET.write_bytes(content)
-    print(f"{TARGET.name}: {len(VARIANTS)} tracks, {len(content)} bytes")
+        args.output.write_bytes(content)
+    print(f"{args.output.name}: {len(VARIANTS)} tracks, {len(content)} bytes")
     return 0
 
 

@@ -100,6 +100,20 @@ int probe_behavior_step(void *pointer,void *behavior,uint64_t now,uint64_t ticks
 }
 uint64_t probe_behavior_deadline(void *behavior,int episode){struct behavior_probe *b=behavior;return episode?b->episode.deadline_pi_us:b->episode.phase_deadline_pi_us;}
 int probe_behavior_reenter(void *behavior,uint64_t now){struct behavior_probe *b=behavior;return db_episode_phase(&b->episode,DB_CHANGE_OUT,b->episode.phase_goal,now,&b->limits);}
+int probe_episode_station(int split,float bounds[2]){
+ struct tr_basis basis={.bound=true,.count=4,.points={{0,0},{.38f,0},{.6f,0},{1,0}}};
+ dw_pose pose={.09f,.24f,0};
+ if(split){
+  basis.points[1]=(dw_point){1,0};basis.points[2]=(dw_point){1,.08f};basis.points[3]=(dw_point){0,.08f};
+  pose=(dw_pose){.5f,.04f,0};
+ }
+ return db_station_bounds(&basis,pose,.0016f,&lp_selected_config,&bounds[0],&bounds[1]);
+}
+int probe_observed_blocker(void *pointer){
+ struct probe *p=pointer;struct db_blocker blocker;struct tr_intent task={true,false,1,1,1,0};
+ if(p->decoded||!db_blocker_observe(&p->snapshot.world,&task,(dw_pose){4.9f,1.2f,0},1.5f,&p->config,&blocker))return -1;
+ return blocker.present;
+}
 void probe_behavior_free(void *behavior){free(behavior);}
 uint32_t probe_round(void *pointer,void *behavior,int action,uint32_t id){
  struct probe *p=pointer;struct behavior_probe *b=behavior;
@@ -324,9 +338,34 @@ int engine_force_node_limit(void *pointer,uint64_t now){
 uint32_t probe_task_lane(void *pointer,float x,float y,float yaw,float error){
  struct probe *p=pointer;return tr_unique_lane(&p->snapshot.world,(dw_pose){x,y,yaw},error,&p->config);
 }
+void probe_task_tape(void *pointer,float half_width){
+ ((struct probe *)pointer)->config.lane_tape_half_width_m=half_width;
+}
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;
  return tr_open(&p->snapshot.world,&task,&view)&&tr_contains(&view,(dw_pose){x,y,yaw},error,&p->config);
+}
+int probe_lane_change_terminal_path(void *pointer,float y){
+ struct probe *p=pointer;
+ const dw_world *w=&p->snapshot.world;
+ if(p->decoded||!tr_basis_accept(&p->basis,w))return LP_INPUT;
+ struct lp_path *path=&p->path;
+ memset(path,0,sizeof(*path));
+ path->count=6;path->task=(struct tr_intent){true,true,2,1,1,0};
+ path->basis=p->basis;path->world_features=w->required_features;
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ /* The goal is close enough for capture and the remaining path permits forward motion. */
+ for(unsigned k=0;k<path->count;k++){
+  float distance=.018f*k;
+  path->points[k]=(xenova_drive_PathPoint){.pose={2+distance*cosf(.2f),y+distance*sinf(.2f),.2f},
+   .velocity_mps=p->config.primitive_speed};
+ }
+ path->goal=path->points[path->count-1].pose;
+ uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
+ struct lp_metrics metrics={0};
+ return lp_validate_path(path,w,&p->config,&metrics,&budget);
 }
 int probe_task_goal(void *pointer,uint32_t id,float x,float y,float horizon,float *out){
  struct probe *p=pointer;struct tr_intent task={true,false,id,id,id,0};dw_pose goal;

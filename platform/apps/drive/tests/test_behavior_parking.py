@@ -7,7 +7,7 @@ import ctypes as C
 import json
 import math
 import pytest
-from test_lattice import library, Product, FOUND
+from test_lattice import library, Product, FOUND, obstacle
 from test_engine import modern_world
 from world_codec import schema
 
@@ -86,7 +86,9 @@ def test_actual_signed_goal_set_enters_only_the_selected_known_slot(library,tmp_
 
 
 def test_signed_parking_rejects_padded_root_across_the_forbidden_divider(library,tmp_path):
-    ports(library); product=Product(library,placed_world())
+    ports(library); world=placed_world()
+    world.lane_model.crossing=bytes(len(world.lane_model.crossing))
+    product=Product(library,world)
     try:
         # Preserve cohort01's original root as a negative. The root footprint
         # fails before graph expansion or occupancy-cell work, not a timeout.
@@ -95,6 +97,29 @@ def test_signed_parking_rejects_padded_root_across_the_forbidden_divider(library
         assert result==10 and trace['root_union']==0,trace
         measured=product.metrics()
         assert measured[0]==0 and measured[2]==1 and measured[3]==0
+    finally: product.close()
+
+
+def test_signed_parking_can_use_the_permitted_adjacent_lane(library,tmp_path):
+    ports(library); product=Product(library,placed_world())
+    try:
+        result=library.probe_parking_search(product.handle,1,1.5,1.2,math.pi/2)
+        valid=library.probe_valid(product.handle) if result==FOUND else None
+        trace=parking_trace(library,product,tmp_path,valid)
+        assert result==valid==FOUND,trace
+        assert trace['root_union']==trace['actual_goal_contains']==1
+    finally: product.close()
+
+
+def test_signed_parking_still_checks_the_cells_across_the_divider(library,tmp_path):
+    ports(library); world=placed_world()
+    obstacle(world,14,16,16,17)
+    product=Product(library,world)
+    try:
+        result=library.probe_parking_search(product.handle,1,1.5,1.2,math.pi/2)
+        trace=parking_trace(library,product,tmp_path)
+        assert trace['root_union']==1 and result==10,trace
+        assert trace['cells']>0 and trace['expanded']==0,trace
     finally: product.close()
 
 
@@ -142,6 +167,26 @@ def test_original_episode_budgets_do_not_follow_path_or_wait_counters(library,ca
         assert library.probe_behavior_deadline(behavior,1)==41000000
         assert library.probe_behavior_deadline(behavior,0)==11000000
     finally: library.probe_behavior_free(behavior); product.close()
+
+
+def test_episode_corners_keep_the_local_station_interval(library):
+    library.probe_episode_station.argtypes = [C.c_int, C.POINTER(C.c_float)]
+    bounds = (C.c_float * 2)()
+    assert library.probe_episode_station(0, bounds) == 1
+    assert bounds[0] <= 0 and bounds[1] >= .39
+    assert library.probe_episode_station(1, bounds) == 0
+
+
+def test_occupied_cell_far_past_lane_end_is_not_a_blocker(library):
+    library.probe_observed_blocker.argtypes = [C.c_void_p]
+    for column, expected in ((63, 0), (59, 1)):
+        world = modern_world()
+        obstacle(world, column, column + 1, 12, 13)
+        product = Product(library, world)
+        try:
+            assert library.probe_observed_blocker(product.handle) == expected
+        finally:
+            product.close()
 
 
 def test_stable_id_pending_survives_same_snapshot_metric_reordering(library):

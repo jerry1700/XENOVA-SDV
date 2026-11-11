@@ -6,7 +6,7 @@
 
 import ctypes as C
 import math
-from test_lattice import library, Product, obstacle, encode, CFG
+from test_lattice import library, Product, obstacle, encode, CFG, FOUND, STOP
 from test_engine import modern_world, vehicle, send_vehicle, load, exported_state, lane_grant
 from world_codec import schema
 
@@ -122,6 +122,79 @@ def test_forbidden_crossing_and_fresh_permission_remain_independent_constraints(
         try: assert library.engine_plan(handle, 1220000, 4096) != 0
         finally: library.engine_free(handle)
     finally: value.close()
+
+
+def test_same_lane_can_overlap_paint_but_not_cross_its_far_edge(library):
+    ports(library)
+    library.probe_task_tape.argtypes = [C.c_void_p, C.c_float]
+    library.probe_task_tape.restype = None
+    world = modern_world()
+    model = world.lane_model
+    model.crossing = bytes(len(model.crossing))
+    model.divider_position_bound_m = model.divider_heading_bound_rad = .0001
+    for lane in model.lanes:
+        lane.position_bound_m = lane.heading_bound_rad = .0001
+    product = Product(library, world)
+    try:
+        width = CFG['half_width'] + CFG['margin']
+        near_divider = 1.6 - width
+        near_outer = .8 + width
+        contains = library.probe_task_contains
+        assert not contains(product.handle, 1, 1, 0, 1.5, near_divider + .004, 0, 0)
+        library.probe_task_tape(product.handle, .006)
+        assert contains(product.handle, 1, 1, 0, 1.5, near_divider + .004, 0, 0)
+        assert contains(product.handle, 1, 1, 0, 1.5, near_outer - .004, 0, 0)
+        assert not contains(product.handle, 1, 1, 0, 1.5, near_divider + .007, 0, 0)
+        assert not contains(product.handle, 1, 1, 0, 1.5, near_outer - .007, 0, 0)
+        assert not contains(product.handle, 1, 2, 1, 1.5, 1.6, 0, 0)
+    finally:
+        product.close()
+
+
+def test_lane_change_tape_limits_both_road_edges_and_keeps_crossing_permission(library):
+    ports(library)
+    library.probe_task_tape.argtypes = [C.c_void_p, C.c_float]
+    library.probe_task_tape.restype = None
+    world = modern_world()
+    model = world.lane_model
+    model.divider_position_bound_m = model.divider_heading_bound_rad = .0001
+    for lane in model.lanes:
+        lane.position_bound_m = lane.heading_bound_rad = .0001
+    product = Product(library, world)
+    try:
+        width = CFG['half_width'] + CFG['margin']
+        limits = ((.8 + width, -1), (2.4 - width, 1))
+        contains = library.probe_task_contains
+        for boundary, outward in limits:
+            assert not contains(product.handle, 2, 1, 1, 2., boundary + outward * .004, 0, 0)
+        library.probe_task_tape(product.handle, .006)
+        for to_lane, from_lane in ((2, 1), (1, 2)):
+            for boundary, outward in limits:
+                assert contains(product.handle, to_lane, from_lane, 1, 2., boundary + outward * .004, 0, 0)
+                assert not contains(product.handle, to_lane, from_lane, 1, 2., boundary + outward * .007, 0, 0)
+            assert contains(product.handle, to_lane, from_lane, 1, 2., 1.6, 0, 0)
+        model.crossing = bytes(len(model.crossing))
+        product.update(world)
+        assert not contains(product.handle, 2, 1, 1, 2., 1.6, 0, 0)
+    finally:
+        product.close()
+
+
+def test_lane_change_captures_a_near_goal_only_after_whole_body_arrives(library):
+    ports(library)
+    library.probe_lane_change_terminal_path.argtypes = [C.c_void_p, C.c_float]
+    library.probe_lane_change_terminal_path.restype = C.c_int
+    for y, lane, expected in ((1.69, 0, FOUND), (1.90, 2, STOP)):
+        product = Product(library, modern_world())
+        try:
+            pose = (2., y, .2)
+            assert library.probe_task_lane(product.handle, *pose, .015) == lane
+            assert library.probe_lane_change_terminal_path(product.handle, y) == FOUND
+            result, command = product.track(pose, 0., 0.)
+            assert result == expected
+            assert (command[0] > 0.) == (expected == FOUND)
+        finally:
+            product.close()
 
 
 def test_open_basis_accepts_only_exact_append_and_keeps_original_prefix(library):

@@ -905,3 +905,36 @@ def test_committed_active_profile_keeps_normal_current_tracking_and_reuse(librar
         assert after[0]==before[0] and current==original
         assert library.engine_track_grant(e,wire,len(wire),1320000,out)==0
     finally:library.engine_free(e)
+
+
+@pytest.mark.parametrize(('swept_room', 'allowed'), [(.012, True), (.007, False)])
+def test_straight_goal_uses_actual_path_clearance(library, swept_room, allowed):
+    from test_lattice import CFG
+
+    world = fixture.world()
+    # The stored straight step needs 10 mm of swept padding. A hypothetical
+    # max-steer step at the stationary goal would require even more room.
+    # Keep the goal within reach of the existing straight terminal connection.
+    for chain in (world.reference, world.left_boundary, world.right_boundary):
+        for point in chain:
+            point.x *= .25
+    half = CFG['half_width'] + CFG['margin'] + CFG['tracking_guard'] + swept_room
+    for left, right in zip(world.left_boundary, world.right_boundary):
+        left.y, right.y = 1.6 + half, 1.6 - half
+    engine = library.engine_new()
+    try:
+        load(library, engine, world)
+        send_vehicle(library, engine, vehicle())
+        send_vehicle(library, engine, vehicle(2, at=1220000))
+        result = library.engine_plan(engine, 1220000, 4096)
+        command = (C.c_float * 4)()
+        if allowed:
+            assert result == 0
+            assert library.engine_track(engine, 1220000, command) == 0
+            assert command[0] > 0 and abs(command[1]) < .01
+        else:
+            assert result == 6
+            assert library.engine_track(engine, 1220000, command) != 0
+            assert command[0] == 0
+    finally:
+        library.engine_free(engine)

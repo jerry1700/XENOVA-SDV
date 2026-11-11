@@ -35,6 +35,8 @@ struct drive_engine {
  atomic_uint search_used,search_peak;
  atomic_ullong search_exhausted;
  struct dw_pool maps;struct dw_odometry odometry;
+ /* Built by the receive owner before publishing the corresponding map slot. */
+ struct lp_collision_index map_indices[DW_MAP_SLOTS];
  struct de_path_slot paths[DE_PATH_SLOTS];atomic_flag lock;
  const struct lp_config *config;const struct lp_assets *assets;
  struct lp_search search;struct lp_tracker tracker;struct lp_metrics tracking,planned;
