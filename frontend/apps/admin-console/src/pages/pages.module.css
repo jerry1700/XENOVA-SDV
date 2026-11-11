@@ -1373,18 +1373,38 @@ button.chip:hover:not(.chipOn) {
   height: auto;
   border-top: 4px solid var(--vm-accent);
 }
+/*
+ * 카드 머리(@xenova/ui Card: header > h3 제목 · div 오른쪽 영역). 공용 Card는 그대로 두고 여기서만:
+ * 제목 쪽이 줄어들며 부제가 말줄임 되고, 오른쪽(권한 배지·마지막 갱신)은 줄지 않아 "N초 전"이 한 줄로 남는다.
+ */
+.memoryVmCard > header > h3 {
+  min-width: 0;
+}
+.memoryVmCard > header > div {
+  flex: none;
+}
 .memoryVmTitle {
   display: grid;
   gap: 3px;
+  min-width: 0;
 }
 .memoryVmTitle strong {
   font-size: var(--x-text-lg);
+}
+.memoryVmTitle strong,
+.memoryVmTitle small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .memoryVmTitle small,
 .memoryCardActions small {
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
   font-weight: 500;
+}
+.memoryCardActions small {
+  white-space: nowrap;
 }
 .memoryCardActions {
   display: grid;
