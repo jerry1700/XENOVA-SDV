@@ -111,6 +111,79 @@ export PYTHONPATH="$PWD/platform/first-install:$PWD/platform/tests:$PWD/platform
 
 제품 코드는 실제 Manager·Worker·소유 lease·파일 잠금을 사용한다.
 로컬 Xen 명령·외부 서비스·storage 오류는 기존 격리 fixture에서 대체한다.
-보드에는 이번 보완 코드를 교체하지 않았으며 기존 Worker의 정상화와 보관 상태를 확인했다.
-기존 recipe가 변경 Python 파일을 포함하는 설치 경로를 확인했다.
-이번 후보의 target package 재빌드·설치 검증은 수행하지 않았다.
+첫 확인에서는 기존 Worker의 정상화와 보관 상태를 읽기 전용으로 확인했다.
+이후 사용자 승인으로 아래 서비스 교체를 수행했다.
+기존 recipe가 변경 Python 파일을 포함하는 설치 경로도 확인했다.
+이번 후보의 target package 재빌드는 수행하지 않았다.
+
+## 보관 주체 재확인
+
+보관 디렉터리의 UID는 0이었다. 보관을 실행한 개인이나 대화방을 식별할 기록은
+확인하지 못했다. 이 대화방의 실행은 보관 직전의 원장 확인 단계에서 중단돼 자산 이동을
+수행하지 않았다. 이후 같은 host boot에서 다시 확인했을 때
+`/srv/xenova/manual-backup-1111` 경로가 사라졌고 `/root/.bash_history`에도 해당 경로의
+명령은 없었다. 앞서 확인한 동일 원장 해시·디스크 inode는 당시 보관 상태의 근거로 남긴다.
+최종 조회에서는 같은 VM UUID가 다시 REGISTERED이며 domid 6으로 실행됐다.
+현재 인스턴스의 디스크 inode는 786440이고 생성 작업은
+`74c02051-6c61-42cd-bb9c-d673180e6d7e`를 가리킨다. 이전 생성 작업 파일과 보관 경로는
+찾지 못했다. 해당 UUID의 API 삭제 시도는 404였으며 보관이나 후속 등록을 한 사람은
+특정할 수 없다. 이번 서비스 교체는 이 VM의 생성·시작·보관을 수행하지 않았다.
+
+## 보드 서비스 적용
+
+사용자 승인 뒤 구현과 회귀·계약 문서를 `93006e9c`로 커밋했다.
+보드의 기존 네 모듈이 커밋 부모의 파일과 일치하는지 확인하고 root 전용 코드 백업을
+만든 뒤 해당 네 파일만 원 소유권·모드로 교체했다. Manager와 Worker를 정상 재시작했다.
+설치 파일의 SHA-256과 커밋 소스를 바이트 대조했다.
+
+| 설치 파일 | SHA-256 |
+|---|---|
+| `/usr/lib/xenova/xenova_management.py` | `0a435e15d09a32f6dc78d085dc807d9e4f6c363e4624d56e8eb73916bd725520` |
+| `/usr/lib/python3.14/site-packages/dom0_manager/drivers/platform.py` | `28a8f71f76dc22cca175c92ff210c02139be5d0bfe34c1adf1440c510cc59911` |
+| `/usr/lib/python3.14/site-packages/dom0_manager/recovery/observe.py` | `ddff41aa2be163bb35b95873ff1b7a702e8ee6cb6aa8c46f8141fa012f5c1e46` |
+| `/usr/lib/python3.14/site-packages/dom0_manager/recovery/__main__.py` | `839dccc8c706e899a65bce20227ea183395ceca8ab0ba2691aebbb58e75d4639` |
+
+첫 적용에서는 API 기동 직후 VM 목록 503을 받아 이전 코드로 복구했다.
+PID 188532의 로그는 `shared VM observation unavailable`이었다.
+기존 `ObservationHub.start`는 먼저 비어 있는 관측을 게시하고 수집 thread를 시작한다.
+재적용에서는 API 준비를 유한하게 확인한 뒤 Worker를 시작했다.
+동일한 일시적 503 한 번 뒤 200으로 회복했고, Worker 시작 후의 API 확인도 200이었다.
+제품의 관측 만료·운영 예산·발행 주기는 변경하지 않았다.
+이 실패와 재적용 근거를 각각 보존했다.
+
+- 적용 후 Manager PID는 191215, Worker PID는 191251이다.
+- Worker는 `OPERABLE / intents_known=true / hold_reasons=[] / gateway_available=true`다.
+- 주행 A domid 1, 주행 B domid 4, Debian domid 5가 유지됐다.
+  현재 의도·intent revision·lifecycle generation도 적용 전과 같았다.
+- 기존 API 토큰과 E4 누적 예산을 적용 전후 대조해 동일함을 확인했다.
+- Gateway PID 137601은 유지됐다. 서비스 교체는 해당 두 Python 서비스에 한정했다.
+- 이전 코드 백업은 `/root/xenova-registration-rollout-20261111-4msy8t9k`다.
+  이 백업은 서비스 코드와 배포 검증 정보다.
+
+로컬 원 실행 기록은
+`C:/Users/SSAFY/Documents/Codex/2026-11-11/gateway-idle-ledger-evidence/registration-rollout-20261111.jsonl`과
+`registration-rollout-20261111-second.jsonl`에 남겼다.
+
+## 적용 뒤 재확인과 비용 표본
+
+추가 Tailscale SSH 연결이 시간 초과되어 기존 보드 호스트 키를 확인한 LAN SSH로
+다시 점검했다. 설치 네 파일의 해시와 적용 직후 세 서비스 PID가 유지됐다.
+인증한 VM 목록은 연속 3회 200, Worker 상태는 `OPERABLE`이고 관측 갱신은
+4.64초 전이었다. Gateway context의 generation은 1, 모드는 `SAFE_STOP`,
+`output_permitted=false`였다. 기존 A/B·Debian의 domid 1·4·5가 유지됐고
+동시에 별도 등록된 같은 UUID의 `web-test-1111`이 domid 6으로 관측됐다.
+
+현재 등록 VM 네 대에서 두 의도 조회를 각 5회 측정했다. 두 조회 모두 호출당
+Manager 파일 읽기 8회, 파일 쓰기 0회, 외부 명령 0회였다. 지연 중앙값은
+`intents` 106ms, `recovery-intents` 88ms였다. 적용 전 3대와 적용 후 4대의
+파일 계수는 서로 다른 등록 집합에서 얻은 값이다.
+
+| 프로세스 CPU, 한 코어 기준 20초 표본 | 교체 전 | 교체 후 |
+|---|---|---|
+| Manager | 13.80% | 15.10% |
+| Worker | 25.55% | 25.35% |
+| Gateway | 23.70% | 23.70% |
+
+운영 부하와 등록 집합이 다른 짧은 표본이므로 CPU 절감률이나 지연 상한으로 해석하지 않는다.
+후속 원 기록은 같은 evidence 디렉터리의 `registration-steady-check-20261111.jsonl`과
+`registration-active-target-20261111.jsonl`에 남겼다.
