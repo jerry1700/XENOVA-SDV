@@ -202,17 +202,31 @@ public class VmService {
 
     // The platform retires the disk instead of deleting it. Keep the specification and vm_id for a future restore,
     // but hide the retired VM from the current v1 list/get/start/stop surface.
+    // dom0-manager answers 404 VMNotFound only when the board has no registration for the VM (contract v1.1):
+    // it was already retired or removed with a platform tool, so the delete is complete and the row is retired too.
     public void destroy(String vmId) {
         VmRecord record = findRecord(vmId);
-        underOperation(vmId, () -> {
-            vmControlPort.destroy(vmId);
+        boolean alreadyGone = underOperation(vmId, () -> {
+            boolean gone = false;
+            try {
+                vmControlPort.destroy(vmId);
+            } catch (ApiException exception) {
+                if (!"VM_NOT_FOUND".equals(exception.getCode())) {
+                    throw exception;
+                }
+                gone = true;
+            }
             runtimeCache.remove(vmId);
             record.retire();
             vmRecordRepository.save(record);
             stateTracker.forget(vmId);
-            return null;
+            return gone;
         });
-        eventRecorder.vmDeleted(vmId, record.getName());
+        if (alreadyGone) {
+            eventRecorder.vmDeleted(vmId, record.getName(), "platform");
+        } else {
+            eventRecorder.vmDeleted(vmId, record.getName());
+        }
         // Only after dom0-manager confirmed the delete. Failures are logged there and never fail the delete.
         inventoryCleaner.vmDeleted(vmId);
     }

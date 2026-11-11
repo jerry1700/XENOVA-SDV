@@ -347,6 +347,22 @@ class VmServiceTest {
     }
 
     @Test
+    void destroyOfAVmTheBoardNoLongerRegistersRetiresTheRow() {
+        VmRecord record = record("vm-1", "web-test");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        org.mockito.Mockito.doThrow(new ApiException(HttpStatus.NOT_FOUND, "VM_NOT_FOUND", "instance vm-1 not registered"))
+                .when(vmControlPort).destroy("vm-1");
+
+        service.destroy("vm-1");
+
+        assertThat(record.getLifecycle()).isEqualTo(VmLifecycle.RETIRED);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).forget("vm-1");
+        verify(eventRecorder).vmDeleted("vm-1", "web-test", "platform");
+        verify(inventoryCleaner).vmDeleted("vm-1");
+    }
+
+    @Test
     void retiredVmIsHiddenAndItsNameRemainsReserved() {
         VmRecord retired = record("vm-1", "alpine-sensor");
         retired.retire();
