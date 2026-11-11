@@ -1,8 +1,10 @@
 """feedback-3 고정 vector(JSON)를 C 호스트 시험 데이터(vectors.inc)로 바꾼다.
 
 사용: python3 gen_vectors.py <gateway-feedback-3.json> <vectors.inc>
+      python3 gen_vectors.py --wires <gateway-feedback-3.json> <link_vectors.inc>
 
 제품 payload 9종의 프레임만 쓴다. 설계 전용 ToF 프레임은 건너뛴다.
+--wires 는 세션·시각 설치 프레임 여섯 개의 wire 바이트만 이름으로 꺼낸다(test_link.c 용).
 """
 import hashlib
 import json
@@ -21,6 +23,8 @@ NAMES = {
     'COMMAND3': 'command',
     'FEEDBACK3': 'report',
 }
+# 한 흐름으로 이어지는 세션·시각 설치 프레임 (vector 의 name)
+LINK_FRAMES = ('hello3', 'hello_ack3', 'clock_probe3', 'clock_reply3', 'clock_install3', 'clock_ack3')
 ERRORS = {
     'serial boundary/size': 'FB3_FRAME_BOUNDARY_SIZE',
     'serial COBS': 'FB3_FRAME_COBS',
@@ -125,7 +129,23 @@ def main(source, target):
         f.write('\n'.join(out))
 
 
+def wires(source, target):
+    with open(source, 'rb') as f:
+        data = f.read()
+    frames = {frame['name']: frame for frame in json.loads(data)['frames'] if frame['origin'] == PRODUCT}
+    missing = [name for name in LINK_FRAMES if name not in frames]
+    if missing:
+        raise ValueError(f'vector 에 없는 프레임: {missing}')
+    out = [f'/* gen_vectors.py --wires 가 만든 파일이다. 직접 고치지 않는다. 원본 SHA-256 {hashlib.sha256(data).hexdigest()} */']
+    out += [f"static const char VEC_{name.upper()}[] = \"{frames[name]['wire_hex']}\";" for name in LINK_FRAMES]
+    with open(target, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(out) + '\n')
+
+
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 4 and sys.argv[1] == '--wires':
+        wires(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3:
+        main(sys.argv[1], sys.argv[2])
+    else:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2])
