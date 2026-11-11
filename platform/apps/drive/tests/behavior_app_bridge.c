@@ -33,7 +33,8 @@ int64_t k_uptime_get(void){uint64_t now;xdiag_clock_us(&now);return (int64_t)(no
 int xd_context_get(struct xt_bootstrap *out){*out=bridge_boot;return 0;}
 bool xd_stopping(void){return false;}
 bool drive_task_stopping(enum drive_task task){(void)task;return false;}
-int k_mutex_lock(struct k_mutex *m,int wait){(void)m;(void)wait;return 0;}
+static bool app_metadata_busy;
+int k_mutex_lock(struct k_mutex *m,int wait){(void)wait;return app_metadata_busy&&m==&app_metadata?-EBUSY:0;}
 void k_mutex_unlock(struct k_mutex *m){(void)m;}
 void k_sleep(int64_t delay){(void)delay;}
 void k_yield(void){}
@@ -230,6 +231,19 @@ int main(void){
    for(unsigned k=0;k<count;k++){b08_input_map_step();(void)planner_step();b08_input_step();}
    observe_step();
   }else if(!strcmp(bridge_line,"io")){b08_input_map_step();b08_input_step();}
+  else if(!strcmp(bridge_line,"preflight-busy")){
+   struct dl_clock mapping;uint64_t now,guest;
+   rc=dl_clock_get(&mapping,&now);if(!rc)rc=clock_us(NULL,&guest);
+   if(!rc){
+    uint64_t original_check=preflight_report.checked_guest_us,original_end=preflight_report.valid_until_pi_us;
+    if(!atomic_load(&preflight_report_accepted)||!atomic_load(&preflight_geometry_valid)||original_end<=now)rc=-ESTALE;
+    else{
+     app_metadata_busy=true;input_preflight(&mapping,now,guest);app_metadata_busy=false;
+     if(preflight_last_result!=-EBUSY||!atomic_load(&preflight_report_accepted)||!atomic_load(&preflight_geometry_valid)||
+        preflight_report.checked_guest_us!=original_check||preflight_report.valid_until_pi_us!=original_end)rc=-EINVAL;
+    }
+   }
+  }
   else if(!strcmp(bridge_line,"event-clock")){
    char *second=argument?strchr(argument,' '):NULL;struct dl_clock original={0};
    if(!second)rc=-EINVAL;

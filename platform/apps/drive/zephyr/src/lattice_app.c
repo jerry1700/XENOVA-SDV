@@ -186,12 +186,16 @@ static void input_preflight(const struct dl_clock *mapping,uint64_t now,uint64_t
  preflight_last_result=-EAGAIN;
  uint32_t generation=0;
  planner_operation_available=!dl_operation_status(&planner_operation,now);
- if(k_mutex_lock(&app_metadata,K_NO_WAIT)){preflight_revoke();return;}
+ if(!mapping->acknowledged||!mapping->probe_sequence||!mapping->confirmed_guest_us||
+    now>=mapping->expires_pi||guest<mapping->confirmed_guest_us||guest>INT64_MAX-100000){preflight_revoke();return;}
+ /* A skipped turn cannot renew the published report. The link owner still
+  * applies its original expiry and context fences. */
+ if(k_mutex_lock(&app_metadata,K_NO_WAIT)){preflight_last_result=-EBUSY;return;}
  bool identity=current_generation&&app_instance[0]&&!strcmp(app_instance,mapping->app_instance);
  generation=current_generation;k_mutex_unlock(&app_metadata);
- if(!identity||!mapping->acknowledged||!mapping->probe_sequence||!mapping->confirmed_guest_us||
-    guest<mapping->confirmed_guest_us||guest>INT64_MAX-100000){preflight_revoke();return;}
+ if(!identity){preflight_revoke();return;}
  preflight_last_result=de_input_current(&engine,now,&preflight_current);
+ if(preflight_last_result==DE_BUSY)return;
  if(preflight_last_result!=DE_OK){preflight_revoke();return;}
  bool cached=atomic_load(&preflight_geometry_valid)&&preflight_current.map_generation==preflight_inputs.map_generation&&
   preflight_current.scene_generation==preflight_inputs.scene_generation&&preflight_current.vehicle.sequence==preflight_inputs.vehicle.sequence&&
@@ -200,16 +204,17 @@ static void input_preflight(const struct dl_clock *mapping,uint64_t now,uint64_t
   preflight_current.vehicle.position_error_m<=preflight_inputs.geometry_position_bound_m&&
   preflight_current.vehicle.heading_error_rad<=preflight_inputs.geometry_heading_bound_rad;
  if(!cached){
-  /* A readiness report never spends the deadline of an already-running plan
-   * or apply. One idle body check is capped at1ms, independently of report E. */
-  if(engine.planning||engine.apply_pending){preflight_revoke();return;}
+  /* Replace a report in the same turn when the new body check succeeds.
+   * If the inputs changed and we cannot verify them now, withdraw it. */
+  if(engine.planning||engine.apply_pending){preflight_last_result=-EBUSY;preflight_revoke();return;}
+  /* One idle body check is capped at 1ms. */
   struct lp_budget budget={guest+1000,clock_us,cancelled,NULL,NULL};
   preflight_geometry_checks++;
   preflight_last_result=de_input_preflight(&engine,now,budget,&preflight_inputs);
   if(preflight_last_result!=DE_OK){preflight_revoke();return;}
   atomic_store(&preflight_geometry_valid,true);
  }
- bool same_report=atomic_load(&preflight_report_accepted)&&preflight_report.control_generation==generation&&
+ bool same_report=cached&&atomic_load(&preflight_report_accepted)&&preflight_report.control_generation==generation&&
     preflight_report_map_generation==preflight_inputs.map_generation&&
     preflight_report.vehicle_sequence==preflight_inputs.vehicle.sequence&&preflight_report.source.world_sequence==preflight_inputs.source.world_sequence&&
     preflight_report.clock_probe_sequence==mapping->probe_sequence&&!memcmp(preflight_report.clock_reply_sha256.bytes,mapping->reply_sha256,32);
@@ -228,18 +233,19 @@ static void input_preflight(const struct dl_clock *mapping,uint64_t now,uint64_t
  /* An unchanged original input E cannot be renewed by another clock read.
   * Keep that exact report until new input exists or its own expiry withdraws. */
  if(same_report&&now<preflight_report.valid_until_pi_us&&end<=preflight_report.valid_until_pi_us){preflight_last_result=0;return;}
- memset(&preflight_report,0,sizeof(preflight_report));
- preflight_report.major=1;preflight_report.source=preflight_inputs.source;
- preflight_report.vehicle_sequence=preflight_inputs.vehicle.sequence;preflight_report.control_generation=generation;
- preflight_report.checked_guest_us=checked;preflight_report.valid_until_pi_us=end;
- preflight_report.clock_probe_sequence=mapping->probe_sequence;preflight_report.clock_reply_sha256.size=32;
- memcpy(preflight_report.clock_reply_sha256.bytes,mapping->reply_sha256,32);
- preflight_last_result=dl_auto_preflight_set(&preflight_report);
- /* Report/P4 admission can change while the same body witness still encloses
-  * the current inputs. The next loop rechecks all cache keys and original E;
-  * a failed report alone is not evidence of a changed physical footprint. */
+ xenova_drive_AutoInputPreflight candidate={0};
+ candidate.major=1;candidate.source=preflight_inputs.source;
+ candidate.vehicle_sequence=preflight_inputs.vehicle.sequence;candidate.control_generation=generation;
+ candidate.checked_guest_us=checked;candidate.valid_until_pi_us=end;
+ candidate.clock_probe_sequence=mapping->probe_sequence;candidate.clock_reply_sha256.size=32;
+ memcpy(candidate.clock_reply_sha256.bytes,mapping->reply_sha256,32);
+ preflight_last_result=dl_auto_preflight_set(&candidate);
+ if(preflight_last_result==-EBUSY&&cached)return;
  if(preflight_last_result)preflight_report_revoke();
- else{preflight_report_map_generation=preflight_inputs.map_generation;atomic_store(&preflight_report_accepted,true);}
+ else{
+  preflight_report=candidate;preflight_report_map_generation=preflight_inputs.map_generation;
+  atomic_store(&preflight_report_accepted,true);
+ }
 }
 static bool prepared_key_current(const xenova_drive_MissionGrant *grant){
  if(k_mutex_lock(&app_metadata,K_NO_WAIT))return false;
@@ -688,19 +694,22 @@ static struct planner_turn planner_turn={.slot=-1};
 static int planner_step(void){
  const dw_state *copy=planner_turn.copy;int slot=planner_turn.slot;bool applying=false;
   struct dl_clock mapping;uint64_t now,guest;PREP_LOCAL;
-#if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
   int mapping_rc=dl_clock_get(&mapping,&now),guest_rc=0;
   if(!mapping_rc){PREP_VALUE(1,pi,now);guest_rc=clock_us(NULL,&guest);}
-  if(mapping_rc||guest_rc){preflight_revoke();planner_operation_available=false;PREP_DIAG(1,mapping_rc?mapping_rc:guest_rc,0,0);return 2;}
-#else
-  if(dl_clock_get(&mapping,&now)||clock_us(NULL,&guest)){preflight_revoke();planner_operation_available=false;return 2;}
-#endif
+  if(mapping_rc||guest_rc){
+   if(mapping_rc!=-EBUSY){preflight_revoke();planner_operation_available=false;}
+   PREP_DIAG(1,mapping_rc?mapping_rc:guest_rc,0,0);return 2;
+  }
   PREP_VALUE(2,guest,guest);PREP_DIAG(16,0,0,0);
   input_preflight(&mapping,now,guest);
   /* No plan/apply exists yet: start its own clock after readiness work. An
    * already-running job retains engine.budget/apply_budget without renewal. */
-  if(!engine.planning&&!engine.apply_pending&&(dl_clock_get(&mapping,&now)||clock_us(NULL,&guest))){
-   preflight_revoke();return 2;
+  if(!engine.planning&&!engine.apply_pending){
+   mapping_rc=dl_clock_get(&mapping,&now);
+   if(mapping_rc||clock_us(NULL,&guest)){
+    if(mapping_rc!=-EBUSY)preflight_revoke();
+    return 2;
+   }
   }
   behavior_io(&mapping,now,guest);
   xenova_drive_MissionGrant mission;bool required;
@@ -731,6 +740,11 @@ static int planner_step(void){
     if(applying)drive_planner_health_admitted(&planner_health,engine.apply_budget.deadline_us);
     if(!applying){if(rc!=DE_BUSY)planner_completed();if(rc==DE_OK)(void)prepare_current(copy);else if(rejected(rc))reject_state(copy,rc);dl_state_release(slot);slot=-1;copy=NULL;}
    }else{
+    /* During WAIT/COUNTDOWN the operation needs current input readiness.
+     * A speculative search without a mission can starve that body check.
+     * A standby StateCopy is still handled by the branch above. */
+    if(planner_operation_available&&!engine.has_grant&&
+       (planner_operation.vehicle_phase==2||planner_operation.vehicle_phase==3))return 1;
     /* Reserve before any engine work can create a phase or be preempted by
      * newer I/O. This numeric proof is not a mission/output grant. */
     if(engine.behavior_enabled&&engine.local_owner&&(!engine.episode.active||!engine.episode_transition)&&dl_episode_event_prepare())return 1;

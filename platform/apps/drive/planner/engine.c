@@ -198,7 +198,10 @@ static enum de_result input_preflight(struct drive_engine *e,uint64_t now,struct
  if(acquired)return acquired==DW_BUSY?DE_BUSY:DE_MAP;
  uint64_t end=UINT64_MAX;
  enum de_result rc=inputs(e,map,now,&out->pose,&out->vehicle,&end);
- if(!rc&&dw_scene_time(&e->maps,&map->world,now,NULL,&out->scene_generation))rc=DE_CHANGED;
+ if(!rc){
+  enum dw_result scene=dw_scene_time(&e->maps,&map->world,now,NULL,&out->scene_generation);
+  if(scene)rc=scene==DW_BUSY?DE_BUSY:DE_CHANGED;
+ }
  const struct lp_config *c=e->config;const dw_vehicle *v=&out->vehicle;
  float steering=v->has_measured_steering_rad?v->measured_steering_rad:v->has_estimated_steering_rad?v->estimated_steering_rad:NAN;
  if(!rc&&(!isfinite(v->velocity_mps)||v->velocity_mps< -c->max_reverse_velocity-.01f||v->velocity_mps>c->max_velocity+.01f||
