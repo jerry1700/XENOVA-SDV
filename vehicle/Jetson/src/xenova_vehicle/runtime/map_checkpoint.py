@@ -87,6 +87,10 @@ def _pipeline_state(pipeline,context):
     arrays={name:_pack_array(getattr(grid,name)) for name in ('state','observed_us','time_known','support','permission',
         'conflict','hit_origin','unordered_hit','hit_available_us')}
     reference=None if pipeline.reference is None else asdict(pipeline.reference)
+    if reference is not None:
+        for segment in reference['segments']:
+            if segment['support_error_m'] is None:segment.pop('support_error_m')
+            if segment['finite_endpoints']:segment.pop('finite_endpoints')
     window=getattr(grid,'rolling_window',None)
     labels=sorted(set(grid.hit_view.values()) if window is None else {str(value) for value in grid.hit_view.values()})
     if len(labels)>64:raise MapCheckpointNotReady('original hit-view inventory exceeds state capacity')
@@ -1167,11 +1171,15 @@ def restore_pipeline(pipeline,complete,current_scope):
         ref=state['reference'];old_fields={'revision','calibration_id','segments','shared_error_m'}
         if (type(ref) is not dict or set(ref) not in (old_fields,old_fields|{'feature_policy'})
                 or type(ref['segments']) is not list or len(ref['segments'])>64
-                or any(type(v) is not dict or set(v)!={'a','b','error_m','component','capture_id'} for v in ref['segments'])):
+                or any(type(v) is not dict
+                    or not {'a','b','error_m','component','capture_id'}<=set(v)
+                    or not set(v)<={'a','b','error_m','component','capture_id','support_error_m','finite_endpoints'}
+                    for v in ref['segments'])):
             raise MapCheckpointNotReady('unsupported exact original reference fields')
         try:
             reference=FrozenReference(ref['revision'],ref['calibration_id'],
-                tuple(SegmentFeature(tuple(v['a']),tuple(v['b']),v['error_m'],v['component'],v['capture_id']) for v in ref['segments']),
+                tuple(SegmentFeature(tuple(v['a']),tuple(v['b']),v['error_m'],v['component'],v['capture_id'],
+                    v.get('support_error_m'),v.get('finite_endpoints',True)) for v in ref['segments']),
                 ref['shared_error_m'],ref.get('feature_policy','UNSPECIFIED'))
         except (TypeError,ValueError) as error:
             raise MapCheckpointNotReady('invalid original reference feature metadata') from error
@@ -1212,7 +1220,7 @@ def restore_pipeline(pipeline,complete,current_scope):
     identity=state['map_from_odom_identity'] and state['alignment'] is None
     if not identity and (reference is None or not reference.segments):
         raise MapRestoreNotReady('storage COMPLETE has no reference for actual nonidentity map relocalization')
-    if not identity and reference.feature_policy!='PHYSICAL_STRIP_ENDPOINTS_V1':
+    if not identity and reference.feature_policy not in ('PHYSICAL_STRIP_ENDPOINTS_V1','OBSERVED_STRIP_SUPPORT_V1'):
         raise MapRestoreNotReady('original nonidentity reference endpoint policy is unspecified')
     if already:
         if pipeline.grid.clock_id!=current_scope.raw_binding.fields['clock_epoch']:

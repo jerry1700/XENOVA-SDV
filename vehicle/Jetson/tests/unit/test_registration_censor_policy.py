@@ -7,9 +7,11 @@ World·채택·LIVE 입력 시험이 아니다. SYNTHETIC 보정과 odom 표시�
 
 from dataclasses import asdict, replace
 import itertools
+import math
 import unittest
 
 from xenova_vehicle.mapping.odometry import PoseEstimate, PoseSample
+from xenova_vehicle.mapping.alignment import MapOdomAlignment
 from xenova_vehicle.mapping.registration import PoseBox, RegistrationProfile, overlapping_points, register
 from xenova_vehicle.perception.calibration import synthetic_calibration
 from xenova_vehicle.perception.inputs import FrameStamp
@@ -33,6 +35,7 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         sample = PoseSample('semantic-odom', self.a.clock_id, self.calibration.sha256,
             self.a.captured_us[0], 0., 0., 0., 0., 0., origin='SYNTHETIC_ODOMETRY')
         self.pose_a = PoseEstimate(sample, self.a.captured_us, self.a.captured_us)
+        self.pipeline._alignment=MapOdomAlignment.from_match(self.pose_a,self.pose_a)
 
     @staticmethod
     def strip(number, *, start='FOV_clip', end='FOV_clip', y=0., points=None, **kwargs):
@@ -51,6 +54,8 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
     def result(self, reference_graph, current_graph):
         reference = self.reference(reference_graph)
         points = self.features(current_graph)
+        if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1':
+            points = overlapping_points(points,reference,self.prior,self.profile,lateral_m=.1425)
         # 기존 register는 empty points를 거절한다. 정보 부족을 새 성공/status로 포장하지 않는다.
         fitted = (register(points, reference, self.prior, self.profile,
             calibration_id=self.calibration.sha256) if points else None)
@@ -84,18 +89,25 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         evidence = 'true_dx=.10; default_profile=' + repr(asdict(self.profile)) + '; ' + self.evidence(points, reference, fitted)
         false_bound = fitted is not None and fitted.status == 'BOUNDED' and not self.contains(fitted)
         self.assertFalse(false_bound, evidence)
-        self.assertEqual(points, (), evidence)
-        self.assertEqual(reference.segments, (), evidence)
+        self.assertTrue(points, evidence)
+        self.assertEqual(reference.feature_policy,'OBSERVED_STRIP_SUPPORT_V1')
+        self.assertTrue(self.contains(fitted,(-.15,0.,0.)),evidence)
+        self.assertTrue(self.contains(fitted,(.15,0.,0.)),evidence)
 
-    def test_both_ends_censored_are_excluded_for_each_original_endpoint_kind(self):
+    def test_observed_censored_ends_supply_normal_support_and_predicted_is_excluded(self):
         self.assertEqual(set(ENDPOINT_KINDS), set(PHYSICAL) | set(CENSORED))
-        for kind in CENSORED:
+        self.assert_excluded(self.strip(0,start='predicted',end='predicted'))
+        for kind in ('FOV_clip','occluded'):
             with self.subTest(endpoint=kind):
-                self.assert_excluded(self.strip(0, start=kind, end=kind))
+                strip=self.strip(0,start=kind,end=kind)
+                points,reference,fitted=self.result(self.graph((strip,),self.a),self.graph((strip,),self.b))
+                self.assertEqual(reference.feature_policy,'OBSERVED_STRIP_SUPPORT_V1')
+                self.assertTrue(points)
+                self.assertTrue(self.contains(fitted))
 
-    def test_mixed_censored_ends_and_one_censored_end_are_excluded_in_both_metric_paths(self):
+    def test_any_predicted_end_is_excluded_in_both_metric_paths(self):
         for start, end in itertools.product(sorted(ENDPOINT_KINDS), repeat=2):
-            if start not in CENSORED and end not in CENSORED:
+            if 'predicted' not in (start,end):
                 continue
             with self.subTest(start=start, end=end):
                 self.assert_excluded(self.strip(0, start=start, end=end))
@@ -125,7 +137,7 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
                 self.assertTrue(fitted.complete, evidence)
                 self.assertTrue(self.contains(fitted), evidence)
 
-    def test_censored_lines_do_not_delete_or_vote_with_independent_real_finite_features(self):
+    def test_observed_corner_support_and_parallel_lines_preserve_true_translation(self):
         clipped = tuple(self.strip(number, y=y) for number, y in enumerate((-.3, 0., .3)))
         finite = (self.strip(3, start='physical_junction', end='observed_paint_end',
             points=((.2, .6), (.8, .6))),
@@ -136,11 +148,41 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         points, reference, fitted = self.result(self.graph(clipped + finite, self.a),
             self.graph(clipped + shifted, self.b))
         evidence = self.evidence(points, reference, fitted)
-        self.assertEqual({point.component for point in points}, {'strip:3', 'strip:4'}, evidence)
-        self.assertEqual({segment.component for segment in reference.segments}, {'strip:3', 'strip:4'}, evidence)
-        self.assertEqual(fitted.status, 'BOUNDED', evidence)
+        self.assertTrue(points,evidence)
+        self.assertEqual(len(reference.segments),5,evidence)
+        self.assertIn(fitted.status, ('BOUNDED','AMBIGUOUS_OR_UNOBSERVABLE'), evidence)
         self.assertTrue(fitted.complete, evidence)
         self.assertTrue(self.contains(fitted), evidence)
+
+    def test_current_capture_cannot_validate_its_own_support(self):
+        graph=self.graph((self.strip(0),),self.a)
+        reference=self.reference(graph)
+        points=self.pipeline._features(graph,'capture-A')
+        shared=overlapping_points(points,reference,self.prior,self.profile,lateral_m=.1425)
+        with self.assertRaises(ValueError):
+            register(shared,reference,self.prior,self.profile,calibration_id=self.calibration.sha256)
+
+    def test_points_past_observed_support_cannot_gain_a_normal_constraint(self):
+        reference=self.reference(self.graph((self.strip(0),),self.a))
+        graph=self.graph((self.strip(0,points=((1.4,0.),(2.4,0.))),),self.b)
+        shared=overlapping_points(self.features(graph),reference,self.prior,self.profile,lateral_m=.1425)
+        self.assertEqual(shared,())
+
+    def test_common_straight_support_reduces_yaw_without_narrowing_along_line(self):
+        original=self.strip(0,points=((.2,0.),(2.6,0.)))
+        angle=.02
+        current=replace(original,points_xy=tuple(
+            (x*math.cos(angle),-x*math.sin(angle)) for x,y in original.points_xy))
+        reference=self.reference(self.graph((original,),self.a))
+        prior=PoseBox((-.1,.1),(-.02,.02),(-.04,.04))
+        profile=replace(self.profile,residual_m=.001,cell_steps=(.01,.005,.0025),
+            max_position_error_m=.2,max_yaw_error_rad=.04)
+        shared=overlapping_points(self.features(self.graph((current,),self.b)),reference,prior,profile,lateral_m=.1425)
+        fitted=register(shared,reference,prior,profile,calibration_id=self.calibration.sha256)
+        self.assertTrue(fitted.complete)
+        self.assertLess(fitted.yaw_error_rad,.02)
+        self.assertTrue(self.contains(fitted,(-.1,0.,angle)))
+        self.assertTrue(self.contains(fitted,(.1,0.,angle)))
 
     def test_transverse_start_line_is_novel_but_an_overlapping_shifted_lane_is_compared(self):
         finite = dict(start='observed_paint_end', end='observed_paint_end')

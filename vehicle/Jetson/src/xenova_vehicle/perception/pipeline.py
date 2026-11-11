@@ -34,6 +34,12 @@ def _physical_registration_strip(strip):
     return strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
 
 
+def _observed_registration_strip(strip):
+    ends=('physical_junction','observed_paint_end','FOV_clip','occluded')
+    return (strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+            and math.dist(strip.points_xy[0],strip.points_xy[-1])>1e-9)
+
+
 def _inside(point, polygon):
     if not polygon:
         return False
@@ -211,31 +217,56 @@ class PerceptionPipeline:
         from .occlusion import box_occlusion
         return box_occlusion(() if evidence is None else evidence.hit_boxes,self.calibration.rgb)
 
+    def _uses_observed_support(self, graph):
+        return (self.reference is not None and self.reference.feature_policy=='OBSERVED_STRIP_SUPPORT_V1'
+                or self._alignment is not None and graph is not None and any(_observed_registration_strip(s)
+                    and not _physical_registration_strip(s) for s in graph.strips))
+
     def _features(self, graph, capture):
         points=[]
+        support = self._uses_observed_support(graph)
         if graph is not None:
             for strip in graph.strips:
-                if not _physical_registration_strip(strip):
+                if not (_observed_registration_strip(strip) if support else _physical_registration_strip(strip)):
                     continue
                 # 각 component에 같은 수의 sample을 둔다. 긴 선을 독립 관측으로 늘리지 않는다.
-                for index in sorted({len(strip.points_xy)//3,2*len(strip.points_xy)//3}):
-                    points.append(PointFeature(strip.points_xy[index],strip.error_m,'strip:'+str(strip.local_id),capture))
+                normal_only=not _physical_registration_strip(strip)
+                if normal_only:
+                    from .road import _at
+                    length=strip.length_m
+                    samples=tuple(_at(strip.points_xy,length*fraction) for fraction in (1/3,2/3))
+                else:
+                    samples=tuple((strip.points_xy[index],None) for index in
+                        sorted({len(strip.points_xy)//3,2*len(strip.points_xy)//3}))
+                for point,index in samples:
+                    error_xy=(strip.segment_error_xy[index] if index is not None and strip.segment_error_xy else None)
+                    points.append(PointFeature(point,strip.error_m,'strip:'+str(strip.local_id),capture,
+                        error_xy=error_xy,normal_only=normal_only))
         return tuple(points)
 
     def _reference_from(self, graph, capture, pose, revision):
         p=pose.sample
         segments=[]
+        support = self._uses_observed_support(graph)
         for strip in graph.strips:
-            if not _physical_registration_strip(strip):
+            if not (_observed_registration_strip(strip) if support else _physical_registration_strip(strip)):
                 continue
             a,b=strip.points_xy[0],strip.points_xy[-1]
             curve_error=max(segment_distance(v,a,b) for v in strip.points_xy)
             radius=max(math.hypot(*v) for v in strip.points_xy)
-            error=strip.error_m+curve_error+p.position_error_m+2*radius*math.sin(min(math.pi,p.yaw_error_rad)/2)
+            pose_error=p.position_error_m+2*radius*math.sin(min(math.pi,p.yaw_error_rad)/2)
+            error=strip.error_m+curve_error+pose_error
+            support_error=None
+            finite=_physical_registration_strip(strip)
+            if support and not finite and strip.segment_error_xy:
+                length=math.dist(a,b);nx,ny=(b[1]-a[1])/length,(a[0]-b[0])/length
+                error=max(abs(nx)*ex+abs(ny)*ey for ex,ey in strip.segment_error_xy)+curve_error+pose_error
+                support_error=max(error,strip.error_m+curve_error+pose_error,
+                    max(math.hypot(*e) for e in strip.segment_error_xy)+curve_error+pose_error)
             segments.append(SegmentFeature(transform_point(a,(p.x,p.y,p.yaw)),transform_point(b,(p.x,p.y,p.yaw)),
-                error,'strip:'+str(strip.local_id),capture))
+                error,(capture+':' if support else '')+'strip:'+str(strip.local_id),capture,support_error,finite))
         return FrozenReference(revision,self.calibration.sha256,tuple(segments),
-            feature_policy='PHYSICAL_STRIP_ENDPOINTS_V1')
+            feature_policy='OBSERVED_STRIP_SUPPORT_V1' if support else 'PHYSICAL_STRIP_ENDPOINTS_V1')
 
     def _extend_reference(self, graph, capture, pose):
         previous = self.reference
@@ -247,7 +278,15 @@ class PerceptionPipeline:
         retained = tuple(old for old in previous.segments if not any(
             new.error_m <= old.error_m and segment_distance(old.a, new.a, new.b) <= tolerance
             and segment_distance(old.b, new.a, new.b) <= tolerance for new in current.segments))
-        return replace(current, segments=(*retained, *current.segments)[-64:], shared_error_m=previous.shared_error_m)
+        if current.feature_policy=='OBSERVED_STRIP_SUPPORT_V1':
+            retained=tuple(replace(old,component=old.capture_id+':'+old.component)
+                if not old.component.startswith(old.capture_id+':') else old for old in retained if old.a!=old.b)
+        segments=(*retained,*current.segments)
+        if current.feature_policy=='OBSERVED_STRIP_SUPPORT_V1':
+            finite=tuple(s for s in segments if s.finite_endpoints)
+            normal=tuple(s for s in segments if not s.finite_endpoints)
+            segments=finite[-32:]+normal[-32:]
+        return replace(current, segments=segments[-64:], shared_error_m=previous.shared_error_m)
 
     def _propagate_odometry(self, raw):
         alignment = self._alignment
@@ -431,10 +470,12 @@ class PerceptionPipeline:
             if type(stage_us) is not int or not now_us<=stage_us<2**64:raise ValueError('registration clock must follow original processing time')
             now_us=stage_us
         registration=None
+        registration_method=None
+        normal_points=0
         geometry_qualified=(self.calibration.metric_qualified and self.calibration.time_qualified
                             and observation.capture_interval is not None)
         unqualified_reference=(self.reference is not None
-            and self.reference.feature_policy!='PHYSICAL_STRIP_ENDPOINTS_V1')
+            and self.reference.feature_policy not in ('PHYSICAL_STRIP_ENDPOINTS_V1','OBSERVED_STRIP_SUPPORT_V1'))
         # 옛 유한 segment의 끝점 의미를 새 영상으로 소급 승인하거나 같은 map을 재seed하지 않는다.
         quarantined=(unqualified_reference or alignment_invalid or missing_map_pose
                      or pose is not None and not geometry_qualified)
@@ -444,10 +485,28 @@ class PerceptionPipeline:
             if points and self.reference is not None and self.reference.segments and not unqualified_reference:
                 prior = registration_pose.prior
                 profile = self.profile.registration
-                common = overlapping_points(points, self.reference, prior, profile,
+                reference = self.reference
+                if self._uses_observed_support(self._last_tape) and reference.feature_policy!='OBSERVED_STRIP_SUPPORT_V1':
+                    reference = replace(reference,feature_policy='OBSERVED_STRIP_SUPPORT_V1',
+                        segments=tuple(replace(s,component=s.capture_id+':'+s.component)
+                            for s in reference.segments if s.a!=s.b))
+                common = overlapping_points(points, reference, prior, profile,
                     lateral_m=self.profile.road.missing_outer_width_m / 2)
                 if common:
-                    registration = register(common, self.reference, prior, profile, calibration_id=self.calibration.sha256)
+                    physical=tuple(p for p in common if not p.normal_only)
+                    normal_points=len(common)-len(physical)
+                    registration_method='PHYSICAL' if physical else 'NORMAL'
+                    registration=register(physical or common,reference,prior,profile,calibration_id=self.calibration.sha256)
+                    cells=profile.max_cells-registration.tested_cells
+                    tests=profile.max_distance_tests-registration.distance_tests
+                    if (physical and len(physical)!=len(common) and registration.status not in ('BOUNDED','INCONSISTENT')
+                            and cells>0 and tests>0):
+                        normal=register(common,reference,prior,replace(profile,max_cells=cells,max_distance_tests=tests),
+                            calibration_id=self.calibration.sha256)
+                        selected=normal if normal.status=='BOUNDED' else registration
+                        if selected is normal:registration_method='MIXED'
+                        registration=replace(selected,tested_cells=registration.tested_cells+normal.tested_cells,
+                            distance_tests=registration.distance_tests+normal.distance_tests)
                 else:
                     registration = RegistrationResult('NO_OVERLAP', None, None, None, (prior,),
                                                       self.reference.revision, 0, 0, True)
@@ -470,7 +529,7 @@ class PerceptionPipeline:
                         pose=candidate_pose;self._alignment=candidate_alignment;self._restore_pending=False
                         if self._propagation_anchor is None:self._propagation_anchor=candidate_alignment
                         quarantined=False
-                elif registration.status != 'NO_OVERLAP':
+                elif registration.status != 'NO_OVERLAP' and any(not p.normal_only for p in common):
                     estimate = (pose.sample.x, pose.sample.y, pose.sample.yaw)
                     # 약한 관측은 위치를 보정하지 않는다. 기존 자세와 모순되면 격리한다.
                     if (registration.status != 'AMBIGUOUS_OR_UNOBSERVABLE'
@@ -767,6 +826,7 @@ class PerceptionPipeline:
                 and geometry_qualified and alignment_current(now_us) and not quarantined),
             quarantined=quarantined,
             registration_status=None if registration is None else registration.status,
+            registration_method=registration_method,registration_normal_points=normal_points,
             reference_revision=None if self.reference is None else self.reference.revision,
             geometric_model_qualified=bool(geometry_qualified),metric_ready=False,world_valid=False,live_authority=False,
             costs_us=dict(input=(input_done-started)//1000,depth=(depth_done-input_done)//1000,

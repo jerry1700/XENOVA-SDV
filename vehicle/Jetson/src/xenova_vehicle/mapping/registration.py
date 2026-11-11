@@ -6,7 +6,7 @@ result17의 중심거리 하한에서 translation/yaw 이동·관측/지도 오�
 """
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 
@@ -49,6 +49,8 @@ class PointFeature:
     component: str
     capture_id: str
     compatible: tuple[str, ...] = ()
+    error_xy: tuple[float, float] | None = None
+    normal_only: bool = False
 
     def __post_init__(self):
         _point(self.point)
@@ -56,6 +58,10 @@ class PointFeature:
             raise ValueError('negative point error')
         if not self.component or not self.capture_id or type(self.compatible) is not tuple:
             raise ValueError('feature requires component/source identity')
+        if self.error_xy is not None and any(v < 0 for v in _point(self.error_xy)):
+            raise ValueError('negative axis-wise point error')
+        if type(self.normal_only) is not bool:
+            raise ValueError('explicit point constraint kind required')
 
 
 @dataclass(frozen=True)
@@ -65,12 +71,18 @@ class SegmentFeature:
     error_m: float
     component: str
     capture_id: str
+    support_error_m: float | None = None
+    finite_endpoints: bool = True
 
     def __post_init__(self):
         _point(self.a)
         _point(self.b)
         if _number(self.error_m, 'segment error') < 0 or not self.component or not self.capture_id:
             raise ValueError('invalid segment error/source identity')
+        if self.support_error_m is not None and _number(self.support_error_m,'support error') < self.error_m:
+            raise ValueError('support error must enclose normal error')
+        if type(self.finite_endpoints) is not bool:
+            raise ValueError('explicit segment endpoint meaning required')
 
 
 @dataclass(frozen=True)
@@ -95,8 +107,13 @@ class FrozenReference:
         if _number(self.shared_error_m, 'shared error') < 0:
             raise ValueError('negative inherited error')
         if (type(self.feature_policy) is not str
-                or self.feature_policy not in ('UNSPECIFIED', 'PHYSICAL_STRIP_ENDPOINTS_V1')):
+                or self.feature_policy not in ('UNSPECIFIED', 'PHYSICAL_STRIP_ENDPOINTS_V1', 'OBSERVED_STRIP_SUPPORT_V1')):
             raise ValueError('unknown reference feature policy')
+        if self.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1':
+            if any(s.a == s.b for s in self.segments):
+                raise ValueError('observed support requires nonzero segments')
+        elif any(not s.finite_endpoints or s.support_error_m is not None for s in self.segments):
+            raise ValueError('censored support requires its original feature policy')
 
 
 @dataclass(frozen=True)
@@ -177,7 +194,6 @@ class RegistrationResult:
     distance_tests: int
     complete: bool
 
-
     def permits(self, pose):
         """완료된 탐색에서 기존 위치가 배제되지 않았는지 확인한다."""
         return self.complete and any(
@@ -214,20 +230,28 @@ def overlapping_points(points, reference, prior, profile, *, lateral_m):
     for point in points:
         x, y = transform_point(point.point, center)
         direction = directions.get(point.component)
-        uncertainty = (translation + rotation * math.hypot(*point.point) + point.error_m
+        point_error=point.error_m if point.error_xy is None else max(point.error_m,math.hypot(*point.error_xy))
+        uncertainty = (translation + rotation * math.hypot(*point.point) + point_error
                        + reference.shared_error_m + profile.residual_m + profile.numeric_guard_m)
+        compatible = []
         for segment, ux, uy, length in segments:
+            if not point.normal_only and not segment.finite_endpoints:
+                continue
             if point.compatible and segment.component not in point.compatible:
                 continue
             # 횡단 표식과 차로 테이프의 가까운 투영을 같은 관측 구간으로 세지 않는다.
             if direction is not None and abs(ux*direction[0] + uy*direction[1]) < direction[2]:
                 continue
             dx, dy = x - segment.a[0], y - segment.a[1]
-            pad = uncertainty + segment.error_m
+            pad = uncertainty + (segment.error_m if segment.support_error_m is None else segment.support_error_m)
             station = dx * ux + dy * uy
-            if -pad <= station <= length + pad and abs(dx * uy - dy * ux) <= lateral_m + pad:
-                observed.append(point)
-                break
+            supported = (pad <= station <= length - pad if point.normal_only
+                         else -pad <= station <= length + pad)
+            if supported and abs(dx * uy - dy * ux) <= lateral_m + pad:
+                compatible.append(segment.component)
+        if compatible:
+            observed.append(replace(point, compatible=tuple(compatible))
+                if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1' else point)
     return tuple(observed)
 
 
@@ -243,18 +267,27 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     if (type(points) is not tuple or not 1 <= len(points) <= 64
             or any(type(p) is not PointFeature for p in points)):
         raise ValueError('registration requires 1..64 point features')
+    if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1' and any(not p.compatible for p in points):
+        raise ValueError('normal constraints require original common-support associations')
+    if any(p.normal_only for p in points) and reference.feature_policy != 'OBSERVED_STRIP_SUPPORT_V1':
+        raise ValueError('normal constraints require an observed-support reference')
     captures = {p.capture_id for p in points}
     if any(s.capture_id in captures for s in reference.segments):
         raise ValueError('current capture cannot validate itself against the reference')
     if not reference.segments:
         return RegistrationResult('NO_REFERENCE', None, None, None, (prior,), reference.revision, 0, 0, False)
-    compatible = [tuple(s for s in reference.segments if not p.compatible or s.component in p.compatible)
-                  for p in points]
+    compatible = [tuple(s for s in reference.segments if (p.normal_only or s.finite_endpoints)
+                       and (not p.compatible or s.component in p.compatible)) for p in points]
     missing_components = {p.component for p, value in zip(points, compatible) if not value}
     if len(missing_components) > profile.outlier_components:
         return RegistrationResult('INCONSISTENT', None, None, None, (), reference.revision, 0, 0, True)
     if len({p.component for p in points}) <= profile.outlier_components:
         return RegistrationResult('UNOBSERVABLE', None, None, None, (prior,), reference.revision, 0, 0, True)
+    normals = {}
+    if any(p.normal_only for p in points):
+        for segment in reference.segments:
+            length=math.dist(segment.a,segment.b)
+            normals[segment]=((segment.b[1]-segment.a[1])/length,(segment.a[0]-segment.b[0])/length)
     pending, leaves = deque((prior,)), []
     tested = distance_tests = 0
     candidates = []
@@ -270,6 +303,8 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
         center = cell.center
         ex, ey, etheta = (w / 2 for w in cell.widths)
         translation = math.hypot(ex, ey)
+        rotation=2*math.sin(etheta/2)
+        cosine,sine=math.cos(center[2]),math.sin(center[2])
         violations, nominal_violations, costs = set(), set(), {}
         for point, segments in zip(points, compatible):
             if not segments:
@@ -278,15 +313,29 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
                 costs.setdefault(point.component, []).append(.25)
                 continue
             location = transform_point(point.point, center)
-            distances = [segment_distance(location, s.a, s.b) for s in segments]
+            if point.normal_only:
+                distances, errors, motions = [], [], []
+                point_rotation=math.hypot(*point.point)*rotation
+                for s in segments:
+                    nx,ny=normals[s]
+                    distances.append(abs((location[0]-s.a[0])*nx+(location[1]-s.a[1])*ny))
+                    bx,by=cosine*nx+sine*ny,-sine*nx+cosine*ny
+                    axis_error=(point.error_m if point.error_xy is None else
+                        abs(bx)*point.error_xy[0]+abs(by)*point.error_xy[1]
+                        +math.hypot(*point.error_xy)*rotation)
+                    errors.append(axis_error)
+                    motions.append(abs(nx)*ex+abs(ny)*ey+point_rotation)
+            else:
+                distances = [segment_distance(location, s.a, s.b) for s in segments]
+                errors=[point.error_m]*len(segments)
+                motions=[translation+math.hypot(*point.point)*rotation]*len(segments)
             distance_tests += len(segments)
             # 연속 yaw 구간의 이동 상한을 사용한다.
-            motion = translation + 2 * math.hypot(*point.point) * math.sin(etheta / 2)
-            lower = min(max(0., d - motion - point.error_m - s.error_m
+            lower = min(max(0., d - motion - error - s.error_m
                             - reference.shared_error_m - profile.numeric_guard_m)
-                        for d, s in zip(distances, segments))
-            nominal = min(max(0., d - point.error_m - s.error_m - reference.shared_error_m)
-                          for d, s in zip(distances, segments))
+                        for d, s, error, motion in zip(distances, segments, errors, motions))
+            nominal = min(max(0., d - error - s.error_m - reference.shared_error_m)
+                          for d, s, error in zip(distances, segments, errors))
             if lower > profile.residual_m:
                 violations.add(point.component)
             if nominal > profile.residual_m + profile.numeric_guard_m:
@@ -315,7 +364,12 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     # 최종 F에 포함된 후보만 쓴다. 배제된 조상 cell의 후보를 자동 채택하지 않는다.
     def inside(pose):
         return any(all(lo <= v <= hi for v, (lo, hi) in zip(pose, (b.x, b.y, b.yaw))) for b in feasible)
-    representative = next((c for c in sorted(candidates) if inside(c[1])), None)
+    if any(p.normal_only for p in points):
+        origin = prior.center
+        candidates.sort(key=lambda c: (sum((a-b)**2 for a,b in zip(c[1],origin)), c[0], c[1]))
+    else:
+        candidates.sort()
+    representative = next((c for c in candidates if inside(c[1])), None)
     if representative is None:
         return RegistrationResult('UNKNOWN_BUDGET' if exhausted else 'UNRESOLVED', None, None, None,
                                   feasible, reference.revision, tested, distance_tests, not exhausted)

@@ -1,25 +1,26 @@
-# 영상 정합 reference의 끝점 정책
+# 영상 정합 reference의 끝점과 공통 관측 구간
 
-`FrozenReference.feature_policy`는 유한 segment를 생산한 규칙이다. 현재 pipeline은
-`PHYSICAL_STRIP_ENDPOINTS_V1`을 생산한다. 일반 `register()`나 LaneCatalog의
-독립 feature 계약에 공통으로 적용하는 승인 표시는 아니다.
+`FrozenReference.feature_policy`는 관측 segment가 어떤 근거로 생성되었는지 기록한다.
+초기 정합의 `PHYSICAL_STRIP_ENDPOINTS_V1`은 실제 양끝이 확인된 조각을 사용한다.
+지도와 오도메트리 사이의 초기 정합이 확보되면 화면이나 가림 경계에 잘린 실제 관측도
+`OBSERVED_STRIP_SUPPORT_V1`의 구간 근거로 저장할 수 있다.
 
 ## 현재 영상에서 사용하는 근거
 
-`PerceptionPipeline`의 current feature와 다음 frozen reference는 같은 조건을 쓴다.
-실제 관측한 열린 strip이며, 양끝이 `physical_junction` 또는 `observed_paint_end`일 때만
-유한 segment로 사용한다. `FOV_clip`, `occluded`, `predicted`, 닫힌 strip은 제외한다.
+실제 관측한 열린 strip의 양끝이 `physical_junction` 또는 `observed_paint_end`이면
+유한 segment 정합에 사용할 수 있다. `FOV_clip`이나 `occluded`가 한쪽이라도 있으면
+겹치는 관측 구간의 법선 거리만 검사한다. `predicted`, 미관측 조각, 닫힌 strip은 제외한다.
 
-화면 경계에서 잘린 끝은 도색의 실제 끝이 아니다. 두 영상에 같은 화면 경계가
-나타나더라도 이를 같은 물리 끝으로 정합하면 전진 이동을 부당하게 배제할 수 있다.
-반대로 물리 끝의 관측이 유지되면 기존 유한 feature 정합을 계속 사용한다.
+잘린 strip에서는 안쪽의 두 점을 선택한다. 오도메트리의 위치·방향 범위와 원 관측
+오차를 반영한 뒤에도 이전에 본 구간에 들어오는 점만 검사한다. 법선 방향으로 투영한
+관측·이동 오차를 비교하며, 직선의 진행 방향은 기존 오도메트리 범위를 보존한다.
+서로 다른 방향의 관측 구간이 확보되면 위치를 두 축에서 검증할 수 있다.
 
-이번 영상에 해당 feature가 없다는 사실만으로 기존 유효 alignment를 폐기하지 않는다.
-원 수명·오차·문맥 검사는 그대로 적용하며, 새 근거가 없으면 정합 수명을 갱신하지 않는다.
-잔차·오차 상한·작업량·시계·원 만료 시각을 이 정책으로 바꾸지 않는다.
-
-같은 지도에 여러 관측의 유한 조각을 최대 64개 보관한다. 방향과 종방향 범위가
-겹치는 관측을 비교하며, 비교할 조각이 없으면 `NO_OVERLAP`으로 기록한다.
+같은 지도에서 여러 원 관측을 최대 64개 보관한다. 구간 정책에서는 물리 끝이 있는 조각과
+잘린 조각을 각각 최대 32개 보관한다. 실제 끝점 정합을 먼저 수행하고, 보완 탐색이 필요한
+경우 같은 작업량 상한 안에서 법선 제약을 추가한다. 법선 후보만으로 수락할 수 없는
+프레임은 기존 오도메트리의 오차 판정을 따른다. `NO_OVERLAP`은 현재 영상에 이전
+지도와 비교할 구간이 없음을 뜻한다.
 
 ## 위치 추정과 정합 유효기간
 
@@ -39,18 +40,14 @@ HIL의 정합 유효기간 0.5초는 원 영상 정합에 근거한 World·FREE�
 
 ## 저장과 이전 기록
 
-mapper state는 reference와 함께 정책을 저장한다. 복원 시 네 필드로 된 이전 reference는
-`UNSPECIFIED`로 읽는다. 다섯 필드의 새 형식은 명시한 정책을 보존하며, 알 수 없는 정책이나
-추가 reference 필드는 거절한다. 좌표나 component 이름으로 과거 끝점 의미를 추정하지 않는다.
+mapper state는 reference와 함께 정책을 저장한다. 구간 segment는 관측 범위의 오차와
+실제 끝점 여부를 보존한다. 이전 segment는 원래의 유한 segment 의미를 그대로 읽는다.
+정책 필드가 없는 이전 reference는 `UNSPECIFIED`로 읽는다. 알 수 없는 정책과 필드는 거절한다.
 
 원 지도와 odometry 사이의 변환이 필요한 nonidentity 기록은, 정책이 없는 reference로
 재정합을 시작하지 않는다. 완전한 원 기록은 보존하고 새 pipeline 설치 전에 NOT_READY를
 반환한다. 원 좌표계가 identity인 이전 기록은 UNSPECIFIED를 유지해 읽되, 그 reference가
 남아 있는 metric 처리 경로를 격리한다. reference를 지우고 같은 map epoch를 다시 seed하지 않는다.
 
-## 남는 범위
-
-이 정책은 잘린 끝을 유한 물리 끝으로 쓰지 않는 보수적인 제한이다. 화면 밖으로 이어지는
-긴 도로의 모든 정보를 사용하는 방법까지 구현한 것은 아니다. 그런 구간은 실제 공통 관측
-범위와 선의 normal 제약을 별도로 다뤄야 한다. 유한 끝이 부족하다는 이유로 UNKNOWN을 FREE로
-바꾸거나 위치 오차를 임의로 줄여서는 안 된다. 실물 보정·odometry·주행 수락은 별도 근거가 필요하다.
+짧은 공통 구간이나 관측 오차가 큰 선은 방향 오차를 충분히 줄이지 못할 수 있다.
+새 정합은 원 영상 시각과 원 관측 근거로 기록하고, 기존 위치·방향 및 World 수락 조건을 적용한다.
