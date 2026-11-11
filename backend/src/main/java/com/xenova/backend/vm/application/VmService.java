@@ -5,6 +5,7 @@ import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
 import com.xenova.backend.template.application.TemplateCatalog;
+import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.vm.domain.CreateVmCommand;
 import com.xenova.backend.vm.domain.Vm;
@@ -18,6 +19,7 @@ import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -93,10 +95,18 @@ public class VmService {
         Map<String, VmRuntime> runtimes = snapshot.runtimes();
         List<Vm> vms = vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED)
                 .stream()
+                .sorted(LIST_ORDER)
                 .map(record -> Vm.of(record, runtimes.get(record.getVmId())))
                 .toList();
         return new VmList(vms, snapshot.observedAt());
     }
+
+    // Screens show VMs in this order whatever filled the table: primary, backup, interaction, then VMs without a role,
+    // drive (Zephyr) guests before Linux among those. The stable sort keeps creation order within each group, so a VM
+    // the board registry sync discovered (created_at = discovery time) does not jump ahead of the drive VMs.
+    private static final Comparator<VmRecord> LIST_ORDER = Comparator
+            .comparingInt((VmRecord record) -> record.getRole() == null ? VmRole.values().length : record.getRole().ordinal())
+            .thenComparingInt(record -> record.getGuestKind() == GuestKind.ZEPHYR ? 0 : 1);
 
     // The role is a console label only: no dom0-manager call, no event, and the VM keeps running as it is.
     public Vm updateRole(String vmId, VmRole role) {
