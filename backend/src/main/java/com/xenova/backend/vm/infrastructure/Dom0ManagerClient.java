@@ -7,6 +7,7 @@ import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmRegistrationInventory;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
 import com.xenova.backend.vm.domain.VmRuntime;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -145,6 +146,17 @@ public class Dom0ManagerClient implements VmControlPort {
                 .retrieve()
                 .onStatus(status -> status.isError(), this::handleError)
                 .body(VmControlOperation.class)));
+    }
+
+    @Override
+    public VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey) {
+        return requireBody(executeCommand(() -> commandClient.put()
+                .uri("/api/v1/vms/{vmId}/resources", vmId)
+                .header("Idempotency-Key", requestKey)
+                .body(new Dom0ResourceUpdateRequest(vcpus, memoryMib))
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(VmResourceUpdate.class)));
     }
 
     @Override
