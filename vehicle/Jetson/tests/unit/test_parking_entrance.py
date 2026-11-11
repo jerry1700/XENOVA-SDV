@@ -1,8 +1,10 @@
 """공유 테이프에 붙은 주차 입구를 관측 순서대로 확인한다."""
 
 import unittest
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from xenova_vehicle.mapping.odometry import PoseEstimate, PoseSample
 from xenova_vehicle.perception.parking_entrance import entrance_summary, observe_entrances
@@ -29,6 +31,20 @@ def observe(owner, sequence, x, walls=()):
 
 
 class ParkingEntranceTests(unittest.TestCase):
+    def test_control_road_map_skips_entrance_diagnostics_across_copy_and_clear(self):
+        control = deepcopy(TemporalRoadMap(parking_entrance_diagnostics=False))
+        control.clear()
+        diagnostic = TemporalRoadMap()
+        for index in range(1, 5):
+            observe(diagnostic, index, .05*index, walls=(.65,.95))
+        self.assertTrue(diagnostic.parking_branches)
+        with patch('xenova_vehicle.perception.temporal_road.observe_entrances') as entrances:
+            for index in range(1, 5):
+                observe(control, index, .05*index, walls=(.65,.95))
+        entrances.assert_not_called()
+        self.assertEqual(control.links, diagnostic.links)
+        self.assertEqual(control.parking_branches, ())
+
     def test_partial_sightings_merge_in_map_without_promoting_a_single_branch(self):
         owner = TemporalRoadMap()
         observe(owner,1,0.)

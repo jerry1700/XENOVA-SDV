@@ -74,7 +74,8 @@ class PcMapperCore:
         self.motion_profile,self.profile,self.binding,self.context,self.storage=motion_profile,mapper_profile,binding,context,storage
         self.calibration,self.clock,self._source_bytes=motion_profile.bound_calibration,clock,source_bytes
         self._pc_owner_token=pc_owner_token;self._thread=get_ident()
-        self._pipeline=PerceptionPipeline(self.calibration,mapper_profile.pipeline,targets=mapper_profile.targets)
+        self._pipeline=PerceptionPipeline(self.calibration,mapper_profile.pipeline,targets=mapper_profile.targets,
+                                          parking_entrance_diagnostics=False)
         self._staged=self._retired=None;self._terminal_token=None;self._world_sequence=0
 
     def _owner(self):

@@ -140,7 +140,8 @@ class MapEvidenceUpdate:
 class PerceptionPipeline:
     """단일 M 또는 offline runner 소유. 원본 1개와 유한 grid/reference만 유지한다."""
 
-    def __init__(self, calibration, profile=None, *, targets=(),rolling_policy=None):
+    def __init__(self, calibration, profile=None, *, targets=(),rolling_policy=None,
+                 parking_entrance_diagnostics=True):
         from .calibration import CalibrationProfile
         if type(calibration) is not CalibrationProfile:
             raise ValueError('pipeline requires CalibrationProfile')
@@ -166,7 +167,7 @@ class PerceptionPipeline:
         self._domain_cache = None
         self._last_tape = self._last_road = self._last_rgb = None
         self._current_lane = None
-        self._temporal_road = TemporalRoadMap()
+        self._temporal_road = TemporalRoadMap(parking_entrance_diagnostics=parking_entrance_diagnostics)
         self._last_neural = None
         self._last_rgb_key = self._last_capture = self._last_now = self._last_clock = None
         self._free_cursor = 0
