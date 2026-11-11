@@ -44,7 +44,9 @@ describe('DisplayAudio', () => {
     render(<Player />);
     const audio = AudioFake.latest!;
 
-    expect(audio.src).toBe('/audio/interaction-theme.mp3');
+    // 빌드 결과 /assets/ 아래로 나가도록 import한 파일을 써야 한다(public/ 고정 경로 금지).
+    expect(audio.src).toMatch(/interaction-theme(-[\w-]+)?\.mp3$/);
+    expect(audio.src).not.toMatch(/^\/audio\//);
     expect(audio.loop).toBe(true);
     expect(audio.volume).toBe(0.55);
     expect(audio.load).toHaveBeenCalledOnce();
