@@ -1,4 +1,4 @@
-"""feedback-3 프레임과 세션·시각·표본 payload 의 PC 쪽 구현, 그리고 시험 대상과 바이트를 주고받는 통로.
+"""feedback-3 프레임과 세션·시각·표본·명령 payload 의 PC 쪽 구현, 그리고 시험 대상과 바이트를 주고받는 통로.
 
 펌웨어 점검 도구(link_bench.py, cutoff_stress.py, pi_link_check.py)가 쓴다. 표준 라이브러리만 쓰며
 시리얼 포트를 열 때만 pyserial 이 필요하다. 계약 docs/contracts/gateway-feedback-3.md §2·§3·§7.
@@ -13,6 +13,7 @@ import time
 HELLO, HELLO_ACK = 0x0f00, 0x0f01
 CLOCK_PROBE, CLOCK_REPLY, CLOCK_INSTALL, CLOCK_ACK = 0x0f10, 0x0f11, 0x0f12, 0x0f13
 SENSOR = 0x0f15
+COMMAND, REPORT = 0x0111, 0x0f14
 HELLO3 = struct.Struct('<B16s32s')
 ACK3 = struct.Struct('<B16s16sH32s32sB')
 PROBE3 = struct.Struct('<16s16sQQ')
@@ -20,6 +21,9 @@ CLOCK3 = struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3 = struct.Struct('<16s16s16sQQQqqQQ')
 CLOCK_ACK3 = struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3 = struct.Struct('<16s16sQQqqBiH16sQ')
+COMMAND3 = struct.Struct('<16s16sQ16sQQQQIBBQhhBB')
+REPORT3 = struct.Struct('<16s16sQIBBBQQQBiiB16sQQQH')
+BAUD = 460800  # 펌웨어의 XENOVA_SERIAL_BAUD 와 같은 개발용 기본값
 REQUIRED_CAPS = 0x01f7  # Pi 가 ready 로 받는 최소 capability
 MAX_FRAME = 256
 REASONS = (
@@ -149,7 +153,7 @@ class Simulator:
 class SerialPort:
     """실보드의 USB 시리얼."""
 
-    def __init__(self, port, baudrate=115200, boot_wait=2.0):
+    def __init__(self, port, baudrate=BAUD, boot_wait=2.0):
         import serial
         self._serial = serial.Serial()
         self._serial.port = port
@@ -188,7 +192,7 @@ def add_device_arguments(parser):
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument('--sim', metavar='실행파일', help='호스트로 빌드한 sim_link')
     target.add_argument('--port', help='실보드 시리얼 포트 (예: COM8, /dev/ttyUSB0)')
-    parser.add_argument('--baud', type=int, default=115200)
+    parser.add_argument('--baud', type=int, default=BAUD, help=f'시리얼 속도 (기본 {BAUD})')
     parser.add_argument('--ticks-per-second', type=int, default=0,
                         help='시뮬레이터의 양쪽 엔코더가 도는 속도 (기본 0, 멈춰 있음)')
 

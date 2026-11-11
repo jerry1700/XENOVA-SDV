@@ -1,8 +1,9 @@
 #include "cutoff.h"
 
-/* 타이머를 믿을 수 없으면 남은 기한도 지킬 수 없다 */
+/* 타이머를 믿을 수 없으면 남은 기한도 지킬 수 없다. 출력부터 끊는다 */
 static void fail(struct fb3_cutoff *c)
 {
+	c->port.cut(c->port.ctx);
 	c->fault = true;
 	for (unsigned i = 0; i < FB3_CUTOFF_SLOTS; i++) {
 		if (c->slot[i].state == FB3_CUTOFF_LIVE) {
@@ -54,6 +55,9 @@ static void service(struct fb3_cutoff *c)
 					pending = true;
 				}
 			} else if (now - slot->at_us <= FB3_CUTOFF_LATE_US) {
+				if (i == FB3_CUTOFF_OUTPUT) {
+					c->port.cut(c->port.ctx);
+				}
 				slot->state = FB3_CUTOFF_EXPIRED;
 				c->expired++;
 			} else {
@@ -133,6 +137,58 @@ enum fb3_cutoff_state fb3_cutoff_query(struct fb3_cutoff *c, unsigned slot)
 	}
 	c->port.unlock(c->port.ctx);
 	return state;
+}
+
+enum fb3_cutoff_state fb3_cutoff_engage(struct fb3_cutoff *c, uint64_t at_us, uint64_t margin_us,
+					bool (*apply)(void *arg), void *arg)
+{
+	struct fb3_cutoff_slot *slot = &c->slot[FB3_CUTOFF_OUTPUT];
+	enum fb3_cutoff_state state;
+	uint64_t now;
+
+	c->port.lock(c->port.ctx);
+	now = audit(c);
+	if (c->fault) {
+		state = FB3_CUTOFF_FAULT;
+	} else if (at_us <= now || at_us - now <= margin_us) {
+		state = FB3_CUTOFF_EXPIRED;
+	} else {
+		slot->state = FB3_CUTOFF_LIVE;
+		slot->at_us = at_us;
+		service(c);
+		state = slot->state;
+		if (state == FB3_CUTOFF_LIVE && !apply(arg)) {
+			c->port.cut(c->port.ctx);
+			state = FB3_CUTOFF_FAULT;
+		}
+		if (state != FB3_CUTOFF_LIVE) {
+			slot->state = FB3_CUTOFF_IDLE;
+			service(c);
+		}
+	}
+	c->port.unlock(c->port.ctx);
+	return state;
+}
+
+void fb3_cutoff_cut(struct fb3_cutoff *c)
+{
+	c->port.lock(c->port.ctx);
+	c->port.cut(c->port.ctx);
+	audit(c);
+	c->slot[FB3_CUTOFF_OUTPUT].state = FB3_CUTOFF_IDLE;
+	service(c);
+	c->port.unlock(c->port.ctx);
+}
+
+bool fb3_cutoff_faulted(struct fb3_cutoff *c)
+{
+	bool fault;
+
+	c->port.lock(c->port.ctx);
+	audit(c);
+	fault = c->fault;
+	c->port.unlock(c->port.ctx);
+	return fault;
 }
 
 void fb3_cutoff_on_alarm(struct fb3_cutoff *c)

@@ -1,11 +1,14 @@
-"""PC 가 Pi 역할을 하며 펌웨어의 feedback-3 세션·시각 설치·주기 표본을 점검한다.
+"""PC 가 Pi 역할을 하며 펌웨어의 feedback-3 세션·시각 설치·주기 표본·명령을 점검한다.
 
 HELLO, CLOCK_PROBE, CLOCK_INSTALL 을 보내고 HELLO_ACK, CLOCK_REPLY, CLOCK_ACK 를 계약대로 받는지,
 lease 가 살아 있는 동안에만 SENSOR 가 20 ms 마다 오는지, 그 사이에 보낸 CLOCK_PROBE 의 응답과 표본 순번·간격이
-이어지는지, lease 가 기한에 만료되는지 본다.
-모터·서보는 움직이지 않는다.
+이어지는지, lease 가 기한에 만료되는지 본다. STOP 에 APPLIED 로 답하고 표본마다 REPORT 가 뒤따르는지도 본다.
+
+실보드에서는 --drive 를 주지 않으면 STOP 만 보내고 모터·서보는 움직이지 않는다. --drive 를 주면 DRIVE 를 보내
+바퀴가 0.2 m/s 로 80 ms 씩 앞뒤로 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다. 시뮬레이터에는 늘 DRIVE 까지 보낸다.
 
   실보드:            python link_bench.py --port COM8     (pyserial 필요, 다른 시리얼 창은 닫는다)
+  실보드, 바퀴 띄움: python link_bench.py --port COM8 --drive
   호스트 시뮬레이터: python link_bench.py --sim <빌드 폴더>/sim_link
 
 Pi Gateway 코드와의 연결은 pi_link_check.py 로 따로 본다.
@@ -18,9 +21,9 @@ import sys
 import time
 from uuid import UUID, uuid4
 
-from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, HELLO, HELLO3,
-                 HELLO_ACK, INSTALL3, PROBE3, REQUIRED_CAPS, SENSOR, SENSOR3, Peer, add_device_arguments, now_us,
-                 open_device, packet, reason_name)
+from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, COMMAND3,
+                 HELLO, HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, Peer,
+                 add_device_arguments, now_us, open_device, packet, reason_name)
 
 # CLOCK_INSTALL 을 Pi 와 같은 식으로 만들 때 쓰는 값. 실측값이 아니다
 TIMESTAMP_ERROR_US = 100
@@ -29,6 +32,11 @@ J_CUTOFF_US = 100
 INSTALLED, REJECTED = 1, 3
 SESSION_MISMATCH, SEQUENCE_REPLAY, IDEMPOTENCY_CONFLICT, CLOCK_UNAVAILABLE, CLOCK_EXPIRED = 3, 4, 5, 6, 7
 DEVICE_FAULT, TIMESTAMP_ORDER = 11, 17
+DRIVE, STOP, HOLD_STEER = 1, 2, 3                      # COMMAND command_kind
+APPLIED = 2                                            # REPORT status
+DIRECTION_STOP_REQUIRED, UNSUPPORTED_PROFILE = 10, 16  # REPORT reason
+DRIVE_MMPS = 200       # --drive 로 보내는 DRIVE 의 속도
+DRIVE_LIFE_US = 80000  # 그 DRIVE 의 기한까지 시간
 QUIET_S = 0.3  # 답이 없어야 할 때 기다리는 시간
 # 펌웨어가 표본 사이에 두는 간격 (link.h 의 FB3_SENSOR_PERIOD_US, FB3_SAMPLE_GAP_US)
 SENSOR_PERIOD_US = 20000
@@ -67,7 +75,8 @@ class Flow:
         self.peer = peer
         self.samples = []  # CLOCK_REPLY 와 SENSOR 의 표본, 받은 순서
         self.sensors = []  # SENSOR 필드 11개, 받은 순서
-        self.odd = 0       # 크기가 틀린 SENSOR
+        self.reports = []  # (REPORT 필드 19개, 그 REPORT 바로 앞에 받은 표본), 받은 순서
+        self.odd = 0       # 크기가 틀린 SENSOR·REPORT
 
     def _next(self, deadline):
         """다음 프레임. 표본을 실었으면 적어 둔다. deadline 까지 오지 않으면 None"""
@@ -82,18 +91,35 @@ class Flow:
                 self.samples.append(Sample(kind, fields[2], fields[3]))
             else:
                 self.odd += 1
+        elif kind == REPORT:
+            if len(payload) == REPORT3.size:
+                self.reports.append((REPORT3.unpack(payload), self.samples[-1] if self.samples else None))
+            else:
+                self.odd += 1
         elif kind == CLOCK_REPLY and len(payload) == CLOCK3.size:
             fields = CLOCK3.unpack(payload)
             self.samples.append(Sample(kind, fields[7], fields[5]))
         return frame
 
     def answer(self, timeout=1.0):
-        """SENSOR 가 아닌 다음 프레임을 (종류, payload, 받은 시각 us) 로. 시간 안에 오지 않으면 None"""
+        """SENSOR·REPORT 가 아닌 다음 프레임을 (종류, payload, 받은 시각 us) 로. 시간 안에 오지 않으면 None"""
         deadline = time.monotonic() + timeout
         while True:
             frame = self._next(deadline)
-            if frame is None or frame[0] != SENSOR:
+            if frame is None or frame[0] not in (SENSOR, REPORT):
                 return frame
+
+    def report(self, wanted, timeout=1.0):
+        """지금부터 받는 REPORT 가운데 wanted(필드) 가 참인 첫 것의 필드. 시간 안에 오지 않으면 None"""
+        deadline = time.monotonic() + timeout
+        seen = len(self.reports)
+        while True:
+            while seen < len(self.reports):
+                seen += 1
+                if wanted(self.reports[seen - 1][0]):
+                    return self.reports[seen - 1][0]
+            if self._next(deadline) is None:
+                return None
 
     def sensor(self, timeout=1.0):
         """다음 SENSOR 를 받은 시각(us). 그 앞에 온 다른 프레임은 버린다. 시간 안에 오지 않으면 None"""
@@ -151,6 +177,28 @@ def stream_problems(samples, late_us=None):
     return problems
 
 
+def report_problems(reports):
+    """받은 순서대로의 REPORT 에서 어긋난 곳을 글로 돌려준다.
+
+    report_sequence 는 1 씩 늘고, 가리키는 표본은 그 REPORT 바로 앞에 받은 표본이어야 한다.
+    앞서 받은 것과 같은 report_sequence 는 다시 보낸 것이므로 건너뛴다.
+    """
+    problems = []
+    seen = set()
+    last = None
+    for fields, sample in reports:
+        if fields[7] in seen:
+            continue
+        seen.add(fields[7])
+        if last is not None and fields[7] != last + 1:
+            problems.append(f'REPORT {last} 다음에 {fields[7]}')
+        last = fields[7]
+        before = (sample.sequence, sample.device_us) if sample is not None else (0, 0)
+        if fields[8:10] != before:
+            problems.append(f'REPORT {fields[7]} 가 표본 {fields[8]} 를 가리킴 (바로 앞에 받은 표본은 {before[0]})')
+    return problems
+
+
 def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, late_us, encoder_bits):
     """한 lease 가 살아 있던 장치 시각 start_us 부터 cutoff_us 사이에 온 SENSOR 가 어긋난 곳을 글로 돌려준다.
 
@@ -181,7 +229,7 @@ def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, la
     return problems
 
 
-def run(flow, lease_us, late_us, report):
+def run(flow, lease_us, late_us, drive, report):
     check, note = report.check, report.note
     peer = flow.peer
 
@@ -373,21 +421,121 @@ def run(flow, lease_us, late_us, report):
     for text in problems[:3]:
         note(text)
 
-    # 9. 새 pi_session 이 오면 앞 session 의 것은 받지 않는다
+    # 9. 명령. STOP 은 출력을 끊고 APPLIED 로 답하며, 그 뒤로 표본마다 REPORT 가 뒤따른다
+    clock = {}  # 명령이 가리킬 lease 의 clock_sequence 와, PC 시각에 더하면 장치 시각 언저리가 되는 값
+
+    def renew(clock_sequence, probe_sequence):
+        """1초짜리 lease 를 새로 설치해 그 뒤의 DRIVE 가 쓰게 한다"""
+        measured = probe(probe_sequence)
+        if measured is None:
+            return False
+        terms = lease_terms(measured[0], measured[1], measured[6], measured[8], SWEEP_LEASE_US)
+        ack = install(epoch, clock_sequence, probe_sequence, terms)[1]
+        clock.update(sequence=clock_sequence, to_device=measured[6] - measured[0])
+        return ack is not None and ack[5:7] == (INSTALLED, 0)
+
+    if not check(renew(9, 40), '명령에 쓸 lease 를 설치'):
+        return
+
+    def command(sequence, kind, stop_sequence=0, velocity=0, steering=0):
+        """COMMAND 를 보내고 (보낸 payload, 그 순번의 첫 REPORT 필드) 를 돌려준다. 답이 없으면 필드가 None"""
+        if kind == STOP:
+            body = COMMAND3.pack(pi, device, sequence, bytes(16), 0, 0, 0, 0, 1, sequence & 255, kind, 0, 0, 0, 0, 0)
+        else:
+            issued = now_us()
+            body = COMMAND3.pack(pi, device, sequence, epoch, clock['sequence'], issued,
+                                 issued + DRIVE_LIFE_US + 10000, issued + clock['to_device'] + DRIVE_LIFE_US, 1,
+                                 sequence & 255, kind, stop_sequence, velocity, steering, 0, 0)
+        peer.send(COMMAND, body)
+        return body, flow.report(lambda fields: fields[2] == sequence)
+
+    def echoed(fields, body):
+        sent = COMMAND3.unpack(body)
+        return fields is not None and fields[:6] == (pi, device, sent[2], sent[8], sent[9], sent[10]) \
+            and fields[14:18] == (sent[3], sent[4], sent[7], sent[11])
+
+    def result(fields):
+        return '답 없음' if fields is None else f'status {fields[6]}, reason {reason_name(fields[18])}'
+
+    def ticks():
+        return flow.sensors[-1][4:6]
+
+    stop, first = command(1, STOP)
+    check(echoed(first, stop) and first[6] == APPLIED and first[18] == 0,
+          f'STOP 에 APPLIED 로 답하고 명령의 칸을 그대로 돌려줌 ({result(first)})')
+    peer.send(COMMAND, stop)
+    again = flow.report(lambda fields: fields[2] == 1 and fields[7] <= first[7]) if first else None
+    check(again is not None and again == first, '같은 STOP 이 다시 오면 처음 REPORT 를 그대로 다시 보냄')
+    mark = len(flow.reports)
+    flow.listen(0.3)
+    follow = [fields for fields, _ in flow.reports[mark:] if fields[2] == 1]
+    check(len(follow) >= 8 and all(fields[6] == APPLIED for fields in follow),
+          f'STOP 뒤로 표본마다 REPORT 가 뒤따름 (0.3초에 {len(follow)}개)')
+    check(follow and follow[-1][10] == 5 and follow[-1][11] == 0 and follow[-1][13] == 1,
+          '멈춰 있는 바퀴를 엔코더로 보고 정지로 알림')
+
+    if drive:
+        # DRIVE 는 출력에 걸리고, 기한이 지나면 장치가 스스로 끊는다. 엔코더 누계로 본다
+        before = ticks()
+        forward, first = command(2, DRIVE, stop_sequence=1, velocity=DRIVE_MMPS)
+        check(echoed(first, forward) and first[6] == APPLIED and first[18] == 0,
+              f'DRIVE 에 APPLIED 로 답하고 명령의 칸을 그대로 돌려줌 ({result(first)})')
+        cutoff = COMMAND3.unpack(forward)[7]
+        flow.listen(0.5)
+        moved = ticks()
+        check(moved[0] > before[0] and moved[1] > before[1], f'DRIVE 동안 양쪽 엔코더 누계가 늘어남 ({before} → {moved})')
+        told = [fields for fields, _ in flow.reports if fields[2] == 2 and fields[6] == APPLIED]
+        check(len(told) >= 3 and all(fields[9] < cutoff for fields in told),
+              f'DRIVE 의 REPORT 는 기한 전의 표본까지만 옴 ({len(told)}개)')
+        note(f'DRIVE 동안 알린 속도 가운데 가장 큰 값 {max((fields[11] for fields in told), default=0)} mm/s')
+        flow.listen(0.1)
+        check(ticks() == moved, '기한이 지난 뒤에는 엔코더가 멈춰 있음 (출력이 끊김)')
+
+        peer.send(COMMAND, forward)
+        again = flow.report(lambda fields: fields[2] == 2 and fields[7] <= first[7]) if first else None
+        flow.listen(0.2)
+        check(again is not None and again == first and ticks() == moved,
+              '기한 뒤에 같은 DRIVE 가 다시 와도 처음 REPORT 만 다시 보내고 출력을 켜지 않음')
+
+        check(renew(10, 41), '다음 DRIVE 들이 쓸 lease 를 새로 설치')
+        back, fields = command(3, DRIVE, stop_sequence=1, velocity=-DRIVE_MMPS)
+        flow.listen(0.2)
+        check(echoed(fields, back) and fields[6] == REJECTED and fields[18] == DIRECTION_STOP_REQUIRED and ticks() == moved,
+              f'STOP 없이 방향을 바꾸는 DRIVE 는 REJECTED DIRECTION_STOP_REQUIRED 이고 움직이지 않음 ({result(fields)})')
+        hold, fields = command(3, HOLD_STEER, stop_sequence=1, steering=100)
+        check(echoed(fields, hold) and fields[6] == REJECTED and fields[18] == UNSUPPORTED_PROFILE,
+              f'HOLD_STEER 는 REJECTED UNSUPPORTED_PROFILE ({result(fields)})')
+
+        stop, fields = command(3, STOP)
+        check(echoed(fields, stop) and fields[6] == APPLIED, f'새 STOP 에 APPLIED 로 답함 ({result(fields)})')
+        back, fields = command(4, DRIVE, stop_sequence=3, velocity=-DRIVE_MMPS)
+        flow.listen(0.5)
+        reversed_to = ticks()
+        check(echoed(fields, back) and fields[6] == APPLIED and reversed_to[0] < moved[0] and reversed_to[1] < moved[1],
+              f'새 STOP 뒤의 반대 방향 DRIVE 는 적용되고 누계가 줄어듦 ({moved} → {reversed_to}, {result(fields)})')
+        flow.listen(0.1)
+        check(ticks() == reversed_to, '그 DRIVE 도 기한 뒤에 멈춤')
+        stop, fields = command(5, STOP)
+        check(echoed(fields, stop) and fields[6] == APPLIED, f'마지막 STOP 에 APPLIED 로 답함 ({result(fields)})')
+
+    # 10. 새 pi_session 이 오면 앞 session 의 것은 받지 않는다
     newcomer = uuid4().bytes
     peer.send(HELLO, HELLO3.pack(3, newcomer, config))
     reply = flow.answer()
     check(reply is not None and reply[0] == HELLO_ACK and ACK3.unpack(reply[1])[1:3] == (newcomer, device),
           '새 pi_session 의 HELLO 에 같은 device_boot_session 으로 답함')
-    before = len(flow.sensors)
+    before = len(flow.sensors), len(flow.reports)
     check(probe(999, wait=QUIET_S) is None, '앞 pi_session 의 CLOCK_PROBE 에는 답하지 않음')
-    check(len(flow.sensors) == before, '새 pi_session 이 온 뒤에는 앞 session 의 lease 로 SENSOR 를 보내지 않음')
+    check((len(flow.sensors), len(flow.reports)) == before,
+          '새 pi_session 이 온 뒤에는 앞 session 의 lease 와 명령으로 SENSOR·REPORT 를 보내지 않음')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_device_arguments(parser)
     parser.add_argument('--lease-ms', type=int, default=500, help='설치할 lease 길이 (기본 500)')
+    parser.add_argument('--drive', action='store_true',
+                        help='실보드에 DRIVE 까지 보낸다. 바퀴가 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
     args = parser.parse_args()
     sys.stdout.reconfigure(errors='backslashreplace')  # 한글을 못 쓰는 콘솔에서도 멈추지 않게
     report = Report()
@@ -395,7 +543,8 @@ def main():
     peer = Peer(device)
     flow = Flow(peer)
     try:
-        run(flow, args.lease_ms * 1000, SIM_LATE_US if args.sim else BOARD_LATE_US, report)
+        run(flow, args.lease_ms * 1000, SIM_LATE_US if args.sim else BOARD_LATE_US, bool(args.sim or args.drive),
+            report)
     finally:
         device.close()
     problems = stream_problems(flow.samples)
@@ -404,7 +553,11 @@ def main():
     for text in problems[:3]:
         report.note(text)
     if flow.odd:
-        report.note(f'크기가 틀린 SENSOR {flow.odd}개')
+        report.note(f'크기가 틀린 SENSOR·REPORT {flow.odd}개')
+    problems = report_problems(flow.reports)
+    report.check(not problems, f'REPORT {len(flow.reports)}개의 순번이 하나씩 늘고 바로 앞에 받은 표본을 가리킴')
+    for text in problems[:3]:
+        report.note(text)
     # 응답이 깨져 오면 그 응답을 기다리던 검사에서 멈춘다. 그때도 깨진 조각을 보여 준다
     report.check(peer.invalid == 0, f'깨진 프레임 {peer.invalid}개')
     for wire in peer.broken[:3]:
