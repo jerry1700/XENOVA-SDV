@@ -36,7 +36,7 @@ class LocalBoundary:
     pending=None
     def __init__(self):self.replies=[];self.sent=[]
     def flush(self,now):pass
-    def receive(self,now):values,self.replies=self.replies,[];return values
+    def receive(self,now,*,clock=None):values,self.replies=self.replies,[];return values
     def offer(self,*args):self.sent.append(args);return True
 
 
