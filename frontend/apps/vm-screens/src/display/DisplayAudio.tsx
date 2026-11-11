@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import styles from './displayAudio.module.css';
-
-const DEFAULT_AUDIO_SRC = '/audio/interaction-theme.mp3';
+// 빌드 시 assets/interaction-theme-<hash>.mp3로 나간다. VM guest app과 dom0 휴대폰 relay는
+// /assets/*.mp3만 허용하므로 public/ 고정 경로(/audio/...)를 쓰면 404가 된다.
+import DEFAULT_AUDIO_SRC from './audio/interaction-theme.mp3';
 
 type PlaybackState = 'loading' | 'ready' | 'playing' | 'paused' | 'blocked' | 'unavailable';
 
