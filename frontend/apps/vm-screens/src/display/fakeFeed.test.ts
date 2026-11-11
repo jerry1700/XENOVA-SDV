@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { build, IDS, SCENARIOS, setScenario, setTripForTest } from '../../scripts/fake-display-feed.mjs';
 import { insideSlot, SCENARIO_MARKS, SLOTS } from './course';
+import { batteryPercent } from './driveExtras';
 import { parsePresentation } from './model';
 
 interface Course {
@@ -11,7 +12,7 @@ interface Course {
 type Feed = {
   state: {
     drive: { mode: string; active_vm_id: string | null };
-    vehicle: { v_mps: number };
+    vehicle: { v_mps: number; batt_v: number };
     drive_apps: Record<string, { autonomous: { command: unknown } }>;
     trip: { distance_m: number };
     course: Course;
@@ -44,6 +45,17 @@ describe('fake display feed', () => {
     expect(p.state.vehicle.v_mps).toBeGreaterThan(0);
     expect(p.state.drive_apps[IDS.primary]!.autonomous.command).not.toBeNull();
     expect(p.state.drive_apps[IDS.backup]!.autonomous.command).toBeNull();
+  });
+
+  it('배터리 전압은 실차 3S 범위 (12.45 V 에서 내려가 11.1 V 에서 멈춤)', () => {
+    setScenario('cruise');
+    const start = build(now) as Feed;
+    expect(start.state.vehicle.batt_v).toBeLessThanOrEqual(12.45);
+    expect(start.state.vehicle.batt_v).toBeGreaterThan(12.3);
+    expect(batteryPercent(start.state.vehicle.batt_v)).toBeGreaterThanOrEqual(85);
+    const later = build(now + 6 * 3600 * 1000) as Feed;
+    expect(later.state.vehicle.batt_v).toBe(11.1);
+    expect(batteryPercent(later.state.vehicle.batt_v)).toBe(29);
   });
 
   it('safe-stop 은 활성 VM 이 없고 VM1 보고가 끊긴다', () => {
