@@ -74,6 +74,7 @@ class Flow:
     def __init__(self, peer):
         self.peer = peer
         self.samples = []  # CLOCK_REPLY 와 SENSOR 의 표본, 받은 순서
+        self.ticks = []    # 그 표본마다 (좌, 우) 엔코더 누계
         self.sensors = []  # SENSOR 필드 11개, 받은 순서
         self.reports = []  # (REPORT 필드 19개, 그 REPORT 바로 앞에 받은 표본), 받은 순서
         self.odd = 0       # 크기가 틀린 SENSOR·REPORT
@@ -89,6 +90,7 @@ class Flow:
                 fields = SENSOR3.unpack(payload)
                 self.sensors.append(fields)
                 self.samples.append(Sample(kind, fields[2], fields[3]))
+                self.ticks.append(fields[4:6])
             else:
                 self.odd += 1
         elif kind == REPORT:
@@ -99,6 +101,7 @@ class Flow:
         elif kind == CLOCK_REPLY and len(payload) == CLOCK3.size:
             fields = CLOCK3.unpack(payload)
             self.samples.append(Sample(kind, fields[7], fields[5]))
+            self.ticks.append(fields[8:10])
         return frame
 
     def answer(self, timeout=1.0):
@@ -197,6 +200,29 @@ def report_problems(reports):
         if fields[8:10] != before:
             problems.append(f'REPORT {fields[7]} 가 표본 {fields[8]} 를 가리킴 (바로 앞에 받은 표본은 {before[0]})')
     return problems
+
+
+def drive_report_problems(told, samples, first, cutoff):
+    """DRIVE 하나의 APPLIED REPORT 가 표본을 따라왔는지 본다. (어긋난 곳의 글, 꼭 와야 했던 후속 REPORT 수) 를 돌려준다.
+
+    told 는 그 DRIVE 의 REPORT 필드를 받은 순서대로, first 는 명령에 바로 답한 REPORT, cutoff 는 명령의 기한(장치 시각)이다.
+    장치는 표본을 보낸 다음 loop 에서, 출력이 걸려 있고 기한까지 SAMPLE_GAP_US 넘게 남았으면 그 표본의 REPORT 를 보낸다.
+    그 loop 는 다음 표본을 뜨기 전이다. 그래서 다음 표본도 기한 전이면 앞 표본의 REPORT 는 PC 나 장치가 얼마나 늦든
+    꼭 와야 하고, 기한 전의 마지막 표본은 REPORT 를 만들 때 이미 기한 뒤일 수 있어 와도 되고 안 와도 된다.
+    """
+    if first is None or told[:1] != [first]:
+        return ['DRIVE 에 바로 답한 APPLIED 가 그 DRIVE 의 첫 REPORT 가 아님'], 0
+    after = [sample for sample in samples if sample.sequence > first[8]]
+    due = [sample.sequence for sample in after if sample.device_us + SAMPLE_GAP_US < cutoff]
+    sure = [sample.sequence for sample, following in zip(after, after[1:])
+            if sample.device_us + SAMPLE_GAP_US < cutoff and following.device_us < cutoff]
+    got = [fields[8] for fields in told[1:]]
+    problems = []
+    if got != due[:len(got)]:
+        problems.append(f'후속 REPORT 가 가리킨 표본 {got} 이 기한 전의 표본 {due} 을 차례로 따르지 않음')
+    elif len(got) < len(sure):
+        problems.append(f'표본 {sure[len(got)]} 의 REPORT 가 오지 않음 (다음 표본도 기한 전)')
+    return problems, len(sure)
 
 
 def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, late_us, encoder_bits):
@@ -485,8 +511,11 @@ def run(flow, lease_us, late_us, drive, report):
         moved = ticks()
         check(moved[0] > before[0] and moved[1] > before[1], f'DRIVE 동안 양쪽 엔코더 누계가 늘어남 ({before} → {moved})')
         told = [fields for fields, _ in flow.reports if fields[2] == 2 and fields[6] == APPLIED]
-        check(len(told) >= 3 and all(fields[9] < cutoff for fields in told),
-              f'DRIVE 의 REPORT 는 기한 전의 표본까지만 옴 ({len(told)}개)')
+        problems, sure_forward = drive_report_problems(told, flow.samples, first, cutoff)
+        check(not problems, f'DRIVE 의 REPORT 가 적용한 때와 그 뒤 기한 전의 표본마다 차례로 옴 '
+                            f'({len(told)}개, 꼭 와야 하는 후속 {sure_forward}개)')
+        for text in problems:
+            note(text)
         note(f'DRIVE 동안 알린 속도 가운데 가장 큰 값 {max((fields[11] for fields in told), default=0)} mm/s')
         flow.listen(0.1)
         check(ticks() == moved, '기한이 지난 뒤에는 엔코더가 멈춰 있음 (출력이 끊김)')
@@ -513,6 +542,14 @@ def run(flow, lease_us, late_us, drive, report):
         reversed_to = ticks()
         check(echoed(fields, back) and fields[6] == APPLIED and reversed_to[0] < moved[0] and reversed_to[1] < moved[1],
               f'새 STOP 뒤의 반대 방향 DRIVE 는 적용되고 누계가 줄어듦 ({moved} → {reversed_to}, {result(fields)})')
+        told = [row for row, _ in flow.reports if row[2] == 4 and row[6] == APPLIED]
+        problems, sure_back = drive_report_problems(told, flow.samples, fields, COMMAND3.unpack(back)[7])
+        check(not problems, f'반대 방향 DRIVE 의 REPORT 도 표본마다 차례로 옴 ({len(told)}개, 꼭 와야 하는 후속 {sure_back}개)')
+        for text in problems:
+            note(text)
+        # 한 DRIVE 는 80 ms 라 PC 가 크게 늦으면 기한 전의 후속 표본이 하나뿐일 수 있다. 두 DRIVE 모두 그러면 확인한 것이 없다
+        check(sure_forward + sure_back >= 1,
+              f'후속 REPORT 가 꼭 와야 하는 표본이 있었음 (앞으로 {sure_forward}개, 뒤로 {sure_back}개)')
         flow.listen(0.1)
         check(ticks() == reversed_to, '그 DRIVE 도 기한 뒤에 멈춤')
         stop, fields = command(5, STOP)

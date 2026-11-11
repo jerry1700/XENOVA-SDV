@@ -26,16 +26,15 @@ from .data_channel import DataLink, DataPeer, data_pair
 from .lifecycle_messages import LifecyclePeer
 from .lifecycle_policy import AbsoluteDeadline, TIMING_US, REQUIRED_NN_PAIR_COUNT
 from .pc_binding_messages import PcBindContext, PcBindMessage, PcBindAck
-from .pc_channel import PcActorLink, PcActorPacket, pc_actor_pair, forward_received
+from .pc_channel import PcActorLink, pc_actor_pair, forward_received
 from .pc_raw_broker import PcRawBroker
 from .pc_resident_profile import PcResidentProfile
 from .pc_source_identity import PcSourceIdentityOwner
 from .pc_source_runtime import PcSupervisorSource
 from .pc_workers import PcWorkerBoot, pc_worker_main, pc_worker_release
 from .raw_leases import Endpoint, RawScope, SLOT_BYTES
-from .resident_profile import canonical, release_sha256
+from .resident_profile import canonical, publish_runtime_artifacts, release_sha256
 from .resident_recovery import ResidentRecovery
-from .health_policy import health_policy
 from .resident_runtime import _Runtime, _identifier, _redirect_worker_output
 from .resident_storage import StorageProfile
 from .resident_transport import j_us
@@ -63,13 +62,6 @@ def _observation_scope(binding):
 
 class _PcRecovery(ResidentRecovery):
     """미구현 PC 복원을 physical recovery로 캐스팅하지 않는다. 원 STOP/reap는 재사용한다."""
-
-    @property
-    def operation_cap(self):
-        # 검증된 NN_START는 실제 설치 완료다. 외부 영상 대기를 cold cap으로 재단하지 않는다.
-        if self.active is None and self.r._pc_start is not None:
-            return 2**64-1
-        return super().operation_cap
 
     def fail(self, role, reason, retryable=True):
         if self.r.stopping:
@@ -130,6 +122,8 @@ class PcResidentRuntime(_Runtime):
 
     def _prepare(self):
         """S-log에서 실제 파일 closure를 한 번 고정한다. Device나 물리 graph는 만들지 않는다."""
+        self.output.mkdir(mode=0o700)
+        self.output_owned = True
         profile = self.pc_profile
         nn = SimNnProfile(profile.oak, 'sim-pc:'+profile.source_id,
             'jetson-monotonic:'+self.clock_epoch, profile.motion.bound_calibration.sha256)
@@ -163,7 +157,7 @@ class PcResidentRuntime(_Runtime):
             graph_profile_sha256=manifest.sha256, format_table_sha256=sha256(formats).hexdigest(),
             calibration_bundle=profile.motion.bound_calibration.sha256,
             mapper_profile_sha256=profile.mapper.sha256, manifests=manifests)
-        self._publish_diagnostics(artifacts)
+        artifacts['published'] = publish_runtime_artifacts(self.output/'artifacts', artifacts)
         return artifacts
 
     def _configure_binding(self):
@@ -209,7 +203,7 @@ class PcResidentRuntime(_Runtime):
                 data_peer = DataPeer(self.service, peer.worker_instance, _identifier())
             boot = PcWorkerBoot(peer, self._pc_peers['A'], self._pc_nn_profile, self.scope,
                 self.handles.raw, self.binding.canonical_bytes, self._pc_manifest.canonical_bytes,
-                self.handles.raw_tokens, deadline, self._diagnostic_directory(role,peer.worker_instance),
+                self.handles.raw_tokens, deadline, str(self.output/role/peer.worker_instance),
                 writer_bind_raw=self.workers['A'].bind.raw if role == 'M' else None)
             if role == 'A':
                 loop = self._acquisition_factory(observation_endpoint=self._observation_endpoint,
@@ -289,13 +283,12 @@ class PcResidentRuntime(_Runtime):
             now = j_us()
             host.bind_draft = dict(kind='BIND', payload=dict(binding_revision='1',
                 binding_sha256=self.binding.sha256, binding=self.binding.fields), domain='RAW', revision=1,
-                request_id=_identifier(), issued_us=now,
-                expires_us=min(now+5000000,host.startup_deadline_us) if role=='A' else now+5000000)
+                request_id=_identifier(), issued_us=now, expires_us=min(now+5000000, host.startup_deadline_us))
         packet = host.link.send(**host.bind_draft)
         if packet is None:
             return
         host.bind = PcBindMessage(packet, PcBindContext(host.peer, self.scope.writer,
-            self.binding, self.scope, self.handles.raw), cap_us=host.startup_deadline_us if role=='A' else None)
+            self.binding, self.scope, self.handles.raw), cap_us=host.startup_deadline_us)
         if role == 'A':
             self.broker = PcRawBroker(host.bind, self.scope,
                 Endpoint(self.identities['M'][1], self.identities['M'][0]), self.handles.raw_tokens,
@@ -355,21 +348,19 @@ class PcResidentRuntime(_Runtime):
             self._pc_storage_observed = True
         if self._pc_start is not None and 'M' in self._pc_binds_observed and owner.parser_deadline is None:
             anchor = max(self._pc_start.packet.issued_us, self.workers['M'].bind_ack.issued_us)
-            deadline = AbsoluteDeadline(anchor, anchor+TIMING_US['warmup'])
+            deadline = AbsoluteDeadline(anchor, min(anchor+TIMING_US['warmup'], self.startup_deadline))
             owner.install_parser_deadline(deadline)
             self.parser_deadline = deadline.expires_us
 
     def _drain_filled(self):
-        if self.broker is None or self._pc_owner is None or self.stopping or getattr(self,'_pc_input_unavailable',False):
+        if self.broker is None or self._pc_owner is None or self.stopping:
             return
         for _ in range(2):
             value = self.broker.take_filled_metadata()
             if value is None:
                 break
-            if value.phase == 'NN' and j_us() < value.expires_j_us:
-                from .health_policy import FrameExpired
-                try:self._pc_owner.observe_nn_result(value, now_us=j_us())
-                except FrameExpired:continue
+            if value.phase == 'NN':
+                self._pc_owner.observe_nn_result(value, now_us=j_us())
 
     def _queue_forward(self, received, role):
         queue = self._pc_relay[role]
@@ -380,23 +371,12 @@ class PcResidentRuntime(_Runtime):
     def _pc_message(self, role, received):
         owner, link, now = self._pc_owner, self._pc_links[role], j_us()
         link.require_received(received)
-        if owner is None:
+        if owner is None or now >= received.packet.expires_us:
             raise TimeoutError('PC actor message has no current original source owner/lifetime')
         packet = received.packet
-        if getattr(self,'_pc_input_unavailable',False):return
-        if now >= packet.expires_us and packet.kind in (
-                'PC_EARLY_META', 'PC_NN_RESULT_META', 'PC_PARSE_COMPLETE', 'PC_SNAPSHOT_ACK'):
-            link.counts['expired_before_dispatch'] = link.counts.get('expired_before_dispatch', 0) + 1
-            return
         if packet.kind == 'PC_SOURCE_FENCE':
             self.event('PC_SOURCE_FENCE', role=role, metadata=dict(packet.metadata))
-            owner.fence('PC_INPUT_UNAVAILABLE')
-            self._pc_input_unavailable=True
-            if self.broker is not None:self.broker.set_publication(None)
-            if self.jio is not None:self.jio.set_world_dispatch_enabled(False)
-            self._queue_forward(received,'M' if role=='A' else 'A')
-            self.event('PC_INPUT_UNAVAILABLE',role=role)
-            return
+            raise RuntimeError('PC_'+role+'_SOURCE_FENCE')
         if role == 'A' and packet.kind == 'PC_NN_START':
             owner.observe_nn_start(received, now_us=now)
             self._pc_start = received
@@ -407,11 +387,7 @@ class PcResidentRuntime(_Runtime):
             self._drain_filled()
             self._queue_forward(received, 'M')
         elif role == 'M' and packet.kind == 'PC_PARSE_COMPLETE':
-            from .health_policy import FrameExpired
-            try:owner.observe_parse_complete(received, now_us=j_us())
-            except FrameExpired:
-                link.counts['expired_before_dispatch'] = link.counts.get('expired_before_dispatch',0)+1
-                return
+            owner.observe_parse_complete(received, now_us=now)
             self._queue_forward(received, 'A')
         elif role == 'M' and packet.kind == 'PC_SNAPSHOT_ACK':
             self._queue_forward(received, 'A')
@@ -432,7 +408,7 @@ class PcResidentRuntime(_Runtime):
             queue = self._pc_relay[role]
             while queue and queue[0][0] == 'FORWARD':
                 original = queue[0][1]
-                if j_us() < original.packet.expires_us or original.packet.kind=='PC_SOURCE_FENCE':break
+                if j_us() < original.packet.expires_us:break
                 other = 'M' if role == 'A' else 'A'
                 self._pc_links[other].require_received(original)
                 if original.packet.kind not in ('PC_EARLY_META', 'PC_NN_RESULT_META', 'PC_SNAPSHOT_ACK', 'PC_PARSE_COMPLETE'):
@@ -452,11 +428,6 @@ class PcResidentRuntime(_Runtime):
     @staticmethod
     def _flush_pc_relay(link):
         """원 frame relay만 E 뒤 폐기한다. Source state와 unknown 송신은 원 실패를 보존한다."""
-        packet=link.pending
-        if (packet is not None and packet.kind=='PC_FORWARD' and j_us()>=packet.expires_us
-                and PcActorPacket(packet.body).kind!='PC_SOURCE_FENCE'):
-            link.discard_expired_work(packet)
-            return None
         try:return link.flush()
         except TimeoutError as error:
             packet = link.pending
@@ -470,10 +441,6 @@ class PcResidentRuntime(_Runtime):
         super()._drive_workers()
         self._drain_filled()
         self._drive_pc()
-
-    def _drive_source(self):
-        if getattr(self,'_pc_input_unavailable',False):return
-        super()._drive_source()
 
     def set_publication(self, binding, storage_context):
         original = None if self._pc_owner is None else self._pc_owner.admission
@@ -505,10 +472,17 @@ class PcResidentRuntime(_Runtime):
         super()._progress(role, packet, now)
 
     def _readiness_timers(self, now):
+        if self.a_phase in self.a_phase_deadlines and now >= self.a_phase_deadlines[self.a_phase]:
+            self.recovery.fail('A', 'original PC A '+self.a_phase+' budget elapsed')
         host = self.workers.get('A')
         if (self._pc_start is not None and host is not None and host.last_heartbeat_us is not None
-                and now-host.last_heartbeat_us >= health_policy().control_stall_us):
+                and now-host.last_heartbeat_us >= 1000000):
             self.recovery.fail('A', 'actual PC A heartbeat stalled')
+        if self.parser_deadline is not None and self.nn_ready_us is None and now >= self.parser_deadline:
+            self.recovery.fail('M', 'original PC parser5 readiness deadline elapsed')
+        if (self.nn_ready_us is not None and self.last_fresh_parser_us is not None
+                and now-self.last_fresh_parser_us >= 5000000):
+            self.recovery.fail('M', 'actual PC parser progress stalled')
         admission = None if self._pc_owner is None else self._pc_owner.admission
         if (self._pc_start is not None and self._pc_owner is not None
                 and self._pc_owner.warmup_count == REQUIRED_NN_PAIR_COUNT
@@ -595,5 +569,7 @@ def run_pc_runtime(profile, state_directory, storage_profile, output, *, observa
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
-    runtime.save_result(result)
+    if runtime.output_owned:
+        with (runtime.output/'runtime-result.json').open('xb') as destination:
+            destination.write(canonical(result))
     return result

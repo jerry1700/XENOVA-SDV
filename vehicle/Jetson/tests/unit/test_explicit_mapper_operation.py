@@ -275,7 +275,7 @@ class ExplicitMapperOperationTests(unittest.TestCase):
         back.owner.submit(back.request(4,'RUN'));back.cycle()
         self.assertTrue(back.owner.status()['mapper_synchronized']);self.assertTrue(back.jio.world_enabled)
 
-    def test_static_consumer_marker_can_retry_without_restarting_the_mapper(self):
+    def test_original_consumer_ready_queued_or_pending_expiry_is_terminal_without_refresh(self):
         for pending in (False,True):
             with self.subTest(pending=pending):
                 f=self.rig(installed=False)
@@ -293,16 +293,15 @@ class ExplicitMapperOperationTests(unittest.TestCase):
                     self.assertEqual((packet.body,packet.header['request_id'],packet.issued_us,packet.expires_us),ready)
                     self.assertIsNone(f.mapper._operation_result)
                 f.clock.set(ready[3])
-                f.mapper.pump(before_outputs=f.ingest)
-                fresh=f.mapper._operation_ready
-                self.assertEqual(fresh[0],ready[0])
-                self.assertNotEqual(fresh[1],ready[1])
-                self.assertGreaterEqual(fresh[2],ready[3])
+                with self.assertRaises(TimeoutError):f.mapper.pump(before_outputs=f.ingest)
+                self.assertIs(f.mapper._operation_ready,ready)
+                if pending:self.assertIs(f.mapper.link.pending,packet)
+                else:self.assertIs(f.mapper._operation_result,ready)
                 self.assertFalse(f.controller.synchronized);self.assertFalse(f.jio.world_enabled)
                 self.assertFalse(f.owner.status()['mapper_synchronized'])
                 self.assertIsNone(f.owner._config)
 
-    def test_late_static_consumer_marker_allows_a_fresh_config_transaction(self):
+    def test_original_consumer_ready_full_sent_before_e_but_received_after_e_is_terminal(self):
         for expires_during_poll in (False,True):
             with self.subTest(expires_during_poll=expires_during_poll):
                 f=self.rig(installed=False);f.mapper.install_operation(f.controller)
@@ -321,14 +320,13 @@ class ExplicitMapperOperationTests(unittest.TestCase):
                     f.supervisor.link.endpoint=DelayedReceive()
                     self.addCleanup(lambda f=f,endpoint=endpoint:setattr(f.supervisor.link,'endpoint',endpoint))
                 else:f.clock.set(ready[3])
-                f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-                self.assertEqual(f.owner._consumer_ready,ready)
-                self.assertIsNotNone(f.owner._config)
-                self.assertGreaterEqual(f.owner._config['issued'],ready[3])
+                with self.assertRaises(TimeoutError):
+                    f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
+                self.assertIsNone(f.owner._consumer_ready);self.assertIsNone(f.owner._config)
                 self.assertFalse(f.owner.status()['mapper_synchronized']);self.assertFalse(f.jio.world_enabled)
                 self.assertEqual(f.mapper._operation_ready,ready)
 
-    def test_expired_config_retries_with_a_new_request_and_synchronizes_the_same_mapper(self):
+    def test_original_config_expiry_is_source_terminal_while_status_query_remain_available(self):
         f=self.rig(installed=False);f.mapper.install_operation(f.controller)
         f.mapper.pump(before_outputs=f.ingest)
         f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
@@ -337,15 +335,11 @@ class ExplicitMapperOperationTests(unittest.TestCase):
         f.clock.set(config['expires'])
         self.assertEqual(f.owner.status()['last_reason'],'CONFIG_EXPIRED')
         self.assertEqual(f.owner.query(compute_fixtures.identifier(999))['reason'],'UNKNOWN_REQUEST')
-        f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-        fresh=f.owner._config
-        self.assertIsNot(fresh,config)
-        self.assertNotEqual(fresh['request_id'],config['request_id'])
+        with self.assertRaises(TimeoutError):
+            f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
+        self.assertIs(f.owner._config,config);self.assertIs(config['selected'],packet)
         self.assertEqual((packet.issued_us,packet.expires_us),(config['issued'],config['expires']))
         self.assertFalse(f.owner.status()['mapper_synchronized']);self.assertFalse(f.jio.world_enabled)
-        f.cycle()
-        self.assertTrue(f.owner.status()['mapper_synchronized'])
-        self.assertTrue(f.controller.synchronized)
 
     def test_polled_late_config_ack_applied_inside_original_e_wins_before_bootstrap_expiry(self):
         f=self.rig(installed=False);f.mapper.install_operation(f.controller)
@@ -365,15 +359,10 @@ class ExplicitMapperOperationTests(unittest.TestCase):
         self.assertEqual(original,(packet.body,packet.header['request_id'],packet.issued_us,packet.expires_us))
         self.assertEqual(f.controller._config_original[1],raw)
 
-    def test_original_user_result_survives_local_delivery_expiry_without_reapplication(self):
+    def test_expired_original_user_result_is_not_a_bootstrap_terminal_or_new_history(self):
         for blocked_at_mapper in (False,True):
             with self.subTest(blocked_at_mapper=blocked_at_mapper):
                 f=self.rig();config=f.owner._config
-                calls=[];apply=f.controller.apply
-                def counted_apply(action,expires,gate):
-                    calls.append((action,expires,gate))
-                    return apply(action,expires,gate)
-                f.controller.apply=counted_apply
                 original_endpoint=f.mapper.link.endpoint
                 if blocked_at_mapper:
                     class Blocked:
@@ -386,75 +375,19 @@ class ExplicitMapperOperationTests(unittest.TestCase):
                 f.clock.set(1001);f.mapper.pump(before_outputs=f.ingest)
                 record=f.owner._records[compute_fixtures.identifier(101)]
                 self.assertEqual(f.controller.state,'RUN')
-                original_ack=f.controller._history[compute_fixtures.identifier(101)][1]
-                serial=f.compute.snapshot()['operation_serial']
                 f.clock.set(5001001)
                 self.assertEqual(f.owner.query(compute_fixtures.identifier(101))['status'],'UNKNOWN')
                 if blocked_at_mapper:
                     f.mapper.pump(before_outputs=f.ingest)
-                    self.assertEqual(f.mapper.link.pending.body,original_ack)
-                    self.assertEqual(f.mapper.link.pending.issued_us,f.clock())
+                    self.assertIsNone(f.mapper.link.pending)
                     self.assertEqual(f.mapper.counts['operation_result_expired'],1)
-                    f.mapper.link.endpoint=original_endpoint;f.cycle()
                 else:
                     f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-                    self.assertEqual(f.supervisor.counts['operation_rejected'],0)
+                    self.assertEqual(f.supervisor.counts['operation_rejected'],1)
                 self.assertIs(f.owner._config,config);self.assertTrue(f.owner._synchronized)
                 self.assertEqual(record['request'].raw_bytes,raw)
-                result=f.owner.query(compute_fixtures.identifier(101))
-                self.assertEqual(canonical(result),original_ack)
-                self.assertEqual(result['status'],'APPLIED');self.assertTrue(f.jio.world_enabled)
-                self.assertEqual(f.compute.snapshot()['operation_serial'],serial)
-                self.assertEqual(len(calls),1)
-
-    def test_late_config_ack_from_previous_delivery_attempt_can_confirm_same_current_setting(self):
-        f=self.rig(installed=False);f.mapper.install_operation(f.controller)
-        f.mapper.pump(before_outputs=f.ingest)
-        f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-        old=f.owner._config
-        endpoint=f.mapper.link.endpoint
-        class Blocked:
-            def __getattr__(self,name):return getattr(endpoint,name)
-            def send(self,raw):raise BlockingIOError()
-        f.mapper.link.endpoint=Blocked()
-        try:
-            f.mapper.pump(before_outputs=f.ingest)
-            original_ack=f.mapper.link.pending.body
-            serial=f.compute.snapshot()['operation_serial']
-            f.clock.set(old['expires'])
-            f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-            self.assertIsNot(f.owner._config,old)
-            f.mapper._flush()
-        finally:f.mapper.link.endpoint=endpoint
-        f.mapper.pump(before_outputs=f.ingest)
-        f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-        self.assertEqual(canonical(old['result']),original_ack)
-        self.assertTrue(f.owner.status()['mapper_synchronized'])
-        self.assertEqual(f.compute.snapshot()['operation_serial'],serial)
-
-    def test_historical_ack_cannot_roll_back_a_newer_revision_or_change_original_completion(self):
-        f=self.rig();f.owner.submit(f.request(1,'RUN'))
-        f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-        f.mapper.pump(before_outputs=f.ingest)
-        held,=f.supervisor.link.poll()
-        old=json.loads(held.body)
-        f.clock.set(int(old['expires_j_us']))
-        self.assertEqual(f.owner.query(old['request_id'])['status'],'UNKNOWN')
-        f.owner.submit(f.request(2,'RUN'));f.cycle()
-        revision=f.owner.status()['config_revision']
-        f.clock.set(f.clock()+5_000_000)
-        def deliver(value):
-            f.mapper.link.send('OPERATION_RESULT',{},canonical(value),request_id=value['request_id'],
-                issued_us=f.clock(),expires_us=f.clock()+5_000_000)
-            f.mapper.link.flush()
-            f.supervisor.pump(f.material,bind_ready=True,on_publication=lambda *_:None)
-        deliver(old)
-        self.assertEqual(f.owner.status()['config_revision'],revision)
-        self.assertEqual(f.owner.query(old['request_id']),old)
-        invalid=dict(old,completed_j_us=old['expires_j_us']);deliver(invalid)
-        self.assertEqual(f.supervisor.counts['operation_rejected'],1)
-        self.assertEqual(f.owner.query(old['request_id']),old)
-        self.assertEqual(f.owner.status()['config_revision'],revision)
+                self.assertEqual(f.owner.query(compute_fixtures.identifier(101))['status'],'UNKNOWN')
+                self.assertFalse(f.jio.world_enabled)
 
     def test_real_compute_cancel_is_normal_mapper_terminal_and_lock_wait_cannot_hide_expiry(self):
         actor=phase_fixtures.Actor();clock=compute_fixtures.Clock();entered=threading.Event();release=threading.Event()

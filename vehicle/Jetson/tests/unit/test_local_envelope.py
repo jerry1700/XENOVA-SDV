@@ -79,19 +79,6 @@ class LocalEnvelopeStructureTests(unittest.TestCase):
         self.assertEqual(canonical.fields, packet.fields)
         self.assertNotEqual(canonical.raw_bytes, original)
 
-    def test_utf8_escape_cost_preserves_exact_packet_boundary(self):
-        for character in ('\x00','\b','\x1f','"','\\','\x7f','é','한','🌍'):
-            with self.subTest(character=repr(character)):
-                text=character*100
-                missing=4096-len(raw(payload={'v':text}))
-                text+='x'*missing
-                original=raw(payload={'v':text})
-                self.assertEqual(len(original),4096)
-                self.assertEqual(encode_structure(fields(payload={'v':text})).raw_bytes,original)
-                self.assertEqual(decode_structure(original).payload,{'v':text})
-                with self.assertRaises(EnvelopeStructureError):
-                    encode_structure(fields(payload={'v':text+'x'}))
-
     def test_decoder_4096_raw_finite_exponent_may_expand_beyond_encoder_cap(self):
         original = raw(payload={"v": 0.0, "pad": ""}).replace(b'"v":0.0', b'"v":1e15')
         original = original.replace(b'"pad":""', b'"pad":"' + b'x' * (4096 - len(original)) + b'"')

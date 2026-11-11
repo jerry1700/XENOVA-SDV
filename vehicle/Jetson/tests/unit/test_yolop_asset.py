@@ -11,7 +11,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from xenova_vehicle.oak import yolop_asset as assets
-from xenova_vehicle.runtime.health_policy import ConfigurationError
 
 
 MANIFEST = (Path(__file__).resolve().parents[2] / "assets" / "manifests" /
@@ -67,7 +66,7 @@ class YolopAssetTests(unittest.TestCase):
             manifest = pinned_manifest()
             manifest["input"]["color_order"] = "RGB"
             path.write_text(json.dumps(manifest), encoding="utf-8")
-            with self.assertRaisesRegex(ConfigurationError, "pinned S01"):
+            with self.assertRaisesRegex(ValueError, "pinned S01"):
                 assets.load_yolop_asset(Path(directory) / "absent", path)
 
     def test_duplicate_nonfinite_and_oversized_manifest_are_rejected(self):
@@ -76,7 +75,7 @@ class YolopAssetTests(unittest.TestCase):
             for raw in ('{"schema_version":1,"schema_version":1}', '{"value":NaN}',
                         '[' * 1100 + ']' * 1100, '"' + "a" * 65_537 + '"'):
                 path.write_text(raw, encoding="utf-8")
-                with self.subTest(raw=raw[:40]), self.assertRaises(ConfigurationError):
+                with self.subTest(raw=raw[:40]), self.assertRaises(ValueError):
                     assets.load_yolop_asset(Path(directory), path)
 
     def test_loaded_bytes_are_retained_if_original_blob_changes(self):
@@ -92,7 +91,7 @@ class YolopAssetTests(unittest.TestCase):
             self.assertIs(actual, blob)
             self.assertEqual(metadata["num_shaves"], 6)
             factory.assert_called_once_with(list(original))
-            with self.assertRaisesRegex(ConfigurationError, "SHA256"):
+            with self.assertRaisesRegex(ValueError, "SHA256"):
                 assets.load_yolop_asset(release, path)
 
     def test_missing_truncated_or_changed_notice_is_rejected(self):
@@ -105,7 +104,7 @@ class YolopAssetTests(unittest.TestCase):
                     target.write_bytes(b"")
                 else:
                     target.write_bytes(b"x" * target.stat().st_size)
-                with self.assertRaises(ConfigurationError):
+                with self.assertRaises((ValueError, FileNotFoundError)):
                     assets.load_yolop_asset(release, path)
 
     def test_sdk_tensor_or_compiler_metadata_mismatch_is_rejected(self):
@@ -122,7 +121,7 @@ class YolopAssetTests(unittest.TestCase):
                 else:
                     blob.networkOutputs["det_out"].strides = [2, 12, 75600]
                 sdk = NS(__version__="2.29.0.0", OpenVINO=NS(Blob=lambda values: blob))
-                with self.subTest(kind=kind), self.assertRaisesRegex(ConfigurationError, "metadata differs"):
+                with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "metadata differs"):
                     assets.validated_sdk_blob(sdk, loaded)
 
     def test_constructor_error_does_not_include_giant_argument_repr(self):
@@ -134,35 +133,6 @@ class YolopAssetTests(unittest.TestCase):
                 assets.validated_sdk_blob(sdk, loaded)
             self.assertLess(len(str(raised.exception)), 100)
             self.assertNotIn("giant raw", str(raised.exception))
-            self.assertNotIsInstance(raised.exception, ConfigurationError)
-
-    def test_sdk_constructor_runtime_and_memory_errors_are_not_configuration(self):
-        with small_asset_tree() as (release, path, _, _):
-            loaded = assets.load_yolop_asset(release, path)
-            for failure in (RuntimeError('native failure'), MemoryError('out of memory'), ValueError('SDK failure')):
-                sdk = NS(__version__='2.29.0.0', OpenVINO=NS(Blob=MagicMock(side_effect=failure)))
-                with self.subTest(kind=type(failure).__name__), self.assertRaises(ValueError) as raised:
-                    assets.validated_sdk_blob(sdk, loaded)
-                self.assertNotIsInstance(raised.exception, ConfigurationError)
-
-    def test_asset_io_and_allocation_failures_keep_their_runtime_class(self):
-        with small_asset_tree() as (release, path, _, _):
-            for failure in (OSError('storage I/O'), MemoryError('asset allocation')):
-                with self.subTest(kind=type(failure).__name__), patch.object(assets, '_regular', side_effect=failure):
-                    with self.assertRaises(type(failure)) as raised:
-                        assets.load_yolop_asset(release, path)
-                    self.assertIs(raised.exception, failure)
-
-    def test_missing_manifest_and_wrong_sdk_are_explicit_configuration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            with self.assertRaisesRegex(ConfigurationError, 'manifest is absent'):
-                assets.load_yolop_asset(Path(directory), Path(directory) / 'absent.json')
-        with small_asset_tree() as (release, path, _, _):
-            loaded = assets.load_yolop_asset(release, path)
-            sdk = NS(__version__='3.0.0', OpenVINO=NS(Blob=MagicMock()))
-            with self.assertRaises(ConfigurationError):
-                assets.validated_sdk_blob(sdk, loaded)
-            sdk.OpenVINO.Blob.assert_not_called()
 
 
 if __name__ == "__main__":

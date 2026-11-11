@@ -264,8 +264,9 @@ class MapperProfile:
             raise MapperProfileError('each aisle needs a declared lane role and no preassigned durable lane ID')
         survey=None if own.get('survey') is None else _typed(SurveyProfile,own['survey'])
         if survey is not None:
-            # 단일 존 ToF는 근거리 HIT 보조이며 정적 지도 조사의 필수 근거가 아니다.
-            if (survey.input_kind!='LIVE' or survey.required_sensor_mask&~3
+            installed=3
+            for _,leaf in sensors.tof_sources:installed|=4<<leaf.sensor_id
+            if (survey.input_kind!='LIVE' or survey.required_sensor_mask&~installed
                     or survey.observation_max_age_us>pipeline.max_observation_age_us
                     or survey.max_pose_gap_us>sensors.max_gap_us
                     or survey.station_window_us>1_000_000 or survey.atlas_cell_capacity>128*4096):

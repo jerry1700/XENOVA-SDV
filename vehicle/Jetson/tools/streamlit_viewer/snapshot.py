@@ -14,8 +14,6 @@ MEDIA_CAP=1024*1024
 MEDIA_COUNT=4
 IDENTITY_CAP=16
 SCHEMA='jetson-viewer-snapshot-1'
-LIVE_KIND='LIVE_HIL'
-LIVE_SCHEMA='pc-live-observer-1'
 PANELS=frozenset(('rgb','yolop','depth','grid'))
 REPRESENTATIVE_KIND='HISTORICAL_OAK_REPRESENTATIVE'
 DISPLAY_CROPS={'REPRESENTATIVE_YOLOP_TOP_LEFT':('yolop',(0,0,640,360)),
@@ -144,50 +142,6 @@ def _number(value,name):
     return value
 
 
-def _live_observation(value):
-    """별도 PC collector의 표시 자료만 검사한다. 장치/주행 권한은 판정하지 않는다."""
-    if type(value) is not dict or value.get('schema')!=LIVE_SCHEMA:raise SnapshotError('INVALID_LIVE_SCHEMA')
-    for name in ('run_id','session_id'):
-        if value.get(name) is not None:_text(value[name],name)
-    collector=value.get('collector');connection=value.get('connection');streams=value.get('streams')
-    if type(collector) is not dict:raise SnapshotError('INVALID_LIVE_COLLECTOR')
-    for name in ('id','epoch'):_text(collector.get(name),'collector '+name)
-    _integer(collector.get('sequence'),'collector sequence');stamp(collector.get('collected_stamp'))
-    if type(connection) is not dict:raise SnapshotError('INVALID_LIVE_CONNECTION')
-    for name in ('stage','state'):_text(connection.get(name),'connection '+name)
-    if connection.get('stop_reason') is not None:_text(connection['stop_reason'],'stop reason',2048)
-    if type(streams) is not list or len(streams)>16:raise SnapshotError('LIVE_STREAM_CAP')
-    names=set()
-    for stream in streams:
-        if type(stream) is not dict:raise SnapshotError('INVALID_LIVE_STREAM')
-        name=_text(stream.get('name'),'stream name')
-        if name in names:raise SnapshotError('DUPLICATE_LIVE_STREAM')
-        names.add(name)
-        for key in ('state','source_id','source_epoch'):
-            if stream.get(key) is not None:_text(stream[key],'stream '+key)
-        for key in ('received_count','source_sequence'):
-            if stream.get(key) is not None:_integer(stream[key],'stream '+key)
-        for key in ('source_stamp','pc_received_stamp'):stamp(stream.get(key))
-        elapsed=stream.get('received_age_s')
-        if elapsed is not None and (type(elapsed) not in (int,float) or not math.isfinite(elapsed) or elapsed<0):
-            raise SnapshotError('INVALID_STREAM_RECEIVE_AGE')
-    stages=value.get('stages')
-    if stages is not None:
-        if type(stages) is not dict or set(stages)-{'command','applied','movement'}:raise SnapshotError('INVALID_LIVE_STAGES')
-        for stage in stages.values():
-            if stage is None:continue
-            if type(stage) is not dict:raise SnapshotError('INVALID_LIVE_STAGE')
-            for key in ('state','source_id'):
-                if stage.get(key) is not None:_text(stage[key],'stage '+key)
-            if stage.get('source_sequence') is not None:_integer(stage['source_sequence'],'stage source sequence')
-            for key in ('source_stamp','pc_received_stamp'):stamp(stage.get(key))
-    pose=value.get('pose')
-    if pose is not None:
-        if type(pose) is not dict:raise SnapshotError('INVALID_LIVE_POSE')
-        _text(pose.get('frame'),'pose frame')
-        for key in ('x','y','yaw'):_number(pose.get(key),'pose '+key)
-
-
 def validate(body):
     if body.get('schema')!=SCHEMA:raise SnapshotError('UNSUPPORTED_VIEWER_SCHEMA')
     source=body.get('source')
@@ -197,10 +151,7 @@ def validate(body):
     historical_unexecuted=(source.get('kind')==REPRESENTATIVE_KIND and source.get('sequence') is None and
         type(recording) is dict and recording.get('status')=='NOT_EXECUTED' and source.get('stamp') is None and not body.get('media'))
     sequence=None if historical_unexecuted else _integer(source.get('sequence'),'source sequence');stamp(source.get('stamp'))
-    if source.get('kind') not in ('DIAGNOSTIC','OFFLINE_SYNTHETIC',REPRESENTATIVE_KIND,LIVE_KIND):raise SnapshotError('UNKNOWN_SOURCE_KIND')
-    if source.get('kind')==LIVE_KIND or body.get('live') is not None:
-        if source.get('kind') not in ('DIAGNOSTIC',LIVE_KIND):raise SnapshotError('LIVE_SOURCE_KIND_REQUIRED')
-        _live_observation(body.get('live'))
+    if source.get('kind') not in ('DIAGNOSTIC','OFFLINE_SYNTHETIC',REPRESENTATIVE_KIND):raise SnapshotError('UNKNOWN_SOURCE_KIND')
     operation=body.get('operation')
     if operation is not None:
         if type(operation) is not dict:raise SnapshotError('INVALID_OPERATION')
@@ -212,7 +163,7 @@ def validate(body):
     if type(layers) is not list or len(layers)>8:raise SnapshotError('INVALID_MAP_LAYERS')
     total=0
     for layer in layers:
-        if type(layer) is not dict or layer.get('kind') not in ('GT','ESTIMATE','UNCERTAINTY','PATH','MODEL'):raise SnapshotError('INVALID_LAYER_KIND')
+        if type(layer) is not dict or layer.get('kind') not in ('GT','ESTIMATE','UNCERTAINTY','PATH'):raise SnapshotError('INVALID_LAYER_KIND')
         _text(layer.get('frame'),'map frame');points=layer.get('points')
         if 'closed' in layer and type(layer['closed']) is not bool:raise SnapshotError('INVALID_LAYER_CLOSED')
         if type(points) is not list or len(points)>2048:raise SnapshotError('MAP_POINT_CAP')

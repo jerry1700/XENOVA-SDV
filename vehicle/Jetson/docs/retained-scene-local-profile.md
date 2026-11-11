@@ -98,11 +98,8 @@ state에서 옛 hazard를 자동 재사용하지 않는다. 이후 새 FREE로 o
 
 생성자 인자 `None`은 기존 호출을 위해 검증된 현재 `tof_sources`에서만 자산을 도출한다.
 명시 `()`는 승인 자산 없음이며 과거 ToF를 수락하는 wildcard가 아니다. 등록된 선택적
-unqualified leaf도 목록에는 보존하되, 실제 현재/과거 ToF proof를 소비할 때는 단일존 schema2의
-`extrinsics_qualified/time_qualified`를 요구한다. ToF는 HIT-only이며 구 FREE용
-`first_surface_qualified/coverage_qualified/free_required_quality`를 재도입하지 않는다.
-구 schema1/8×8 자산을 새 leaf나 현재 근거리 관측으로 자동 변환하지 않는다.
-RGB-only scope는 선택적 leaf의 미수락 때문에 막지 않는다.
+unqualified leaf도 목록에는 보존하되, 실제 현재/과거 ToF proof를 소비할 때는 기존 네 가지
+qualification을 계속 요구한다. RGB-only scope는 선택적 leaf의 미수락 때문에 막지 않는다.
 자산 제거·변경이나 method SHA 변경을 표본 부재와 혼동하지 않고 기존 NOT_READY로 남긴다.
 이 구분은 wire/SQL·원 proof·관측 기한·필수 sensor mask를 바꾸지 않는다.
 

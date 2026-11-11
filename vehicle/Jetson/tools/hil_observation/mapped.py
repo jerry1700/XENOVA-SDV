@@ -11,7 +11,7 @@ import threading
 
 from xenova_vehicle.perception.inputs import FrameStamp, ImageFrame, PerceptionInput
 from xenova_vehicle.simulation.pc_input import PcSourceBinding, PcFrameInput, _PcInputIssuer
-from .clock import ClockSource, HilObservationClock, ClockLeaseEvidence, HilClockError
+from .clock import ClockSource, HilObservationClock, ClockLeaseEvidence
 from .transport import SessionScope, ObservationFrame, ReceivedPacket
 
 
@@ -100,15 +100,10 @@ class MappedPcOwner:
         _need(self._head is None or packet.sequence > self._head, 'PC frame sequence cannot be replayed or retimed')
         self._head = packet.sequence  # 매핑 실패도 이미 수신한 원 순번/E를 환급하지 않는다.
         lease = evidence.lease
-        try:
-            rgb = lease.map_interval(*packet.rgb_pc_interval, now_j_us)
-            depth = lease.map_interval(*packet.depth_pc_interval, now_j_us)
-            deadline = lease.deadline_lower(packet.expires_pc_us, now_j_us)
-        except HilClockError as error:
-            # 유효 clock으로 이 관측을 매핑할 수 없는 경우 해당 프레임만 폐기한다.
-            raise PcMappingError(str(error)) from error
+        rgb = lease.map_interval(*packet.rgb_pc_interval, now_j_us)
+        depth = lease.map_interval(*packet.depth_pc_interval, now_j_us)
         full_lower, full_upper = min(rgb[0], depth[0]), max(rgb[1], depth[1])
-        expires = min(deadline, full_lower + 500_000)
+        expires = min(lease.deadline_lower(packet.expires_pc_us, now_j_us), full_lower + 500_000)
         _need(full_upper <= received.received_local_us and full_upper < expires and now_j_us + 1 < expires,
             'mapped capture is future, unavailable, or past its original E')
         fields = self.binding.fields
@@ -148,13 +143,10 @@ class MappedPcOwner:
         return result
 
     def current_view(self, pc_frame, *, now_j_us):
+        self._current(now_j_us)
         _need(type(pc_frame) is PcFrameInput and pc_frame._issuer is self._issuer
             and pc_frame.binding.canonical_bytes == self.binding.canonical_bytes,
             'original issued PC frame required')
-        if now_j_us+1>=pc_frame.expires_j_us:
-            from xenova_vehicle.runtime.health_policy import FrameExpired
-            raise FrameExpired('original PC frame expired before mapping use')
-        self._current(now_j_us)
         evidence = pc_frame._lease_token
         _need(type(evidence) is ClockLeaseEvidence and evidence.lease.source == self._source
             and pc_frame._revision == (self._revision, self.clock_owner.fence_revision)

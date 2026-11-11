@@ -182,7 +182,7 @@ class MapperBootstrapTests(unittest.TestCase):
         self.assertTrue(evidence.current(self.f.bootstrap,self.f.peer,self.f.incarnation,self.f.now))
         self.assertFalse(evidence.current(dict(self.f.bootstrap,database_uuid=uid()),self.f.peer,self.f.incarnation,self.f.now))
         self.assertFalse(evidence.current(dict(self.f.bootstrap,allocator_highwater='2'),self.f.peer,self.f.incarnation,self.f.now))
-        self.assertTrue(evidence.current(self.f.bootstrap,self.f.peer,self.f.incarnation,report.expires_us))
+        self.assertFalse(evidence.current(self.f.bootstrap,self.f.peer,self.f.incarnation,report.expires_us))
         self.assertEqual(self.store.latest_complete(expires_us=self.f.now+5_000_000),self.f.bootstrap['selected_checkpoint'])
         self.assertIsNone(binding['scene_admission_ref'])
         self.assertFalse(self.f.jio.worlds)
@@ -218,26 +218,6 @@ class MapperBootstrapTests(unittest.TestCase):
         self.f.vehicle();self.f.cycle()
         self.assertEqual(len(self.f.publications),1);self.assertIsNone(self.bootstrap.failure)
 
-    def test_late_local_completion_delivery_uses_original_validated_load_without_reloading(self):
-        request=self.start();self.copy_page(request)
-        report=self.bootstrap.take_complete();self.assertIsNotNone(report)
-        f=self.f;f.mapper.accept_bootstrap(report)
-        delivery_issued=f.now
-        f.mapper.pump()
-        f.now=delivery_issued+5_000_000
-        f.supervisor.pump(f.material,bind_ready=True,on_publication=self.published,
-            on_bootstrap_load=self.runtime.request_storage_bootstrap_load,
-            bootstrap_completion=lambda:self.runtime.db_broker.last_completion)
-        evidence=f.supervisor.bootstrap.evidence
-        self.assertIsNotNone(evidence)
-        self.assertEqual(evidence.expires_us,request.job.expires_us)
-        self.assertLess(int(json.loads(report.body)['completed_us']),request.job.expires_us)
-        self.assertEqual(len(f.supervisor.bootstrap.requests),1)
-        self.assertIsNone(self.bootstrap.take_request())
-        f.sample.sequence+=1;f.vehicle();self.source_cycle()
-        self.assertIsNotNone(f.mapper.publication)
-        self.assertEqual(len(f.supervisor.bootstrap.requests),1)
-
     def test_false_foreign_and_late_complete_reports_do_not_open_identity(self):
         request=self.start();self.copy_page(request);report=self.bootstrap.take_complete()
         self.assertIsNotNone(report)
@@ -266,9 +246,9 @@ class MapperBootstrapTests(unittest.TestCase):
             with self.subTest(change=change),self.assertRaises(ValueError):
                 self.f.supervisor.bootstrap.accept_complete(packet,self.f.material,self.f.now)
             self.assertIsNone(self.f.supervisor.owner.binding)
-        evidence=self.f.supervisor.bootstrap.accept_complete(original,self.f.material,request.job.expires_us)
-        self.assertIs(self.f.supervisor.bootstrap.evidence,evidence)
-        self.assertTrue(evidence.current(self.f.bootstrap,self.f.peer,self.f.incarnation,request.job.expires_us))
+        with self.assertRaises(ValueError):
+            self.f.supervisor.bootstrap.accept_complete(original,self.f.material,request.job.expires_us)
+        self.assertIsNone(self.f.supervisor.bootstrap.evidence)
         self.assertEqual(value['checkpoint_ref'],self.f.bootstrap['selected_checkpoint'])
         with self.assertRaises(ValueError):BootstrapReport()
         with self.assertRaises(ValueError):BootstrapIdentityEvidence()

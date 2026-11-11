@@ -14,14 +14,10 @@ from .ipc_contract import ENDPOINT, HEADER, MAX_BYTES, VERSION, decode, encode, 
 
 CONNECTION_LIMIT = 16
 IO_BUDGET_S = 1.0
-# Open connections poll actor results and deadlines every POLL_WAIT_S. With none
-# open only accept() and stop matter; close() waits 0.5 s for this loop to end.
-POLL_WAIT_S = .01
-IDLE_WAIT_S = .1
 
 
 class GatewayServer:
-    def __init__(self, runner, lease, endpoint=ENDPOINT, *, uid=0, contract=None,submit=None,connection_limit=CONNECTION_LIMIT):
+    def __init__(self, runner, lease, endpoint=ENDPOINT, *, uid=0):
         self.runner, self.lease, self.path, self.uid = runner, lease, Path(endpoint), uid
         self.stop = threading.Event()
         self.thread = None
@@ -29,11 +25,6 @@ class GatewayServer:
         self.stats = dict(accepted=0, malformed=0, busy=0, expired=0, high_water=0,
                           decoded=0, encoded=0, peer_denied=0)
         self.failure = None
-        self.contract=contract;self.submit=runner.submit_provider if submit is None else submit
-        self.connection_limit=connection_limit
-
-    def _error(self,code):
-        return self.contract.error(code) if self.contract else dict(version=VERSION,ok=False,error={'code':code})
 
     def start(self):
         if self.thread is not None or self.lease.fd is None:
@@ -91,19 +82,20 @@ class GatewayServer:
             def reply(stream, state, value):
                 try: state['out'] = memoryview(encode(value))
                 except ValueError:
-                    state['out'] = memoryview(encode(self._error('INVALID_FRAME' if self.contract else 'RESPONSE_TOO_LARGE')))
+                    state['out'] = memoryview(encode(dict(version=VERSION, ok=False,
+                                                          error={'code':'RESPONSE_TOO_LARGE'})))
                 self.stats['encoded'] += 1
                 select.modify(stream, selectors.EVENT_WRITE)
             try:
                 while not self.stop.is_set():
-                    for key, mask in select.select(POLL_WAIT_S if connections else IDLE_WAIT_S):
+                    for key, mask in select.select(.01):
                         stream = key.fileobj
                         if stream is self.listener:
                             stream, _ = self.listener.accept(); stream.setblocking(False)
                             _, peer, _ = struct.unpack('3i', stream.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                             if peer != self.uid:
                                 self.stats['peer_denied'] += 1; stream.close(); continue
-                            if len(connections) >= self.connection_limit:
+                            if len(connections) >= CONNECTION_LIMIT:
                                 self.stats['busy'] += 1; stream.close(); continue
                             state = dict(data=bytearray(), size=None, out=None, result=None,
                                          deadline=time.monotonic()+IO_BUDGET_S)
@@ -133,20 +125,19 @@ class GatewayServer:
                             if state['size'] is not None and len(state['data']) >= state['size']+4:
                                 if len(state['data']) != state['size']+4:
                                     raise ValueError('one call per connection')
-                                call = (self.contract.decode(state['data'][4:]) if self.contract else
-                                    request(decode(state['data'][4:]))); self.stats['decoded'] += 1
+                                call = request(decode(state['data'][4:])); self.stats['decoded'] += 1
                                 state['data'].clear()
-                                try: state['result'] = self.submit(call)
+                                try: state['result'] = self.runner.submit_provider(call)
                                 except queue.Full:
                                     self.stats['busy'] += 1
-                                    reply(stream, state, self._error('BUSY_NOT_ACCEPTED'))
+                                    reply(stream, state, dict(version=VERSION, ok=False, error={'code':'BUSY_NOT_ACCEPTED'}))
                                 except ValueError:
-                                    reply(stream, state, self._error('UNSUPPORTED_PROFILE' if self.contract else 'PROFILE_UNSUPPORTED'))
+                                    reply(stream, state, dict(version=VERSION, ok=False, error={'code':'PROFILE_UNSUPPORTED'}))
                         except (OSError, EOFError):
                             close(stream)
-                        except ValueError as error:
+                        except ValueError:
                             self.stats['malformed'] += 1
-                            reply(stream, state, self._error(getattr(error,'code','INVALID_FRAME')))
+                            reply(stream, state, dict(version=VERSION, ok=False, error={'code':'INVALID_FRAME'}))
                     for stream, state in list(connections.items()):
                         if time.monotonic() >= state['deadline']:
                             self.stats['expired'] += 1; close(stream); continue

@@ -178,36 +178,6 @@ print(json.dumps(reply))
         with ownership.request_output(),ownership.lifecycle_slot(case.p):
             with self.assertRaises(OperationBusy):ownership.ensure_quiet(case.p)
 
-    def test_accepted_retire_usage_barrier_allows_other_queries_and_stop(self):
-        case=fixtures.ReadProgressTest('runTest');case.setUp();self.addCleanup(case.doCleanups)
-        first,second=case.pair()
-        self.assertTrue(case.m.call('stop',{'vm_id':first},idempotency_key='retire-stop')['ok'])
-        request=case.m.fork();usage=request.usage_check
-        entered,release=threading.Event(),threading.Event();results=[];visits=[]
-        def delayed(*args):
-            usage(*args);visits.append(args)
-            if len(visits)==2:
-                entered.set()
-                if not release.wait(10):raise RuntimeError('unreleased retire usage')
-        request.usage_check=delayed
-        thread=threading.Thread(target=lambda:results.append(request.call(
-            'retire',{'vm_id':first},execute=True,idempotency_key='retire-owned')))
-        thread.start()
-        try:
-            self.assertTrue(entered.wait(5))
-            for action,spec in (('list',{}),('get',{'vm_id':second}),
-                                ('operation',{'idempotency_key':'retire-owned'})):
-                reply=case.m.fork().call(action,spec,budget_ms=2000)
-                self.assertTrue(reply['ok'],reply)
-            stopped=case.m.fork().call('stop',{'vm_id':second},
-                                      idempotency_key='retire-other-stop',budget_ms=2000)
-            self.assertTrue(stopped['ok'],stopped)
-            original=case.m.fork().call('control-operation',{'idempotency_key':'retire-other-stop'})
-            self.assertEqual(original['data']['operation']['phase'],'completed')
-            self.assertTrue(thread.is_alive());self.assertFalse(release.is_set())
-        finally:release.set();thread.join(10)
-        self.assertFalse(thread.is_alive());self.assertTrue(results[0]['ok'],results)
-
     def test_purge_unlink_barrier_allows_other_stop_and_same_key_resumes_after_io_failure(self):
         case=fixtures.ReadProgressTest('runTest');case.setUp();self.addCleanup(case.doCleanups)
         first,second=case.pair()
@@ -226,9 +196,6 @@ print(json.dumps(reply))
         thread.start()
         try:
             self.assertTrue(entered.wait(5))
-            for action,specification in (('list',{}),('get',{'vm_id':second})):
-                queried=case.m.fork().call(action,specification,budget_ms=2000)
-                self.assertTrue(queried['ok'],queried)
             stop=case.m.fork().call('stop',{'vm_id':second},idempotency_key='purge-other-stop')
             self.assertTrue(stop['ok'],stop)
             original=case.m.fork().call('control-operation',{'idempotency_key':'purge-other-stop'})

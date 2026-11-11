@@ -217,11 +217,8 @@ class PcFrameInput(_Frozen):
             and current_view._issuer is self._issuer and current_view._frame_token is self._frame_token
             and current_view._lease_token is self._lease_token and current_view._revision == self._revision
             and type(now_us) is int and current_view.checked_j_us <= now_us
-            and self.expires_j_us == current_view.expires_j_us,
+            and now_us + 1 < self.expires_j_us == current_view.expires_j_us,
             'original PC owner/session/fence/lease/frame/E is not current')
-        if now_us + 1 >= self.expires_j_us:
-            from ..runtime.health_policy import FrameExpired
-            raise FrameExpired('original PC frame expired')
 
 
 class _PcInputIssuer(_Frozen):

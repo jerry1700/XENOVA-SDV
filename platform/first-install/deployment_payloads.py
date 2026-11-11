@@ -1,4 +1,4 @@
-"""dom0 API·MQTT·Gateway·실행 로그 설치 소스 계약. 조립 시 과거 payload를 거부한다."""
+"""dom0 API·MQTT·실행 로그 설치 소스 계약. 조립 시 파일 누락과 과거 이미지 재사용을 거부한다."""
 from pathlib import Path
 import stat
 
@@ -8,9 +8,6 @@ ROOT = Path(__file__).resolve().parents[2]
 RECIPES = ROOT / "platform/yocto/meta-xenova/recipes-core"
 API = ROOT / "platform/services/dom0-manager"
 MQTT = ROOT / "platform/services/vm-agent/mqtt-client"
-GATEWAY = ROOT / "platform/services/gateway"
-WORLD = ROOT / "platform/apps/drive/world/python"
-DISPLAY = ROOT / "platform/services/display/router"
 RUNTIME_LOGS = RECIPES / "xenova-dom0-manager/files/runtime-logs"
 COLLECTOR = "xenova-runtime-log-collector.service"
 LOG_ENV = "etc/xenova/runtime-logs/collector.env"
@@ -19,9 +16,7 @@ LOG_ENV = "etc/xenova/runtime-logs/collector.env"
 def source_files(site_packages):
     """배포 대상 소스와 rootfs 경로를 연결한다. 실행·파일 변경은 하지 않는다."""
     result = {}
-    for project, package in ((API, "dom0_manager"), (MQTT, "xenova_mqtt"),
-                              (GATEWAY, "xenova_gateway"), (WORLD, "xenova_drive_world"),
-                              (DISPLAY, "xenova_display")):
+    for project, package in ((API, "dom0_manager"), (MQTT, "xenova_mqtt")):
         if not (project/package/"__init__.py").is_file():
             raise ValueError("required deployment source package missing: " + package)
         for source in sorted((project/package).rglob("*.py")):
@@ -36,12 +31,6 @@ def source_files(site_packages):
         LOG_ENV: RUNTIME_LOGS/"runtime-log-db.env",
         "usr/share/xenova/dom0-manager-pyproject.toml": API/"pyproject.toml",
         "usr/share/xenova/mqtt-client-pyproject.toml": MQTT/"pyproject.toml",
-        "usr/lib/systemd/system/xenova-display-feed.service": RECIPES/"xenova-display/files/xenova-display-feed.service",
-        "usr/lib/systemd/system/xenova-display-guest-relay.service": DISPLAY/"deploy/guest-display/xenova-display-guest-relay.service",
-        "usr/share/xenova/display/examples/guest-display-data-only.json.example": DISPLAY/"deploy/guest-display/guest-display-data-only.json.example",
-        "usr/lib/xenova/xenova_display_setup.py": RECIPES/"xenova-platform/files/xenova_display_setup.py",
-        "usr/sbin/xenova-display-setup": RECIPES/"xenova-platform/files/xenova-display-setup",
-        "usr/lib/systemd/system/xenova-display-check.service": RECIPES/"xenova-platform/files/xenova-display-check.service",
     })
     return result
 
@@ -65,9 +54,6 @@ def installed_sources(root):
             raise ValueError("required API/MQTT runtime dependency missing: "+name)
     if not path("usr/bin/python3").is_file() or not path("usr/bin/python3").stat().st_mode & 0o111:
         raise ValueError("required Python runtime missing")
-    wrapper = path('usr/sbin/xenova-display-setup')
-    if not wrapper.is_file() or stat.S_IMODE(wrapper.stat().st_mode) != 0o755:
-        raise ValueError('Display setup entrypoint must be installed executable (0755)')
     for unit, source in (("xenova-dom0-manager.service", RECIPES/"xenova-dom0-manager/files/xenova-dom0-manager.service"),
                          ("xenova-recovery-worker.service", API/"deploy/xenova-recovery-worker.service")):
         link = root/"etc/systemd/system/multi-user.target.wants"/unit
@@ -75,14 +61,6 @@ def installed_sources(root):
             raise ValueError("required dom0 service not enabled: " + unit)
     if stat.S_IMODE(path("etc/xenova/dom0-manager.env").stat().st_mode) != 0o600:
         raise ValueError("dom0 API environment must be root-only (0600)")
-    for unit in ('xenova-display-feed.service', 'xenova-display-guest-relay.service', 'xenova-display-check.service'):
-        link = root/'etc/systemd/system/multi-user.target.wants'/unit
-        if not link.is_symlink() or path(str(link.relative_to(root))) != path('usr/lib/systemd/system/'+unit):
-            raise ValueError('required Display service not enabled: '+unit)
-    for relative in ('etc/xenova/display.env', 'etc/xenova/display-bindings.json',
-                     'etc/xenova/guest-display.json', 'etc/xenova/guest-display/guest-data.token'):
-        if (root/relative).is_symlink() or path(relative).exists():
-            raise ValueError('common image must not contain board Display configuration or credentials')
     collector_link = "etc/systemd/system/multi-user.target.wants/" + COLLECTOR
     if not (root/collector_link).is_symlink() or path(collector_link) != path("usr/lib/systemd/system/" + COLLECTOR):
         raise ValueError("required dom0 service not enabled: " + COLLECTOR)

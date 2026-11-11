@@ -55,20 +55,16 @@ def follow(store, units, *, stopped, executable="journalctl"):
                 store.source("dom0", units)
                 next_status = time.monotonic() + 2
             for key, _ in selector.select(timeout=.5):
-                # Every record of one read and the cursor after them commit in one transaction.
-                rows, checkpoint = [], None
                 for raw in framing.feed(os.read(key.fileobj.fileno(), 65536)):
                     try:
                         row = json.loads(raw)
                         if row.get("_SYSTEMD_UNIT") not in units:
                             continue
                         record = journal_record(row)
-                        rows.append(store.prepare(**record))
-                        checkpoint = record["native_id"]
+                        store.append(**record)
+                        store.source("dom0", units, checkpoint=record["native_id"], recorded=True)
                     except (ValueError, KeyError, TypeError, OverflowError):
                         continue
-                if rows:
-                    store.insert(rows, source=dict(source_id="dom0", components=units, checkpoint=checkpoint, recorded=True))
     finally:
         store.source("dom0", units, state="disconnected")
         if process.poll() is None:

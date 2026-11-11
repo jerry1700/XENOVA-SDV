@@ -7,7 +7,6 @@ MAPPER_STARTED.reason은 원 만료 decimal이다. 다른 reason은 실제 phase
 
 from dataclasses import dataclass, replace
 from uuid import UUID
-from .health_policy import health_policy
 
 
 STAGES=frozenset(('MAPPER_STARTED','MAPPER_PROGRESS','MAPPER_COMPLETED'))
@@ -83,8 +82,8 @@ class MapperJobWatch:
         return True
 
     def stalled(self, now_us):
-        """계산 정체를 단일 건강 감시 예산으로 판정한다. frame E와 heartbeat는 별개다."""
+        """원 기한을 넘겼고 실제 진전도500ms 없으면 고장이다. heartbeat는 입력이 아니다."""
         _uint(now_us)
         current=self.active
         return bool(current is not None and now_us>=current.expires_us
-                    and now_us-current.progressed_us>=health_policy().compute_stall_us)
+                    and now_us-current.progressed_us>=MAX_SOURCE_JOB_US)

@@ -8,10 +8,10 @@ from collections import deque
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import sys
 import time
 import uuid
-import hashlib
 
 from ..yolop_profile import YolopBenchProfile
 from .lifecycle_messages import LifecycleMessage, LifecyclePeer
@@ -26,7 +26,6 @@ from .resident_samples import CaptureAssembler, decode_sample_slot, encode_sampl
 from .resident_transport import ResidentLink, j_us
 from .slot_cleanup import CleanupTimeLimits, ReleaseMessage
 from .slot_messages import ReaderSlotContext, SlotMessage, SlotTimeLimits, WriterSlotContext
-from .health_policy import ConfigurationError, FrameExpired, health_policy
 
 
 @dataclass(frozen=True)
@@ -39,9 +38,9 @@ class WorkerBoot:
     raw_profile: RawBindingProfile
     raw_tokens: tuple
     startup_deadline_us: int
-    diagnostic_directory: str | None
+    diagnostic_directory: str
     writer_bind: RawBindMessage | None = None
-    slot_limits: SlotTimeLimits = SlotTimeLimits(5_000_000, 500_000, 5_000_000)
+    slot_limits: SlotTimeLimits = SlotTimeLimits(150_000, 500_000, 150_000)
     cleanup_limits: CleanupTimeLimits = CleanupTimeLimits(1_000_000)
     perception_profile_bytes: bytes | None = None
     copy_handles: tuple | None = None
@@ -65,9 +64,7 @@ class WorkerBoot:
                 raise ValueError('worker boot requires exact registered values')
         if (self.peer.role not in ('A', 'M') or self.peer.service_instance != self.raw_scope.service_instance
                 or type(self.startup_deadline_us) is not int or not 0 < self.startup_deadline_us < 2**64
-                or self.diagnostic_directory is not None and
-                    (type(self.diagnostic_directory) is not str or not self.diagnostic_directory)
-                or not self.raw_profile.nn_enabled):
+                or type(self.diagnostic_directory) is not str or not self.raw_profile.nn_enabled):
             raise ValueError('invalid resident worker scope/deadline')
         if (self.peer.role == 'A' and self.raw_profile.jpeg_enabled != (self.jpeg_endpoint is not None)
                 or self.peer.role == 'M' and self.jpeg_endpoint is not None):
@@ -380,8 +377,7 @@ class _Actor:
         if self.bind is not None:
             raise ValueError('resident source accepts one original RAW BIND')
         context = RawBindContext(self.boot.peer, self.boot.raw_scope.writer, self.boot.raw_profile)
-        bind = RawBindMessage(packet, context,
-            cap_us=self.boot.startup_deadline_us if self.boot.peer.role == 'A' else None)
+        bind = RawBindMessage(packet, context, cap_us=self.boot.startup_deadline_us)
         if not bind.issued_us <= j_us() < bind.expires_us:
             raise ValueError('BIND is outside its original lifetime')
         if bind.binding.sha256 != self.boot.raw_scope.raw_binding_sha256:
@@ -403,7 +399,7 @@ class _Actor:
                     raise ValueError('expected initial RAW BIND')
                 self.accept_bind(packet)
             now = j_us()
-            end = (self.boot.startup_deadline_us if self.boot.peer.role == 'A' else 2**64-1) if self.bind is None else self.bind.expires_us
+            end = self.boot.startup_deadline_us if self.bind is None else self.bind.expires_us
             if now >= end:
                 raise TimeoutError('original RAW BIND/ACK deadline elapsed')
             time.sleep(0.002)
@@ -412,29 +408,6 @@ class _Actor:
     def slot(self, payload, *, request_id=None, issued=None, expires=None):
         return self.link.send('SLOT', payload, domain='RAW', revision=self.bind.binding_revision,
                               request_id=request_id, issued_us=issued, expires_us=expires)
-
-    def cancel_request(self, request):
-        """native 취득 전에만 호출한다. 같은 채널의 다음 REQUEST보다 먼저 취소를 보낸다."""
-        now = j_us()
-        packet = self.send_required('RAW_CONTROL', dict(op='CANCEL_REQUEST',
-            request_id=request.request_id, request_sha256=hashlib.sha256(request.raw).hexdigest(),
-            raw_binding_sha256=self.boot.raw_scope.raw_binding_sha256), domain='RAW',
-            revision=self.bind.binding_revision, request_id=request.request_id,
-            issued_us=now, expires_us=now + health_policy().control_stall_us)
-        self.await_sent(packet)
-        history = getattr(self, '_cancelled_raw', None)
-        if history is None:self._cancelled_raw = history = deque(maxlen=16)
-        history.append(request)
-        self.leases_released = True
-
-    def cancelled_grant(self, packet, context, limits, parser=SlotMessage):
-        """취소 전에 S가 이미 보낸 GRANT/ACQUIRED는 원 parent 검산 뒤 무효과로 버린다."""
-        if packet.kind != 'SLOT' or packet.payload.get('op') not in ('GRANT', 'ACQUIRED'):return False
-        for original in getattr(self, '_cancelled_raw', ()):
-            if original.request_id == packet.fields['request_id']:
-                parser(packet, original.context if context is None else context, original, limits=limits)
-                return True
-        return False
 
     def required_slot(self, payload, *, request_id, issued, expires):
         return self.send_required('SLOT', payload, domain='RAW', revision=self.bind.binding_revision,
@@ -470,7 +443,7 @@ class _Actor:
             self.service_idle()
             actual = self.last_actual_sent
             if actual is not None and actual.packet is packet:
-                if actual.completed_us >= deadline and not ResidentLink._cleanup(packet):
+                if actual.completed_us >= deadline:
                     raise TimeoutError('required packet actual send missed its original deadline')
                 return actual
             if j_us() >= deadline:
@@ -481,18 +454,17 @@ class _Actor:
                 time.sleep(0.002)
 
     def save(self, filename, value):
-        from .resident_diagnostics import DiagnosticWriter
-        if self.boot.diagnostic_directory is None:
-            return True
-        if not hasattr(self, '_diagnostics'):
-            try:self._diagnostics = DiagnosticWriter()
-            except Exception as error:
-                self.failure_diagnostic_error = type(error).__name__[:96]
-                return False
-        return self._diagnostics.save(self.boot.diagnostic_directory, filename, value)
+        path = Path(self.boot.diagnostic_directory)
+        path.mkdir(parents=True, exist_ok=True)
+        raw = (json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii')
+        if len(raw) > 2 * 1024 * 1024:
+            raise ValueError('resident diagnostic exceeds its bound')
+        with (path / filename).open('xb') as target:
+            target.write(raw)
 
     def fault(self, error):
-        configuration = issubclass(type(error), ConfigurationError)
+        configuration = (issubclass(type(error), ValueError) and self.state in
+                         ('STARTING', 'WAIT_INPUT', 'ASSET_CHECK', 'DEVICE_BOOT', 'PIPELINE_START'))
         self.failure = type.__getattribute__(type(error), '__name__')
         try:
             message, truncated = _exception_message(error)
@@ -588,7 +560,7 @@ def acquisition_main(endpoint, boot):
 
         setup = source.start(stage)
         if setup['model_asset']['blob_sha256'] != boot.raw_profile.model_id:
-            raise ConfigurationError('actual validated model differs from the accepted binding')
+            raise ValueError('actual validated model differs from the accepted binding')
         actor.save('oak-setup.json', setup)
         queue_j = int(setup['queues_configured_j_us'])
         bridge = source.sample_clock()
@@ -598,11 +570,11 @@ def acquisition_main(endpoint, boot):
         scope = CaptureScope(bind.binding.sha256, boot.peer.worker_instance, streams['rgb_video'],
                              streams['depth_right'], streams.get('nn_input0'), streams.get('nn_output0'))
         deadline = AbsoluteDeadline.after(queue_j, 15_000_000, now_us=j_us(), cap_us=boot.startup_deadline_us)
-        warmup = CaptureWarmup(scope, queue_j, bridge['sdk_us'], deadline, now_us=j_us(), enforce_deadline=False)
+        warmup = CaptureWarmup(scope, queue_j, bridge['sdk_us'], deadline, now_us=j_us())
         actor.state = 'WARMUP'
         actor.progress('GRAPH_STARTED', completed=queue_j)
         next_clock = j_us() + 100_000
-        last_raw = dict(rgb_video=queue_j, depth_right=queue_j)
+        last_raw = dict(rgb_video=j_us(), depth_right=j_us())
         last_nn = None
         request = pending_sample = None
         last_published = None
@@ -643,16 +615,17 @@ def acquisition_main(endpoint, boot):
             if video is not None:
                 video.step()
             now = j_us()
+            if not warmup.ready and warmup.poll(now):
+                raise TimeoutError('capture30 original warmup deadline elapsed')
             if warmup.ready and not capture_reported:
                 actor.state = 'STREAMING'
                 actor.progress('CAPTURE_READY', assembler.latest_capture.rgb.sequence, completed=warmup.ready_us)
                 capture_reported = True
-            # 개별 실제 stream의 건강과 fresh pair 준비 개수는 다른 근거다.
-            if any(now - completed >= health_policy().capture_stall_us for completed in last_raw.values()):
+            if any(now - completed >= 500_000 for completed in last_raw.values()):
                 raise TimeoutError('active RGB/depth stream stalled')
-            # NN 입력/출력 부재는 readiness 제한이다. SDK 고장과 control 정체는 별도로 복구한다.
+            if last_nn is not None and now - last_nn >= int(boot.profile.nn_stall_timeout_s * 1_000_000):
+                raise TimeoutError('actual NN output stream stalled')
             for packet in incoming:
-                if actor.cancelled_grant(packet, context, boot.slot_limits):continue
                 if packet.kind == 'RAW_CONTROL':
                     op = packet.payload.get('op')
                     if op == 'PAUSE':
@@ -676,23 +649,18 @@ def acquisition_main(endpoint, boot):
                 if packet.kind != 'SLOT' or packet.payload.get('op') != 'GRANT' or request is None:
                     raise ValueError('unexpected A control statement')
                 grant = SlotMessage(packet, context, request, limits=boot.slot_limits)
-                if (j_us() >= request.expires_us or pending_sample is None or not pending_sample.fresh(j_us())):
-                    actor.cancel_request(request)
-                    request = pending_sample = None
-                    continue
+                request.record.check(j_us())
+                if pending_sample is None or not pending_sample.fresh(j_us()):
+                    raise TimeoutError('granted sample is no longer fresh')
                 encoding = encode_sample(pending_sample, grant.record.key, bind.binding)
                 actor.leases_released = False
-                try:info = writer.publish(grant.record, encoding)
-                except FrameExpired:
-                    actor.cancel_request(request)
-                    request = pending_sample = None
-                    continue
+                info = writer.publish(grant.record, encoding)
                 actor.leases_released = True
                 payload = grant.payload
                 payload.update(op='FILLED', payload_length=info.payload_length,
                                descriptor_sha256=info.descriptor_sha256)
                 out = actor.required_slot(payload, request_id=grant.request_id, issued=info.completed_us,
-                                  expires=info.completed_us + boot.cleanup_limits.transport_budget_us)
+                                 expires=grant.expires_us)
                 SlotMessage(out, context, grant, limits=boot.slot_limits)
                 last_filled = out
                 published += 1
@@ -708,8 +676,7 @@ def acquisition_main(endpoint, boot):
                     issued_us=complete, expires_us=pause.expires_us)
                 paused_ack = RawControlMessage(reply, bind, pause)
             if not write_paused and request is not None and j_us() >= request.expires_us:
-                actor.cancel_request(request)
-                request = pending_sample = None
+                raise TimeoutError('original copy request expired without GRANT')
             sample = assembler.latest(j_us())
             if (not write_paused and capture_reported and request is None
                     and sample is not None and sample.key != last_published):
@@ -793,10 +760,11 @@ def mapper_main(endpoint, boot):
 
         from .resident_profile import parser_manifest_sha256
         if parser_manifest_sha256() != boot.raw_profile.parser_id:
-            raise ConfigurationError('actual local parser manifest differs from the accepted binding')
+            raise ValueError('actual local parser manifest differs from the accepted binding')
         reader = RawArenaReader(boot.raw_scope, boot.raw_tokens)
         # S가 CAPTURE_READY 후 발급한 원 ACK 시각이다. 첫 NN 수신/heartbeat로 갱신하지 않는다.
-        parser_deadline = AbsoluteDeadline.after(actor.ack.issued_us, 15_000_000, now_us=j_us())
+        parser_deadline = AbsoluteDeadline.after(actor.ack.issued_us, 15_000_000, now_us=j_us(),
+                                                cap_us=boot.startup_deadline_us)
         actor.state = 'WARMUP'
         if boot.copy_handles is not None:
             from .mapper_storage import MapperStorageMailbox
@@ -815,9 +783,8 @@ def mapper_main(endpoint, boot):
             from .mapper_publication import MapperPublicationPort
             mapping_port=MappingContextPort()
             publication_port=MapperPublicationPort(mapping_port)
-            # 외부 capture/material 대기는 cold 기동 시간이 아니다. 각 실제 LOAD의 5초는 유지한다.
             bootstrap=MapperBootstrap(storage_mailbox,mapper_worker=boot.peer.worker_instance,
-                mapper_instance=boot.mapper_instance,cap_us=2**64-1,clock_us=j_us)
+                mapper_instance=boot.mapper_instance,cap_us=boot.startup_deadline_us,clock_us=j_us)
         if boot.mapper_profile_bytes is not None:
             if source is None:raise ValueError('operational sensors require the registered source channel')
             sensor_config,sensor_owner=mapper_sensor_owner(boot,bind.binding)
@@ -909,7 +876,6 @@ def mapper_main(endpoint, boot):
             if publication_port is not None:
                 relay_publications(publication_port,source)
             for packet in incoming:
-                if actor.cancelled_grant(packet, context, boot.slot_limits):continue
                 if storage_client is not None and storage_client.receive(packet):continue
                 if packet.kind != 'SLOT':
                     raise ValueError('unexpected M control statement')
@@ -930,19 +896,12 @@ def mapper_main(endpoint, boot):
                     if acquire is None:
                         raise ValueError('ACQUIRED has no original read request')
                     acquired = SlotMessage(packet, context, acquire, limits=boot.slot_limits)
-                    if j_us() >= acquire.expires_us:
-                        actor.cancel_request(acquire)
-                        acquire = None
-                        continue
+                    acquired.record.read_request.request.check(j_us())
                     expected = ExpectedSlot(P0Context(acquired.record.key.write_key,
                         p0_stream_ids(bind.binding), boot.raw_profile.nn_enabled),
                         acquired.record.read_request.offer.content)
                     actor.leases_released = False
-                    try:owned, returned = reader.copy_owned(acquired.record, expected)
-                    except FrameExpired:
-                        actor.cancel_request(acquire)
-                        acquire = None
-                        continue
+                    owned, returned = reader.copy_owned(acquired.record, expected)
                     payload = acquired.payload
                     payload['op'] = 'RELEASE'
                     completed = returned.writable_posted_us
@@ -961,7 +920,7 @@ def mapper_main(endpoint, boot):
                     expires=min(2**64-1,lower+500_000)
                     pump_inputs()
                     item=MapperInput(str(uuid.uuid4()),bind.binding.sha256,sample,expires,
-                        parser_cap_us=None,
+                        parser_cap_us=None if control.ready else parser_deadline.expires_us,
                         context_bytes=b'' if source is None else source.context_bytes())
                     if sensor_owner is not None:
                         item=attach_sensor_snapshot(item,sensor_owner,sensor_config.capture_timing,now_us=j_us(),
@@ -974,8 +933,7 @@ def mapper_main(endpoint, boot):
                 else:
                     raise ValueError('unsupported M SLOT operation')
             if acquire is not None and j_us() >= acquire.expires_us:
-                actor.cancel_request(acquire)
-                acquire = None
+                raise TimeoutError('original read request expired without ACQUIRED')
             time.sleep(0.002)
     except _StopWork:
         pass

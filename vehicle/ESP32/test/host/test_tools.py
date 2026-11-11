@@ -11,8 +11,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import cutoff_stress
 import link_bench
 import pi_link_check
+import steer_check
 from cutoff_stress import FAR_FIRST, IN_TURN, ONE, TWINS
-from fb3 import ACK3, CLOCK3, CLOCK_REPLY, HELLO_ACK, REPORT, REPORT3, SENSOR, SENSOR3
+from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, COMMAND3, HELLO,
+                 HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, SENSOR, SENSOR3)
 from link_bench import SAMPLE_GAP_US, SENSOR_PERIOD_US, Sample
 
 checks = failures = 0
@@ -378,6 +380,35 @@ def test_bench_sees_report_out_of_step():
     check(len(problems([(report_fields(1, 0, 0), one)])) == 1, '표본을 받은 뒤인데 가리키지 않으면 문제')
 
 
+def drive_report(sample, stamp, report_sequence=1, command=2):
+    return report_fields(report_sequence, sample, stamp, command)
+
+
+def test_bench_needs_drive_reports_to_follow_samples():
+    problems = link_bench.drive_report_problems
+    cutoff = 100000
+    # 적용한 때의 표본 10, 그 뒤 20 ms 마다 11·12·13·14. 14 는 기한까지 5 ms 가 안 남았고 15 는 기한 뒤다
+    samples = [Sample(SENSOR, 10, 20000), Sample(SENSOR, 11, 40000), Sample(SENSOR, 12, 60000), Sample(SENSOR, 13, 80000),
+               Sample(SENSOR, 14, 96000), Sample(SENSOR, 15, 116000)]
+    first = drive_report(10, 20000)
+    told = [first, drive_report(11, 40000, 2), drive_report(12, 60000, 3), drive_report(13, 80000, 4)]
+    check(problems(told, samples, first, cutoff) == ([], 3), f'기한 전의 표본마다 차례로 오면 문제 없음 {problems(told, samples, first, cutoff)}')
+    check(problems(told[:3], samples, first, cutoff)[0] != [], '다음 표본도 기한 전인 표본의 REPORT 가 빠지면 문제')
+    check(problems(told[:1], samples, first, cutoff)[0] != [], '후속 REPORT 가 하나도 없으면 문제')
+    check(problems([first, told[2], told[1], told[3]], samples, first, cutoff)[0] != [], '표본 순서와 다르면 문제')
+    check(problems(told + [drive_report(14, 96000, 5)], samples, first, cutoff)[0] != [], '기한까지 5 ms 가 안 남은 표본에 오면 문제')
+    check(problems(told + [drive_report(15, 116000, 5)], samples, first, cutoff)[0] != [], '기한 뒤의 표본에 오면 문제')
+    check(problems(told[1:], samples, first, cutoff)[0] != [], '적용한 때의 REPORT 가 맨 앞이 아니면 문제')
+    check(problems([drive_report(10, 20000, 9)] + told[1:], samples, first, cutoff)[0] != [],
+          '맨 앞의 REPORT 가 명령에 바로 답한 것과 다르면 문제')
+    check(problems([], samples, None, cutoff)[0] != [], 'DRIVE 에 답이 없었으면 문제')
+    # 기한 전의 표본이 13 하나뿐이면 그 REPORT 는 장치가 만들 때 이미 기한 뒤일 수 있다. 와도 되고 안 와도 된다
+    late = [Sample(SENSOR, 12, 60000), Sample(SENSOR, 13, 80000), Sample(SENSOR, 14, 101000)]
+    first = drive_report(12, 60000)
+    check(problems([first], late, first, cutoff) == ([], 0) and problems([first, drive_report(13, 80000, 2)], late, first, cutoff) == ([], 0),
+          '다음 표본이 기한 뒤인 마지막 표본의 REPORT 는 없어도 되고, 꼭 와야 하는 것은 0 으로 셈')
+
+
 def test_flow_sets_report_aside():
     ack = ACK3.pack(3, PI, DEVICE, 0x1f7, bytes(32), bytes(32), 32)
     flow = link_bench.Flow(FakePeer([
@@ -395,6 +426,123 @@ def test_flow_sets_report_aside():
     check(answer is not None and answer[0] == HELLO_ACK and len(flow.reports) == 1, '응답을 기다릴 때 REPORT 는 건너뛰고 적어 둠')
 
 
+class QuietReport(link_bench.Report):
+    """도구의 판정만 세고 화면에는 쓰지 않는다."""
+
+    def check(self, ok, text):
+        self.checks += 1
+        self.failed += not ok
+        return bool(ok)
+
+    def note(self, text):
+        pass
+
+
+class SteerDevice:
+    """steer_check 가 말을 거는 장치의 대역. Peer 자리에 들어간다.
+
+    drive    DRIVE 에 돌려줄 (status, reason). None 이면 답이 없다
+    sensors  보내는 SENSOR 수의 한도. lease 를 설치할 때와 DRIVE 를 받을 때 하나씩 보낸다. None 이면 한도가 없다
+    after    DRIVE 에 답한 뒤 조용할 때 이어서 보내는 SENSOR 수
+    creep    DRIVE 를 받을 때마다 엔코더 누계가 이만큼 늘어난다 (바퀴가 돈 경우)
+    wobble   DRIVE 를 받으면 누계가 한 칸 늘었다가 제자리로 돌아온다
+    drift    DRIVE 에 답한 뒤 이어서 보내는 SENSOR 에서만 누계가 한 칸 늘어 있다
+    jump     CLOCK_REPLY 에 실린 누계만 한 칸 늘어 있다
+    """
+
+    def __init__(self, drive=(2, 0), sensors=None, after=2, creep=0, wobble=False, drift=False, jump=False):
+        self.drive, self.sensors, self.after, self.creep, self.wobble = drive, sensors, after, creep, wobble
+        self.drift, self.jump = drift, jump
+        self.pending = 0  # 조용할 때 이어서 보낼 SENSOR 수
+        self.pi = None
+        self.frames = []
+        self.steered = []  # 받은 DRIVE 의 (속도, 조향)
+        self.invalid = 0
+        self.ticks = self.sample = self.reports = 0
+        self.epoch, self.lease = bytes(16), 0
+
+    def _reply(self, kind, payload):
+        self.frames.append((kind, payload, 0))
+
+    def send(self, kind, payload):
+        if kind == HELLO:
+            pi = HELLO3.unpack(payload)[1]
+            self._reply(HELLO_ACK, ACK3.pack(3, pi, DEVICE, 0x01f7, b'c' * 32, b'f' * 32, 32))
+        elif kind == CLOCK_PROBE:
+            pi, device, sequence, p1 = PROBE3.unpack(payload)
+            self.sample += 1
+            self._reply(CLOCK_REPLY, CLOCK3.pack(pi, device, sequence, p1, 1000, 1001, 1002, self.sample,
+                                                 self.ticks + self.jump, self.ticks, 1, 0, 0))
+        elif kind == CLOCK_INSTALL:
+            pi, device, self.epoch, self.lease, probe = INSTALL3.unpack(payload)[:5]
+            cutoff = INSTALL3.unpack(payload)[9]
+            self._reply(CLOCK_ACK, CLOCK_ACK3.pack(pi, device, self.epoch, self.lease, probe, 1, 0, 2000, cutoff))
+            self._sensor(pi)
+        elif kind == COMMAND:
+            fields = COMMAND3.unpack(payload)
+            status, reason = (2, 0)
+            if fields[10] == steer_check.DRIVE:
+                self.steered.append(fields[12:14])
+                self.pi, self.pending = fields[0], self.after
+                self.ticks += self.creep
+                if self.wobble:
+                    self.ticks += 1
+                    self._sensor(fields[0])
+                    self.ticks -= 1
+                self._sensor(fields[0])
+                if self.drive is None:
+                    return
+                status, reason = self.drive
+            self.reports += 1
+            self._reply(REPORT, REPORT3.pack(fields[0], fields[1], fields[2], fields[8], fields[9], fields[10], status,
+                                             self.reports, self.sample, 3000, 0, 0, 0, 0, fields[3], fields[4],
+                                             fields[7], fields[11], reason))
+
+    def _sensor(self, pi):
+        if self.sensors is not None:
+            if self.sensors == 0:
+                return
+            self.sensors -= 1
+        self.sample += 1
+        self._reply(SENSOR, SENSOR3.pack(pi, DEVICE, self.sample, 3000 + self.sample, self.ticks, self.ticks, 1, 0, 0,
+                                         self.epoch, self.lease))
+
+    def receive(self, timeout=1.0):
+        if not self.frames and self.pending:
+            self.pending -= 1
+            self.ticks += self.drift
+            self._sensor(self.pi)
+            self.ticks -= self.drift
+        return self.frames.pop(0) if self.frames else None
+
+
+def steered(device, steps=(0, 200, -200)):
+    report = QuietReport()
+    steer_check.run(link_bench.Flow(device), steps, 0.01, report)
+    return report
+
+
+def test_steer_check_counts_only_applied_steering():
+    device = SteerDevice()
+    report = steered(device)
+    check(report.failed == 0 and report.checks == 18, f'모두 APPLIED 면 통과 ({report.checks} 검사, 실패 {report.failed})')
+    check(device.steered == [(0, 0), (0, 200), (0, -200)], f'속도는 0 이고 조향만 차례로 보냄 {device.steered}')
+    check(steered(SteerDevice(drive=(3, 9))).failed == 3, 'DRIVE 가 거절되면 그 자리마다 실패')
+    check(steered(SteerDevice(drive=None)).failed >= 3, 'DRIVE 에 답이 없으면 그 자리마다 실패')
+    check(steered(SteerDevice(creep=1)).failed == 3, '엔코더 누계가 바뀌면 그 자리마다 실패')
+    check(steered(SteerDevice(sensors=0)).failed == 1, 'SENSOR 가 처음부터 없어 누계를 보지 못했으면 실패')
+    check(steered(SteerDevice(sensors=1, creep=1)).failed == 3,
+          '첫 SENSOR 뒤로 표본이 끊기면 옛 누계로 넘어가지 않고 그 자리마다 실패')
+    check(steered(SteerDevice(wobble=True)).failed == 3, '누계가 한 칸 움직였다가 제자리로 돌아와도 실패')
+    report = steered(SteerDevice(sensors=5))
+    check(report.failed == 2, f'도중에 표본이 끊기면 그 뒤 자리는 실패 (실패 {report.failed})')
+    check(steered(SteerDevice(after=0)).failed == 3, 'DRIVE 에 답한 뒤로 표본이 없으면 앞서 받은 표본으로 넘어가지 않고 실패')
+    check(steered(SteerDevice(drift=True)).failed == 3, 'DRIVE 에 답한 뒤의 표본에서 누계가 바뀌어 있으면 실패')
+    check(steered(SteerDevice(jump=True)).failed == 3, 'CLOCK_REPLY 에 실린 누계만 바뀌어 있어도 실패')
+    check(steer_check.side(0) == '가운데' and '왼쪽' in steer_check.side(1) and '오른쪽' in steer_check.side(-1),
+          '조향 값은 왼쪽이 +')
+
+
 def main():
     sys.stdout.reconfigure(errors='backslashreplace')  # 한글을 못 쓰는 콘솔에서도 멈추지 않게
     test_stress_counts_what_it_verified()
@@ -409,7 +557,9 @@ def main():
     test_bench_needs_sensor_through_the_lease()
     test_flow_sets_sensor_aside()
     test_bench_sees_report_out_of_step()
+    test_bench_needs_drive_reports_to_follow_samples()
     test_flow_sets_report_aside()
+    test_steer_check_counts_only_applied_steering()
     print(f'tools: {checks} checks, {failures} failures')
     return 1 if failures else 0
 
