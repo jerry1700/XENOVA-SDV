@@ -12,7 +12,7 @@ import cutoff_stress
 import link_bench
 import pi_link_check
 from cutoff_stress import FAR_FIRST, IN_TURN, ONE, TWINS
-from fb3 import ACK3, CLOCK3, CLOCK_REPLY, HELLO_ACK, SENSOR, SENSOR3
+from fb3 import ACK3, CLOCK3, CLOCK_REPLY, HELLO_ACK, REPORT, REPORT3, SENSOR, SENSOR3
 from link_bench import SAMPLE_GAP_US, SENSOR_PERIOD_US, Sample
 
 checks = failures = 0
@@ -361,6 +361,40 @@ def test_flow_sets_sensor_aside():
     check(flow.answer(0.01) is None, '더 오는 것이 없으면 None')
 
 
+def report_fields(report_sequence, sample, stamp, command=1):
+    return (PI, DEVICE, command, 1, 0, 2, 2, report_sequence, sample, stamp, 5, 0, 0, 1, bytes(16), 0, 0, 0, 0)
+
+
+def test_bench_sees_report_out_of_step():
+    problems = link_bench.report_problems
+    one, two = Sample(SENSOR, 4, 1000), Sample(CLOCK_REPLY, 5, 9000)
+    good = [(report_fields(1, 0, 0), None), (report_fields(2, 4, 1000), one), (report_fields(3, 5, 9000), two)]
+    check(problems(good) == [], f'순번이 하나씩 늘고 바로 앞 표본을 가리키면 문제 없음 {problems(good)}')
+    check(problems(good + [good[1]]) == [], '다시 보낸 REPORT 는 건너뜀')
+    check(len(problems([good[0], good[2]])) == 1, 'report_sequence 를 건너뛰면 문제')
+    check(len(problems([good[0], (report_fields(2, 3, 1000), one)])) == 1, '바로 앞 표본이 아닌 순번을 가리키면 문제')
+    check(len(problems([good[0], (report_fields(2, 4, 999), one)])) == 1, '그 표본의 시각이 아니면 문제')
+    check(len(problems([(report_fields(1, 4, 1000), None)])) == 1, '표본을 받기 전인데 표본을 가리키면 문제')
+    check(len(problems([(report_fields(1, 0, 0), one)])) == 1, '표본을 받은 뒤인데 가리키지 않으면 문제')
+
+
+def test_flow_sets_report_aside():
+    ack = ACK3.pack(3, PI, DEVICE, 0x1f7, bytes(32), bytes(32), 32)
+    flow = link_bench.Flow(FakePeer([
+        (REPORT, REPORT3.pack(*report_fields(1, 0, 0)), 9), (SENSOR, SENSOR3.pack(*sensor_fields(6, 3000)), 10),
+        (REPORT, REPORT3.pack(*report_fields(2, 6, 3000)), 11), (REPORT, b'short', 12),
+        (REPORT, REPORT3.pack(*report_fields(3, 6, 3000, command=7)), 13), (HELLO_ACK, ack, 14)]))
+    found = flow.report(lambda fields: fields[2] == 7, 0.01)
+    check(found is not None and found[7] == 3, '조건에 맞는 첫 REPORT 를 찾음')
+    check([fields[7] for fields, _ in flow.reports] == [1, 2, 3], 'REPORT 는 받은 순서대로 적음')
+    check(flow.reports[0][1] is None and flow.reports[1][1] == Sample(SENSOR, 6, 3000), '그 앞에 받은 표본을 함께 적음')
+    check(flow.odd == 1, '크기가 틀린 REPORT 는 따로 셈')
+    check(flow.report(lambda fields: fields[2] == 7, 0.01) is None, '이미 지나간 REPORT 는 다시 찾지 않음')
+    flow = link_bench.Flow(FakePeer([(REPORT, REPORT3.pack(*report_fields(1, 0, 0)), 9), (HELLO_ACK, ack, 14)]))
+    answer = flow.answer(0.01)
+    check(answer is not None and answer[0] == HELLO_ACK and len(flow.reports) == 1, '응답을 기다릴 때 REPORT 는 건너뛰고 적어 둠')
+
+
 def main():
     sys.stdout.reconfigure(errors='backslashreplace')  # 한글을 못 쓰는 콘솔에서도 멈추지 않게
     test_stress_counts_what_it_verified()
@@ -374,6 +408,8 @@ def main():
     test_bench_sees_broken_sample_order()
     test_bench_needs_sensor_through_the_lease()
     test_flow_sets_sensor_aside()
+    test_bench_sees_report_out_of_step()
+    test_flow_sets_report_aside()
     print(f'tools: {checks} checks, {failures} failures')
     return 1 if failures else 0
 

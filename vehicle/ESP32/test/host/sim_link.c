@@ -1,6 +1,7 @@
 /* 펌웨어의 통신 처리(link·cutoff)를 PC 에서 돌리는 대역. stdin 으로 받은 바이트에 stdout 으로 답하고,
  * 스케치의 loop 처럼 입력이 없을 때에도 1 ms 마다 돌면서 주기 표본을 보낸다.
- * 시계는 PC 의 단조 시계다. 엔코더는 0 에 멈춰 있고, 인자로 초당 칸 수를 주면 양쪽 바퀴가 그 속도로 돈다.
+ * 시계는 PC 의 단조 시계다. 엔코더는 DRIVE 로 출력이 걸려 있는 동안 명령한 속도대로 돌고, 출력이 끊기면 그 자리에 선다.
+ * 인자로 초당 칸 수를 주면 명령과 상관없이 양쪽 바퀴가 그 속도로 더 돈다. 모터와 차체의 움직임을 흉내 낸 것이 아니다.
  * alarm 은 맞춘 시각에 울린 것으로 순서대로 처리한다. 실제 ESP32·USB·타이머 시험이 아니다.
  * Windows 에서는 stdin 이 pipe 여야 한다.
  * tools/link_bench.py, tools/cutoff_stress.py, tools/pi_link_check.py 가 쓴다
@@ -35,7 +36,10 @@ struct sim {
 	uint64_t alarm_at;
 	bool in_alarm; /* alarm 을 처리하는 동안 시계는 울린 시각에 멈춘다 */
 	uint64_t frozen_us;
-	int64_t ticks_per_second; /* 양쪽 엔코더가 도는 속도 */
+	int64_t ticks_per_second; /* 명령과 상관없이 양쪽 엔코더가 도는 속도 */
+	int32_t drive_mmps;       /* 출력에 걸려 있는 속도. 끊겨 있으면 0 */
+	int64_t driven_um;        /* 출력으로 굴러간 거리 */
+	uint64_t driven_us;       /* 그 거리를 셈한 시각 */
 	struct fb3_cutoff cutoff;
 };
 
@@ -90,13 +94,46 @@ static void sim_unlock(void *ctx)
 	(void)ctx;
 }
 
+/* 출력이 걸려 있던 동안 굴러간 거리를 지금까지 셈한다 */
+static void sim_roll(struct sim *s, uint64_t now)
+{
+	s->driven_um += (int64_t)s->drive_mmps * (int64_t)(now - s->driven_us) / 1000;
+	s->driven_us = now;
+}
+
+static void sim_cut(void *ctx)
+{
+	struct sim *s = ctx;
+
+	sim_roll(s, sim_now(s));
+	s->drive_mmps = 0;
+}
+
+static bool sim_drive(void *ctx, int16_t velocity_mmps, int16_t steering_mrad)
+{
+	struct sim *s = ctx;
+
+	(void)steering_mrad;
+	sim_roll(s, sim_now(s));
+	s->drive_mmps = velocity_mmps;
+	return true;
+}
+
+static bool sim_estop(void *ctx)
+{
+	(void)ctx;
+	return false;
+}
+
 static bool sim_latch(void *ctx, struct fb3_sample *out)
 {
 	struct sim *s = ctx;
 	int64_t ticks;
 
 	out->device_us = sim_now(s);
-	ticks = (int64_t)(out->device_us - SIM_BOOT_AGE_US) * s->ticks_per_second / 1000000;
+	sim_roll(s, out->device_us);
+	ticks = (int64_t)(out->device_us - SIM_BOOT_AGE_US) * s->ticks_per_second / 1000000
+		+ s->driven_um / XENOVA_UM_PER_TICK;
 	/* 펌웨어처럼 32비트 누계이고 넘치면 돌아간다 */
 	out->left_ticks = (int32_t)(uint32_t)ticks;
 	out->right_ticks = (int32_t)(uint32_t)ticks;
@@ -185,8 +222,9 @@ int main(int argc, char **argv)
 	static struct fb3_link link;
 	static struct fb3_framer framer;
 	static struct fb3_frame frame;
-	struct fb3_cutoff_port cutoff_port = {&sim, sim_now, sim_set_alarm, sim_clear_alarm, sim_lock, sim_unlock};
-	struct fb3_link_port link_port = {&sim, sim_now, sim_latch};
+	struct fb3_cutoff_port cutoff_port = {&sim, sim_now, sim_set_alarm, sim_clear_alarm, sim_lock, sim_unlock,
+					      sim_cut};
+	struct fb3_link_port link_port = {&sim, sim_now, sim_latch, sim_drive, sim_estop};
 	struct fb3_link_config config;
 	uint8_t wire[FB3_MAX_WIRE], input[256];
 	int got;
@@ -197,12 +235,17 @@ int main(int argc, char **argv)
 #endif
 	sim.ticks_per_second = argc > 1 ? strtoll(argv[1], NULL, 10) : 0;
 	sim.origin = host_us();
+	sim.driven_us = sim_now(&sim);
 	fb3_cutoff_init(&sim.cutoff, &cutoff_port);
 	make_session(config.device_boot_session);
 	config.capabilities = XENOVA_CAPABILITIES;
 	memcpy(config.vehicle_config_sha256, config_sha256, sizeof config_sha256);
 	memcpy(config.firmware_sha256, firmware_sha256, sizeof firmware_sha256);
 	config.encoder_bits = XENOVA_ENCODER_BITS;
+	config.um_per_tick = XENOVA_UM_PER_TICK;
+	config.j_apply_us = XENOVA_J_APPLY_US;
+	config.max_velocity_mmps = XENOVA_MAX_VELOCITY_MMPS;
+	config.max_steering_mrad = XENOVA_MAX_STEERING_MRAD;
 	fb3_link_init(&link, &config, &link_port, &sim.cutoff);
 	fb3_framer_init(&framer);
 	/* 스케치처럼 켜지면 구분자 하나를 먼저 보낸다 */

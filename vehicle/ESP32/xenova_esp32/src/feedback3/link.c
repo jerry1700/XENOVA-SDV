@@ -36,11 +36,22 @@ static void close_session(struct fb3_link *link)
 	link->open = false;
 	link->probe_fence = 0;
 	link->probe_held = false;
+	/* 앞 session 의 명령으로 걸린 출력을 끊고 명령 기록을 버린다 */
+	fb3_cutoff_cut(link->cutoff);
+	link->command_fence = 0;
+	link->generation = 0;
+	memset(link->results, 0, sizeof link->results);
+	link->result_next = 0;
+	link->stop.sequence = 0;
+	link->reporting = false;
+	link->report_due = false;
+	link->direction = 0;
+	link->stop_needed = false;
 	memset(link->replies, 0, sizeof link->replies);
 	link->reply_next = 0;
 	link->has_epoch = false;
 	link->clock_fence = 0;
-	for (unsigned i = 0; i < FB3_CUTOFF_SLOTS; i++) {
+	for (unsigned i = 0; i < FB3_CUTOFF_LEASES; i++) {
 		if (link->leases[i].installed) {
 			fb3_cutoff_cancel(link->cutoff, i);
 			link->leases[i].installed = false;
@@ -79,6 +90,33 @@ static size_t on_hello(struct fb3_link *link, const struct fb3_frame *frame, uin
 	ack.encoder_bits = link->config.encoder_bits;
 	return fb3_encode_frame(FB3_HELLO_ACK_ID, payload, fb3_pack_hello_ack(&ack, payload, sizeof payload),
 				wire, cap);
+}
+
+/* 표본을 내보낼 때 부른다. 앞 표본과 견줘 속도를 구하고, 누계가 바뀌었으면 그때부터 다시 멈춘 시간을 잰다 */
+static void note_sample(struct fb3_link *link, const struct fb3_sample *sample)
+{
+	if (link->sample_sequence == 0) {
+		link->still_since_us = sample->device_us;
+	} else {
+		/* 32비트 누계는 넘치면 돌아간다. 차이도 그 폭으로 구한다 */
+		int64_t left = link->config.encoder_bits == 32
+			? (int32_t)((uint32_t)sample->left_ticks - (uint32_t)link->sample_left)
+			: sample->left_ticks - link->sample_left;
+		int64_t right = link->config.encoder_bits == 32
+			? (int32_t)((uint32_t)sample->right_ticks - (uint32_t)link->sample_right)
+			: sample->right_ticks - link->sample_right;
+		int64_t elapsed = (int64_t)(sample->device_us - link->sample_us);
+		int64_t velocity = (left + right) * (int64_t)link->config.um_per_tick * 500 / elapsed;
+
+		link->velocity_mmps = velocity > INT32_MAX ? INT32_MAX : velocity < INT32_MIN ? INT32_MIN : (int32_t)velocity;
+		link->has_velocity = true;
+		/* 표본이 오래 끊겼으면 그사이를 보지 못했으므로 여기서부터 다시 잰다 */
+		if (left != 0 || right != 0 || elapsed > (int64_t)FB3_STILL_US) {
+			link->still_since_us = sample->device_us;
+		}
+	}
+	link->sample_left = sample->left_ticks;
+	link->sample_right = sample->right_ticks;
 }
 
 /* 계약 §3 CLOCK_REPLY 의 quality·조향·누계 범위 */
@@ -159,8 +197,10 @@ static size_t answer_probe(struct fb3_link *link, uint8_t *wire, size_t cap)
 		return 0;
 	}
 
+	note_sample(link, &sample);
 	link->sample_sequence = reply.source_sample;
 	link->sample_us = sample.device_us;
+	link->report_due = link->reporting;
 	/* 다음 probe 는 200 ms 뒤에 온다. 그 앞뒤로 SENSOR 가 반 주기씩 떨어지게 한다 */
 	link->sensor_due_us = sample.device_us + FB3_SENSOR_PERIOD_US / 2;
 	link->probe_fence = probe->probe_sequence;
@@ -203,18 +243,18 @@ static const struct fb3_lease *newest_live_lease(struct fb3_link *link)
 	uint64_t below = UINT64_MAX;
 
 	for (;;) {
-		unsigned pick = FB3_CUTOFF_SLOTS;
+		unsigned pick = FB3_CUTOFF_LEASES;
 
-		for (unsigned i = 0; i < FB3_CUTOFF_SLOTS; i++) {
+		for (unsigned i = 0; i < FB3_CUTOFF_LEASES; i++) {
 			const struct fb3_lease *lease = &link->leases[i];
 
 			if (lease->installed && lease->install.clock_sequence < below
-					&& (pick == FB3_CUTOFF_SLOTS
+					&& (pick == FB3_CUTOFF_LEASES
 					    || lease->install.clock_sequence > link->leases[pick].install.clock_sequence)) {
 				pick = i;
 			}
 		}
-		if (pick == FB3_CUTOFF_SLOTS) {
+		if (pick == FB3_CUTOFF_LEASES) {
 			return NULL;
 		}
 		if (fb3_cutoff_query(link->cutoff, pick) == FB3_CUTOFF_LIVE) {
@@ -260,8 +300,10 @@ static size_t send_sensor(struct fb3_link *link, uint64_t now, uint8_t *wire, si
 		return 0;
 	}
 
+	note_sample(link, &sample);
 	link->sample_sequence = sensor.source_sample;
 	link->sample_us = sample.device_us;
+	link->report_due = link->reporting;
 	link->sensor_due_us = sample.device_us + FB3_SENSOR_PERIOD_US;
 	return len;
 }
@@ -309,7 +351,7 @@ static unsigned pick_slot(const struct fb3_link *link)
 {
 	unsigned oldest = 0;
 
-	for (unsigned i = 0; i < FB3_CUTOFF_SLOTS; i++) {
+	for (unsigned i = 0; i < FB3_CUTOFF_LEASES; i++) {
 		if (!link->leases[i].installed) {
 			return i;
 		}
@@ -346,7 +388,7 @@ static size_t on_clock_install(struct fb3_link *link, const struct fb3_frame *fr
 	}
 
 	/* 이미 설치한 lease 의 재전송에는 처음 보낸 ACK 를 그대로 다시 보낸다. 타이머는 건드리지 않는다 */
-	for (slot = 0; slot < FB3_CUTOFF_SLOTS; slot++) {
+	for (slot = 0; slot < FB3_CUTOFF_LEASES; slot++) {
 		lease = &link->leases[slot];
 		if (!lease->installed || lease->install.clock_sequence != install.clock_sequence) {
 			continue;
@@ -380,6 +422,12 @@ static size_t on_clock_install(struct fb3_link *link, const struct fb3_frame *fr
 	/* 기한을 실제 타이머에 건 뒤에만 INSTALLED 로 답한다 */
 	slot = pick_slot(link);
 	lease = &link->leases[slot];
+	/* 출력에 걸려 있는 DRIVE 가 쓰는 lease 는 밀어내지 않는다 */
+	if (lease->installed && link->reporting && link->active.command_kind == FB3_COMMAND_DRIVE
+			&& link->active.clock_sequence == lease->install.clock_sequence
+			&& fb3_cutoff_query(link->cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_LIVE) {
+		return reject(link, &install, FB3_REASON_CLOCK_UNAVAILABLE, wire, cap);
+	}
 	armed = fb3_cutoff_arm(link->cutoff, slot, install.cutoff_device_us);
 	now = link->port.now_us(link->port.ctx);
 	if (armed == FB3_CUTOFF_LIVE && now >= install.cutoff_device_us) {
@@ -406,6 +454,258 @@ static size_t on_clock_install(struct fb3_link *link, const struct fb3_frame *fr
 	return clock_ack(link, &install, FB3_CLOCK_INSTALLED, FB3_REASON_OK, now, wire, cap);
 }
 
+/* REPORT 하나를 묶는다. 마지막으로 내보낸 표본을 가리키고, 적용을 알릴 때는 그 표본에서 구한 측정을 싣는다.
+ * payload 에는 묶기 전의 REPORT 를 남긴다 */
+static size_t send_report(struct fb3_link *link, const struct fb3_command *command, uint8_t status,
+			  enum fb3_reason reason, uint8_t payload[FB3_REPORT_SIZE], uint8_t *wire, size_t cap)
+{
+	struct fb3_report report;
+	size_t len;
+
+	memset(payload, 0, FB3_REPORT_SIZE);
+	if (link->report_sequence >= FB3_U63_MAX) {
+		return 0;
+	}
+	memcpy(report.pi_session, link->pi_session, 16);
+	memcpy(report.device_session, link->config.device_boot_session, 16);
+	report.command_sequence = command->command_sequence;
+	report.generation = command->generation;
+	report.counter = command->counter;
+	report.command_kind = command->command_kind;
+	report.status = status;
+	report.report_sequence = link->report_sequence + 1;
+	report.source_sample = link->sample_sequence;
+	report.source_device_us = link->sample_sequence != 0 ? link->sample_us : 0;
+	report.flags = 0;
+	report.velocity_mmps = 0;
+	report.steering_mrad = 0; /* 조향 센서가 없다 */
+	report.stationary = 0;
+	if (status == FB3_REPORT_APPLIED && link->sample_sequence != 0) {
+		report.flags |= FB3_REPORT_STATIONARY;
+		report.stationary = link->sample_us - link->still_since_us >= FB3_STILL_US;
+		if (link->has_velocity) {
+			report.flags |= FB3_REPORT_VELOCITY;
+			report.velocity_mmps = link->velocity_mmps;
+		}
+	}
+	memcpy(report.clock_epoch, command->clock_epoch, 16);
+	report.clock_sequence = command->clock_sequence;
+	report.cutoff_device_us = command->cutoff_device_us;
+	report.stop_command_sequence = command->stop_command_sequence;
+	report.reason = (uint16_t)reason;
+	len = fb3_encode_frame(FB3_REPORT_ID, payload, fb3_pack_report(&report, payload, FB3_REPORT_SIZE), wire, cap);
+	if (len != 0) {
+		link->report_sequence = report.report_sequence;
+	}
+	return len;
+}
+
+/* 이 session 에서 받아들인 명령 가운데 그 순번의 것. 없으면 NULL */
+static const struct fb3_result *find_result(const struct fb3_link *link, uint64_t sequence)
+{
+	if (sequence == 0) {
+		return NULL;
+	}
+	if (link->stop.sequence == sequence) {
+		return &link->stop;
+	}
+	for (unsigned i = 0; i < FB3_LINK_RESULTS; i++) {
+		if (link->results[i].sequence == sequence) {
+			return &link->results[i];
+		}
+	}
+	return NULL;
+}
+
+struct drive_request {
+	struct fb3_link *link;
+	const struct fb3_command *command;
+};
+
+static bool apply_drive(void *arg)
+{
+	const struct drive_request *request = arg;
+
+	return request->link->port.drive(request->link->port.ctx, request->command->velocity_mmps,
+					 request->command->steering_mrad);
+}
+
+/* DRIVE 를 검사하고 출력에 건다. 걸었으면 FB3_REASON_OK, 아니면 받아들이지 않는 이유 */
+static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_command *command)
+{
+	struct drive_request request = {link, command};
+	const struct fb3_lease *lease = NULL;
+	int8_t direction = command->velocity_mmps > 0 ? 1 : command->velocity_mmps < 0 ? -1 : 0;
+
+	if (command->generation < link->generation) {
+		return FB3_REASON_GENERATION_REPLAY;
+	}
+	if (link->port.estop(link->port.ctx)) {
+		fb3_cutoff_cut(link->cutoff);
+		link->stop_needed = true;
+		return FB3_REASON_E_STOP;
+	}
+	/* 실제로 적용한 마지막 STOP 을 가리켜야 하고, 그 뒤로 가던 방향을 바꾸려면 새 STOP 이 있어야 한다 */
+	if (link->stop_needed || link->stop.sequence == 0 || command->stop_command_sequence != link->stop.sequence
+			|| (direction != 0 && link->direction != 0 && direction != link->direction)) {
+		return FB3_REASON_DIRECTION_STOP_REQUIRED;
+	}
+	if (command->velocity_mmps > link->config.max_velocity_mmps
+			|| command->velocity_mmps < -link->config.max_velocity_mmps
+			|| command->steering_mrad > link->config.max_steering_mrad
+			|| command->steering_mrad < -link->config.max_steering_mrad
+			|| !in_range(command->issued_pi_us) || !in_range(command->expires_pi_us)
+			|| !in_range(command->cutoff_device_us) || command->expires_pi_us <= command->issued_pi_us
+			|| command->expires_pi_us - command->issued_pi_us > FB3_COMMAND_LIFE_US) {
+		return FB3_REASON_RANGE;
+	}
+	if (link->has_epoch && memcmp(command->clock_epoch, link->clock_epoch, 16) == 0) {
+		for (unsigned i = 0; i < FB3_CUTOFF_LEASES; i++) {
+			if (link->leases[i].installed
+					&& link->leases[i].install.clock_sequence == command->clock_sequence) {
+				lease = &link->leases[i];
+			}
+		}
+	}
+	if (lease == NULL) {
+		return FB3_REASON_CLOCK_UNAVAILABLE;
+	}
+	/* 명령의 기한은 그 lease 의 기한을 넘지 못한다. 그래서 lease 가 끝난 뒤에 출력이 남지 않는다 */
+	if (command->expires_pi_us > lease->install.valid_until_pi_us
+			|| command->cutoff_device_us > lease->install.cutoff_device_us) {
+		return FB3_REASON_DEADLINE_MISMATCH;
+	}
+	switch (fb3_cutoff_engage(link->cutoff, command->cutoff_device_us, link->config.j_apply_us, apply_drive,
+				  &request)) {
+	case FB3_CUTOFF_LIVE:
+		break;
+	case FB3_CUTOFF_EXPIRED:
+		return FB3_REASON_COMMAND_EXPIRED;
+	default:
+		return FB3_REASON_DEVICE_FAULT;
+	}
+	if (direction != 0) {
+		link->direction = direction;
+	}
+	return FB3_REASON_OK;
+}
+
+/* 명령을 검사하고 출력에 적용한다. 적용했으면 FB3_REASON_OK, 아니면 받아들이지 않는 이유 */
+static enum fb3_reason accept(struct fb3_link *link, const struct fb3_command *command)
+{
+	/* 이 session 의 STOP 이면 검사에 앞서 출력부터 끊는다 */
+	if (command->command_kind == FB3_COMMAND_STOP) {
+		fb3_cutoff_cut(link->cutoff);
+	}
+	if (!in_range(command->command_sequence) || command->generation == 0 || command->reserved != 0
+			|| command->reason > FB3_COMMAND_REASON_MAX) {
+		return FB3_REASON_RANGE;
+	}
+	if (command->command_kind != FB3_COMMAND_DRIVE && command->command_kind != FB3_COMMAND_STOP) {
+		return FB3_REASON_UNSUPPORTED_PROFILE;
+	}
+	if (command->command_sequence <= link->command_fence) {
+		return FB3_REASON_SEQUENCE_REPLAY;
+	}
+	if (command->command_kind == FB3_COMMAND_DRIVE) {
+		return accept_drive(link, command);
+	}
+	/* STOP 은 시각 lease 없이 온다. 기한·속도·조향 칸은 모두 0 이다 */
+	if (!is_nil(command->clock_epoch) || command->clock_sequence != 0 || command->issued_pi_us != 0
+			|| command->expires_pi_us != 0 || command->cutoff_device_us != 0
+			|| command->stop_command_sequence != 0 || command->velocity_mmps != 0
+			|| command->steering_mrad != 0) {
+		return FB3_REASON_RANGE;
+	}
+	link->direction = 0;
+	link->stop_needed = false;
+	return FB3_REASON_OK;
+}
+
+static size_t on_command(struct fb3_link *link, const struct fb3_frame *frame, uint8_t *wire, size_t cap)
+{
+	struct fb3_command command;
+	const struct fb3_result *known;
+	struct fb3_result *result;
+	uint8_t report[FB3_REPORT_SIZE];
+	enum fb3_reason reason;
+	size_t len;
+
+	if (!fb3_unpack_command(frame->payload, frame->length, &command)) {
+		return refuse(link, FB3_REASON_BAD_LENGTH);
+	}
+	if (!same_session(link, command.pi_session, command.device_session)) {
+		return refuse(link, FB3_REASON_SESSION_MISMATCH);
+	}
+	known = find_result(link, command.command_sequence);
+	if (known != NULL) {
+		if (memcmp(known->command, frame->payload, FB3_COMMAND_SIZE) != 0) {
+			link->refused[FB3_REASON_IDEMPOTENCY_CONFLICT]++;
+			return send_report(link, &command, FB3_REPORT_REJECTED, FB3_REASON_IDEMPOTENCY_CONFLICT, report,
+					   wire, cap);
+		}
+		/* 받아들인 명령이 다시 왔다. 처음 보낸 REPORT 만 다시 보내고 출력과 기한은 건드리지 않는다 */
+		return fb3_encode_frame(FB3_REPORT_ID, known->report, FB3_REPORT_SIZE, wire, cap);
+	}
+
+	reason = accept(link, &command);
+	if (reason != FB3_REASON_OK) {
+		link->refused[reason]++;
+		return send_report(link, &command,
+				   reason == FB3_REASON_DEVICE_FAULT ? FB3_REPORT_FAULT : FB3_REPORT_REJECTED, reason,
+				   report, wire, cap);
+	}
+
+	/* 출력에 적용한 뒤다. 이제부터 이 명령을 표본마다 보고한다 */
+	link->command_fence = command.command_sequence;
+	if (command.generation > link->generation) {
+		link->generation = command.generation;
+	}
+	link->active = command;
+	link->reporting = true;
+	link->report_due = false;
+	len = send_report(link, &command, FB3_REPORT_APPLIED, FB3_REASON_OK, report, wire, cap);
+	result = &link->results[link->result_next];
+	link->result_next = (link->result_next + 1) % FB3_LINK_RESULTS;
+	result->sequence = command.command_sequence;
+	memcpy(result->command, frame->payload, FB3_COMMAND_SIZE);
+	memcpy(result->report, report, FB3_REPORT_SIZE);
+	if (command.command_kind == FB3_COMMAND_STOP) {
+		link->stop = *result;
+	}
+	return len;
+}
+
+/* 방금 내보낸 표본을 가리켜 지금 명령의 상태를 다시 알린다 */
+static size_t report_sample(struct fb3_link *link, uint8_t *wire, size_t cap)
+{
+	uint8_t report[FB3_REPORT_SIZE];
+
+	if (!link->reporting) {
+		return 0;
+	}
+	/* 기한이 지나 출력이 끊긴 DRIVE 는 더 알리지 않는다. 기한이 코앞인 것도 그 REPORT 가 Pi 의 기한 뒤에
+	 * 닿을 수 있어 알리지 않는다 */
+	if (link->active.command_kind == FB3_COMMAND_DRIVE
+			&& (link->active.cutoff_device_us <= link->sample_us + FB3_SAMPLE_GAP_US
+			    || fb3_cutoff_query(link->cutoff, FB3_CUTOFF_OUTPUT) != FB3_CUTOFF_LIVE)) {
+		link->reporting = false;
+		return 0;
+	}
+	return send_report(link, &link->active, FB3_REPORT_APPLIED, FB3_REASON_OK, report, wire, cap);
+}
+
+/* 어느 명령의 것도 아닌 장치 고장을 알린다 (계약 §7 의 순번 0·종류 0·FAULT) */
+static size_t report_fault(struct fb3_link *link, enum fb3_reason reason, uint8_t *wire, size_t cap)
+{
+	struct fb3_command none;
+	uint8_t report[FB3_REPORT_SIZE];
+
+	memset(&none, 0, sizeof none);
+	none.generation = link->generation;
+	return send_report(link, &none, FB3_REPORT_FAULT, reason, report, wire, cap);
+}
+
 void fb3_link_init(struct fb3_link *link, const struct fb3_link_config *config,
 		   const struct fb3_link_port *port, struct fb3_cutoff *cutoff)
 {
@@ -425,6 +725,8 @@ size_t fb3_link_receive(struct fb3_link *link, const struct fb3_frame *frame, ui
 		return on_clock_probe(link, frame, received_us, wire, cap);
 	case FB3_CLOCK_INSTALL_ID:
 		return on_clock_install(link, frame, wire, cap);
+	case FB3_COMMAND_ID:
+		return on_command(link, frame, wire, cap);
 	default:
 		return refuse(link, FB3_REASON_UNSUPPORTED_PROFILE);
 	}
@@ -438,9 +740,27 @@ size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap)
 	if (link->probe_held) {
 		return answer_probe(link, wire, cap);
 	}
+	/* 방금 보낸 표본에 대한 REPORT 가 그 표본 바로 뒤에 간다 */
+	if (link->report_due) {
+		link->report_due = false;
+		return report_sample(link, wire, cap);
+	}
 	now = link->port.now_us(link->port.ctx);
 	if (now < link->sensor_due_us) {
 		return 0;
+	}
+	/* 비상정지가 눌리면 출력을 끊고, 새 STOP 을 받을 때까지 DRIVE 를 받지 않는다 */
+	if (!link->stop_needed && link->port.estop(link->port.ctx)) {
+		fb3_cutoff_cut(link->cutoff);
+		link->stop_needed = true;
+		if (link->open) {
+			return report_fault(link, FB3_REASON_E_STOP, wire, cap);
+		}
+	}
+	if (link->open && !link->fault_reported && fb3_cutoff_faulted(link->cutoff)) {
+		link->fault_reported = true;
+		link->reporting = false;
+		return report_fault(link, FB3_REASON_DEVICE_FAULT, wire, cap);
 	}
 	return send_sensor(link, now, wire, cap);
 }
@@ -450,7 +770,7 @@ bool fb3_link_lease_live(struct fb3_link *link, const uint8_t clock_epoch[16], u
 	if (!link->has_epoch || memcmp(clock_epoch, link->clock_epoch, 16) != 0) {
 		return false;
 	}
-	for (unsigned i = 0; i < FB3_CUTOFF_SLOTS; i++) {
+	for (unsigned i = 0; i < FB3_CUTOFF_LEASES; i++) {
 		if (link->leases[i].installed && link->leases[i].install.clock_sequence == clock_sequence) {
 			return fb3_cutoff_query(link->cutoff, i) == FB3_CUTOFF_LIVE;
 		}

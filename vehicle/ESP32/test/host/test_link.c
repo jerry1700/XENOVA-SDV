@@ -1,4 +1,4 @@
-/* feedback-3 세션·시각 설치·주기 표본과 cutoff 타이머 호스트 시험. 시계·엔코더·alarm 은 가짜 하드웨어다 */
+/* feedback-3 세션·시각 설치·주기 표본·명령과 cutoff 타이머 호스트 시험. 시계·엔코더·alarm·출력은 가짜 하드웨어다 */
 #include "check.h"
 #include "feedback3/link.h"
 
@@ -19,6 +19,14 @@ struct fake {
 	unsigned alarm_writes;
 	unsigned interrupts;
 	bool sensor_dead;
+	bool output_on; /* 모터 출력이 걸려 있다 */
+	int16_t velocity;
+	int16_t steering;
+	unsigned drives;      /* 출력을 건 횟수 */
+	unsigned cuts;        /* 출력을 끊은 횟수 */
+	bool drive_fails;     /* 출력을 걸 수 없다 */
+	bool drive_unlocked;  /* lock 없이 출력을 건 적이 있다 */
+	bool estop;           /* 비상정지가 눌려 있다 */
 	struct fb3_sample sample; /* latch 가 내줄 값. device_us 가 0 이면 그때 시각 */
 };
 
@@ -96,6 +104,38 @@ static void fake_unlock(void *ctx)
 	fake_dispatch(f);
 }
 
+static void fake_cut(void *ctx)
+{
+	struct fake *f = ctx;
+
+	f->output_on = false;
+	f->cuts++;
+}
+
+static bool fake_drive(void *ctx, int16_t velocity_mmps, int16_t steering_mrad)
+{
+	struct fake *f = ctx;
+
+	if (f->locked == 0) {
+		f->drive_unlocked = true;
+	}
+	if (f->drive_fails) {
+		return false;
+	}
+	f->output_on = true;
+	f->velocity = velocity_mmps;
+	f->steering = steering_mrad;
+	f->drives++;
+	return true;
+}
+
+static bool fake_estop(void *ctx)
+{
+	struct fake *f = ctx;
+
+	return f->estop;
+}
+
 static bool fake_latch(void *ctx, struct fb3_sample *out)
 {
 	struct fake *f = ctx;
@@ -122,8 +162,8 @@ struct bench {
 static void start_with(struct bench *b, const struct fb3_link_config *config)
 {
 	struct fb3_cutoff_port cutoff_port = {&b->hw, fake_now, fake_set_alarm, fake_clear_alarm, fake_lock,
-					      fake_unlock};
-	struct fb3_link_port link_port = {&b->hw, fake_now, fake_latch};
+					      fake_unlock, fake_cut};
+	struct fb3_link_port link_port = {&b->hw, fake_now, fake_latch, fake_drive, fake_estop};
 
 	memset(b, 0, sizeof *b);
 	b->hw.cutoff = &b->cutoff;
@@ -144,6 +184,10 @@ static void start(struct bench *b)
 	memcpy(config.vehicle_config_sha256, CONFIG, 32);
 	memcpy(config.firmware_sha256, FIRMWARE, 32);
 	config.encoder_bits = 32;
+	config.um_per_tick = 164;
+	config.j_apply_us = 200;
+	config.max_velocity_mmps = 1000;
+	config.max_steering_mrad = 500;
 	start_with(b, &config);
 }
 
@@ -483,7 +527,7 @@ static void test_cutoff_missed_alarm_is_kept(void)
 {
 	struct bench b;
 
-	for (unsigned early = 0; early < FB3_CUTOFF_SLOTS; early++) {
+	for (unsigned early = 0; early < FB3_CUTOFF_LEASES; early++) {
 		unsigned other = 1 - early;
 
 		current = "cutoff: 다른 칸을 조회해도 울리지 않은 alarm 을 알아챔";
@@ -975,13 +1019,13 @@ static void test_unsupported(void)
 	struct bench b;
 	struct fb3_hello_ack ack;
 	struct fb3_frame out;
-	uint8_t payload[FB3_COMMAND_SIZE];
+	uint8_t payload[FB3_REPORT_SIZE];
 
-	current = "아직 다루지 않는 종류에는 답하지 않음";
+	current = "다루지 않는 종류에는 답하지 않음";
 	start(&b);
 	CHECK(hello(&b, PI_A, CONFIG, &ack));
 	memset(payload, 0, sizeof payload);
-	CHECK(!post(&b, FB3_COMMAND_ID, payload, FB3_COMMAND_SIZE, &out));
+	CHECK(!post(&b, FB3_REPORT_ID, payload, FB3_REPORT_SIZE, &out));
 	CHECK(!post(&b, FB3_HELLO_ACK_ID, payload, FB3_HELLO_ACK_SIZE, &out));
 	CHECK(b.link.refused[FB3_REASON_UNSUPPORTED_PROFILE] == 2 && b.link.open);
 }
@@ -1088,10 +1132,10 @@ static void test_sensor_period(void)
 	last = s.source_device_us + FB3_SENSOR_PERIOD_US;
 	fake_run(&b.hw, last);
 	b.hw.step = 7;
-	CHECK(sensor(&b, &s) && s.source_sample == 10 && s.source_device_us == last + 7);
+	CHECK(sensor(&b, &s) && s.source_sample == 10 && s.source_device_us == last + 14);
 	b.hw.step = 0;
-	CHECK(quiet_until(&b, last + 7 + FB3_SENSOR_PERIOD_US - 1));
-	fake_run(&b.hw, last + 7 + FB3_SENSOR_PERIOD_US);
+	CHECK(quiet_until(&b, last + 14 + FB3_SENSOR_PERIOD_US - 1));
+	fake_run(&b.hw, last + 14 + FB3_SENSOR_PERIOD_US);
 	CHECK(sensor(&b, &s) && s.source_sample == 11);
 
 	current = "sensor: 오래 멈췄다 돌아도 밀린 표본을 몰아 보내지 않음";
@@ -1284,11 +1328,11 @@ static void test_sensor_lease_choice(void)
 	current = "lease: 기한 바로 앞의 표본은 보냄";
 	start(&b);
 	at = open_and_probe(&b, 1);
-	in = lease(PI_A, 1, 1, at + 10015);
+	in = lease(PI_A, 1, 1, at + 10022);
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
 	fake_run(&b.hw, at + 10000);
 	b.hw.step = 7;
-	CHECK(sensor(&b, &s) && s.source_device_us == at + 10007 && s.source_sample == 2);
+	CHECK(sensor(&b, &s) && s.source_device_us == at + 10014 && s.source_sample == 2);
 	b.hw.step = 0;
 }
 
@@ -1310,6 +1354,7 @@ static void test_sensor_sees_fault_while_choosing(void)
 {
 	struct bench b;
 	struct fb3_sensor s;
+	struct fb3_frame frame;
 	uint64_t soon;
 
 	for (unsigned newest_ends_first = 0; newest_ends_first < 2; newest_ends_first++) {
@@ -1317,19 +1362,22 @@ static void test_sensor_sees_fault_while_choosing(void)
 		start(&b);
 		soon = two_leases(&b, newest_ends_first);
 		b.hw.timer_dead = true;
-		fake_run(&b.hw, soon + FB3_CUTOFF_LATE_US - 10);
+		fake_run(&b.hw, soon + FB3_CUTOFF_LATE_US - 17);
 		b.link.sensor_due_us = b.hw.now;
 		b.hw.step = 7;
 		CHECK(!sensor(&b, &s) && b.cutoff.fault && b.link.sample_sequence == 1);
 		b.hw.step = 0;
 		CHECK(fb3_cutoff_query(&b.cutoff, 0) == FB3_CUTOFF_FAULT && fb3_cutoff_query(&b.cutoff, 1) == FB3_CUTOFF_FAULT);
+		/* 다음 주기에 고장을 REPORT 로 한 번 알리고, 그 뒤로는 아무것도 보내지 않는다 */
+		fake_run(&b.hw, b.hw.now + FB3_SENSOR_PERIOD_US);
+		CHECK(spin(&b, &frame) && frame.id == FB3_REPORT_ID);
 		CHECK(quiet_until(&b, b.hw.now + 100000) && b.link.sample_sequence == 1);
 
 		current = "고장: 끝난 lease 다음 lease 를 조회하다 드러난 고장도 놓치지 않음";
 		start(&b);
 		soon = two_leases(&b, newest_ends_first);
 		b.hw.timer_dead = true;
-		fake_run(&b.hw, soon + FB3_CUTOFF_LATE_US - 14);
+		fake_run(&b.hw, soon + FB3_CUTOFF_LATE_US - 21);
 		b.link.sensor_due_us = b.hw.now;
 		b.hw.step = 7;
 		if (newest_ends_first) {
@@ -1344,7 +1392,7 @@ static void test_sensor_sees_fault_while_choosing(void)
 		start(&b);
 		soon = two_leases(&b, newest_ends_first);
 		b.hw.timer_dead = true;
-		fake_run(&b.hw, soon + FB3_CUTOFF_LATE_US - 21);
+		fake_run(&b.hw, soon + FB3_CUTOFF_LATE_US - 28);
 		b.link.sensor_due_us = b.hw.now;
 		b.hw.step = 7;
 		CHECK(sensor(&b, &s) && !b.cutoff.fault && s.source_sample == 2);
@@ -1361,6 +1409,7 @@ static void test_sensor_stops(void)
 	struct fb3_clock_install in, later;
 	struct fb3_clock_ack ack;
 	struct fb3_sensor s;
+	struct fb3_frame frame;
 	uint64_t at;
 
 	current = "멈춤: lease 가 만료되면";
@@ -1373,7 +1422,9 @@ static void test_sensor_stops(void)
 
 	current = "멈춤: 타이머가 고장 나면 기한 전인 lease 로도 보내지 않음";
 	leases_with_missed_alarm(&b, &later);
-	CHECK(quiet_until(&b, b.hw.now + 100000) && b.cutoff.fault && b.link.sample_sequence == 3);
+	fake_run(&b.hw, b.hw.now + FB3_SENSOR_PERIOD_US);
+	CHECK(spin(&b, &frame) && frame.id == FB3_REPORT_ID && b.cutoff.fault);
+	CHECK(quiet_until(&b, b.hw.now + 100000) && b.link.sample_sequence == 3);
 
 	current = "멈춤: 새 pi_session 이 오면 그 session 의 lease 가 생길 때까지";
 	start(&b);
@@ -1465,6 +1516,759 @@ static void test_sensor_skips_bad_sample(void)
 	CHECK(sensor(&b, &s) && s.source_sample == 4);
 }
 
+static bool engage_ok(void *arg)
+{
+	struct fake *f = arg;
+
+	if (f->locked == 0) {
+		f->drive_unlocked = true;
+	}
+	f->output_on = true;
+	f->drives++;
+	return !f->drive_fails;
+}
+
+static void test_output_cutoff(void)
+{
+	struct bench b;
+	uint64_t t;
+
+	current = "출력: 기한까지 여유가 있어야 걸고, lock 을 쥔 채 건다";
+	start(&b);
+	t = b.hw.now;
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 1000, 200, engage_ok, &b.hw) == FB3_CUTOFF_LIVE);
+	CHECK(b.hw.drives == 1 && !b.hw.drive_unlocked && b.hw.output_on);
+	CHECK(b.hw.alarm_set && b.hw.alarm_at == t + 1000);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_LIVE);
+
+	current = "출력: 여유가 모자란 기한은 걸지 않고, 걸려 있던 출력과 기한은 그대로";
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 200, 200, engage_ok, &b.hw) == FB3_CUTOFF_EXPIRED);
+	CHECK(fb3_cutoff_engage(&b.cutoff, t, 0, engage_ok, &b.hw) == FB3_CUTOFF_EXPIRED);
+	CHECK(b.hw.drives == 1 && b.hw.output_on && b.hw.cuts == 0 && b.hw.alarm_at == t + 1000);
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 201, 200, engage_ok, &b.hw) == FB3_CUTOFF_LIVE);
+	CHECK(b.hw.drives == 2 && b.hw.alarm_at == t + 201);
+
+	current = "출력: 기한이 되면 alarm 인터럽트가 끊음";
+	fake_run(&b.hw, t + 200);
+	CHECK(b.hw.output_on && b.hw.cuts == 0);
+	fake_run(&b.hw, t + 201);
+	CHECK(!b.hw.output_on && b.hw.cuts == 1 && b.hw.interrupts == 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_EXPIRED && !b.cutoff.fault);
+
+	current = "출력: lease 의 기한이 지나는 것으로는 끊지 않음";
+	start(&b);
+	t = b.hw.now;
+	CHECK(fb3_cutoff_arm(&b.cutoff, 0, t + 500) == FB3_CUTOFF_LIVE);
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 2000, 200, engage_ok, &b.hw) == FB3_CUTOFF_LIVE);
+	fake_run(&b.hw, t + 500);
+	CHECK(b.hw.output_on && b.hw.cuts == 0 && b.hw.alarm_at == t + 2000);
+	fake_run(&b.hw, t + 2000);
+	CHECK(!b.hw.output_on && b.hw.cuts == 1 && b.cutoff.expired == 2);
+
+	current = "출력: cut 은 곧바로 끊고 출력의 기한을 지움";
+	start(&b);
+	t = b.hw.now;
+	CHECK(fb3_cutoff_arm(&b.cutoff, 1, t + 5000) == FB3_CUTOFF_LIVE);
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 1000, 200, engage_ok, &b.hw) == FB3_CUTOFF_LIVE);
+	fb3_cutoff_cut(&b.cutoff);
+	CHECK(!b.hw.output_on && b.hw.cuts == 1 && b.hw.alarm_at == t + 5000);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+	fake_run(&b.hw, t + 1000);
+	CHECK(b.hw.cuts == 1 && b.hw.interrupts == 0);
+
+	current = "출력: 걸지 못하면 끊고 FAULT, 타이머는 고장이 아님";
+	start(&b);
+	t = b.hw.now;
+	b.hw.drive_fails = true;
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 1000, 200, engage_ok, &b.hw) == FB3_CUTOFF_FAULT);
+	CHECK(!b.hw.output_on && b.hw.cuts == 1 && !b.cutoff.fault && !b.hw.alarm_set);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+
+	current = "출력: 출력의 alarm 이 울리지 않으면 다음 검사에서 끊고 고장으로 굳음";
+	start(&b);
+	t = b.hw.now;
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 1000, 200, engage_ok, &b.hw) == FB3_CUTOFF_LIVE);
+	b.hw.timer_dead = true;
+	fake_run(&b.hw, t + 1000 + FB3_CUTOFF_LATE_US + 1);
+	CHECK(b.hw.output_on && b.hw.cuts == 0);
+	CHECK(fb3_cutoff_faulted(&b.cutoff) && !b.hw.output_on && b.hw.cuts == 1);
+	CHECK(fb3_cutoff_engage(&b.cutoff, b.hw.now + 1000, 200, engage_ok, &b.hw) == FB3_CUTOFF_FAULT);
+	CHECK(!b.hw.output_on && b.hw.drives == 1);
+
+	current = "출력: lease 의 alarm 이 울리지 않아도 출력을 끊음";
+	start(&b);
+	t = b.hw.now;
+	CHECK(fb3_cutoff_arm(&b.cutoff, 0, t + 500) == FB3_CUTOFF_LIVE);
+	CHECK(fb3_cutoff_engage(&b.cutoff, t + 900000, 200, engage_ok, &b.hw) == FB3_CUTOFF_LIVE);
+	b.hw.timer_dead = true;
+	fake_run(&b.hw, t + 500 + FB3_CUTOFF_LATE_US + 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_FAULT && !b.hw.output_on && b.hw.cuts == 1);
+
+	current = "출력: 고장이 없으면 고장이라 하지 않음";
+	start(&b);
+	CHECK(!fb3_cutoff_faulted(&b.cutoff) && b.hw.cuts == 0);
+}
+
+static struct fb3_command stop_command(const uint8_t *pi, uint64_t sequence, uint32_t generation)
+{
+	struct fb3_command c;
+
+	memset(&c, 0, sizeof c);
+	memcpy(c.pi_session, pi, 16);
+	memcpy(c.device_session, BOOT, 16);
+	c.command_sequence = sequence;
+	c.generation = generation;
+	c.counter = (uint8_t)(sequence + 40);
+	c.command_kind = FB3_COMMAND_STOP;
+	return c;
+}
+
+static struct fb3_command drive_command(uint64_t sequence, uint64_t stop_sequence, uint64_t clock_sequence,
+					uint64_t cutoff, int16_t velocity, int16_t steering)
+{
+	struct fb3_command c = stop_command(PI_A, sequence, 1);
+
+	memcpy(c.clock_epoch, EPOCH, 16);
+	c.clock_sequence = clock_sequence;
+	c.issued_pi_us = 1500000;
+	c.expires_pi_us = 1590000;
+	c.cutoff_device_us = cutoff;
+	c.command_kind = FB3_COMMAND_DRIVE;
+	c.stop_command_sequence = stop_sequence;
+	c.velocity_mmps = velocity;
+	c.steering_mrad = steering;
+	return c;
+}
+
+/* COMMAND 를 넣는다. REPORT 가 나왔으면 풀어 준다 */
+static bool command(struct bench *b, const struct fb3_command *in, struct fb3_report *out)
+{
+	uint8_t payload[FB3_COMMAND_SIZE];
+	struct fb3_frame frame;
+
+	memset(out, 0, sizeof *out);
+	CHECK(fb3_pack_command(in, payload, sizeof payload) == sizeof payload);
+	if (!post(b, FB3_COMMAND_ID, payload, sizeof payload, &frame)) {
+		return false;
+	}
+	CHECK(frame.id == FB3_REPORT_ID && fb3_unpack_report(frame.payload, frame.length, out));
+	return true;
+}
+
+/* 명령의 칸을 그대로 돌려주는 REPORT 인지 */
+static bool echoes(const struct fb3_report *r, const struct fb3_command *c)
+{
+	return memcmp(r->pi_session, c->pi_session, 16) == 0 && memcmp(r->device_session, BOOT, 16) == 0
+		&& r->command_sequence == c->command_sequence && r->generation == c->generation
+		&& r->counter == c->counter && r->command_kind == c->command_kind
+		&& memcmp(r->clock_epoch, c->clock_epoch, 16) == 0 && r->clock_sequence == c->clock_sequence
+		&& r->cutoff_device_us == c->cutoff_device_us && r->stop_command_sequence == c->stop_command_sequence;
+}
+
+static bool applied(struct bench *b, const struct fb3_command *in)
+{
+	struct fb3_report r;
+
+	return command(b, in, &r) && r.status == FB3_REPORT_APPLIED && r.reason == FB3_REASON_OK && echoes(&r, in);
+}
+
+static bool turned_down(struct bench *b, const struct fb3_command *in, enum fb3_reason reason)
+{
+	struct fb3_report r;
+
+	return command(b, in, &r) && r.status == FB3_REPORT_REJECTED && r.reason == (uint16_t)reason && echoes(&r, in)
+		&& r.flags == 0 && r.velocity_mmps == 0 && r.stationary == 0;
+}
+
+/* 메인 루프를 한 바퀴 돌려 REPORT 가 나왔으면 풀어 준다 */
+static bool next_report(struct bench *b, struct fb3_report *out)
+{
+	struct fb3_frame frame;
+
+	memset(out, 0, sizeof *out);
+	if (!spin(b, &frame)) {
+		return false;
+	}
+	CHECK(frame.id == FB3_REPORT_ID && fb3_unpack_report(frame.payload, frame.length, out));
+	return true;
+}
+
+/* session 을 맺고 lease 하나(기한은 900 ms 뒤)를 설치한 뒤 STOP 1 을 적용한다. probe 응답의 표본 시각을 돌려준다 */
+static uint64_t ready_to_drive(struct bench *b)
+{
+	struct fb3_command stop = stop_command(PI_A, 1, 1);
+	uint64_t at = open_with_lease(b, 900000);
+
+	CHECK(applied(b, &stop));
+	return at;
+}
+
+static void test_command_stop(void)
+{
+	struct bench b;
+	struct fb3_hello_ack ack;
+	struct fb3_command stop, other;
+	struct fb3_report r;
+	uint8_t first[FB3_MAX_WIRE];
+	size_t first_len;
+	unsigned cuts;
+
+	current = "stop: session 전에는 답하지 않음";
+	start(&b);
+	stop = stop_command(PI_A, 1, 7);
+	CHECK(!command(&b, &stop, &r) && b.link.refused[FB3_REASON_SESSION_MISMATCH] == 1);
+
+	current = "stop: lease 가 없어도 출력을 끊고 APPLIED 로 알림";
+	CHECK(hello(&b, PI_A, CONFIG, &ack));
+	cuts = b.hw.cuts;
+	CHECK(command(&b, &stop, &r));
+	CHECK(r.status == FB3_REPORT_APPLIED && r.reason == FB3_REASON_OK && echoes(&r, &stop));
+	CHECK(r.report_sequence == 1 && r.source_sample == 0 && r.source_device_us == 0 && r.flags == 0);
+	CHECK(b.hw.cuts == cuts + 1 && !b.hw.output_on);
+	CHECK(b.link.stop.sequence == 1 && b.link.generation == 7 && b.link.command_fence == 1);
+
+	current = "stop: 같은 바이트가 다시 오면 처음 REPORT 만 다시 보냄";
+	first_len = b.response_len;
+	memcpy(first, b.response, first_len);
+	cuts = b.hw.cuts;
+	pass(&b, 30000);
+	CHECK(command(&b, &stop, &r));
+	CHECK(b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(b.hw.cuts == cuts && b.link.report_sequence == 1);
+
+	current = "stop: 같은 순번의 다른 바이트는 충돌";
+	other = stop;
+	other.counter++;
+	CHECK(turned_down(&b, &other, FB3_REASON_IDEMPOTENCY_CONFLICT));
+	CHECK(b.link.report_sequence == 2 && b.link.stop.sequence == 1);
+
+	current = "stop: 낮은 generation 의 STOP 도 적용하되 generation 은 내리지 않음";
+	other = stop_command(PI_A, 2, 3);
+	CHECK(applied(&b, &other) && b.link.generation == 7 && b.link.stop.sequence == 2);
+
+	current = "stop: 계약 밖 STOP 은 거절하지만 출력은 끊음";
+	cuts = b.hw.cuts;
+	other = stop_command(PI_A, 3, 7);
+	other.velocity_mmps = 10;
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE) && b.hw.cuts == cuts + 1);
+	other = stop_command(PI_A, 3, 7);
+	other.clock_sequence = 1;
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 3, 7);
+	other.cutoff_device_us = 1;
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 3, 7);
+	other.stop_command_sequence = 2;
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 3, 7);
+	memcpy(other.clock_epoch, EPOCH, 16);
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 3, 7);
+	other.reserved = 1;
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 3, 7);
+	other.reason = FB3_COMMAND_REASON_MAX + 1;
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 3, 0);
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, 0, 7);
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	other = stop_command(PI_A, FB3_U63_MAX + 1, 7);
+	CHECK(turned_down(&b, &other, FB3_REASON_RANGE));
+	CHECK(b.link.stop.sequence == 2 && b.link.command_fence == 2 && b.hw.cuts == cuts + 10);
+
+	current = "stop: 설계에 있는 reason 값은 받음";
+	other = stop_command(PI_A, 3, 7);
+	other.reason = FB3_COMMAND_REASON_MAX;
+	CHECK(applied(&b, &other));
+
+	current = "stop: 받은 적 없는 지난 순번은 거절";
+	other = stop_command(PI_A, 10, 7);
+	CHECK(applied(&b, &other));
+	other = stop_command(PI_A, 5, 7);
+	CHECK(turned_down(&b, &other, FB3_REASON_SEQUENCE_REPLAY) && b.link.stop.sequence == 10);
+
+	current = "stop: 결과 칸에서 밀려난 뒤에도 마지막 STOP 은 다시 온 것으로 알아봄";
+	stop = stop_command(PI_A, 11, 7);
+	CHECK(applied(&b, &stop));
+	first_len = b.response_len;
+	memcpy(first, b.response, first_len);
+	memset(b.link.results, 0, sizeof b.link.results);
+	CHECK(command(&b, &stop, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+}
+
+static void test_command_drive(void)
+{
+	struct bench b;
+	struct fb3_command drive, next, stop;
+	struct fb3_report r;
+	uint8_t first[FB3_MAX_WIRE];
+	size_t first_len;
+	unsigned cuts;
+	uint64_t at, cutoff;
+
+	current = "drive: 출력에 건 뒤 APPLIED 로 알림";
+	start(&b);
+	at = ready_to_drive(&b);
+	cutoff = b.hw.now + 80000;
+	drive = drive_command(2, 1, 1, cutoff, 300, -120);
+	CHECK(command(&b, &drive, &r));
+	CHECK(r.status == FB3_REPORT_APPLIED && r.reason == FB3_REASON_OK && echoes(&r, &drive));
+	CHECK(r.report_sequence == 2 && r.source_sample == 1 && r.source_device_us == at);
+	CHECK(r.flags == FB3_REPORT_STATIONARY && r.stationary == 0 && r.velocity_mmps == 0 && r.steering_mrad == 0);
+	CHECK(b.hw.output_on && b.hw.velocity == 300 && b.hw.steering == -120 && b.hw.drives == 1 && !b.hw.drive_unlocked);
+	CHECK(b.hw.alarm_set && b.hw.alarm_at == cutoff && b.link.command_fence == 2);
+
+	current = "drive: 같은 명령이 다시 와도 다시 걸지 않고 기한을 늘리지 않음";
+	first_len = b.response_len;
+	memcpy(first, b.response, first_len);
+	pass(&b, 30000);
+	CHECK(command(&b, &drive, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(b.hw.drives == 1 && b.hw.alarm_at == cutoff && b.link.report_sequence == 2);
+
+	current = "drive: 같은 순번의 다른 바이트는 충돌이고 걸려 있던 출력은 그대로";
+	next = drive;
+	next.velocity_mmps = 500;
+	CHECK(turned_down(&b, &next, FB3_REASON_IDEMPOTENCY_CONFLICT));
+	CHECK(b.hw.output_on && b.hw.velocity == 300 && b.hw.drives == 1 && b.hw.alarm_at == cutoff);
+
+	current = "drive: 기한이 되면 타이머가 출력을 끊음";
+	fake_run(&b.hw, cutoff - 1);
+	CHECK(b.hw.output_on);
+	cuts = b.hw.cuts;
+	fake_run(&b.hw, cutoff);
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_EXPIRED && !b.cutoff.fault);
+
+	current = "drive: 기한 뒤에 같은 명령이 다시 와도 출력을 켜지 않음";
+	CHECK(command(&b, &drive, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(!b.hw.output_on && b.hw.drives == 1);
+
+	current = "drive: 새 명령은 새 기한으로 다시 검";
+	next = drive_command(3, 1, 1, b.hw.now + 80000, 320, 50);
+	CHECK(applied(&b, &next));
+	CHECK(b.hw.output_on && b.hw.velocity == 320 && b.hw.steering == 50 && b.hw.drives == 2);
+	CHECK(b.hw.alarm_at == next.cutoff_device_us);
+	pass(&b, 20000);
+	next = drive_command(4, 1, 1, b.hw.now + 80000, 340, 0);
+	CHECK(applied(&b, &next) && b.hw.velocity == 340 && b.hw.drives == 3 && b.hw.alarm_at == next.cutoff_device_us);
+
+	current = "drive: STOP 이 오면 곧바로 끊고 출력의 기한을 지움";
+	cuts = b.hw.cuts;
+	stop = stop_command(PI_A, 5, 1);
+	CHECK(applied(&b, &stop));
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+	CHECK(b.hw.alarm_set && b.hw.alarm_at == at + 900000);
+	fake_run(&b.hw, next.cutoff_device_us);
+	CHECK(b.hw.cuts == cuts + 1 && b.hw.interrupts == 1);
+
+	current = "drive: 속도 0 도 걸 수 있음";
+	next = drive_command(6, 5, 1, b.hw.now + 80000, 0, 200);
+	CHECK(applied(&b, &next) && b.hw.output_on && b.hw.velocity == 0 && b.hw.steering == 200);
+}
+
+static void test_drive_rejects(void)
+{
+	struct bench b;
+	struct fb3_command drive, stop;
+	struct fb3_report r;
+	struct fb3_frame out;
+	uint8_t payload[FB3_COMMAND_SIZE];
+	uint64_t at, cutoff;
+
+	start(&b);
+	at = open_with_lease(&b, 900000);
+	cutoff = b.hw.now + 80000;
+
+	current = "거절: 적용한 STOP 이 없으면";
+	drive = drive_command(1, 0, 1, cutoff, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	CHECK(!b.hw.output_on && b.hw.drives == 0 && b.link.command_fence == 0);
+	stop = stop_command(PI_A, 1, 1);
+	CHECK(applied(&b, &stop));
+
+	current = "거절: 마지막 STOP 이 아닌 것을 가리키면";
+	drive = drive_command(2, 9, 1, cutoff, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	drive = drive_command(2, 0, 1, cutoff, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+
+	current = "거절: 범위 밖 값";
+	drive = drive_command(2, 1, 1, cutoff, 1001, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, -1001, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 501);
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, -501);
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.issued_pi_us = 0;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.issued_pi_us = 0;
+	drive.expires_pi_us = 50000;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.expires_pi_us = drive.issued_pi_us;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.expires_pi_us = drive.issued_pi_us + FB3_COMMAND_LIFE_US + 1;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, 0, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, FB3_U63_MAX + 1, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.reserved = 1;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.reason = FB3_COMMAND_REASON_MAX + 1;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.generation = 0;
+	CHECK(turned_down(&b, &drive, FB3_REASON_RANGE));
+
+	current = "거절: 다루지 않는 명령 종류";
+	drive = drive_command(2, 1, 1, cutoff, 0, 100);
+	drive.command_kind = FB3_COMMAND_HOLD_STEER;
+	CHECK(turned_down(&b, &drive, FB3_REASON_UNSUPPORTED_PROFILE));
+	drive.command_kind = 0;
+	CHECK(turned_down(&b, &drive, FB3_REASON_UNSUPPORTED_PROFILE));
+	drive.command_kind = 9;
+	CHECK(turned_down(&b, &drive, FB3_REASON_UNSUPPORTED_PROFILE));
+
+	current = "거절: 설치하지 않은 lease";
+	drive = drive_command(2, 1, 2, cutoff, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_CLOCK_UNAVAILABLE));
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	memcpy(drive.clock_epoch, EPOCH_B, 16);
+	CHECK(turned_down(&b, &drive, FB3_REASON_CLOCK_UNAVAILABLE));
+
+	current = "거절: lease 를 넘는 기한";
+	drive = drive_command(2, 1, 1, cutoff, 300, 0);
+	drive.issued_pi_us = 1950000;
+	drive.expires_pi_us = 2000001;
+	CHECK(turned_down(&b, &drive, FB3_REASON_DEADLINE_MISMATCH));
+	drive = drive_command(2, 1, 1, at + 900001, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DEADLINE_MISMATCH));
+
+	current = "거절: 걸 시간이 모자란 기한";
+	drive = drive_command(2, 1, 1, b.hw.now, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_COMMAND_EXPIRED));
+	drive = drive_command(2, 1, 1, b.hw.now - 1, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_COMMAND_EXPIRED));
+	drive = drive_command(2, 1, 1, b.hw.now + 200, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_COMMAND_EXPIRED));
+
+	current = "거절: 거절은 출력을 걸지 않고 순번도 쓰지 않음";
+	CHECK(!b.hw.output_on && b.hw.drives == 0 && b.link.command_fence == 1 && b.hw.alarm_at == at + 900000);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+	drive = drive_command(2, 1, 1, at + 900000, 300, 0);
+	drive.issued_pi_us = 1900000;
+	drive.expires_pi_us = 2000000;
+	CHECK(applied(&b, &drive) && b.hw.output_on && b.hw.alarm_at == at + 900000);
+
+	current = "거절: 가던 방향을 바꾸려면 새 STOP 이 있어야 함";
+	drive = drive_command(3, 1, 1, cutoff, -300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	CHECK(b.hw.output_on && b.hw.velocity == 300 && b.hw.drives == 1);
+	drive = drive_command(3, 1, 1, cutoff, 0, 0);
+	CHECK(applied(&b, &drive) && b.hw.velocity == 0);
+	drive = drive_command(4, 1, 1, cutoff, -300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	stop = stop_command(PI_A, 4, 1);
+	CHECK(applied(&b, &stop));
+	drive = drive_command(5, 1, 1, cutoff, -300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	drive = drive_command(5, 4, 1, cutoff, -300, 0);
+	CHECK(applied(&b, &drive) && b.hw.velocity == -300);
+	drive = drive_command(6, 4, 1, cutoff, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	drive = drive_command(6, 4, 1, cutoff, -200, 0);
+	CHECK(applied(&b, &drive) && b.hw.velocity == -200);
+
+	current = "거절: 낮은 generation 의 DRIVE";
+	stop = stop_command(PI_A, 7, 5);
+	CHECK(applied(&b, &stop));
+	drive = drive_command(8, 7, 1, cutoff, 300, 0);
+	drive.generation = 4;
+	CHECK(turned_down(&b, &drive, FB3_REASON_GENERATION_REPLAY));
+	drive.generation = 5;
+	CHECK(applied(&b, &drive));
+	drive = drive_command(9, 7, 1, cutoff, 300, 0);
+	drive.generation = 6;
+	CHECK(applied(&b, &drive) && b.link.generation == 6);
+
+	current = "거절: 다른 session·크기에는 답하지 않음";
+	drive = drive_command(10, 7, 1, cutoff, 300, 0);
+	memcpy(drive.pi_session, PI_B, 16);
+	CHECK(!command(&b, &drive, &r));
+	drive = drive_command(10, 7, 1, cutoff, 300, 0);
+	memcpy(drive.device_session, STRANGER, 16);
+	CHECK(!command(&b, &drive, &r));
+	memset(payload, 0, sizeof payload);
+	CHECK(!post(&b, FB3_COMMAND_ID, payload, sizeof payload - 1, &out));
+	CHECK(b.link.refused[FB3_REASON_SESSION_MISMATCH] == 2 && b.link.refused[FB3_REASON_BAD_LENGTH] == 1);
+	CHECK(b.link.command_fence == 9);
+}
+
+static void test_drive_faults(void)
+{
+	struct bench b;
+	struct fb3_command drive, stop;
+	struct fb3_report r;
+	struct fb3_sensor s;
+	struct fb3_frame frame;
+	unsigned cuts;
+
+	current = "고장: 출력을 걸지 못하면 FAULT 로 알리고 끊음";
+	start(&b);
+	ready_to_drive(&b);
+	b.hw.drive_fails = true;
+	cuts = b.hw.cuts;
+	drive = drive_command(2, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(command(&b, &drive, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
+	CHECK(echoes(&r, &drive) && r.flags == 0);
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1 && b.link.command_fence == 1 && !b.cutoff.fault);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+	b.hw.drive_fails = false;
+	CHECK(applied(&b, &drive) && b.hw.output_on);
+
+	current = "고장: 출력의 alarm 이 울리지 않았으면 다음 DRIVE 에서 끊고 FAULT";
+	start(&b);
+	ready_to_drive(&b);
+	drive = drive_command(2, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive));
+	b.hw.timer_dead = true;
+	fake_run(&b.hw, drive.cutoff_device_us + FB3_CUTOFF_LATE_US + 1);
+	CHECK(b.hw.output_on);
+	drive = drive_command(3, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(command(&b, &drive, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
+	CHECK(!b.hw.output_on && b.cutoff.fault && b.hw.drives == 1);
+
+	current = "고장: 명령이 없어도 메인 루프가 알아채 끊고, 어느 명령의 것도 아닌 FAULT 로 한 번 알림";
+	start(&b);
+	ready_to_drive(&b);
+	drive = drive_command(2, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive));
+	b.hw.timer_dead = true;
+	fake_run(&b.hw, drive.cutoff_device_us + FB3_CUTOFF_LATE_US + 1);
+	CHECK(b.hw.output_on);
+	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
+	CHECK(r.command_sequence == 0 && r.command_kind == 0 && r.counter == 0 && r.generation == 1 && r.flags == 0);
+	CHECK(!b.hw.output_on && b.cutoff.fault);
+	CHECK(!spin(&b, &frame));
+	fake_run(&b.hw, b.hw.now + 100000);
+	CHECK(!spin(&b, &frame));
+	stop = stop_command(PI_A, 3, 1);
+	CHECK(applied(&b, &stop));
+	drive = drive_command(4, 3, 1, b.hw.now + 80000, 300, 0);
+	CHECK(command(&b, &drive, &r) && r.status == FB3_REPORT_FAULT && !b.hw.output_on);
+
+	current = "비상정지: 눌리면 출력을 끊고 알림";
+	start(&b);
+	ready_to_drive(&b);
+	drive = drive_command(2, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive) && b.hw.output_on);
+	b.hw.estop = true;
+	fake_run(&b.hw, b.link.sensor_due_us);
+	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_E_STOP);
+	CHECK(r.command_sequence == 0 && r.command_kind == 0 && !b.hw.output_on);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+
+	current = "비상정지: 끊긴 DRIVE 를 걸려 있는 것처럼 알리지 않음";
+	CHECK(sensor(&b, &s) && s.source_device_us < drive.cutoff_device_us - FB3_SAMPLE_GAP_US);
+	CHECK(!spin(&b, &frame) && !b.link.reporting);
+
+	current = "비상정지: 눌려 있는 동안의 DRIVE 는 거절";
+	drive = drive_command(3, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_E_STOP) && !b.hw.output_on);
+
+	current = "비상정지: 풀어도 새 STOP 을 받기 전에는 DRIVE 를 받지 않음";
+	b.hw.estop = false;
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED) && !b.hw.output_on);
+	stop = stop_command(PI_A, 3, 1);
+	CHECK(applied(&b, &stop));
+	drive = drive_command(4, 3, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive) && b.hw.output_on);
+
+	current = "비상정지: DRIVE 를 받는 순간 눌려 있어도 끊음";
+	b.hw.estop = true;
+	drive = drive_command(5, 3, 1, b.hw.now + 80000, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_E_STOP) && !b.hw.output_on);
+	b.hw.estop = false;
+	drive = drive_command(5, 3, 1, b.hw.now + 80000, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED));
+}
+
+static void test_reports_follow_samples(void)
+{
+	struct bench b;
+	struct fb3_command drive;
+	struct fb3_clock_reply reply;
+	struct fb3_report r;
+	struct fb3_sensor s;
+	struct fb3_frame frame;
+	uint64_t at, last;
+
+	current = "보고: STOP 을 표본마다 그 표본을 가리켜 다시 알림";
+	start(&b);
+	at = ready_to_drive(&b);
+	CHECK(!spin(&b, &frame));
+	fake_run(&b.hw, at + 10000);
+	CHECK(sensor(&b, &s) && s.source_sample == 2);
+	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_APPLIED && r.command_sequence == 1);
+	CHECK(r.command_kind == FB3_COMMAND_STOP && r.report_sequence == 2);
+	CHECK(r.source_sample == 2 && r.source_device_us == s.source_device_us);
+	CHECK(r.flags == (FB3_REPORT_VELOCITY | FB3_REPORT_STATIONARY) && r.velocity_mmps == 0 && r.stationary == 0);
+	CHECK(!spin(&b, &frame));
+
+	current = "보고: 누계가 100 ms 동안 그대로면 멈춘 것으로 알림";
+	for (unsigned i = 0; i < 4; i++) {
+		fake_run(&b.hw, at + 30000 + 20000 * i);
+		CHECK(sensor(&b, &s) && next_report(&b, &r) && r.source_sample == 3 + i && r.stationary == 0);
+	}
+	fake_run(&b.hw, at + 110000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.source_sample == 7 && r.stationary == 1);
+	CHECK(r.report_sequence == 7);
+
+	current = "보고: 누계가 바뀌면 그 속도를 싣고 멈춘 시간을 다시 잼";
+	b.hw.sample.left_ticks += 100;
+	b.hw.sample.right_ticks += 100;
+	fake_run(&b.hw, at + 130000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.velocity_mmps == 820 && r.stationary == 0);
+	b.hw.sample.left_ticks -= 50;
+	fake_run(&b.hw, at + 150000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.velocity_mmps == -205 && r.stationary == 0);
+	for (unsigned i = 0; i < 4; i++) {
+		fake_run(&b.hw, at + 170000 + 20000 * i);
+		CHECK(sensor(&b, &s) && next_report(&b, &r) && r.velocity_mmps == 0 && r.stationary == 0);
+	}
+	fake_run(&b.hw, at + 250000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 1);
+
+	current = "보고: 한쪽 누계만 바뀌어도 멈춘 것이 아님";
+	b.hw.sample.right_ticks += 1;
+	fake_run(&b.hw, at + 270000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0 && r.velocity_mmps == 4);
+	b.hw.sample.left_ticks -= 1;
+	fake_run(&b.hw, at + 290000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0);
+	for (unsigned i = 0; i < 4; i++) {
+		fake_run(&b.hw, at + 310000 + 20000 * i);
+		CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0);
+	}
+	fake_run(&b.hw, at + 390000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 1);
+	at += 140000;
+
+	current = "보고: CLOCK_REPLY 의 표본에도 따라붙음";
+	fake_run(&b.hw, at + 262000);
+	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
+	CHECK(next_report(&b, &r) && r.source_sample == reply.source_sample
+	      && r.source_device_us == reply.latch_device_us && r.stationary == 1);
+	CHECK(!spin(&b, &frame));
+
+	current = "보고: 표본이 오래 끊겼다 이어지면 멈춘 시간을 다시 잼";
+	last = at + 262000 + 150000;
+	fake_run(&b.hw, last);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0 && r.velocity_mmps == 0);
+
+	current = "보고: DRIVE 는 기한까지만 알림";
+	drive = drive_command(2, 1, 1, last + 30000, 300, 0);
+	CHECK(applied(&b, &drive));
+	fake_run(&b.hw, last + 20000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 2 && r.command_kind == FB3_COMMAND_DRIVE);
+	CHECK(r.status == FB3_REPORT_APPLIED && echoes(&r, &drive) && r.source_sample == s.source_sample);
+	fake_run(&b.hw, last + 40000);
+	CHECK(!b.hw.output_on && sensor(&b, &s));
+	CHECK(!spin(&b, &frame) && !b.link.reporting);
+	fake_run(&b.hw, last + 60000);
+	CHECK(sensor(&b, &s) && !spin(&b, &frame));
+
+	current = "보고: 기한이 5 ms 안으로 남은 DRIVE 는 알리지 않음";
+	last = s.source_device_us;
+	drive = drive_command(3, 1, 1, last + 20000 + FB3_SAMPLE_GAP_US, 300, 0);
+	CHECK(applied(&b, &drive));
+	fake_run(&b.hw, last + 20000);
+	CHECK(sensor(&b, &s) && b.hw.output_on && !spin(&b, &frame) && !b.link.reporting);
+	drive = drive_command(4, 1, 1, last + 40000 + FB3_SAMPLE_GAP_US + 1, 300, 0);
+	CHECK(applied(&b, &drive));
+	fake_run(&b.hw, last + 40000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 4);
+}
+
+static void test_command_session_and_lease(void)
+{
+	struct bench b;
+	struct fb3_hello_ack hello_ack;
+	struct fb3_clock_reply reply;
+	struct fb3_clock_install in;
+	struct fb3_clock_ack ack;
+	struct fb3_command drive, stop;
+	struct fb3_report r;
+	unsigned cuts;
+	uint64_t at;
+
+	current = "session: 새 pi_session 이 오면 출력을 끊고 명령 기록을 버림";
+	start(&b);
+	ready_to_drive(&b);
+	drive = drive_command(2, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive) && b.hw.output_on);
+	cuts = b.hw.cuts;
+	CHECK(hello(&b, PI_B, CONFIG, &hello_ack));
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
+	CHECK(b.link.command_fence == 0 && b.link.stop.sequence == 0 && !b.link.reporting && b.link.generation == 0);
+	CHECK(!command(&b, &drive, &r));
+	stop = stop_command(PI_B, 1, 1);
+	CHECK(applied(&b, &stop) && b.link.stop.sequence == 1);
+
+	current = "session: 같은 pi_session 의 HELLO 는 걸려 있는 출력을 끊지 않음";
+	start(&b);
+	ready_to_drive(&b);
+	drive = drive_command(2, 1, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive));
+	cuts = b.hw.cuts;
+	CHECK(hello(&b, PI_A, CONFIG, &hello_ack));
+	CHECK(b.hw.output_on && b.hw.cuts == cuts && b.link.command_fence == 2);
+
+	current = "lease: 출력에 걸려 있는 DRIVE 가 쓰는 lease 는 새 lease 가 밀어내지 않음";
+	start(&b);
+	CHECK(hello(&b, PI_A, CONFIG, &hello_ack));
+	pass(&b, 1000);
+	CHECK(probe(&b, PI_A, BOOT, 1, 900000, &reply));
+	pass(&b, 6000);
+	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
+	at = reply.latch_device_us;
+	in = lease(PI_A, 1, 1, at + 800000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	in = lease(PI_A, 2, 2, at + 900000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	stop = stop_command(PI_A, 1, 1);
+	CHECK(applied(&b, &stop));
+	drive = drive_command(2, 1, 1, at + 80000, 300, 0);
+	CHECK(applied(&b, &drive));
+	pass(&b, 6000);
+	CHECK(probe(&b, PI_A, BOOT, 3, 1300000, &reply));
+	in = lease(PI_A, 3, 3, at + 1000000);
+	CHECK(install(&b, &in, &ack) && rejected(&ack, FB3_REASON_CLOCK_UNAVAILABLE));
+	CHECK(fb3_link_lease_live(&b.link, EPOCH, 1) && fb3_link_lease_live(&b.link, EPOCH, 2) && b.hw.output_on);
+	fake_run(&b.hw, at + 80000);
+	CHECK(!b.hw.output_on);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	CHECK(!fb3_link_lease_live(&b.link, EPOCH, 1) && fb3_link_lease_live(&b.link, EPOCH, 3));
+
+	current = "lease: lease 가 끝나면 그 lease 로는 DRIVE 를 걸지 못함";
+	start(&b);
+	at = ready_to_drive(&b);
+	fake_run(&b.hw, at + 900000);
+	drive = drive_command(2, 1, 1, at + 900000, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_COMMAND_EXPIRED) && !b.hw.output_on);
+}
+
 /* 고정 vector 의 HELLO → PROBE → INSTALL 을 넣으면 vector 의 ACK·REPLY·CLOCK_ACK 와 같은 바이트가 나온다 */
 static void vector_session(struct bench *bench)
 {
@@ -1477,6 +2281,7 @@ static void vector_session(struct bench *bench)
 	size_t len, expected_len;
 
 	current = "vector: HELLO_ACK";
+	memset(&config, 0, sizeof config);
 	memset(&hello_ack, 0, sizeof hello_ack);
 	expected_len = from_hex(VEC_HELLO_ACK3, expected, sizeof expected);
 	CHECK(fb3_decode_frame(expected, expected_len, &frame) == FB3_FRAME_OK
@@ -1597,6 +2402,13 @@ int main(void)
 	test_sensor_sees_fault_while_choosing();
 	test_sensor_stops();
 	test_sensor_skips_bad_sample();
+	test_output_cutoff();
+	test_command_stop();
+	test_command_drive();
+	test_drive_rejects();
+	test_drive_faults();
+	test_reports_follow_samples();
+	test_command_session_and_lease();
 	test_vectors();
 	printf("feedback-3 link: %d checks, %d failures\n", checks, failures);
 	return failures == 0 ? 0 : 1;
