@@ -14,7 +14,7 @@ from xenova_vehicle.perception.depth import DepthEvidence
 from xenova_vehicle.perception.geometry import PointBounds
 from xenova_vehicle.perception.pipeline import PerceptionPipeline
 from xenova_vehicle.perception.tape import TapeGraph
-from xenova_vehicle.mapping.registration import transform_point
+from xenova_vehicle.mapping.registration import PoseBox, register, transform_point
 
 import test_alignment_flow as fixture_module
 
@@ -136,6 +136,44 @@ class AlignmentAnchorTests(unittest.TestCase):
         self.assertIs(pipeline._propagation_anchor,pipeline._alignment)
         self.assertEqual(pipeline._propagation_anchor.observed_j_interval,(1_150_000,1_150_000))
         self.assertTrue(matched.summary['localization_qualified'])
+
+    def test_joint_endpoint_match_cannot_shift_a_pose_supported_by_current_observation(self):
+        pipeline = self.pipeline()
+        anchor = self.seed(pipeline)
+        self.execute(pipeline,3,x=.02,truth_x=.02)
+        attempted = []
+
+        def fit(points, reference, prior, profile, **kwargs):
+            result = register(points,reference,prior,profile,**kwargs)
+            if len({point.capture_id for point in points}) == 1:
+                return result
+            attempted.append(points)
+            x,y,yaw = prior.center
+            return replace(result,status='BOUNDED',complete=True,representative=(x+.04,y,yaw),
+                position_error_m=0.,yaw_error_rad=0.,feasible=(PoseBox((x+.04,x+.04),(y,y),(yaw,yaw)),))
+
+        with patch('xenova_vehicle.perception.pipeline.register',side_effect=fit):
+            result = self.execute(pipeline,4,x=.04,truth_x=.04)
+        self.assertTrue(attempted)
+        self.assertEqual(result.registration.status,'BOUNDED')
+        self.assertNotEqual(result.summary['registration_method'],'MULTI_FRAME')
+        self.assertAlmostEqual(result.summary['mapped_pose'][0],.04,places=6)
+        self.assertIs(pipeline._propagation_anchor,anchor)
+
+    def test_unlocalized_frame_keeps_its_original_observation_off_the_reference(self):
+        limits = dict(self.limits,localization_position_drift_mps=.06)
+        pipeline = self.pipeline()
+        self.seed(pipeline,limits=limits)
+        reference = pipeline.reference
+        other_corner = tuple(tuple((x+3.,y) for x,y in line) for line in fixture_module.CORNER_GT)
+        result = self.execute(pipeline,3,at_us=1_200_000,x=3.,truth_x=3.,limits=limits,
+            world_lines=other_corner)
+        self.assertEqual(result.summary['localization_status'],'ODOMETRY_OUT_OF_BOUNDS')
+        self.assertIs(pipeline.reference,reference)
+        frame = pipeline._registration_history[-1]
+        self.assertEqual(frame.capture,result.summary['capture_id'])
+        self.assertEqual(frame.odometry.captured_us,(1_200_000,1_200_000))
+        self.assertTrue(frame.points)
 
     def test_expiry_requires_a_fresh_match_for_qualification_and_profile_change_cannot_relabel_anchor(self):
         pipeline = self.pipeline()

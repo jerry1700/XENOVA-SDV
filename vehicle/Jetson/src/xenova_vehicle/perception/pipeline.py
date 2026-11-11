@@ -581,7 +581,11 @@ class PerceptionPipeline:
                             max_cells=profile.max_cells-registration.tested_cells,
                             max_distance_tests=profile.max_distance_tests-registration.distance_tests),
                             calibration_id=self.calibration.sha256,position_radius_m=position_radius)
-                        if (joint.status=='BOUNDED' and (registration.status!='BOUNDED'
+                        # 끝점 대응을 추가한 결과가 현재 관측에서 성립하는 위치를 배제하면
+                        # 여러 프레임이 같은 지도 끝점을 잘못 고른 것일 수 있다.
+                        preserves_supported_prior = (not registration.permits(prior.center)
+                            or joint.permits(prior.center))
+                        if (joint.status=='BOUNDED' and preserves_supported_prior and (registration.status!='BOUNDED'
                                 or (joint.position_error_m<=registration.position_error_m
                                     and joint.yaw_error_rad<=registration.yaw_error_rad
                                     and (joint.position_error_m<registration.position_error_m
@@ -643,8 +647,8 @@ class PerceptionPipeline:
         if points and not quarantined:
             # 원 오도메트리 오차 안의 지도 갱신은 시각 정합의 만료를 갱신하지 않는다.
             self.reference = self._extend_reference(self._last_tape, capture, pose)
-            if current_registration_observation is not None and self._alignment is not None:
-                self._registration_history=(*self._registration_history,current_registration_observation)[-HISTORY_FRAMES:]
+        if current_registration_observation is not None and self._alignment is not None:
+            self._registration_history=(*self._registration_history,current_registration_observation)[-HISTORY_FRAMES:]
         grid=self.grid
         if quarantined:
             # 기존 atlas/reference는 그대로 두고 새 관측은 별도 body-frame 진단으로만 처리한다.

@@ -223,6 +223,11 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         loose,_ = fit(.4)
         self.assertEqual({point.capture_id for point in loose},{'now','recent'})
         self.assertEqual(fit(.4,99_999)[0],())
+        # 격리되어 frozen reference에 들어가지 않은 원 관측도 다른 캡처와 정합할 수 있다.
+        frozen = replace(reference,segments=older.segments)
+        from_quarantine,_ = combined_constraints((earlier,),current,frozen,prior,self.profile,
+            position_radius_m=.30,max_lateral_match_m=.4,max_age_us=500_000)
+        self.assertEqual({point.capture_id for point in from_quarantine},{'now','recent'})
 
     def test_finite_strip_requires_both_ends_to_match_the_same_reference(self):
         reference=FrozenReference(1,self.calibration.sha256,(

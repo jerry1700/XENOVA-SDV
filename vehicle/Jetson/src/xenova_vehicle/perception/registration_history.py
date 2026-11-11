@@ -5,6 +5,7 @@ import math
 
 from ..mapping.odometry import PoseEstimate
 from ..mapping.registration import PointFeature, overlapping_points, transform_point, wrap_yaw
+from ..mapping.wheel_motion import relative_wheel_bounds
 
 
 HISTORY_FRAMES = 2
@@ -27,10 +28,14 @@ def _in_current_frame(earlier, current):
     shift = transform_point((dx,dy),(0.,0.,-now.yaw))
     rotation = wrap_yaw(previous.yaw-now.yaw)
     transform = (*shift,rotation)
-    # 두 오도메트리가 공유하는 오차를 서로 독립이라고 가정하지 않는다.
-    displacement_error = (previous.position_error_m+now.position_error_m
-        + 2*math.hypot(dx,dy)*math.sin(min(math.pi,now.yaw_error_rad)/2))
-    rotation_scale = 2*math.sin(min(math.pi,previous.yaw_error_rad+now.yaw_error_rad)/2)
+    # 현재 차체에서 본 이전 자세다. 연속 휠 구간이면 두 캡처 사이의 오차만 사용한다.
+    bounds = relative_wheel_bounds(current.odometry,earlier.odometry)
+    if bounds is None:
+        bounds = (previous.position_error_m+now.position_error_m
+            + 2*math.hypot(dx,dy)*math.sin(min(math.pi,now.yaw_error_rad)/2),
+            previous.yaw_error_rad+now.yaw_error_rad)
+    displacement_error,yaw_error = bounds
+    rotation_scale = 2*math.sin(min(math.pi,yaw_error)/2)
     c,s = abs(math.cos(rotation)),abs(math.sin(rotation))
     points = []
     for feature in earlier.points:
@@ -50,9 +55,8 @@ def _in_current_frame(earlier, current):
 def combined_constraints(history, current, reference, prior, profile, *, position_radius_m,
                          max_lateral_match_m, max_age_us):
     """자기 관측을 제외한 frozen map에 현재·이전 관측을 각각 대응시킨다."""
-    reference_sources = {segment.capture_id for segment in reference.segments}
-    previous = tuple(frame for frame in history if frame.capture in reference_sources
-        and frame.stream == current.stream and frame.odometry.sample.context == current.odometry.sample.context
+    previous = tuple(frame for frame in history if frame.stream == current.stream
+        and frame.odometry.sample.context == current.odometry.sample.context
         and frame.odometry.captured_us[1] < current.odometry.captured_us[0]
         and current.odometry.captured_us[1]-frame.odometry.captured_us[0] <= max_age_us)
     if not previous:
