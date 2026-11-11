@@ -1410,6 +1410,10 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
   distance(stopped,goal)+final_pad<=goal_distance&&fabsf(dw_angle(pose.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
   fabsf(dw_angle(stopped.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
   (exit_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
+ /* Goal proximity is insufficient while the body still straddles the divider. */
+ if(captured&&live_task.changing)
+  captured=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==live_task.selected_lane_id&&
+   tr_unique_lane(w,stopped,final_pad+c->tracking_guard,c)==live_task.selected_lane_id;
  /* Only the last selected parking segment has a region terminal. Its actual
   * correspondence must be in the same movement window; a clipped projection
   * cannot turn a teleport or an earlier cusp into completed progress. */

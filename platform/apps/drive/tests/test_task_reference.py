@@ -6,7 +6,7 @@
 
 import ctypes as C
 import math
-from test_lattice import library, Product, obstacle, encode, CFG
+from test_lattice import library, Product, obstacle, encode, CFG, FOUND, STOP
 from test_engine import modern_world, vehicle, send_vehicle, load, exported_state, lane_grant
 from world_codec import schema
 
@@ -178,6 +178,23 @@ def test_lane_change_tape_limits_both_road_edges_and_keeps_crossing_permission(l
         assert not contains(product.handle, 2, 1, 1, 2., 1.6, 0, 0)
     finally:
         product.close()
+
+
+def test_lane_change_captures_a_near_goal_only_after_whole_body_arrives(library):
+    ports(library)
+    library.probe_lane_change_terminal_path.argtypes = [C.c_void_p, C.c_float]
+    library.probe_lane_change_terminal_path.restype = C.c_int
+    for y, lane, expected in ((1.69, 0, FOUND), (1.90, 2, STOP)):
+        product = Product(library, modern_world())
+        try:
+            pose = (2., y, .2)
+            assert library.probe_task_lane(product.handle, *pose, .015) == lane
+            assert library.probe_lane_change_terminal_path(product.handle, y) == FOUND
+            result, command = product.track(pose, 0., 0.)
+            assert result == expected
+            assert (command[0] > 0.) == (expected == FOUND)
+        finally:
+            product.close()
 
 
 def test_open_basis_accepts_only_exact_append_and_keeps_original_prefix(library):

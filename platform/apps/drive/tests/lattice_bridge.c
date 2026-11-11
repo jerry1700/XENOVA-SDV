@@ -345,6 +345,28 @@ int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;
  return tr_open(&p->snapshot.world,&task,&view)&&tr_contains(&view,(dw_pose){x,y,yaw},error,&p->config);
 }
+int probe_lane_change_terminal_path(void *pointer,float y){
+ struct probe *p=pointer;
+ const dw_world *w=&p->snapshot.world;
+ if(p->decoded||!tr_basis_accept(&p->basis,w))return LP_INPUT;
+ struct lp_path *path=&p->path;
+ memset(path,0,sizeof(*path));
+ path->count=6;path->task=(struct tr_intent){true,true,2,1,1,0};
+ path->basis=p->basis;path->world_features=w->required_features;
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ /* The goal is close enough for capture and the remaining path permits forward motion. */
+ for(unsigned k=0;k<path->count;k++){
+  float distance=.018f*k;
+  path->points[k]=(xenova_drive_PathPoint){.pose={2+distance*cosf(.2f),y+distance*sinf(.2f),.2f},
+   .velocity_mps=p->config.primitive_speed};
+ }
+ path->goal=path->points[path->count-1].pose;
+ uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
+ struct lp_metrics metrics={0};
+ return lp_validate_path(path,w,&p->config,&metrics,&budget);
+}
 int probe_task_goal(void *pointer,uint32_t id,float x,float y,float horizon,float *out){
  struct probe *p=pointer;struct tr_intent task={true,false,id,id,id,0};dw_pose goal;
  enum lp_result rc=lp_task_goal(&p->snapshot.world,&task,(dw_pose){x,y,0},horizon,.4f,&goal);
