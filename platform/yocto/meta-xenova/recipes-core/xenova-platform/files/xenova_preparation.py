@@ -412,9 +412,10 @@ class LinuxSlot:
     def __init__(self, platform):
         self.p=platform
         self.fd=self.owner_fd=None
+        self.slot_name='linux-prepare.lock'
 
     def __enter__(self):
-        self.fd=os.open(_owners(self.p.runtime)/'linux-prepare.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+        self.fd=os.open(_owners(self.p.runtime)/self.slot_name,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
         try:
             _plain(self.fd)
             fcntl.flock(self.fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -424,6 +425,16 @@ class LinuxSlot:
         except BaseException:
             os.close(self.fd);self.fd=None
             raise
+        return self
+
+    def adopt(self, fd):
+        """일회 후속 프로세스가 상속한 같은 준비 슬롯만 인수한다. 새 잠금은 만들지 않는다."""
+        info=_plain(fd)
+        current=(_owners(self.p.runtime)/self.slot_name).stat(follow_symlinks=False)
+        if (info.st_dev,info.st_ino)!=(current.st_dev,current.st_ino):
+            raise PlatformError('inherited preparation I/O slot changed')
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        self.fd=fd
         return self
 
     def claim(self, op, *, role='create', reconciliation_id=None):
@@ -453,6 +464,13 @@ class LinuxSlot:
             current.preparation_fds=()
         for fd in (self.owner_fd,self.fd):
             if fd is not None:os.close(fd)
+
+
+class ReconciliationSlot(LinuxSlot):
+    """자산 어댑터의 기존 I/O 슬롯을 재사용한다. 새 전역 잠금은 만들지 않는다."""
+    def __init__(self, platform, op):
+        super().__init__(platform)
+        if op['template']['guest_kind']=='zephyr':self.slot_name='lifecycle-io.lock'
 
 
 def owner_state(platform, op):

@@ -37,7 +37,7 @@ class ResidentRawBroker:
     """같은 A와2slot의 예약. 실제 pause/exit/정규화 뒤 M incarnation만 교체할 수 있다."""
 
     def __init__(self, writer_bind, scope, reader, raw_tokens, *,
-                 limits=SlotTimeLimits(150_000, 500_000, 150_000),
+                 limits=SlotTimeLimits(5_000_000, 500_000, 5_000_000),
                  cleanup_limits=CleanupTimeLimits(1_000_000)):
         if (type(writer_bind) is not RawBindMessage or type(scope) is not RawScope
                 or type(reader) is not Endpoint or type(limits) is not SlotTimeLimits
@@ -61,6 +61,46 @@ class ResidentRawBroker:
         self._quiescing = False
         self._paused = None
         self._last_reader_recovery = None
+        self._cancelled_requests = deque(maxlen=16)
+
+    def cancel_request(self, role, packet, *, now_us):
+        """같은 ordered 채널의 native 취득 전 취소다. 새 예약/쓰기 권한을 발급하지 않는다."""
+        self._now(now_us)
+        p, h = packet.payload, packet.fields
+        if (role not in ('A', 'M') or packet.kind != 'RAW_CONTROL'
+                or set(p) != {'op', 'request_id', 'request_sha256', 'raw_binding_sha256'}
+                or p['op'] != 'CANCEL_REQUEST' or h['binding_domain'] != 'RAW'
+                or h['binding_revision'] != str(self.writer.bind.binding_revision)
+                or p['raw_binding_sha256'] != self.writer.scope.raw_binding_sha256
+                or p['request_id'] != h['request_id']):
+            raise BrokerError('invalid current raw cancellation scope')
+        key = role, p['request_id'], p['request_sha256']
+        if any(x[:2] == key[:2] and x != key for x in self._cancelled_requests):
+            raise BrokerError('cancelled request changed original SHA')
+        if key in self._cancelled_requests:return
+        parents = ([self._request] + [g.parent for g in self._grants if g is not None] if role == 'A'
+            else [x.parent for queue in self._reads for x in queue])
+        draft = self._writer_draft if role == 'A' else self._reader_draft
+        if draft is not None and draft.parent is not None:parents.append(draft.parent)
+        originals = [x for x in parents if x is not None and x.request_id == p['request_id']]
+        for original in originals:
+            if hashlib.sha256(original.raw).hexdigest() != p['request_sha256']:
+                raise BrokerError('cancellation differs from original request bytes')
+        if (not isinstance(p['request_sha256'], str) or len(p['request_sha256']) != 64
+                or any(x not in '0123456789abcdef' for x in p['request_sha256'])):
+            raise BrokerError('cancellation requires original SHA256')
+        for slot in self._ledger.snapshot.slots:
+            if role == 'A' and slot.write is not None and slot.write.request.request_id == p['request_id']:
+                self._ledger.cancel_unstarted_write(slot.write, now_us=now_us)
+            elif role == 'M' and slot.read is not None and slot.read.read_request.request.request_id == p['request_id']:
+                self._ledger.cancel_unstarted_read(slot.read, now_us=now_us)
+        if role == 'A':
+            if self._request is not None and self._request.request_id == p['request_id']:self._request = None
+            if self._writer_draft is not None and self._writer_draft.request_id == p['request_id']:self._writer_draft = None
+        elif self._reader_draft is not None and self._reader_draft.request_id == p['request_id']:
+            self._reader_draft = None
+        self._cancelled_requests.append(key)
+        self._counts['cancelled_requests'] += 1
 
     def begin_pause(self):
         """미승인 REQUEST는 취소하고 기존 예약 GRANT만 배출한다. Device pause는 아직 아니다."""
@@ -164,6 +204,9 @@ class ResidentRawBroker:
         op = payload.get('op')
         if role == 'A' and op == 'REQUEST':
             message = SlotMessage(packet, self.writer, limits=self.limits)
+            if now_us >= message.expires_us:
+                self._counts['expired_requests'] += 1
+                return None
             if self._quiescing:
                 self._counts['requests_paused'] += 1
                 return None
@@ -187,7 +230,6 @@ class ResidentRawBroker:
             if type(slot) is not int or slot not in (0, 1) or self._grants[slot] is None:
                 raise BrokerError('FILLED has no original selected GRANT')
             message = SlotMessage(packet, self.writer, self._grants[slot], limits=self.limits)
-            self._live(message, now_us)
             result = self._ledger.filled(message.record, now_us=now_us)
             self._counts['filled'] += result.status is LeaseStatus.APPLIED
             return result
@@ -216,6 +258,9 @@ class ResidentRawBroker:
                 self._counts['stale_acquire'] += 1
                 return None
             message = SlotMessage(packet, self.reader_context, offer, limits=self.limits)
+            if now_us >= message.expires_us:
+                self._counts['expired_acquires'] += 1
+                return None
             self._live(message, now_us)
             for queue in self._reads:
                 for previous in queue:
@@ -286,7 +331,10 @@ class ResidentRawBroker:
         request = self._request
         if request is None or self._writer_draft is not None:
             return
-        self._live(request, now_us)
+        if now_us >= request.expires_us:
+            self._request = None
+            self._counts['expired_requests'] += 1
+            return
         snapshot = self._ledger.snapshot
         if any(s.state is SlotState.WRITING for s in snapshot.slots):
             return
@@ -314,8 +362,8 @@ class ResidentRawBroker:
             if draft.op == 'OFFER':
                 self._counts['offer_expired_before_selection'] += 1
                 return None, True
-            self.fence(now_us)
-            raise BrokerError('reserved outgoing statement expired before selection')
+            self._cancel_unselected(draft, now_us)
+            return None, True
         try:
             packet = link.send('SLOT', draft.payload, domain='RAW', revision=self.writer.bind.binding_revision,
                                request_id=draft.request_id, issued_us=draft.issued_us, expires_us=draft.expires_us)
@@ -340,6 +388,16 @@ class ResidentRawBroker:
             self._reads[message.record.key.write_key.slot].append(message)
             self._counts['acquired_selected'] += 1
         return packet, True
+
+    def _cancel_unselected(self, draft, now_us):
+        """송신 queue에 넣기 전 예약만 회수한다. 상대 native 취득은 아직 시작되지 않았다."""
+        for slot in self._ledger.snapshot.slots:
+            if draft.op == 'GRANT' and slot.write is not None and slot.write.request.request_id == draft.request_id:
+                self._ledger.cancel_unstarted_write(slot.write, now_us=now_us)
+                self._request = None
+            if draft.op == 'ACQUIRED' and slot.read is not None and slot.read.read_request.request.request_id == draft.request_id:
+                self._ledger.cancel_unstarted_read(slot.read, now_us=now_us)
+        self._counts['reservation_expired_before_send'] += 1
 
     def pump(self, writer_link, reader_link=None, *, now_us):
         """수락되지 않은 draft는 그대로 보존한다. 반환 packet도 actual full-send 증거와 별개다."""

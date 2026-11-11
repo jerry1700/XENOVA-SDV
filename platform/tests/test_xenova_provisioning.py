@@ -35,6 +35,60 @@ ROOT=Path(__file__).resolve().parents[2]
 REAL_RUN=subprocess.run
 
 
+class DisplayProvisioningTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(prefix='xenova-display-provisioning-')
+        self.addCleanup(self.temp.cleanup)
+        self.base=Path(self.temp.name);self.root=self.base/'root';self.root.mkdir()
+        (self.root/'etc/xenova').mkdir(parents=True)
+        (self.root/'etc/passwd').write_text(
+            'root:x:0:0:root:/root:/bin/bash\n'
+            'xenova-display:x:998:998::/nonexistent:/usr/sbin/nologin\n')
+        self.config=self.root/'etc/xenova/guest-display-domu.json'
+        self.config.write_text(json.dumps({
+            'web_root':'/opt/xenova/display-web','bind':'192.168.77.20','app_port':8086,
+            'allowed_clients':['192.168.77.1'],'data_host':'192.168.77.1','data_port':8085,
+            'data_token_file':'/etc/xenova/guest-display/guest-data.token','page':'/display/combined'}))
+        self.token=self.base/'relay.token';self.token.write_text('shared-secret\n');self.token.chmod(0o600)
+
+    def apply(self, address='192.168.77.6'):
+        return provision.apply_guest_display(
+            {'ipv4':address},self.root,token_path=self.token,token_owner_uid=os.geteuid())
+
+    def test_private_root_gets_actual_ip_and_relay_token(self):
+        with patch.object(provision.os,'chown') as chown:
+            result=self.apply()
+        self.assertEqual(result['bind'],'192.168.77.6')
+        self.assertEqual(json.loads(self.config.read_text())['bind'],'192.168.77.6')
+        supplied=self.root/'etc/xenova/guest-display/guest-data.token'
+        self.assertEqual(supplied.read_text(),'shared-secret\n')
+        self.assertEqual(supplied.stat().st_mode&0o777,0o600)
+        self.assertEqual((self.root/'etc/xenova/guest-display').stat().st_mode&0o777,0o700)
+        self.assertEqual(chown.call_count,2)
+
+    def test_full_private_subnet_address_is_accepted(self):
+        with patch.object(provision.os,'chown'):
+            self.assertEqual(self.apply('192.168.77.200')['bind'],'192.168.77.200')
+
+    def test_missing_or_public_token_refuses_broken_guest_without_config_mutation(self):
+        before=self.config.read_bytes();self.token.unlink()
+        with self.assertRaises(FileNotFoundError):self.apply()
+        self.assertEqual(self.config.read_bytes(),before)
+        self.token.write_text('shared-secret\n');self.token.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'root-owned mode 0600'):self.apply()
+        self.assertEqual(self.config.read_bytes(),before)
+
+    def test_gateway_and_outside_addresses_are_rejected(self):
+        for address in ('192.168.77.1','192.168.77.255','192.168.78.6','not-an-ip'):
+            with self.subTest(address=address),self.assertRaisesRegex(ValueError,'assigned private IPv4'):
+                self.apply(address)
+
+    def test_non_display_linux_guest_is_unchanged(self):
+        self.config.unlink()
+        self.assertEqual(provision.apply_guest_display({'ipv4':'192.168.77.6'},self.root,
+                         token_path=self.base/'absent'),{'state':'not-requested'})
+
+
 class ProvisioningTest(unittest.TestCase):
     def setUp(self):
         if os.geteuid()!=0:self.skipTest('root-owned local fixtures required')

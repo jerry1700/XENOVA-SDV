@@ -2,7 +2,7 @@
 
 physical nn_input0 stream/SourceStamp를 만들지 않고 원 RGB4/NN8 key를 쓴다.
 NN_READY progress는 parser 준비 사실이며 Source/clock/metric/World/주행 권한이 아니다.
-무거운 해석·SDK·파일·DB는 호출하지 않는다. 원 PARSER_STARTED full-send 뒤만 decode를 연다.
+무거운 해석·SDK·파일·DB는 호출하지 않는다. 계산 사건을 송신 순서에 맞춰 보고한다.
 """
 
 import json
@@ -31,6 +31,7 @@ class PcMapperControl:
         self._completion = None
         self.latest_summary = self._result_phase = None
         self.result_count = 0
+        self.wait_reason = None
 
     def _progress(self, event, stage, reason=None):
         if len(event.source_key) != 4 or type(event.source_key[3]) is not int:
@@ -40,7 +41,7 @@ class PcMapperControl:
 
     def _nn_complete(self, event, *, fresh):
         if self._parser is None or self._parser[0] != event.job_id:
-            raise RuntimeError('PC NN completion has no original actual parser-start send')
+            raise RuntimeError('PC NN completion has no original compute parser start')
         _, key, began = self._parser
         self._parser = None
         now = self.clock()
@@ -59,16 +60,15 @@ class PcMapperControl:
         self.previous = key
         self.streak += 1
         self.last_completion = event.completed_us
+        self.wait_reason = None
         report = self.compute.take_parser_completion(event)
         if report is None:
             raise RuntimeError('accepted PC NN completion lost its original actual parser metadata')
-        if self._completion is not None:
-            raise RuntimeError('one actual PC parser completion is waiting for main transport selection')
+        # 송신 후보는 최신 하나만 유지한다. 이전 계산 완료의 유실은 owner 고장이 아니다.
         self._completion = report
         if not self.ready and self.streak >= REQUIRED_NN_PAIR_COUNT:
-            if self.deadline.expired(now) or self.deadline.expired(event.completed_us):
-                raise TimeoutError('PC parser5 missed original warmup deadline')
             self.ready = True
+            self.wait_reason = None
             self.actor.state = 'WAIT_INPUT'
             self._progress(event, 'NN_READY', 'METRIC_NOT_READY')
         else:
@@ -81,17 +81,14 @@ class PcMapperControl:
                 if self._metric_job is not None: raise RuntimeError('PC compute replaced its active original job')
                 self._metric_job = event.job_id
                 self._progress(event, 'MAPPER_STARTED', str(event.expires_us))
-            elif event.kind == 'PARSER_START_REQUIRED':
-                if self.clock() >= min(event.parser_deadline_us, event.expires_us): continue
+            elif event.kind == 'PARSER_STARTED':
                 key = event.nn_source_key
                 if type(key) is not tuple or len(key) != 8 or key[:4] != event.source_key:
                     raise ValueError('PC parser start lacks original full NN8 key')
                 if self._parser is not None: raise RuntimeError('one PC compute cannot open two NN parsers')
-                original = self.actor.progress('PARSER_STARTED', key[3], completed=event.started_us,
+                self.actor.progress('PARSER_STARTED', key[3], completed=event.started_us,
                     request_id=event.job_id)
-                actual = self.actor.await_sent(original, cap_us=event.parser_deadline_us)
                 self._parser = (event.job_id, key, event.started_us)
-                self.compute.acknowledge_parser_start(event.job_id, actual)
             elif event.kind == 'NN_COMPLETED':
                 self._nn_complete(event, fresh=event.accepted)
             elif event.kind == 'PROGRESS':
@@ -105,7 +102,7 @@ class PcMapperControl:
                     self._nn_complete(event, fresh=False)
                 if self._metric_job == event.job_id:
                     self._progress(event, 'MAPPER_COMPLETED', event.reason); self._metric_job = None
-                if event.kind == 'FAILED' or event.reason == 'PARSER_DEADLINE':
+                if event.kind == 'FAILED':
                     raise RuntimeError('PC mapper compute failed: ' + str(event.reason))
             elif event.kind != 'NN_SKIPPED':
                 raise ValueError('unsupported PC compute lifecycle event')
@@ -125,9 +122,10 @@ class PcMapperControl:
         if self.ready:
             current = self._result_phase
             self.actor.state = 'WAIT_INPUT' if current is None or now >= current[1] else current[0]
-        if not self.ready and self.deadline.expired(now): raise TimeoutError('PC parser5 original warmup expired')
+        if not self.ready and self.deadline.expired(now): self.wait_reason = 'NN_WARMUP_WAIT_INPUT'
         if self.ready and self.last_completion is not None and now - self.last_completion >= self.nn_stall_us:
-            raise TimeoutError('fresh PC NN parser association stalled')
+            self.wait_reason = 'NN_WAIT_INPUT'
+            self.actor.state = 'WAIT_INPUT'
 
     def take_parser_completion(self):
         """원 metadata를 한 번 선택한다. 실제 full-send와 Source 승인으로 세지 않는다."""

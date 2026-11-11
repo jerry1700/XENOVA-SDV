@@ -147,7 +147,7 @@ class SceneSourcePortTests(unittest.TestCase):
         self.assertEqual(len(fixture.publications),1)
         self.assertFalse(fixture.jio.fenced)
 
-    def test_positive_publication_requires_actual_grant_and_exact_next_revision_and_null_keeps_source(self):
+    def test_full_publication_allows_revision_gap_but_requires_actual_grant_and_rejects_rollback(self):
         fixture=self.runtime()
         # 실제 S peer라도 M이 받은 grant 없이 positive ref를 채우지 못한다.
         source=fixture.supervisor.source;origin=fixture.supervisor.origin
@@ -169,14 +169,46 @@ class SceneSourcePortTests(unittest.TestCase):
             fixture.supervisor.link.flush();fixture.mapper.pump()
         send(binding)
         self.assertEqual(fixture.mapper.publication,original)
-        self.assertEqual(fixture.mapper.counts['publication_rejected'],1)
-        null=dict(original,source_binding_revision=str(int(original['source_binding_revision'])+2))
+        self.assertEqual(fixture.mapper.counts['publication_wait_current_input'],1)
+        self.assertEqual(fixture.mapper._publication_pending.body,canonical(binding))
+        self.original_scene(fixture)
+        self.assertEqual(fixture.mapper.publication,binding)
+        self.assertIsNone(fixture.mapper._publication_pending)
+        null=dict(original,source_binding_revision=str(int(original['source_binding_revision'])+4))
         send(null)
-        self.assertEqual(fixture.mapper.publication,original)
-        self.assertEqual(fixture.mapper.counts['publication_rejected'],2)
-        null['source_binding_revision']=str(int(original['source_binding_revision'])+1);send(null)
         self.assertEqual(fixture.mapper.publication,null)
+        old=dict(original,source_binding_revision=str(int(original['source_binding_revision'])+2));send(old)
+        self.assertEqual(fixture.mapper.publication,null)
+        self.assertEqual(fixture.mapper.counts['publication_rejected'],1)
+        foreign=dict(null,map_epoch=source_fixture.uid(),source_binding_revision=str(int(null['source_binding_revision'])+1))
+        send(foreign)
+        self.assertEqual(fixture.mapper.publication,null)
+        self.assertEqual(fixture.mapper.counts['publication_rejected'],2)
         self.assertEqual(fixture.mapper.source,source)
+
+    def test_late_full_publication_keeps_original_grant_expiry_separate_from_local_delivery(self):
+        fixture=self.runtime();value,lease=self.original_scene(fixture)
+        original=fixture.mapper.publication
+        original_grant=fixture.mapper.scene['raw']
+        positive=dict(original,scene_admission_ref=scene_ref_fields(value.scene),
+            source_binding_revision=str(int(original['source_binding_revision'])+3))
+        def send(binding,expires):
+            context=replace(fixture.mapper.storage_context,source_binding=canonical(binding))
+            packet=fixture.supervisor.link.send('SOURCE_PUBLICATION',dict(source=fixture.supervisor.source,
+                origin=fixture.supervisor.origin,geometry_origin=context.geometry_origin_fields,
+                context_sha256=context.sha256),canonical(binding),issued_us=fixture.now,expires_us=expires)
+            fixture.supervisor.link.flush()
+            return packet
+        packet=send(positive,fixture.now+1)
+        fixture.now=packet.expires_us;fixture.mapper.pump()
+        self.assertEqual(fixture.mapper.publication,positive)
+        self.assertEqual(fixture.mapper.scene['raw'],original_grant)
+        self.assertEqual(value.valid_until_pi_us,lease.expires_pi_us)
+        fixture.now=lease.expires_pi_us
+        stale=dict(positive,source_binding_revision=str(int(positive['source_binding_revision'])+1))
+        send(stale,fixture.now+5_000_000);fixture.mapper.pump()
+        self.assertEqual(fixture.mapper.publication,positive)
+        self.assertEqual(fixture.mapper.counts['publication_wait_current_input'],1)
 
     def test_new_local_caps_are_structural_only_and_keep_original_header_and_direction_limits(self):
         fixture=self.runtime()

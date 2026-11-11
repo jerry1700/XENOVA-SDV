@@ -38,8 +38,9 @@ class Clock:
 
 
 def sample(sequence=1, nn=False):
-    rgb = RawFrame('rgb_video', sequence, 800, 900, 1000, 2, 2, 'NV12', bytes(6), 10)
-    depth = RawFrame('depth_right', sequence + 10, 801, 901, 1000, 2, 2, 'RAW16_LE', bytes(8), None)
+    delta = sequence - 1
+    rgb = RawFrame('rgb_video', sequence, 800 + delta, 900 + delta, 1000, 2, 2, 'NV12', bytes(6), 10)
+    depth = RawFrame('depth_right', sequence + 10, 801 + delta, 901 + delta, 1000, 2, 2, 'RAW16_LE', bytes(8), None)
     packet = original = None
     names = ['rgb_video', 'depth_right']
     if nn:
@@ -48,10 +49,10 @@ def sample(sequence=1, nn=False):
             RuntimeTensor('drive_area_seg', 0, 0x4321, 4, (1, 2, 320, 320), (409600, 204800, 640, 2), 75600),
             RuntimeTensor('lane_line_seg', 0, 0x4321, 4, (1, 2, 320, 320), (409600, 204800, 640, 2), 485200),
         )
-        packet = NNPacket('nn_output', sequence, 800, 900, 1000, bytes(894800), tensors, 'A', golden={'match': True})
-        original = NNInputStamp('nn_input', sequence, 800, 900, 1000, 320, 320, 'BGR888p', 'A')
+        packet = NNPacket('nn_output', sequence, 800 + delta, 900 + delta, 1000, bytes(894800), tensors, 'A', golden={'match': True})
+        original = NNInputStamp('nn_input', sequence, 800 + delta, 900 + delta, 1000, 320, 320, 'BGR888p', 'A')
         names.extend(('nn_input', 'nn_output'))
-    clocks = {name: dict(bridge_sample={'j_before_us': '1000', 'sdk_us': '900', 'j_after_us': '1000'},
+    clocks = {name: dict(bridge_sample={'j_before_us': '1000', 'sdk_us': str(900 + delta), 'j_after_us': '1000'},
                         sdk_host_timestamp_j_bracket_us=['1000', '1000']) for name in names}
     return CaptureSample(rgb, depth, original, packet, clocks)
 
@@ -240,7 +241,7 @@ class MapperComputeTests(unittest.TestCase):
         with self.assertRaises(MapperComputeError):
             MapperInput(identifier(2), 'A', original, 2000, context_bytes=bytearray(b'x'))
 
-    def test_parser_waits_for_actual_send_and_nn_completion_precedes_geometry(self):
+    def test_parser_completes_without_main_poll_or_send_ack_before_geometry(self):
         clock, entered, gate = Clock(), threading.Event(), threading.Event()
 
         def parse(original, checkpoint):
@@ -253,15 +254,12 @@ class MapperComputeTests(unittest.TestCase):
         try:
             original = item(nn=True)
             self.assertTrue(owner.submit(original))
-            request = event_of(owner, 'PARSER_START_REQUIRED')
-            self.assertEqual(processor.parsed, [])
-            self.assertFalse(owner.acknowledge_parser_start(identifier(99), sent(request)))
-            with self.assertRaises(MapperComputeError):
-                owner.acknowledge_parser_start(original.job_id, sent(request, sequence=99))
-            self.assertEqual(processor.parsed, [])
-            self.assertTrue(owner.acknowledge_parser_start(original.job_id, sent(request)))
-            completed = event_of(owner, 'NN_COMPLETED')
+            # main은 poll도 송신 ACK도 하지 않았지만 parse가 끝나 geometry에 도달한다.
             self.assertTrue(entered.wait(2))
+            events = owner.poll()
+            self.assertEqual([event.kind for event in events], ['JOB_STARTED', 'PARSER_STARTED', 'NN_COMPLETED'])
+            completed = events[-1]
+            self.assertEqual(processor.parsed, [original.job_id])
             self.assertEqual((completed.started_us, completed.decode_started_us, completed.completed_us), (1000, 1000, 1100))
             self.assertTrue(completed.accepted)
             self.assertEqual(completed.nn_source_key, (1, 800, 900, 1000))
@@ -275,23 +273,29 @@ class MapperComputeTests(unittest.TestCase):
         finally:
             self.cleanup(owner, gate)
 
-    def test_original_parser_cap_is_not_extended_by_delayed_send_ack(self):
-        clock, processor = Clock(), Processor()
+    def test_actual_parse_still_obeys_original_parser_cap_without_send_ack(self):
+        clock, entered, gate = Clock(), threading.Event(), threading.Event()
+        def parse(original, checkpoint):
+            entered.set()
+            self.assertTrue(gate.wait(2))
+            checkpoint()
+        processor = Processor(parse=parse)
         owner = MapperCompute(lambda generation: processor, source_generation='A', clock=clock)
         owner.start()
         try:
             original = item(nn=True, parser_cap=1500)
             owner.submit(original)
-            request = event_of(owner, 'PARSER_START_REQUIRED')
+            request = event_of(owner, 'PARSER_STARTED')
             self.assertEqual(request.parser_deadline_us, 1500)
+            self.assertTrue(entered.wait(2))
             clock.set(1500)
-            self.assertFalse(owner.acknowledge_parser_start(original.job_id, sent(request, completed=1500)))
+            gate.set()
             event = event_of(owner, 'CANCELLED')
             self.assertFalse(event.accepted)
-            self.assertEqual(processor.parsed, [])
+            self.assertEqual(event.reason, 'PARSER_DEADLINE')
             self.assertIsNone(owner.take_result())
         finally:
-            self.cleanup(owner)
+            self.cleanup(owner, gate)
 
     def test_latest_raw_and_nn_have_separate_bounded_fair_pending_slots(self):
         entered, gate, processor = threading.Event(), threading.Event(), Processor()
@@ -301,8 +305,6 @@ class MapperComputeTests(unittest.TestCase):
         try:
             first = item(1, nn=True)
             owner.submit(first)
-            request = event_of(owner, 'PARSER_START_REQUIRED')
-            owner.acknowledge_parser_start(first.job_id, sent(request))
             self.assertTrue(entered.wait(2))
             event_of(owner, 'NN_COMPLETED')
             for original in (item(2), item(3), item(4, nn=True), item(5, nn=True)):
@@ -311,10 +313,8 @@ class MapperComputeTests(unittest.TestCase):
             self.assertEqual((state['active'], state['pending_raw'], state['pending_nn']), (first.job_id, True, True))
             self.assertEqual(state['counts']['pending_replaced'], 2)
             gate.set()
-            second = event_of(owner, 'PARSER_START_REQUIRED')
+            second = event_of(owner, 'PARSER_STARTED')
             self.assertEqual(second.job_id, identifier(5))
-            owner.acknowledge_parser_start(second.job_id, sent(second))
-            event_of(owner, 'GEOMETRY_COMPLETED')
             wait_until(lambda: len(processor.geometries) == 3)
             self.assertEqual(processor.geometries, [identifier(1), identifier(3), identifier(5)])
             self.assertEqual(processor.parsed, [identifier(1), identifier(5)])
@@ -427,17 +427,42 @@ class MapperComputeTests(unittest.TestCase):
         try:
             original = item(nn=True)
             owner.submit(original)
-            request = event_of(owner, 'PARSER_START_REQUIRED')
-            self.assertEqual(request.nn_source_key, (1, 800, 900, 1000))
-            self.assertTrue(owner.skip_parser(original.job_id))
-            self.assertFalse(owner.skip_parser(original.job_id))
+            event_of(owner, 'GEOMETRY_COMPLETED')
+            owner.take_result()
+            # 다른 job이어도 같은 원 NN stamp는 compute가 자체적으로 건너뛴다.
+            duplicate = item(99, sequence=1, nn=True)
+            owner.submit(duplicate)
             events = []
             event_of(owner, 'GEOMETRY_COMPLETED', events)
-            self.assertEqual(processor.parsed, [])
-            self.assertEqual(processor.geometries, [original.job_id])
+            self.assertEqual(processor.parsed, [original.job_id])
+            self.assertEqual(processor.geometries, [original.job_id, duplicate.job_id])
             self.assertFalse(any(event.kind == 'NN_COMPLETED' for event in events))
-            self.assertEqual(owner.take_result().expires_us, original.expires_us)
+            self.assertEqual(owner.take_result().expires_us, duplicate.expires_us)
             self.assertEqual(owner.snapshot()['counts']['parser_skipped'], 1)
+        finally:
+            self.cleanup(owner)
+
+    def test_delayed_control_drain_keeps_bounded_phases_without_owner_failure(self):
+        processor = Processor()
+        owner = MapperCompute(lambda generation: processor, source_generation='A', clock=Clock())
+        owner.start()
+        try:
+            owner.submit(item(1, nn=True))
+            wait_until(lambda: len(processor.geometries) == 1 and owner.snapshot()['active'] is None)
+            owner.submit(item(2, nn=True))
+            wait_until(lambda: len(processor.geometries) == 2 and owner.snapshot()['active'] is None)
+            self.assertEqual(owner.snapshot()['phase_events'], MAX_PHASE_EVENTS)
+            owner.submit(item(3, nn=True))
+            owner.submit(item(4, nn=True))
+            self.assertIsNone(owner.terminal_error)
+            self.assertTrue(owner.snapshot()['pending_nn'])
+            events = list(owner.poll())
+            event_of(owner, 'GEOMETRY_COMPLETED', events)
+            self.assertEqual(processor.parsed, [identifier(1), identifier(2), identifier(4)])
+            for job in (identifier(1), identifier(2), identifier(4)):
+                self.assertEqual([event.kind for event in events if event.job_id == job],
+                    ['JOB_STARTED', 'PARSER_STARTED', 'NN_COMPLETED', 'GEOMETRY_COMPLETED'])
+            self.assertIsNone(owner.terminal_error)
         finally:
             self.cleanup(owner)
 
