@@ -27,7 +27,7 @@ def test_demo_profile_seeds_and_full_world_envelope(track_id):
     first = sim.vehicle.obstacles[0]
     vehicle = sim.track.layout["vehicle"]
     front_offset = (vehicle["length_m"] + vehicle["wheelbase_m"]) / 2
-    assert sim.vehicle.x - front_offset - first.x - first.w / 2 == pytest.approx(.55)
+    assert sim.vehicle.x - front_offset - first.x - first.w / 2 == pytest.approx(.61)
     assert not sim.vehicle.obstacle_ahead()
     body = SimTopics(sim, object()).world()
     assert body["car"] == {"length_m": .30, "width_m": .22}

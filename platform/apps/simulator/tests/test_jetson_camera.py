@@ -18,8 +18,8 @@ def test_parking_pavement_and_slot_paint_are_in_actual_camera_image():
     settings = settings_for_track(SimSettings(camera_listen=None), track)
     renderer = Renderer(settings.camera)
     slot = track.layout["parking_slots"][1]["outline"]
-    slot_x = (slot[0][0] + slot[2][0]) / 2
-    pose = (slot_x, .7, math.pi / 2)
+    slot_y = (slot[0][1] + slot[2][1]) / 2
+    pose = (slot[2][0] + .52, slot_y, math.pi)
     actual = renderer.render(track, *pose)
     no_paint = deepcopy(track)
     no_paint.id = "jetson-no-slot-paint"
@@ -52,10 +52,15 @@ def test_parking_entrance_does_not_keep_a_transverse_road_edge_stripe():
     track = load("jetson-demo")
     spec = settings_for_track(SimSettings(camera_listen=None), track).camera
     slot = track.layout["parking_slots"][1]["outline"]
-    slot_x = (slot[0][0] + slot[2][0]) / 2
-    image = Renderer(spec).render(track, slot_x, .4, math.pi / 2)
+    slot_y = (slot[0][1] + slot[2][1]) / 2
+    rear_x = slot[2][0] + .52
+    renderer = Renderer(spec)
+    image = renderer.render(track, rear_x, slot_y, math.pi)
+    apron = track.layout["paved_areas"][0]
+    inner_edge_x = apron[1][0] - .015
+    px, py = renderer._project(rear_x - spec.mount_x_m - inner_edge_x, 0., 0.)
     # 도로와 연결 마당이 만나는 구간이다. 주차칸 입구선보다 가까운 지면에는 선이 없어야 한다.
-    assert np.all(image[145:165, spec.width // 2] == ASPHALT)
+    assert np.all(image[round(py) - 2:round(py) + 3, round(px)] == ASPHALT)
 
 
 @pytest.mark.parametrize("track_id", [t for t in track_ids() if t.startswith("jetson-")])

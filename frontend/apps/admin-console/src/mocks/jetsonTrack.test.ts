@@ -12,40 +12,36 @@ describe('Jetson 시험 코스', () => {
     expect(TRACKS.filter((t) => !t.layout)).toHaveLength(10);
     expect(TRACKS.filter((t) => t.layout).map((t) => t.id)).toEqual([
       'jetson-demo',
+      'jetson-r40',
       'jetson-r45',
+      'jetson-r50',
       'jetson-r55',
-      'jetson-r65',
-      'jetson-r75',
-      'jetson-r80',
+      'jetson-r60',
     ]);
     for (const source of TRACKS.filter((t) => t.layout)) {
       const layout = source.layout!;
-      expect(layout.bounds).toEqual([0, 0, 4.5, 3]);
-      expect(source.centerline[0]).toEqual([2.56, 0.5]);
-      expect(layout.start_pose.slice(0, 2)).toEqual([2.81, 0.7]);
+      expect(layout.bounds).toEqual([0, 0, 3.35, 2.27]);
+      expect(source.centerline[0]).toEqual([2.14, 0.385]);
+      expect(layout.start_pose.slice(0, 2)).toEqual([2.39, 0.5275]);
       expect(layout.start_pose[2]).toBeCloseTo(Math.PI, 12);
       expect(layout.obstacle_seeds.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
-        { id: 'A', x: 1.92, y: 0.7 },
-        { id: 'B', x: 1.4, y: 0.3 },
+        { id: 'A', x: 1.44, y: 0.5275 },
+        { id: 'B', x: 1.05, y: 0.2425 },
       ]);
       expect(layout.lane_count).toBe(2);
-      expect(source.lane_width_m! / layout.lane_count).toBe(0.4);
+      expect(source.lane_width_m! / layout.lane_count).toBe(0.285);
       expect(source.curb_m).toBe(0);
       const parking = layout.parking_slots.flatMap((slot) => slot.outline);
-      expect([Math.min(...parking.map(([x]) => x)), Math.max(...parking.map(([x]) => x))]).toEqual([
-        2.7, 3.5,
+      expect([Math.min(...parking.map(([, y]) => y)), Math.max(...parking.map(([, y]) => y))]).toEqual([
+        0.77, 1.37,
       ]);
-      const parkingY = source.id === 'jetson-r75' || source.id === 'jetson-r80' ? [1.2, 1.8] : [1.1, 1.7];
-      expect([Math.min(...parking.map(([, y]) => y)), Math.max(...parking.map(([, y]) => y))]).toEqual(
-        parkingY,
-      );
       for (const slot of layout.parking_slots) {
         expect(
           Math.max(...slot.outline.map(([x]) => x)) - Math.min(...slot.outline.map(([x]) => x)),
-        ).toBeCloseTo(0.4, 12);
+        ).toBeCloseTo(0.46, 12);
         expect(
           Math.max(...slot.outline.map(([, y]) => y)) - Math.min(...slot.outline.map(([, y]) => y)),
-        ).toBeCloseTo(0.6, 12);
+        ).toBeCloseTo(0.3, 12);
       }
       const points = [
         ...source.centerline,
@@ -78,25 +74,28 @@ describe('Jetson 시험 코스', () => {
     expect(isCircuit(track)).toBe(true);
     if (!isCircuit(track)) throw Error('Expected circuit');
     expect(track.layout).toEqual(demo.layout);
-    expect(track.lane_width_m).toBe(0.8);
+    expect(track.lane_width_m).toBe(0.57);
     expect(track.curb_m).toBe(0);
     expect(track.start_index).toBe(0);
     expect(track.centerline).toEqual(demo.centerline);
     const g = circuitOf(track);
     expect(g.scale).toBe(1);
     expect(g.deco).toEqual([]);
-    expect(g.box).toEqual({ x0: 0, y0: 0, x1: 4.5, y1: 3 });
+    expect(g.box).toEqual({ x0: 0, y0: 0, x1: 3.35, y1: 2.27 });
   });
 
   it('주차 지면에서는 단일고리 벽으로 차를 밀어내지 않고 안쪽 lane을 기본 목표로 쓴다', () => {
     const s = initialSim(0, 'jetson-demo');
     const T = s.T;
-    expect(decide(T, perceive(T, { ...s.car }, []), null).target).toBe(-0.2);
+    expect(decide(T, perceive(T, { ...s.car }, []), null).target).toBe(-0.1425);
     expect(steerLimit(T)).toBeCloseTo(Math.atan(0.2 / 0.55), 12);
-    const car = { ...s.car, x: 3.1, y: 1.4, yaw: 0 };
+    const [[back, south], , [mouth, north]] = demo.layout!.parking_slots[0]!.outline;
+    const x = (back + mouth) / 2;
+    const y = (south + north) / 2;
+    const car = { ...s.car, x, y, yaw: 0 };
     physics(T, car, 0, 0, 0.01, [], 1);
-    expect([car.x, car.y, car.wallAt]).toEqual([3.1, 1.4, -9]);
-    expect(place(s, 'cone', 3.3, 1.4).ok).toBe(true);
+    expect([car.x, car.y, car.wallAt]).toEqual([x, y, -9]);
+    expect(place(s, 'cone', x, y + 0.3).ok).toBe(true);
     expect(place(s, 'cone', 0, 0).code).toBe('OUT_OF_TRACK');
     expect(
       place(s, 'cone', s.car.x + 0.2 * Math.cos(s.car.yaw), s.car.y + 0.2 * Math.sin(s.car.yaw)).code,

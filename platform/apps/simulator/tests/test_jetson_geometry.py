@@ -16,8 +16,8 @@ from xenova_simulator.track import Track, load, point_in_polygon, sources, track
 REPO = Path(__file__).resolve().parents[4]
 GENERATOR = REPO / "platform/apps/simulator/tools/generate_jetson_tracks.py"
 CANONICAL = REPO / "frontend/packages/ui/src/sim/jetson-tracks.json"
-RADII = {"jetson-demo": .60, "jetson-r45": .45, "jetson-r55": .55,
-         "jetson-r65": .65, "jetson-r75": .75, "jetson-r80": .80}
+RADII = {"jetson-demo": .4625, "jetson-r40": .40, "jetson-r45": .45,
+         "jetson-r50": .50, "jetson-r55": .55, "jetson-r60": .60}
 # 변경 전 구현으로 채취한 canonical JSON payload SHA256. 새 geometry가 기존 벽 계산을 바꾸면 실패한다.
 LEGACY_PAYLOADS = {
     "spielberg": "5754bf12eb68ad1409c71c334f117765925a09154f8a87c7aa37dc442bc0ad8a",
@@ -47,10 +47,10 @@ def test_original_payload_bytes_are_unchanged(track_id, digest):
 @pytest.mark.parametrize("track_id,radius", RADII.items())
 def test_course_dimensions_direction_and_start(track_id, radius):
     track = load(track_id)
-    assert track.layout["bounds"] == [0, 0, 4.5, 3.0]
-    assert (track.lane_width_m, track.curb_m, track.road_m) == (.8, 0, .4)
-    assert track.C[0] == (2.56, .5)
-    assert track.start_pose() == pytest.approx((2.81, .7, math.pi))
+    assert track.layout["bounds"] == [0, 0, 3.35, 2.27]
+    assert (track.lane_width_m, track.curb_m, track.road_m) == (.57, 0, .285)
+    assert track.C[0] == (2.14, .385)
+    assert track.start_pose() == pytest.approx((2.39, .5275, math.pi))
     car = placement.Car(*track.start_pose(), 0, 0, track.start_index)
     body = placement.car_polygon(track, car)
     assert min(p[0] for p in body) == pytest.approx(track.C[0][0])
@@ -59,15 +59,21 @@ def test_course_dimensions_direction_and_start(track_id, radius):
     assert sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(track.C, track.C[1:] + track.C[:1])) < 0
     assert max(math.dist(a, track.C[(i + 1) % track.N]) for i, a in enumerate(track.C)) <= .050002
     assert min(math.dist(a, track.C[(i + 1) % track.N]) for i, a in enumerate(track.C)) > 1e-6
-    edges = [track.at(i, off) for i in range(track.N) for off in (-.4, .4)]
+    edges = [track.at(i, off) for i in range(track.N) for off in (-.285, .285)]
     assert all(math.isfinite(v) for p in edges for v in p)
     assert [min(p[0] for p in edges), min(p[1] for p in edges),
-            max(p[0] for p in edges), max(p[1] for p in edges)] == pytest.approx([.1, .1, 4.4, 2.9], abs=.001)
-    # 기존 0.2 m 간격 가정 대신 실제 sample 간 거리를 사용한 곡률이어야 한다.
-    assert min(track.turn) == pytest.approx(-1 / (radius + .2), abs=.003)
+            max(p[0] for p in edges), max(p[1] for p in edges)] == pytest.approx([.1, .1, 3.25, 2.17], abs=.001)
+    # R60의 1.5 cm 직선 접합부에는 불균등 샘플이 생긴다. 반경은 원호 안쪽에서 직접 검사한다.
+    center = .1 + radius + .4275
+    divider_radius = radius + .1425
+    corner = [(i, p) for i, p in enumerate(track.C) if p[0] < center - .1 and p[1] < center - .1]
+    assert len(corner) >= 5
+    assert all(math.dist(p, (center, center)) == pytest.approx(divider_radius, abs=1e-6) for _, p in corner)
+    middle = min(corner, key=lambda row: abs(row[1][0] - row[1][1]))[0]
+    assert track.turn[middle] == pytest.approx(-1 / divider_radius, abs=.004)
     assert type(track.real_m) is int
-    assert track.paved_at(2, .7)
-    assert [(o["x"], o["y"]) for o in track.layout["obstacle_seeds"]] == [(1.92, .7), (1.4, .3)]
+    assert track.paved_at(2, .5275)
+    assert [(o["x"], o["y"]) for o in track.layout["obstacle_seeds"]] == [(1.44, .5275), (1.05, .2425)]
     assert all(track.box_is_paved(o["x"], o["y"], o["w"]) for o in track.layout["obstacle_seeds"])
 
 
@@ -75,24 +81,26 @@ def test_course_dimensions_direction_and_start(track_id, radius):
 def test_slots_apron_and_world_payload(track_id):
     track = load(track_id)
     slots = track.layout["parking_slots"]
-    mouth, back = (1.2, 1.8) if RADII[track_id] > .65 else (1.1, 1.7)
     road_layout = deepcopy(track.layout)
     road_layout["paved_areas"] = []
     road_only = Track(replace(sources()[track_id], layout=road_layout))
     assert [slot["id"] for slot in slots] == ["P1", "P2"]
-    left, right = slots[0]["outline"][0][0], slots[1]["outline"][2][0]
-    assert (left, right) == (2.7, 3.5)
-    for slot in slots:
+    back, mouth = slots[0]["outline"][0][0], slots[0]["outline"][2][0]
+    assert mouth - back == pytest.approx(.46)
+    apron = track.layout["paved_areas"][0]
+    for i, slot in enumerate(slots):
         a, b, c, d = slot["outline"]
-        assert [a[1], b[1], c[1], d[1]] == [mouth, back, back, mouth]
+        south = .77 + i * .30
+        north = south + .30
+        assert [a[1], b[1], c[1], d[1]] == pytest.approx([south, north, north, south])
+        assert [a[0], b[0], c[0], d[0]] == [back, back, mouth, mouth]
         assert all(not road_only.paved_at(*point) for point in slot["outline"])
-        assert c[0] - b[0] == pytest.approx(.4)
-        assert track.box_is_paved((a[0] + c[0]) / 2, 1.4, .18)
-    assert track.box_is_paved((left + right) / 2, mouth, .18)  # 두 slot과 apron의 경계를 가로지른다.
-    assert track.box_is_paved((left + right) / 2, .91, .18)  # 도로와 apron의 .015 m 겹침.
-    assert not track.box_is_paved(left - .02, 1.4, .18)
-    assert track.surface_at((left + right) / 2, 1.4) == "road"
-    assert track.surface_at(left - .2, 1.4) == "grass"
+        assert track.box_is_paved((back + mouth) / 2, (south + north) / 2, .18)
+        assert track.box_is_paved(mouth, (south + north) / 2, .18)
+    assert all(road_only.paved_at(*apron[i]) for i in (1, 2))
+    assert not track.box_is_paved(back - .02, 1.07, .18)
+    assert track.surface_at((back + mouth) / 2, 1.07) == "road"
+    assert track.surface_at(back - .2, 1.07) == "grass"
     assert track.bounds(0) == pytest.approx(track.layout["bounds"])
     payload = track.payload()
     assert payload["layout"] == track.layout and payload["layout"] is not track.layout
@@ -105,7 +113,7 @@ def test_slots_apron_and_world_payload(track_id):
 
 def test_whole_footprint_does_not_accept_an_enclosed_grass_hole():
     track = load("jetson-demo")
-    corners = [(.6, .6), (3.9, .6), (3.9, 2.4), (.6, 2.4)]
+    corners = [(1.25, .4), (1.90, .4), (1.90, 1.85), (1.25, 1.85)]
     assert all(track.paved_at(*p) for p in corners)
     assert not track.polygon_is_paved(corners)
 
@@ -129,9 +137,10 @@ def test_demo_placement_uses_full_box_and_rear_axle_body():
     assert placement.check(track, [near_nose], near_nose, car, False).code == "ON_CAR"
     slot = track.layout["parking_slots"][0]["outline"]
     ox = (slot[0][0] + slot[2][0]) / 2
-    parked = placement.Item.at(track, "parked", "cone", ox, 1.4)
+    oy = (slot[0][1] + slot[2][1]) / 2
+    parked = placement.Item.at(track, "parked", "cone", ox, oy)
     assert placement.check(track, [parked], parked, car, False) is None
-    outside = placement.Item.at(track, "outside", "cone", slot[0][0] - .02, 1.4)
+    outside = placement.Item.at(track, "outside", "cone", slot[0][0] - .02, oy)
     assert placement.check(track, [outside], outside, car, False).code == "OUT_OF_TRACK"
 
 

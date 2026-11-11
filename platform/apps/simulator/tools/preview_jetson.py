@@ -72,7 +72,7 @@ def top_view(sim: Simulator) -> np.ndarray:
             for a, b in ((1,1),(1,-1),(-1,-1),(-1,1))]
     cv2.fillPoly(image, [points(body)], (225, 150, 60))
     cv2.arrowedLine(image, pixel(center), pixel(center + direction * .25), LINE, 2, tipLength=.3)
-    cv2.putText(image, track.id + " | clockwise | two 0.40m lanes", (pad, 30),
+    cv2.putText(image, track.id + f" | clockwise | two {track.road_m:.3f}m lanes", (pad, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, .72, LINE, 1, cv2.LINE_AA)
     cv2.putText(image, "Vehicle Rmin 0.55m (assumed) | static preview, not a driving result", (pad, height-20),
                 cv2.FONT_HERSHEY_SIMPLEX, .53, LINE, 1, cv2.LINE_AA)
@@ -89,9 +89,9 @@ def main(argv=None) -> int:
     sim = Simulator(object(), SimSettings(track_id=args.track, camera_listen=None, start_lights=False))
     renderer = Renderer(sim.settings.camera)
     layout = sim.track.layout
-    # 오른쪽 칸 정면을 보는 별도 가상 자세다. 출발점에서 이 자세까지의 경로를 주장하지 않는다.
+    # 오른쪽에서 주차칸을 정면으로 보는 별도 가상 자세다.
     slot = layout["parking_slots"][1]["outline"]
-    survey = (sum(p[0] for p in slot) / len(slot), .4, math.pi / 2)
+    survey = (slot[2][0] + .52, (slot[0][1] + slot[2][1]) / 2, math.pi)
     images = {"top.png": top_view(sim),
               "start.png": renderer.render(sim.track, *sim.track.start_pose(), sim.vehicle.obstacles),
               "parking.png": renderer.render(sim.track, *survey, sim.vehicle.obstacles)}

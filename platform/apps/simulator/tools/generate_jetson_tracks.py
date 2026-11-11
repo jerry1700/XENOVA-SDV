@@ -1,4 +1,4 @@
-"""측정 전 Jetson 데모 코스 6종의 공유 geometry를 생성한다.
+"""실측 도로 외곽과 사진을 바탕으로 Jetson 코스 6종의 공유 geometry를 생성한다.
 
 좌표는 metre, world XY-up이다. 중심선은 도로 가운데 분리선이며 시계 방향이다.
 이 데이터는 주차장 표현용이고 차량 기동 가능성이나 실측 보정을 보증하지 않는다.
@@ -13,8 +13,12 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 TARGET = HERE.parents[3] / "frontend/packages/ui/src/sim/jetson-tracks.json"
-VARIANTS = (("jetson-demo", .60), ("jetson-r45", .45), ("jetson-r55", .55),
-            ("jetson-r65", .65), ("jetson-r75", .75), ("jetson-r80", .80))
+VARIANTS = (("jetson-demo", .4625), ("jetson-r40", .40), ("jetson-r45", .45),
+            ("jetson-r50", .50), ("jetson-r55", .55), ("jetson-r60", .60))
+ROAD_LENGTH_M = 3.15
+ROAD_HEIGHT_M = 2.07
+LANE_WIDTH_M = .285
+WORLD_MARGIN_M = .10
 SAMPLE_M = .05
 
 
@@ -23,24 +27,27 @@ def _point(x: float, y: float) -> list[float]:
 
 
 def generate(track_id: str, inner_radius: float) -> dict:
-    """외곽 4.5×3 m를 고정하고 반경에 맞춰 직선 길이를 조절한다."""
-    if not .2 < inner_radius <= .8:
-        raise ValueError("4.5×3 m 안의 두 차로 코스는 안쪽 차로 중심 반경이 0.2 m 초과, 0.8 m 이하여야 합니다")
-    width, height = 4.3, 2.8
-    outer = inner_radius + .6
-    radius = inner_radius + .2
-    tx, cy = .1 + outer, .1 + outer
-    horizontal = round(width - 2 * outer, 9)
-    vertical = round(height - 2 * outer, 9)
+    """도로 외곽 315×207 cm와 두 차로 폭을 고정한다."""
+    outer = inner_radius + 1.5 * LANE_WIDTH_M
+    inner_edge = inner_radius - LANE_WIDTH_M / 2
+    radius = inner_radius + LANE_WIDTH_M / 2
+    horizontal = round(ROAD_LENGTH_M - 2 * outer, 9)
+    vertical = round(ROAD_HEIGHT_M - 2 * outer, 9)
+    if not math.isfinite(inner_radius) or inner_edge <= 0 or vertical < 0:
+        raise ValueError("안쪽 차로 중심 반경이 315×207 cm의 두 차로 코스에 맞지 않습니다")
+    tx = cy = WORLD_MARGIN_M + outer
     rx, top_cy = tx + horizontal, cy + vertical
-    # 반경 비교에서 출발 조건이 바뀌지 않도록 기본 코스의 좌표를 공통으로 쓴다.
-    start_x = 2.56
-    points = [_point(start_x, .5)]
+    # 여섯 코스의 하단 직선에 공통으로 들어오는 출발 위치다.
+    start_x = WORLD_MARGIN_M + 2.04
+    divider_y = WORLD_MARGIN_M + LANE_WIDTH_M
+    inner_lane_y = WORLD_MARGIN_M + 1.5 * LANE_WIDTH_M
+    outer_lane_y = WORLD_MARGIN_M + LANE_WIDTH_M / 2
+    points = [_point(start_x, divider_y)]
 
     def line(x: float, y: float) -> None:
         ax, ay = points[-1]
         distance = math.hypot(x - ax, y - ay)
-        if distance < 1e-9:  # R80에서는 세로 직선이 사라진다.
+        if distance < 1e-9:
             return
         count = max(1, math.ceil(distance / SAMPLE_M))
         points.extend(_point(ax + (x - ax) * i / count, ay + (y - ay) * i / count)
@@ -52,7 +59,7 @@ def generate(track_id: str, inner_radius: float) -> dict:
                              center_y + radius * math.sin(a + (b - a) * i / count))
                       for i in range(1, count + 1))
 
-    line(tx, .5)
+    line(tx, divider_y)
     arc(tx, cy, -math.pi / 2, -math.pi)
     line(tx - radius, top_cy)
     arc(tx, top_cy, math.pi, math.pi / 2)
@@ -60,53 +67,57 @@ def generate(track_id: str, inner_radius: float) -> dict:
     arc(rx, top_cy, math.pi / 2, 0)
     line(rx + radius, cy)
     arc(rx, cy, 0, -math.pi / 2)
-    line(start_x, .5)
+    line(start_x, divider_y)
     points.pop()  # 마지막 점은 첫 점과 같으므로 고리 연결에만 사용한다.
     lap = sum(math.dist(a, points[(i + 1) % len(points)]) for i, a in enumerate(points))
-    left, right = 2.7, 3.5
-    # 큰 코너에서도 두 칸이 안마당에 들어가도록 10 cm 위로 옮긴다.
-    mouth = 1.2 if inner_radius > .65 else 1.1
-    back = mouth + .6
-    inner_edge = inner_radius - .2
-    right_join_y = cy - math.sqrt(inner_edge ** 2 - max(0., right - rx) ** 2)
+    # 사진의 오른쪽 안마당에 세로로 두 칸을 배치한다. 입구는 오른쪽 차로 쪽이다.
+    slot_width, slot_depth = .30, .46
+    south = WORLD_MARGIN_M + .67
+    north = south + 2 * slot_width
+
+    def inner_east(y: float) -> float:
+        dy = max(cy - y, y - top_cy, 0.)
+        return rx + math.sqrt(inner_edge ** 2 - dy ** 2)
+
+    # 두 칸을 곡선 안쪽에 놓고, 연결 마당은 실제 도로와 겹치게 한다.
+    mouth = min(inner_east(south), inner_east(north)) - .01
+    back = mouth - slot_depth
+    apron_east = rx + inner_edge + .015
     slots = []
     for i in range(2):
-        bx = left + i * .4
-        slots.append({"id": f"P{i + 1}", "outline": [_point(bx, mouth), _point(bx, back),
-                      _point(bx + .4, back), _point(bx + .4, mouth)]})
-    apron = [_point(left, .885), _point(right, .885), _point(right, mouth), _point(left, mouth)]
+        y = south + i * slot_width
+        slots.append({"id": f"P{i + 1}", "outline": [_point(back, y), _point(back, y + slot_width),
+                      _point(mouth, y + slot_width), _point(mouth, y)]})
+    apron = [_point(mouth, south), _point(apron_east, south),
+             _point(apron_east, north), _point(mouth, north)]
     layout = {
-        "bounds": [0, 0, round(width + .2, 6), round(height + .2, 6)],
+        "bounds": [0, 0, *_point(ROAD_LENGTH_M + 2 * WORLD_MARGIN_M, ROAD_HEIGHT_M + 2 * WORLD_MARGIN_M)],
         "lane_count": 2,
-        "start_pose": [round(start_x + (.30 + .20) / 2, 6), .7, math.pi],
+        "start_pose": [*_point(start_x + (.30 + .20) / 2, inner_lane_y), math.pi],
         "paved_areas": [apron, *[slot["outline"] for slot in slots]],
         "paint_lines": [*[slot["outline"] + [slot["outline"][0]] for slot in slots],
-                        [_point(left, mouth), _point(left, .9)],
-                        [_point(right, mouth), _point(right, right_join_y)]],
+                        [_point(mouth, south), _point(inner_east(south), south)],
+                        [_point(mouth, north), _point(inner_east(north), north)]],
         "parking_slots": slots,
         "obstacle_seeds": [
-            {"id": "A", "kind": "cone", "x": 1.92, "y": .7, "w": .18, "h": .18},
-            {"id": "B", "kind": "cone", "x": 1.4, "y": .3, "w": .18, "h": .18},
+            {"id": "A", "kind": "cone", "x": 1.44, "y": round(inner_lane_y, 6), "w": .18, "h": .18},
+            {"id": "B", "kind": "cone", "x": 1.05, "y": round(outer_lane_y, 6), "w": .18, "h": .18},
         ],
         "vehicle": {"length_m": .30, "width_m": .22, "wheelbase_m": .20, "min_turn_radius_m": .55},
         "camera": {"height_m": .12, "pitch_rad": math.pi / 12, "hfov_rad": 69 * math.pi / 180,
                    "mount_x_m": .20},
-        "assumptions": (f"Illustrative unmeasured geometry; inner lane centre radius {inner_radius:.2f} m; "
-                        "both lanes follow the clockwise centreline order. Vehicle and camera values are "
-                        "provisional, not measured calibration. Symmetric front/rear overhang is assumed; "
+        "assumptions": (f"Measured road envelope 3.15 by 2.07 m; both lanes are 0.285 m wide and clockwise. "
+                        f"Inner lane centre radius {inner_radius:.4f} m; the default radius is estimated from the image. "
+                        "Parking dimensions and positions, vehicle and camera values are provisional. "
+                        "Symmetric front/rear overhang is assumed; "
                         "the rear-axle initial pose places the front bumper on the start line. "
-                        "All courses share 4.5 by 3 m bounds, the start pose and obstacle coordinates; "
-                        "straight lengths change with the corner radius. R0.75 and R0.80 parking bays "
-                        "are shifted 0.10 m north to stay inside the infield; "
-                        "the parking entrance lies behind the camera at the initial pose. "
-                        "Obstacle placement and parking manoeuvres "
-                        "are not physically validated; no autonomous parking planner is added."),
+                        "Parking bays move in x to stay inside the road loop as the radius changes."),
     }
     role = "기본" if track_id == "jetson-demo" else "비교"
-    name = f"Jetson {role} 코스 (R{round(inner_radius * 100)}cm)"
+    name = f"Jetson {role} 코스 (R{inner_radius * 100:g}cm)"
     return {"id": track_id, "name": name, "short": track_id,
             "real_m": round(lap), "centerline": points,
-            "lane_width_m": .8, "curb_m": 0, "layout": layout}
+            "lane_width_m": 2 * LANE_WIDTH_M, "curb_m": 0, "layout": layout}
 
 
 def generated_bytes() -> bytes:
