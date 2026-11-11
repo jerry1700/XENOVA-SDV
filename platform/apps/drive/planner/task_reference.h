@@ -30,4 +30,12 @@ bool tr_parking_approach(const struct tr_view *,uint32_t slot_id);
 /* Aisle, permitted adjacent-lane crossings and one selected slot. */
 bool tr_parking_contains(const struct tr_view *,const dw_point slot[4],float slot_pad,
  dw_pose,float extra,const struct lp_config *);
+/* Exterior edge samples depend only on the observed corridor and slot polygon.
+ * A dense geometry falls back to evaluating the original edges. */
+#define TR_PARKING_EDGE_SAMPLES 80
+struct tr_parking_edges {dw_point points[TR_PARKING_EDGE_SAMPLES];unsigned count;bool ready;};
+struct tr_parking_geometry {struct tr_view aisle,both;struct tr_parking_edges aisle_edges,both_edges;bool has_both;};
+void tr_prepare_parking(struct tr_parking_geometry *,const struct tr_view *,const dw_point slot[4]);
+bool tr_prepared_parking_contains(const struct tr_parking_geometry *,const dw_point slot[4],float slot_pad,
+ dw_pose,float extra,const struct lp_config *);
 #endif

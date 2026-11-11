@@ -40,7 +40,8 @@ static inline float lp_lane_boundary_allowance_m(const struct lp_config *config)
 struct lp_primitive_point { float x,y,yaw,steer; };
 struct lp_assets { const char *id,*sha256; float resolution,wheelbase,max_steer,steer_rate,speed,duration;
  struct lp_primitive_point motion[LP_STEERS][LP_STEERS][LP_PRIMITIVE_SAMPLES]; };
-struct lp_collision_index { const dw_world *world;uint64_t sequence,rows[64],shoulder[64];float cell_age_ms,live_age_us;bool lane_pair_simple; };
+struct lp_collision_index { const dw_world *world;uint64_t sequence,rows[64],shoulder[64];float cell_age_ms,live_age_us;bool lane_pair_simple;
+ float road_allowance;dw_point road_with_allowance[2*TR_BASIS_POINTS]; };
 struct lp_budget { uint64_t deadline_us; int (*clock)(void *,uint64_t *); bool (*cancelled)(void *);void *context;
  const struct lp_collision_index *collision_index; };
 struct lp_metrics { uint64_t expanded,primitives,footprints,cells,road_checks,cancel_checks,clock_checks;
@@ -79,6 +80,7 @@ struct lp_road_state {dw_pose pose;float arc,offset,curvature,length;};
 /* Geometry of one immutable path, owned by its published slot. Each segment
  * starts at arc zero. Live map and vehicle checks remain in the tracker. */
 struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3];};
+struct lp_parking_cache {struct tr_parking_geometry geometry;bool ready;};
 struct lp_tracker { size_t index;float last_velocity,last_steer;uint64_t completed;
  uint64_t path_token,last_pi_us,gate_revision;unsigned segment;float progress;bool initialized; };
 /* 실제 현재 owner의 STOP/APPLIED·정지/조향 확인을 소비하는 내부 사실이다.
@@ -131,9 +133,11 @@ enum lp_result lp_clearance_lower(const struct lp_path *,const dw_world *,const 
 enum lp_result lp_track(struct lp_tracker *,const struct lp_path *,const dw_world *,dw_pose,const dw_vehicle *,
  const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,const struct lp_budget *);
 bool lp_prepare_tracking(const struct lp_path *,struct lp_tracking_geometry *);
-/* Only use geometry prepared for this exact, unmodified path. */
+/* Only use geometry prepared for this exact path. Reset the optional parking
+ * cache whenever the leased map or path generation changes. */
 enum lp_result lp_track_prepared(struct lp_tracker *,const struct lp_path *,const struct lp_tracking_geometry *,
- const dw_world *,dw_pose,const dw_vehicle *,const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,const struct lp_budget *);
+ const dw_world *,dw_pose,const dw_vehicle *,const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,
+ const struct lp_budget *,struct lp_parking_cache *);
 /* tracker 단일 owner. 새 immutable path token만 progress를 초기화한다. */
 void lp_tracker_begin(struct lp_tracker *,uint64_t path_token);
 bool lp_tracker_next_segment(struct lp_tracker *,const struct lp_path *,uint64_t now_pi_us,

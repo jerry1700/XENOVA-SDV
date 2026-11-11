@@ -14,7 +14,7 @@ extern const struct lp_assets lp_selected_assets;
 struct probe {struct dw_snapshot snapshot;struct lp_search search;struct lp_path path;
  struct lp_tracker tracker;struct lp_config config;struct lp_metrics tracked;
  struct lp_collision_index collision_index;struct tr_basis basis;uint64_t cancel_after;bool cancelled;enum dw_result decoded;
- struct lp_tracking_geometry tracking_geometry;bool use_prepared_tracking;
+ struct lp_tracking_geometry tracking_geometry;struct lp_parking_cache parking_cache;bool use_prepared_tracking;
  double parking_trace[24];};
 struct behavior_probe {struct db_episode episode;struct db_facts facts;struct db_limits limits;struct dp_round round;};
 static const struct dw_trust trust={.vehicle="rc-test-1",.mapper_boot="11111111-1111-4111-8111-111111111111",
@@ -462,6 +462,7 @@ int probe_parking_cusp_fixture(void *pointer,unsigned strategy){
 }
 bool probe_prepare_tracking(void *pointer){
  struct probe *p=pointer;
+ p->parking_cache.ready=false;
  p->use_prepared_tracking=lp_prepare_tracking(&p->path,&p->tracking_geometry);
  return p->use_prepared_tracking;
 }
@@ -474,7 +475,7 @@ int probe_track_sample(void *pointer,unsigned index,uint64_t stamp,float velocit
  struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
  const struct lp_tracking_geometry *geometry=p->use_prepared_tracking?&p->tracking_geometry:NULL;
  enum lp_result rc=lp_track_prepared(&p->tracker,&p->path,geometry,&p->snapshot.world,p->path.points[index].pose,&vehicle,
-  &p->config,.02f,&command,&metrics,&budget);
+  &p->config,.02f,&command,&metrics,&budget,geometry?&p->parking_cache:NULL);
  out[0]=command.velocity;out[1]=command.steer;out[2]=command.gate_required;out[3]=command.segment_index;out[4]=command.requested_direction;out[5]=p->tracker.progress;
  return rc;
 }

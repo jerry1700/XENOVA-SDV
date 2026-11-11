@@ -817,7 +817,14 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
      db_travel_upper(&facts,path->episode.core.meter_baseline_total_ticks,now,
       fmaxf(e->config->max_velocity,e->config->max_reverse_velocity))>=path->episode.core.max_travel_m))rc=DE_STATE;
   else{calculated=true;lp_tracker_begin(tracker,ph.generation);
-   tracked=lp_track_prepared(tracker,path,&e->paths[ph.slot].tracking_geometry,&map->world,pose,vehicle,e->config,dt,command,&measured,&budget);
+   struct lp_parking_cache *parking=NULL;
+   if(tracker==&e->tracker&&path->space.parking&&!path->space.exiting){
+    parking=&e->tracking_parking;
+    if(e->tracking_parking_map!=mh.generation||e->tracking_parking_path!=ph.generation){
+     parking->ready=false;e->tracking_parking_map=mh.generation;e->tracking_parking_path=ph.generation;
+    }
+   }
+   tracked=lp_track_prepared(tracker,path,&e->paths[ph.slot].tracking_geometry,&map->world,pose,vehicle,e->config,dt,command,&measured,&budget,parking);
    if(path->has_episode&&path->episode.core.state==1&&!path->episode.core.phase&&e->episode_status.commit_state<2){command->velocity=0;command->steer=0;command->emergency=true;}
    if(tracker==&e->tracker&&e->behavior_enabled&&path->execution.mission.kind==2&&path->execution.mission.phase!=DP_SEARCH){
     unsigned phase=path->execution.mission.phase;
