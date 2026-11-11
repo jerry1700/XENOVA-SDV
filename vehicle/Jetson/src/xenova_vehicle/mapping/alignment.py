@@ -9,6 +9,7 @@ import math
 
 from .odometry import PoseEstimate
 from .registration import transform_point, wrap_yaw
+from .wheel_motion import relative_wheel_bounds
 
 
 @dataclass(frozen=True)
@@ -94,12 +95,32 @@ class MapOdomAlignment:
     def apply(self, odom):
         if type(odom) is not PoseEstimate or odom.sample.context!=self.context:
             raise ValueError('alignment cannot cross odom epoch/calibration/clock/origin')
-        raw=odom.sample
-        transform_angle=self.yaw_error_rad;position_drift=0.
+        elapsed_us=0
         if self.has_metadata:
             _interval(odom.captured_us)
             if odom.captured_us[1]<self.observed_j_interval[1]:raise ValueError('alignment cannot apply to an older original capture')
-            seconds=math.nextafter((odom.captured_us[1]-self.observed_j_interval[0])/1_000_000,math.inf)
+            elapsed_us=odom.captured_us[1]-self.observed_j_interval[0]
+        return self._project(odom,elapsed_us)
+
+    def project_history(self, odom):
+        """첫 정합 전 선 관측을 원 시각과 오차로 지도에 옮긴다."""
+        if (type(odom) is not PoseEstimate or odom.sample.context!=self.context
+                or not self.has_metadata or self._matched_poses is None):
+            raise ValueError('historical observation requires its original matched odom context')
+        _interval(odom.captured_us)
+        if odom.captured_us[1]>self.observed_j_interval[0]:
+            raise ValueError('historical observation overlaps the alignment capture')
+        return self._project(odom,self.observed_j_interval[1]-odom.captured_us[0])
+
+    def _project(self, odom, elapsed_us):
+        raw=odom.sample
+        if self._matched_poses is not None:
+            original, fitted = self._matched_poses
+            if odom == original and fitted.captured_us == odom.captured_us:
+                return replace(odom,sample=fitted.sample,wheel_capture=None)
+        transform_angle=self.yaw_error_rad;position_drift=yaw_drift=0.
+        if self.has_metadata:
+            seconds=math.nextafter(elapsed_us/1_000_000,math.inf)
             position_drift=math.nextafter(self.position_drift_mps*seconds,math.inf) if self.position_drift_mps else 0.
             yaw_drift=math.nextafter(self.yaw_drift_rps*seconds,math.inf) if self.yaw_drift_rps else 0.
             transform_angle=math.nextafter(transform_angle+yaw_drift,math.inf)
@@ -107,14 +128,20 @@ class MapOdomAlignment:
         rotation_scale=2*math.sin(min(math.pi,transform_angle)/2)
         rotation=math.hypot(raw.x,raw.y)*rotation_scale
         error=self.position_error_m+raw.position_error_m+rotation+position_drift
+        angle=transform_angle+raw.yaw_error_rad
         if self._matched_poses is not None:
-            original, fitted = (pose.sample for pose in self._matched_poses)
-            distance = math.hypot(raw.x-original.x, raw.y-original.y)
+            start, goal = original.sample, fitted.sample
+            distance = math.hypot(raw.x-start.x, raw.y-start.y)
             # map 기준점 오차는 한 번 포함하고, yaw 오차는 기준점 이후 변위에 적용한다.
-            relative_error = (fitted.position_error_m + original.position_error_m + raw.position_error_m
+            relative_error = (goal.position_error_m + start.position_error_m + raw.position_error_m
                               + distance*rotation_scale + position_drift)
             error = min(error, relative_error)
-        angle=transform_angle+raw.yaw_error_rad
+            wheel_bounds = relative_wheel_bounds(original,odom)
+            if wheel_bounds is not None:
+                position, yaw = wheel_bounds
+                anchor_rotation = 2*math.sin(min(math.pi,goal.yaw_error_rad+yaw_drift)/2)
+                error = min(error,goal.position_error_m+position+distance*anchor_rotation+position_drift)
+                angle = min(angle,goal.yaw_error_rad+yaw+yaw_drift)
         if angle>math.pi and not self.has_metadata:
             raise ValueError('alignment no longer bounds a usable heading')
         if self.has_metadata:

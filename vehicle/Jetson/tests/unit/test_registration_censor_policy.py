@@ -12,10 +12,12 @@ import unittest
 
 from xenova_vehicle.mapping.odometry import PoseEstimate, PoseSample
 from xenova_vehicle.mapping.alignment import MapOdomAlignment
-from xenova_vehicle.mapping.registration import PoseBox, RegistrationProfile, overlapping_points, register
+from xenova_vehicle.mapping.registration import (FrozenReference, PointFeature, PoseBox, RegistrationProfile,
+    SegmentFeature, overlapping_points, register)
 from xenova_vehicle.perception.calibration import synthetic_calibration
 from xenova_vehicle.perception.inputs import FrameStamp
 from xenova_vehicle.perception.pipeline import PerceptionPipeline
+from xenova_vehicle.perception.registration_history import RegistrationObservation, combined_constraints
 from xenova_vehicle.perception.tape import ENDPOINT_KINDS, TapeGraph, TapeStrip
 
 
@@ -55,7 +57,7 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         reference = self.reference(reference_graph)
         points = self.features(current_graph)
         if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1':
-            points = overlapping_points(points,reference,self.prior,self.profile,lateral_m=.1425)
+            points = overlapping_points(points,reference,self.prior,self.profile)
         # 기존 register는 empty points를 거절한다. 정보 부족을 새 성공/status로 포장하지 않는다.
         fitted = (register(points, reference, self.prior, self.profile,
             calibration_id=self.calibration.sha256) if points else None)
@@ -158,15 +160,93 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         graph=self.graph((self.strip(0),),self.a)
         reference=self.reference(graph)
         points=self.pipeline._features(graph,'capture-A')
-        shared=overlapping_points(points,reference,self.prior,self.profile,lateral_m=.1425)
+        shared=overlapping_points(points,reference,self.prior,self.profile)
         with self.assertRaises(ValueError):
             register(shared,reference,self.prior,self.profile,calibration_id=self.calibration.sha256)
 
     def test_points_past_observed_support_cannot_gain_a_normal_constraint(self):
         reference=self.reference(self.graph((self.strip(0),),self.a))
         graph=self.graph((self.strip(0,points=((1.4,0.),(2.4,0.))),),self.b)
-        shared=overlapping_points(self.features(graph),reference,self.prior,self.profile,lateral_m=.1425)
+        shared=overlapping_points(self.features(graph),reference,self.prior,self.profile)
         self.assertEqual(shared,())
+
+    def test_unmatched_adjacent_lane_does_not_invalidate_supported_normal_points(self):
+        old=self.graph((self.strip(0,y=0.),),self.a)
+        reference=self.reference(old)
+        reference=replace(reference,segments=tuple(replace(s,error_m=.09) for s in reference.segments))
+        current=self.graph((replace(self.strip(0,y=0.),error_m=.035),
+                            replace(self.strip(1,y=.285),error_m=.035)),self.b)
+        prior=PoseBox((-.035,.035),(-.035,.035),(-.001,.001))
+        shared=overlapping_points(self.features(current),reference,prior,self.profile)
+        self.assertEqual({point.component for point in shared},{'strip:0'})
+        fitted=register(shared,reference,prior,self.profile,calibration_id=self.calibration.sha256)
+        self.assertEqual(fitted.status,'BOUNDED')
+        self.assertTrue(fitted.permits((0.,0.,0.)))
+
+    def test_large_uncertainty_does_not_match_parallel_lines_across_a_lane(self):
+        reference = FrozenReference(1,self.calibration.sha256,(
+            SegmentFeature((.2,0.),(2.5,0.),.17,'capture-A:edge','capture-A',.23,False),
+        ),feature_policy='OBSERVED_STRIP_SUPPORT_V1')
+        points = tuple(PointFeature((x,y),.035,component,'capture-B',normal_only=True)
+                       for component,y in (('same',.04),('adjacent',.285)) for x in (1.2,1.5))
+        prior = PoseBox((-.045,.045),(-.045,.045),(-.001,.001))
+        self.assertEqual({p.component for p in overlapping_points(points,reference,prior,self.profile)},
+                         {'same','adjacent'})
+        shared = overlapping_points(points,reference,prior,self.profile,max_lateral_match_m=.285/2)
+        self.assertEqual([p.component for p in shared],['same','same'])
+        self.assertEqual({p.compatible for p in shared},{('capture-A:edge',)})
+        fitted = register(shared,reference,prior,self.profile,calibration_id=self.calibration.sha256,
+                          position_radius_m=.045)
+        self.assertEqual(fitted.status,'BOUNDED')
+        self.assertTrue(fitted.permits((0.,0.,0.)))
+
+    def test_history_cannot_match_an_adjacent_lane_or_its_own_capture(self):
+        current_pose = replace(self.pose_a, sample=replace(self.pose_a.sample,at_us=200_000,x=.10),
+                               captured_us=(200_000,200_000),bracket_us=(200_000,200_000))
+        earlier_pose = replace(self.pose_a,sample=replace(self.pose_a.sample,position_error_m=.30))
+        current = RegistrationObservation('now',self.b.key[:-1],current_pose,
+            tuple(PointFeature((x,0.),.001,'current','now',normal_only=True) for x in (.4,.7)),())
+        earlier = RegistrationObservation('recent',self.a.key[:-1],earlier_pose,
+            tuple(PointFeature((x,.285),.001,'previous','recent',normal_only=True) for x in (.5,.8)),())
+        reference = FrozenReference(1,self.calibration.sha256,(
+            SegmentFeature((-1.,0.),(2.,0.),.001,'older:center','older',finite_endpoints=False),
+            SegmentFeature((-1.,.285),(2.,.285),.001,'recent:outer','recent',finite_endpoints=False)),
+            feature_policy='OBSERVED_STRIP_SUPPORT_V1')
+        prior = PoseBox((-.20,.40),(-.30,.30),(-.01,.01))
+        def fit(lateral, age=500_000):
+            return combined_constraints((earlier,),current,reference,prior,self.profile,
+                position_radius_m=.30,max_lateral_match_m=lateral,max_age_us=age)
+
+        accepted, older = fit(.1425)
+        self.assertEqual(accepted,())
+        self.assertEqual(tuple(s.capture_id for s in older.segments),('older',))
+        loose,_ = fit(.4)
+        self.assertEqual({point.capture_id for point in loose},{'now','recent'})
+        self.assertEqual(fit(.4,99_999)[0],())
+
+    def test_finite_strip_requires_both_ends_to_match_the_same_reference(self):
+        reference=FrozenReference(1,self.calibration.sha256,(
+            SegmentFeature((.60,0.),(.86,0.),.09,'capture-A:strip:0','capture-A'),),
+            feature_policy='OBSERVED_STRIP_SUPPORT_V1')
+        prior=PoseBox((-.035,.035),(-.035,.035),(0.,0.))
+        ends={'strip:0':((.86,0.),(.61,0.),.04),
+              'strip:1':((.995,.015),(1.13,.02),.04)}
+        points=tuple(PointFeature(point,error,component,'capture-B')
+            for component,(a,b,error) in ends.items() for point in (a,b))
+        old=overlapping_points(points,reference,prior,self.profile)
+        self.assertIn('strip:1',{point.component for point in old})
+        shared=overlapping_points(points,reference,prior,self.profile,
+            observed_ends=ends,position_radius_m=.035)
+        self.assertEqual([point.component for point in shared],['strip:0','strip:0'])
+        fitted=register(shared,reference,prior,self.profile,calibration_id=self.calibration.sha256,
+            position_radius_m=.035)
+        self.assertEqual(fitted.status,'BOUNDED')
+        self.assertTrue(fitted.permits((0.,0.,0.)))
+        with_ends=overlapping_points(points,reference,prior,self.profile,observed_ends=ends,
+            position_radius_m=.035,include_endpoints=True)
+        self.assertEqual(tuple((point.component,point.endpoint_matches) for point in with_ends
+            if point.endpoint_matches),(('strip:0',(('capture-A:strip:0',1),)),
+                                        ('strip:0',(('capture-A:strip:0',0),))))
 
     def test_common_straight_support_reduces_yaw_without_narrowing_along_line(self):
         original=self.strip(0,points=((.2,0.),(2.6,0.)))
@@ -177,21 +257,65 @@ class RegistrationCensorPolicyTests(unittest.TestCase):
         prior=PoseBox((-.1,.1),(-.02,.02),(-.04,.04))
         profile=replace(self.profile,residual_m=.001,cell_steps=(.01,.005,.0025),
             max_position_error_m=.2,max_yaw_error_rad=.04)
-        shared=overlapping_points(self.features(self.graph((current,),self.b)),reference,prior,profile,lateral_m=.1425)
+        shared=overlapping_points(self.features(self.graph((current,),self.b)),reference,prior,profile)
         fitted=register(shared,reference,prior,profile,calibration_id=self.calibration.sha256)
         self.assertTrue(fitted.complete)
         self.assertLess(fitted.yaw_error_rad,.02)
         self.assertTrue(self.contains(fitted,(-.1,0.,angle)))
         self.assertTrue(self.contains(fitted,(.1,0.,angle)))
 
-    def test_transverse_start_line_is_novel_but_an_overlapping_shifted_lane_is_compared(self):
+    def test_circular_position_prior_keeps_its_radius_when_lines_add_no_constraint(self):
+        reference=self.reference(self.graph((self.strip(0),),self.a))
+        prior=PoseBox((-.04,.04),(-.04,.04),(-.001,.001))
+        # 넓은 측정 오차는 원 prior의 모든 위치를 허용한다. 원을 사각형으로 만들며
+        # 추가한 모서리 때문에 4cm가 sqrt(2)*4cm로 커져서는 안 된다.
+        points=tuple(replace(p,error_m=.1,error_xy=None) for p in self.features(
+            self.graph((self.strip(0),),self.b)))
+        shared=overlapping_points(points,reference,prior,self.profile)
+        box=register(shared,reference,prior,self.profile,calibration_id=self.calibration.sha256)
+        disk=register(shared,reference,prior,self.profile,calibration_id=self.calibration.sha256,
+            position_radius_m=.04)
+        self.assertEqual(box.status,'AMBIGUOUS_OR_UNOBSERVABLE')
+        self.assertEqual(disk.status,'BOUNDED')
+        self.assertAlmostEqual(disk.position_error_m,.04,places=8)
+        self.assertTrue(disk.permits((.04,0.,0.)))
+        self.assertTrue(disk.permits((0.,-.04,0.)))
+        self.assertEqual(disk.yaw_error_rad,.001)
+        for radius in (-.01,float('nan'),True):
+            with self.subTest(radius=radius),self.assertRaises(ValueError):
+                register(shared,reference,prior,self.profile,calibration_id=self.calibration.sha256,
+                    position_radius_m=radius)
+
+    def test_square_corner_outside_original_disk_cannot_become_a_valid_match(self):
+        reference=FrozenReference(1,'calibration',tuple(SegmentFeature((x+.035,.035),(x+.035,.035),
+            .0001,str(i),'old') for i,x in enumerate((0.,1.))))
+        points=tuple(PointFeature((x,0.),.0001,str(i),'new',(str(i),)) for i,x in enumerate((0.,1.)))
+        prior=PoseBox((-.04,.04),(-.04,.04),(0.,0.))
+        profile=replace(self.profile,cell_steps=(.001,.001,.01),residual_m=.0001)
+        square=register(points,reference,prior,profile,calibration_id='calibration')
+        disk=register(points,reference,prior,profile,calibration_id='calibration',position_radius_m=.04)
+        self.assertEqual(square.status,'BOUNDED')
+        self.assertEqual(disk.status,'INCONSISTENT')
+
+    def test_finite_feature_noise_does_not_move_an_already_compatible_odometry_pose(self):
+        reference=FrozenReference(1,'calibration',(
+            SegmentFeature((.008,.008),(.008,.008),.001,'landmark','old'),))
+        point=PointFeature((0.,0.),.001,'landmark','new')
+        prior=PoseBox((-.02,.02),(-.02,.02),(0.,0.))
+        result=register((point,),reference,prior,replace(self.profile,cell_steps=(.005,.005,.01)),
+            calibration_id='calibration',position_radius_m=.02)
+        self.assertEqual(result.status,'BOUNDED')
+        self.assertEqual(result.representative,(0.,0.,0.))
+        self.assertTrue(result.permits((.008,.008,0.)))
+
+    def test_transverse_start_line_is_novel_but_incompatible_shared_points_are_rejected(self):
         finite = dict(start='observed_paint_end', end='observed_paint_end')
         reference = self.reference(self.graph((self.strip(0, **finite),), self.a))
         start_line = self.strip(1, points=((.7, -.12), (.7, .12)), **finite)
-        shifted_lane = self.strip(2, y=.08, **finite)
+        shifted_lane = self.strip(2, points=((.3,.04),(1.3,-.04)), **finite)
         current = self.features(self.graph((start_line, shifted_lane), self.b))
-        prior = PoseBox((0., 0.), (0., 0.), (0., 0.))
-        shared = overlapping_points(current, reference, prior, self.profile, lateral_m=.1425)
+        prior = PoseBox((0., 0.), (-.05, .05), (0., 0.))
+        shared = overlapping_points(current, reference, prior, self.profile)
         self.assertEqual({point.component for point in shared}, {'strip:2'})
         fit = register(shared, reference, prior, self.profile, calibration_id=self.calibration.sha256)
         self.assertEqual(fit.status, 'INCONSISTENT')

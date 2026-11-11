@@ -550,6 +550,11 @@ class MapperMapping:
                     capture=sha256(canonical(draft.frame.observation.rgb.stamp.key)).hexdigest()
                     root=collector._reference_geometry.get(capture,collector._rgb_refs.get(capture))
                     if root is None:raise MappingNotReady('actual original RGB provenance missing')
+                    temporal_root=None
+                    temporal=result.mapped_road
+                    if (temporal is not None and result.summary.get('localization_qualified') is True
+                            and self._crossing is not None and temporal.within(self.profile.pipeline.registration)):
+                        temporal_root=collector.temporal_lane_root(temporal)
                     evidence=EvidenceTable(tuple(collector._records[key] for key in sorted(collector._records)),
                         tuple(collector._contexts[key] for key in sorted(collector._contexts)))
                     pose=draft.inputs.pose
@@ -566,7 +571,8 @@ class MapperMapping:
                             else alignment.registration_revision,
                         prior_qualified=result.summary.get('localization_qualified') is True,
                         metric_evidence=self.catalogs.metric_from_frame(draft.frame),lane_provenance_ids=(root,root),
-                        base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m))
+                        base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m),
+                        temporal_provenance_id=temporal_root)
                     if self._atlas is not None:
                         atlas=self._atlas.prepare_frame(grid,collector._atlas_proof)
         except AtlasResource:ready=False;reason='ATLAS_RESOURCE'

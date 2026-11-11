@@ -223,16 +223,19 @@ class MapperCatalogs:
             tuple(parent.provenance_id for parent in frame.parents))
 
     def prepare(self, original_job, result, *, context, stamp, capture_prior, registration_revision,
-            prior_qualified, metric_evidence, lane_provenance_ids, base_evidence, now_us, roi_bounds):
+            prior_qualified, metric_evidence, lane_provenance_ids, base_evidence, now_us, roi_bounds,
+            temporal_provenance_id=None):
         self._owner();uint(now_us)
         if type(original_job) is not MapperInput:
             raise ValueError('original physical MapperInput required')
         return self._prepare(original_job,result,context=context,stamp=stamp,capture_prior=capture_prior,
             registration_revision=registration_revision,prior_qualified=prior_qualified,metric_evidence=metric_evidence,
             lane_provenance_ids=lane_provenance_ids,base_evidence=base_evidence,now_us=now_us,roi_bounds=roi_bounds,
-            original_rgb_sequence=original_job.sample.rgb.sequence,original_context_bytes=original_job.context_bytes)
+            original_rgb_sequence=original_job.sample.rgb.sequence,original_context_bytes=original_job.context_bytes,
+            temporal_provenance_id=temporal_provenance_id)
 
-    def prepare_pc(self,proof,result,*,capture_prior,registration_revision,prior_qualified,now_us,roi_bounds):
+    def prepare_pc(self,proof,result,*,capture_prior,registration_revision,prior_qualified,now_us,roi_bounds,
+                   temporal_provenance_id=None):
         """원 PC/D-range proof만 별도 입구로 받는다. CAMERA FrameEvidence를 가장하지 않는다."""
         from .pc_mapper_storage import PcFrameProofDraft
         self._owner();uint(now_us)
@@ -244,11 +247,11 @@ class MapperCatalogs:
             capture_prior=capture_prior,registration_revision=registration_revision,prior_qualified=prior_qualified,
             metric_evidence=proof.metric_evidence,lane_provenance_ids=(identity,identity),base_evidence=proof.evidence,
             now_us=now_us,roi_bounds=roi_bounds,original_rgb_sequence=proof.rgb_sequence,
-            original_context_bytes=proof.context_bytes)
+            original_context_bytes=proof.context_bytes,temporal_provenance_id=temporal_provenance_id)
 
     def _prepare(self,original_job,result,*,context,stamp,capture_prior,registration_revision,
                  prior_qualified,metric_evidence,lane_provenance_ids,base_evidence,now_us,roi_bounds,
-                 original_rgb_sequence,original_context_bytes):
+                 original_rgb_sequence,original_context_bytes,temporal_provenance_id=None):
         self._owner(); uint(now_us)
         if self._staged is not None or self._transition is not None:
             raise CatalogNotReady('original draft/publication transition is unresolved')
@@ -269,7 +272,10 @@ class MapperCatalogs:
                 or not stamp.available_us <= summary.get('now_us', -1) <= now_us):
             raise ValueError('original perception/capture/map source changed')
         uint(registration_revision)
-        if type(capture_prior) is PoseEstimate: capture_prior = capture_prior.prior
+        position_radius_m = None
+        if type(capture_prior) is PoseEstimate:
+            position_radius_m = capture_prior.sample.position_error_m
+            capture_prior = capture_prior.prior
         if type(capture_prior) is not PoseBox: raise ValueError('actual joint capture prior required')
         state = self._accepted.fork(); reasons = []; lane_model = None; parking_publication = None
         if summary.get('quarantined') is True:
@@ -293,6 +299,12 @@ class MapperCatalogs:
             raise ValueError('two actual collector lane provenance references required')
         for identity in lane_provenance_ids:
             uint(identity, positive=True); parent_roots.add(identity)
+        temporal = result.mapped_road
+        if temporal_provenance_id is not None:
+            uint(temporal_provenance_id, positive=True)
+            if temporal is None or not temporal.within(self._lane_profile):
+                raise ValueError('provenance requires actual bounded mapped road')
+            parent_roots.add(temporal_provenance_id)
         checked = _closure(merged, parent_roots, context)
         by_id = {r.provenance_id: r for r in checked.provenance}
         for identity in lane_provenance_ids:
@@ -302,18 +314,34 @@ class MapperCatalogs:
                 raise ValueError('lane provenance is not the original full RGB capture')
         if self._crossing is None:
             lane_status = 'UNCONFIGURED'; reasons.append('CROSSING_POLICY_UNCONFIGURED')
-        elif result.road is None:
+        elif temporal is not None and not temporal.within(self._lane_profile):
+            lane_status = 'UNKNOWN'; reasons.append('GEOMETRY_ENVELOPE_TOO_WIDE')
+        elif temporal is not None and temporal_provenance_id is None:
+            lane_status = 'UNKNOWN'; reasons.append('TEMPORAL_RGB_PROVENANCE_UNAVAILABLE')
+        elif result.road is None and temporal is None:
             lane_status = 'UNKNOWN'; reasons.append('ROAD_UNAVAILABLE')
         else:
-            crossing = self._crossing(result.road, stamp) if callable(self._crossing) else self._crossing
+            road = result.road if temporal is None else temporal.road
+            crossing = self._crossing(road, stamp) if callable(self._crossing) else self._crossing
             source = LaneSource(stamp, state.lane.calibration_id, context.map_epoch, state.lane.frame_id,
                 context.odom_epoch, result.map_snapshot['revision'], registration_revision,
                 result.summary.get('geometric_model_qualified') is True and prior_qualified
                 and (state.parking.calibration_profile is None or state.parking.calibration_profile.metric_qualified),
                 state.parking._kind)
-            proof = state.lane.observe(result.road, source, capture_prior,
-                prior_qualified=prior_qualified, crossing=crossing, profile=self._lane_profile)
-            lane_status = 'AMBIGUOUS' if result.road.complete and result.road.status == 'AMBIGUOUS' else proof.status
+            if temporal is None:
+                proof = state.lane.observe(road, source, capture_prior,
+                    prior_qualified=prior_qualified, crossing=crossing, profile=self._lane_profile,
+                    position_radius_m=position_radius_m)
+            else:
+                record = by_id[temporal_provenance_id]
+                if (PROVENANCE.unpack(record.payload)[2] != 4 or len(record.parents) < 2
+                        or not record.source_mask & 1 or record.observation_sequence != metric_evidence.observation_sequence
+                        or record.pi_lower > metric_evidence.pi_interval[0] or record.pi_upper < metric_evidence.pi_interval[1]):
+                    raise ValueError('original temporal RGB closure required')
+                proof = state.lane.observe_mapped(temporal, source, prior_qualified=prior_qualified,
+                    crossing=crossing, profile=self._lane_profile)
+                lane_provenance_ids = (temporal_provenance_id,)*2
+            lane_status = 'AMBIGUOUS' if road.complete and road.status == 'AMBIGUOUS' else proof.status
             lane_model = state.lane.update(proof, provenance_ids=lane_provenance_ids)
             if proof.status == 'NEW' and lane_model is None: reasons.append('WAIT_COMMITTED_LANE_RANGE')
         if lane_model is None or stamp.captured_us is None:

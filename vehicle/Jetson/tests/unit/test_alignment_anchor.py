@@ -35,7 +35,7 @@ class AlignmentAnchorTests(unittest.TestCase):
         return PerceptionPipeline(self.fixture.calibration, profile)
 
     def execute(self, pipeline, sequence, *, at_us=None, x=0., truth_x=0., yaw=0., truth_yaw=0., error=.00001,
-                tape=True, epoch='odom', clock='clock', limits=None):
+                tape=True, epoch='odom', clock='clock', limits=None, world_lines=fixture_module.CORNER_GT):
         at = sequence * 100_000 if at_us is None else at_us
         value = replace(self.fixture.observation(sequence), kind='LIVE')
         value = replace(value, **{name: replace(getattr(value, name), stamp=replace(getattr(value, name).stamp,
@@ -43,7 +43,7 @@ class AlignmentAnchorTests(unittest.TestCase):
         raw = self.fixture.pose(sequence, x, error=error, epoch=epoch, clock=clock)
         raw = replace(raw, sample=replace(raw.sample, at_us=at, yaw=yaw, yaw_error_rad=.00001, origin='ODOMETRY'),
             captured_us=(at, at), bracket_us=(at, at))
-        graph = (self.fixture.graph(fixture_module.CORNER_GT, truth_x) if tape else
+        graph = (self.fixture.graph(world_lines, truth_x) if tape else
             TapeGraph((), status='UNKNOWN', complete=False, calibration_qualified=True))
         graph = replace(graph, strips=tuple(replace(strip, points_xy=tuple(
             transform_point(point, (0., 0., -truth_yaw)) for point in strip.points_xy)) for strip in graph.strips))
@@ -108,6 +108,7 @@ class AlignmentAnchorTests(unittest.TestCase):
         self.assertEqual(result.registration.status, 'BOUNDED')
         self.assertAlmostEqual(result.summary['mapped_pose'][0], .1, delta=.03)
         self.assertIs(pipeline._propagation_anchor, anchor)
+
         current = pipeline._alignment
         no_match = self.execute(pipeline, 4, at_us=350_000, x=.25, truth_x=.15, tape=False)
         self.assertIsNone(no_match.registration)
@@ -119,6 +120,22 @@ class AlignmentAnchorTests(unittest.TestCase):
         self.assertEqual(recovered.registration.status, 'BOUNDED')
         self.assertAlmostEqual(recovered.summary['mapped_pose'][0], .15, delta=.003)
         self.assertIs(pipeline._propagation_anchor, anchor)
+
+    def test_recent_complementary_lines_reduce_propagation_error_and_move_anchor(self):
+        self.fixture.profile=replace(self.fixture.profile,registration=replace(
+            self.fixture.profile.registration,cell_steps=(.005,.005,.002)))
+        pipeline = self.pipeline()
+        limits = dict(self.limits, localization_position_drift_mps=.031, localization_yaw_drift_rps=.006)
+        original = self.seed(pipeline,limits=limits)
+        self.execute(pipeline,3,at_us=950_000,x=.07,truth_x=.07,limits=limits,
+                     world_lines=fixture_module.CORNER_GT[1:])
+        matched=self.execute(pipeline,4,at_us=1_150_000,x=.11,truth_x=.11,limits=limits,
+                             world_lines=fixture_module.CORNER_GT[:1])
+        self.assertEqual(matched.summary['registration_method'],'MULTI_FRAME')
+        self.assertIs(pipeline._previous_propagation_anchor,original)
+        self.assertIs(pipeline._propagation_anchor,pipeline._alignment)
+        self.assertEqual(pipeline._propagation_anchor.observed_j_interval,(1_150_000,1_150_000))
+        self.assertTrue(matched.summary['localization_qualified'])
 
     def test_expiry_requires_a_fresh_match_for_qualification_and_profile_change_cannot_relabel_anchor(self):
         pipeline = self.pipeline()
@@ -157,6 +174,44 @@ class AlignmentAnchorTests(unittest.TestCase):
         self.assertGreaterEqual(propagated.sample.position_error_m,
             anchor.position_error_m + far.sample.position_error_m + lever)
         self.assertEqual(anchor.apply(far), propagated)
+
+    def test_discarded_widthless_path_does_not_hide_other_observed_registration_strips(self):
+        for reasons, usable in ((('NO_MEASURED_TAPE_WIDTH',), True),
+                                (('THINNING_CAP',), False),
+                                (('NO_MEASURED_TAPE_WIDTH','STRIP_COUNT_CAP'), False)):
+            with self.subTest(reasons=reasons):
+                pipeline=self.pipeline()
+                self.seed(pipeline)
+                alignment,reference=pipeline._alignment,pipeline.reference
+                graph=replace(self.fixture.graph(fixture_module.CORNER_GT,0.),
+                    status='UNKNOWN',complete=False,reasons=reasons)
+                with patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=graph):
+                    value=replace(self.fixture.observation(3),kind='LIVE')
+                    raw=self.fixture.pose(3)
+                    raw=replace(raw,sample=replace(raw.sample,origin='ODOMETRY',yaw_error_rad=.00001))
+                    result=pipeline.process(value,pose=raw,now_us=300_000,**self.limits)
+                self.assertEqual(result.tape.status,'UNKNOWN')
+                self.assertFalse(result.tape.complete)
+                if usable:
+                    self.assertEqual(result.registration.status,'BOUNDED')
+                    self.assertEqual(result.summary['registration_method'],'NORMAL')
+                    self.assertIsNot(pipeline._alignment,alignment)
+                    self.assertIsNot(pipeline.reference,reference)
+                else:
+                    self.assertIsNone(result.registration)
+                    self.assertIs(pipeline._alignment,alignment)
+                    self.assertIs(pipeline.reference,reference)
+
+    def test_incomplete_graph_cannot_establish_the_initial_map_alignment(self):
+        pipeline=self.pipeline()
+        graph=replace(self.fixture.graph(fixture_module.CORNER_GT,0.),status='UNKNOWN',
+            complete=False,reasons=('NO_MEASURED_TAPE_WIDTH',))
+        with patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=graph):
+            result=pipeline.process(replace(self.fixture.observation(1),kind='LIVE'),
+                pose=self.fixture.pose(1),now_us=100_000,**self.limits)
+        self.assertIsNone(result.registration)
+        self.assertIsNone(pipeline.reference)
+        self.assertIsNone(pipeline._alignment)
 
     def test_new_odom_or_clock_context_cannot_inherit_previous_anchor(self):
         for field in ('epoch', 'clock'):

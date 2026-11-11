@@ -51,6 +51,7 @@ class PointFeature:
     compatible: tuple[str, ...] = ()
     error_xy: tuple[float, float] | None = None
     normal_only: bool = False
+    endpoint_matches: tuple[tuple[str, int], ...] = ()
 
     def __post_init__(self):
         _point(self.point)
@@ -62,6 +63,10 @@ class PointFeature:
             raise ValueError('negative axis-wise point error')
         if type(self.normal_only) is not bool:
             raise ValueError('explicit point constraint kind required')
+        if (type(self.endpoint_matches) is not tuple or self.endpoint_matches and
+                (self.normal_only or tuple(segment for segment,_ in self.endpoint_matches)!=self.compatible
+                 or any(type(end) is not int or end not in (0,1) for _,end in self.endpoint_matches))):
+            raise ValueError('endpoint constraint requires an original finite segment correspondence')
 
 
 @dataclass(frozen=True)
@@ -202,8 +207,20 @@ class RegistrationResult:
             for box in self.feasible)
 
 
-def overlapping_points(points, reference, prior, profile, *, lateral_m):
-    """공통 종방향 구간의 관측만 고른다. 횡방향 잔차의 수락은 register가 판정한다."""
+def overlapping_points(points, reference, prior, profile, *, observed_ends=None, position_radius_m=None,
+                       max_lateral_match_m=None, include_endpoints=False):
+    """공통 구간을 고른다. observed_ends는 조각 ID별 (a, b, 중심선 오차)다.
+
+    끝점 검사와 횡방향 대응 상한에는 capture로 조각 ID를 구분한 reference를 사용한다.
+    횡방향 상한은 선의 대응을 고르는 조건이다. 잔차 계산의 원 관측 오차는 보존한다.
+    include_endpoints는 관측한 중심선 끝과 방향이 확인된 유한 지도 조각에만 적용한다.
+    """
+    if max_lateral_match_m is None:
+        lateral_limit = math.inf
+    else:
+        lateral_limit = _number(max_lateral_match_m, 'lateral match limit')
+        if lateral_limit <= 0 or reference.feature_policy != 'OBSERVED_STRIP_SUPPORT_V1':
+            raise ValueError('lateral match limit requires a positive bound and capture-specific segments')
     if not reference.segments:
         return ()
     center = prior.center
@@ -226,7 +243,29 @@ def overlapping_points(points, reference, prior, profile, *, lateral_m):
         length = math.hypot(dx, dy)
         if length:
             segments.append((segment, dx / length, dy / length, length))
+    end_matches = {}
+    if observed_ends:
+        if reference.feature_policy != 'OBSERVED_STRIP_SUPPORT_V1':
+            raise ValueError('endpoint pairing requires capture-specific reference segments')
+        end_translation = translation if position_radius_m is None else min(translation, position_radius_m)
+        base_pad = end_translation + reference.shared_error_m + profile.residual_m + profile.numeric_guard_m
+        for component, (a, b, error_m) in observed_ends.items():
+            mapped_a, mapped_b = transform_point(a, center), transform_point(b, center)
+            pad_a = base_pad + error_m + rotation * math.hypot(*a)
+            pad_b = base_pad + error_m + rotation * math.hypot(*b)
+            matches = {}
+            for segment, _, _, _ in segments:
+                if not segment.finite_endpoints:
+                    continue
+                limit_a, limit_b = pad_a + segment.error_m, pad_b + segment.error_m
+                # 조각의 추적 방향은 뒤집힐 수 있다. 양끝을 같은 지도 조각에 대응시킨다.
+                forward = math.dist(mapped_a, segment.a) <= limit_a and math.dist(mapped_b, segment.b) <= limit_b
+                reverse = math.dist(mapped_a, segment.b) <= limit_a and math.dist(mapped_b, segment.a) <= limit_b
+                if forward or reverse:
+                    matches[segment.component] = 0 if forward and not reverse else 1 if reverse and not forward else None
+            end_matches[component] = matches
     observed = []
+    endpoint_support = {}
     for point in points:
         x, y = transform_point(point.point, center)
         direction = directions.get(point.component)
@@ -234,8 +273,11 @@ def overlapping_points(points, reference, prior, profile, *, lateral_m):
         uncertainty = (translation + rotation * math.hypot(*point.point) + point_error
                        + reference.shared_error_m + profile.residual_m + profile.numeric_guard_m)
         compatible = []
+        matching_ends = None if point.normal_only else end_matches.get(point.component)
         for segment, ux, uy, length in segments:
             if not point.normal_only and not segment.finite_endpoints:
+                continue
+            if matching_ends is not None and segment.component not in matching_ends:
                 continue
             if point.compatible and segment.component not in point.compatible:
                 continue
@@ -247,19 +289,34 @@ def overlapping_points(points, reference, prior, profile, *, lateral_m):
             station = dx * ux + dy * uy
             supported = (pad <= station <= length - pad if point.normal_only
                          else -pad <= station <= length + pad)
-            if supported and abs(dx * uy - dy * ux) <= lateral_m + pad:
+            # 큰 오차 범위가 다른 차로의 경계를 같은 선의 대응으로 확대하지 않게 한다.
+            if supported and abs(dx * uy - dy * ux) <= min(pad, lateral_limit):
                 compatible.append(segment.component)
         if compatible:
             observed.append(replace(point, compatible=tuple(compatible))
                 if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1' else point)
+            if include_endpoints and matching_ends:
+                # 끝점도 같은 횡방향 상한과 원 유한 구간 대응을 통과해야 한다.
+                endpoint_support.setdefault(point.component,(point.capture_id,set()))[1].update(compatible)
+    for component,(capture,compatible) in endpoint_support.items():
+        a,b,error=observed_ends[component]
+        matches=tuple((segment,orientation) for segment,orientation in end_matches[component].items()
+                      if segment in compatible and orientation is not None)
+        if matches:
+            for end,location in enumerate((a,b)):
+                observed.append(PointFeature(location,error,component,capture,
+                    tuple(segment for segment,_ in matches),endpoint_matches=tuple(
+                        (segment,orientation^end) for segment,orientation in matches)))
     return tuple(observed)
 
 
-def register(points, reference, prior, profile=RegistrationProfile(), *, calibration_id):
+def register(points, reference, prior, profile=RegistrationProfile(), *, calibration_id, position_radius_m=None):
     """연속 prior의 conservative outer set과 유한 representative를 반환한다.
 
     max64 sample/segment, cap 도달 시 UNKNOWN_BUDGET다. BOUNDED는 입력 prior와
     feature-error 가정 아래의 수학적 결과이며 실제 odom/scene·이동 권한은 아니다.
+    position_radius_m은 prior 중심의 원 위치 오차 반경이다. 생략하면 기존 사각 prior만
+    사용한다. 탐색용 사각형으로 변환하며 생긴 모서리를 원래 위치 오차로 되돌리지 않는다.
     """
     if (type(reference) is not FrozenReference or type(prior) is not PoseBox
             or type(profile) is not RegistrationProfile or calibration_id != reference.calibration_id):
@@ -267,6 +324,8 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     if (type(points) is not tuple or not 1 <= len(points) <= 64
             or any(type(p) is not PointFeature for p in points)):
         raise ValueError('registration requires 1..64 point features')
+    if position_radius_m is not None and _number(position_radius_m, 'position radius') < 0:
+        raise ValueError('negative position radius')
     if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1' and any(not p.compatible for p in points):
         raise ValueError('normal constraints require original common-support associations')
     if any(p.normal_only for p in points) and reference.feature_policy != 'OBSERVED_STRIP_SUPPORT_V1':
@@ -288,12 +347,18 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
         for segment in reference.segments:
             length=math.dist(segment.a,segment.b)
             normals[segment]=((segment.b[1]-segment.a[1])/length,(segment.a[0]-segment.b[0])/length)
+    endpoint_indices = tuple(dict(point.endpoint_matches) for point in points)
     pending, leaves = deque((prior,)), []
     tested = distance_tests = 0
     candidates = []
     exhausted = False
     while pending:
         cell = pending.popleft()
+        if position_radius_m is not None:
+            dx=max(cell.x[0]-prior.center[0],0.,prior.center[0]-cell.x[1])
+            dy=max(cell.y[0]-prior.center[1],0.,prior.center[1]-cell.y[1])
+            if math.hypot(dx,dy)>position_radius_m+profile.numeric_guard_m:
+                continue
         needed = sum(len(s) for s in compatible)
         if tested >= profile.max_cells or distance_tests + needed > profile.max_distance_tests:
             pending.appendleft(cell)
@@ -306,7 +371,7 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
         rotation=2*math.sin(etheta/2)
         cosine,sine=math.cos(center[2]),math.sin(center[2])
         violations, nominal_violations, costs = set(), set(), {}
-        for point, segments in zip(points, compatible):
+        for point, segments, ends in zip(points, compatible, endpoint_indices):
             if not segments:
                 violations.add(point.component)
                 nominal_violations.add(point.component)
@@ -326,7 +391,8 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
                     errors.append(axis_error)
                     motions.append(abs(nx)*ex+abs(ny)*ey+point_rotation)
             else:
-                distances = [segment_distance(location, s.a, s.b) for s in segments]
+                distances = ([math.dist(location,(s.a,s.b)[ends[s.component]]) for s in segments] if ends
+                             else [segment_distance(location, s.a, s.b) for s in segments])
                 errors=[point.error_m]*len(segments)
                 motions=[translation+math.hypot(*point.point)*rotation]*len(segments)
             distance_tests += len(segments)
@@ -363,12 +429,12 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
                                   tested, distance_tests, True)
     # 최종 F에 포함된 후보만 쓴다. 배제된 조상 cell의 후보를 자동 채택하지 않는다.
     def inside(pose):
-        return any(all(lo <= v <= hi for v, (lo, hi) in zip(pose, (b.x, b.y, b.yaw))) for b in feasible)
-    if any(p.normal_only for p in points):
-        origin = prior.center
-        candidates.sort(key=lambda c: (sum((a-b)**2 for a,b in zip(c[1],origin)), c[0], c[1]))
-    else:
-        candidates.sort()
+        return ((position_radius_m is None or math.dist(pose[:2],prior.center[:2])<=position_radius_m)
+            and any(all(lo <= v <= hi for v, (lo, hi) in zip(pose, (b.x, b.y, b.yaw))) for b in feasible))
+    # 관측 오차 안에서 이미 성립하는 자세를 잔차 최솟값을 위해 밀어내지 않는다.
+    # 모든 후보는 위에서 잔차를 통과했다. 허용 집합 전체로 위치 오차를 계산한다.
+    origin = prior.center
+    candidates.sort(key=lambda c: (sum((a-b)**2 for a,b in zip(c[1],origin)), c[0], c[1]))
     representative = next((c for c in candidates if inside(c[1])), None)
     if representative is None:
         return RegistrationResult('UNKNOWN_BUDGET' if exhausted else 'UNRESOLVED', None, None, None,
@@ -376,6 +442,8 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     pose = representative[1]
     position_error = max(math.hypot(max(abs(b.x[0]-pose[0]), abs(b.x[1]-pose[0])),
                                    max(abs(b.y[0]-pose[1]), abs(b.y[1]-pose[1]))) for b in feasible)
+    if position_radius_m is not None:
+        position_error=min(position_error,position_radius_m+math.dist(pose[:2],prior.center[:2]))
     yaw_error = max(max(abs(b.yaw[0]-pose[2]), abs(b.yaw[1]-pose[2])) for b in feasible)
     position_error += reference.shared_error_m + profile.shared_bias_m + profile.numeric_guard_m
     yaw_error += profile.shared_bias_rad

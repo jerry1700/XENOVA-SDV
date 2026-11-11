@@ -15,6 +15,8 @@ from .inputs import PerceptionInput, FrameStamp
 from .tape import TapeProfile, extract_tape
 from .road import RoadProfile, infer_road
 from .lane_tracking import mapped_lane_ahead, track_lane
+from .registration_history import HISTORY_FRAMES, RegistrationObservation, combined_constraints
+from .temporal_road import MappedRoad, TemporalRoadMap
 from .depth import DepthConfig
 from ..mapping.local_map import EvidenceGrid, GridSpec, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
@@ -38,6 +40,13 @@ def _observed_registration_strip(strip):
     ends=('physical_junction','observed_paint_end','FOV_clip','occluded')
     return (strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
             and math.dist(strip.points_xy[0],strip.points_xy[-1])>1e-9)
+
+
+def _registration_graph_usable(graph):
+    # 폭을 하나도 읽지 못한 path는 추출기에서 이미 제외했다. 다른 정상 strip은
+    # 위치 정합에 사용하되 전체 도로/폭의 완전성 판정은 UNKNOWN으로 보존한다.
+    return (graph is not None and (graph.status=='VALID'
+        or graph.status=='UNKNOWN' and set(graph.reasons)=={'NO_MEASURED_TAPE_WIDTH'}))
 
 
 def _inside(point, polygon):
@@ -108,6 +117,8 @@ class PerceptionResult:
     map_snapshot: dict
     rgb: object
     neural: object = None
+    mapped_road: MappedRoad | None = None
+    temporal_rgb_sources: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -146,17 +157,42 @@ class PerceptionPipeline:
         self.grid = self.reference = self._context = None
         self._alignment = None
         # 현재 match의 사용 기한과 다음 prior의 물리 전파 기준은 서로 다른 수명이다.
-        # 최초 수락 후보의 보수 변환만 고정해 fitted 오차를 매 frame 다시 누적하지 않는다.
+        # 여러 원 관측으로 전파 오차가 실제 줄어들 때만 기준점을 교체한다.
         self._propagation_anchor = None
+        self._previous_propagation_anchor = None
+        self._registration_history = ()
         self._restore_pending = False
         self._domain_cache = None
         self._last_tape = self._last_road = self._last_rgb = None
         self._current_lane = None
+        self._temporal_road = TemporalRoadMap()
         self._last_neural = None
         self._last_rgb_key = self._last_capture = self._last_now = self._last_clock = None
         self._free_cursor = 0
         self._free_scheduler = None
         self.counts = dict(inputs=0,rgb=0,depth=0,nn=0,duplicate_rgb=0,duplicate_depth=0)
+
+    @property
+    def temporal_road_links(self):
+        """여러 원 관측으로 연결한 지도 좌표의 후보 구간이다."""
+        return self._temporal_road.links
+
+    @property
+    def temporal_road_sections(self):
+        """원 오차가 남아 있는 누적 두 차로를 지도 좌표에서 조회한다."""
+        return self._temporal_road.sections(self.profile.road)
+
+    @property
+    def road_markings(self):
+        return self._temporal_road.markings
+
+    @property
+    def road_marking_joins(self):
+        return self._temporal_road.marking_joins(self.profile.road)
+
+    @property
+    def startup_markings(self):
+        return self._temporal_road.startup_markings
 
     def _base(self, point, pose):
         if pose is None:
@@ -219,8 +255,8 @@ class PerceptionPipeline:
 
     def _uses_observed_support(self, graph):
         return (self.reference is not None and self.reference.feature_policy=='OBSERVED_STRIP_SUPPORT_V1'
-                or self._alignment is not None and graph is not None and any(_observed_registration_strip(s)
-                    and not _physical_registration_strip(s) for s in graph.strips))
+                or self._alignment is not None and graph is not None and (graph.status!='VALID'
+                    or any(_observed_registration_strip(s) and not _physical_registration_strip(s) for s in graph.strips)))
 
     def _features(self, graph, capture):
         points=[]
@@ -230,7 +266,7 @@ class PerceptionPipeline:
                 if not (_observed_registration_strip(strip) if support else _physical_registration_strip(strip)):
                     continue
                 # 각 component에 같은 수의 sample을 둔다. 긴 선을 독립 관측으로 늘리지 않는다.
-                normal_only=not _physical_registration_strip(strip)
+                normal_only=graph.status!='VALID' or not _physical_registration_strip(strip)
                 if normal_only:
                     from .road import _at
                     length=strip.length_m
@@ -257,7 +293,7 @@ class PerceptionPipeline:
             pose_error=p.position_error_m+2*radius*math.sin(min(math.pi,p.yaw_error_rad)/2)
             error=strip.error_m+curve_error+pose_error
             support_error=None
-            finite=_physical_registration_strip(strip)
+            finite=graph.status=='VALID' and _physical_registration_strip(strip)
             if support and not finite and strip.segment_error_xy:
                 length=math.dist(a,b);nx,ny=(b[1]-a[1])/length,(a[0]-b[0])/length
                 error=max(abs(nx)*ex+abs(ny)*ey for ex,ey in strip.segment_error_xy)+curve_error+pose_error
@@ -424,7 +460,12 @@ class PerceptionPipeline:
             self.reference=None
             self._alignment=None
             self._propagation_anchor=None
+            self._previous_propagation_anchor=None
+            self._registration_history=()
             self._free_scheduler=None
+            same_startup = (self._context is not None and self._context[:3] == context[:3]
+                            and self._context[-1].startswith('frame:'))
+            self._temporal_road.clear(keep_startup=same_startup)
             self._context=context
         raw_pose=pose
         registration_pose=pose
@@ -480,29 +521,44 @@ class PerceptionPipeline:
         quarantined=(unqualified_reference or alignment_invalid or missing_map_pose
                      or pose is not None and not geometry_qualified)
         points=()
-        if pose is not None and rgb_new and geometry_qualified and self._last_tape is not None and self._last_tape.status=='VALID':
+        current_registration_observation=None
+        if (pose is not None and rgb_new and geometry_qualified and _registration_graph_usable(self._last_tape)
+                and (self._last_tape.status=='VALID' or self._alignment is not None)):
             points=self._features(self._last_tape,capture)
             if points and self.reference is not None and self.reference.segments and not unqualified_reference:
                 prior = registration_pose.prior
                 profile = self.profile.registration
                 reference = self.reference
-                if self._uses_observed_support(self._last_tape) and reference.feature_policy!='OBSERVED_STRIP_SUPPORT_V1':
+                position_radius = registration_pose.sample.position_error_m
+                observed_ends = {}
+                if self._alignment is not None and self._last_tape.status == 'VALID':
+                    for strip in self._last_tape.strips:
+                        error_a, error_b = strip.endpoint_error_m
+                        if _physical_registration_strip(strip) and error_a is not None and error_b is not None:
+                            # 지도 조각은 중심선 좌표를 보관한다. 테이프 외곽 끝의 폭 여유는 대응에 더하지 않는다.
+                            observed_ends['strip:'+str(strip.local_id)] = (strip.points_xy[0], strip.points_xy[-1], strip.error_m)
+                if reference.feature_policy!='OBSERVED_STRIP_SUPPORT_V1':
+                    # 최초 정합에서도 후보를 capture별로 고정해 탐색 중 옆 차로를 다시 고르지 않는다.
                     reference = replace(reference,feature_policy='OBSERVED_STRIP_SUPPORT_V1',
                         segments=tuple(replace(s,component=s.capture_id+':'+s.component)
                             for s in reference.segments if s.a!=s.b))
                 common = overlapping_points(points, reference, prior, profile,
-                    lateral_m=self.profile.road.missing_outer_width_m / 2)
+                    observed_ends=observed_ends, position_radius_m=position_radius,
+                    max_lateral_match_m=self.profile.road.missing_outer_width_m / 2)
+                current_registration_observation=RegistrationObservation(capture,observation.rgb.stamp.key[:-1],
+                    raw_pose,points,tuple(observed_ends.items()))
                 if common:
                     physical=tuple(p for p in common if not p.normal_only)
                     normal_points=len(common)-len(physical)
                     registration_method='PHYSICAL' if physical else 'NORMAL'
-                    registration=register(physical or common,reference,prior,profile,calibration_id=self.calibration.sha256)
+                    registration=register(physical or common,reference,prior,profile,
+                        calibration_id=self.calibration.sha256,position_radius_m=position_radius)
                     cells=profile.max_cells-registration.tested_cells
                     tests=profile.max_distance_tests-registration.distance_tests
                     if (physical and len(physical)!=len(common) and registration.status not in ('BOUNDED','INCONSISTENT')
                             and cells>0 and tests>0):
                         normal=register(common,reference,prior,replace(profile,max_cells=cells,max_distance_tests=tests),
-                            calibration_id=self.calibration.sha256)
+                            calibration_id=self.calibration.sha256,position_radius_m=position_radius)
                         selected=normal if normal.status=='BOUNDED' else registration
                         if selected is normal:registration_method='MIXED'
                         registration=replace(selected,tested_cells=registration.tested_cells+normal.tested_cells,
@@ -510,6 +566,31 @@ class PerceptionPipeline:
                 else:
                     registration = RegistrationResult('NO_OVERLAP', None, None, None, (prior,),
                                                       self.reference.revision, 0, 0, True)
+                if (common and operational_localization and self._alignment is not None
+                        and registration.status not in ('INCONSISTENT','UNKNOWN_BUDGET')
+                        and registration.tested_cells < profile.max_cells
+                        and registration.distance_tests < profile.max_distance_tests):
+                    combined,older_reference=combined_constraints(self._registration_history,
+                        current_registration_observation,reference,prior,profile,position_radius_m=position_radius,
+                        max_lateral_match_m=self.profile.road.missing_outer_width_m/2,
+                        max_age_us=min(localization_valid_for_us,self.profile.max_observation_age_us))
+                    if combined:
+                        joint=register(combined,older_reference,prior,replace(profile,
+                            max_cells=profile.max_cells-registration.tested_cells,
+                            max_distance_tests=profile.max_distance_tests-registration.distance_tests),
+                            calibration_id=self.calibration.sha256,position_radius_m=position_radius)
+                        if (joint.status=='BOUNDED' and (registration.status!='BOUNDED'
+                                or (joint.position_error_m<=registration.position_error_m
+                                    and joint.yaw_error_rad<=registration.yaw_error_rad
+                                    and (joint.position_error_m<registration.position_error_m
+                                         or joint.yaw_error_rad<registration.yaw_error_rad)))):
+                            registration_method='MULTI_FRAME'
+                            normal_points=sum(p.normal_only for p in combined)
+                            selected=joint
+                        else:
+                            selected=registration
+                        registration=replace(selected,tested_cells=registration.tested_cells+joint.tested_cells,
+                            distance_tests=registration.distance_tests+joint.distance_tests)
                 if registration.status=='BOUNDED':
                     x,y,yaw=registration.representative
                     fitted=replace(pose.sample,x=x,y=y,yaw=yaw,
@@ -526,6 +607,16 @@ class PerceptionPipeline:
                     if operational_localization and not candidate_alignment.valid_at(now_us):
                         quarantined=True
                     else:
+                        if registration_method=='MULTI_FRAME':
+                            # 새 기준점에 남는 원 엔코더 오차까지 포함해 실제 전파 이득을 비교한다.
+                            projected=candidate_alignment.apply(raw_pose).sample
+                            earlier=pose.sample
+                            if (projected.position_error_m<=earlier.position_error_m
+                                    and projected.yaw_error_rad<=earlier.yaw_error_rad
+                                    and (projected.position_error_m<earlier.position_error_m
+                                         or projected.yaw_error_rad<earlier.yaw_error_rad)):
+                                self._previous_propagation_anchor=self._propagation_anchor
+                                self._propagation_anchor=candidate_alignment
                         pose=candidate_pose;self._alignment=candidate_alignment;self._restore_pending=False
                         if self._propagation_anchor is None:self._propagation_anchor=candidate_alignment
                         quarantined=False
@@ -535,6 +626,7 @@ class PerceptionPipeline:
                     if (registration.status != 'AMBIGUOUS_OR_UNOBSERVABLE'
                             or not registration.permits(estimate)):
                         quarantined = True
+        map_pose = pose if not quarantined and not self._restore_pending and self._alignment is not None else None
         odometry_rejection=None
         if pose is not None and (pose.sample.position_error_m>self.profile.registration.max_position_error_m
                 or pose.sample.yaw_error_rad>self.profile.registration.max_yaw_error_rad):
@@ -546,10 +638,11 @@ class PerceptionPipeline:
             odometry_rejection='ODOMETRY_STALE'
             quarantined=True
         if self._restore_pending:quarantined=True
-        if (points and not quarantined and (self.reference is None or registration is not None
-                and registration.status in ('BOUNDED', 'NO_OVERLAP'))):
+        if points and not quarantined:
             # 원 오도메트리 오차 안의 지도 갱신은 시각 정합의 만료를 갱신하지 않는다.
             self.reference = self._extend_reference(self._last_tape, capture, pose)
+            if current_registration_observation is not None and self._alignment is not None:
+                self._registration_history=(*self._registration_history,current_registration_observation)[-HISTORY_FRAMES:]
         grid=self.grid
         if quarantined:
             # 기존 atlas/reference는 그대로 두고 새 관측은 별도 body-frame 진단으로만 처리한다.
@@ -749,6 +842,24 @@ class PerceptionPipeline:
             self._current_lane = None
         self._current_lane, lane_status = track_lane(
             self._current_lane, self._last_road, self._last_tape, lane_pose, lane_scope, self.profile.road)
+        mapped_road = None
+        if (self._alignment is None and not self._restore_pending and rgb_new and geometry_qualified
+                and rgb_age is not None and rgb_age <= self.profile.max_observation_age_us):
+            self._temporal_road.collect_startup(self._last_tape,observation.rgb.stamp,raw_pose)
+        geometry_pose = lane_pose
+        if (geometry_pose is None and odometry_rejection == 'ODOMETRY_OUT_OF_BOUNDS'
+                and rgb_new and geometry_qualified and rgb_age is not None and rgb_age <= self.profile.max_observation_age_us):
+            geometry_pose = map_pose
+        if geometry_pose is not None and self._alignment is not None:
+            self._temporal_road.place_startup(self._propagation_anchor or self._alignment,
+                stamp=observation.rgb.stamp)
+            temporal = self._temporal_road.observe(self._last_tape,geometry_pose,self.profile.road,self.profile.tape,
+                stamp=observation.rgb.stamp,capture_pose=raw_pose,qualified=lane_pose is not None)
+            # 현재 영상이 여러 도로를 가리키거나 탐색을 끝내지 못했다면 후보를 승격하지 않는다.
+            if (self._last_road is None or (self._last_road.status == 'UNKNOWN'
+                    and len(self._last_road.hypotheses) <= 1 and set(self._last_road.reasons) <= {
+                        'NO_MEASURED_TAPE_WIDTH','NO_SUPPORTED_ROAD','GEOMETRY_ERROR_BUDGET'})):
+                mapped_road = temporal
         lane_section = None
         if lane_status == 'HELD' and lane_pose is not None:
             lane_section = mapped_lane_ahead(self._current_lane, lane_pose, self.profile.road)
@@ -801,6 +912,7 @@ class PerceptionPipeline:
             road_reasons=[] if self._last_road is None else list(self._last_road.reasons),
             current_lane=(dict(status=lane_status) if self._current_lane is None
                           else self._current_lane.summary(lane_status, lane_section)),
+            temporal_road_revision=self._temporal_road.revision,
             road_semantic_scored=0 if self._last_road is None else self._last_road.semantic_scored,
             neural_layer=None if self._last_neural is None else self._last_neural.descriptor(),
             neural_matches_current_rgb=self._last_neural is not None and self._last_neural.rgb_source_key==self._last_rgb_key,
@@ -834,7 +946,8 @@ class PerceptionPipeline:
                 hits=(hits_done-registration_done)//1000,free=(free_done-hits_done)//1000,
                 snapshot=(ended-free_done)//1000,total=(ended-started)//1000))
         if diagnostics is not None: summary['diagnostic_timings']=diagnostics.snapshot()
-        return PerceptionResult(summary,self._last_tape,self._last_road,evidence,registration,snapshot,self._last_rgb,self._last_neural)
+        return PerceptionResult(summary,self._last_tape,self._last_road,evidence,registration,snapshot,
+                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys)
 
 
 def render_diagnostics(result, calibration):

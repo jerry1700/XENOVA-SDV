@@ -7,7 +7,7 @@ actor/thread/요청 UUID를 만들지 않으며 LIVE/Scene 경계를 넓히지 �
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import get_ident
 
 from .mapper_catalogs import CatalogNotReady
@@ -176,7 +176,10 @@ class PcMapperCore:
                 mapped=inputs.pose
                 if qualified:
                     if result.registration is not None and result.registration.status=='BOUNDED':
-                        mapped=alignment.apply(inputs.pose)
+                        fit=result.registration
+                        x,y,yaw=fit.representative
+                        mapped=replace(inputs.pose,sample=replace(inputs.pose.sample,x=x,y=y,yaw=yaw,
+                            position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
                     else:
                         _,mapped=core._propagate_odometry(inputs.pose)
                 spec=core.grid.spec;low=spec.bounds(0,0);high=spec.bounds(spec.width-1,spec.height-1)
