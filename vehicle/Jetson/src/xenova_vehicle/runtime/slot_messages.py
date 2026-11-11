@@ -67,8 +67,7 @@ class SlotTimeLimits:
     def __post_init__(self):
         for value in (self.copy_budget_us, self.offer_budget_us, self.read_budget_us):
             _u64(value, positive=True)
-        if self.read_budget_us > 150000:
-            _fail('read budget exceeds the initial M frame cap')
+        # native 소유권 거래와 관측 신선도는 별개다. frame age는 consumer가 검사한다.
 
 
 @dataclass(frozen=True)
@@ -226,9 +225,9 @@ class SlotMessage:
                 _fail('GRANT must preserve original copy request ID/expiry')
             return WriteGrant(key, parent.record, issued)
         if op == 'FILLED':
-            if (key != parent.record.key or request_id != parent.request_id or expires != parent.expires_us
+            if (key != parent.record.key or request_id != parent.request_id
                     or not parent.issued_us <= issued < expires):
-                _fail('FILLED must preserve original grant/key/ID/expiry and completion order')
+                _fail('FILLED must preserve original grant/key/ID and actual completion order')
             return FilledInfo(key, payload['payload_length'], payload['descriptor_sha256'], issued)
         if op == 'OFFER':
             end = issued + limits.offer_budget_us

@@ -20,7 +20,7 @@ from ..perception.inputs import FrameStamp
 SOURCE_FIELDS=frozenset(('vehicle','device','mapper_boot','mapper_instance','clock_epoch','map_epoch','frame_epoch',
     'odom_epoch','configuration','calibration','primitive'))
 CRC_HEADER=struct.Struct('<16s16sQQI16sQB16sII32sBBH')
-CRC_ZONE=struct.Struct('<HBB')
+CRC_SAMPLE=struct.Struct('<HBB')
 
 
 class SampleRejected(ValueError):
@@ -191,15 +191,17 @@ class _Sensor:
 
 
 def tof_crc32(sample):
-    """부록B의 원 serial common metadata+64 interleaved zones=393B. Pi receive 시각은 제외한다."""
+    """단일 ToF의 원 common metadata137B+distance/status/quality4B. Pi receive 시각은 제외한다."""
     if type(sample.sensor_instance) is not bytes or len(sample.sensor_instance)!=16:raise SampleRejected('original sensor instance16 required')
-    distances=struct.unpack('<64H',sample.distance_mm_le)
+    if ((sample.rows,sample.cols)!=(1,1) or len(sample.distance_mm_le)!=2
+            or len(sample.status)!=1 or len(sample.quality)!=1):raise SampleRejected('exact1x1 original ToF return required')
+    distance=struct.unpack('<H',sample.distance_mm_le)[0]
     header=CRC_HEADER.pack(UUID(sample.pi_session).bytes,UUID(sample.device_session).bytes,sample.source_sample,sample.source_us,
         sample.sensor_time_error_us,UUID(sample.clock_epoch).bytes,sample.clock_seq,sample.sensor_id,sample.sensor_instance,sample.sensor_generation,
         sample.sensor_config_revision,bytes.fromhex(sample.calibration),sample.rows,sample.cols,sample.frame_status)
-    zones=b''.join(CRC_ZONE.pack(distance,status,quality) for distance,status,quality in zip(distances,sample.status,sample.quality))
-    if len(header)+len(zones)!=393:raise SampleRejected('original CRC profile layout differs')
-    return zlib.crc32(header+zones)
+    returned=CRC_SAMPLE.pack(distance,sample.status[0],sample.quality[0])
+    if len(header)+len(returned)!=141:raise SampleRejected('original CRC profile layout differs')
+    return zlib.crc32(header+returned)
 
 
 class SensorSamples:
@@ -318,6 +320,9 @@ class SensorSamples:
         old.clock_epoch=sample.clock_epoch;old.clock_sequence=sample.clock_seq
         old.evidence=None
         if sample.frame_status&3!=3:raise SampleRejected('ToF sensor/integration timing is not valid')
+        distance=struct.unpack('<H',sample.distance_mm_le)[0]
+        if sample.status[0]!=1 or not sample.quality[0]&1 or distance in (0,65535):
+            raise SampleRejected('ToF has no valid single return')
         error=sample.clock_error_us+sample.sensor_time_error_us
         pi=(sample.pi_sample_us-error,sample.pi_sample_us+error)
         interval=self._clock(clock_lease,pi,now_us,self.tof_age)
@@ -325,7 +330,7 @@ class SensorSamples:
         value=TofEvidence(raw,sha256(raw).hexdigest(),sample.sensor_id,instance,sample.sensor_generation,sample.sensor_config_revision,
             sample.calibration,self.context.calibration.sha256,self.context.source['odom_epoch'],sample.source_sample,sample.source_us,sample.source_crc32,
             sample.clock_epoch,sample.clock_seq,sample.clock_error_us,sample.sensor_time_error_us,sample.frame_status,
-            struct.unpack('<64H',sample.distance_mm_le),sample.status,sample.quality,pi,interval,stamp,clock_lease,interval[0]+self.tof_age)
+            (distance,),sample.status,sample.quality,pi,interval,stamp,clock_lease,interval[0]+self.tof_age)
         old.evidence=value
         return value
 

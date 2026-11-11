@@ -2,6 +2,52 @@
 #include "controller.h"
 #include <string.h>
 
+static bool command_context_same(const struct drive_command_context *a,const struct drive_command_context *b)
+{
+ return a->control_revision==b->control_revision&&a->connection_revision==b->connection_revision&&
+  a->lifetime==b->lifetime&&a->generation==b->generation&&a->mode==b->mode&&
+  !strcmp(a->app_instance,b->app_instance);
+}
+bool drive_deadline_attempt_due(struct drive_deadline_gate *gate,const struct drive_command_context *context,
+ uint64_t sequence,const char *reason)
+{
+ if(!gate)return true;
+ if(!context||context->mode!=DRIVE_AUTO||!context->control_revision||!context->connection_revision||
+    !context->lifetime||!context->generation||!sequence||
+    strnlen(context->app_instance,sizeof(context->app_instance))!=XM_UUID_LEN){
+  gate->seen=false;gate->misses=0;return true;
+ }
+ bool same=gate->seen&&command_context_same(&gate->context,context);
+ if(same&&sequence<=gate->sequence)return false;
+ if(!same)gate->misses=0;
+ gate->context=*context;gate->sequence=sequence;gate->seen=true;
+ if(!reason||strcmp(reason,"DEADLINE")){gate->misses=0;return true;}
+ if(gate->misses<DRIVE_DEADLINE_RETRY_LIMIT)gate->misses++;
+ return gate->misses>=DRIVE_DEADLINE_RETRY_LIMIT;
+}
+
+bool drive_command_attempt_due(struct drive_command_gate *gate,const struct drive_command_context *context,
+ uint64_t check,const char *reason,float v_mps,float steer_rad)
+{
+ if(!gate)return true;
+ /* Exact zero excludes NaN/Inf without changing the existing output guard.
+  * Invalid metadata must pass to the original path, never become a cache key. */
+ size_t reason_length=reason?strnlen(reason,sizeof(gate->reason)):0;
+ if(!reason_length||reason_length>=sizeof(gate->reason)||v_mps!=0||steer_rad!=0||!context||
+    !context->control_revision||!context->connection_revision||!context->lifetime||!context->generation||
+    (context->mode!=DRIVE_AUTO&&context->mode!=DRIVE_MANUAL)||
+    strnlen(context->app_instance,sizeof(context->app_instance))!=XM_UUID_LEN){
+  gate->restricted=false;return true;
+ }
+ bool same=gate->restricted&&command_context_same(&gate->context,context)&&!strcmp(gate->reason,reason);
+ if(same&&gate->check==check)return false;
+ /* The check is a local supervisor observation, not a new command deadline.
+  * Retain only the last attempted check; do not claim queue or device success. */
+ gate->context=*context;gate->check=check;
+ memcpy(gate->reason,reason,reason_length+1);gate->restricted=true;
+ return true;
+}
+
 void drive_controller_init(struct drive_controller *c)
 {
  memset(c,0,sizeof(*c));drive_auto_adapter(&c->automatic,&c->auto_cfg);drive_manual_adapter(&c->manual,&c->manual_cfg);

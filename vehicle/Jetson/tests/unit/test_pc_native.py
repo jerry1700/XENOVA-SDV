@@ -10,6 +10,7 @@ from multiprocessing import shared_memory
 import sys
 import time
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 
 import test_pc_slot as slot_fixtures
@@ -53,6 +54,26 @@ class PcNativeTests(unittest.TestCase):
         return lease, wanted
 
     def values(self): return tuple((w.get_value(), r.get_value()) for w, r in self.tokens)
+
+    def test_copy_finishes_after_frame_expiry_and_still_returns_actual_tokens(self):
+        _, info = self.publish()
+        lease, wanted = self.lease(info)
+        expiry = self.encoding.expires_j_us
+        with patch('xenova_vehicle.runtime.pc_native._now', side_effect=[now_us(),expiry+1,expiry+2]):
+            owned, returned = self.reader.copy_owned(lease,wanted)
+        self.assertEqual(owned.expires_j_us,expiry)
+        self.assertEqual(returned.writable_posted_us,expiry+2)
+        self.assertEqual(self.values(),((1,0),(1,0)))
+
+    def test_native_write_ownership_budget_can_outlive_frame_without_retiming_payload(self):
+        now = now_us(); expiry = self.encoding.expires_j_us
+        request = LeaseRequest(str(uuid4()),now,expiry+1_000_000)
+        grant = WriteGrant(self.encoding.context.write_key,request,now)
+        with patch('xenova_vehicle.runtime.pc_native._now',side_effect=[now,expiry+1,expiry+2]):
+            info = self.writer.publish(grant,self.encoding)
+        self.assertEqual(info.completed_us,expiry+2)
+        self.assertEqual(self.encoding.expires_j_us,expiry)
+        self.assertEqual(self.values(),((0,1),(1,0)))
 
     def test_actual_tokens_copy_then_next_generation_nn_preserve_original_job_and_e(self):
         grant, info = self.publish()

@@ -29,6 +29,8 @@ DOCUMENTATION = (
     "docs/requests/2026-10-27-recovery-health-ctrl.md",
     "docs/requests/2026-10-27-authority-recovery-ctrl.md",
     "docs/verification/platform-management-boundaries-history.md",
+    "docs/verification/recovery-scenario-closure-20261030.md",
+    "platform/deploy/mosquitto/README.md",
     "docs/verification/zephyr-lifecycle-20261025.md", "docs/verification/boot-status-20261025.md",
     "platform/tests/fixtures/cpu-layout-responses.json",
     "platform/yocto/layers.lock", "platform/guests/sources.lock.json",
@@ -73,8 +75,8 @@ def runtime_sources():
         "xenova_recovery", "xenova_resources", "xenova_zephyr_control",
         "xenova_zephyr_transition", "xenova_domain_identity", "xenova_catalog",
         "xenova_management", "xenova_management_cli", "xenova_first_boot", "xenova_wifi",
-        "xenova_preparation", "xenova_creation", "xenova_provisioning", "xenova_guest_profile",
-        "xenova_registration_hook", "xenova_registration", "xenova_drive_binding")}
+        "xenova_preparation", "xenova_creation", "xenova_creation_auto", "xenova_provisioning", "xenova_guest_profile",
+        "xenova_registration_hook", "xenova_registration", "xenova_display_sync", "xenova_display_setup", "xenova_drive_binding")}
     result["xenova_broker.py"] = "platform/deploy/mosquitto/scripts/xenova_broker.py"
     result.update({name + ".py": f"platform/first-install/{name}.py"
                    for name in ("artifact_io", "first_install_contract")})

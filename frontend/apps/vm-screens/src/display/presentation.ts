@@ -1,4 +1,4 @@
-import type { DisplayVm, Presentation } from './model';
+import type { Presentation } from './model';
 
 const MODES: Record<string, string> = {
   AUTO: '자율주행',
@@ -6,14 +6,6 @@ const MODES: Record<string, string> = {
   AUTO_READY: '자율 재개 대기',
   SAFE_STOP: '안전 정지',
 };
-const OS_NAMES: Record<string, string> = { zephyr: 'Zephyr', debian: 'Debian' };
-export const osName = (name: string) => OS_NAMES[name] ?? name;
-export function osReport(vm: DisplayVm, connected: boolean) {
-  if (!connected) return 'OS 보고 연결 미확인';
-  if (!vm.os.observed) return 'OS 보고 미수신';
-  if (vm.sources.inventory.status !== 'fresh') return 'OS 보고 지연 · 현재 OS 미확인';
-  return `OS 보고: ${osName(vm.os.observed)}${vm.os.current_run_verified ? '' : ' · 실행 연결 미검증'}`;
-}
 
 export function driveSummary(p: Presentation | null, connected: boolean, valid = true) {
   const fresh = connected && valid && p?.state.drive.source.status === 'fresh';

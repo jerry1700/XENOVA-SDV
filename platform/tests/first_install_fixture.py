@@ -159,8 +159,10 @@ def platform_root(root):
                'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
+                 'xenova_creation.py','xenova_creation_auto.py',
                  'xenova_resources.py','xenova_zephyr_transition.py','xenova_zephyr_control.py',
-                 'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py'):
+                 'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
+                 'xenova_display_sync.py','xenova_display_setup.py'):
         mapping['usr/lib/xenova/'+name] = FILES/name
     mapping['usr/lib/xenova/xenova_broker.py']=ROOT/'platform/deploy/mosquitto/scripts/xenova_broker.py'
     mapping['usr/share/xenova/mqtt/policy.json']=ROOT/'platform/deploy/mosquitto/etc/policy.json'
@@ -210,6 +212,9 @@ def platform_root(root):
         (wants / name).symlink_to('/usr/lib/systemd/system/' + name)
     collector = assemble.deployment_payloads.COLLECTOR
     (wants/collector).symlink_to('/usr/lib/systemd/system/' + collector)
+    for name in ('xenova-display-feed.service', 'xenova-display-guest-relay.service', 'xenova-display-check.service'):
+        (wants/name).symlink_to('/usr/lib/systemd/system/'+name)
+    (root/'usr/sbin/xenova-display-setup').chmod(0o755)
     early = root/'etc/systemd/system/sysinit.target.wants'
     early.mkdir(parents=True, exist_ok=True)
     (early/'xenova-boot-status.service').symlink_to('/usr/lib/systemd/system/xenova-boot-status.service')

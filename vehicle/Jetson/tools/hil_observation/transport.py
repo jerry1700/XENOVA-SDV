@@ -290,6 +290,7 @@ class PacketSender:
         self.endpoint, self.scope = _endpoint(endpoint), scope
         self._pending = self._active = None
         self._part = self._offset = 0
+        self._transfer_end = None
         self._heads = {}
         self.closed, self.failure = False, None
         self._stats = dict(offered=0, replaced=0, sent_packets=0, sent_bytes=0, expired=0, failed=0)
@@ -343,12 +344,20 @@ class PacketSender:
         if self._active is None:
             self._active, self._pending = self._pending, None
             self._part = self._offset = 0
+            from xenova_vehicle.runtime.health_policy import health_policy
+            self._transfer_end = now + health_policy().control_stall_us
         if self._active is None:
             return None
         packet, expires = self._active
         if now >= expires:
-            self._stats['expired'] += 1
-            self._fail('original send deadline expired; caller must close connection', TransportTimeout)
+            if self._part == 0 and self._offset == 0:
+                self._stats['expired'] += 1
+                self._active = None
+                return None
+            # 이미 전송한 header 뒤에는 같은 body를 끝내야 한다. 관측 E는 그대로여서
+            # 수신자는 늦은 프레임을 폐기하며 이 시간은 새 관측 유효기간이 아니다.
+            if now >= self._transfer_end:
+                self._fail('partial transfer stalled beyond connection budget', TransportTimeout)
         part = packet.wire_parts[self._part]
         try:
             sent = self.endpoint.send(memoryview(part)[self._offset:self._offset + MAX_IO])

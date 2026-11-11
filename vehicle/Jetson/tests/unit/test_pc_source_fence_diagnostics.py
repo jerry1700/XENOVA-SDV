@@ -1,7 +1,7 @@
 """원 PC fence 사유와 A loop의 유한 진단·기존 정리 경계를 검사한다.
 
 고정 software clock과 socketpair만 사용한다. S 생성·worker 등록·Device·NN·DB를
-시작하지 않으며, owner sentinel은 dispatch의 존재 검사만 위한 값이다.
+시작하지 않으며, owner·출력 경계는 원 관측 철회 호출을 기록하는 대역이다.
 """
 
 from dataclasses import replace
@@ -49,9 +49,12 @@ class PcSourceFenceDiagnosticsTests(unittest.TestCase):
     def runtime(self, role, supervisor):
         # 실제 S 생성의 자원 부작용 없이 원 dispatch와 inherited event만 호출한다.
         runtime = object.__new__(pc_resident_runtime.PcResidentRuntime)
-        runtime._pc_owner = object()
+        runtime._pc_owner = SimpleNamespace(fence=Mock())
         runtime._pc_links = {role: supervisor}
         runtime.events = []
+        runtime.broker = SimpleNamespace(set_publication=Mock())
+        runtime.jio = SimpleNamespace(set_world_dispatch_enabled=Mock())
+        runtime._queue_forward = Mock()
         return runtime
 
     def receive_fence(self, role, metadata):
@@ -64,7 +67,7 @@ class PcSourceFenceDiagnosticsTests(unittest.TestCase):
         self.assertEqual(received.packet.raw, packet.raw)
         return supervisor, received
 
-    def test_a_and_m_fence_record_original_metadata_before_same_terminal_error(self):
+    def test_a_and_m_fence_record_original_metadata_and_keep_runtime_resident(self):
         for role, failure in (('A', 'stream receive failed: ConnectionResetError'), ('M', None)):
             with self.subTest(role=role):
                 original = dict(reason='TransportError' if failure else 'DURATION', failure=failure)
@@ -76,33 +79,39 @@ class PcSourceFenceDiagnosticsTests(unittest.TestCase):
                 packet.header['metadata']['failure'] = 'changed decoded copy'
                 runtime = self.runtime(role, supervisor)
 
-                with self.assertRaisesRegex(RuntimeError, '^PC_'+role+'_SOURCE_FENCE$'):
-                    runtime._pc_message(role, received)
+                runtime._pc_message(role, received)
 
                 self.assertEqual(runtime.events, [dict(event='PC_SOURCE_FENCE',
-                    observed_j_us=str(self.now), role=role, metadata=original)])
+                    observed_j_us=str(self.now), role=role, metadata=original),
+                    dict(event='PC_INPUT_UNAVAILABLE', observed_j_us=str(self.now), role=role)])
+                runtime._pc_owner.fence.assert_called_once_with('PC_INPUT_UNAVAILABLE')
+                runtime.broker.set_publication.assert_called_once_with(None)
+                runtime.jio.set_world_dispatch_enabled.assert_called_once_with(False)
+                runtime._queue_forward.assert_called_once_with(received, 'M' if role == 'A' else 'A')
+                self.assertTrue(runtime._pc_input_unavailable)
                 runtime.events[0]['metadata']['reason'] = 'changed diagnostic copy'
                 self.assertEqual(packet.metadata, original)
                 self.assertEqual((packet.raw, packet.expires_us, packet.request_id, packet.sequence),
                     (raw, expires, request, sequence))
 
-    def test_missing_owner_and_exact_expiry_keep_original_timeout_without_event(self):
+    def test_missing_owner_rejected_but_expired_fence_keeps_original_cleanup_fact(self):
         for role in ('A', 'M'):
             with self.subTest(role=role):
                 supervisor, received = self.receive_fence(role, dict(reason='DURATION', failure=None))
                 runtime = self.runtime(role, supervisor)
+                owner = runtime._pc_owner
                 runtime._pc_owner = None
                 with self.assertRaisesRegex(TimeoutError,
                         '^PC actor message has no current original source owner/lifetime$'):
                     runtime._pc_message(role, received)
                 self.assertEqual(runtime.events, [])
 
-                runtime._pc_owner = object()
+                runtime._pc_owner = owner
                 self.now = received.packet.expires_us
-                with self.assertRaisesRegex(TimeoutError,
-                        '^PC actor message has no current original source owner/lifetime$'):
-                    runtime._pc_message(role, received)
-                self.assertEqual(runtime.events, [])
+                runtime._pc_message(role, received)
+                owner.fence.assert_called_once_with('PC_INPUT_UNAVAILABLE')
+                self.assertEqual(runtime.events[0]['event'], 'PC_SOURCE_FENCE')
+                self.assertEqual(received.packet.expires_us, self.now)
                 self.assertLess(received.received_j_us, received.packet.expires_us)
 
     def test_foreign_actual_receive_ticket_is_rejected_before_diagnostic(self):
