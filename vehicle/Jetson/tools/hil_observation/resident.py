@@ -113,11 +113,12 @@ def _path(base, value):
 
 
 def load_motion_profile(development_raw, motion_raw, *, expected_development_sha256,
-                        expected_motion_sha256, expected_calibration_sha256):
+                        expected_motion_sha256, expected_calibration_sha256, derived_development=None):
     """원 개발 metadata를 constructor만으로 재구성한다. 원문·모든 파생 필드도 비교한다.
 
     이 함수는 SDK/clock/plant를 만들지 않는다. motion1은 명시 estimated 원문만,
-    motion2는 원 가상 steering leaf를 재구성한다. 누락 필드에 기본값을 넣지 않는다.
+    motion2는 원 가상 steering leaf를 재구성한다. 명시적으로 새 개발 모델을
+    주면 원문 검산 뒤 같은 motion 가정으로 새 모델을 만든다.
     """
     from xenova_vehicle.simulation.profile import DevelopmentProfile
     from xenova_vehicle.simulation.motion_profile import DevelopmentMotionProfile
@@ -172,6 +173,8 @@ def load_motion_profile(development_raw, motion_raw, *, expected_development_sha
         and motion.sha256 == expected_motion_sha256
         and motion.bound_calibration.sha256 == expected_calibration_sha256,
         'reconstructed motion fields/canonical/whole bundle/local calibration differ')
+    if derived_development is not None:
+        return DevelopmentMotionProfile(derived_development, **arguments)
     return motion
 
 
@@ -188,7 +191,7 @@ class ResidentInstallation:
     service_scope: str | None
 
 
-def load_installation(path):
+def load_installation(path, *, expected_sha256=None):
     """명시 실행 JSON을 읽고 원 metadata/profile의 핀을 검사한다. 실행·연결은 하지 않는다."""
     from xenova_vehicle.yolop_profile import load_yolop_profile
     from xenova_vehicle.runtime.mapper_profile import MapperProfile
@@ -200,7 +203,10 @@ def load_installation(path):
     from .clock import ClockPolicy
 
     path = Path(path).expanduser().absolute()
-    value = _json(_read(path, MAX_CONFIG_BYTES), MAX_CONFIG_BYTES)
+    config_raw = _read(path, MAX_CONFIG_BYTES)
+    if expected_sha256 is not None:
+        _need(sha256(config_raw).hexdigest() == _digest(expected_sha256), 'installation bytes SHA differs')
+    value = _json(config_raw, MAX_CONFIG_BYTES)
     _keys(value, ('profile', 'inputs', 'jio_profile_path', 'storage', 'runtime', 'pc',
         'capture_clock', 'probe_interval_us', 'observation_duration_s', 'slot_limits', 'cleanup_limits'))
     _need(value['profile'] == PROFILE, 'explicit PC resident run profile required')
@@ -215,12 +221,13 @@ def load_installation(path):
         paths[name] = _path(path.parent, row['path'])
         raw[name] = _read(paths[name], cap)
         _need(sha256(raw[name]).hexdigest() == _digest(row['sha256']), 'pinned original '+name+' bytes differ')
-    # 원 e80 진단 또는 별도 a9f83 crossing 선언만 명시 선택한다. 원문을 보정하지 않는다.
-    _need(inputs['development_profile']['sha256'] == PINNED_DEVELOPMENT_SHA256
-        and inputs['motion_profile']['sha256'] == PINNED_MOTION_SHA256
-        and inputs['mapper_profile']['sha256'] in (PINNED_MAPPER_SHA256, FOLLOW_MAPPER_SHA256)
-        and inputs['calibration_profile_sha256'] == PINNED_CALIBRATION_SHA256,
-        'this development assembly requires its original pinned metadata family')
+    # 새 개발 family는 파일별 SHA를 고정하는 명시 installation SHA로 선택한다.
+    if expected_sha256 is None:
+        _need(inputs['development_profile']['sha256'] == PINNED_DEVELOPMENT_SHA256
+            and inputs['motion_profile']['sha256'] == PINNED_MOTION_SHA256
+            and inputs['mapper_profile']['sha256'] in (PINNED_MAPPER_SHA256, FOLLOW_MAPPER_SHA256)
+            and inputs['calibration_profile_sha256'] == PINNED_CALIBRATION_SHA256,
+            'this development assembly requires its original pinned metadata family')
     motion = load_motion_profile(raw['development_profile'], raw['motion_profile'],
         expected_development_sha256=inputs['development_profile']['sha256'],
         expected_motion_sha256=inputs['motion_profile']['sha256'],
@@ -337,13 +344,14 @@ def _save_final_failure(output, result):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='명시 PC 관측 한 연결의 개발용 A/S/M/D 상주 실행')
     parser.add_argument('--installation', type=Path, required=True)
+    parser.add_argument('--installation-sha256', help='pin the entire configuration when selecting a new development family')
     parser.add_argument('--listen-host', required=True, help='명시 numeric IPv4, 자동 주소 선택 없음')
     parser.add_argument('--listen-port', type=int, required=True)
     parser.add_argument('--accept-timeout-s', type=float, required=True)
     args = parser.parse_args(argv)
     endpoint = None
     try:
-        installation = load_installation(args.installation)
+        installation = load_installation(args.installation, expected_sha256=args.installation_sha256)
         endpoint = accept_once(args.listen_host, args.listen_port, args.accept_timeout_s)
         result = run_connected(installation, endpoint)
     except (OSError, ValueError, RuntimeError, ImportError) as error:
