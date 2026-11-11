@@ -7,6 +7,9 @@
 #include <float.h>
 
 #define PI 3.14159265358979323846f
+/* Initial parking tracker limits from the R45 host simulation. */
+#define LP_PARKING_TRACK_SPEED_MPS 0.16f
+#define LP_PARKING_TRACK_RESPONSE_M 0.10f
 _Static_assert(sizeof(struct lp_node)<=64,"signed gear/cusp labels preserve the design node bound");
 static float clamp(float v,float low,float high) { return fminf(high,fmaxf(low,v)); }
 static enum lp_result guard(const struct lp_budget *b,struct lp_metrics *m) {
@@ -1176,7 +1179,7 @@ static enum lp_result project(const dw_world *w,dw_pose pose,float current_veloc
  if(current_velocity*velocity<0)return LP_INPUT;
  float maximum=fmaxf(c->max_velocity,c->max_reverse_velocity);
  struct tr_view view;
- bool tight=task&&!(space&&(space->parking||space->exiting))&&narrow_lane(w,task,c,&view);
+ bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||narrow_lane(w,task,c,&view));
  float interval=fminf(tight?.01f:.025f,c->resolution/(4*fmaxf(maximum,.01f)));
  float time=0,v=current_velocity,delta=current_steer;*known=0;
  float horizon=c->reaction_s+fmaxf(fabsf(v),fabsf(velocity))/c->max_brake+.1f;
@@ -1417,7 +1420,8 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  /* Only the last selected parking segment has a region terminal. Its actual
   * correspondence must be in the same movement window; a clipped projection
   * cannot turn a teleport or an earlier cusp into completed progress. */
- bool parking_final=path->space.parking&&!path->space.exiting&&tracker->segment+1==path_segments(path);
+ bool parking_entry=path->space.parking&&!path->space.exiting;
+ bool parking_final=parking_entry&&tracker->segment+1==path_segments(path);
  bool intended_gear=!path->execution.present||path->execution.mission.kind!=2||
   (path->execution.mission.strategy==1&&gear==-1)||(path->execution.mission.strategy==2&&gear==1);
  if(parking_final)captured=pose_in_window&&intended_gear&&stopped_result==LP_PATH_FOUND&&
@@ -1442,34 +1446,36 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
  /* AUTO publishes an episode snapshot even when its state is NONE. */
  bool ordinary_episode=!path->has_episode||path->episode.core.state==1;
  bool avoidance_episode=path->has_episode&&path->episode.core.state==2;
- bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode)&&!path->space.parking&&
-  !path->space.exiting&&!path->has_route&&
-  narrow_lane(w,&live_task,c,&narrow_view)&&(!live_task.changing||change_toward_outside(&narrow_view));
- if(narrow){
+ bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode||live_task.changing)&&
+  !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,&narrow_view);
+ if(narrow||parking_entry){
   dw_pose reference_pose=carrot(path,segment,tracker->progress);
   dw_pose error=dw_compose(dw_inverse(reference_pose),pose);
-  float response=c->lookahead_min*(.24f/.35f);
+  float response=parking_entry?LP_PARKING_TRACK_RESPONSE_M:c->lookahead_min*(.24f/.35f);
   float feed=tanf(path->points[tracker->index].steering_rad)/c->wheelbase;
-  out->curvature=feed-2*dw_angle(error.yaw)/response-error.y/(response*response);
+  out->curvature=feed-2*gear*dw_angle(error.yaw)/response-error.y/(response*response);
   delta=clamp(atanf(c->wheelbase*out->curvature),-allowed,allowed);
  }
  delta=steering+clamp(delta-steering,-c->steer_rate*dt,c->steer_rate*dt);
  float speed=gear>0?c->max_velocity:c->max_reverse_velocity;
  if(narrow)speed=fminf(speed,c->narrow_lane_speed_mps);
+ if(parking_entry)speed=fminf(speed,LP_PARKING_TRACK_SPEED_MPS);
  if(fabsf(out->curvature)>1e-6f)speed=fminf(speed,sqrtf(c->max_lateral_accel/fabsf(out->curvature)));
  for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
   float ds=distance(path->points[i-1].pose,path->points[i].pose),slope=fabsf(path->points[i].steering_rad-path->points[i-1].steering_rad)/ds;
   if(slope>1e-6f)speed=fminf(speed,c->steer_rate/slope);
  }
  float reaction=fabsf(vehicle->velocity_mps)*c->reaction_s+.5f*c->max_accel*c->reaction_s*c->reaction_s;
+ bool can_creep=parking_final&&remaining>vehicle->position_error_m&&speed>=c->min_control_speed;
  speed=fminf(speed,sqrtf(2*c->max_brake*fmaxf(0,remaining-reaction-vehicle->position_error_m)));
+ if(can_creep)speed=fmaxf(speed,c->min_control_speed);
  if(path->space.parking&&speed<c->min_control_speed)return out->result=LP_INPUT;
  enum lp_result rc=project(w,pose,vehicle->velocity_mps,steering,gear*speed,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space);
  if(rc!=LP_PATH_FOUND&&rc!=LP_COLLISION)return out->result=rc;
  /* A failed fast sweep can still have a safe slower command. Each candidate
   * covers reaction and braking, and the acceleration-limited command below
   * is checked again before publishing. */
- if(narrow&&rc==LP_COLLISION)for(unsigned i=1;i<=3;i++){
+ if((narrow||parking_final)&&rc==LP_COLLISION)for(unsigned i=1;i<=3;i++){
   float candidate=speed*(1-.25f*i);
   rc=project(w,pose,vehicle->velocity_mps,steering,gear*candidate,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space);
   if(rc!=LP_COLLISION){speed=candidate;break;}
@@ -1481,7 +1487,7 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
   float limit=sqrtf(c->max_brake*c->max_brake*c->reaction_s*c->reaction_s+2*c->max_brake*safe)-c->max_brake*c->reaction_s;
   speed=fminf(speed,limit);
  }
- float actual=fabsf(vehicle->velocity_mps),limited=actual+clamp(speed-actual,-c->max_brake*dt,c->max_accel*dt);
+ float actual=fabsf(vehicle->velocity_mps),limited=clamp(speed,fmaxf(0,actual-c->max_brake*dt),actual+c->max_accel*dt);
  if(path->space.parking&&limited>0&&limited<c->min_control_speed)return out->result=LP_INPUT;
  if(speed<actual-c->max_brake*dt){limited=0;out->emergency=true;}
  rc=project(w,pose,vehicle->velocity_mps,steering,gear*limited,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space);

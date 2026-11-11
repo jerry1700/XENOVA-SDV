@@ -7,7 +7,7 @@ import ctypes as C
 import json
 import math
 import pytest
-from test_lattice import library, Product, FOUND, obstacle
+from test_lattice import library, Product, CFG, FOUND, obstacle
 from test_engine import modern_world
 from world_codec import schema
 
@@ -35,6 +35,7 @@ def placed_world(count=1,*,shared_entry=True):
 def ports(lib):
     lib.probe_parking_goal_set.argtypes=[C.c_void_p,C.c_uint32,C.c_uint,C.POINTER(C.c_float)]
     lib.probe_parking_search.argtypes=[C.c_void_p,C.c_uint32,C.c_float,C.c_float,C.c_float]
+    lib.probe_parking_search_strategy.argtypes=[C.c_void_p,C.c_uint32,C.c_float,C.c_float,C.c_float,C.c_uint]
     lib.probe_parking_trace.argtypes=[C.c_void_p,C.POINTER(C.c_double)]
     lib.probe_parking_trace.restype=None
     lib.probe_parking_terminal.argtypes=[C.c_void_p,C.c_uint32,C.c_float,C.c_float,C.c_float,C.c_float]
@@ -83,6 +84,32 @@ def test_actual_signed_goal_set_enters_only_the_selected_known_slot(library,tmp_
         assert all(point[4]<=0 for point in product.path())
         assert product.path()[-1][1]<.8
     finally: product.close()
+
+
+def test_forward_parking_tracks_at_low_speed_and_stops_for_new_occupancy(library):
+    ports(library)
+    world=placed_world()
+    slot=world.parking_slots[0]
+    slot.goal_mask=3
+    slot.forward_goal.CopyFrom(schema.Pose(x=1.5,y=.4,yaw=-math.pi/2))
+    product=Product(library,world)
+    try:
+        goals=(C.c_float*81)()
+        assert library.probe_parking_goal_set(product.handle,1,2,goals)>0
+        # A straight approach two test primitives from the first parking seed.
+        approach=2*CFG['primitive_speed']*CFG['primitive_duration']
+        pose=(goals[0],goals[1]+approach,goals[2])
+        assert library.probe_parking_search_strategy(product.handle,1,*pose,2)==FOUND
+        rc,command=product.track(pose,.16,0.)
+        assert rc==FOUND and command[0]==pytest.approx(.16)
+        ix=int(pose[0]/world.resolution_m)
+        iy=int(pose[1]/world.resolution_m)
+        obstacle(world,ix,ix+1,iy,iy+1)
+        product.update(world)
+        rc,command=product.track(pose,.16,0.)
+        assert rc==10 and command[0]==0.
+    finally:
+        product.close()
 
 
 def test_signed_parking_rejects_padded_root_across_the_forbidden_divider(library,tmp_path):

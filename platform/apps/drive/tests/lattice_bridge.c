@@ -54,10 +54,10 @@ int probe_parking_terminal(void *pointer,uint32_t slot,float x,float y,float yaw
  float radius=hypotf(fmaxf(p->config.front,p->config.rear)+p->config.margin,p->config.half_width+p->config.margin);
  return dp_terminal_accept(&space,(dw_pose){x,y,yaw},error+radius*.003f,goals.poses[0],.003f,&p->config);
 }
-int probe_parking_search(void *pointer,uint32_t slot,float x,float y,float yaw){
+int probe_parking_search_strategy(void *pointer,uint32_t slot,float x,float y,float yaw,unsigned strategy){
  struct probe *p=pointer;const dw_world *w=&p->snapshot.world;const xenova_drive_ParkingSlot *s=dp_slot(w,slot);
  struct lp_goal_set goals;struct lp_space space;struct dp_limits limits=parking_limits(&p->config);
- if(!dp_slot_eligible(w,s,1)||!dp_goal_seeds(s,1,&p->config,&limits,.01f,&goals,&space)||!tr_basis_accept(&p->basis,w))return LP_INPUT;
+ if(!dp_slot_eligible(w,s,strategy)||!dp_goal_seeds(s,strategy,&p->config,&limits,.01f,&goals,&space)||!tr_basis_accept(&p->basis,w))return LP_INPUT;
  struct tr_intent task={true,false,s->approach_lane_id,s->approach_lane_id,s->approach_lane_id,.01f};
  struct tr_view view;dw_pose root={x,y,yaw};memset(p->parking_trace,0,sizeof(p->parking_trace));
  bool opened=tr_open(w,&task,&view);
@@ -67,7 +67,7 @@ int probe_parking_search(void *pointer,uint32_t slot,float x,float y,float yaw){
  p->parking_trace[14]=x;p->parking_trace[15]=y;p->parking_trace[16]=yaw;
  p->parking_trace[17]=goals.poses[0].x;p->parking_trace[18]=goals.poses[0].y;p->parking_trace[19]=goals.poses[0].yaw;
  uint64_t now;clock_us(NULL,&now);struct lp_budget b={now+1000000,clock_us,cancelled,p,&p->collision_index};
- enum lp_result rc=lp_start_parking(&p->search,w,(dw_pose){x,y,yaw},0,&goals,-1,2,&space,&task,&p->basis,&p->config,&lp_selected_assets,b);
+ enum lp_result rc=lp_start_parking(&p->search,w,(dw_pose){x,y,yaw},0,&goals,goals.final_gear,2,&space,&task,&p->basis,&p->config,&lp_selected_assets,b);
  p->parking_trace[1]=rc;
  while(rc==LP_SEARCHING)rc=lp_advance(&p->search,8,&p->path);
  p->parking_trace[2]=rc;p->parking_trace[4]=p->search.selected_goal;p->parking_trace[5]=p->path.count;
@@ -78,6 +78,9 @@ int probe_parking_search(void *pointer,uint32_t slot,float x,float y,float yaw){
   p->parking_trace[20]=last.x;p->parking_trace[21]=last.y;p->parking_trace[22]=last.yaw;
   p->parking_trace[23]=dp_goal_contains(&space,last,p->config.tracking_guard+task.vehicle_pad,&p->config);}
  return rc;
+}
+int probe_parking_search(void *pointer,uint32_t slot,float x,float y,float yaw){
+ return probe_parking_search_strategy(pointer,slot,x,y,yaw,1);
 }
 void probe_parking_trace(void *pointer,double out[24]){memcpy(out,((struct probe *)pointer)->parking_trace,24*sizeof(*out));}
 void *probe_behavior_new(void *pointer){
