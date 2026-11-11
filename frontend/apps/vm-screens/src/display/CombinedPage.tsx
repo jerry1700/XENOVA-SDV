@@ -1,38 +1,40 @@
-import { useEffect, useState } from 'react';
-import { obstacleAhead } from './course';
-import { CourseNav } from './CourseNav';
-import { CourseScene } from './CourseScene';
-import {
-  activeCommand,
-  courseOf,
-  maxSpeedOf,
-  RATED_RUNTIME_S,
-  remainingRuntimeS,
-  tripOf,
-  vmLineStatus,
-  vehicleOf,
-} from './driveExtras';
-import { ROLE } from './model';
-import { DEPART_MS, ParkedView, type ParkedCallout } from './ParkedView';
+import { useEffect, useState, type ReactNode } from 'react';
+import { ArcGauge, type GaugeTone } from './ArcGauge';
+import { CarTop } from './CarTop';
 import { DisplayAudioControl, useDisplayAudio } from './DisplayAudio';
+import {
+  BatteryIcon,
+  CarIcon,
+  LinkIcon,
+  NoteIcon,
+  SpeedIcon,
+  SteeringIcon,
+  WarningIcon,
+} from './DriverIcons';
+import {
+  batteryOf,
+  driverMode,
+  gaugeMaxOf,
+  MAX_STEER_RAD,
+  maxSpeedOf,
+  steeringOf,
+  vehicleOf,
+  type DriverModeTone,
+} from './driveExtras';
 import { driveSummary } from './presentation';
-import { useDisplayTheme } from './theme';
-import { useScenarioSteps } from './scenarioSteps';
+import { averageSpeed, useSpeedHistory } from './speedHistory';
+import { SpeedTrend } from './SpeedTrend';
 import { useDisplay } from './useDisplay';
-import { useSmoothPose } from './useSmoothPose';
-import styles from './combined.module.css';
+import styles from './driver.module.css';
 
 /**
- * 모니터 2대(계기판·인포테인먼트)를 한 화면(1920×1080)으로 합친 차량 화면. 양산차 중앙 화면 배치:
- * 왼쪽 = 주행 화면 (속도·최대 속도·Jetson 시험 코스 3D·예상 주행 가능 시간·트립),
- * 오른쪽 = 내비게이션 (코스 탑뷰·시연 시나리오 4단계·VM 상태).
- * 값은 /api/v1/display/presentation 하나에서 온다. 신선하지 않거나 없는 값은 "—" 로 둔다.
- * 속도는 실제 RC 로봇과 맞대어 보도록 m/s 로 표시한다.
+ * 운전자용 차량 화면 (S15P31E110-452). 휴대폰 가로(780×360)가 기준이고 HDMI(16:9)는 같은 배치를 확대한다.
+ * 3열 패널: 속도 게이지·속도 추이·주행 모드 | 시각·위에서 본 차량·배터리·조향 | 주행 상태·음악. VM 정보는 보이지 않는다.
+ * 항상 어두운 테마 (Xenova 브랜드 토큰 data-theme="xenova"). 색은 주행 모드가 정한다 (data-tone → --tone, driver.module.css):
+ * 자율 = 자율 앱 색, 수동 = 수동 앱 색, 준비 중·재개 대기 = 주의, 안전 정지 = 위험 + 경고 아이콘, 미확인 = 흐린 회색.
+ * 값은 /api/v1/display/presentation 하나에서 온다. 신선하지 않거나 없는 값은 "—"/수신 대기/미확인으로 둔다.
+ * 속도는 RC 차 실측과 맞대어 보도록 m/s 로 표시한다.
  */
-const mps = (v: number) => v.toFixed(2);
-/** 최대 속도 표지: 0.5 처럼 짧게 */
-const mpsShort = (v: number) => String(Number(v.toFixed(2)));
-
 function useClock() {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -42,261 +44,259 @@ function useClock() {
   return now;
 }
 
-/** 트립이 출발점을 벗어난 적이 있는지. 한 번 주행한 뒤에는 수신이 끊겨도 정차 화면으로 돌아가지 않는다 */
-function useHasDriven(trip: { distance_m: number } | null) {
-  const [driven, setDriven] = useState(false);
-  if (!driven && trip !== null && trip.distance_m >= 0.05) setDriven(true);
-  return driven;
+/** 0.5 처럼 짧게 */
+const short = (v: number) => String(Number(v.toFixed(2)));
+
+/** 조향 최대각 (도) */
+const MAX_STEER_DEG = Math.round((MAX_STEER_RAD * 180) / Math.PI);
+
+/**
+ * 주행 모드 표시: 색 점 + 색 글자. 안전 정지만 옅은 위험색 바탕·위험색 테두리 + 작은 경고 아이콘 (글자 크기는 같다)
+ */
+function ModeChip({
+  tone,
+  children,
+  className,
+  testId,
+}: {
+  tone: DriverModeTone;
+  children: ReactNode;
+  className?: string;
+  testId?: string;
+}) {
+  return (
+    <span className={className} data-tone={tone} data-band={tone === 'danger'} data-testid={testId}>
+      {tone === 'danger' ? (
+        <WarningIcon className={styles.chipIcon} />
+      ) : (
+        <i className={styles.chipDot} aria-hidden="true" />
+      )}
+      {children}
+    </span>
+  );
 }
 
-/** 정차 → 출발: 출발한 뒤 DEPART_MS 동안은 정차 화면에서 바퀴가 구르며 나가는 모습을 보여 준다 */
-function useDeparture(parked: boolean) {
-  const [departing, setDeparting] = useState(false);
-  const [wasParked, setWasParked] = useState(parked);
-  // 정차 → 움직임 전환은 렌더 중에 알아챈다 (이전 값에서 이어 가는 React 권장 방식). 다시 서면 연출을 끝낸다
-  if (wasParked !== parked) {
-    setWasParked(parked);
-    setDeparting(!parked);
-  }
-  useEffect(() => {
-    if (!departing) return;
-    const timer = window.setTimeout(() => setDeparting(false), DEPART_MS);
-    return () => window.clearTimeout(timer);
-  }, [departing]);
-  return departing;
+const GEARS = [
+  { key: 'AUTO', text: '자율' },
+  { key: 'MANUAL', text: '수동' },
+  { key: 'AUTO_READY', text: '대기' },
+  { key: 'SAFE_STOP', text: '정지' },
+] as const;
+
+/** 차량 위 모서리 정보: 아이콘·영문 소제목, 값, 작은 보조 줄 */
+function SideInfo({
+  id,
+  icon,
+  caption,
+  label,
+  value,
+  sub,
+  tone,
+  align,
+}: {
+  id: string;
+  icon: ReactNode;
+  /** 작은 영문 대문자 소제목 */
+  caption: string;
+  /** 보조기기·툴팁 설명 */
+  label: string;
+  value: string;
+  sub: string;
+  tone: GaugeTone;
+  align: 'start' | 'end';
+}) {
+  return (
+    <div
+      className={styles.sideInfo}
+      data-tone={tone}
+      data-align={align}
+      aria-label={label}
+      title={label}
+      role="group"
+    >
+      <span className={styles.caption}>
+        <span className={styles.sideIcon}>{icon}</span>
+        {caption}
+      </span>
+      <strong data-testid={`${id}-value`}>{value}</strong>
+      <small data-testid={`${id}-sub`}>{sub}</small>
+    </div>
+  );
+}
+
+/** 차량 양옆 얇은 세로 막대 (아래부터 채움) */
+function SideBar({ id, fraction, tone }: { id: string; fraction: number | null; tone: GaugeTone }) {
+  return (
+    <span
+      className={styles.barTrack}
+      data-tone={tone}
+      data-testid={`${id}-bar`}
+      data-empty={fraction === null}
+    >
+      {fraction !== null && (
+        <i style={{ height: `${Math.round(Math.min(1, Math.max(0, fraction)) * 100)}%` }} />
+      )}
+    </span>
+  );
 }
 
 export function CombinedPage() {
-  const theme = useDisplayTheme();
   const audio = useDisplayAudio();
   const now = useClock();
   const { presentation: p, connected, error } = useDisplay();
-  const { mode, modeLabel, preparing, active, selectedDrive } = driveSummary(p, connected);
+  const summary = driveSummary(p, connected);
+  const mode = driverMode(summary);
   const vehicle = connected ? vehicleOf(p) : null;
   const live = vehicle?.source.status === 'fresh' ? vehicle : null;
-  const drive = activeCommand(p, connected);
   const speed = live?.v_mps ?? null;
+  const steer = steeringOf(live?.steer_rad ?? null);
   const maxSpeed = connected ? maxSpeedOf(p) : null;
-  const target = drive?.command?.v_mps ?? null;
-  const trip = connected ? tripOf(p) : null;
-  // 코스 위 위치·콘·계획 (제안 필드 state.course). 1초마다 오는 위치 사이를 이어 그린다
-  const course = connected ? courseOf(p) : null;
-  const pose = useSmoothPose(course?.pose ?? null);
-  const obstacles = course?.obstacles ?? [];
-  const plan = course?.plan ?? [];
-  const stopped = mode === 'SAFE_STOP';
-  const autopilot = mode === 'AUTO' && Boolean(active);
-  const handover = !active && (preparing || mode === 'AUTO_READY') ? selectedDrive : null;
-  // 차 앞 1 m 안 콘
-  const cone = pose ? obstacleAhead(pose, obstacles) : null;
-  // 출발 전 정차: 트립이 시작점이고 멈춰 있으면 차 외관 화면. 움직이기 시작하면 바퀴가 구르며 나가는 모습을
-  // 잠깐 보여 준 뒤 2분할 주행 화면. 트립을 아직 못 받았고 주행한 적도 없으면(수집기가 트립을 안 보내는 보드 등)
-  // 빈 주행 화면 대신 정차 화면에 둔다
-  const driven = useHasDriven(trip);
-  const parked = (speed ?? 0) < 0.02 && (trip !== null ? trip.distance_m < 0.05 : !driven);
-  const departing = useDeparture(parked);
-  const steps = useScenarioSteps({
-    mode: connected ? mode : null,
-    activeRole: active?.role ?? null,
-    pose,
-    speed,
-    parked,
-  });
-  const vmStatus = (vm: NonNullable<typeof p>['state']['vms'][number]) => vmLineStatus(p, vm, connected);
-  const callouts: ParkedCallout[] = (p?.state.vms ?? []).map((vm) => ({
-    key: ROLE[vm.role].name,
-    title: `${ROLE[vm.role].name} · ${ROLE[vm.role].title}`,
-    // 주행 VM 은 엔진룸(본닛), 인포테인먼트는 차 가운데로 선이 이어진다
-    anchor: vm.role === 'interaction' ? ('center' as const) : ('hood' as const),
-    ...vmStatus(vm),
-  }));
-  const time = now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+  const scaleMax = gaugeMaxOf(maxSpeed);
+  const battery = connected ? batteryOf(p) : null;
+  const voltage = battery === null ? null : (live?.batt_v ?? null);
+  const history = useSpeedHistory(p, speed, connected, mode.tone);
+  const average = averageSpeed(history);
+  const time = now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
 
-  const parkedView = (
-    <ParkedView
-      runtimeS={trip ? remainingRuntimeS(trip.driving_s) : null}
-      callouts={callouts}
-      connected={connected}
-      time={time}
-      audioControl={<DisplayAudioControl controller={audio} />}
-      departing={departing}
-    />
-  );
-  if (parked) {
-    return (
-      <main className={styles.screen} data-theme={theme} data-testid="combined" data-connected={connected}>
-        <h1 className={styles.srOnly}>차량 화면</h1>
-        {parkedView}
-      </main>
-    );
-  }
-  const lamps = [
-    { key: 'estop', label: '비상정지', on: live?.flags?.estop },
-    { key: 'watchdog', label: '명령 끊김', on: live?.flags?.watchdog },
-    { key: 'obstacle', label: '장애물 인식', on: cone !== null },
-  ];
+  const over = speed !== null && maxSpeed !== null && Math.abs(speed) > maxSpeed + 1e-9;
+  const batteryTone: GaugeTone =
+    battery === null ? 'muted' : battery <= 20 ? 'danger' : battery <= 50 ? 'warning' : 'ok';
+  // 준비 중(자율·수동)은 그 모드 칸을, 미확인은 아무 칸도 켜지 않는다
+  const current = mode.tone === 'muted' ? null : summary.mode;
 
   return (
-    <main className={styles.screen} data-theme={theme} data-testid="combined" data-connected={connected}>
+    <main className={styles.screen} data-theme="xenova" data-testid="combined" data-connected={connected}>
       <h1 className={styles.srOnly}>차량 화면</h1>
 
-      {/* 왼쪽: 주행 화면 */}
-      <section className={styles.drivePanel} aria-label="주행 화면" data-mode={mode}>
-        <header className={styles.driveTop}>
-          <div className={styles.speedBlock}>
-            <strong data-testid="speed-value">{speed === null ? '—' : mps(speed)}</strong>
-            <span>m/s</span>
-          </div>
-          <div className={styles.limitBlock}>
-            <span className={styles.limitSign} aria-label="최대 속도">
-              {maxSpeed === null ? '—' : mpsShort(maxSpeed)}
-            </span>
-            <small>최대 m/s</small>
-            <span className={styles.targetSpeed} aria-label="목표 속도">
-              목표 {target === null ? '—' : `${mps(target)} m/s`}
-            </span>
-          </div>
+      {/* 오른쪽: 주행 상태 · 음악 */}
+      <section className={styles.panel} data-panel="status" aria-label="주행 상태와 음악">
+        <header className={styles.panelHead}>
+          <h2 className={styles.panelTitle}>
+            <CarIcon className={styles.titleIcon} />
+            STATUS
+          </h2>
         </header>
-        <div className={styles.statusLine}>
-          <svg
-            className={styles.wheel}
-            data-on={autopilot}
-            viewBox="0 0 24 24"
-            aria-label={autopilot ? '자율주행 작동' : '자율주행 꺼짐'}
-          >
-            <circle cx="12" cy="12" r="9" />
-            <circle cx="12" cy="12" r="2.4" />
-            <path d="M3.5 11h6.1M14.4 11h6.1M12 14.4V21" />
-          </svg>
-          <span className={styles.modeText} data-tone={stopped ? 'danger' : preparing ? 'warning' : 'normal'}>
-            {modeLabel}
+        <div className={styles.card}>
+          <span className={styles.caption}>DRIVE MODE</span>
+          <ModeChip tone={mode.tone} className={styles.modeLabel} testId="drive-mode">
+            {mode.label}
+          </ModeChip>
+          <span className={styles.link} data-connected={connected} data-testid="link">
+            <LinkIcon className={styles.inlineIcon} />
+            {connected ? '연결됨' : '연결 끊김'}
           </span>
-          <span className={styles.driverText} data-testid="active-vm">
-            {active
-              ? `${ROLE[active.role].name} 운전 중`
-              : handover
-                ? `${ROLE[handover.role].name} 승계 준비`
-                : '구동 VM 없음'}
-          </span>
-        </div>
-        <ul className={styles.lamps} aria-label="경고등">
-          {lamps.map((lamp) => (
-            <li
-              key={lamp.key}
-              data-key={lamp.key}
-              data-on={lamp.on === true}
-              data-unknown={!live}
-              data-testid={`lamp-${lamp.key}`}
-            >
-              <i aria-hidden="true" />
-              {lamp.label}
-            </li>
-          ))}
-        </ul>
-
-        <div className={styles.sceneWrap}>
-          <CourseScene
-            pose={pose}
-            obstacles={obstacles}
-            plan={plan}
-            stopped={stopped}
-            braking={stopped || speed === 0}
-          />
-          {cone && (
-            <p className={styles.signalNote} data-state="obstacle" data-testid="obstacle-note">
-              <span className={styles.coneIcon} aria-hidden="true" />콘 {cone.obstacle.id} 인식 ·{' '}
-              {cone.ahead < 0.05 ? '옆으로 지나는 중' : '피해 가는 중'}
-              <b>{Math.max(0, Math.round(cone.ahead * 100))} cm</b>
+          {!connected && (
+            <p role="alert" className={styles.alert}>
+              {error ?? '연결 대기'} · 현재 값은 미확인입니다.
             </p>
           )}
         </div>
-
-        <footer className={styles.driveStats}>
-          <div>
-            {/* 배터리 잔량 센서가 없어, 완충 기준 시간에서 이번 주행 시간을 뺀 추정값 */}
-            <h2>예상 주행 가능 시간</h2>
-            {trip ? (
-              <>
-                <strong data-testid="runtime-value">
-                  {Math.floor(remainingRuntimeS(trip.driving_s) / 60)}
-                  <small>분</small>
-                </strong>
-                <span>
-                  완충 {RATED_RUNTIME_S / 60}분 기준 · {Math.floor(trip.driving_s / 60)}분 사용 · 추정
-                </span>
-              </>
-            ) : (
-              <>
-                <strong data-testid="runtime-value">—</strong>
-                <span>주행 시간 수신 대기</span>
-              </>
-            )}
-          </div>
-          <div>
-            <h2>트립</h2>
-            {trip ? (
-              <>
-                <strong>
-                  {trip.distance_m.toFixed(1)}
-                  <small>m</small>
-                </strong>
-                <span>
-                  주행 {Math.floor(trip.driving_s / 60)}분 {trip.driving_s % 60}초
-                </span>
-              </>
-            ) : (
-              <>
-                <strong>—</strong>
-                <span>트립 수신 대기</span>
-              </>
-            )}
-          </div>
-        </footer>
+        <div className={styles.card} data-grow="true">
+          <span className={styles.caption}>
+            <NoteIcon className={styles.inlineIcon} />
+            MUSIC
+          </span>
+          <DisplayAudioControl controller={audio} />
+        </div>
       </section>
 
-      {/* 오른쪽: 내비게이션 */}
-      <section className={styles.navPanel} aria-label="내비게이션">
-        <header className={styles.topBar}>
-          <span>{now.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>
-          <DisplayAudioControl controller={audio} compact />
-          <span className={connected ? styles.linkOk : styles.linkLost}>
-            {connected ? '표시 연결됨' : '표시 연결 끊김'}
+      {/* 가운데: 시각 · 위에서 본 차량 · 배터리 · 조향 */}
+      <section className={styles.panel} data-panel="vehicle" aria-label="차량">
+        <header className={styles.panelHead} data-align="center">
+          <span className={styles.clockPill}>
+            <time data-testid="clock" dateTime={now.toISOString()}>
+              {time}
+            </time>
           </span>
         </header>
-        {!connected && (
-          <div role="alert" className={styles.alert}>
-            {error ?? '연결 대기'} · 현재 값은 미확인입니다.
+        <div className={styles.vehicle}>
+          <div className={styles.vehicleInfo}>
+            <SideInfo
+              id="battery"
+              align="start"
+              icon={<BatteryIcon />}
+              caption="BATTERY"
+              label="배터리 잔량 (전압 기반 추정)"
+              value={battery === null ? '—' : `${battery}%`}
+              sub={voltage === null ? '수신 대기' : `${voltage.toFixed(1)} V`}
+              tone={batteryTone}
+            />
+            <SideInfo
+              id="steer"
+              align="end"
+              icon={<SteeringIcon />}
+              caption="STEERING"
+              label="조향 각도"
+              value={steer === null ? '—' : steer.side ? `${steer.deg}° ${steer.side}` : '0°'}
+              sub={steer === null ? '수신 대기' : `최대 ±${MAX_STEER_DEG}°`}
+              tone="interaction"
+            />
           </div>
-        )}
-        <CourseNav pose={pose} obstacles={obstacles} plan={plan} steps={steps} />
-        <footer className={styles.dock} aria-label="VM 상태">
-          {p?.state.vms.map((vm) => {
-            const status = vmStatus(vm);
-            return (
-              <span
-                key={vm.vm_id}
-                className={styles.dockItem}
-                data-tone={status.tone}
-                data-testid={`dock-${ROLE[vm.role].name}`}
-              >
-                <b>{ROLE[vm.role].name}</b>
-                {status.label}
-              </span>
-            );
-          })}
-        </footer>
+          <div className={styles.vehicleStage}>
+            <SideBar id="battery" fraction={battery === null ? null : battery / 100} tone={batteryTone} />
+            <div className={styles.carStage}>
+              <CarTop steerDeg={steer ? (steer.side === '우' ? -steer.deg : steer.deg) : null} />
+            </div>
+            <SideBar id="steer" fraction={steer === null ? null : Math.abs(steer.ratio)} tone="interaction" />
+          </div>
+        </div>
       </section>
 
-      {/* 출발 연출: 주행 화면을 아래에 미리 깔고, 위의 정차 화면이 차가 멀어지는 동안 서서히 흐려진다 */}
-      {departing && (
-        <div
-          className={styles.departLayer}
-          style={{ animationDuration: `${DEPART_MS}ms` }}
-          data-testid="depart-layer"
-        >
-          {parkedView}
+      {/* 왼쪽: 속도 게이지 · 속도 추이 · 주행 모드 */}
+      <section className={styles.panel} data-panel="speed" aria-label="속도">
+        <header className={styles.panelHead}>
+          <h2 className={styles.panelTitle}>
+            <SpeedIcon className={styles.titleIcon} />
+            SPEED
+          </h2>
+          <span className={styles.headValue} data-testid="speed-max">
+            {maxSpeed === null ? 'MAX —' : `MAX ${short(maxSpeed)} m/s`}
+          </span>
+        </header>
+        <ArcGauge
+          id="speed"
+          label={speed === null ? '속도 미확인' : `속도 ${speed.toFixed(2)} m/s`}
+          fraction={speed === null ? null : Math.abs(speed) / scaleMax}
+          // 채움 색 = 현재 주행 모드 색 (미확인이면 중립색)
+          tone={mode.tone}
+          over={over}
+          value={speed === null ? '—' : speed.toFixed(2)}
+          unit={speed === null ? '속도 수신 대기' : 'm/s'}
+          scaleStart="0"
+          scaleEnd={short(scaleMax)}
+          boundary={maxSpeed !== null && maxSpeed <= scaleMax ? maxSpeed / scaleMax : null}
+          // 안쪽 보조 호: 조향 (가운데 0, 왼쪽 조향은 왼쪽으로, 최대각 ±0.55 rad)
+          inner={steer === null ? null : { from: 0.5, to: 0.5 - steer.ratio / 2, center: 0.5 }}
+        />
+        <div className={styles.trendBlock}>
+          <div className={styles.trendHead}>
+            <span>최근 60초</span>
+            <span data-testid="speed-average">
+              {average === null ? '평균 —' : `평균 ${average.toFixed(2)} m/s`}
+            </span>
+          </div>
+          <SpeedTrend samples={history} scaleMax={scaleMax} />
         </div>
-      )}
+        <ol className={styles.gears} aria-label="주행 모드">
+          {GEARS.map((gear) => (
+            <li
+              key={gear.key}
+              data-active={current === gear.key}
+              data-tone={current === gear.key ? mode.tone : undefined}
+              data-band={current === gear.key && mode.tone === 'danger'}
+              data-testid={`gear-${gear.key}`}
+            >
+              {current === gear.key &&
+                (mode.tone === 'danger' ? (
+                  <WarningIcon className={styles.chipIcon} />
+                ) : (
+                  <i className={styles.chipDot} aria-hidden="true" />
+                ))}
+              {gear.text}
+            </li>
+          ))}
+        </ol>
+      </section>
     </main>
   );
 }

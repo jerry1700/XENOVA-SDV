@@ -232,6 +232,78 @@ export function courseOf(p: Presentation | null): CourseState | null {
 }
 
 /**
+ * 배터리 잔량 추정 (운전자 화면). 잔량 센서가 없어 전압에서 선형으로 추정한다.
+ * 실차 배터리 3S LiPo: 셀당 완충 4.2 V(팩 12.6 V) = 100%, 하한 3.5 V(팩 10.5 V) = 0%
+ */
+export const BATTERY_CELLS = 3;
+export const CELL_FULL_V = 4.2;
+export const CELL_EMPTY_V = 3.5;
+
+/** 팩 전압 → 추정 잔량 % (정수, 0~100) */
+export function batteryPercent(packV: number): number {
+  const ratio = (packV / BATTERY_CELLS - CELL_EMPTY_V) / (CELL_FULL_V - CELL_EMPTY_V);
+  return Math.round(Math.min(1, Math.max(0, ratio)) * 100);
+}
+
+/** 신선한 vehicle.status 의 batt_v 로 추정 잔량 %. 없거나 신선하지 않으면 null */
+export function batteryOf(p: Presentation | null): number | null {
+  const v = vehicleOf(p);
+  return v?.source.status === 'fresh' && v.batt_v !== null && v.batt_v > 0 ? batteryPercent(v.batt_v) : null;
+}
+
+/** 운전자 화면 주행 모드 한 줄. 색은 tone (auto 청록 · manual 파랑 · warning 주황 · danger 빨강 · muted 회색) */
+export type DriverModeTone = 'auto' | 'manual' | 'warning' | 'danger' | 'muted';
+
+/**
+ * state.drive.mode 를 운전자에게 보이는 문구로. VM 이름은 넣지 않는다.
+ * summary 는 presentation.driveSummary 결과 (신선하지 않거나 연결이 끊기면 mode 'unknown')
+ */
+export function driverMode(summary: { mode: string; preparing: unknown }): {
+  label: string;
+  tone: DriverModeTone;
+} {
+  const { mode } = summary;
+  if (summary.preparing && (mode === 'AUTO' || mode === 'MANUAL'))
+    return { label: `${mode === 'AUTO' ? '자율' : '수동'} 주행 준비 중`, tone: 'warning' };
+  switch (mode) {
+    case 'AUTO':
+      return { label: '자율 주행', tone: 'auto' };
+    case 'MANUAL':
+      return { label: '수동 주행', tone: 'manual' };
+    case 'AUTO_READY':
+      return { label: '자율 재개 대기', tone: 'warning' };
+    case 'SAFE_STOP':
+      return { label: '안전 정지', tone: 'danger' };
+    default:
+      return { label: '미확인', tone: 'muted' };
+  }
+}
+
+/** 계기판 최대 눈금: 최대 속도 × 2, 최대 속도를 모르면 1.0 m/s */
+export const DEFAULT_GAUGE_MAX_MPS = 1;
+export const gaugeMaxOf = (maxSpeed: number | null) =>
+  maxSpeed !== null && maxSpeed > 0 ? maxSpeed * 2 : DEFAULT_GAUGE_MAX_MPS;
+
+/**
+ * 조향 최대각 (rad). 주행 프로필 platform/apps/drive/profiles/lattice-lab-1.json max_steer 0.55 (약 31.5°).
+ * steer_rad 는 + 가 왼쪽 (MQTT 계약 수동 입력 변환: left = steer_rad +)
+ */
+export const MAX_STEER_RAD = 0.55;
+
+/** 조향각 표시: 정수 도, 좌/우 (1° 미만은 방향 없음), 최대각 대비 비율 -1(오른쪽 끝) ~ 1(왼쪽 끝) */
+export function steeringOf(
+  rad: number | null,
+): { deg: number; side: '좌' | '우' | null; ratio: number } | null {
+  if (rad === null || !Number.isFinite(rad)) return null;
+  const deg = Math.round((Math.abs(rad) * 180) / Math.PI);
+  return {
+    deg,
+    side: deg < 1 ? null : rad > 0 ? '좌' : '우',
+    ratio: Math.max(-1, Math.min(1, rad / MAX_STEER_RAD)),
+  };
+}
+
+/**
  * 완충 기준 연속 주행 가능 시간 (초). 배터리 잔량 센서가 없어 이 값에서 주행한 시간을 빼서 남은 시간을 추정한다.
  * 가정값 — 실제 차의 측정값을 알면 바꾼다
  */

@@ -17,7 +17,7 @@
  * 10초 쉬고 처음부터.
  *
  * 제안 확장 필드 (현재 dom0 수집기는 아직 보내지 않는다 — 화면이 정해지면 수집기 요청 명세가 된다):
- *   state.vehicle             vehicle.status (MQTT 계약 5.4, MQTT-10) — 게이트웨이가 ESP32 실측을 변환
+ *   state.vehicle             vehicle.status (MQTT 계약 5.4, MQTT-10) — 게이트웨이가 ESP32 실측을 변환 (batt_v 는 3S 팩 전압)
  *   state.drive_apps[vm_id]   Zephyr 주행 펌웨어의 앱별 보고
  *     .autonomous / .manual = { heartbeat (6.1), lifecycle (6.3 warm-drive-1), command (5.4 drive.command),
  *                               perception (perception.event, 자율만), source }
@@ -346,7 +346,8 @@ function build(now) {
         v_mps: round(speed),
         steer_rad: round(steer),
         flags,
-        batt_v: round(Math.max(7.3, 8.05 - (t / 3600) * 0.25), 2),
+        // 실차 3S LiPo 범위: 12.45 V(약 93%)에서 시간당 0.6 V 씩 내려가 11.1 V(약 29%)에서 멈춘다
+        batt_v: round(Math.max(11.1, 12.45 - (t / 3600) * 0.6), 2),
         source: fresh(50),
       },
       drive_apps: { [IDS.primary]: primaryApps, [IDS.backup]: backupApps },
