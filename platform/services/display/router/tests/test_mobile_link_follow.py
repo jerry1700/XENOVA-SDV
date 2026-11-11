@@ -95,15 +95,9 @@ class FakeServer:
             await asyncio.sleep(.005)
 
 
-def test_replug_same_address_keeps_session_and_new_address_issues_a_new_code(monkeypatch):
-    codes = itertools.cycle([111111, 222222, 333333])
-    monkeypatch.setattr(mobile.secrets, "randbelow", lambda _: next(codes))
-    published_codes, endpoints, servers, sessions = [], [], [], []
-    pairing = Pairing(publish=published_codes.append)
-    pairing.rotate()
-    pairing.session, pairing.session_until = "paired-phone", float("inf")
+def run_link(pairing, script):
+    endpoints, servers, sessions = [], [], []
     app = create_app(A, Feed(), pairing)
-    script = [A, None, None, A_REPLUGGED, B]
 
     def read():
         sessions.append(pairing.session)
@@ -118,9 +112,67 @@ def test_replug_same_address_keeps_session_and_new_address_issues_a_new_code(mon
     assert [s.sockets for s in servers] == [[("socket", A)], [("socket", A_REPLUGGED)], [("socket", B)]]
     assert endpoints == [None, A_REPLUGGED, B]
     assert app.state.endpoint == B and link.endpoint == B
-    # Session survived the pause and the same-address re-plug; the new address revoked it.
-    assert sessions[:5] == ["paired-phone"] * 5 and pairing.session == ""
-    assert published_codes == ["111111", "222222"] and pairing.code == "222222"
+    return app, sessions
+
+
+def test_replug_keeps_session_and_new_address_lets_the_paired_phone_in_without_a_new_code(monkeypatch):
+    codes = itertools.cycle([111111, 222222, 333333])
+    monkeypatch.setattr(mobile.secrets, "randbelow", lambda _: next(codes))
+    published_codes = []
+    pairing = Pairing(publish=published_codes.append)
+    pairing.rotate()
+    pairing.pair("111111")
+    old = pairing.session
+    app, sessions = run_link(pairing, [A, None, None, A_REPLUGGED, B])
+    # Session survived the pause and the same-address re-plug.
+    assert sessions[:5] == [old] * 5
+    # New address: the old cookie (old address) is revoked, no new code, a carry-over is open.
+    assert pairing.session != old and pairing.carried and not pairing.valid(old) and pairing.carried
+    assert published_codes == ["111111", None] and pairing.code == ""
+    with TestClient(app, base_url=B.origin, client=(B.phone_ip, 1234), follow_redirects=False) as client:
+        # A browser pre-load that drops its cookie does not use the hand-out up.
+        assert client.get("/display/combined").status_code == 200
+        client.cookies.clear()
+        # The advertised URL hands the session over and goes straight to the screen.
+        assert client.get("/display/mobile").headers["location"] == "/display/combined"
+        handed = client.cookies.get(mobile.COOKIE)
+        assert handed and handed != old
+        assert client.get("/display/combined").status_code == 200 and not pairing.carried
+        client.cookies.clear()
+        # Once the phone used it: another browser without the cookie needs a code again.
+        assert client.get("/display/combined").headers["location"] == "/connect"
+        assert client.get("/connect").status_code == 200
+        assert pairing.valid(handed)
+
+
+def test_new_address_without_a_paired_phone_issues_a_new_code(monkeypatch):
+    codes = itertools.cycle([111111, 222222, 333333])
+    monkeypatch.setattr(mobile.secrets, "randbelow", lambda _: next(codes))
+    published_codes = []
+    pairing = Pairing(publish=published_codes.append)
+    pairing.rotate()
+    run_link(pairing, [A, None, None, A_REPLUGGED, B])
+    assert published_codes == ["111111", "222222"] and pairing.code == "222222" and not pairing.carried
+
+
+def test_carry_over_needs_a_live_session_and_ends_with_rotation_or_expiry():
+    now = [0.0]
+    pairing = Pairing(clock=lambda: now[0])
+    pairing.rotate()
+    assert not pairing.carry_over()  # nothing paired yet
+    pairing.pair(pairing.code)
+    assert pairing.carry_over() and pairing.carried
+    pairing.rotate()  # operator rotation revokes the pending carry-over too
+    assert not pairing.carried and pairing.claim() is None
+    pairing.pair(pairing.code)
+    assert pairing.carry_over()
+    now[0] = mobile.SESSION_SECONDS + 1  # the 8h session ran out before the phone came back
+    assert pairing.claim() is None and not pairing.valid(pairing.session)
+    pairing.rotate()
+    pairing.pair(pairing.code)
+    now[0] += mobile.SESSION_SECONDS - 100
+    assert pairing.carry_over()
+    assert pairing.claim() and pairing.remaining() == 100  # the carried session keeps the original expiry
 
 
 def test_listener_bind_failure_waits_and_retries_instead_of_exiting():
