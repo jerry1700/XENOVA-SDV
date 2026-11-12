@@ -77,11 +77,7 @@ export function VmListPage() {
         </div>
         <div className={styles.controlHeadingActions}>
           {vms.data && (
-            <ObservedClock
-              at={observedAt(vms.data.observed_at, vms.dataUpdatedAt)}
-              receivedAt={vms.dataUpdatedAt}
-              refreshing={!vms.isFetchedAfterMount}
-            />
+            <ObservedClock at={observedAt(vms.data.observed_at, vms.dataUpdatedAt)} />
           )}
           <Button variant="secondary" onClick={() => void synchronize()} disabled={vms.isFetching}>
             {vms.isFetching ? '동기화 중…' : 'VM 동기화'}
@@ -275,25 +271,15 @@ function observedAt(iso: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-/** at: 서버가 dom0 목록을 받은 시각, receivedAt: 화면이 그 응답을 받은 시각 (둘의 차이가 서버 목록의 나이) */
-function ObservedClock({
-  at,
-  receivedAt,
-  refreshing,
-}: {
-  at: number;
-  receivedAt: number;
-  refreshing: boolean;
-}) {
+/** 서버가 마지막 단일 동기화 요청에서 dom0 목록을 받은 시각 */
+function ObservedClock({ at }: { at: number }) {
   const time = new Date(at).toTimeString().slice(0, 8);
-  const ageSeconds = Math.max(0, Math.round((receivedAt - at) / 1000));
   return (
     <span className={styles.observedTime}>
-      마지막 확인
+      마지막 동기화
       <b key={time} className={styles.tick}>
         {time}
       </b>
-      {refreshing ? ' · 갱신 중' : ageSeconds >= 3 ? ` · ${ageSeconds}초 전` : ''}
     </span>
   );
 }
