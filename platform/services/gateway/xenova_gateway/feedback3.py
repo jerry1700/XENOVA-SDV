@@ -327,8 +327,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
         rows=[row for row in self.odometry.samples if row['source_sample']<=sample
             and row['pi_sample_us']-row['clock_error_us']>=pin['submitted_us']]
         if rows:
-            end=rows[-1]['pi_sample_us']
-            while len(rows)>2 and end-rows[1]['pi_sample_us']>=self.stationary_policy.window_us+2*rows[1]['clock_error_us']:
+            # check_stationary_window 은 창의 길이에서 처음과 마지막 표본의 시각 오차를 뺀다. 같은 식으로 잘라야
+            # 마지막 표본의 오차가 더 클 때에도 남긴 창이 그 검사에 모자라지 않는다.
+            end=rows[-1]['pi_sample_us']-rows[-1]['clock_error_us']
+            while len(rows)>2 and end-rows[1]['pi_sample_us']-rows[1]['clock_error_us']>=self.stationary_policy.window_us:
                 rows.pop(0)
         if (not rows or rows[-1]['source_sample']!=sample or self.odometry.latest is None
                 or self.odometry.latest['source_sample']!=sample):return None
@@ -492,7 +494,8 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 report=FEEDBACK3.unpack(hold['feedback'])
                 rows=[row for row in snapshot['rows'] if row['pi_sample_us']-row['clock_error_us']>=pin['submitted_us']]
                 if rows:
-                    while len(rows)>2 and rows[-1]['pi_sample_us']-rows[1]['pi_sample_us']>=self.stationary_policy.window_us+2*rows[1]['clock_error_us']:rows.pop(0)
+                    newest=rows[-1]['pi_sample_us']-rows[-1]['clock_error_us']
+                    while len(rows)>2 and newest-rows[1]['pi_sample_us']-rows[1]['clock_error_us']>=self.stationary_policy.window_us:rows.pop(0)
                 window=tuple(encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':pin['gateway']})) for row in rows)
                 if len(window)<2:return None
                 check_stationary_window(window,current,self.odometry.host_boot,pin['gateway'],sample['pi_session'],
