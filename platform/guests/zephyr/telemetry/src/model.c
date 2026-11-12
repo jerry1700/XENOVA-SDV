@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* Diagnostics adapter and closed v2 serializer. No transport or app-health claim. */
+/* Telemetry serializers. No transport or app-health claim. */
 #include <xenova/telemetry_core.h>
 #include "writer.h"
 #include <errno.h>
@@ -127,10 +127,11 @@ static const char *status(int rc)
 	if (rc==-ENODATA) { return "no_sample"; }
 	return "collection_failed";
 }
+static const char *cpu_status(int rc){return rc==-EOVERFLOW?"counter_discontinuity":status(rc);}
 
-static void sample(struct xt_writer *w, struct xt_publisher *p, const char *name,
+static void sample_value(struct xt_writer *w, const char *name,
 	const char *unit, const char *kind, unsigned encoding, int rc, uint64_t value,
-	unsigned labels, const char *override)
+	const char *override)
 {
 	const char *enc[]={"u64_decimal","i64_decimal","boolean","float64"};
 	const char *state=override ? override : status(rc);
@@ -140,16 +141,102 @@ static void sample(struct xt_writer *w, struct xt_publisher *p, const char *name
 	if (strcmp(state,"ok")) { xt_raw(w,"null"); }
 	else if (encoding==2) { xt_raw(w,"%s",boolean(value!=0)); }
 	else if (encoding==1) { xt_i64(w,(int64_t)value); }
-	else { xt_u64(w,value); }
+	else if (encoding==3) {
+		/* Exact thousandths, locale/libc float formatting independent. */
+		if(value>100000){w->error=-ERANGE;return;}
+		xt_raw(w,"%u.%03u",(unsigned)(value/1000),(unsigned)(value%1000));
+	} else { xt_u64(w,value); }
 	xt_raw(w,",\"status\":\"%s\",\"reason\":",state);
 	xt_string(w,strcmp(state,"ok") ? state : NULL);
 	xt_raw(w,",\"source_rc\":%d,\"labels\":{",rc);
+}
+
+static void sample(struct xt_writer *w, struct xt_publisher *p, const char *name,
+	const char *unit, const char *kind, unsigned encoding, int rc, uint64_t value,
+	unsigned labels, const char *override)
+{
+	sample_value(w,name,unit,kind,encoding,rc,value,override);
 	if (labels==1) { xt_raw(w,"\"interface\":"); xt_string(w,p->inventory.interface_name); }
 	if (labels==2) {
 		xt_raw(w,"\"task_id\":"); xt_string(w,p->inventory.task_id);
 		xt_raw(w,",\"task_epoch\":"); xt_string(w,p->task_epoch);
 	}
 	xt_raw(w,"}}");
+}
+
+static int network_source_rc(int rc, const struct xdr_snapshot *r, uint64_t sent)
+{
+	/* A recent Publisher collection does not refresh the copied source window. */
+	if (rc) { return rc; }
+	if (r->net_end_ms>sent || sent-r->net_end_ms>2000) { return -ETIMEDOUT; }
+	return r->net_epoch ? 0 : -ENODATA;
+}
+
+static void network_rate(struct xt_writer *w, const struct xt_publisher *p,
+	const struct xdr_snapshot *r, uint64_t sent)
+{
+	int rc=network_source_rc(r->net_rate_rc,r,sent);
+	sample_value(w,"rx_bytes_per_s","bytes/s","gauge",0,rc,r->rx_bytes_per_s,
+		rc==-EOVERFLOW ? "counter_discontinuity" : NULL);
+	xt_raw(w,"\"interface\":");xt_string(w,p->inventory.interface_name);
+	xt_raw(w,",\"counter_epoch\":");xt_u64(w,r->net_epoch);
+	xt_raw(w,"}}");
+}
+
+static void network_counter_v1(struct xt_writer *w, const char *name, const char *iface,
+	uint64_t epoch, int rc, uint64_t value)
+{
+	const char *reason=NULL;
+	if (rc==-ENODATA) { reason="first_sample"; }
+	else if (rc==-ENOTSUP || rc==-ENOENT) { reason="not_supported"; }
+	else if (rc==-ETIMEDOUT) { reason="stale_sample"; }
+	else if (rc==-ERANGE) { reason="counter_saturated"; }
+	else if (rc) { reason="read_failed"; }
+
+	xt_raw(w,"{\"name\":\"%s\",\"unit\":\"bytes\",\"value\":",name);
+	if (rc) { xt_raw(w,"null"); } else { xt_u64(w,value); }
+	xt_raw(w,",\"unavailable_reason\":");xt_string(w,reason);
+	xt_raw(w,",\"source_rc\":%d,\"labels\":{\"iface\":",rc);xt_string(w,iface);
+	xt_raw(w,",\"counter_epoch\":");xt_u64(w,epoch);
+	xt_raw(w,"}}");
+}
+
+static int encode_network_v1(struct xt_publisher *p, const struct xdr_snapshot *r,
+	uint64_t sent, struct xt_message *out)
+{
+	if (p->network_v1_sequence>=INT64_MAX || r->net_bytes_rc>0) { return -ERANGE; }
+	char message_id[XT_UUID_BYTES];
+	int rc=xt_sample_id(p,message_id);
+	if (rc) { return rc; }
+	uint64_t seq=p->network_v1_sequence+1;
+	int counter_rc=network_source_rc(r->net_bytes_rc,r,sent);
+	const struct xt_identity *id=&p->identity;
+	struct xt_writer w={.data=out->bytes,.size=XT_NETWORK_V1_MAX+1};
+
+	out->stream=XT_STREAMS;
+	out->qos=0;
+	out->retain=false;
+	(void)snprintf(out->topic,sizeof(out->topic),"xenova/v1/vms/%s/metrics",id->vm_id);
+	xt_raw(&w,"{\"schema_version\":\"1.0\",\"type\":\"agent.metrics\",\"message_id\":\"%s\","
+		"\"vm_id\":\"%s\",\"boot_id\":\"%s\",\"agent_instance_id\":\"%s\",\"seq\":%" PRIu64 ",\"sent_at\":",
+		message_id,id->vm_id,id->boot_id,id->publisher_id,seq);
+	char iso[25];uint64_t uncertainty;
+	xt_string(&w,xt_utc_read(&p->utc,sent,iso,&uncertainty) ? NULL : iso);
+	xt_raw(&w,",\"payload\":{\"window_ms\":null,\"observed_uptime_ms\":");
+	if (counter_rc) { xt_raw(&w,"null"); } else { xt_u64(&w,r->net_end_ms); }
+	xt_raw(&w,",\"values\":[");
+	network_counter_v1(&w,"net_rx_bytes_total",p->inventory.interface_name,r->net_epoch,counter_rc,r->rx_bytes);
+	xt_raw(&w,",");
+	network_counter_v1(&w,"net_tx_bytes_total",p->inventory.interface_name,r->net_epoch,counter_rc,r->tx_bytes);
+	xt_raw(&w,"]}}");
+	if (w.error) {
+		out->bytes[0]=0;out->length=0;
+		if (w.error==-ENOSPC) { ++p->counters.payload_oversize; }
+		return w.error;
+	}
+	out->length=w.used;
+	p->network_v1_sequence=seq;
+	return 0;
 }
 
 static void capability(struct xt_writer *w,const char *id,bool supported,const char *reason)
@@ -164,9 +251,12 @@ static void inventory(struct xt_writer *w, struct xt_publisher *p,const struct x
 	const struct xt_inventory *i=&p->inventory;
 	xt_raw(w,",\"os\":{\"id\":\"zephyr\",\"version\":");xt_string(w,i->os_version);
 	xt_raw(w,",\"kernel_release\":");xt_string(w,i->os_version);
-	xt_raw(w,"},\"hostname\":null,\"display_name\":null,\"firmware\":{\"build_id\":");xt_string(w,i->build_id);
-	xt_raw(w,",\"artifact_sha256\":null,\"measurement_profile\":");xt_string(w,i->profile);
-	xt_raw(w,"},\"publisher\":{\"name\":\"xenova.telemetry\",\"version\":\"2.0.0\",\"metric_catalog\":\"xenova-telemetry-core-2.0\"},\"interfaces\":[");
+	xt_raw(w,"},\"hostname\":");xt_string(w,i->hostname[0]?i->hostname:NULL);
+	xt_raw(w,",\"display_name\":");xt_string(w,i->display_name[0]?i->display_name:NULL);
+	xt_raw(w,",\"firmware\":{\"build_id\":");xt_string(w,i->build_id);
+	xt_raw(w,",\"artifact_sha256\":");xt_string(w,i->artifact_sha256[0]?i->artifact_sha256:NULL);
+	xt_raw(w,",\"measurement_profile\":");xt_string(w,i->profile);
+	xt_raw(w,"},\"publisher\":{\"name\":\"xenova.telemetry\",\"version\":\"2.1.0\",\"metric_catalog\":\"xenova-telemetry-core-2.1\"},\"interfaces\":[");
 	if (i->mac[0]) {
 		xt_raw(w,"{\"name\":");xt_string(w,i->interface_name);xt_raw(w,",\"mac\":");xt_string(w,i->mac);
 		xt_raw(w,",\"addresses\":[");
@@ -177,8 +267,9 @@ static void inventory(struct xt_writer *w, struct xt_publisher *p,const struct x
 	capability(w,"kernel_heap",i->heap,"not enabled in this build");xt_raw(w,",");
 	capability(w,"thread_stack",i->threads,"not enabled in this build");xt_raw(w,",");
 	capability(w,"timing",i->timing,"64-bit timing unavailable");xt_raw(w,",");
-	capability(w,"cpu_runtime",false,"no runtime provider");xt_raw(w,",");
-	capability(w,"persistent_crash",false,"current boot RAM history only");
+	capability(w,"cpu_runtime",i->cpu_runtime,"runtime provider not enabled");xt_raw(w,",");
+	capability(w,"memory_pools",i->pools,"fixed data pool statistics not enabled");xt_raw(w,",");
+	capability(w,"persistent_crash",i->persistent_crash,"no verified external capture configuration");
 	xt_raw(w,",{\"id\":\"loop\",\"support\":\"%s\",\"reason\":",s->timing_rc ? "not_registered" : "available");
 	xt_string(w,s->timing_rc ? "no observed task registered" : NULL);
 	xt_raw(w,"}],\"capabilities_omitted\":0,\"clock_domains\":{\"uptime\":\"guest_boot_milliseconds\",\"loop_counter\":\"local_hw_cycles_converted_us\",\"frequency_hz\":");
@@ -188,7 +279,7 @@ static void inventory(struct xt_writer *w, struct xt_publisher *p,const struct x
 
 static void heartbeat(struct xt_writer *w,const struct xt_counters *c)
 {
-	xt_raw(w,",\"publisher_state\":\"%s\",\"last_collection_success_uptime_ms\":",c->stopping ? "stopping" : c->collection_failures ? "degraded" : "running");
+	xt_raw(w,",\"publisher_state\":\"%s\",\"last_collection_success_uptime_ms\":",c->stopping ? "stopping" : c->collection_degraded ? "degraded" : "running");
 	if (c->has_success) { xt_u64(w,c->last_success_ms); } else { xt_raw(w,"null"); }
 	xt_raw(w,",\"collection_failures_total\":");xt_u64(w,c->collection_failures);
 	xt_raw(w,",\"connection_attempts_total\":");xt_u64(w,c->connection_attempts);
@@ -197,15 +288,37 @@ static void heartbeat(struct xt_writer *w,const struct xt_counters *c)
 	xt_raw(w,",\"app_health_asserted\":false");
 }
 
-static void metrics(struct xt_writer *w,struct xt_publisher *p,enum xt_kind kind,const struct xt_observation *s)
+static void metrics(struct xt_writer *w,struct xt_publisher *p,enum xt_kind kind,
+	const struct xt_observation *s,uint64_t sent)
 {
 	const char *family=kind==XT_MEMORY ? "memory" : kind==XT_NETWORK ? "network" : kind==XT_PROGRESS ? "loop_progress" : "publisher";
-	xt_raw(w,",\"family\":\"%s\",\"samples\":[",family);
+	xt_raw(w,",\"family\":\"%s\"",family);
+	if(kind==XT_MEMORY){
+	 const struct xdr_snapshot *r=&s->resources;
+	 if(r->raw.at_ms>s->end_ms){w->error=-EINVAL;return;}
+	 /* The page allocator is cached; heap fields retain collection timing. */
+	 xt_raw(w,",\"source_sample_seq\":");xt_u64(w,r->sample);
+	 xt_raw(w,",\"observed_uptime_ms\":");xt_u64(w,r->raw.at_ms);
+	}
+	xt_raw(w,",\"samples\":[");
 	if (kind==XT_MEMORY) {
 		sample(w,p,"memory.kernel_heap.used_bytes","bytes","gauge",0,s->heap_rc,s->heap_used,0,NULL);xt_raw(w,",");
 		sample(w,p,"memory.kernel_heap.free_bytes","bytes","gauge",0,s->heap_rc,s->heap_free,0,NULL);xt_raw(w,",");
 		sample(w,p,"memory.kernel_heap.high_water_bytes","bytes","gauge",0,s->heap_rc,s->heap_peak,0,NULL);xt_raw(w,",");
-		sample(w,p,"cpu.system.percent","percent","gauge",3,-ENOTSUP,0,0,NULL);
+		int rc=s->heap_rc;
+		uint64_t accounted=0;
+		if (!rc) {
+			if (s->heap_used>UINT64_MAX-s->heap_free) { rc=-ERANGE; }
+			else { accounted=s->heap_used+s->heap_free; }
+		}
+		sample(w,p,"memory.kernel_heap.accounted_bytes","bytes","gauge",0,rc,accounted,0,NULL);
+        const struct xdr_snapshot *r=&s->resources;
+        const char *names[]={"memory.firmware.ram_region_bytes","memory.firmware.mapped_bytes",
+         "memory.firmware.static_data_bytes","memory.page_allocator.free_bytes"};
+        uint64_t values[]={r->ram_region_bytes,r->mapped_bytes,r->static_data_bytes,r->page_free_bytes};
+        for(unsigned i=0;i<4;i++){
+         xt_raw(w,",");sample(w,p,names[i],"bytes","gauge",0,i==3?r->page_rc:r->firmware_rc,values[i],0,NULL);
+        }
 	} else if (kind==XT_NETWORK) {
 		const char *names[]={"tx_packets","rx_packets","tx_drop","rx_drop","pool_busy","protocol_errors"};
 		for (unsigned i=0;i<6;++i) {
@@ -214,7 +327,8 @@ static void metrics(struct xt_writer *w,struct xt_publisher *p,enum xt_kind kind
 			sample(w,p,name,i<2 ? "packets" : "count","raw_counter",0,rc,s->net[i],1,NULL);xt_raw(w,",");
 		}
 		sample(w,p,"network.interface_up","bool","gauge",2,s->network_rc,s->interface_up,1,NULL);xt_raw(w,",");
-		sample(w,p,"network.carrier","bool","gauge",2,s->network_rc,s->carrier,1,NULL);
+		sample(w,p,"network.carrier","bool","gauge",2,s->network_rc,s->carrier,1,NULL);xt_raw(w,",");
+		network_rate(w,p,&s->resources,sent);
 	} else if (kind==XT_PROGRESS) {
 		const struct xdiag_timing *t=&s->timing;
 		const char *names[]={"completed_total","in_flight","last_completed_age_us","deadline_miss_total","skipped_release_total","last_interval_us","last_jitter_us"};
@@ -257,6 +371,111 @@ static void distribution(struct xt_writer *w,struct xt_publisher *p,enum xt_kind
 	xt_raw(w,"}");
 }
 
+/* The buffer view describes stored owner metadata, never current permission.
+ * Negative original receive time remains unavailable; it is not rewritten to 0. */
+static void app_buffer(struct xt_writer *w,const struct xdr_app_region *m,
+ const struct xdr_app_buffer *b,unsigned index,uint64_t collection_end)
+{
+ xt_raw(w,",\"buffer\":");
+ if(m->rc){xt_raw(w,"null");return;}
+ if(b->phase>XDR_BUFFER_RETAINED||b->input_status>XDR_INPUT_CONTEXT_CHANGED||
+    b->source_rc>0||b->content_bytes>m->used||
+    (b->phase&&b->phase!=index+XDR_BUFFER_STORED)||
+    (!b->phase&&(m->used||b->content_bytes))||
+    (b->phase&&b->source_ms>=0&&(uint64_t)b->source_ms>collection_end)){
+  w->error=-ERANGE;return;
+ }
+ static const char *phases[]={"empty","stored","pending","running","retained"};
+ static const char *inputs[]={"missing","unclassified","accepted","invalid","expired","context_changed"};
+ xt_raw(w,"{\"phase\":");xt_string(w,phases[b->phase]);
+ xt_raw(w,",\"content_bytes\":");xt_u64(w,b->content_bytes);
+ xt_raw(w,",\"sequence\":");if(b->phase)xt_u64(w,b->sequence);else xt_raw(w,"null");
+ xt_raw(w,",\"source_uptime_ms\":");
+ if(b->phase&&b->source_ms>=0)xt_u64(w,(uint64_t)b->source_ms);else xt_raw(w,"null");
+ xt_raw(w,",\"owner_lifetime\":");if(b->lifetime)xt_u64(w,b->lifetime);else xt_raw(w,"null");
+ xt_raw(w,",\"context_revision\":");xt_u64(w,b->context_revision);
+ xt_raw(w,",\"connection_revision\":");xt_u64(w,b->connection_revision);
+ xt_raw(w,",\"input_status\":");xt_string(w,inputs[b->input_status]);
+ xt_raw(w,",\"source_rc\":%d,\"performed\":",b->source_rc);
+ if(index==XDR_MANUAL_REGIONS-1)xt_raw(w,"%s",boolean(b->performed));else xt_raw(w,"null");
+ xt_raw(w,",\"revoked\":%s,\"last_read_sequence\":",boolean(b->revoked));
+ if(index==XDR_MANUAL_REGIONS-1&&b->read_sequence)xt_u64(w,b->read_sequence);else xt_raw(w,"null");
+ xt_raw(w,"}");
+}
+
+static void resources(struct xt_writer *w,struct xt_publisher *p,enum xt_kind kind,
+ const struct xt_observation *s,unsigned part)
+{
+ const struct xdr_snapshot *r=&s->resources;
+ if(r->rows>XDR_THREADS||r->regions>XDR_REGIONS){w->error=-ERANGE;return;}
+ if(kind==XT_APP_MEMORY){
+  static const char *ids[]={"drive_maps","drive_paths","drive_search_nodes","drive_odometry",
+   "manual_input","manual_pending","manual_running","manual_result"};
+  if(!r->app_registered||(r->app_count!=XDR_AUTO_REGIONS&&r->app_count!=XDR_APP_REGIONS)||
+     part>=r->app_count){w->error=-EINVAL;return;}
+  const struct xdr_app_region *m=&r->app[part];
+  if(m->rc>0||(!m->rc&&(m->used>m->capacity||m->peak>m->capacity||m->used>m->peak||m->capacity>m->reserved))){
+   w->error=-ERANGE;return;
+  }
+  xt_raw(w,",\"family\":\"app_memory\",\"source_sample_seq\":");xt_u64(w,r->sample);
+  xt_raw(w,",\"observed_uptime_ms\":");xt_u64(w,r->raw.at_ms);xt_raw(w,",\"samples\":[");
+  const char *names[]={"reserved_bytes","used_bytes","free_bytes","capacity_bytes","high_water_bytes","min_free_bytes","capacity_failure_total","contention_total"};
+  uint64_t values[]={m->reserved,m->used,m->capacity-m->used,m->capacity,m->peak,m->capacity-m->peak,m->exhausted,m->contention};
+  for(unsigned i=0;i<8;i++){
+   if(i)xt_raw(w,",");
+   xt_raw(w,"{\"name\":\"memory.app.%s\",\"unit\":\"%s\",\"kind\":\"%s\",\"encoding\":\"u64_decimal\",\"value\":",
+    names[i],i<6?"bytes":"count",i<6?"gauge":"raw_counter");
+   if(m->rc)xt_raw(w,"null");else xt_u64(w,values[i]);
+   xt_raw(w,",\"status\":\"%s\",\"reason\":",status(m->rc));xt_string(w,m->rc==-EBUSY?"owner_busy":m->rc==-ETIMEDOUT?"sample_expired":m->rc?status(m->rc):NULL);
+   xt_raw(w,",\"source_rc\":%d,\"labels\":{\"region\":",m->rc);xt_string(w,ids[part]);xt_raw(w,"}}");
+  }
+  xt_raw(w,"]");
+  if(part>=XDR_AUTO_REGIONS)app_buffer(w,m,&r->app_buffer[part-XDR_AUTO_REGIONS],part-XDR_AUTO_REGIONS,s->end_ms);
+  return;
+ }
+ if(kind==XT_POOLS){
+  xt_raw(w,",\"family\":\"memory_regions\",\"source_sample_seq\":");xt_u64(w,r->sample);
+  xt_raw(w,",\"observed_uptime_ms\":");xt_u64(w,r->raw.at_ms);xt_raw(w,",\"samples\":[");
+  for(size_t i=0;i<r->regions;i++){
+   const struct xdr_region *m=&r->memory[i];
+   if(m->rc>0){w->error=-ERANGE;return;}
+   if(i)xt_raw(w,",");
+   const char *names[]={"used_bytes","free_bytes","capacity_bytes"};
+   uint64_t values[]={m->used,m->free,m->capacity};
+   for(unsigned j=0;j<3;j++){
+    if(j)xt_raw(w,",");
+    xt_raw(w,"{\"name\":\"memory.region.%s\",\"unit\":\"bytes\",\"kind\":\"gauge\",\"encoding\":\"u64_decimal\",\"value\":",names[j]);
+    if(m->rc)xt_raw(w,"null");else xt_u64(w,values[j]);
+    xt_raw(w,",\"status\":\"%s\",\"reason\":",status(m->rc));xt_string(w,m->rc?status(m->rc):NULL);
+    xt_raw(w,",\"source_rc\":%d,\"labels\":{\"region\":",m->rc);xt_string(w,m->id);xt_raw(w,"}}");
+   }
+  }
+  xt_raw(w,"]");return;
+ }
+ unsigned count=(unsigned)((r->rows+3)/4);if(!count)count=1;
+ if(part>=count){w->error=-EINVAL;return;}
+ xt_raw(w,",\"family\":\"cpu\",\"window\":{\"sample_seq\":");xt_u64(w,r->sample);
+ xt_raw(w,",\"start_uptime_ms\":");xt_u64(w,r->cpu.start_ms);
+ xt_raw(w,",\"end_uptime_ms\":");xt_u64(w,r->cpu.end_ms);
+ xt_raw(w,",\"scope\":\"guest_accounted_up\",\"part_index\":%u,\"part_count\":%u,\"threads_status\":\"%s\",\"rows_seen\":",
+  part,count,r->threads_rc==-ENOSPC?"truncated":status(r->threads_rc));
+ if(!r->threads_rc||r->threads_rc==-ENOSPC)xt_raw(w,"%zu",r->seen);else xt_raw(w,"null");
+ xt_raw(w,",\"rows_returned\":%zu},\"samples\":[",r->rows);
+ sample(w,p,"cpu.system.percent","percent","gauge",3,r->cpu.rc,r->cpu.percent_milli,0,cpu_status(r->cpu.rc));
+ for(size_t i=part*4;i<r->rows&&i<(part+1)*4;i++){
+  const struct xdr_thread *t=&r->threads[i];
+  if(t->rc>0||!t->lifetime){w->error=-ERANGE;return;}
+  xt_raw(w,",{\"name\":\"cpu.thread.percent\",\"unit\":\"percent\",\"kind\":\"gauge\",\"encoding\":\"float64\",\"value\":");
+  if(t->rc)xt_raw(w,"null");
+  else if(t->percent_milli>100000){w->error=-ERANGE;return;}
+  else xt_raw(w,"%u.%03u",(unsigned)(t->percent_milli/1000),(unsigned)(t->percent_milli%1000));
+  xt_raw(w,",\"status\":\"%s\",\"reason\":",cpu_status(t->rc));xt_string(w,t->rc?cpu_status(t->rc):NULL);
+  xt_raw(w,",\"source_rc\":%d,\"labels\":{\"thread_id\":",t->rc);xt_u64(w,t->lifetime);
+  xt_raw(w,",\"thread_name\":");xt_string(w,t->name);xt_raw(w,",\"name_truncated\":\"%s\"}}",t->name_truncated?"true":"false");
+ }
+ xt_raw(w,"]");
+}
+
 static void event(struct xt_writer *w,struct xt_publisher *p,const struct xdiag_event *e)
 {
 	if (!valid_event(e)) { w->error=-ERANGE;return; }
@@ -277,10 +496,12 @@ static void coverage(struct xt_writer *w,struct xt_publisher *p,const struct xdi
 
 static void thread(struct xt_writer *w,const struct xt_thread *t,size_t row)
 {
-	xt_raw(w,"{\"row_id\":%zu,\"name\":",row);xt_string(w,t->name);
+	if(t->stack_rc>0||(!t->stack_rc&&t->unused_bytes>t->stack_bytes)){w->error=-ERANGE;return;}
+    xt_raw(w,"{\"row_id\":%zu,\"name\":",row);xt_string(w,t->name);
 	xt_raw(w,",\"name_truncated\":%s,\"state_text\":",boolean(t->name_truncated));xt_string(w,t->state);
 	xt_raw(w,",\"state_flags\":%u,\"priority\":%d,\"stack\":{\"status\":\"%s\",\"source_rc\":%d,\"size_bytes\":",(unsigned)t->flags,t->priority,t->stack_rc==-E2BIG ? "scan_limit" : status(t->stack_rc),t->stack_rc);xt_u64(w,t->stack_bytes);
-	xt_raw(w,",\"unused_high_water_bytes\":");if (t->stack_rc) { xt_raw(w,"null"); } else { xt_u64(w,t->unused_bytes); }xt_raw(w,"}}");
+	xt_raw(w,",\"unused_high_water_bytes\":");if (t->stack_rc) { xt_raw(w,"null"); } else { xt_u64(w,t->unused_bytes); }
+    xt_raw(w,",\"max_used_bytes\":");if(t->stack_rc){xt_raw(w,"null");}else{xt_u64(w,t->stack_bytes-t->unused_bytes);}xt_raw(w,"}}");
 }
 
 static void snapshot(struct xt_writer *w,struct xt_publisher *p,enum xt_kind kind,
@@ -312,11 +533,22 @@ int xt_encode(struct xt_publisher *p,enum xt_kind kind,const struct xt_observati
 	uint64_t sent,const char sample_id[37],const char snapshot_id[37],unsigned part,struct xt_message *out)
 {
 	if (!p || !s || !out || !xt_uuid_valid(sample_id) || s->start_ms>s->end_ms || s->end_ms>sent ||
-	    s->rows>XT_THREAD_MAX || kind<XT_INVENTORY || kind>XT_HISTORY) { return -EINVAL; }
-	if ((kind==XT_HEARTBEAT || (kind>=XT_MEMORY && kind<=XT_PUBLISHER)) && sent-s->end_ms>2000) { ++p->counters.live_discarded;return -ETIMEDOUT; }
+    s->rows>XT_THREAD_MAX || kind<XT_INVENTORY || kind>XT_APP_MEMORY) { return -EINVAL; }
+	if ((kind==XT_HEARTBEAT || (kind>=XT_MEMORY && kind<=XT_PUBLISHER) ||
+	     kind==XT_CPU || kind==XT_POOLS || kind==XT_NETWORK_V1 || kind==XT_APP_MEMORY) && sent-s->end_ms>2000) {
+		++p->counters.live_discarded;return -ETIMEDOUT;
+	}
+	if (kind==XT_NETWORK_V1) { return encode_network_v1(p,&s->resources,sent,out); }
+	/* Collection copies a cache: its new end timestamp cannot renew the source
+	 * window. Reject stale resource pages before allocating a stream sequence. */
+	if (kind==XT_CPU || kind==XT_POOLS || kind==XT_APP_MEMORY) {
+		uint64_t source=kind==XT_CPU ? s->resources.cpu.end_ms : s->resources.raw.at_ms;
+		if (source>s->end_ms) { return -EINVAL; }
+		if (sent-source>2000) { ++p->counters.live_discarded;return -ETIMEDOUT; }
+	}
 	if (kind>=XT_INTERVAL && kind<=XT_ELAPSED && s->timing_rc) { return s->timing_rc; }
 	if (kind==XT_EVENT && !p->event_count) { return -EAGAIN; }
-	unsigned stream=kind==XT_INVENTORY ? 0 : kind==XT_HEARTBEAT ? 1 : kind==XT_EVENT ? 3 : kind>=XT_THREADS ? 4 : 2;
+	unsigned stream=kind==XT_INVENTORY ? 0 : kind==XT_HEARTBEAT ? 1 : kind==XT_EVENT ? 3 : (kind==XT_THREADS||kind==XT_HISTORY) ? 4 : 2;
 	if (p->sequence[stream]==UINT64_MAX) { return -ERANGE; }
 	if (!p->task_epoch[0] || (!s->timing_rc && (!p->task_seen || s->timing.origin_us!=p->task_origin))) {
 		/* One watched Core task: boot namespace + its fixed initialization origin.
@@ -328,7 +560,7 @@ int xt_encode(struct xt_publisher *p,enum xt_kind kind,const struct xt_observati
 	(void)snprintf(out->topic,sizeof(out->topic),"xenova/v2/vms/%s/telemetry/%s",p->identity.vm_id,streams[stream]);
 	struct xt_writer w={.data=out->bytes,.size=sizeof(out->bytes)};
 	uint64_t seq=p->sequence[stream]+1;
-	xt_raw(&w,"{\"schema_version\":\"2.0\",\"type\":\"telemetry.%s\",\"message_id\":\"%s/%s/%s/%s/%" PRIu64 "\",\"vm_id\":",streams[stream],p->identity.vm_id,p->identity.boot_id,p->identity.publisher_id,streams[stream],seq);
+	xt_raw(&w,"{\"schema_version\":\"2.1\",\"type\":\"telemetry.%s\",\"message_id\":\"%s/%s/%s/%s/%" PRIu64 "\",\"vm_id\":",streams[stream],p->identity.vm_id,p->identity.boot_id,p->identity.publisher_id,streams[stream],seq);
 	xt_string(&w,p->identity.vm_id);xt_raw(&w,",\"boot_id\":");xt_string(&w,p->identity.boot_id);
 	xt_raw(&w,",\"publisher_instance_id\":");xt_string(&w,p->identity.publisher_id);
 	xt_raw(&w,",\"seq\":");xt_u64(&w,seq);
@@ -337,14 +569,22 @@ int xt_encode(struct xt_publisher *p,enum xt_kind kind,const struct xt_observati
 	xt_raw(&w,",\"execution_id\":");xt_string(&w,bound ? p->identity.execution_id : NULL);
 	xt_raw(&w,",\"receipt_id\":");xt_string(&w,bound ? p->identity.receipt_id : NULL);
 	xt_raw(&w,"},\"clock\":{\"sent_uptime_ms\":");xt_u64(&w,sent);
-	xt_raw(&w,",\"sent_at\":null,\"utc_quality\":\"unavailable\",\"utc_source\":null,\"uncertainty_ms\":null},\"payload\":{");
+	char iso[25];uint64_t error;
+	if(xt_utc_read(&p->utc,sent,iso,&error)){
+	 xt_raw(&w,",\"sent_at\":null,\"utc_quality\":\"unavailable\",\"utc_source\":null,\"uncertainty_ms\":null}");
+	}else{
+	 xt_raw(&w,",\"sent_at\":");xt_string(&w,iso);xt_raw(&w,",\"utc_quality\":\"synchronized\",\"utc_source\":");
+	 xt_string(&w,p->utc.source);xt_raw(&w,",\"uncertainty_ms\":%" PRIu64 "}",error);
+	}
+	xt_raw(&w,",\"payload\":{");
 	collection(&w,s,sample_id);
 	if (kind==XT_INVENTORY) { inventory(&w,p,s); }
 	else if (kind==XT_HEARTBEAT) { heartbeat(&w,&p->counters); }
 	else if (kind>=XT_INTERVAL && kind<=XT_ELAPSED) { distribution(&w,p,kind,s); }
 	else if (kind==XT_EVENT) { xt_raw(&w,",\"event\":");event(&w,p,&p->events[0]);xt_raw(&w,",\"coverage\":");coverage(&w,p,&s->history); }
-	else if (kind>=XT_THREADS) { snapshot(&w,p,kind,s,snapshot_id,part); }
-	else { metrics(&w,p,kind,s); }
+	else if (kind==XT_THREADS||kind==XT_HISTORY) { snapshot(&w,p,kind,s,snapshot_id,part); }
+	else if (kind==XT_CPU||kind==XT_POOLS||kind==XT_APP_MEMORY) { resources(&w,p,kind,s,part); }
+	else { metrics(&w,p,kind,s,sent); }
 	xt_raw(&w,"}}");
 	if (w.error) { out->bytes[0]=0;out->length=0;if (w.error==-ENOSPC) { ++p->counters.payload_oversize; }return w.error; }
 	out->length=w.used;p->sequence[stream]=seq;return 0;

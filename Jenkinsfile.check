@@ -1,5 +1,6 @@
-// Xenova Merge Check
-// GitLab MR의 소스 브랜치를 검사한다. 배포와 운영 Health Check는 수행하지 않는다.
+// Xenova integration check
+// xenova-develop-check과 xenova-master-check Job이 공통으로 사용한다.
+// MR merge 결과에서 Backend·Frontend·Platform·Docker 구성을 모두 검사하며 배포는 하지 않는다.
 
 pipeline {
     agent any
@@ -8,7 +9,7 @@ pipeline {
         gitLabConnection('gitlab')
         timeout(time: 30, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '30'))
-        disableConcurrentBuilds(abortPrevious: true)
+        disableConcurrentBuilds()
         skipDefaultCheckout(true)
     }
 
@@ -22,29 +23,24 @@ pipeline {
 
                     checkout([
                         $class: 'GitSCM',
-                        branches: [[name: "origin/${env.gitlabSourceBranch}"]],
-                        extensions: [[
-                            $class: 'PreBuildMerge',
-                            options: [
-                                fastForwardMode: 'FF',
-                                mergeRemote: 'origin',
-                                mergeStrategy: 'DEFAULT',
-                                mergeTarget: env.gitlabTargetBranch
-                            ]
-                        ]],
+                        branches: [[name: "origin/${env.gitlabTargetBranch}"]],
                         userRemoteConfigs: [[
                             credentialsId: 'xenova-gitlab-checkout',
                             name: 'origin',
+                            refspec: '+refs/heads/*:refs/remotes/origin/*',
                             url: 'https://lab.ssafy.com/s15-final/S15P31E110.git'
                         ]]
                     ])
+                    withEnv(["MR_SOURCE_REF=origin/${env.gitlabSourceBranch}"]) {
+                        sh '''git -c user.name='Xenova Jenkins' -c user.email='jenkins@k15e110.p.ssafy.io' merge --no-edit "$MR_SOURCE_REF"'''
+                    }
                 }
             }
         }
 
         stage('Backend Test') {
             steps {
-                updateGitlabCommitStatus name: 'jenkins-merge-check', state: 'running'
+                updateGitlabCommitStatus name: integrationStatusName(), state: 'running'
                 dir('backend') {
                     sh './mvnw -B -ntp test'
                 }
@@ -93,6 +89,7 @@ pipeline {
             steps {
                 dir('platform/services/dom0-manager') {
                     catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                        sh 'mkdir -p target'
                         sh 'python3 -m pip install -q --user -e .[test] && python3 -m pytest -q --junitxml=target/pytest.xml'
                     }
                 }
@@ -103,10 +100,50 @@ pipeline {
             steps {
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                     dir('platform/services/vm-agent/mqtt-client') {
+                        sh 'mkdir -p target'
                         sh 'python3 -m pip install -q --user "paho-mqtt>=1.6,<3" "pytest>=7" && python3 -m pytest -q --junitxml=target/pytest.xml'
                     }
                     dir('platform/services/vm-agent/agent') {
+                        sh 'mkdir -p target'
                         sh 'python3 -m pytest -q --junitxml=target/pytest.xml'
+                    }
+                }
+            }
+        }
+
+        stage('Vehicle Python Test') {
+            // Jenkinsfile.vehicle 과 같은 시험. 시뮬레이터·인지·수동 앱 (OpenCV 불필요, 브로커 시험은 건너뜀)
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    script {
+                        for (app in ['simulator', 'perception', 'manual']) {
+                            dir("platform/apps/${app}") {
+                                sh 'mkdir -p target'
+                                sh 'python3 -m pip install -q --user -e .[test] && python3 -m pytest -q --junitxml=target/pytest.xml'
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Vehicle C Host Test') {
+            // Jenkinsfile.vehicle 과 같은 시험. 공통 MQTT C 라이브러리와 Zephyr 앱 로직 (cmake·ctest, ASan·UBSan)
+            steps {
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
+                    script {
+                        def suites = [
+                            'mqtt-c'    : 'platform/apps/common/xenova-mqtt-c',
+                            'manual'    : 'platform/apps/manual/zephyr/tests',
+                            'autonomous': 'platform/apps/autonomous/zephyr/tests',
+                        ]
+                        suites.each { name, source ->
+                            sh """
+                                cmake -S ${source} -B target/c-host/${name} -DCMAKE_EXE_LINKER_FLAGS=-no-pie
+                                cmake --build target/c-host/${name} -j 2
+                                ctest --test-dir target/c-host/${name} --output-on-failure --output-junit ctest.xml
+                            """
+                        }
                     }
                 }
             }
@@ -115,7 +152,7 @@ pipeline {
 
     post {
         always {
-            junit testResults: 'backend/target/surefire-reports/*.xml,frontend/target/vitest.xml,platform/services/dom0-manager/target/pytest.xml,platform/services/vm-agent/mqtt-client/target/pytest.xml,platform/services/vm-agent/agent/target/pytest.xml', allowEmptyResults: true
+            junit testResults: 'backend/target/surefire-reports/*.xml,frontend/target/vitest.xml,platform/services/dom0-manager/target/pytest.xml,platform/services/vm-agent/mqtt-client/target/pytest.xml,platform/services/vm-agent/agent/target/pytest.xml,platform/apps/simulator/target/pytest.xml,platform/apps/perception/target/pytest.xml,platform/apps/manual/target/pytest.xml,target/c-host/*/ctest.xml', allowEmptyResults: true
             sh '''
                 if command -v docker >/dev/null 2>&1; then
                     docker image rm \
@@ -126,22 +163,26 @@ pipeline {
             '''
         }
         success {
-            updateGitlabCommitStatus name: 'jenkins-merge-check', state: 'success'
+            updateGitlabCommitStatus name: integrationStatusName(), state: 'success'
             notifyMattermost('good', '✅ CI 성공')
         }
         unstable {
-            updateGitlabCommitStatus name: 'jenkins-merge-check', state: 'failed'
+            updateGitlabCommitStatus name: integrationStatusName(), state: 'failed'
             notifyMattermost('warning', '⚠️ CI 불안정')
         }
         failure {
-            updateGitlabCommitStatus name: 'jenkins-merge-check', state: 'failed'
+            updateGitlabCommitStatus name: integrationStatusName(), state: 'failed'
             notifyMattermost('danger', '❌ CI 실패')
         }
         aborted {
-            updateGitlabCommitStatus name: 'jenkins-merge-check', state: 'canceled'
+            updateGitlabCommitStatus name: integrationStatusName(), state: 'canceled'
             notifyMattermost('warning', '⚠️ CI 중단')
         }
     }
+}
+
+def integrationStatusName() {
+    return env.gitlabTargetBranch == 'master' ? 'jenkins-master-check' : 'jenkins-develop-check'
 }
 
 // Mattermost 웹훅 URL과 채널은 Jenkins 시스템 설정(Global Mattermost Notifier Settings)에 둔다.

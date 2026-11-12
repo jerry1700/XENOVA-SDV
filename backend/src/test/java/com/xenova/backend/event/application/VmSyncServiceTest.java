@@ -37,14 +37,14 @@ class VmSyncServiceTest {
     void capturesTheOperationMarkBeforeReadingVmState() {
         VmService vmService = mock(VmService.class);
         VmStateTracker tracker = mock(VmStateTracker.class);
-        when(vmService.list()).thenReturn(List.of());
+        when(vmService.listLive()).thenReturn(List.of());
         VmSyncService syncService = new VmSyncService(vmService, tracker);
 
         syncService.sync();
 
         InOrder order = inOrder(tracker, vmService);
         order.verify(tracker).mark();
-        order.verify(vmService).list();
+        order.verify(vmService).listLive();
         verifyNoMoreInteractions(vmService);
     }
 
@@ -53,7 +53,7 @@ class VmSyncServiceTest {
         VmService vmService = mock(VmService.class);
         VmStateTracker tracker = mock(VmStateTracker.class);
         when(tracker.mark()).thenReturn(7L);
-        when(vmService.list()).thenReturn(List.of(VM));
+        when(vmService.listLive()).thenReturn(List.of(VM));
         when(tracker.touchedSince("vm-1", 7L)).thenReturn(true);
 
         new VmSyncService(vmService, tracker).sync();
@@ -66,7 +66,7 @@ class VmSyncServiceTest {
         VmService vmService = mock(VmService.class);
         VmStateTracker tracker = mock(VmStateTracker.class);
         when(tracker.mark()).thenReturn(7L);
-        when(vmService.list()).thenReturn(List.of(VM));
+        when(vmService.listLive()).thenReturn(List.of(VM));
 
         List<Vm> result = new VmSyncService(vmService, tracker).sync();
 

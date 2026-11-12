@@ -23,12 +23,16 @@ import {
   restartSimRace,
   selectSimTrack,
   setSimEstop,
+  describeSimResult,
+  SIM_DONE_TEXT,
+  SimCommandError,
   useSimState,
   type ObstacleKind,
   type SimCommandResult,
 } from '../api/sim';
 import { useDrive } from '../layout/DriveContext';
 import { SimTrackSelect } from './SimTrackSelect';
+import { simFlow } from './simFlow';
 import styles from './pages.module.css';
 
 const KINDS: { kind: ObstacleKind; name: string; w: number }[] = [
@@ -44,8 +48,9 @@ const PUSH_M = 0.3;
 /**
  * 관리자 트랙 조작 (시뮬레이터 구성, -267) — 지도 밖 장애물 그림을 끌어다 지도에 놓기(또는 지도 누르기),
  * 지도 위 장애물을 끌어서 옮기기, 두 번 눌러 치우기.
- * 이 차가 지나가지 못하는 자리는 시뮬레이터가 거부하고 이유를 준다 (MQTT 계약 v1.4 배치 검사, MQTT-18).
- * 트랙 바꾸기·다시 출발·E-stop·차 밀기 (REST-31~37 → MQTT-17).
+ * 놓을 수 없는 자리(차와 겹침·벽 밖)는 시뮬레이터가 거부하고 이유를 준다 (MQTT 계약 v1.6 §12.1 배치 검사, MQTT-18).
+ * 트랙 바꾸기·다시 출발·E-stop·차 밀기 (REST-31~37 → MQTT-17). 결과는 WS-06 의 같은 request_id 로 받아
+ * 적용은 짧게, 거부는 이유를, 3초 안에 없으면 "시뮬레이터 응답 없음" 을 띄운다.
  */
 export function SimTrackControl() {
   const sim = useSimState();
@@ -67,26 +72,43 @@ export function SimTrackControl() {
   }, [reject]);
 
   const world = sim.world;
-  if (!sim.available || !world || !isCircuit(world.track)) return null;
+  // 시뮬레이터가 없거나 끊기면 카드를 지우지 않고 "없음" 으로 두고 조작을 막는다 (-262 완료 조건 2)
+  const off = !sim.available;
+  if (!world || !isCircuit(world.track)) return <SimUnavailable />;
   const g = circuitOf(world.track);
-  const pose = sim.pose;
+  const pose = off ? null : sim.pose;
   const race = pose?.race;
   const active = drive?.control?.active_app;
   const carColor = active === 'autonomous' || active === 'manual' ? CAR_COLOR[active] : 'var(--x-fault)';
   const estop = world.estop;
   const ahead = pose ? obstaclesAhead(g, pose, world.obstacles, 1e9) : [];
-  const fail = (e: unknown) => toast.show(e instanceof Error ? e.message : String(e), 'fault');
+  const firstAhead = ahead.find(({ ahead: a }) => a >= 0)?.ahead ?? null;
+  const flow = simFlow(drive, pose?.v_mps ?? null, firstAhead == null ? null : realM(g, firstAhead));
+  /**
+   * 명령 결과 (MQTT-18, WS-06 으로 같은 request_id). 거부·응답 없음은 이유를, 적용은 짧게 띄운다.
+   * null = 결과를 따로 돌려주지 않는 mock 명령
+   */
   const shown = (r: SimCommandResult | null, at?: { x: number; y: number }) => {
-    if (r && !r.ok) {
-      toast.show(r.message ?? '시뮬레이터가 거부했어요', 'fault');
-      if (at) setReject(at);
-    }
-    return !r || r.ok;
+    if (!r) return true;
+    if (!r.ok) {
+      const noResponse = r.code === 'NO_RESPONSE';
+      toast.show(describeSimResult(r), noResponse ? 'recovering' : 'fault');
+      if (at && !noResponse) setReject(at);
+    } else toast.show(describeSimResult(r), 'ok', 1500);
+    return r.ok;
   };
+  const report = (r: SimCommandResult | null) => void shown(r);
+  /** 결과를 돌려주지 않는 명령(트랙 바꾸기·다시 출발)의 적용 알림 */
+  const done = (op: string) => () => toast.show(SIM_DONE_TEXT[op] ?? '적용했어요', 'ok', 1500);
+  const fail = (e: unknown) =>
+    e instanceof SimCommandError
+      ? void shown(e.result)
+      : toast.show(e instanceof Error ? e.message : String(e), 'fault');
   const hit = (x: number, y: number) =>
     world.obstacles.find((o) => Math.hypot(o.x - x, o.y - y) < o.w / 2 + 0.12);
 
   const onPointer = (e: TrackPointer) => {
+    if (off) return;
     if (e.type === 'down') {
       const o = hit(e.x, e.y);
       drag.current = o ? { id: o.id, moved: false, lastAt: 0, warnAt: 0 } : null;
@@ -115,14 +137,14 @@ export function SimTrackControl() {
       setSelected(null);
     } else if (e.type === 'double') {
       const o = hit(e.x, e.y);
-      if (o) void removeSimObstacles([o.id]).catch(fail);
+      if (o) void removeSimObstacles([o.id]).then(report).catch(fail);
     }
   };
 
   // 지도 밖 그림을 끌어다 놓기 (HTML 끌어 놓기)
   const onDragTrack = (e: { type: 'over' | 'leave' | 'drop'; x: number; y: number }) => {
     const k = KINDS.find((q) => q.kind === dragKind);
-    if (!k) return;
+    if (!k || off) return;
     if (e.type === 'over') setPreview({ x: e.x, y: e.y, w: k.w });
     else if (e.type === 'leave') setPreview(null);
     else {
@@ -139,13 +161,15 @@ export function SimTrackControl() {
       title={<span style={{ color: 'var(--x-app-simulator)' }}>트랙 조작 — 시뮬레이터</span>}
       actions={
         <SimTrackSelect
+          disabled={off}
           tracks={world.tracks ?? []}
           current={g.track.id}
-          onPick={(id) => void selectSimTrack(id).catch(fail)}
+          onPick={(id) => void selectSimTrack(id).then(done('track.select')).catch(fail)}
         />
       }
     >
-      <div className={styles.simControl}>
+      {off && <SimOffNotice />}
+      <div className={styles.simControl} aria-disabled={off}>
         <div className={styles.simMap}>
           {/* 지도 밖 장애물 그림 — 끌어다 지도에 놓는다. 누르면 "지도 누르기"로 놓을 종류로 고른다 */}
           <div className={styles.palette} aria-label="장애물 — 끌어다 트랙에 놓기">
@@ -154,7 +178,8 @@ export function SimTrackControl() {
               <button
                 key={k.kind}
                 type="button"
-                draggable
+                draggable={!off}
+                disabled={off}
                 className={[styles.paletteItem, kind === k.kind ? styles.paletteOn : ''].join(' ')}
                 onClick={() => setKind(k.kind)}
                 onDragStart={(e) => {
@@ -207,16 +232,63 @@ export function SimTrackControl() {
         </div>
         <div className={styles.simSide}>
           <div className={styles.simGroup}>
+            <small>주행 흐름</small>
+            <div className={styles.rows} aria-label="주행 흐름">
+              <div>
+                <span>모드</span>
+                {flow.mode ? (
+                  <StatusBadge health={flow.mode.health} label={flow.mode.label} size="sm" />
+                ) : (
+                  <span>—</span>
+                )}
+              </div>
+              <div>
+                <span>모는 앱</span>
+                <span>{flow.app}</span>
+              </div>
+              <div>
+                <span>차</span>
+                <StatusBadge
+                  health={off ? 'stopped' : flow.motion.health}
+                  label={off ? '시뮬레이터 없음' : flow.motion.label}
+                  size="sm"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className={styles.simGroup}>
             <small>장애물 한꺼번에</small>
             <span className={styles.simTracks}>
-              <Button size="sm" variant="secondary" onClick={() => void randomSimObstacles().catch(fail)}>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={off}
+                onClick={() =>
+                  void randomSimObstacles(
+                    g,
+                    pose,
+                    world.obstacles.map((o) => o.id),
+                  )
+                    .then((n) => {
+                      if (n === null) return;
+                      if (n === 3) toast.show('장애물 3개를 놓았어요', 'ok', 1500);
+                      else toast.show(`장애물 ${n}개만 놓았어요 — 나머지는 자리가 없었어요`, 'recovering');
+                    })
+                    .catch(fail)
+                }
+              >
                 무작위 3개
               </Button>
               <Button
                 size="sm"
                 variant="ghost"
-                disabled={!world.obstacles.length}
-                onClick={() => void removeSimObstacles(world.obstacles.map((o) => o.id)).catch(fail)}
+                disabled={off || !world.obstacles.length}
+                onClick={() =>
+                  void removeSimObstacles(world.obstacles.map((o) => o.id))
+                    .then(report)
+                    .catch(fail)
+                }
               >
                 모두 치우기
               </Button>
@@ -250,7 +322,12 @@ export function SimTrackControl() {
                 </span>
               </div>
             </div>
-            <Button size="sm" variant="secondary" onClick={() => void restartSimRace().catch(fail)}>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={off}
+              onClick={() => void restartSimRace().then(done('race.start')).catch(fail)}
+            >
               다시 출발 (출발 신호)
             </Button>
           </div>
@@ -258,17 +335,28 @@ export function SimTrackControl() {
           <div className={styles.simGroup}>
             <small>차</small>
             <span className={styles.simTracks}>
-              <Button size="sm" variant="secondary" onClick={() => void pushSimCar(PUSH_M).catch(fail)}>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={off}
+                onClick={() => void pushSimCar(PUSH_M).then(report).catch(fail)}
+              >
                 ◀ 왼쪽으로 밀기 {realM(g, PUSH_M).toFixed(0)} m
               </Button>
-              <Button size="sm" variant="secondary" onClick={() => void pushSimCar(-PUSH_M).catch(fail)}>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={off}
+                onClick={() => void pushSimCar(-PUSH_M).then(report).catch(fail)}
+              >
                 오른쪽으로 밀기 ▶
               </Button>
             </span>
             <Button
               size="sm"
               variant={estop ? 'secondary' : 'danger'}
-              onClick={() => void setSimEstop(!estop).catch(fail)}
+              disabled={off}
+              onClick={() => void setSimEstop(!estop).then(report).catch(fail)}
             >
               {estop ? 'E-stop 풀기' : 'E-stop 걸기'}
             </Button>
@@ -291,7 +379,8 @@ export function SimTrackControl() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      onClick={() => void removeSimObstacles([o.id]).catch(fail)}
+                      disabled={off}
+                      onClick={() => void removeSimObstacles([o.id]).then(report).catch(fail)}
                     >
                       치우기
                     </Button>
@@ -304,6 +393,35 @@ export function SimTrackControl() {
           </div>
         </div>
       </div>
+    </Card>
+  );
+}
+
+/** 시뮬레이터 위치가 1초 넘게 안 오면 (SIM_STALE_MS). 조작은 막고 마지막 트랙은 그대로 둔다 */
+function SimOffNotice() {
+  return (
+    <p className={styles.simOff} role="status">
+      시뮬레이터 없음 — 1초 넘게 위치를 받지 못했다. 시뮬레이터를 켜면 다시 이어지고 조작 버튼이 켜진다.
+    </p>
+  );
+}
+
+/** 한 번도 트랙을 받지 못했을 때 (시뮬레이터를 안 켰거나 실차 구성) */
+function SimUnavailable() {
+  return (
+    <Card title={<span style={{ color: 'var(--x-app-simulator)' }}>트랙 조작 — 시뮬레이터</span>}>
+      <SimOffNotice />
+      <span className={styles.simTracks}>
+        <Button size="sm" variant="secondary" disabled>
+          다시 출발 (출발 신호)
+        </Button>
+        <Button size="sm" variant="secondary" disabled>
+          차 밀기
+        </Button>
+        <Button size="sm" variant="danger" disabled>
+          E-stop 걸기
+        </Button>
+      </span>
     </Card>
   );
 }

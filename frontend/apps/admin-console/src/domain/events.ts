@@ -25,9 +25,12 @@ const CATEGORY: Record<EventType, EventCategory> = {
   'agent.status.changed': 'lifecycle',
   'recovery.started': 'lifecycle',
   'recovery.completed': 'lifecycle',
+  'recovery.recovered': 'lifecycle',
+  'recovery.cancelled': 'lifecycle',
   'demo.command.sent': 'demo',
   'demo.command.completed': 'demo',
   'demo.command.failed': 'demo',
+  'display.route.changed': 'demo',
 };
 
 export const categoryOf = (event: VmEvent): EventCategory => CATEGORY[event.type] ?? 'lifecycle';
@@ -41,6 +44,8 @@ const REASON: Record<string, string> = {
   autonomous_lost: '자율주행이 다시 끊김',
   manual_lost: '수동주행 끊김',
   not_auto_ready: 'AUTO_READY 아님',
+  operator_cancelled: '운영자 취소',
+  readiness_lost: '준비 상태 깨짐',
 };
 
 const str = (value: unknown) => (value == null ? '' : String(value));
@@ -85,7 +90,20 @@ export function describe(
     case 'recovery.started':
       return { title: `${vmName(event.vm_id)} 재시작`, detail: '복구 서비스' };
     case 'recovery.completed':
-      return { title: `${vmName(event.vm_id)} 복구 완료`, detail: '앱 명령 재개' };
+      return {
+        title: `${vmName(event.vm_id)} 재시작 실행 확인`,
+        detail: '새 Xen 실행 관측 · 앱 준비·주행권은 별도 확인',
+      };
+    case 'recovery.recovered':
+      return {
+        title: `${vmName(event.vm_id)} 회복 관측`,
+        detail: '복구 시도 외 경로에서 회복 · 앱 준비·주행권은 별도 확인',
+      };
+    case 'recovery.cancelled':
+      return {
+        title: `${vmName(event.vm_id)} 복구 취소`,
+        detail: '정지·삭제·의도 변경 등으로 복구 대상에서 제외',
+      };
     case 'recovery.failed':
       return { title: `${vmName(event.vm_id)} 복구 실패`, detail: str(p.reason) };
     case 'demo.command.sent':

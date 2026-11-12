@@ -33,6 +33,7 @@ def test_default_and_explicit_follow_do_not_conflate_mode_and_vm(settings, store
     state["drive"].update(active_vm_id=VM2, mode="MANUAL", source={"status": "fresh"})
     default = policy.presentation(state)
     assert default["outputs"][0]["view"] == "overview"
+    assert [o["screen"] for o in default["outputs"]] == ["instrument", "infotainment"]
     assert default["outputs"][1]["vm_id"] == VM1  # pinned
     policy.select(Selection(policy_epoch=policy.epoch, revision=1, selection="follow_active"))
     followed = policy.presentation(state)
@@ -50,6 +51,7 @@ def test_vm_fault_alone_never_switches_selection(settings, store):
     state = store.snapshot()
     state["vms"][0]["xen_state"] = "crashed"
     assert policy.presentation(state)["outputs"][1]["vm_id"] == VM1
+    assert [o["screen"] for o in policy.presentation(state)["outputs"]] == ["instrument", "infotainment"]
 
 
 def test_os_mismatch_and_unrecognized_xen_state_are_not_normal(store):
@@ -84,6 +86,21 @@ def test_render_revision_changes_for_new_run_and_not_for_age_only(settings, stor
     assert policy.presentation(state)["render_revision"] != old
 
 
+def test_heartbeat_sequence_alone_does_not_churn_render_revision(settings, store):
+    policy = DisplayPolicy(settings, store.epoch)
+    state = store.snapshot()
+    for name in ("agent", "app"):
+        state["vms"][0]["sources"][name]["sequence"] = 1
+    state["drive"]["source"]["sequence"] = 1
+    old = policy.presentation(state)["render_revision"]
+    for name in ("agent", "app"):
+        state["vms"][0]["sources"][name]["sequence"] = 2
+    state["drive"]["source"]["sequence"] = 2
+    assert policy.presentation(state)["render_revision"] == old
+    state["vms"][0]["sources"]["agent"]["status"] = "stale"
+    assert policy.presentation(state)["render_revision"] != old
+
+
 def test_closed_renderer_ack_expires_even_when_content_has_not_changed(settings, store):
     policy = DisplayPolicy(settings, store.epoch, clock=store.clock)
     state = store.snapshot()
@@ -107,6 +124,7 @@ def test_browser_cookie_cannot_change_policy_or_reveal_service_state(settings, s
     service = create_app(settings, driver=Driver(), store=store, mqtt_factory=NoMqtt, web_root=tmp_path)
     with TestClient(service) as client:
         assert client.get("/display/monitor-1").status_code == 401
+        assert client.get("/display/mobile").status_code == 401
         assert client.post("/api/v1/display/session").status_code == 401
         headers = {"Authorization": "Bearer test-only-token"}
         session = client.post("/api/v1/display/session", headers=headers)
@@ -114,12 +132,18 @@ def test_browser_cookie_cannot_change_policy_or_reveal_service_state(settings, s
         assert "HttpOnly" in session.headers["set-cookie"]
         assert "test-only-token" not in session.headers["set-cookie"]
         assert client.get("/display/monitor-1").status_code == 200
+        assert client.get("/display/combined").status_code == 200
+        assert client.get("/display/mobile").status_code == 200
+        assert client.get("/display/unknown").status_code == 401
         p = client.get("/api/v1/display/presentation").json()
+        assert [o["output_id"] for o in p["outputs"]] == ["monitor-1", "monitor-2"]
         assert "test-only-token" not in str(p)
         assert client.get("/api/v1/display/state").status_code == 401
         select = {"policy_epoch": p["policy_epoch"], "revision": p["revision"], "selection": "pinned", "vm_id": VM2}
         assert client.post("/api/v1/display/selection", json=select).status_code == 401
         ack = {key: p[key] for key in ("policy_epoch", "revision", "render_revision")}
+        assert client.post("/api/v1/display/outputs/mobile/ack", json=ack).status_code == 401
+        assert client.post("/api/v1/display/outputs/mobile/ack", headers=headers, json=ack).status_code == 404
         assert client.post("/api/v1/display/outputs/monitor-1/ack", json=ack).status_code == 204
         changed = client.post("/api/v1/display/selection", headers=headers, json=select)
         assert changed.status_code == 200

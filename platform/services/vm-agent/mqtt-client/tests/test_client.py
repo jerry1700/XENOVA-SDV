@@ -64,6 +64,38 @@ def client(monkeypatch):
     c._fake = fake
     return c
 
+def test_trusted_app_guard_precedes_seq_and_latest_mutation(client):
+    from uuid import uuid4
+    from xenova_mqtt.drive_binding import BindingCache
+    from xenova_mqtt import topics
+    vm,host,boot,transport,automatic,manual=[str(uuid4()) for _ in range(6)]
+    cache=BindingCache(host,clock=lambda:100.)
+    row=dict(status='observed',profile='warm-drive-1',execution_id=str(uuid4()),boot_id=boot,
+        app_instance_id=transport,app_instances={'autonomous':automatic,'manual':manual},
+        intent_revision=1,lifecycle_generation=1,domid=1,xen_unique_id='1',observed_monotonic_ms=100000)
+    cache.install(dict(schema_version='1.0-drive-bindings',host_boot_id=host,
+        observed_monotonic_ms=100000,expires_monotonic_ms=103000,vms={vm:row}))
+    client.set_receive_guard(cache.guard((vm,)))
+    topic=topics.vm_app_events(vm,'autonomous');received=[];client.subscribe(topic,received.append,qos=0)
+    def deliver(instance,seq,retained=False):
+        envelope=env.build(Identity(vm_id=vm,app_id='autonomous',boot_id=boot,agent_instance_id=instance),
+            'drive.command',dict(generation=42,v_mps=.1,steer_rad=0),seq)
+        client._on_message(client._fake,None,SimpleNamespace(topic=topic,payload=json.dumps(envelope).encode(),retain=retained))
+    deliver(automatic,10);assert len(received)==1
+    # An unseen old session must not reset seq, permitting a duplicate of the
+    # accepted current command to appear as freshly received work.
+    deliver(str(uuid4()),1);deliver(automatic,10);assert len(received)==1
+    deliver(automatic,999,True);deliver(automatic,11);assert len(received)==2
+    assert client.latest(topic).envelope['seq']==11
+    current=cache.current(vm);current['app_instances']['autonomous']=str(uuid4())
+    assert cache.accepts(vm,boot,automatic,100.,app='autonomous')  # immutable cache copy
+    row['app_instances']['autonomous']=str(uuid4())
+    cache.install(dict(schema_version='1.0-drive-bindings',host_boot_id=host,
+        observed_monotonic_ms=100000,expires_monotonic_ms=103000,vms={vm:row}))
+    deliver(automatic,1000);deliver(row['app_instances']['autonomous'],1)
+    assert len(received)==3 and received[-1].envelope['agent_instance_id']==row['app_instances']['autonomous']
+    assert not cache.accepts(vm,boot,None,100.)
+
 
 def test_subscribed_requires_connack_and_suback(client):
     client.subscribe("xenova/v1/vms/+/heartbeat", qos=1)
@@ -248,3 +280,161 @@ def test_message_exposes_retain_flag(client):
     envelope = env.build(Identity(source_id="dom0-server"), "vm.health", {"ok": True}, 2)
     client._on_message(client._fake, None, SimpleNamespace(topic=HEALTH_TOPIC, payload=json.dumps(envelope).encode(), retain=False))
     assert client.latest(HEALTH_TOPIC).retained is False
+
+
+def test_connections_counts_successful_connects_so_a_fast_reconnect_is_visible(client):
+    assert client.connections == 0
+    client._on_connect(client._fake, None, {}, 0)
+    assert client.connections == 1 and client.connected
+    client._on_disconnect(client._fake, None, 0)
+    client._on_connect(client._fake, None, {}, 0)  # 두 확인 사이에 끊겼다 다시 붙음: connected 는 그대로 True
+    assert client.connections == 2 and client.connected
+    client._on_connect(client._fake, None, {}, 135)  # 거부된 CONNACK 은 세지 않는다
+    assert client.connections == 2
+
+
+def test_connection_attempts_counts_every_connack_including_refusals(client):
+    assert client.connection_attempts == 0
+    client._on_connect(client._fake, None, {}, 0)
+    client._on_connect(client._fake, None, {}, 135)
+    assert client.connection_attempts == 2 and client.connections == 1
+
+
+def test_publish_raw_sends_the_bytes_as_given_without_a_v1_envelope(client):
+    topic = "xenova/v2/vms/11111111-1111-4111-8111-111111111111/telemetry/heartbeat"
+    client.publish_raw(topic, b'{"schema_version":"2.1"}', qos=0, retain=False, wait_s=0)
+    assert client._fake.published[-1] == (topic, b'{"schema_version":"2.1"}', 0, False)
+    with pytest.raises(TypeError):
+        client.publish_raw(topic, {"schema_version": "2.1"}, qos=0, retain=False)
+    client._fake.publish_rc = 4  # MQTT_ERR_NO_CONN
+    with pytest.raises(PublishError):
+        client.publish_raw(topic, b"{}", qos=1, retain=True, wait_s=0)
+
+
+
+@pytest.mark.parametrize("stage", ["validate", "guard", "tracker"])
+def test_receive_age_includes_admission_delay(client, monkeypatch, stage):
+    """A slow admission stage ages this callback rather than renewing its time."""
+    import time
+
+    received = []
+    client.subscribe(HEALTH_TOPIC, received.append, qos=1)
+    envelope = env.build(Identity(source_id="dom0-server"), "vm.health", {"ok": True}, 1)
+    message = SimpleNamespace(topic=HEALTH_TOPIC, payload=json.dumps(envelope).encode(), retain=False)
+    admission = {}
+
+    def delayed(callback):
+        def call(*args, **kwargs):
+            admission["begin"] = time.monotonic()
+            time.sleep(.01)
+            result = callback(*args, **kwargs)
+            admission["end"] = time.monotonic()
+            return result
+        return call
+
+    if stage == "validate":
+        monkeypatch.setattr(env, "validate", delayed(env.validate))
+    elif stage == "guard":
+        client.set_receive_guard(delayed(lambda *args: True))
+    else:
+        monkeypatch.setattr(client._tracker, "accept", delayed(client._tracker.accept))
+    before = time.monotonic()
+    client._on_message(client._fake, None, message)
+    assert len(received) == 1
+    assert before <= received[0].received_monotonic <= admission["begin"]
+    assert received[0].age_ms() >= (admission["end"] - admission["begin"]) * 1000
+
+
+def test_receive_callback_captures_once_and_preserves_wire_handler_and_retain(client, monkeypatch):
+    import time
+
+    received = []
+    client.subscribe(HEALTH_TOPIC, received.append, qos=1)
+    envelope = env.build(Identity(source_id="dom0-server"), "vm.health", {"ok": True}, 1)
+    clock = time.monotonic
+    calls = []
+
+    def now():
+        value = clock()
+        calls.append(value)
+        return value
+
+    monkeypatch.setattr(client_module.time, "monotonic", now)
+    client._on_message(client._fake, None,
+                       SimpleNamespace(topic=HEALTH_TOPIC, payload=json.dumps(envelope).encode(), retain=True))
+    assert len(calls) == 1
+    assert received[0].received_monotonic == calls[0]
+    assert received[0].envelope == envelope and received[0].retained is True
+    assert client.latest(HEALTH_TOPIC) is received[0]
+
+
+@pytest.mark.parametrize("invalid", ["empty", "utf8", "json", "envelope", "oversize"])
+def test_bad_callback_then_valid_recovers_with_new_entry_without_replay(client, invalid):
+    import time
+    from xenova_mqtt import policy
+
+    received = []
+    client.subscribe(HEALTH_TOPIC, received.append, qos=1)
+    bad = {"empty": b"", "utf8": b"\xff", "json": b"{", "envelope": b"{}",
+           "oversize": b"x" * (policy.MAX_BYTES + 1)}[invalid]
+    client._on_message(client._fake, None, SimpleNamespace(topic=HEALTH_TOPIC, payload=bad, retain=False))
+    assert received == [] and client.latest(HEALTH_TOPIC) is None
+    envelope = env.build(Identity(source_id="dom0-server"), "vm.health", {"ok": True}, 1)
+    message = SimpleNamespace(topic=HEALTH_TOPIC, payload=json.dumps(envelope).encode(), retain=False)
+    before = time.monotonic()
+    client._on_message(client._fake, None, message)
+    assert len(received) == 1 and received[0].received_monotonic >= before
+    original = received[0]
+    client._on_message(client._fake, None, message)
+    assert received == [original] and client.latest(HEALTH_TOPIC) is original
+
+
+def test_slow_validation_keeps_identity_guard_at_current_time_and_recovers(client, monkeypatch):
+    from uuid import uuid4
+    from xenova_mqtt.drive_binding import BindingCache
+    from xenova_mqtt import topics
+
+    now = [100.]
+    vm, host, boot, transport, automatic, manual = [str(uuid4()) for _ in range(6)]
+    cache = BindingCache(host, clock=lambda: now[0])
+
+    def bind():
+        stamp = int(now[0] * 1000)
+        row = dict(status="observed", profile="warm-drive-1", execution_id=str(uuid4()), boot_id=boot,
+                   app_instance_id=transport, app_instances={"autonomous": automatic, "manual": manual},
+                   intent_revision=1, lifecycle_generation=1, domid=1, xen_unique_id="1",
+                   observed_monotonic_ms=stamp)
+        cache.install(dict(schema_version="1.0-drive-bindings", host_boot_id=host,
+                           observed_monotonic_ms=stamp, expires_monotonic_ms=stamp+3000, vms={vm: row}))
+
+    bind()
+    client.set_receive_guard(cache.guard((vm,)))
+    topic = topics.vm_app_events(vm, "autonomous")
+    received = []
+    client.subscribe(topic, received.append, qos=0)
+    envelope = env.build(Identity(vm_id=vm, app_id="autonomous", boot_id=boot, agent_instance_id=automatic),
+                         "drive.command", dict(generation=42, v_mps=.1, steer_rad=0), 1)
+    message = SimpleNamespace(topic=topic, payload=json.dumps(envelope).encode(), retain=False)
+    validate = env.validate
+
+    def slow(*args):
+        validate(*args)
+        now[0] = 104.  # The original binding expires during validation.
+
+    monkeypatch.setattr(env, "validate", slow)
+    client._on_message(client._fake, None, message)
+    assert received == [] and client.latest(topic) is None
+    bind()
+    client._on_message(client._fake, None, message)
+    assert len(received) == 1 and received[0].envelope["seq"] == 1
+
+
+def test_direct_message_default_and_explicit_timestamp_stay_supported():
+    import time
+    from xenova_mqtt.client import Message
+
+    before = time.monotonic()
+    message = Message(HEALTH_TOPIC, {"type": "vm.health", "payload": {}})
+    assert before <= message.received_monotonic <= time.monotonic()
+    explicit = Message(HEALTH_TOPIC, message.envelope, received_monotonic=123., retained=True)
+    assert explicit.received_monotonic == 123. and explicit.retained is True

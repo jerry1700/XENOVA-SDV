@@ -37,7 +37,8 @@ class TelemetryModelTest(unittest.TestCase):
             binary = Path(directory) / "producer"
             command = [shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror", "-g",
                        "-I" + str(BASE / "include"), "-I" + str(CORE / "include"),
-                       str(CORE / "src/core.c"), str(BASE / "src/writer.c"), str(BASE / "src/model.c"),
+                       str(CORE / "src/core.c"), str(CORE / "src/resources_core.c"),
+                       str(BASE / "src/clock.c"), str(BASE / "src/writer.c"), str(BASE / "src/model.c"),
                        str(BASE / "tests/emit.c"), "-o", str(binary)]
             if sanitized:
                 command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie"]
@@ -47,18 +48,163 @@ class TelemetryModelTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout.decode() + result.stderr.decode())
             self.assertIn(b"PASS production model", result.stderr)
             received = []
+            v1 = []
             for line in result.stdout.splitlines():
                 row = json.loads(line, object_pairs_hook=self.oracle.reject_duplicate_keys)
                 message = row["message"]
                 raw = line.split(b'"message":', 1)[1][:-1]
+                if message['type'] == 'agent.metrics':
+                    self.assertEqual(row['topic'], f"xenova/v1/vms/{message['vm_id']}/metrics")
+                    self.assertEqual((row['qos'], row['retain']), (0, False))
+                    self.assertLessEqual(len(raw), 1024)
+                    v1.append(message)
+                    continue
                 self.oracle.validate(message, row["topic"], row["qos"], row["retain"], len(raw))
                 received.append(message)
             self.assertEqual({m["type"] for m in received}, {"telemetry." + s for s in self.oracle.STREAMS})
             samples = [s for m in received if m["type"] == "telemetry.metrics" for s in m["payload"].get("samples", [])]
             self.assertTrue(any(s["name"] == "loop.last_jitter_us" and s["value"] == "-100" for s in samples))
             self.assertTrue(any(s["name"] == "memory.kernel_heap.used_bytes" and s["value"] == "9007199254741003" for s in samples))
+            def values_for(family):
+                return [{s['name']: s for s in m['payload']['samples']} for m in received
+                        if m['type'] == 'telemetry.metrics' and m['payload']['family'] == family]
+
+            all_app_memory=values_for('app_memory')
+            app_memory=[v for v in all_app_memory if not next(iter(v.values()))['labels']['region'].startswith('manual_')]
+            self.assertEqual(len(app_memory),6)
+            busy=app_memory[4]
+            self.assertTrue(all(v['value'] is None and v['source_rc']==-16 and v['reason']=='owner_busy' for v in busy.values()))
+            self.assertEqual(app_memory[5]['memory.app.used_bytes']['value'],'0')
+            for region in app_memory[:4]:
+                self.assertEqual(int(region['memory.app.used_bytes']['value'])+int(region['memory.app.free_bytes']['value']),int(region['memory.app.capacity_bytes']['value']))
+                self.assertEqual(region['memory.app.capacity_failure_total']['value'],'3')
+            manual=[m for m in received if m['type']=='telemetry.metrics' and
+                    m['payload'].get('family')=='app_memory' and
+                    m['payload']['samples'][0]['labels']['region'].startswith('manual_')]
+            self.assertEqual(len(manual),17)
+            self.assertEqual({v['labels']['region'] for row in all_app_memory for v in row.values()},
+                             {'drive_maps','drive_paths','drive_search_nodes','drive_odometry',
+                              'manual_input','manual_pending','manual_running','manual_result'})
+            def manual_values(message):
+                return {v['name'].removeprefix('memory.app.'):v for v in message['payload']['samples']}
+            empty=[m for m in manual if m['payload']['buffer'] is not None and m['payload']['buffer']['phase']=='empty']
+            self.assertEqual(len(empty),4)
+            for m in empty:
+                b=m['payload']['buffer'];v=manual_values(m)
+                self.assertIsNone(b['sequence']);self.assertIsNone(b['source_uptime_ms'])
+                self.assertEqual((b['content_bytes'],v['used_bytes']['value']),('0','0'))
+            stored=[m for m in manual if m['payload']['samples'][0]['labels']['region']=='manual_input' and
+                    m['payload']['buffer']['phase']=='stored']
+            self.assertEqual(len(stored),5)
+            zero=stored[0]['payload']['buffer']
+            self.assertEqual((zero['sequence'],zero['source_uptime_ms']),('0','0'))
+            self.assertIsNone(stored[-1]['payload']['buffer']['source_uptime_ms'])
+            self.assertEqual(stored[-1]['payload']['buffer']['sequence'],'0')
+            self.assertEqual([m['payload']['buffer']['input_status'] for m in stored],
+                             ['accepted','unclassified','invalid','expired','accepted'])
+            for m in stored:
+                self.assertEqual(manual_values(m)['used_bytes']['value'],'256')
+                self.assertEqual(manual_values(m)['high_water_bytes']['value'],'256')
+                self.assertTrue(all(v['status']=='ok' for v in m['payload']['samples']))
+            for phase in ('pending','running'):
+                m=next(m for m in manual if m['payload']['buffer'] and m['payload']['buffer']['phase']==phase)
+                b=m['payload']['buffer'];v=manual_values(m)
+                self.assertEqual((v['used_bytes']['value'],b['content_bytes']),('1024','512'))
+                self.assertIsNone(b['performed']);self.assertIsNone(b['last_read_sequence'])
+            retained=[m for m in manual if m['payload']['buffer'] and m['payload']['buffer']['phase']=='retained'
+                      and m['payload']['buffer']['sequence']=='9']
+            self.assertEqual(len(retained),3)
+            self.assertEqual([m['payload']['buffer']['last_read_sequence'] for m in retained],[None,'9','9'])
+            self.assertEqual([m['payload']['buffer']['revoked'] for m in retained],[False,False,True])
+            for m in retained:
+                self.assertEqual(manual_values(m)['used_bytes']['value'],'1024')
+                self.assertEqual(m['payload']['buffer']['content_bytes'],'1024')
+                self.assertTrue(m['payload']['buffer']['performed'])
+            missing=[m for m in manual if m['payload']['buffer'] is None]
+            self.assertEqual(len(missing),2)
+            self.assertEqual({m['payload']['samples'][0]['reason'] for m in missing},
+                             {'owner_busy','sample_expired'})
+            self.assertTrue(all(v['value'] is None for m in missing for v in m['payload']['samples']))
+            maximum=manual[-1]
+            self.assertEqual(maximum['payload']['buffer']['content_bytes'],str(2**64-1))
+            self.assertEqual(maximum['payload']['buffer']['sequence'],str(2**64-1))
+            self.assertLessEqual(len(self.oracle.wire_bytes(maximum)),4096)
+            memory = values_for('memory')
+            accounted = 'memory.kernel_heap.accounted_bytes'
+            self.assertEqual([(m[accounted]['status'], m[accounted]['value']) for m in memory],
+                             [('ok', '9007199254743003'), ('collection_failed', None), ('unsupported', None)])
+            network = values_for('network')
+            counter, tx, rate = 'net_rx_bytes_total', 'net_tx_bytes_total', 'rx_bytes_per_s'
+            self.assertTrue(all(counter not in sample and tx not in sample for sample in network))
+            self.assertEqual(network[0][rate]['value'], '12345')
+            self.assertEqual(network[0][rate]['labels'], {'interface': 'eth0', 'counter_epoch': '7'})
+            self.assertEqual(network[1][rate]['value'], '0')
+            self.assertEqual(network[2][rate]['status'], 'no_sample')
+            self.assertIsNone(network[2][rate]['value'])
+            self.assertEqual(network[3][rate]['status'], 'counter_discontinuity')
+            self.assertIsNone(network[3][rate]['value'])
+            for failed in network[4:]:
+                self.assertEqual(failed[rate]['status'], 'collection_failed')
+                self.assertIsNone(failed[rate]['value'])
+            self.assertEqual([m['seq'] for m in v1], [1, 2, 3, 4, 5])
+            self.assertEqual({m['schema_version'] for m in v1}, {'1.0'})
+            self.assertEqual(len({uuid.UUID(m['message_id']) for m in v1}), len(v1))
+            self.assertIsNone(v1[0]['sent_at'])
+            self.assertEqual(v1[1]['sent_at'], '2026-01-01T00:00:00.000Z')
+            self.assertEqual(v1[0]['payload']['observed_uptime_ms'], '50000')
+            for m in v1:
+                self.assertNotIn('processes', m['payload'])
+                self.assertEqual({v['name'] for v in m['payload']['values']}, {counter, tx})
+            totals = [m['payload']['values'] for m in v1]
+            self.assertEqual([v['value'] for v in totals[0]], ['9007199254741111', '18446744073709551615'])
+            self.assertEqual(totals[0][0]['labels'], {'iface': 'eth0', 'counter_epoch': '7'})
+            self.assertEqual(totals[2][0]['value'], '0')
+            self.assertEqual(totals[2][0]['labels']['counter_epoch'], '8')
+            for values, reason in zip(totals[3:], ['stale_sample', 'read_failed'], strict=True):
+                self.assertTrue(all(v['value'] is None and v['unavailable_reason'] == reason for v in values))
             self.assertTrue(any(s["status"] == "collection_failed" for s in samples))
             self.assertTrue(any(s["status"] == "not_registered" for s in samples))
+            # Negative mutations of actual producer output exercise the closed
+            # 2.1 contract independently of the C encoder's implementation.
+            from copy import deepcopy
+            message = next(m for m in received if m['type'] == 'telemetry.metrics'
+                           and m['payload']['family'] == 'network')
+            topic = f"xenova/v2/vms/{message['vm_id']}/telemetry/metrics"
+            for label in ('0', 'not-an-epoch'):
+                changed = deepcopy(message)
+                next(s for s in changed['payload']['samples'] if s['name'] == rate)['labels']['counter_epoch'] = label
+                with self.assertRaises(self.oracle.ContractError):
+                    self.oracle.validate(changed, topic, 0, False)
+            cpu=next(m for m in received if m['type']=='telemetry.metrics'
+                     and m['payload']['family']=='cpu' and m['payload']['samples'][0]['status']=='ok')
+            for invalid in ('25.25',-0.001,100.001,float('nan'),float('inf')):
+                changed=deepcopy(cpu);changed['payload']['samples'][0]['value']=invalid
+                with self.assertRaises(self.oracle.ContractError):
+                    self.oracle.validate(changed,f"xenova/v2/vms/{changed['vm_id']}/telemetry/metrics",0,False)
+            changed=deepcopy(cpu);changed['payload']['window']['part_count']+=1
+            with self.assertRaises(self.oracle.ContractError):
+                self.oracle.validate(changed,f"xenova/v2/vms/{changed['vm_id']}/telemetry/metrics",0,False)
+            changed=deepcopy(cpu);changed['payload']['unknown_field']=1
+            with self.assertRaises(self.oracle.ContractError):
+                self.oracle.validate(changed,f"xenova/v2/vms/{changed['vm_id']}/telemetry/metrics",0,False)
+            pages=[m for m in received if m['type']=='telemetry.metrics' and m['payload'].get('family')=='cpu'
+                   and m['payload']['window']['rows_returned']==32 and m['payload']['samples'][0]['status']=='ok']
+            self.assertEqual(len(pages),8)
+            self.assertEqual(len({m['payload']['collection']['sample_id'] for m in pages}),1)
+            self.assertEqual({m['payload']['window']['threads_status'] for m in pages},{'truncated'})
+            self.assertEqual({m['payload']['window']['rows_seen'] for m in pages},{73})
+            consumer=self.oracle.ReferenceConsumer();consumer.bind(cpu['vm_id'],cpu['boot_id'],cpu['publisher_instance_id'])
+            for page in pages[:7]:self.assertEqual(consumer.ingest(page,1000),'CURRENT_OBSERVATION')
+            # A valid page is not proof of full thread coverage. Missing last
+            # page remains missing; repeated source windows cannot renew leases.
+            group=next(iter(consumer.cpu_parts.values()));self.assertEqual(len(group),7)
+            self.assertNotEqual(len(group),pages[0]['payload']['window']['part_count'])
+            self.assertEqual(consumer.freshness(pages[0],7001),'STALE')
+            self.assertEqual(consumer.ingest(pages[7],7002),'CURRENT_OBSERVATION');self.assertEqual(len(group),8)
+            changed=deepcopy(pages[7]);changed['seq']=str(int(changed['seq'])+100)
+            changed['message_id']=changed['message_id'].rsplit('/',1)[0]+'/'+changed['seq']
+            changed['payload']['window']['start_uptime_ms']='49001'
+            self.assertEqual(consumer.ingest(changed,7003),'CPU_SAMPLE_CONFLICT')
             if os.environ.get("XENOVA_TEST_LOG_DIR"):
                 out = Path(os.environ["XENOVA_TEST_LOG_DIR"])
                 out.mkdir(parents=True, exist_ok=True)
@@ -76,7 +222,7 @@ class TelemetryBootstrapTest(unittest.TestCase):
         self.context = {"vm_id": str(uuid.uuid4()), "host_boot_id": str(uuid.uuid4()),
                         "execution_id": str(uuid.uuid4()), "domid": 42, "xen_unique_id": "18446744073709551615"}
         self.credential = {"vm_id": self.context["vm_id"], "broker_ipv4": "192.0.2.1", "port": 18883,
-                           "username": self.context["vm_id"], "password": "synthetic-unit-test-password",
+                           "username": "telemetry-" + self.context["vm_id"], "password": "synthetic-unit-test-password",
                            "trusted_internal_plaintext": True}
         self.source = {"inode": 123, "mtime_ns": 456, "bytes": 100}
         self.calls = []
@@ -221,3 +367,21 @@ class TelemetryBootstrapTest(unittest.TestCase):
         path.write_text(json.dumps({**self.credential, "trusted_internal_plaintext": False}))
         with self.assertRaises(ValueError):
             self.module.credentials(path, self.context["vm_id"])
+
+    def test_broker_account_namespace_is_bound_to_selected_channel(self):
+        path = self.directory / 'account.json'
+        path.write_text(json.dumps(self.credential))
+        path.chmod(0o600)
+        self.module.credentials(path, self.context['vm_id'], 'telemetry')
+        self.module.credentials(path, self.context['vm_id'])
+        with self.assertRaises(ValueError):
+            self.module.credentials(path, self.context['vm_id'], 'drive')
+        path.write_text(json.dumps({**self.credential, 'username': self.context['vm_id']}))
+        self.module.credentials(path, self.context['vm_id'], 'drive')
+        self.module.credentials(path, self.context['vm_id'])
+        with self.assertRaises(ValueError):
+            self.module.credentials(path, self.context['vm_id'], 'telemetry')
+        self.module.credentials(path, self.context['vm_id'], 'telemetry', for_reconciliation=True)
+        path.write_text(json.dumps({**self.credential, 'username': 'telemetry-' + str(uuid.uuid4())}))
+        with self.assertRaises(ValueError):
+            self.module.credentials(path, self.context['vm_id'], 'telemetry')

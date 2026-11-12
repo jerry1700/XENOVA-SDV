@@ -4,10 +4,12 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 import hmac
 import logging
+import os
 import secrets
 import time
 from pathlib import Path
 
+from dom0_manager.observations import ObservationFile
 from dom0_manager.config import Settings
 from dom0_manager.drivers import build_driver
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -18,38 +20,87 @@ from .config import FeedSettings
 from .mqtt import MqttSource
 from .state import StateStore
 from .policy import DisplayPolicy, RenderAck, Selection
+from .gateway import GatewayReader
+from .shared import SharedFollower
 
 log = logging.getLogger(__name__)
 
 
-def create_app(settings=None, *, driver=None, store=None, mqtt_factory=MqttSource, web_root=None):
+def create_app(settings=None, *, driver=None, store=None, mqtt_factory=MqttSource, web_root=None,
+               gateway_factory=GatewayReader):
     settings = settings or FeedSettings.from_env()
-    driver = driver or build_driver(Settings.from_env())
+    if driver is None:
+        shared_path = os.environ.get("XENOVA_OBSERVATIONS_PATH")
+        driver = ObservationFile(shared_path) if shared_path else build_driver(Settings.from_env())
     store = store or StateStore(settings)
     policy = DisplayPolicy(settings, store.epoch, clock=store.clock)
     sessions = {}
 
-    async def poll():
+    async def poll_gateway():
+        reader = None
+        unavailable = False
         while True:
+            started = time.monotonic()
             try:
-                domains = await asyncio.to_thread(driver.list_domains)
-                store.poll_success(domains)
+                if reader is None:
+                    # Built lazily and retried: a missing Gateway client or host boot id
+                    # (e.g. a development PC) leaves driving state unknown instead of
+                    # failing startup. Without a reader there is no observation to expire.
+                    reader = gateway_factory(settings)
+                value, observed = await asyncio.to_thread(reader.read)
+                store.gateway_success(value, observed_mono=observed)
+                unavailable = False
             except Exception as error:
+                if reader is not None:
+                    store.gateway_failure()
+                if not unavailable:
+                    log.warning("Gateway display context unavailable (%s)", type(error).__name__)
+                unavailable = True
+            # One outstanding bounded call at a time; skip catch-up polls.
+            await asyncio.sleep(max(0, 1 - (time.monotonic() - started)))
+
+    async def poll():
+        unavailable = False
+        follower = SharedFollower(driver) if isinstance(driver, ObservationFile) else None
+        interval = .25 if follower is not None else 1
+        while True:
+            started = time.monotonic()
+            try:
+                if follower is not None:
+                    update = await asyncio.to_thread(follower.read_changed)
+                    if update is not None:
+                        domains, observed = update
+                        store.poll_success(domains, observed_mono=observed)
+                else:
+                    # Explicitly injected test/probe adapters only.
+                    domains = await asyncio.to_thread(driver.list_domains)
+                    store.poll_success(domains)
+                unavailable = False
+            except Exception as error:
+                if follower is not None:
+                    follower.invalidate()
                 store.poll_failure()
-                log.warning("Xen display query unavailable (%s)", type(error).__name__)
-            await asyncio.sleep(1)
+                if not unavailable:
+                    log.warning("Shared VM display observation unavailable (%s)", type(error).__name__)
+                unavailable = True
+            await asyncio.sleep(max(0, interval - (time.monotonic() - started)))
 
     @asynccontextmanager
     async def lifespan(app):
-        task = asyncio.create_task(poll())
         source = mqtt_factory(store)
+        # Driving state is read only from the Gateway context; an unavailable
+        # Gateway is reported as unknown, never replaced by MQTT/retained or raw
+        # Authority-file reads.
+        tasks = [asyncio.create_task(poll()), asyncio.create_task(poll_gateway())]
         try:
             source.start()
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
             await asyncio.to_thread(source.stop)
 
     app = FastAPI(title="Xenova read-only display feed", lifespan=lifespan)
@@ -63,7 +114,8 @@ def create_app(settings=None, *, driver=None, store=None, mqtt_factory=MqttSourc
     async def service_auth(request, call_next):
         path = request.url.path
         read_screen = request.method == "GET" and (
-            path in {"/display/monitor-1", "/display/monitor-2", "/api/v1/display/presentation"}
+            path in {"/display/monitor-1", "/display/monitor-2", "/display/combined", "/display/mobile",
+                     "/api/v1/display/presentation"}
             or path.startswith("/assets/"))
         ack_screen = request.method == "POST" and path in {
             "/api/v1/display/outputs/monitor-1/ack", "/api/v1/display/outputs/monitor-2/ack"}
@@ -117,7 +169,6 @@ def create_app(settings=None, *, driver=None, store=None, mqtt_factory=MqttSourc
             raise HTTPException(409, str(error)) from error
 
     if web_root is None:
-        import os
         web_root = os.environ.get("XENOVA_DISPLAY_WEB_ROOT")
     if web_root:
         root = Path(web_root).resolve()
@@ -127,7 +178,8 @@ def create_app(settings=None, *, driver=None, store=None, mqtt_factory=MqttSourc
 
         @app.get("/display/{output_id}", include_in_schema=False)
         def monitor_page(output_id: str):
-            if output_id not in {"monitor-1", "monitor-2"}:
+            # monitor-1·2 는 vm-screens 가 합친 차량 화면(/display/combined)으로 넘긴다. 새로고침해도 열리게 둔다
+            if output_id not in {"monitor-1", "monitor-2", "combined", "mobile"}:
                 raise HTTPException(404)
             return FileResponse(root / "index.html")
 

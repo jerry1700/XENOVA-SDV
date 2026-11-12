@@ -51,6 +51,11 @@ def app_events(app_id: str) -> str:
     return f"{PREFIX}/apps/{_segment('app_id', app_id)}/events"
 
 
+def vm_app_events(vm_id: str, app_id: str) -> str:
+    """Verified drive profile: the broker binds the publisher account to VM path."""
+    return f"{PREFIX}/vms/{_segment('vm_id', vm_id)}/apps/{_segment('app_id', app_id)}/events"
+
+
 def manual_input() -> str:
     """백엔드 → 수동 VM 키 입력 (MQTT-11)."""
     return f"{PREFIX}/apps/manual/input"
@@ -62,6 +67,23 @@ def vehicle_control() -> str:
 
 def vehicle_status() -> str:
     return f"{PREFIX}/vehicle/status"
+
+
+def sim_pose() -> str:
+    """계약 12장 시뮬레이터 전용 (실차에는 없음)."""
+    return f"{PREFIX}/sim/pose"
+
+
+def sim_world() -> str:
+    return f"{PREFIX}/sim/world"
+
+
+def sim_command() -> str:
+    return f"{PREFIX}/sim/command"
+
+
+def sim_result() -> str:
+    return f"{PREFIX}/sim/result"
 
 
 def probe_request(target_vm_id: str) -> str:
@@ -83,10 +105,13 @@ class TopicInfo:
 _VM = re.compile(rf"^{PREFIX}/vms/([^/]+)/[^/]+$")
 # apps/manual/input 은 백엔드가 보내는 입력이라 app_id 대조 대상이 아니다 (events 만)
 _APP = re.compile(rf"^{PREFIX}/apps/([^/]+)/events$")
+_VM_APP = re.compile(rf"^{PREFIX}/vms/([^/]+)/apps/([^/]+)/events$")
 
 
 def parse(topic: str) -> TopicInfo:
     """토픽에서 vm_id·app_id 를 꺼낸다. 계약 밖 토픽이면 빈 TopicInfo."""
+    if match := _VM_APP.match(topic):
+        return TopicInfo(vm_id=match.group(1), app_id=match.group(2))
     if match := _VM.match(topic):
         return TopicInfo(vm_id=match.group(1))
     if match := _APP.match(topic):

@@ -17,7 +17,7 @@ import com.xenova.backend.agent.domain.NetworkInterface;
 import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.vm.domain.CreateVmCommand;
-import com.xenova.backend.vm.domain.VmControlPort;
+import com.xenova.backend.vm.infrastructure.Dom0ManagerClient;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
 import com.xenova.backend.vm.domain.VmRuntime;
@@ -64,7 +64,7 @@ class OsEvidenceReportApiIntegrationTest {
     private AgentHeartbeatRepository heartbeatRepository;
 
     @MockitoBean
-    private VmControlPort vmControlPort;
+    private Dom0ManagerClient vmControlPort;
 
     @Autowired
     private VmRecordRepository vmRecordRepository;
@@ -110,15 +110,15 @@ class OsEvidenceReportApiIntegrationTest {
                 .andExpect(jsonPath("$.required_os_ids.length()").value(2))
                 .andExpect(jsonPath("$.observation_window.from").isNotEmpty())
                 .andExpect(jsonPath("$.entries.length()").value(3))
-                .andExpect(jsonPath("$.entries[0].xen_state").value("running"))
-                .andExpect(jsonPath("$.entries[0].agent_status").value("ONLINE"))
-                .andExpect(jsonPath("$.entries[0].expected_os.id").value("debian"))
-                .andExpect(jsonPath("$.entries[0].observed_os.pretty_name").value("Debian GNU/Linux 12 (bookworm)"))
-                .andExpect(jsonPath("$.entries[0].interfaces[0].ips[0]").value("10.0.0.11"))
-                .andExpect(jsonPath("$.entries[0].match").value("MATCH"))
-                .andExpect(jsonPath("$.entries[0].guest_kind").value("linux"))
-                .andExpect(jsonPath("$.entries[2].guest_kind").value("zephyr"))
-                .andExpect(jsonPath("$.entries[2].match").value("NOT_APPLICABLE"));
+                .andExpect(jsonPath("$.entries[1].xen_state").value("running"))
+                .andExpect(jsonPath("$.entries[1].agent_status").value("ONLINE"))
+                .andExpect(jsonPath("$.entries[1].expected_os.id").value("debian"))
+                .andExpect(jsonPath("$.entries[1].observed_os.pretty_name").value("Debian GNU/Linux 12 (bookworm)"))
+                .andExpect(jsonPath("$.entries[1].interfaces[0].ips[0]").value("10.0.0.11"))
+                .andExpect(jsonPath("$.entries[1].match").value("MATCH"))
+                .andExpect(jsonPath("$.entries[1].guest_kind").value("linux"))
+                .andExpect(jsonPath("$.entries[0].guest_kind").value("zephyr"))
+                .andExpect(jsonPath("$.entries[0].match").value("NOT_APPLICABLE"));
     }
 
     @Test
@@ -129,7 +129,7 @@ class OsEvidenceReportApiIntegrationTest {
         report()
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.verdict").value("FAIL"))
-                .andExpect(jsonPath("$.entries[1].match").value("MISMATCH"))
+                .andExpect(jsonPath("$.entries[2].match").value("MISMATCH"))
                 .andExpect(jsonPath("$.reasons", hasItem(startsWith("ubuntu VM"))));
     }
 
@@ -141,7 +141,7 @@ class OsEvidenceReportApiIntegrationTest {
         report()
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.verdict").value("BLOCKED"))
-                .andExpect(jsonPath("$.entries[1].agent_status").value("OFFLINE"))
+                .andExpect(jsonPath("$.entries[2].agent_status").value("OFFLINE"))
                 .andExpect(jsonPath("$.reasons", hasItem(startsWith("ubuntu VM"))));
     }
 
@@ -150,9 +150,9 @@ class OsEvidenceReportApiIntegrationTest {
         report()
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.verdict").value("BLOCKED"))
-                .andExpect(jsonPath("$.entries[0].agent_status").value("UNKNOWN"))
-                .andExpect(jsonPath("$.entries[0].observed_os").isEmpty())
-                .andExpect(jsonPath("$.entries[0].match").value("UNKNOWN"));
+                .andExpect(jsonPath("$.entries[1].agent_status").value("UNKNOWN"))
+                .andExpect(jsonPath("$.entries[1].observed_os").isEmpty())
+                .andExpect(jsonPath("$.entries[1].match").value("UNKNOWN"));
     }
 
     @Test

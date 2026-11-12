@@ -1,0 +1,12 @@
+[Unit]
+Description=Bounded Xenova guest UTC correspondence
+Requisite=xenova-first-boot.service
+RequiresMountsFor=/srv/xenova
+After=xenova-first-boot.service xenstored.service
+ConditionPathExists=/proc/xen/capabilities
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/xenova-telemetry-support clock-once
+TimeoutStartSec=8
+UMask=0077

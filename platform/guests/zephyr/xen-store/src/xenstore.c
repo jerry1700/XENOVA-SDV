@@ -100,6 +100,14 @@ static int connection(struct xs_client *c)
 	return 0;
 }
 
+static int publish_progress(struct xs_client *c, uint32_t *index, uint32_t value)
+{
+	__atomic_store_n(index, value, __ATOMIC_RELEASE);
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	int rc = c->io.notify(c->io.context);
+	return rc ? fatal(c, rc) : 0;
+}
+
 /* Acquire the peer's index before bytes; release our index after bytes.
  * Notifications are sent after publishing either producer or consumer progress.
  */
@@ -123,11 +131,8 @@ static int ring_transfer(struct xs_client *c, bool write, void *data, size_t cou
 		else { bytes[i] = ring[MASK_XENSTORE_IDX(index + i)]; }
 	}
 	if (count) {
-		__atomic_store_n(write ? &r->req_prod : &r->rsp_cons,
-				 index + (uint32_t)count, __ATOMIC_RELEASE);
-		__atomic_thread_fence(__ATOMIC_SEQ_CST);
-		rc = c->io.notify(c->io.context);
-		if (rc) { return fatal(c, rc); }
+		rc = publish_progress(c, write ? &r->req_prod : &r->rsp_cons, index + (uint32_t)count);
+		if (rc) { return rc; }
 	}
 	return (int)count;
 }
@@ -260,13 +265,14 @@ static int pump(struct xs_client *c, uint32_t request, uint32_t type,
 	} else if (h.req_id != request) {
 		c->late_responses++;
 		if (h.req_id == c->abandoned_start) {
-			if (h.type == XS_TRANSACTION_START) {
+			if (h.tx_id || c->active_tx) { rc = fatal(c, -EPROTO); }
+			else if (h.type == XS_TRANSACTION_START) {
 				uint32_t orphan;
 				size_t n = h.len;
 				if (n && c->rx_body[n-1] == 0) { n--; }
 				rc = memchr(c->rx_body, 0, n) ? -EPROTO : parse_number(c->rx_body, &orphan);
 				if (rc) { fatal(c, rc); }
-				if (!rc) { c->active_tx = orphan; }
+				if (!rc) { c->active_tx = orphan; c->orphan_tx = true; }
 			} else if (h.type != XS_ERROR) { rc = fatal(c, -EPROTO); }
 			c->abandoned_start = 0;
 		}
@@ -286,6 +292,51 @@ static int pump(struct xs_client *c, uint32_t request, uint32_t type,
 	return rc ? rc : 1;
 }
 
+/* A frame that fits in the request ring must never expose a partial header or
+ * body. The session owner is the only producer, and the peer only frees space. */
+static int try_request_frame(struct xs_client *c, const struct xsd_sockmsg *header,
+			     const void *payload, int64_t end)
+{
+	struct xenstore_domain_interface *r = c->ring;
+	int rc = connection(c);
+	if (rc) { return rc; }
+	uint32_t prod = __atomic_load_n(&r->req_prod, __ATOMIC_ACQUIRE);
+	uint32_t used = prod - __atomic_load_n(&r->req_cons, __ATOMIC_ACQUIRE);
+	if (used > XENSTORE_RING_SIZE) { return fatal(c, -EPROTO); }
+	const size_t total = sizeof(*header) + header->len;
+	if (total > XENSTORE_RING_SIZE - used) { return 0; }
+	const char *bytes = (const char *)header;
+	for (size_t i = 0; i < sizeof(*header); i++) {
+		r->req[MASK_XENSTORE_IDX(prod + i)] = bytes[i];
+	}
+	bytes = payload;
+	for (size_t i = 0; i < header->len; i++) {
+		r->req[MASK_XENSTORE_IDX(prod + sizeof(*header) + i)] = bytes[i];
+	}
+	if (!xs_remaining(c, end)) { return -ETIMEDOUT; }
+	c->sending_request = 0;
+	rc = publish_progress(c, &r->req_prod, prod + (uint32_t)total);
+	return rc ? rc : (int)total;
+}
+
+static int send_request_frame(struct xs_client *c, const struct xsd_sockmsg *header,
+			      const void *payload, int64_t end)
+{
+	for (;;) {
+		/* Correlate any buffered late response or invalid early reply before
+		 * the request becomes visible to the server. */
+		bool ignored = false;
+		int progress = pump(c, 0, 0, 0, NULL, 0, NULL, &ignored);
+		if (progress < 0) { return progress; }
+		int rc = try_request_frame(c, header, payload, end);
+		if (rc) { return rc < 0 ? rc : 0; }
+		if (!xs_remaining(c, end)) { return -ETIMEDOUT; }
+		if (progress) { continue; }
+		rc = wait_until(c, end);
+		if (rc < 0) { return rc; }
+	}
+}
+
 static int request_held(struct xs_client *c, uint32_t type, uint32_t tx,
 		   const void *payload, size_t length, void *output,
 		   size_t capacity, size_t *output_length, int ms)
@@ -296,8 +347,12 @@ static int request_held(struct xs_client *c, uint32_t type, uint32_t tx,
 	int64_t end = xs_deadline(c, ms);
 	if (end < 0) { return -EINVAL; }
 	int rc;
-	if (tx && tx != c->active_tx) { return -EINVAL; }
+	if (tx && (tx != c->active_tx || (c->orphan_tx && type != XS_TRANSACTION_END))) {
+		return -EINVAL;
+	}
 	if (c->next_request == UINT32_MAX) { return -EOVERFLOW; }
+	/* An enclosing deadline can reach zero between Store calls. */
+	if (!ms) { return -ETIMEDOUT; }
 	unsigned int slot;
 	for (;;) {
 		for (slot = 0; slot < XS_PENDING_LIMIT; slot++) {
@@ -315,6 +370,14 @@ static int request_held(struct xs_client *c, uint32_t type, uint32_t tx,
 	size_t sent = 0;
 	const size_t total = sizeof(h) + length;
 	c->last_error[0] = 0;
+	if (total <= XENSTORE_RING_SIZE) {
+		rc = send_request_frame(c, &h, payload, end);
+		if (rc) {
+			if (c->sending_request) { c->pending[slot] = 0; c->sending_request = 0; }
+			return rc;
+		}
+		sent = total;
+	}
 	while (sent < total) {
 		void *data = sent < sizeof(h) ? (char *)&h + sent : (char *)payload + sent-sizeof(h);
 		size_t count = sent < sizeof(h) ? sizeof(h)-sent : total-sent;
@@ -444,14 +507,45 @@ int xs_remove(struct xs_client *c, const char *path, int ms)
 	return path_request(c, XS_RM, 0, path, reply, sizeof(reply), NULL, ms);
 }
 
+static int transaction_end_held(struct xs_client *c, uint32_t tx, bool commit, int ms)
+{
+	if (tx != c->active_tx) { return -EINVAL; }
+	/* Replaying a commit can hide the original uncertain outcome. A later
+	 * abort only retires the same ID, including ENOENT after a late commit. */
+	if (commit && c->orphan_tx) { return -EALREADY; }
+	char reply[4];
+	int rc = request_held(c, XS_TRANSACTION_END, tx, commit ? "T" : "F", 2,
+			 reply, sizeof(reply), NULL, ms);
+	if (!rc || rc == -EAGAIN || rc == -ENOENT) {
+		c->active_tx = 0;
+		c->orphan_tx = false;
+	} else {
+		c->orphan_tx = true;
+	}
+	return rc;
+}
+
 int xs_transaction_start(struct xs_client *c, uint32_t *tx, int ms)
 {
 	if (!c || !tx) { return -EINVAL; }
 	int lock = enter(c);
 	if (lock) { return lock; }
-	if (c->active_tx || c->abandoned_start) { return leave(c, -EBUSY); }
+	int64_t end = xs_deadline(c, ms);
+	if (end < 0) { return leave(c, -EINVAL); }
+	while (c->abandoned_start) {
+		if (!xs_remaining(c, end)) { return leave(c, -EBUSY); }
+		bool ignored = false;
+		int rc = pump(c, 0, 0, 0, NULL, 0, NULL, &ignored);
+		if (rc <= 0) { return leave(c, rc ? rc : -EBUSY); }
+	}
+	if (c->orphan_tx) {
+		int rc = transaction_end_held(c, c->active_tx, false, xs_remaining(c, end));
+		if (rc && rc != -ENOENT && rc != -EAGAIN) { return leave(c, rc); }
+	}
+	if (c->active_tx) { return leave(c, -EBUSY); }
 	char reply[16]; size_t len = 0;
-	int rc = request_held(c, XS_TRANSACTION_START, 0, "", 1, reply, sizeof(reply)-1, &len, ms);
+	int rc = request_held(c, XS_TRANSACTION_START, 0, "", 1, reply, sizeof(reply)-1, &len,
+			      xs_remaining(c, end));
 	if (rc) { return leave(c, rc); }
 	reply[len] = 0;
 	if (len && reply[len-1] == 0) { reply[--len] = 0; }
@@ -464,15 +558,10 @@ int xs_transaction_start(struct xs_client *c, uint32_t *tx, int ms)
 
 int xs_transaction_end(struct xs_client *c, uint32_t tx, bool commit, int ms)
 {
-	char reply[4];
-	if (!c || !tx) { return -EINVAL; }
+	if (!c || !tx || ms < 0) { return -EINVAL; }
 	int lock = enter(c);
 	if (lock) { return lock; }
-	if (tx != c->active_tx) { return leave(c, -EINVAL); }
-	int rc = request_held(c, XS_TRANSACTION_END, tx, commit ? "T" : "F", 2,
-			 reply, sizeof(reply), NULL, ms);
-	if (!rc || rc == -EAGAIN || rc == -ENOENT) { c->active_tx = 0; }
-	return leave(c, rc);
+	return leave(c, transaction_end_held(c, tx, commit, ms));
 }
 
 int xs_transaction(struct xs_client *c, unsigned int limit, int ms,
@@ -503,6 +592,7 @@ int xs_watch(struct xs_client *c, const char *path, uint32_t *id, int ms)
 	if (!c || !id || path_length(path) < 0 || path[0] != '/') { return -EINVAL; }
 	int lock = enter(c);
 	if (lock) { return lock; }
+	if (!ms) { return leave(c, -ETIMEDOUT); }
 	struct xs_watch_slot *w = NULL;
 	for (unsigned int i = 0; i < XS_WATCH_LIMIT; i++) {
 		if (c->watches[i].state == XS_W_FREE) { w = &c->watches[i]; break; }
@@ -535,6 +625,7 @@ int xs_unwatch(struct xs_client *c, uint32_t id, int ms)
 	if (lock) { return lock; }
 	struct xs_watch_slot *w = watch_slot(c, id);
 	if (!w) { return leave(c, -ENOENT); }
+	if (!ms) { return leave(c, -ETIMEDOUT); }
 	w->state = XS_W_CLOSING;
 	w->initial = false; w->notifications = 0;
 	char payload[XS_PATH_LIMIT+16], reply[4];

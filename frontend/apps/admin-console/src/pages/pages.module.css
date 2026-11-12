@@ -56,6 +56,337 @@
   color: var(--x-text-muted);
   font-weight: 600;
 }
+
+/* ---- Simulator VM load test ---- */
+.simulatorTabs {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px;
+  border: 1px solid var(--x-border);
+  border-radius: 10px;
+  background: var(--x-surface-2);
+}
+.simulatorTabs a {
+  padding: 8px 14px;
+  border-radius: 7px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  text-decoration: none;
+}
+.simulatorTabs a[aria-current='page'] {
+  background: var(--x-surface);
+  color: var(--x-text);
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--x-text) 10%, transparent);
+}
+.stressLab {
+  scroll-margin-top: var(--x-space-5);
+}
+.stressVmSection {
+  display: grid;
+  gap: var(--x-space-3);
+}
+.stressSectionTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+}
+.stressSectionTitle > div {
+  display: flex;
+  align-items: center;
+  gap: var(--x-space-3);
+}
+.stressSectionTitle > div > span {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--x-primary) 13%, var(--x-surface-2));
+  color: var(--x-primary);
+  font: 800 11px var(--x-font-mono);
+}
+.stressSectionTitle h2,
+.stressSectionTitle p {
+  margin: 0;
+}
+.stressSectionTitle h2 {
+  font-size: var(--x-text-lg);
+}
+.stressSectionTitle p,
+.stressSectionTitle small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.stressVmGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-3);
+}
+.stressVmGrid button {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: 12px;
+  background: var(--x-surface);
+  color: var(--x-text);
+  text-align: left;
+  cursor: pointer;
+}
+.stressVmGrid button:hover {
+  border-color: var(--x-border-strong);
+  background: var(--x-surface-2);
+}
+.stressVmGrid button[data-selected='true'] {
+  border-color: var(--x-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--x-primary) 12%, transparent);
+}
+.stressVmGrid button > strong {
+  margin-top: 4px;
+  font-size: var(--x-text-md);
+}
+.stressVmGrid button > small {
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stressVmGrid button > i {
+  position: absolute;
+  top: var(--x-space-3);
+  right: var(--x-space-3);
+  color: var(--x-ok);
+  font: normal 700 9px var(--x-font-mono);
+}
+.stressOsBadge {
+  width: fit-content;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--x-primary) 11%, var(--x-surface-2));
+  color: var(--x-primary);
+  font: 800 9px var(--x-font-mono);
+  text-transform: uppercase;
+}
+.stressOsBadge[data-kind='linux'] {
+  background: color-mix(in srgb, var(--x-app-interaction) 12%, var(--x-surface-2));
+  color: var(--x-app-interaction);
+}
+.stressScenarioGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-3);
+  margin-top: var(--x-space-3);
+}
+.stressScenarioGrid[data-count='2'] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.stressScenarioGrid[data-count='1'] {
+  grid-template-columns: minmax(0, 1fr);
+}
+.stressScenarioGrid .stressControlCard {
+  padding: var(--x-space-4);
+  background: var(--x-surface);
+}
+.stressScenarioGrid .stressSubhead {
+  justify-content: flex-start;
+}
+.stressScenarioGrid .stressSubhead > div:last-child {
+  display: grid;
+  gap: 3px;
+}
+.stressScenarioGrid .stressSubhead p,
+.stressTelemetry .stressSubhead p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: 11px;
+}
+.stressScenarioIcon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--x-primary) 11%, var(--x-surface-2));
+  color: var(--x-primary);
+  font: 800 9px var(--x-font-mono);
+}
+.stressObservationGrid {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.75fr) minmax(0, 1.25fr);
+  gap: var(--x-space-3);
+  margin-top: var(--x-space-3);
+}
+.stressToolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+  margin-bottom: var(--x-space-4);
+}
+.stressToolbar label {
+  display: grid;
+  gap: 6px;
+  min-width: min(100%, 360px);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.stressToolbar select {
+  min-height: 42px;
+  padding: 8px 36px 8px 12px;
+  border: 1px solid var(--x-border-strong);
+  border-radius: 9px;
+  background: var(--x-surface);
+  color: var(--x-text);
+  font: 700 var(--x-text-sm) inherit;
+}
+.stressVmMeta {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+.stressVmMeta strong {
+  color: var(--x-primary);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-sm);
+}
+.stressVmMeta span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.stressWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(340px, 0.85fr);
+  gap: var(--x-space-4);
+}
+.stressControls,
+.stressObserve {
+  display: grid;
+  align-content: start;
+  gap: var(--x-space-3);
+}
+.stressControlCard,
+.stressTelemetry,
+.stressExecution {
+  display: grid;
+  gap: var(--x-space-3);
+  padding: var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--x-surface-2) 76%, transparent);
+}
+.stressSubhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+}
+.stressSubhead strong {
+  font-size: var(--x-text-sm);
+}
+.stressSubhead span {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.stressFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-2);
+}
+.stressField {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.stressField > span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.stressField > small {
+  color: var(--x-text-muted);
+  font-size: 10px;
+}
+.stressGauge {
+  display: grid;
+  gap: 7px;
+}
+.stressGauge > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.stressGauge span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.stressGauge strong {
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+}
+.stressTableWrap {
+  overflow-x: auto;
+}
+.stressExecution .table {
+  min-width: 440px;
+}
+.stressCommand {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--x-space-3);
+  margin-top: var(--x-space-3);
+  padding: var(--x-space-3);
+  border: 1px solid color-mix(in srgb, var(--x-ok) 35%, var(--x-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--x-ok) 8%, transparent);
+  color: var(--x-ok);
+  font-size: var(--x-text-sm);
+}
+.stressCommand[data-tone='fault'] {
+  border-color: color-mix(in srgb, var(--x-fault) 35%, var(--x-border));
+  background: color-mix(in srgb, var(--x-fault) 8%, transparent);
+  color: var(--x-fault);
+}
+.stressCommand code {
+  color: var(--x-text-muted);
+  font-size: 10px;
+}
+@media (max-width: 1000px) {
+  .stressWorkspace {
+    grid-template-columns: 1fr;
+  }
+  .stressScenarioGrid,
+  .stressScenarioGrid[data-count='2'],
+  .stressScenarioGrid[data-count='1'],
+  .stressObservationGrid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 640px) {
+  .stressVmGrid {
+    grid-template-columns: 1fr;
+  }
+  .stressToolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .stressVmMeta {
+    justify-items: start;
+  }
+  .stressFields {
+    grid-template-columns: 1fr;
+  }
+  .stressCommand {
+    grid-template-columns: 1fr;
+  }
+}
 .rowActions {
   display: flex;
   gap: var(--x-space-1);
@@ -296,6 +627,23 @@ button.chip:hover:not(.chipOn) {
   color: var(--x-recovering);
   font-size: var(--x-text-xs);
 }
+.placeholder {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--x-space-2);
+  min-height: 280px;
+  padding: var(--x-space-5);
+  border: 1px dashed var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+  color: var(--x-text-muted);
+  text-align: center;
+}
+.placeholder strong {
+  color: var(--x-text);
+  font-size: var(--x-text-lg);
+}
 .bar {
   height: 6px;
   border-radius: 3px;
@@ -485,6 +833,48 @@ button.chip:hover:not(.chipOn) {
   gap: var(--x-space-1);
   border-top-width: 3px;
 }
+.consoleStates {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--x-space-2);
+}
+.consoleAuthority {
+  padding: 4px var(--x-space-2);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.consoleAuthority[data-authority='active'] {
+  border-color: color-mix(in srgb, var(--x-primary) 52%, var(--x-border));
+  background: color-mix(in srgb, var(--x-primary) 14%, var(--x-surface-2));
+  color: var(--x-primary);
+}
+.consoleAuthority[data-authority='standby'] {
+  border-color: color-mix(in srgb, var(--x-recovering) 42%, var(--x-border));
+  background: var(--x-recovering-soft);
+  color: var(--x-recovering);
+}
+.consoleAuthority[data-authority='infotainment'] {
+  border-color: color-mix(in srgb, var(--x-app-interaction) 42%, var(--x-border));
+  background: color-mix(in srgb, var(--x-app-interaction) 10%, var(--x-surface-2));
+  color: var(--x-app-interaction);
+}
+.consoleRuntime {
+  display: inline-flex;
+}
+.consoleRuntime > [role='status'] {
+  gap: 4px;
+  padding: 1px 6px;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
 .clickCard {
   cursor: pointer;
   transition:
@@ -540,6 +930,19 @@ button.chip:hover:not(.chipOn) {
   gap: var(--x-space-3);
   min-width: 0;
 }
+/* 시뮬레이터 없음 (-262) — 끊기면 카드를 지우지 않고 알리고 조작을 막는다 */
+.simOff {
+  margin: 0 0 var(--x-space-3);
+  padding: var(--x-space-2) var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  border: 1px solid var(--x-border);
+  color: var(--x-text-muted);
+}
+.simControl[aria-disabled='true'] .simMap {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .simGroup {
   display: grid;
   gap: var(--x-space-2);
@@ -642,4 +1045,3144 @@ button.chip:hover:not(.chipOn) {
 .paletteOn {
   border-color: var(--x-app-simulator);
   box-shadow: 0 0 0 1px var(--x-app-simulator);
+}
+
+/* ---- S15P31E110-299 Active/Standby VM Overview ---- */
+.overviewPage {
+  display: grid;
+  gap: var(--x-space-5);
+}
+.overviewTitle {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+}
+.overviewTitle h2 {
+  margin: 4px 0 0;
+  color: var(--x-text);
+  font-size: clamp(30px, 3vw, 46px);
+  letter-spacing: -0.04em;
+}
+.overviewTitle p {
+  margin: var(--x-space-2) 0 0;
+  color: var(--x-text-muted);
+}
+.overviewTitle > strong {
+  padding-bottom: 6px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-md);
+  font-weight: 500;
+}
+.overviewSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--x-surface) 74%, var(--x-bg));
+}
+.summaryItem {
+  display: grid;
+  gap: 4px;
+  padding: var(--x-space-3) var(--x-space-4);
+  border-right: 1px solid var(--x-border);
+}
+.summaryItem:last-child {
+  border-right: 0;
+}
+.summaryItem span,
+.vmKicker,
+.vmCardFoot span {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.summaryItem strong {
+  overflow: hidden;
+  color: var(--x-text);
+  font-size: var(--x-text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.summaryItem[data-tone='ok'] strong {
+  color: var(--x-ok);
+}
+.summaryItem[data-tone='recovering'] strong {
+  color: var(--x-recovering);
+}
+.summaryItem[data-tone='fault'] strong {
+  color: var(--x-fault);
+}
+.statePanel {
+  padding: var(--x-space-4);
+  border: 1px dashed var(--x-border);
+  border-radius: var(--x-radius);
+  color: var(--x-text-muted);
+  text-align: center;
+}
+.vmGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-4);
+}
+.vmCard {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 560px;
+  flex-direction: column;
+  gap: var(--x-space-5);
+  padding: var(--x-space-5);
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 18px;
+  background: var(--x-surface);
+  box-shadow: var(--x-shadow);
+  color: var(--x-text);
+  text-decoration: none;
+  transition:
+    border-color 0.18s ease,
+    transform 0.18s ease,
+    box-shadow 0.18s ease;
+}
+.vmCard::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 5px;
+  background: var(--vm-accent);
+  content: '';
+}
+.vmCard[href]:hover,
+.vmCard[href]:focus-visible {
+  border-color: color-mix(in srgb, var(--vm-accent) 62%, var(--x-border));
+  box-shadow: 0 18px 38px rgb(2 7 14 / 34%);
+  transform: translateY(-3px);
+}
+.vmCard[href]:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 3px;
+}
+.vmCardMissing {
+  opacity: 0.72;
+}
+.vmCardTop {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+}
+.vmCardTop h3 {
+  margin: 6px 0 2px;
+  font-size: 36px;
+  letter-spacing: -0.04em;
+}
+.vmCardTop p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.vmKicker {
+  color: var(--vm-accent);
+}
+.authority {
+  padding: 5px 9px;
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+.authority[data-authority='active'] {
+  border-color: color-mix(in srgb, var(--x-primary) 52%, var(--x-border));
+  background: color-mix(in srgb, var(--x-primary) 14%, var(--x-surface-2));
+  color: var(--x-primary);
+}
+.authority[data-authority='standby'] {
+  border-color: color-mix(in srgb, var(--x-recovering) 42%, var(--x-border));
+  background: var(--x-recovering-soft);
+  color: var(--x-recovering);
+}
+.authority[data-authority='infotainment'] {
+  border-color: color-mix(in srgb, var(--x-app-interaction) 42%, var(--x-border));
+  background: color-mix(in srgb, var(--x-app-interaction) 10%, var(--x-surface-2));
+  color: var(--x-app-interaction);
+}
+.vmStatusRows {
+  display: grid;
+  gap: var(--x-space-2);
+  padding-block: var(--x-space-4);
+  border-block: 1px solid var(--x-border);
+}
+.statusLine {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--x-space-2);
+  min-height: 24px;
+}
+.statusLine > span,
+.statusLine small {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+}
+.statusLine strong {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  overflow-wrap: anywhere;
+  font-size: var(--x-text-sm);
+}
+.statusLine strong i {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.statusLine[data-tone='ok'] strong {
+  color: var(--x-ok);
+}
+.statusLine[data-tone='fault'] strong {
+  color: var(--x-fault);
+}
+.statusLine[data-tone='recovering'] strong {
+  color: var(--x-recovering);
+}
+.statusLine[data-tone='stopped'] strong {
+  color: var(--x-stopped);
+}
+.resourceBlock {
+  display: grid;
+  gap: var(--x-space-4);
+}
+.metricRow {
+  display: grid;
+  gap: var(--x-space-2);
+}
+.metricRow > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+}
+.metricRow span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.metricRow strong {
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+}
+.metricRow small {
+  min-height: 1em;
+  color: var(--x-text-muted);
+  font-size: 11px;
+}
+.metricTrack {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--x-surface-3);
+}
+.metricTrack i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--vm-accent);
+}
+.vmCardFoot {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+  margin-top: auto;
+  padding-top: var(--x-space-4);
+  border-top: 1px solid var(--x-border);
+}
+.vmCardFoot > div {
+  min-width: 0;
+}
+.vmCardFoot p {
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vmCardFoot strong {
+  flex: 0 0 auto;
+  color: var(--vm-accent);
+  font-size: var(--x-text-sm);
+}
+
+@media (max-width: 1200px) {
+  .vmGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* ---- S15P31E110-311 VM별 RX/TX 데이터 Pool ---- */
+.memoryHeadingMeta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--x-space-2);
+}
+.memoryHeadingMeta span {
+  padding: 6px 10px;
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+}
+.memoryVmGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-4);
+  /* VM별 상세 길이가 달라도 다른 카드에 빈 영역을 만들지 않는다. */
+  align-items: start;
+}
+.memoryVmCard {
+  min-width: 0;
+  height: auto;
+  border-top: 4px solid var(--vm-accent);
+}
+.memoryVmTitle {
+  display: grid;
+  gap: 3px;
+}
+.memoryVmTitle strong {
+  font-size: var(--x-text-lg);
+}
+.memoryVmTitle small,
+.memoryCardActions small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+.memoryCardActions {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+}
+.publisherStatus {
+  margin-bottom: var(--x-space-3);
+}
+.publisherStatus strong {
+  font-weight: 600;
+}
+.memoryNotice {
+  margin-bottom: var(--x-space-3);
+  padding: 8px var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.memoryNotice[data-tone='fault'] {
+  background: var(--x-fault-soft);
+  color: var(--x-fault);
+}
+.poolSummaryGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--x-space-3);
+}
+.poolSummary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px var(--x-space-3);
+  min-width: 0;
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius);
+  background: var(--x-surface-2);
+  --pool-accent: var(--rx-accent);
+}
+.poolSummary[data-tone='tx'] {
+  --pool-accent: var(--tx-accent);
+}
+.poolSummaryHead {
+  display: contents;
+}
+.poolSummaryHead > span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 700;
+}
+.poolSummaryHead > span i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--pool-accent);
+}
+/* 오른쪽 열은 %·여유 중 긴 쪽 폭을 따르므로, 글자 길이와 상관없이 오른쪽 끝에 붙인다 */
+.poolSummaryHead > strong,
+.linuxMemorySummaryHead > strong {
+  justify-self: end;
+}
+.poolSummaryHead > strong {
+  color: var(--pool-accent);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+}
+.poolAmount {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+.poolAmount strong {
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: clamp(18px, 1.5vw, 24px);
+  white-space: nowrap;
+}
+.poolAmount span,
+.poolFree span {
+  color: var(--x-text-muted);
+  font-size: 10px;
+}
+.poolFree {
+  display: grid;
+  justify-items: end;
+  align-content: center;
+  gap: 2px;
+}
+.poolFree strong {
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+}
+.poolBar {
+  grid-column: 1 / -1;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--x-surface-sunken);
+}
+.poolBar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--pool-accent);
+}
+.memoryChartBlock {
+  margin-top: var(--x-space-3);
+  padding: var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius);
+  background: color-mix(in srgb, var(--x-surface-2) 55%, transparent);
+}
+.memoryChartBlock > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+  margin-bottom: var(--x-space-2);
+}
+.memoryLegend {
+  display: flex;
+  gap: var(--x-space-3);
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+}
+.memoryLegend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.memoryLegend i {
+  width: 15px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--rx-accent);
+}
+.memoryLegend span[data-tone='tx'] i {
+  background: var(--tx-accent);
+}
+/* Network 탭 그래프(현재 값을 보이는 범례, data-values)·툴팁의 라벨과 값은 선과 같은 색. xenova 테마 그래프 배경 대비 RX 10.2:1, TX 5.6:1 (AA 4.5:1 이상) */
+.memoryLegend[data-values] span[data-tone='rx'],
+.chartTooltip span[data-tone='rx'] {
+  color: var(--rx-accent);
+}
+.memoryLegend[data-values] span[data-tone='tx'],
+.chartTooltip span[data-tone='tx'] {
+  color: var(--tx-accent);
+}
+.memoryLegend[data-values] b,
+.chartTooltip b {
+  font-weight: 800;
+}
+.chartPlot {
+  position: relative;
+  cursor: crosshair;
+}
+.chartCursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--x-text-muted);
+  pointer-events: none;
+}
+.chartTooltip {
+  position: absolute;
+  top: var(--x-space-1);
+  z-index: 1;
+  display: grid;
+  gap: var(--x-space-1);
+  padding: var(--x-space-1) var(--x-space-2);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* 기준선 오른쪽 끝 근처에서는 왼쪽으로 펼쳐 그래프 밖으로 잘리지 않게 한다 */
+.chartTooltip[data-side='right'] {
+  margin-left: var(--x-space-2);
+}
+.chartTooltip[data-side='left'] {
+  transform: translateX(-100%);
+  margin-left: calc(-1 * var(--x-space-2));
+}
+.chartTooltip time {
+  color: var(--x-text-muted);
+}
+.memoryChart {
+  position: relative;
+  min-height: 170px;
+  padding: var(--x-space-2) 0 var(--x-space-4);
+}
+.memoryChart svg {
+  display: block;
+  width: 100%;
+  height: 150px;
+  overflow: visible;
+}
+.memoryGridLine {
+  stroke: var(--x-border);
+  stroke-width: 0.45;
+}
+.memoryRxLine,
+.memoryTxLine {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+.memoryRxLine {
+  stroke: var(--rx-accent);
+}
+.memoryTxLine {
+  stroke: var(--tx-accent);
+}
+.memoryChartEmpty {
+  display: grid;
+  min-height: 150px;
+  place-items: center;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.memoryChartMax {
+  position: absolute;
+  top: 3px;
+  left: 4px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 9px;
+}
+.memoryChartAxis {
+  position: absolute;
+  right: 0;
+  bottom: 1px;
+  left: 0;
+  display: flex;
+  justify-content: space-between;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+}
+.memoryChartBlock + .linuxMemorySummary,
+.memoryChartBlock + .poolSummaryGrid {
+  margin-top: var(--x-space-3);
+}
+.counterGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-2);
+  margin-top: var(--x-space-3);
+}
+.counterItem {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+}
+.counterItem span,
+.counterItem small {
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.counterItem strong {
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+}
+.counterItem[data-active='true'] {
+  border-color: color-mix(in srgb, var(--x-recovering) 55%, var(--x-border));
+}
+.counterItem[data-active='true'] strong {
+  color: var(--x-recovering);
+}
+.memoryObservation {
+  margin-top: var(--x-space-2);
+  padding: 9px var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-sunken);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.linuxMemorySummary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px var(--x-space-3);
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius);
+  background: var(--x-surface-2);
+}
+.linuxMemorySummaryHead {
+  display: contents;
+}
+.linuxMemorySummaryHead > span {
+  color: var(--x-text);
+  font-weight: 700;
+}
+.linuxMemorySummaryHead > strong {
+  color: var(--vm-accent);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+}
+.linuxMemoryAmount {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.linuxMemoryAmount strong {
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: clamp(18px, 1.5vw, 24px);
+}
+.linuxMemoryAmount span,
+.linuxMemoryFree span {
+  color: var(--x-text-muted);
+  font-size: 10px;
+}
+.linuxMemoryFree {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+}
+.linuxMemoryFree strong {
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+}
+.memoryBasisNote {
+  color: var(--x-text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.memoryBasisBadge {
+  margin-left: var(--x-space-2);
+  padding: 0 var(--x-space-2);
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  color: var(--x-text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+  cursor: help;
+}
+/* 사용률 그래프 바로 아래 Pool 요약도 다른 블록과 같은 간격(.memoryChartBlock margin-top)을 둔다 */
+.memoryChartBlock + .poolSummaryGrid {
+  margin-top: var(--x-space-3);
+}
+.linuxMemoryBar {
+  grid-column: 1 / -1;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--x-surface-sunken);
+}
+.linuxMemoryBar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--vm-accent);
+}
+.linuxMemoryLegend {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+}
+.linuxMemoryLegend i {
+  width: 15px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--vm-accent);
+}
+.linuxMemoryLine {
+  fill: none;
+  stroke: var(--vm-accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+.appMemorySection {
+  margin-bottom: var(--x-space-4);
+}
+.appMemorySection > header,
+.appMemoryPool > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--x-space-2);
+  flex-wrap: wrap;
+}
+.appMemorySection h3 {
+  margin: 0;
+}
+.appMemorySection small,
+.appMemoryTime {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.appMemoryGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--x-space-3);
+}
+.memoryGroup {
+  margin-top: var(--x-space-4);
+}
+.memoryGroup h4 {
+  margin: 0 0 var(--x-space-2);
+}
+.memoryGroupBadge {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  font-size: var(--x-text-xs);
+  color: var(--x-text-muted);
+}
+.bufferState {
+  display: grid;
+  gap: 4px;
+  margin-top: var(--x-space-2);
+  font-size: var(--x-text-xs);
+}
+.bufferState span,
+.bufferState small {
+  color: var(--x-text-muted);
+}
+.memorySharedNetwork {
+  grid-column: 1 / -1;
+}
+.managedRamSection {
+  margin-bottom: var(--x-space-4);
+}
+.managedRamNotice {
+  grid-column: 1 / -1;
+}
+.appMemoryPool {
+  min-width: 0;
+  padding: var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius);
+  background: var(--x-surface-2);
+  --pool-accent: var(--vm-accent);
+}
+.appMemoryPool header b {
+  color: var(--vm-accent);
+  font-family: var(--x-font-mono);
+}
+.appMemoryAmount {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: var(--x-space-2) 0;
+  font-family: var(--x-font-mono);
+}
+.appMemoryAmount > strong {
+  font-size: var(--x-text-lg);
+}
+.appMemoryAmount > span,
+.appMemoryPool dt {
+  color: var(--x-text-muted);
+}
+.appMemoryPool dl {
+  margin: var(--x-space-3) 0;
+  display: grid;
+  gap: 6px;
+  font-size: var(--x-text-xs);
+}
+.appMemoryPool dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--x-space-2);
+}
+.appMemoryPool dd {
+  margin: 0;
+  font-family: var(--x-font-mono);
+  overflow-wrap: anywhere;
+}
+.appMemoryNotice {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.appPoolChart svg {
+  display: block;
+  width: 100%;
+  height: 80px;
+  overflow: visible;
+}
+.appPoolChart > div:last-child {
+  display: flex;
+  justify-content: space-between;
+  color: var(--x-text-muted);
+  font-size: 10px;
+}
+.appPoolChartEmpty {
+  display: grid;
+  place-items: center;
+  min-height: 80px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.appMemoryDot {
+  fill: var(--vm-accent);
+}
+.appMemoryTime {
+  display: block;
+  margin-top: var(--x-space-2);
+}
+@media (max-width: 1200px) {
+  .memoryVmGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 720px) {
+  .contentHeading,
+  .memoryVmTitle,
+  .memoryCardActions {
+    align-items: flex-start;
+  }
+  .contentHeading,
+  .memoryCardActions {
+    flex-direction: column;
+  }
+  .memoryHeadingMeta {
+    justify-content: flex-start;
+  }
+  .memoryCardActions {
+    justify-items: start;
+  }
+}
+@media (max-width: 760px) {
+  .memoryVmGrid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 760px) {
+  .overviewTitle {
+    align-items: start;
+    flex-direction: column;
+  }
+  .overviewTitle > strong {
+    padding: 0;
+  }
+  .overviewSummary,
+  .vmGrid {
+    grid-template-columns: 1fr;
+  }
+  .summaryItem {
+    border-right: 0;
+    border-bottom: 1px solid var(--x-border);
+  }
+  .summaryItem:last-child {
+    border-bottom: 0;
+  }
+  .vmCard {
+    min-height: 0;
+    padding: var(--x-space-4);
+  }
+}
+
+/* ---- S15P31E110-299 관측 중심 VM 상세 ---- */
+.vmDetailPage {
+  display: grid;
+  gap: var(--x-space-4);
+  max-width: 1500px;
+  margin: 0 auto;
+}
+.vmDetailHero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+  padding: var(--x-space-5);
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 16px;
+  background: var(--x-surface);
+}
+.vmDetailHero::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 4px;
+  background: var(--vm-accent);
+  content: '';
+}
+.vmDetailHero h1 {
+  margin: 6px 0 0;
+  font-size: clamp(34px, 4vw, 52px);
+  letter-spacing: -0.04em;
+}
+.vmDetailHero p {
+  margin: 4px 0 0;
+  color: var(--x-text-muted);
+}
+.vmDetailBadges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--x-space-2);
+}
+.vmDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-4);
+}
+.resourceFacts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-2);
+  margin-bottom: var(--x-space-4);
+}
+.resourceFacts > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+}
+.resourceFacts span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.resourceFacts strong {
+  overflow: hidden;
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.resourceFacts small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.detailEvents {
+  display: grid;
+}
+.detailEvents > div {
+  display: grid;
+  grid-template-columns: 90px 82px minmax(0, 1fr);
+  gap: var(--x-space-3);
+  align-items: start;
+  padding: var(--x-space-3) 0;
+  border-bottom: 1px solid var(--x-border);
+}
+.detailEvents > div:last-child {
+  border-bottom: 0;
+}
+.detailEvents > div > div {
+  display: grid;
+  gap: 3px;
+}
+.detailEvents small {
+  color: var(--x-text-muted);
+}
+.controlHandoff {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+  padding: var(--x-space-4) var(--x-space-5);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius);
+  background: color-mix(in srgb, var(--x-surface) 72%, var(--x-bg));
+}
+.controlHandoff > div {
+  display: grid;
+  gap: 3px;
+}
+.controlHandoff span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.controlHandoff a {
+  flex: 0 0 auto;
+  font-weight: 700;
+  text-decoration: none;
+}
+@media (max-width: 800px) {
+  .vmDetailHero,
+  .controlHandoff {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .vmDetailBadges {
+    justify-content: flex-start;
+  }
+  .vmDetailGrid,
+  .resourceFacts {
+    grid-template-columns: 1fr;
+  }
+  .detailEvents > div {
+    grid-template-columns: 76px 74px minmax(0, 1fr);
+    gap: var(--x-space-2);
+  }
+}
+
+/* ---- S15P31E110-299 VM별 CPU 시계열 ---- */
+.contentHeading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+  padding: var(--x-space-2) 0;
+}
+.contentHeading h1,
+.contentHeading h2 {
+  margin: 6px 0 0;
+  color: var(--x-text);
+  font-size: clamp(30px, 3vw, 46px);
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+}
+.contentEyebrow {
+  color: var(--x-primary);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+.cpuGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-4);
+}
+.cpuCard {
+  min-width: 0;
+  border-top: 4px solid var(--vm-accent);
+}
+.cpuCardTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--x-space-2);
+}
+.cpuCardTitle > i {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--vm-accent);
+}
+.cpuCardTitle > span {
+  display: grid;
+  gap: 2px;
+}
+.cpuCardTitle strong {
+  font-size: var(--x-text-lg);
+}
+.cpuCardTitle small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+.cpuCurrent {
+  color: var(--vm-accent);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xl);
+  font-weight: 800;
+}
+.cpuChart {
+  position: relative;
+  min-height: 260px;
+  padding: var(--x-space-3) 0 var(--x-space-5);
+  border-block: 1px solid var(--x-border);
+}
+.cpuChart svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.cpuPlot {
+  position: relative;
+  height: 220px;
+  padding-left: 38px;
+}
+.cpuYAxis {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 32px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+}
+.cpuYAxis span {
+  position: absolute;
+  right: 0;
+  transform: translateY(-50%);
+  white-space: nowrap;
+}
+.cpuYAxis span:first-child {
+  transform: none;
+}
+.cpuYAxis span:last-child {
+  transform: translateY(-100%);
+}
+.cpuGridLine {
+  stroke: var(--x-border);
+  stroke-width: 0.5;
+}
+.cpuLine {
+  fill: none;
+  stroke: var(--vm-accent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+.cpuEmpty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--x-space-2);
+  min-height: 220px;
+  color: var(--x-text-muted);
+  text-align: center;
+}
+.cpuEmpty strong {
+  color: var(--x-text);
+}
+.cpuEmpty span {
+  max-width: 280px;
+  font-size: var(--x-text-xs);
+}
+.cpuAxis {
+  position: absolute;
+  right: 0;
+  bottom: 7px;
+  left: 38px;
+  display: flex;
+  justify-content: space-between;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+}
+.cpuMeta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+  padding-top: var(--x-space-3);
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+}
+@media (max-width: 1200px) {
+  .cpuGrid {
+    grid-template-columns: 1fr;
+  }
+  .cpuChart svg,
+  .cpuEmpty {
+    min-height: 200px;
+    height: 200px;
+  }
+  .cpuPlot {
+    height: 200px;
+  }
+}
+@media (max-width: 720px) {
+  .page .contentHeading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+/* ---- S15P31E110-300 VM Control UX ---- */
+.controlPage,
+.createPage {
+  display: grid;
+  gap: var(--x-space-5);
+}
+.headingDescription {
+  margin: var(--x-space-2) 0 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.controlHeadingActions {
+  display: flex;
+  align-items: center;
+  gap: var(--x-space-4);
+}
+.observedTime {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.controlSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--x-surface) 74%, var(--x-bg));
+}
+.controlSummaryItem {
+  display: grid;
+  gap: 5px;
+  padding: var(--x-space-4) var(--x-space-5);
+  border-right: 1px solid var(--x-border);
+}
+.controlSummaryItem:last-child {
+  border-right: 0;
+}
+.controlSummaryItem span {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.controlSummaryItem strong {
+  color: var(--x-text);
+  font-size: var(--x-text-lg);
+}
+.controlSummaryItem[data-tone='ok'] strong {
+  color: var(--x-ok);
+}
+.controlGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-5);
+}
+.controlVmCard {
+  position: relative;
+  min-height: 410px;
+  overflow: hidden;
+  border-radius: 18px;
+}
+.controlVmCard::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 5px;
+  background: var(--vm-accent);
+  content: '';
+}
+.controlVmCard:hover,
+.controlVmCard:focus-visible {
+  border-color: color-mix(in srgb, var(--vm-accent) 62%, var(--x-border));
+  box-shadow: 0 18px 38px rgb(2 7 14 / 34%);
+}
+.controlVmCard:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 3px;
+}
+.controlCardBody {
+  display: flex;
+  min-height: 365px;
+  flex-direction: column;
+  gap: var(--x-space-5);
+  padding-top: var(--x-space-2);
+}
+.controlCardTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+}
+.controlCardTop h3 {
+  margin: 7px 0 3px;
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-size: clamp(24px, 2vw, 32px);
+  letter-spacing: -0.035em;
+}
+.controlCardTop p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.controlCardKicker {
+  color: var(--vm-accent);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.controlFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-3);
+  margin: 0;
+}
+.controlFacts > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: color-mix(in srgb, var(--x-surface-2) 72%, transparent);
+}
+.controlFacts dt {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 600;
+}
+.controlFacts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  line-height: 1.45;
+}
+.controlFacts dd small {
+  color: var(--x-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.controlFactWide {
+  grid-column: 1 / -1;
+}
+.controlCardActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+  margin-top: auto;
+  padding-top: var(--x-space-4);
+  border-top: 1px solid var(--x-border);
+}
+.controlCardActions > div {
+  display: flex;
+  gap: var(--x-space-2);
+}
+.vmOperationNotice {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--x-space-2);
+  padding: 10px 12px;
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  font-size: var(--x-text-xs);
+}
+.vmOperationNotice > i {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--x-primary) 30%, transparent);
+  border-top-color: var(--x-primary);
+  border-radius: 50%;
+  animation: vmOperationSpin 0.8s linear infinite;
+}
+.vmOperationNotice > strong {
+  color: var(--x-text);
+}
+.vmOperationNotice > span {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+}
+.vmOperationNotice[data-tone='pending'] {
+  border-color: color-mix(in srgb, var(--x-primary) 42%, var(--x-border));
+  background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
+}
+.vmOperationNotice[data-tone='fault'] {
+  grid-template-columns: auto 1fr;
+  border-color: color-mix(in srgb, var(--x-fault) 44%, var(--x-border));
+  background: color-mix(in srgb, var(--x-fault) 7%, var(--x-surface-2));
+}
+.vmOperationNotice[data-tone='fault'] > strong,
+.vmOperationNotice[data-tone='fault'] > span {
+  color: var(--x-fault);
+}
+@keyframes vmOperationSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.controlEmpty {
+  display: grid;
+  place-items: center;
+  gap: var(--x-space-2);
+  min-height: 260px;
+  padding: var(--x-space-5);
+  border: 1px dashed var(--x-border);
+  border-radius: 18px;
+  color: var(--x-text-muted);
+  text-align: center;
+}
+.controlEmpty strong {
+  color: var(--x-text);
+  font-size: var(--x-text-lg);
+}
+.controlEmpty button {
+  margin-top: var(--x-space-3);
+}
+.deleteConfirm {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--x-space-4);
+  padding: var(--x-space-4);
+  border: 1px solid color-mix(in srgb, var(--x-fault) 42%, var(--x-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--x-fault) 8%, var(--x-surface-2));
+}
+.deleteConfirm > span {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--x-fault-soft);
+  color: var(--x-fault);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xl);
+  font-weight: 900;
+}
+.deleteConfirm strong {
+  display: block;
+  color: var(--x-text);
+  font-size: var(--x-text-md);
+  line-height: 1.45;
+}
+.deleteConfirm p {
+  margin: var(--x-space-2) 0 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  line-height: 1.65;
+}
+.deleteIrreversible {
+  display: block;
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--x-fault) 72%, var(--x-text));
+  font-weight: 700;
+}
+
+.headingLink {
+  padding: var(--x-space-2) var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  text-decoration: none;
+}
+.headingLink:hover,
+.headingLink:focus-visible {
+  border-color: var(--x-primary);
+  color: var(--x-primary);
+}
+.createSteps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  max-width: 980px;
+  width: 100%;
+  margin: 0 auto;
+}
+.createStep {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px max-content;
+  align-items: center;
+  justify-content: center;
+  gap: var(--x-space-2);
+  min-width: 0;
+  color: var(--x-text-muted);
+}
+.createStep::after {
+  position: absolute;
+  top: 17px;
+  left: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--x-border);
+  content: '';
+}
+.createStep:last-child::after {
+  display: none;
+}
+.createStep > span {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--x-border);
+  border-radius: 50%;
+  background: var(--x-surface);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  font-weight: 800;
+}
+.createStep > strong {
+  position: relative;
+  z-index: 1;
+  padding: 3px var(--x-space-3) 3px 0;
+  background: var(--x-bg);
+  font-size: var(--x-text-sm);
+  white-space: nowrap;
+}
+.createStepCurrent,
+.createStepDone {
+  color: var(--x-text);
+}
+.createStepCurrent > span {
+  border-color: var(--x-primary);
+  background: var(--x-primary);
+  color: var(--x-primary-text);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--x-primary) 14%, transparent);
+}
+.createStepDone > span {
+  border-color: var(--x-ok);
+  background: var(--x-ok-soft);
+  color: var(--x-ok);
+}
+.createStepDone::after {
+  background: color-mix(in srgb, var(--x-ok) 58%, var(--x-border));
+}
+.createStage {
+  display: grid;
+  gap: var(--x-space-5);
+  max-width: 1280px;
+  width: 100%;
+  margin: 0 auto;
+  padding: var(--x-space-5);
+  border: 1px solid var(--x-border);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--x-surface) 74%, var(--x-bg));
+}
+.createStageHead {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+  padding-bottom: var(--x-space-4);
+  border-bottom: 1px solid var(--x-border);
+}
+.createStageHead span,
+.templateSummary > span,
+.reviewIntro > span {
+  color: var(--x-primary);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.createStageHead h3 {
+  margin: 5px 0 0;
+  color: var(--x-text);
+  font-size: var(--x-text-xl);
+  letter-spacing: -0.025em;
+}
+.createStageHead p {
+  max-width: 520px;
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  line-height: 1.6;
+  text-align: right;
+}
+.templateGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-4);
+}
+.templateCard {
+  position: relative;
+  display: grid;
+  gap: var(--x-space-2);
+  min-height: 240px;
+  padding: var(--x-space-5);
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 16px;
+  background: var(--x-surface);
+  color: var(--x-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    transform 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.templateCard::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 5px;
+  background: var(--template-accent);
+  content: '';
+}
+.templateCard:hover,
+.templateCard:focus-visible,
+.templateCardSelected {
+  border-color: color-mix(in srgb, var(--template-accent) 64%, var(--x-border));
+  box-shadow: 0 15px 32px rgb(2 7 14 / 26%);
+  transform: translateY(-2px);
+}
+.templateCard:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 3px;
+}
+.templateCard > strong {
+  margin-top: var(--x-space-2);
+  font-size: var(--x-text-xl);
+  letter-spacing: -0.03em;
+}
+.templateCard > p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.templateCard > small {
+  align-self: end;
+  overflow-wrap: anywhere;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 11px;
+}
+.templateCard > i {
+  position: absolute;
+  right: var(--x-space-4);
+  bottom: var(--x-space-4);
+  color: var(--template-accent);
+  font-size: var(--x-text-xs);
+  font-style: normal;
+  font-weight: 800;
+}
+.templateKind {
+  display: inline-flex;
+  height: 34px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  justify-self: start;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--template-accent) 46%, var(--x-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--template-accent) 10%, transparent);
+  color: var(--template-accent);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+.createStageActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--x-space-2);
+  padding-top: var(--x-space-4);
+  border-top: 1px solid var(--x-border);
+}
+.createFormLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 0.8fr);
+  gap: var(--x-space-4);
+  align-items: stretch;
+}
+.createFormCard {
+  box-shadow: none;
+}
+.createForm {
+  display: grid;
+  gap: var(--x-space-3);
+}
+.createForm label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--x-space-3);
+  color: var(--x-text);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+}
+.createForm label small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+.createForm input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+  color: var(--x-text);
+  font: inherit;
+}
+.createForm input:focus {
+  border-color: var(--x-primary);
+  outline: 2px solid color-mix(in srgb, var(--x-primary) 18%, transparent);
+}
+.createForm input[aria-invalid='true'] {
+  border-color: var(--x-fault);
+}
+.resourceInputs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-4);
+  padding-top: var(--x-space-3);
+  border-top: 1px solid var(--x-border);
+}
+.resourceInputs > div {
+  display: grid;
+  gap: var(--x-space-2);
+}
+.inputWithUnit {
+  position: relative;
+}
+.inputWithUnit input {
+  padding-right: 58px;
+}
+.inputWithUnit > span {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  transform: translateY(-50%);
+}
+.fixedProfile {
+  display: grid;
+  gap: 5px;
+  margin-top: var(--x-space-3);
+  padding: var(--x-space-4);
+  border: 1px solid color-mix(in srgb, var(--x-primary) 34%, var(--x-border));
+  border-radius: var(--x-radius-sm);
+  background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
+}
+.fixedProfile > span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.fixedProfile > strong {
+  color: var(--x-text);
+  font-size: var(--x-text-lg);
+}
+.fixedProfile > small {
+  color: var(--x-text-muted);
+  line-height: 1.5;
+}
+.templateSummary {
+  padding: var(--x-space-5);
+  border: 1px solid var(--x-border);
+  border-radius: 14px;
+  background: var(--x-surface);
+}
+.templateSummary h3 {
+  margin: 8px 0 var(--x-space-4);
+  color: var(--x-text);
+  font-size: var(--x-text-xl);
+  letter-spacing: -0.03em;
+}
+.templateSummary dl {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+.templateSummary dl > div {
+  display: grid;
+  gap: 5px;
+  padding: var(--x-space-3) 0;
+  border-top: 1px solid var(--x-border);
+}
+.templateSummary dt {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.templateSummary dd {
+  margin: 0;
+  color: var(--x-text);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+}
+.reviewCard {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.8fr);
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 16px;
+  background: var(--x-surface);
+}
+.reviewIntro {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  padding: var(--x-space-5);
+  border-right: 1px solid var(--x-border);
+  background: color-mix(in srgb, var(--x-primary) 6%, var(--x-surface-2));
+}
+.reviewIntro h3 {
+  margin: var(--x-space-2) 0 4px;
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-size: var(--x-text-xl);
+  letter-spacing: -0.03em;
+}
+.reviewIntro p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.reviewGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  padding: var(--x-space-3) var(--x-space-5);
+}
+.reviewGrid > div {
+  min-width: 0;
+  padding: var(--x-space-3);
+  border-bottom: 1px solid var(--x-border);
+}
+.reviewGrid > div:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+.reviewGrid dt {
+  margin-bottom: 5px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.reviewGrid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-size: var(--x-text-md);
+  font-weight: 700;
+}
+.reviewGrid small {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+}
+.createError {
+  display: grid;
+  gap: 4px;
+  padding: var(--x-space-3) var(--x-space-4);
+  border: 1px solid color-mix(in srgb, var(--x-fault) 52%, var(--x-border));
+  border-radius: var(--x-radius-sm);
+  background: var(--x-fault-soft);
+  color: var(--x-fault);
+  font-size: var(--x-text-sm);
+}
+.createError > span {
+  color: var(--x-text-muted);
+}
+.createProgress {
+  display: grid;
+  gap: var(--x-space-4);
+  padding: var(--x-space-4);
+  border: 1px solid color-mix(in srgb, var(--x-primary) 48%, var(--x-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
+}
+.createProgressHeading {
+  display: flex;
+  align-items: center;
+  gap: var(--x-space-3);
+}
+.createProgressHeading > i,
+.pendingCreationSummary > i,
+.vmCreationCardNotice > i {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--x-primary) 28%, transparent);
+  border-top-color: var(--x-primary);
+  border-radius: 50%;
+  animation: vmOperationSpin 0.8s linear infinite;
+}
+.createProgressHeading > div {
+  display: grid;
+  gap: 3px;
+}
+.createProgressHeading strong {
+  color: var(--x-text);
+  font-size: var(--x-text-md);
+}
+.createProgressHeading span,
+.createProgress p {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.createProgress dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+}
+.createProgress dl > div {
+  display: grid;
+  gap: 5px;
+  padding: var(--x-space-3);
+  border-right: 1px solid var(--x-border);
+}
+.createProgress dl > div:last-child {
+  border-right: 0;
+}
+.createProgress dt {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.createProgress dd {
+  margin: 0;
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+  font-weight: 800;
+}
+.createProgress p {
+  margin: 0;
+  line-height: 1.55;
+}
+.createTimeoutActions {
+  display: flex;
+  justify-content: flex-end;
+}
+.createLeaveNotice {
+  display: grid;
+  gap: var(--x-space-2);
+  padding: var(--x-space-3);
+}
+.createLeaveNotice strong {
+  color: var(--x-text);
+  line-height: 1.55;
+}
+.createLeaveNotice p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.pendingCreationSummary {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--x-space-3);
+  padding: var(--x-space-3) var(--x-space-4);
+  border: 1px solid color-mix(in srgb, var(--x-primary) 45%, var(--x-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
+}
+.pendingCreationSummary > div {
+  display: grid;
+  gap: 3px;
+}
+.pendingCreationSummary strong,
+.pendingCreationSummary span {
+  color: var(--x-text);
+}
+.pendingCreationSummary span,
+.pendingCreationSummary small {
+  font-size: var(--x-text-xs);
+}
+.pendingCreationSummary small {
+  color: var(--x-text-muted);
+}
+.vmCreationCardNotice {
+  display: flex;
+  align-items: center;
+  gap: var(--x-space-2);
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--x-primary) 42%, var(--x-border));
+  border-radius: var(--x-radius-sm);
+  background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.createSuccess {
+  display: grid;
+  justify-items: center;
+  gap: var(--x-space-3);
+  padding: var(--x-space-2) 0;
+  text-align: center;
+}
+.createSuccess > span {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--x-ok) 42%, var(--x-border));
+  border-radius: 50%;
+  background: var(--x-ok-soft);
+  color: var(--x-ok);
+  font-size: 34px;
+  font-weight: 900;
+  box-shadow: 0 0 0 7px color-mix(in srgb, var(--x-ok) 8%, transparent);
+}
+.createSuccess strong {
+  color: var(--x-text);
+  font-size: var(--x-text-xl);
+  letter-spacing: -0.025em;
+}
+.createSuccess p {
+  margin: 5px 0 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.createSuccessMeta {
+  display: grid;
+  width: 100%;
+  box-sizing: border-box;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: var(--x-space-2) 0 0;
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 10px;
+  background: var(--x-surface-2);
+  text-align: left;
+}
+.createSuccessMeta > div {
+  display: grid;
+  gap: 5px;
+  padding: var(--x-space-3) var(--x-space-4);
+}
+.createSuccessMeta > div + div {
+  border-left: 1px solid var(--x-border);
+}
+.createSuccessMeta dt {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.createSuccessMeta dd {
+  margin: 0;
+  color: var(--x-text);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+}
+
+@media (max-width: 1200px) {
+  .controlGrid,
+  .templateGrid {
+    grid-template-columns: 1fr;
+  }
+  .controlVmCard {
+    min-height: 0;
+  }
+  .controlCardBody {
+    min-height: 0;
+  }
+  .createFormLayout {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 800px) {
+  .controlPage .contentHeading,
+  .createPage .contentHeading,
+  .createStageHead {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .createProgress dl {
+    grid-template-columns: 1fr;
+  }
+  .createProgress dl > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--x-border);
+  }
+  .createProgress dl > div:last-child {
+    border-bottom: 0;
+  }
+  .pendingCreationSummary {
+    grid-template-columns: auto 1fr;
+  }
+  .pendingCreationSummary > small {
+    grid-column: 2;
+  }
+  .controlHeadingActions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .controlSummary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .controlSummaryItem:nth-child(2) {
+    border-right: 0;
+  }
+  .controlSummaryItem:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--x-border);
+  }
+  .createStageHead p {
+    text-align: left;
+  }
+  .reviewCard {
+    grid-template-columns: 1fr;
+  }
+  .reviewIntro {
+    border-right: 0;
+    border-bottom: 1px solid var(--x-border);
+  }
+}
+@media (max-width: 600px) {
+  .createSteps {
+    grid-template-columns: 1fr;
+    gap: var(--x-space-2);
+  }
+  .createStep {
+    justify-content: start;
+  }
+  .createStep::after {
+    top: 36px;
+    bottom: calc(-1 * var(--x-space-2));
+    left: 16px;
+    width: 1px;
+    height: auto;
+  }
+  .createStep > strong {
+    white-space: normal;
+  }
+  .createSuccessMeta {
+    grid-template-columns: 1fr;
+  }
+  .createSuccessMeta > div + div {
+    border-top: 1px solid var(--x-border);
+    border-left: 0;
+  }
+  .createStage {
+    padding: var(--x-space-4);
+  }
+  .resourceInputs,
+  .reviewGrid {
+    grid-template-columns: 1fr;
+  }
+  .reviewGrid > div,
+  .reviewGrid > div:nth-last-child(-n + 2) {
+    border-bottom: 1px solid var(--x-border);
+  }
+  .reviewGrid > div:last-child {
+    border-bottom: 0;
+  }
+}
+
+/* ---- S15P31E110-300 VM Control 전용 상세 ---- */
+.controlDetailPage {
+  display: grid;
+  gap: var(--x-space-5);
+}
+.controlDetailHero {
+  position: relative;
+  display: grid;
+  gap: 34px;
+  padding: var(--x-space-5);
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 18px;
+  background: var(--x-surface);
+  box-shadow: var(--x-shadow);
+}
+.controlDetailHero::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 5px;
+  background: var(--vm-accent);
+  content: '';
+}
+.controlDetailHero h1 {
+  margin: 8px 0 4px;
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-size: clamp(34px, 4vw, 52px);
+  letter-spacing: -0.045em;
+}
+.controlDetailHero p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.controlBackLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--x-text);
+  text-decoration: none;
+  transition:
+    color 0.16s ease,
+    transform 0.16s ease;
+}
+.controlBackLink > span:first-child {
+  color: var(--x-primary);
+  font-size: 25px;
+  line-height: 1;
+}
+.controlBackLink strong {
+  font-size: var(--x-text-md);
+  letter-spacing: -0.01em;
+}
+.controlBackLink:hover,
+.controlBackLink:focus-visible {
+  color: var(--x-primary);
+  outline: none;
+  transform: translateX(-2px);
+}
+.controlDetailTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+}
+.controlDetailTitle {
+  display: grid;
+  justify-items: start;
+}
+.controlDetailStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  font-weight: 800;
+}
+.controlDetailStatus > i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.controlDetailStatus[data-health='ok'] {
+  color: var(--x-ok);
+}
+.controlDetailStatus[data-health='fault'] {
+  color: var(--x-fault);
+}
+.controlDetailStatus[data-health='recovering'] {
+  color: var(--x-recovering);
+}
+.controlDetailStatus[data-health='stopped'] {
+  color: var(--x-stopped);
+}
+.controlDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-4);
+}
+.identityGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-3);
+}
+.identityWide,
+.identityFact {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--x-surface-2) 72%, transparent);
+}
+.identityWide {
+  grid-column: 1 / -1;
+}
+.identityLabel {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 600;
+}
+.identityId {
+  min-width: 0;
+}
+.identityId code {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  line-height: 1.55;
+}
+.identityFact strong {
+  overflow-wrap: anywhere;
+  color: var(--x-text);
+  font-size: var(--x-text-md);
+}
+.identityFact code {
+  overflow-wrap: anywhere;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.identityStatus {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 7px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+}
+.identityStatus > i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+.identityStatus[data-tone='ok'] {
+  color: var(--x-ok);
+}
+.identityStatus[data-tone='warning'] {
+  color: var(--x-recovering);
+}
+.identityStatus[data-tone='fault'] {
+  color: var(--x-fault);
+}
+.lifecycleState {
+  display: grid;
+  gap: var(--x-space-2);
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: 12px;
+  background: var(--x-surface-2);
+}
+.lifecycleState > span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.lifecycleState > strong {
+  color: var(--x-ok);
+  font-size: var(--x-text-xl);
+}
+.lifecycleState > small {
+  color: var(--x-text-muted);
+  line-height: 1.5;
+}
+.lifecycleActions {
+  display: flex;
+  gap: var(--x-space-2);
+  margin-top: var(--x-space-4);
+}
+.lifecycleState + .vmOperationNotice {
+  margin-top: var(--x-space-3);
+}
+.controlResourceSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--x-border);
+  border-radius: 12px;
+  background: var(--x-surface-2);
+}
+.controlResourceSummary > div {
+  display: grid;
+  gap: 4px;
+  padding: var(--x-space-4);
+  border-right: 1px solid var(--x-border);
+}
+.controlResourceSummary > div:last-child {
+  border-right: 0;
+}
+.controlResourceSummary span,
+.controlResourceSummary small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.controlResourceSummary strong {
+  font-size: var(--x-text-xl);
+}
+.controlResourceSummary > div[data-available='true'] strong {
+  color: var(--x-primary);
+}
+.controlResourceSummary > div[data-available='false'] strong {
+  color: color-mix(in srgb, var(--x-text-muted) 72%, var(--x-surface-3));
+}
+.pinningCardTag {
+  color: var(--x-primary);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.pinningIntro {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+  margin-bottom: var(--x-space-4);
+}
+.pinningIntro > div:first-child {
+  display: grid;
+  gap: 6px;
+}
+.pinningIntro strong {
+  color: var(--x-text);
+  font-size: var(--x-text-md);
+}
+.pinningIntro p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  line-height: 1.55;
+}
+.pinningObservation {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--x-space-2);
+}
+.pinningObservation span {
+  padding: 6px 9px;
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+.pinningObservation span:first-child {
+  border-color: color-mix(in srgb, var(--x-primary) 35%, var(--x-border));
+  color: var(--x-primary);
+}
+.pinningState {
+  display: grid;
+  gap: 6px;
+  min-height: 108px;
+  place-content: center;
+  padding: var(--x-space-5);
+  border: 1px dashed var(--x-border);
+  border-radius: 12px;
+  color: var(--x-text-muted);
+  text-align: center;
+}
+.pinningState strong {
+  color: var(--x-text);
+}
+.pinningState span {
+  max-width: 620px;
+  font-size: var(--x-text-sm);
+  line-height: 1.55;
+}
+.pinningState[data-tone='waiting'] {
+  border-color: color-mix(in srgb, var(--x-recovering) 48%, var(--x-border));
+  background: color-mix(in srgb, var(--x-recovering) 5%, transparent);
+}
+.pinningTableWrap {
+  overflow-x: auto;
+  border: 1px solid var(--x-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--x-surface-2) 74%, transparent);
+}
+.pinningTable {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.pinningTable th,
+.pinningTable td {
+  border-right: 1px solid var(--x-border);
+  border-bottom: 1px solid var(--x-border);
+}
+.pinningTable tr:last-child th,
+.pinningTable tr:last-child td {
+  border-bottom: 0;
+}
+.pinningTable th:last-child,
+.pinningTable td:last-child {
+  border-right: 0;
+}
+.pinningTable thead th {
+  position: relative;
+  height: 94px;
+  padding: var(--x-space-3);
+  background: color-mix(in srgb, var(--x-surface-3) 82%, transparent);
+  color: var(--x-text);
+  text-align: center;
+}
+.pinningTable thead th:first-child {
+  width: 210px;
+  color: var(--x-text);
+  text-align: left;
+}
+.pinningTable thead th > span,
+.pinningTable thead th > small {
+  display: block;
+}
+.pinningTable thead th > span {
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-md);
+  font-weight: 800;
+}
+.pinningTable thead th:first-child > span {
+  font-family: inherit;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+}
+.pinningTable thead th > small {
+  margin-top: 7px;
+  color: var(--x-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pinningTable thead th > em {
+  display: inline-block;
+  margin-top: 7px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--vm-accent) 16%, transparent);
+  color: var(--vm-accent);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+.pinningTable thead th[data-exclusive='true'] {
+  box-shadow: inset 0 3px 0 var(--vm-accent);
+}
+.pinningTable tbody th {
+  padding: 20px;
+  background: color-mix(in srgb, var(--x-surface-3) 48%, transparent);
+  text-align: left;
+}
+.pinningTable tbody th span,
+.pinningTable tbody th small {
+  display: block;
+}
+.pinningTable tbody th span {
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: 17px;
+  font-weight: 800;
+}
+.pinningTable tbody th small {
+  margin-top: 8px;
+  color: color-mix(in srgb, var(--x-text-muted) 86%, var(--x-text));
+  font-size: 12px;
+  font-weight: 700;
+}
+.pinningTable td {
+  height: 84px;
+  padding: 12px;
+  text-align: center;
+}
+.pinningCell {
+  display: inline-grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border: 1px solid var(--x-border-strong);
+  border-radius: 12px;
+  background: var(--x-surface);
+  color: var(--x-bg);
+  cursor: pointer;
+  transition:
+    border-color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease,
+    transform 0.16s ease;
+}
+.pinningCell:hover:not(:disabled),
+.pinningCell:focus-visible {
+  border-color: var(--vm-accent);
+  outline: none;
+  transform: translateY(-1px);
+}
+.pinningCell[data-selected='true'] {
+  border-color: color-mix(in srgb, var(--vm-accent) 78%, white);
+  background: var(--vm-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vm-accent) 14%, transparent);
+}
+.pinningCell[data-changed='true'] {
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--x-recovering) 25%, transparent),
+    inset 0 0 0 2px var(--x-recovering);
+}
+.pinningCell:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+.pinningCell > span {
+  font-size: 21px;
+  font-weight: 900;
+  line-height: 1;
+}
+.pinningReview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+  margin-top: var(--x-space-4);
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--x-surface-2) 76%, transparent);
+}
+.pinningReview[data-dirty='true'] {
+  border-color: color-mix(in srgb, var(--x-recovering) 44%, var(--x-border));
+  background: color-mix(in srgb, var(--x-recovering) 5%, var(--x-surface-2));
+}
+.pinningReview > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 11px;
+}
+.pinningReview > div:first-child > span {
+  color: var(--x-text);
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.pinningReview p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  line-height: 1.55;
+}
+.pinningReview ul {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.pinningReview li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 11px;
+  color: color-mix(in srgb, var(--x-text-muted) 82%, var(--x-text));
+  font-family: var(--x-font-mono);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+.pinningReview li strong {
+  color: var(--x-text);
+  font-size: 15px;
+  font-weight: 850;
+}
+.pinningReview li b {
+  color: var(--x-recovering);
+  font-size: 17px;
+  font-weight: 900;
+}
+.pinningActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--x-space-2);
+}
+.pinningFeedback {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: var(--x-space-3);
+  padding: 11px 13px;
+  border-radius: 10px;
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+}
+.pinningFeedback > i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+.pinningFeedback[data-tone='ok'] {
+  background: color-mix(in srgb, var(--x-ok) 10%, transparent);
+  color: var(--x-ok);
+}
+.pinningFeedback[data-tone='fault'] {
+  background: color-mix(in srgb, var(--x-fault) 10%, transparent);
+  color: var(--x-fault);
+}
+.resourceTuningSection {
+  min-width: 0;
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--x-surface-2) 76%, transparent);
+}
+.resourceSectionHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+  margin-bottom: var(--x-space-4);
+}
+.resourceSectionHeading > div {
+  display: grid;
+  gap: 6px;
+}
+.resourceSectionHeading > div > span {
+  color: var(--x-text);
+  font-size: 18px;
+  font-weight: 850;
+  letter-spacing: -0.025em;
+}
+.resourceSectionHeading p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  line-height: 1.55;
+}
+.resourceEditState {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--vm-accent) 38%, var(--x-border));
+  border-radius: 999px;
+  color: var(--vm-accent);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+.resourceEditState:not([data-enabled='true']) {
+  border-color: var(--x-border);
+  color: var(--x-text-muted);
+  font-family: inherit;
+}
+.resourceEditState[data-enabled='true'] {
+  border-color: color-mix(in srgb, var(--x-ok) 42%, var(--x-border));
+  color: var(--x-ok);
+}
+.memoryInputGroup input {
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  border: 1px solid var(--x-border-strong);
+  border-radius: 9px;
+  outline: none;
+  background: var(--x-surface-2);
+  color: var(--x-text);
+  font: 800 var(--x-text-md) var(--x-font-mono);
+}
+.memoryInputGroup input:focus {
+  border-color: var(--vm-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vm-accent) 12%, transparent);
+}
+.memoryInputGroup input[aria-invalid='true'] {
+  border-color: var(--x-fault);
+}
+.resourceValidation {
+  margin: 8px 0 0;
+  color: var(--x-fault);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.resourceApplyRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-4);
+  margin-top: var(--x-space-4);
+  padding-top: var(--x-space-3);
+  border-top: 1px solid var(--x-border);
+}
+.resourceApplyRow > span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  line-height: 1.5;
+}
+.resourceApplyRow > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--x-space-2);
+}
+.resourceCapacityGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 420px));
+  justify-content: center;
+  gap: var(--x-space-3);
+}
+.resourceCapacityItem {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: 12px;
+  background: var(--x-surface);
+}
+.resourceCapacityItem > span:first-child {
+  color: var(--x-text);
+  font-size: var(--x-text-sm);
+  font-weight: 800;
+}
+.resourceCapacityItem > small {
+  color: color-mix(in srgb, var(--x-text-muted) 82%, var(--x-text));
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+.vcpuOptions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+.vcpuOptions button {
+  display: grid;
+  place-content: center;
+  min-width: 0;
+  min-height: 52px;
+  padding: 7px;
+  border: 1px solid var(--x-border-strong);
+  border-radius: 9px;
+  background: var(--x-surface-2);
+  color: var(--x-text-muted);
+  cursor: pointer;
+}
+.vcpuOptions button strong {
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-md);
+}
+.vcpuOptions button small {
+  font-size: 9px;
+  font-weight: 700;
+}
+.vcpuOptions button[aria-pressed='true'] {
+  border-color: var(--vm-accent);
+  background: color-mix(in srgb, var(--vm-accent) 13%, var(--x-surface-2));
+  color: var(--vm-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--vm-accent) 10%, transparent);
+}
+.vcpuOptions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.64;
+}
+.memoryInputGroup {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+}
+.memoryInputGroup input {
+  padding: 12px 54px 12px 14px;
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+.memoryInputGroup > span {
+  z-index: 1;
+  grid-column: 2;
+  grid-row: 1;
+  padding-right: 14px;
+  color: color-mix(in srgb, var(--x-text-muted) 82%, var(--x-text));
+  font-size: 12px;
+  font-weight: 800;
+  pointer-events: none;
+}
+.resourceEmpty {
+  display: grid;
+  min-height: 116px;
+  place-content: center;
+  padding: var(--x-space-4);
+  border: 1px dashed var(--x-border);
+  border-radius: 12px;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+  text-align: center;
+}
+.resourceEmpty[data-tone='fault'] {
+  border-color: color-mix(in srgb, var(--x-fault) 42%, var(--x-border));
+  color: var(--x-fault);
+}
+.dangerZone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+  padding: var(--x-space-5);
+  border: 1px solid color-mix(in srgb, var(--x-fault) 42%, var(--x-border));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--x-fault) 6%, var(--x-surface));
+}
+.dangerZone > div > span {
+  color: var(--x-fault);
+  font-family: var(--x-font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.dangerZone h2 {
+  margin: 5px 0;
+  color: var(--x-text);
+  font-size: var(--x-text-lg);
+}
+.dangerZone p {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+@media (max-width: 900px) {
+  .controlDetailGrid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 640px) {
+  .controlDetailHero,
+  .dangerZone {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .controlDetailTop {
+    width: 100%;
+  }
+  .identityGrid {
+    grid-template-columns: 1fr;
+  }
+  .identityWide {
+    grid-column: auto;
+  }
+  .lifecycleActions {
+    flex-direction: column;
+  }
+  .controlResourceSummary {
+    grid-template-columns: 1fr;
+  }
+  .controlResourceSummary > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--x-border);
+  }
+  .controlResourceSummary > div:last-child {
+    border-bottom: 0;
+  }
+  .pinningIntro,
+  .pinningReview {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .pinningObservation {
+    flex-wrap: wrap;
+  }
+  .pinningActions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .resourceSectionHeading,
+  .resourceApplyRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .resourceCapacityGrid {
+    grid-template-columns: 1fr;
+  }
+  .resourceApplyRow > div {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---- Network 탭 카드 제목·상태 줄 ---- */
+/* 부제("인터랙션 · Debian 13")는 한 줄. 좁으면 말줄임 */
+.netVmTitle {
+  min-width: 0;
+}
+.netVmTitle small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 제목 아래 얇은 상태 줄. 세 카드 모두 한 줄 높이로 같은 자리에 온다 */
+.netStatusLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--x-space-1) var(--x-space-4);
+  min-height: calc(var(--x-text-xs) * 1.5);
+  margin-bottom: var(--x-space-3);
+  font-size: var(--x-text-xs);
+  line-height: 1.5;
+}
+/* 알약 배경 없이 상태 색 점 + 작은 글자. 글자는 본문 색이라 대비가 상태 색과 무관하다 */
+.netStatusItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--x-space-1);
+  color: var(--x-text);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: help;
+}
+.netStatusItem i {
+  width: 0.6em;
+  height: 0.6em;
+  border-radius: 50%;
+  background: var(--x-stopped);
+}
+.netStatusItem[data-tone='ok'] i {
+  background: var(--x-ok);
+}
+.netStatusItem[data-tone='recovering'] i {
+  background: var(--x-recovering);
+}
+.netStatusItem[data-tone='fault'] i {
+  background: var(--x-fault);
+}
+
+/* ---- Network 탭 RX/TX 표 (행 이름 | 간격 | RX 수신 | TX 송신). 숫자는 선과 같은 색, 단위는 작고 흐리게 ---- */
+/* 아래 그래프 블록(.memoryChartBlock)과 같은 좌우 안쪽 여백·테두리 폭을 두어,
+   행 이름은 그래프 제목과, TX 열 오른쪽 끝은 그래프 범례 끝과 같은 세로선에 온다 */
+.netTableBlock {
+  container-type: inline-size;
+  overflow-x: auto;
+  padding: 0 var(--x-space-3);
+  border: 1px solid transparent;
+  border-block: 0;
+}
+/* table-layout: fixed + colgroup → 열 너비가 값이 아니라 아래 간격 변수로만 정해진다.
+   RX·TX 열은 오른쪽부터 같은 폭으로 붙고, 남는 너비는 빈 간격 열이 가져간다.
+   그래서 같은 너비의 Zephyr·Linux 카드에서 RX·TX 열 시작 위치가 같고, 값이 바뀌어도 움직이지 않는다 */
+.netTable {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+/* 행 이름 열: "Pool"·"패킷" 이 들어가는 폭 (32px + 12px) */
+.netLabelCol {
+  width: calc(var(--x-space-6) + var(--x-space-3));
+}
+/* RX·TX 열: 가장 긴 값 "8388.6 KiB/s"(≈106px)와 다음 열 사이 여백이 들어가는 폭 (32px × 4 = 128px) */
+.netValueCol {
+  width: calc(var(--x-space-6) * 4);
+}
+.netTable th,
+.netTable td {
+  overflow: hidden;
+  padding: var(--x-space-1) 0;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+.netTable tbody th,
+.netTable thead td:first-child {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+/* 제목은 값과 같은 왼쪽 시작점 */
+.netTable thead th {
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+}
+.netTable .netGap {
+  padding: 0;
+}
+/* xenova 테마 카드 배경 대비: RX 11.4:1, TX 6.3:1, 주의 8.2:1, 위험 5.8:1, 단위(muted) 7.5:1 */
+.netTable [data-tone='rx'] {
+  color: var(--rx-accent);
+}
+.netTable [data-tone='tx'] {
+  color: var(--tx-accent);
+}
+.netTable td[data-level='warn'] {
+  color: var(--x-recovering);
+}
+.netTable td[data-level='fault'] {
+  color: var(--x-fault);
+}
+.netNumber {
+  display: flex;
+  align-items: baseline;
+  gap: var(--x-space-1);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-lg);
+  font-weight: 800;
+  white-space: nowrap;
+}
+.netNumber small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+/* 보조 줄은 열 폭 안에서 말줄임, 전체 문구는 title 로 본다 */
+.netNote {
+  display: block;
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 좁은 카드(표 영역이 행 이름 + RX + TX 폭 합계 300px 미만)에서는 숫자를 16px 로 줄이고
+   RX·TX 열도 32px × 3 = 96px 로 함께 줄인다. 그보다 더 좁으면 표 영역 안에서만 가로 스크롤된다 */
+@container (max-width: 300px) {
+  .netValueCol {
+    width: calc(var(--x-space-6) * 3);
+  }
+  .netNumber {
+    font-size: var(--x-text-md);
+  }
+}
+/* 수치 표와 아래 그래프 사이는 카드 사이 간격(--x-space-4)보다 한 단계 넓게 */
+.netTableBlock + .memoryChartBlock {
+  margin-top: var(--x-space-5);
 }

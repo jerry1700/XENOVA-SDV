@@ -32,10 +32,13 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
 
     // QoS is the subscription maximum: vehicle/control is QoS 1 retained, the rest arrive at their own QoS.
     static final String[] TOPICS = {
-            DriveStateTracker.CONTROL_TOPIC, DriveStateTracker.STATUS_TOPIC, DriveStateTracker.APP_EVENTS_FILTER};
-    static final int[] QOS = {1, 0, 1};
+            DriveStateTracker.CONTROL_TOPIC, DriveStateTracker.STATUS_TOPIC, DriveStateTracker.APP_EVENTS_FILTER,
+            DriveStateTracker.VM_APP_EVENTS_FILTER};
+    static final int[] QOS = {1, 0, 1, 0};
 
     private static final Logger log = LoggerFactory.getLogger(MqttDriveClient.class);
+    // Matches the 10 s connection timeout below.
+    static final long ACTION_TIMEOUT_MS = 10_000;
 
     private final MqttProperties properties;
     private final DriveStateTracker tracker;
@@ -69,6 +72,9 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
             throw new IllegalStateException("Invalid MQTT broker settings: " + properties.brokerUrl(), exception);
         }
         client.setCallback(this);
+        // A QoS 1 publish (resume request) waits for PUBACK on an HTTP thread inside a synchronized method;
+        // without a limit a stalled broker would hang that request and every one queued behind it.
+        client.setTimeToWait(ACTION_TIMEOUT_MS);
         running = true;
         scheduler.execute(this::connect);
     }
@@ -80,6 +86,7 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
         try {
             client.connect(connectOptions());
         } catch (MqttException exception) {
+            tracker.mqttDisconnected();
             log.warn("MQTT broker {} unavailable for the drive relay ({}), retrying in {}",
                     properties.brokerUrl(), exception.getMessage(), properties.reconnectInterval());
             scheduler.schedule(this::connect, properties.reconnectInterval().toMillis(), TimeUnit.MILLISECONDS);
@@ -107,8 +114,12 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
         log.info("MQTT drive relay {} to {}", reconnect ? "reconnected" : "connected", serverUri);
         scheduler.execute(() -> {
             try {
+                // Advance the receive generation before SUBSCRIBE: retained control may arrive before it returns.
+                tracker.mqttConnected();
                 client.subscribe(TOPICS, QOS);
+                log.info("MQTT drive relay subscribed to {} topic filters", TOPICS.length);
             } catch (MqttException exception) {
+                tracker.mqttDisconnected();
                 log.error("MQTT drive subscribe failed", exception);
             }
         });
@@ -116,12 +127,19 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
 
     @Override
     public void connectionLost(Throwable cause) {
+        tracker.mqttDisconnected();
         log.warn("MQTT drive relay connection lost: {}", cause == null ? "unknown" : cause.getMessage());
     }
 
     @Override
     public void messageArrived(String topic, MqttMessage message) {
-        tracker.accept(topic, message.getPayload()).ifPresent(notice -> recorder.execute(() -> eventLogger.record(notice)));
+        // An exception thrown back to Paho closes the connection, so one bad message must not escape.
+        try {
+            tracker.accept(topic, message.getPayload(), message.isRetained())
+                    .ifPresent(notice -> recorder.execute(() -> eventLogger.record(notice)));
+        } catch (RuntimeException exception) {
+            log.warn("Dropped MQTT drive message on {}", topic, exception);
+        }
     }
 
     @Override
@@ -149,6 +167,7 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
     @Override
     public void stop() {
         running = false;
+        tracker.mqttDisconnected();
         scheduler.shutdownNow();
         recorder.shutdown();
         MqttClient current = client;

@@ -22,6 +22,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
@@ -107,26 +108,47 @@ class DriveRelayIntegrationTest {
 
     @Test
     void gatewayAndAppMessagesBecomeTheDriveState() throws Exception {
-        // The relay subscribes asynchronously, so keep publishing until it has seen the messages.
+        String token = login();
+        AtomicReference<JsonNode> observed = new AtomicReference<>();
+        // The command is fresh for only 100 ms. Publish and read the API in the same retry so a slow login
+        // or CI scheduling pause cannot turn the direction assertion into a timing race.
         await(() -> {
             publish(DriveStateTracker.CONTROL_TOPIC, "dom0-gateway", null, "vehicle.control",
-                    "{\"mode\":\"MANUAL\",\"generation\":7,\"active_app\":\"manual\",\"active_vm_id\":null,\"reason\":\"command_timeout\"}",
+                    "{\"mode\":\"MANUAL\",\"generation\":7,\"active_app\":\"manual\",\"active_vm_id\":\"22222222-2222-4222-8222-222222222222\",\"reason\":\"command_timeout\"}",
                     1, true);
             publish("xenova/v1/apps/manual/events", "22222222-2222-4222-8222-222222222222", "manual",
                     "drive.command", "{\"generation\":7,\"v_mps\":0.3,\"steer_rad\":0.0}", 0, false);
-            var control = tracker.snapshot().control();
-            return control != null && "MANUAL".equals(control.mode()) && tracker.snapshot().apps().containsKey("manual");
+            ResponseEntity<String> candidate = restTemplate.exchange(
+                    "/api/v1/drive/state", HttpMethod.GET, new HttpEntity<>(bearer(token)), String.class);
+            if (!candidate.getStatusCode().is2xxSuccessful() || candidate.getBody() == null) {
+                return false;
+            }
+            try {
+                JsonNode state = objectMapper.readTree(candidate.getBody());
+                if ("FORWARD".equals(state.path("apps").path("manual").path("direction")
+                        .path("longitudinal").asText())) {
+                    observed.set(state);
+                    return true;
+                }
+                return false;
+            } catch (IOException exception) {
+                return false;
+            }
         });
 
-        ResponseEntity<String> response = restTemplate.exchange(
-                "/api/v1/drive/state", HttpMethod.GET, new HttpEntity<>(bearer(login())), String.class);
-        assertThat(response.getStatusCode().is2xxSuccessful()).isTrue();
-        JsonNode state = objectMapper.readTree(response.getBody());
+        JsonNode state = observed.get();
         assertThat(state.path("control").path("mode").asText()).isEqualTo("MANUAL");
         assertThat(state.path("control").path("generation").asLong()).isEqualTo(7);
+        assertThat(state.path("control").path("active_vm_id").asText())
+                .isEqualTo("22222222-2222-4222-8222-222222222222");
+        assertThat(state.path("control").path("source").path("status").asText()).isEqualTo("fresh");
         assertThat(state.path("apps").path("manual").path("vm_id").asText())
                 .isEqualTo("22222222-2222-4222-8222-222222222222");
         assertThat(state.path("apps").path("manual").path("last_command").path("v_mps").asDouble()).isEqualTo(0.3);
+        assertThat(state.path("apps").path("manual").path("direction").path("longitudinal").asText())
+                .isEqualTo("FORWARD");
+        assertThat(state.path("apps").path("manual").path("direction").path("lateral").asText())
+                .isEqualTo("STRAIGHT");
 
         JsonNode stats = objectMapper.readTree(restTemplate.exchange(
                 "/api/v1/messaging/stats", HttpMethod.GET, new HttpEntity<>(bearer(login())), String.class).getBody());
@@ -204,11 +226,11 @@ class DriveRelayIntegrationTest {
     }
 
     @Test
-    void resumeIsPublishedOnlyInAutoReadyAndTheCountdownIsRelayed() throws Exception {
+    void resumeIsRefusedOutsideResumableModesAndTheCountdownIsRelayed() throws Exception {
         String token = login();
         await(() -> {
             publish(DriveStateTracker.CONTROL_TOPIC, "dom0-gateway", null, "vehicle.control",
-                    "{\"mode\":\"MANUAL\",\"generation\":30,\"active_app\":\"manual\"}", 1, true);
+                    "{\"mode\":\"UNKNOWN_MODE\",\"generation\":30,\"active_app\":null}", 1, true);
             var control = tracker.snapshot().control();
             return control != null && control.generation() != null && control.generation() == 30;
         });
@@ -218,6 +240,14 @@ class DriveRelayIntegrationTest {
         assertThat(objectMapper.readTree(refused.getBody()).path("code").asText()).isEqualTo("NOT_AUTO_READY");
         assertThat(restTemplate.postForEntity("/api/v1/drive/resume", null, String.class).getStatusCode().value())
                 .isEqualTo(401);
+        // No countdown to cancel yet (contract v1.7).
+        ResponseEntity<String> nothingToCancel = restTemplate.exchange(
+                "/api/v1/drive/resume", HttpMethod.DELETE, new HttpEntity<>(bearer(token)), String.class);
+        assertThat(nothingToCancel.getStatusCode().value()).isEqualTo(409);
+        assertThat(objectMapper.readTree(nothingToCancel.getBody()).path("code").asText())
+                .isEqualTo("NO_RESUME_COUNTDOWN");
+        assertThat(restTemplate.exchange("/api/v1/drive/resume", HttpMethod.DELETE, HttpEntity.EMPTY, String.class)
+                .getStatusCode().value()).isEqualTo(401);
 
         await(() -> {
             publish(DriveStateTracker.CONTROL_TOPIC, "dom0-gateway", null, "vehicle.control",
@@ -234,6 +264,10 @@ class DriveRelayIntegrationTest {
         assertThat(request.path("type").asText()).isEqualTo("drive.resume.requested");
         assertThat(request.path("source_id").asText()).isEqualTo("dom0-server");
         assertThat(request.path("payload").path("requested_by").asText()).isEqualTo("drive-relay-user");
+        // Bound to the control publication the gateway made (verified profile, contract §5.2).
+        String controlMessageId = tracker.controlContext().orElseThrow().messageId();
+        assertThat(request.path("causation_id").asText()).isEqualTo(controlMessageId);
+        assertThat(request.path("payload").path("expected_generation").asLong()).isEqualTo(31);
 
         // The gateway answers with a countdown: event log + drive state.
         await(() -> {
@@ -247,12 +281,51 @@ class DriveRelayIntegrationTest {
         assertThat(state.path("resume").has("remaining_ms")).isTrue();
         assertThat(events(EventType.DRIVE_RESUME_ACCEPTED).get(0).getSeverity()).isEqualTo(EventSeverity.INFO);
 
+        // The operator cancels the countdown: same topic, same control binding, the countdown's generation.
+        ResponseEntity<String> cancel = restTemplate.exchange(
+                "/api/v1/drive/resume", HttpMethod.DELETE, new HttpEntity<>(bearer(token)), String.class);
+        assertThat(cancel.getStatusCode().value()).isEqualTo(202);
+        JsonNode cancelRequest = resumes.poll(5, TimeUnit.SECONDS);
+        assertThat(cancelRequest).isNotNull();
+        assertThat(cancelRequest.path("type").asText()).isEqualTo("drive.resume.cancel_requested");
+        assertThat(cancelRequest.path("causation_id").asText()).isEqualTo(controlMessageId);
+        assertThat(cancelRequest.path("payload").path("expected_generation").asLong()).isEqualTo(31);
+        assertThat(cancelRequest.path("payload").path("requested_by").asText()).isEqualTo("drive-relay-user");
+
         await(() -> {
             publish("xenova/v1/apps/vehicle/events", "dom0-gateway", "vehicle", "drive.resume.cancelled",
-                    "{\"reason\":\"mode_changed\"}", 1, false);
+                    "{\"reason\":\"operator_cancelled\",\"generation\":31,\"requested_by\":\"drive-relay-user\"}",
+                    1, false);
             return !events(EventType.DRIVE_RESUME_CANCELLED).isEmpty();
         });
         assertThat(tracker.snapshot().resume()).isNull();
+    }
+
+    @Test
+    void scopedAppReportsReachTheExistingDriveStateApiThroughMqtt() throws Exception {
+        String vm = "99999999-9999-4999-8999-999999999999";
+        String topic = "xenova/v1/vms/" + vm + "/apps/autonomous/events";
+        String token = login();
+        AtomicReference<JsonNode> observed = new AtomicReference<>();
+        await(() -> {
+            long check = SEQ.incrementAndGet();
+            publish(topic, vm, "autonomous", "app.lifecycle", """
+                    {"profile":"warm-drive-1","phase":"WAITING","readiness":"NOT_READY","reason":"INPUT_UNAVAILABLE",
+                     "applied_generation":0,"check_seq":"%d","progress_seq":"0"}
+                    """.formatted(check), 0, false);
+            publish(topic, vm, "autonomous", "app.heartbeat", "{\"state\":\"idle\",\"uptime_s\":1.25}", 0, false);
+            ResponseEntity<JsonNode> result = restTemplate.exchange(
+                    "/api/v1/drive/state", HttpMethod.GET, new HttpEntity<>(bearer(token)), JsonNode.class);
+            if (!result.getStatusCode().is2xxSuccessful() || result.getBody() == null) {
+                return false;
+            }
+            JsonNode app = result.getBody().path("vm_apps").path(vm).path("autonomous");
+            observed.set(app);
+            return app.path("lifecycle").isObject() && app.path("heartbeat").isObject();
+        });
+        assertThat(observed.get().path("lifecycle").path("phase").asText()).isEqualTo("WAITING");
+        assertThat(observed.get().path("lifecycle").path("reason").asText()).isEqualTo("INPUT_UNAVAILABLE");
+        assertThat(observed.get().path("heartbeat").path("state").asText()).isEqualTo("idle");
     }
 
     // ---- helpers ------------------------------------------------------------------------------------
@@ -261,8 +334,10 @@ class DriveRelayIntegrationTest {
             boolean retained) {
         boolean vm = publisher.length() == 36;
         String json = """
-                {"schema_version":"1.0","message_id":"it-%d","%s":"%s",%s"boot_id":"it-boot",
-                 "agent_instance_id":"it-run","type":"%s","seq":%d,"sent_at":"%s","payload":%s}
+                {"schema_version":"1.0","message_id":"it-%d","%s":"%s",%s
+                 "boot_id":"77777777-7777-4777-8777-777777777777",
+                 "agent_instance_id":"88888888-8888-4888-8888-888888888888",
+                 "type":"%s","seq":%d,"sent_at":"%s","payload":%s}
                 """.formatted(SEQ.incrementAndGet(), vm ? "vm_id" : "source_id", publisher,
                 appId == null ? "" : "\"app_id\":\"" + appId + "\",", type, SEQ.get(), Instant.now(), payload);
         try {

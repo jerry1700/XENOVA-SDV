@@ -2,6 +2,7 @@
 """완료된 Zephyr 앱 빌드에서 새 배포 번들을 게시한다. 컴파일·원본 수정·다운로드는 하지 않는다."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 from pathlib import Path
@@ -28,7 +29,7 @@ def main(argv=None):
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--app-source', type=Path, help='application source files to fingerprint; no build or source changes')
     parser.add_argument('--networked', action='store_true', help='validated existing netfront/cooperative 16MiB profile')
-    parser.add_argument('--template-id', help='publish a new catalog entry for the pinned Starter App')
+    parser.add_argument('--template-id', help='publish the verified Starter or common drive catalog entry')
     parser.add_argument('--template-version', help='catalog deployment version; distinct from application firmware version')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args(argv)
@@ -47,6 +48,8 @@ def main(argv=None):
             'source': {'zephyr_version': '4.4.0', 'app': args.app,
                        'source_revision': args.source_revision, 'build_id': args.build_id},
             'hardware_profile': profile, 'capabilities': zephyr.NET_CAPABILITIES if args.networked else zephyr.CAPABILITIES}
+    from xenova_guest_profile import from_manifest
+    meta['provisioning_profile']=from_manifest(meta,config=(args.build_dir/'.config').read_text())
     if not all(value.strip() for value in meta['source'].values()):
         raise ValueError('firmware provenance values must not be empty')
     if args.app_source is not None:
@@ -64,7 +67,24 @@ def main(argv=None):
             raise ValueError('empty application source')
         meta['source']['app_files'] = fingerprints
         meta['source']['app_source_sha256'] = hashlib.sha256(json.dumps(fingerprints, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    if args.template_id is not None:
+    if args.template_id == 'xenova-zephyr-drive-common':
+        if not args.networked or args.app != 'xenova-drive' or args.app_source != ROOT / 'platform/apps/drive/zephyr':
+            raise ValueError('common drive catalog requires the verified networked drive application')
+        spec = importlib.util.spec_from_file_location('drive_build_inputs', ROOT / 'platform/scripts/build-xenova-drive-app.py')
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        digest = hashlib.sha256(json.dumps(builder.fingerprint('drive'), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        lock = json.loads((ROOT / 'platform/guests/zephyr/starter.lock.json').read_text())
+        match = re.search(r'^ZEPHYR_BASE:PATH=(.+)$', cache, re.M)
+        if (args.source_revision != 'sha256:' + digest or args.version != '0.1.0-drive-' + digest[:12]
+                or not match or subprocess.check_output(['git', '-C', match[1], 'rev-parse', 'HEAD'], text=True).strip() != lock['zephyr_commit']):
+            raise ValueError('common drive catalog source/build provenance mismatch')
+        meta.update(id=args.template_id, kind='zephyr-xen-firmware', template_id='zephyr-xenvm-starter-arm64',
+                    template_version=args.template_version or args.version, schema_version='1.0')
+        from xenova_catalog import identity
+        identity(meta['template_id'], meta['template_version'])
+        meta['source'].update(zephyr_commit=lock['zephyr_commit'], sdk_version=lock['sdk_version'])
+    elif args.template_id is not None:
         if args.networked:
             raise ValueError('networked application candidate is not the pinned legacy Starter catalog publication')
         lock = json.loads((ROOT / 'platform/guests/zephyr/starter.lock.json').read_text())
@@ -108,6 +128,12 @@ def main(argv=None):
     if args.networked:
         sources.update({'zephyr.map': args.build_dir / 'zephyr.map',
                         'XEN-ABI-LICENSE': ROOT / 'platform/guests/zephyr/xen-store/LICENSES/MIT-Xen'})
+    # The linked Publisher carries a pre-link input digest, not a self hash.
+    build_ids=set(re.findall(rb'xenova-build:(sha256:[0-9a-f]{64})',sources['zephyr.bin'].read_bytes()))
+    if len(build_ids)>1:
+        raise ValueError('ambiguous embedded build identity')
+    if build_ids:
+        meta['source']['build_id']=next(iter(build_ids)).decode('ascii')
     meta['files'] = {}
     for name, source in sources.items():
         if source.is_symlink() or not source.is_file():

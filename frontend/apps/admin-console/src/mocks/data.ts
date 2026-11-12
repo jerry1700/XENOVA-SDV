@@ -51,11 +51,13 @@ export function initialVms(): Vm[] {
       guest_kind: 'zephyr',
       state: 'running',
       agent_status: 'UNKNOWN', // Zephyr 는 에이전트가 없다 (§2.2)
-      ipv4: null, // Zephyr 는 PV 네트워크 없이 vchan 중계 (MQTT 계약 4.1)
+      ipv4: null,
+      assigned_ipv4: null,
       template_id: 'zephyr-xenvm-starter-arm64',
       template_version: '1.0.0',
       vcpus: 1,
       memory_mib: 16,
+      role: 'primary_drive',
     },
     {
       vm_id: VM_IDS.manual,
@@ -64,10 +66,12 @@ export function initialVms(): Vm[] {
       state: 'running',
       agent_status: 'UNKNOWN',
       ipv4: null,
+      assigned_ipv4: null,
       template_id: 'zephyr-xenvm-starter-arm64',
       template_version: '1.0.0',
       vcpus: 1,
       memory_mib: 16,
+      role: 'backup_drive',
     },
     {
       vm_id: VM_IDS.interaction,
@@ -76,10 +80,12 @@ export function initialVms(): Vm[] {
       state: 'running',
       agent_status: 'ONLINE',
       ipv4: '192.168.77.13',
+      assigned_ipv4: '192.168.77.13',
       template_id: 'debian-13-arm64',
       template_version: '1.0.0',
       vcpus: 1,
       memory_mib: 512,
+      role: 'interaction',
     },
   ];
 }

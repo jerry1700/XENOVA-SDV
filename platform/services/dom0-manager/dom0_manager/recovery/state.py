@@ -21,13 +21,18 @@ from pydantic import ValidationError
 
 from ..models import RecoveryEvent
 from .model import FailureReason
+from .protection import PHASES as PROTECTION_PHASES
+from .store_files import preserve_corrupt, read_state
 
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+BUDGET_SCHEMA_VERSION = 2  # 구형 writer가 예산을 조용히 버리지 못하게 하는 내부 호환 경계.
 MODES = ("start-if-absent", "graceful-restart", "force-restart")
 GUEST_KINDS = ("linux", "zephyr")
 REASONS = frozenset(reason.value for reason in FailureReason)
+PROTECTION_SPEC = frozenset({"host_boot_id", "target_vm", "target_execution_id", "intent_revision", "lifecycle_generation", "expected_owner",
+                             "expected_generation", "deadline_ms", "parent_deadline_ms", "purpose"})
 
 
 class RecoveryStatus(str, Enum):
@@ -61,6 +66,15 @@ def _finite(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f'duplicate recovery state field {key!r}')
+        result[key] = value
+    return result
+
+
 @dataclass
 class RecoveryRecord:
     recovery_id: UUID
@@ -80,8 +94,13 @@ class RecoveryRecord:
     cancel_requested: bool = False  # 실행 중에 사용자가 껐다. 실행 결과를 회수한 뒤 취소로 닫는다
     execution_id: str | None = None  # 플랫폼이 결합한 새 실행 ID
     last_error: dict[str, Any] | None = None  # {code, platform_code, message}
-    graceful_failed: bool = False  # graceful-restart 가 정상 종료 실패로 끝나 force-restart 로 올렸다
+    # graceful-restart 가 정상 종료에 실패한 실행. 같은 실행이 지금도 돌 때만 다음 시도를 force-restart 로 올린다(다른 실행에 옛 실패를 쓰지 않음)
+    graceful_failed_execution_id: str | None = None
     attempt_closed: bool = False  # 현재 attempt 의 종료 이벤트(재시도 실패)를 이미 냈다. 그 뒤의 recovered·cancelled 는 시도에 붙이지 않는다
+    # 주행 VM 의 Gateway 보호(S15P31E110-346): {request_id, spec(원 spec), phase, note}. 첫 송신 전에 저장한다.
+    # 단계가 LIVE 이면 복구가 닫혀도 정산(finish·cancel)이 끝날 때까지 기록을 지우지 않는다
+    protection: dict[str, Any] | None = None
+    protection_requests: int = 0  # 이 복구에서 발급한 보호 키 수. 정책 시도 수를 넘겨 새 키를 만들지 않는다
     final: bool = False
     closed_monotonic: float | None = None
     # 아직 outbox(recovery-events.jsonl)에 옮기지 못한 이벤트(계약 2.5, event_id 고정). 상태 전이와 같은 파일에 저장돼
@@ -105,6 +124,13 @@ class RecoveryRecord:
         if not isinstance(data, dict):
             raise ValueError("recovery record must be an object")
         fields = dict(data)
+        if "graceful_failed" in fields:
+            # 실행을 적기 전의 상태 파일: 승격 근거를 그 시도가 겨냥한 원 실행으로 옮긴다. 원 실행을 모르면 승격하지 않는다
+            legacy = fields.pop("graceful_failed")
+            if type(legacy) is not bool:
+                raise ValueError(f"graceful_failed must be a boolean, got {legacy!r}")
+            expected = ((fields.get("request") or {}).get("expected_execution") or {}) if isinstance(fields.get("request"), dict) else {}
+            fields.setdefault("graceful_failed_execution_id", expected.get("execution_id") if legacy is True else None)
         known = set(cls.__dataclass_fields__)
         unknown = set(fields) - known
         if unknown:
@@ -135,13 +161,17 @@ class RecoveryRecord:
             raise ValueError("detected_monotonic must be a finite number")
         if type(self.attempt) is not int or self.attempt < 0:
             raise ValueError("attempt must be a non-negative integer")
+        if type(self.protection_requests) is not int or self.protection_requests < 0 or (self.protection is not None and self.protection_requests < 1):
+            raise ValueError("protection_requests must be a non-negative integer counting the recorded protection")
         for name in ("attempt_started_monotonic", "due_monotonic", "closed_monotonic"):
             value = getattr(self, name)
             if value is not None and not _finite(value):
                 raise ValueError(f"{name} must be a finite number or null")
         if self.mode is not None and self.mode not in MODES:
             raise ValueError(f"unknown mode {self.mode!r}")
-        for name in ("replay", "cancel_requested", "graceful_failed", "final", "attempt_closed"):
+        if self.graceful_failed_execution_id is not None and (not isinstance(self.graceful_failed_execution_id, str) or not self.graceful_failed_execution_id):
+            raise ValueError("graceful_failed_execution_id must be a non-empty string or null")
+        for name in ("replay", "cancel_requested", "final", "attempt_closed"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         if not isinstance(self.pending_events, list):
@@ -154,6 +184,8 @@ class RecoveryRecord:
             if event["event_id"] in seen:
                 raise ValueError(f"duplicate pending event_id {event['event_id']}")
             seen.add(event["event_id"])
+        if self.protection is not None:
+            self._validate_protection()
         if self.request is not None:
             if not isinstance(self.request, dict):
                 raise ValueError("request must be an object")
@@ -176,25 +208,66 @@ class RecoveryRecord:
         elif self.closed_monotonic is None:
             raise ValueError(f"{self.status.value} requires closed_monotonic")
 
+    def _validate_protection(self) -> None:
+        """손상된 보호 기록으로 다른 실행을 정산하거나 새 키를 만들지 않도록 원 spec 의 모양까지 본다."""
+        entry = self.protection
+        if not isinstance(entry, dict) or set(entry) != {"request_id", "spec", "phase", "note"}:
+            raise ValueError("protection must be {request_id, spec, phase, note}")
+        if not isinstance(entry["request_id"], str) or not entry["request_id"] or entry["phase"] not in PROTECTION_PHASES:
+            raise ValueError("protection request_id/phase invalid")
+        if entry["note"] is not None and not isinstance(entry["note"], str):
+            raise ValueError("protection note must be a string or null")
+        spec = entry["spec"]
+        if not isinstance(spec, dict) or set(spec) != PROTECTION_SPEC or spec["purpose"] != "protect" or spec["target_vm"] != str(self.vm_id):
+            raise ValueError("protection spec does not belong to the record")
+        for name in ("host_boot_id", "target_execution_id", "expected_owner"):
+            if not isinstance(spec[name], str) or str(UUID(spec[name])) != spec[name]:
+                raise ValueError(f"protection spec {name} must be a canonical UUID")
+        for name in ("intent_revision", "lifecycle_generation", "expected_generation", "deadline_ms", "parent_deadline_ms"):
+            if type(spec[name]) is not int or spec[name] < 0:
+                raise ValueError(f"protection spec {name} must be a non-negative integer")
+        if spec["deadline_ms"] > spec["parent_deadline_ms"]:
+            raise ValueError("protection deadline exceeds its parent deadline")
+
 
 class RecoveryStore:
-    """`XENOVA_RECOVERY_STATE_DIR/recoveries.json`. 원자적 쓰기(tmp + rename). 깨진 파일은 `.corrupt` 로 보존하고 history_lost 를 세운다."""
+    """Worker 상태+pending 사건의 원자 저장. 손상 원본/격리 흔적으로 차단을 복원한다."""
 
     def __init__(self, path: Path | None) -> None:
         self._path = path
         self.history_lost = False
+        self._write_blocked = False
+        self.budget_tracking = False
+        self.budget_baseline_known = True
+        self.vm_budget_used: dict[UUID, int | None] = {}
 
     @property
     def path(self) -> Path | None:
         return self._path
 
     def load(self) -> dict[UUID, RecoveryRecord]:
-        if self._path is None or not self._path.exists():
+        if self._path is None:
             return {}
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or data.get("version") != SCHEMA_VERSION:
-                raise ValueError(f"unsupported schema (expected version {SCHEMA_VERSION})")
+            text = read_state(self._path)
+            if text is None:
+                return {}
+            data = json.loads(text, object_pairs_hook=_unique_fields)
+            if not isinstance(data, dict) or type(data.get('version')) is not int or data['version'] not in (SCHEMA_VERSION, BUDGET_SCHEMA_VERSION):
+                raise ValueError('unsupported recovery schema')
+            self.budget_tracking = data['version'] == BUDGET_SCHEMA_VERSION
+            self.budget_baseline_known = False  # 남은 닫힌 기록만으로 과거 총사용량을 복원할 수 없다.
+            self.vm_budget_used = {}
+            if self.budget_tracking:
+                budget = data.get('vm_budget')
+                if not isinstance(budget, dict) or set(budget) != {'baseline_known', 'used'} or type(budget['baseline_known']) is not bool or not isinstance(budget['used'], dict):
+                    raise ValueError('invalid VM recovery budget')
+                self.budget_baseline_known = budget['baseline_known']
+                for key, used in budget['used'].items():
+                    identity = UUID(key)
+                    if str(identity) != key or identity.int == 0 or (used is not None and (type(used) is not int or used < 0)):
+                        raise ValueError('invalid VM recovery budget entry')
+                    self.vm_budget_used[identity] = used
             raw = data.get("recoveries")
             if not isinstance(raw, list):
                 raise ValueError("'recoveries' must be a list")
@@ -214,31 +287,42 @@ class RecoveryStore:
         open_vms = [r.vm_id for r in result.values() if r.open]
         if len(open_vms) != len(set(open_vms)):
             return self._lost("more than one open recovery for a VM", preserve=True)
-        self.history_lost = lost
+        self.history_lost = self.history_lost or lost
         return result
 
     def _lost(self, why: str, *, preserve: bool) -> dict[UUID, RecoveryRecord]:
         self.history_lost = True
         log.error(
-            "recovery store %s corrupt (%s): in-flight recoveries are unknown; no recovery will be executed until the file is removed",
+            "recovery store %s unavailable/corrupt (%s): in-flight recoveries are unknown; recovery is blocked; preserve state and evidence for investigation",
             self._path, why,
         )
         if preserve:
             try:
-                os.replace(self._path, self._path.with_suffix(self._path.suffix + ".corrupt"))
+                preserve_corrupt(self._path)
             except OSError as exc:
+                self._write_blocked = True
                 log.warning("recovery store %s could not be set aside: %s", self._path, exc)
-        self.save({})
+        else:
+            # 읽지 못한 원본·부재 뒤 잔존 증거를 빈 파일로 덮어쓰지 않는다.
+            self._write_blocked = True
+        if not self._write_blocked:
+            self.save({})  # False여도 원본 또는 보존 사본으로 다음 load가 차단된다.
         return {}
 
     def save(self, records: dict[UUID, RecoveryRecord]) -> bool:
         if self._path is None:
             return True
+        if self._write_blocked:
+            log.error("recovery store %s not saved: unresolved state/evidence", self._path)
+            return False
         body = {
-            "version": SCHEMA_VERSION,
+            "version": BUDGET_SCHEMA_VERSION if self.budget_tracking else SCHEMA_VERSION,
             "history_lost": self.history_lost,
             "recoveries": [record.to_json() for record in records.values()],
         }
+        if self.budget_tracking:
+            body['vm_budget'] = {'baseline_known': self.budget_baseline_known,
+                                 'used': {str(vm): used for vm, used in self.vm_budget_used.items()}}
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")

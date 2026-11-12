@@ -7,10 +7,15 @@ info:
     기준 문서는 docs/contracts/vm-api-contract-v1.md 이며, 이 파일은 HTTP 계약의 기계 판독용 원본이다.
     플랫폼 공통 Manager/CLI의 JSON envelope와 동일한 스키마가 아니다.
     생성·시작·등록 목록·예약 IP·수명주기 전달의 계층 경계는 기준 문서 1.4절과 13장을 따른다.
-    서비스는 보드의 Tailscale 주소에 바인딩하고 모든 엔드포인트에서 Bearer 서비스 토큰을 검사한다.
+    서비스는 보드의 Tailscale 주소에 바인딩하고 모든 엔드포인트에서 Bearer 서비스 토큰을 검사한다
+    (예외는 자체 소스 토큰을 쓰는 /api/v1/logs/ingest 하나).
+    API 문서 경로(/docs, /redoc, /openapi.json)는 기본으로 열지 않는다(404). 개발용 XENOVA_DOM0_API_DOCS=1 로만 켜며
+    켜도 서비스 토큰을 검사한다 (기준 문서 4장, 2026-11-06).
     Spring 이 발급한 vm_id 를 플랫폼 registry 와 Xen UUID의 영구 식별자로 사용한다.
     FastAPI 기본 422(HTTPValidationError)는 400 InvalidArgument 로 정규화하고, 생성 스키마에서
     422 응답과 HTTPValidationError 모델을 제거해야 이 파일과의 차이 검사가 통과한다.
+    /healthz 를 뺀 모든 엔드포인트는 선택 헤더 X-Request-Budget-Ms(components.parameters.RequestBudget)를 받는다.
+    형식 오류는 400. 없으면 기존 한도를 쓴다 (기준 문서 4.9절).
 servers:
   - url: http://{tailscale_address}:8081
     description: dom0 Tailscale address
@@ -23,6 +28,164 @@ tags:
   - name: VMs
   - name: Health
 paths:
+  /api/v1/logs:
+    get:
+      tags:
+      - logs
+      summary: List Logs
+      operationId: listRuntimeLogs
+      parameters:
+      - name: after
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+            minimum: 0
+          - type: 'null'
+          title: After
+      - name: source_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Source Id
+      - name: vm_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Vm Id
+      - name: component
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Component
+      - name: level
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            pattern: ^(DEBUG|INFO|WARN|ERROR|FATAL)$
+          - type: 'null'
+          title: Level
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 500
+          minimum: 1
+          default: 200
+          title: Limit
+      - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
+  /api/v1/logs/sources:
+    get:
+      tags:
+      - logs
+      summary: Sources
+      operationId: listRuntimeLogSources
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - $ref: '#/components/parameters/RequestBudget'
+  /api/v1/logs/ingest:
+    post:
+      tags:
+      - logs
+      summary: Ingest
+      description: Private producer endpoint, intentionally not proxied by Spring's
+        browser API.
+      operationId: ingestRuntimeLogs
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '503':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Service Unavailable
+      security:
+      - LogProducerToken: []
+      parameters:
+      - name: X-Log-Source
+        in: header
+        required: true
+        schema:
+          type: string
+      - $ref: '#/components/parameters/RequestBudget'
   /api/v1/vms:
     get:
       tags: [VMs]
@@ -30,8 +193,11 @@ paths:
       summary: Xen 에 존재하는 도메인 목록
       description: >-
         Xen 에 현재 존재하는 도메인만 반환한다. 종료된 VM 을 포함한 전체 목록은
-        Spring 이 자기 레코드와 조합해 만든다.
+        Spring 이 자기 레코드와 조합해 만든다. 조회 한도 5초(하위 list 에 timeout_ms 5000 명시,
+        요청 예산이 더 짧으면 그 값). 넘으면 504 DriverTimeout (기준 문서 4.1).
       x-driver-timeout-seconds: 5
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -59,9 +225,13 @@ paths:
         다시 호출하는 것이며 별도 start 엔드포인트는 없다.
         Spring 불변조건: 같은 vm_id 에는 항상 같은 생성 명세를 보낸다.
         실행 도메인이 있으면 명세 비교 없이 409 VMExists 를 반환하며 Spring 이 자기 명세와 대조한다.
+        플랫폼 VM_NAME_CONFLICT(발급한 내부 이름·UUID 예약·MAC 이 다른 VM 과 겹침)는 409 VMNameConflict 이며
+        같은 VM 이 아니므로 생성 성공으로 바꾸지 않는다 (기준 문서 4.2·8.1).
         플랫폼 공통 create 는 정지 등록이므로 실제 도메인 시작은 별도 start 연결이 필요하다.
         Linux IP 는 플랫폼 전역 잠금 안에서 자동 할당한다.
       x-driver-timeout-seconds: 30
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
       requestBody:
         required: true
         content:
@@ -80,7 +250,13 @@ paths:
         '400':
           $ref: '#/components/responses/InvalidArgument'
         '409':
-          $ref: '#/components/responses/VMExists'
+          description: >-
+            VMExists — 같은 vm_id 의 VM 이 이미 있음(실행 중 또는 정지 등록에 다른 명세). VMNameConflict — 플랫폼
+            VM_NAME_CONFLICT, 다른 VM 과 내부 이름·UUID 예약·MAC 충돌(생성 성공 아님)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '507':
           $ref: '#/components/responses/InsufficientResources'
         '500':
@@ -98,7 +274,11 @@ paths:
       tags: [VMs]
       operationId: getVm
       summary: VM 단건 조회
+      description: >-
+        조회 한도 5초(하위 get 에 timeout_ms 5000 명시, 요청 예산이 더 짧으면 그 값). 넘으면 504 DriverTimeout (기준 문서 4.1).
       x-driver-timeout-seconds: 5
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -126,6 +306,8 @@ paths:
         실행 중인 VM 은 409 로 거부한다. 정지된 VM 은 retire 생명주기로 숨김 보관하며
         tombstone 과 generation 을 유지한다. 같은 디스크를 restore 하면 기존 vm_id 를 유지한다.
       x-driver-timeout-seconds: 90
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -158,14 +340,191 @@ paths:
         멱등성은 목표 상태 기준이다. 없는 VM 에 대한 호출도 204 다.
         호출은 동기 방식이며 최대 90초까지 소멸을 기다린다. 일반 stop 은 시간 초과 시
         자동으로 강제 종료하지 않는다. 강제 종료는 명시적인 force 정책에서만 수행한다.
+        Idempotency-Key 가 있으면 요청 추적 모드다 (기준 문서 4.3.1): VM 잠금·직렬화를 기다리지 않고 정지 의도를 먼저
+        내구 수락하며, 완료면 200, 수락했지만 실행이 남았으면 202 로 ControlOperation 을 돌려준다.
+        2xx 를 정지 완료로 보지 않는다(status 를 본다). 키 없는 호출의 응답은 바뀌지 않는다.
       x-driver-timeout-seconds: 90
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: 최초 전송 전에 정한 요청 키. 재전송·조회에 같은 값. ASCII 가시 문자 1..200자
+          schema:
+            type: [string, 'null']
+        - $ref: '#/components/parameters/RequestBudget'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 키 있음. 원 작업 완료(같은 키 재전달이어도 같은 operation_id, 물리 동작 반복 없음)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperation'
+        '202':
+          description: 키 있음. 정지 의도를 내구 수락했고 실행이 남음 (status=pending). 같은 키로 재전달하거나 조회한다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperation'
         '204':
-          description: 도메인이 없는 상태 (디스크 보존)
+          description: 키 없음 정지 완료, 또는 키 유무와 무관하게 등록이 없어 정지 목표 달성(작업 기록 없음). 디스크 보존
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/reboot:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    post:
+      tags: [VMs]
+      operationId: rebootVm
+      summary: 정상 재부팅 (같은 디스크로 새 실행)
+      description: >-
+        실행 중인 VM 을 게스트 정상 재부팅으로 같은 등록·디스크의 새 실행(새 execution_id)으로 다시 시작한다 (기준 문서 4.10).
+        stop + create 조합이 아니라 플랫폼 reboot 한 번이다. 키 없는 호출은 동기 방식이며 새 실행이 관측될 때까지 최대 90초 기다린다.
+        자동 강제 재부팅은 없다. 명령 제출 전 기한 만료는 504, 제출 뒤 새 실행을 확인하지 못하면 503(RECONCILE_REQUIRED, 결과 미확정).
+        force 입력은 없다(협력 제어 채널이 없는 Zephyr 는 501).
+        신규 재부팅은 키 유무와 관계없이 실행 중인 도메인만 대상이다: 꺼짐·paused·crashed·stopping 이면 409, 등록이 없으면 404.
+        Idempotency-Key 가 있으면 정지와 같은 요청 추적 모드다 (4.3.1): 같은 키의 원 작업이 있으면 재전달로 보고 상태 확인 없이
+        이어 가며, 완료면 200, 수락했지만 실행이 남았으면 202 로 ControlOperation(action=reboot) 을 돌려준다.
+      x-driver-timeout-seconds: 90
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: 최초 전송 전에 정한 요청 키. 재전송·조회에 같은 값. ASCII 가시 문자 1..200자
+          schema:
+            type: [string, 'null']
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 키 있음. 원 작업 완료(새 실행 관측). 같은 키 재전달이어도 같은 operation_id, 물리 동작 반복 없음
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperation'
+        '202':
+          description: 키 있음. 재부팅을 내구 수락했고 실행이 남음 (status=pending). 같은 키로 재전달하거나 조회한다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperation'
+        '204':
+          description: 키 없음. 재부팅 완료(새 실행 관측). 디스크 보존
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/resources:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    put:
+      tags: [VMs]
+      operationId: updateVmResources
+      summary: 정지한 Linux VM 의 vCPU·메모리 변경 (다음 시작부터 적용)
+      description: >-
+        정지한 Linux VM 의 등록 설정에서 vcpus·memory_mib 를 바꾼다 (기준 문서 4.12). 실행 중인 게스트를 바꾸지 않고 게스트를 시작하지
+        않는다. 플랫폼 update-resources 한 번이다. 같은 키의 원 작업을 자산·제어 원장 모두에서 먼저 찾아, 같은 VM·같은 값의 원 자원
+        변경이면 원 요청을 그대로 다시 보내고(같은 결과), 다른 요청의 키면 409 VMExists 로 아무것도 보내지 않는다. TARGET_CHANGED 는
+        원 작업이 없음을 다시 확인한 뒤에만 409 다. 504 는 제출 전 예산 만료뿐이다. 실행 중 핀·가중치·메모리 변경은 범위 밖이다.
+      x-driver-timeout-seconds: 15
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: 필수. 최초 전송 전에 정한 요청 키. 응답을 잃으면 같은 키·같은 본문으로 다시 보낸다. ASCII 가시 문자 1..200자
+          schema:
+            type: string
+        - $ref: '#/components/parameters/RequestBudget'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateResourcesRequest'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 변경 완료. 같은 키·같은 본문의 재전송도 원 결과(같은 operation_id·before·after)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResourceUpdate'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
+        '409':
+          description: >-
+            InvalidState: 도메인이 있음·stopped 의도 아님·설정이 바뀌었고 원 작업 없음(TARGET_CHANGED)·자산 사용 중.
+            VMExists: 같은 키가 다른 요청(다른 VM·값·동작)의 원 작업
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/control-operations:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [VMs]
+      operationId: getControlOperation
+      summary: 요청 키로 원 제어 작업 조회 (실행하지 않음)
+      description: >-
+        최초 응답을 잃어 operation_id 를 받지 못했을 때 제출 전에 정한 키로 원 작업을 찾는다. 짧은 수락 잠금만 쓰고
+        시작·정지·이행이나 Xen 관측을 하지 않는다. 404 는 조회 시점의 검색 부재이며 미수락의 증거가 아니다.
+        superseded 는 이 조회로 알 수 없다(현재 의도는 VM 조회로 본다). 기본 한도 5초.
+      x-driver-timeout-seconds: 5
+      parameters:
+        - name: request_key
+          in: query
+          required: true
+          description: 최초 제출 때 보낸 Idempotency-Key
+          schema:
+            type: string
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 원 작업 상태
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperation'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/OperationNotFound'
         '500':
           $ref: '#/components/responses/DriverError'
         '501':
@@ -184,6 +543,8 @@ paths:
         Domain-0 은 없고 꺼진 VM 은 표본이 없다. 사용률(CPU %, bytes/s)은 싣지 않으며 Spring 이 연속 표본으로 계산한다.
         측정하지 못한 필드는 0 이 아니라 null 이고 unavailable 에 사유가 있다. 플랫폼 Manager 를 거치지 않는다.
       x-driver-timeout-seconds: 5
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -195,6 +556,70 @@ paths:
                 $ref: '#/components/schemas/StatsResponse'
         '500':
           $ref: '#/components/responses/DriverError'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/cpu-layout:
+    get:
+      tags: [Resources]
+      operationId: getCpuLayout
+      summary: 전체 VM 의 CPU 배치(정책·실제 Xen)
+      description: >-
+        플랫폼 cpu-layout (기준 문서 4.11). 정책이 정한 vCPU→pCPU 배치와 실제 Xen hard affinity·전용성 검사를 돌려준다. 조회만 하며
+        정책·affinity·VM 을 바꾸지 않는다. 200 은 조회 성공이지 배치 준수가 아니다: host.ready·affinity_matches·exclusive_verified·issues 를
+        함께 본다. null 은 해당 없음·모름(정지·공유·정책 미설정)이며 성공이 아니다. 긴 변경 작업이 플랫폼 잠금을 쥐고 있으면 기다리지 않고
+        503(재시도 가능). 관측 실패는 빈 마스크로 꾸미지 않고 503 이다.
+      x-driver-timeout-seconds: 5
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 정책·실제 CPU 배치
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CpuLayout'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/cpu-layout:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [Resources]
+      operationId: getVmCpuLayout
+      summary: 한 VM 의 CPU 배치(정책·실제 Xen)
+      description: >-
+        전체 조회와 같은 스키마이며 vms 에 그 VM 하나만 담는다. 전용성 검사는 다른 모든 도메인의 vCPU 를 함께 관측해 판정한다.
+        등록이 없으면 404 (기준 문서 4.11).
+      x-driver-timeout-seconds: 5
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 정책·실제 CPU 배치(그 VM)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CpuLayout'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
         '503':
           $ref: '#/components/responses/PlatformUnavailable'
         '504':
@@ -226,6 +651,7 @@ paths:
             minimum: 1
             maximum: 1000
             default: 200
+        - $ref: '#/components/parameters/RequestBudget'
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -270,13 +696,161 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+  /api/v1/vm-registrations:
+    get:
+      tags:
+      - VM registrations
+      summary: Registrations
+      operationId: listVmRegistrations
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Registration'
+                type: array
+                title: Response Listvmregistrations
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal Server Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '501':
+          description: Not Implemented
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Service Unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: Gateway Timeout
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - $ref: '#/components/parameters/RequestBudget'
+  /api/v1/vm-registrations/{vm_id}/notify:
+    post:
+      tags:
+      - VM registrations
+      summary: Notify
+      description: 조회와 송신이 같은 호출 예산을 쓴다. 응답 유실 후 자동 재송신하지 않는다.
+      operationId: notifyVmRegistration
+      parameters:
+      - name: vm_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Vm Id
+      - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+        '400':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        '401':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Unauthorized
+        '404':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        '500':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Server Error
+        '501':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Implemented
+        '502':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notification'
+          description: Bad Gateway
+        '503':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/Notification'
+                - $ref: '#/components/schemas/Error'
+                title: Response 503 Notifyvmregistration
+          description: Service Unavailable
+        '504':
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/Notification'
+                - $ref: '#/components/schemas/Error'
+                title: Response 504 Notifyvmregistration
+          description: Gateway Timeout
+
 components:
   securitySchemes:
+    LogProducerToken:
+      type: http
+      scheme: bearer
+      bearerFormat: source-scoped log producer token
     ServiceToken:
       type: http
       scheme: bearer
       bearerFormat: opaque service token
   parameters:
+    RequestBudget:
+      name: X-Request-Budget-Ms
+      in: header
+      required: false
+      description: >-
+        호출자가 이 요청을 기다릴 남은 시간(ms). 요청 도착부터 VM·자원 잠금 대기, Manager 직렬화 대기, 하위 Manager 호출,
+        xl·xentop 실행이 이 기한 하나를 나눠 쓰고, 다 쓰면 실행·제출하지 않고 504 다. 다른 서버의 시각이 아니라 남은 기간만 보낸다.
+        /healthz 는 받지 않는다 (기준 문서 4.9절)
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 105000
     VmId:
       name: vm_id
       in: path
@@ -289,6 +863,87 @@ components:
         type: string
         format: uuid
   schemas:
+    Registration:
+      properties:
+        vm_id:
+          type: string
+          title: Vm Id
+        name:
+          type: string
+          title: Name
+        guest_kind:
+          type: string
+          enum:
+          - linux
+          - zephyr
+          title: Guest Kind
+        template_id:
+          type: string
+          title: Template Id
+        template_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Template Version
+        vcpus:
+          type: integer
+          title: Vcpus
+        memory_mib:
+          type: integer
+          title: Memory Mib
+        assigned_ipv4:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Assigned Ipv4
+      additionalProperties: false
+      type: object
+      required:
+      - vm_id
+      - name
+      - guest_kind
+      - template_id
+      - template_version
+      - vcpus
+      - memory_mib
+      - assigned_ipv4
+      title: Registration
+    Notification:
+      properties:
+        vm_id:
+          type: string
+          title: Vm Id
+        request_id:
+          type: string
+          title: Request Id
+        state:
+          type: string
+          title: State
+        confirmed:
+          type: boolean
+          title: Confirmed
+        http_status:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Http Status
+        upstream_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Upstream Code
+        cause_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cause Type
+      type: object
+      required:
+      - vm_id
+      - request_id
+      - state
+      - confirmed
+      title: Notification
     VmState:
       type: string
       description: >-
@@ -349,6 +1004,53 @@ components:
           description: >-
             공통 하한 16 (Zephyr 는 16 고정 프로필). 템플릿별 하한·상한은 플랫폼 템플릿 resource_limits 와
             Spring 템플릿 설정이 검사한다. 배수 제약 없음. 64 단위는 화면 입력 규칙일 뿐이다
+    UpdateResourcesRequest:
+      type: object
+      description: >-
+        정지한 Linux VM 의 자원 변경 (기준 문서 4.12). 범위는 vcpus 1..4, memory_mib 128..1024(플랫폼 하한 128, API 상한 1024).
+        템플릿별 하한(Debian 256, Ubuntu 512)은 Spring 이 검사한다
+      additionalProperties: false
+      required: [vcpus, memory_mib]
+      properties:
+        vcpus:
+          type: integer
+          minimum: 1
+          maximum: 4
+        memory_mib:
+          type: integer
+          minimum: 128
+          maximum: 1024
+    VmResources:
+      type: object
+      additionalProperties: false
+      required: [vcpus, memory_mib]
+      properties:
+        vcpus:
+          type: integer
+          minimum: 1
+        memory_mib:
+          type: integer
+          minimum: 1
+    ResourceUpdate:
+      type: object
+      description: 자원 변경 결과. 같은 키 재전송도 원 결과다. Spring 은 after 로 자기 레코드를 갱신하고 재시작(4.2)에 이 값을 보낸다
+      additionalProperties: false
+      required: [vm_id, operation_id, before, after, applies_on_next_start]
+      properties:
+        vm_id:
+          type: string
+          format: uuid
+        operation_id:
+          type: [string, 'null']
+          format: uuid
+          description: 하위 원 자산 작업. 플랫폼에서는 항상 UUID, 작업 기록이 없는 mock 만 null
+        before:
+          $ref: '#/components/schemas/VmResources'
+        after:
+          $ref: '#/components/schemas/VmResources'
+        applies_on_next_start:
+          type: boolean
+          description: 항상 true. 실행 중인 게스트를 바꾸지 않고 다음 시작부터 적용된다
     ResourceError:
       type: object
       additionalProperties: false
@@ -374,10 +1076,12 @@ components:
             드라이버·플랫폼 실패는 HTTP 상태와 1:1 이다: DriverError 500 / DriverTimeout 504 / PlatformUnavailable 503 /
             NotSupported 501. Spring 은 이 code 를 같은 상태로 전달해야 한다 (vm-api-contract-v1.md 8.2 변환표).
             Unauthorized 401 은 Bearer 서비스 토큰 없음·불일치이며 /healthz 를 포함한 모든 엔드포인트에서 난다.
+            VMExists 409 는 같은 VM 이 이미 있음, VMNameConflict 409 는 플랫폼 VM_NAME_CONFLICT(다른 VM 과 식별 충돌)이다.
           enum:
             - InvalidArgument
             - VMNotFound
             - VMExists
+            - VMNameConflict
             - InsufficientResources
             - InvalidState
             - DriverError
@@ -385,6 +1089,7 @@ components:
             - PlatformUnavailable
             - NotSupported
             - Unauthorized
+            - OperationNotFound
         message:
           type: string
         detail:
@@ -398,6 +1103,70 @@ components:
         platform_code:
           type: [string, 'null']
           description: 플랫폼 Manager 가 준 원본 오류 코드(HOST_QUIESCING 등). 플랫폼 오류에만 있다. 분기는 detail 문자열이 아니라 이 값으로 한다
+        retryable:
+          type: [boolean, 'null']
+          description: 플랫폼이 준 원본 재시도 가능 여부. 코드의 고정 속성이 아니며 이것만으로 재시도 정책을 만들지 않는다
+        operation:
+          oneOf:
+            - $ref: '#/components/schemas/ControlOperation'
+            - type: 'null'
+          description: 키 있는 제어 요청의 오류에만 있다. 원 작업 문맥(status=failed·uncertain·superseded·unknown·rejected)
+    ControlStatus:
+      type: string
+      description: >-
+        pending 수락·실행 남음 / completed 원 작업 완료 / failed 원 작업 실패(수락된 의도는 되돌리지 않음) /
+        uncertain 결과 미확정(자동 재시도·새 키 금지, 조사) / superseded 이후 사용자 의도로 대체 /
+        unknown 수락 여부 미확인 / rejected 수락 전 거절
+      enum: [pending, completed, failed, uncertain, superseded, unknown, rejected]
+    ControlOperation:
+      type: object
+      additionalProperties: false
+      required: [vm_id, action, status]
+      description: 제어 요청 하나의 상태. 실제 VM 상태(GET /vms/{vm_id})와 별개다. 하위 원 작업 기록의 허용 필드만 담는다
+      properties:
+        vm_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+          description: stop 또는 reboot
+        request_key:
+          type: [string, 'null']
+        operation_id:
+          type: [string, 'null']
+          format: uuid
+          description: 하위 원 제어 작업. 수락 전 거절·작업 기록 없는 드라이버(mock·xen)면 null
+        status:
+          $ref: '#/components/schemas/ControlStatus'
+        accepted:
+          type: [boolean, 'null']
+          description: 의도 수락 여부. 확인하지 못했으면 null
+        phase:
+          type: [string, 'null']
+          description: 원 작업 단계 prepared·accepted·executing·completed·failed·uncertain
+        intent_revision:
+          type: [integer, 'null']
+        host_boot_id:
+          type: [string, 'null']
+        lifecycle_generation:
+          type: [integer, 'null']
+        deadline_monotonic_ms:
+          type: [integer, 'null']
+          description: 원 실행 기한(그 host 의 단조 시각 ms). 다른 시계와 비교하지 않는다
+        execution_deadline_expired:
+          type: [boolean, 'null']
+          description: 같은 host 에서 원 기한이 지났는가. 확인할 수 없으면 null. true 면 재전달해도 새 물리 동작을 하지 않는다
+        next_action:
+          type: [string, 'null']
+          description: 플랫폼이 권하는 다음 동작. 진단 문자열이며 고정 열거값이 아니다
+        error_code:
+          type: [string, 'null']
+          description: 원 작업의 플랫폼 오류 코드
+        warnings:
+          type: array
+          items:
+            type: string
+          description: 진단 경고 코드. 결과를 바꾸지 않는다
     StatsSource:
       type: string
       description: Spring 메트릭 필터의 허용값과 같은 문자열. 에이전트 보고는 guest_agent 다
@@ -574,6 +1343,110 @@ components:
         status:
           type: string
           enum: [ok, xen_unavailable]
+    VcpuAffinity:
+      type: object
+      required: [vcpu, pcpus]
+      properties:
+        vcpu: {type: integer, minimum: 0}
+        pcpus:
+          type: array
+          items: {type: integer}
+          description: 이 vCPU 가 돌 수 있는 물리 CPU(hard affinity)
+    CpuHost:
+      type: object
+      required: [online_pcpus, max_cpu_id, pool_name, scheduler, desired_dom0_pcpus, observed_dom0_hard_affinity, ready]
+      properties:
+        online_pcpus: {type: array, items: {type: integer}}
+        max_cpu_id: {type: integer}
+        pool_name: {type: string}
+        scheduler: {type: string}
+        desired_dom0_pcpus:
+          type: [array, 'null']
+          items: {type: integer}
+          description: 정책의 공유 집합. 정책 미설정이면 null
+        observed_dom0_hard_affinity:
+          type: array
+          items: {$ref: '#/components/schemas/VcpuAffinity'}
+        ready:
+          type: boolean
+          description: 현재 host 부팅·정책 revision 의 준비 기록과 실제 배치가 일치
+    CpuReservation:
+      type: object
+      required: [vm_id, pcpus]
+      description: 전용 코어 예약. 플랫폼 정책 1.0 {vm_id, pcpu} 와 2.0 {vm_id, mode, pcpus} 를 같은 모양으로 맞춘다
+      properties:
+        vm_id: {type: string, format: uuid}
+        pcpus: {type: array, items: {type: integer}}
+    CpuObserved:
+      type: object
+      required: [presence, domid, xen_unique_id, vcpus, hard_affinity]
+      properties:
+        presence:
+          type: string
+          enum: [present, absent]
+          description: absent 면 나머지는 모두 null(정지는 불일치가 아니다), present 면 모두 값이 있다
+        domid: {type: [integer, 'null']}
+        xen_unique_id: {type: [string, 'null']}
+        vcpus: {type: [integer, 'null']}
+        hard_affinity:
+          type: [array, 'null']
+          items: {$ref: '#/components/schemas/VcpuAffinity'}
+    CpuConflict:
+      type: object
+      required: [domid, vcpu, pcpus]
+      properties:
+        domid: {type: integer}
+        vm_id: {type: [string, 'null'], format: uuid, description: 관리 VM 이 아니면(Domain-0 등) null}
+        name: {type: [string, 'null']}
+        vcpu: {type: integer}
+        pcpus: {type: array, items: {type: integer}, description: 겹친 물리 CPU}
+    CpuIssue:
+      type: object
+      required: [code]
+      description: >-
+        AFFINITY_MISMATCH · EXCLUSIVE_CONFLICT · CPU_NOT_READY · POLICY_PUBLICATION_PENDING. 코드마다 쓰는 필드만 담는다
+        (쓰지 않는 필드는 빠진다)
+      properties:
+        code: {type: string, enum: [AFFINITY_MISMATCH, EXCLUSIVE_CONFLICT, CPU_NOT_READY, POLICY_PUBLICATION_PENDING]}
+        vm_id: {type: string, format: uuid}
+        domid: {type: integer}
+        name: {type: string}
+        expected: {type: array, items: {$ref: '#/components/schemas/VcpuAffinity'}}
+        actual: {type: array, items: {$ref: '#/components/schemas/VcpuAffinity'}}
+        conflicts: {type: array, items: {$ref: '#/components/schemas/CpuConflict'}}
+        operation_id: {type: string}
+    VmCpuLayout:
+      type: object
+      required: [vm_id, execution_id, vcpus, allocation, desired_hard_affinity, observed, affinity_matches, exclusive_verified, issues]
+      properties:
+        vm_id: {type: string, format: uuid}
+        execution_id: {type: [string, 'null'], description: 현재 Xen 실행과 결합한 실행 ID. 미관리·부재는 null}
+        vcpus: {type: integer}
+        allocation: {type: [string, 'null'], enum: [exclusive, shared, null], description: 정책 미설정이면 null}
+        desired_hard_affinity:
+          type: [array, 'null']
+          items: {$ref: '#/components/schemas/VcpuAffinity'}
+        observed: {$ref: '#/components/schemas/CpuObserved'}
+        affinity_matches: {type: [boolean, 'null'], description: 실제 수량·마스크가 정책과 일치. 정지·미설정이면 null}
+        exclusive_verified: {type: [boolean, 'null'], description: 전용 VM 의 마스크 일치와 다른 도메인과의 중복 없음. 공유·정지·미설정이면 null}
+        issues: {type: array, items: {$ref: '#/components/schemas/CpuIssue'}}
+    CpuLayout:
+      type: object
+      required: [configured, policy_revision, host_boot_id, observed_monotonic_ms, host, reservations, vms, issues]
+      description: 조회 성공이 배치 준수를 뜻하지 않는다. host.ready·affinity_matches·exclusive_verified·issues 를 함께 본다
+      properties:
+        configured: {type: boolean}
+        policy_revision: {type: [integer, 'null']}
+        policy_schema_version: {type: [string, 'null']}
+        host_boot_id: {type: string}
+        observed_monotonic_ms: {type: integer, description: 관측한 host 의 단조 시각 ms. UTC 아님, 다른 시계와 빼지 않는다}
+        host: {$ref: '#/components/schemas/CpuHost'}
+        reservations: {type: array, items: {$ref: '#/components/schemas/CpuReservation'}}
+        vms:
+          type: array
+          items: {$ref: '#/components/schemas/VmCpuLayout'}
+          description: 전체 조회면 등록된 모든 VM, 한 VM 조회면 그 VM 하나
+        issues: {type: array, items: {$ref: '#/components/schemas/CpuIssue'}}
   responses:
     InvalidArgument:
       description: 형식 또는 범위 오류 (FastAPI 422 를 400 으로 정규화). 경로의 vm_id 가 UUID 가 아니거나 nil UUID(Domain-0)인 경우 포함
@@ -587,8 +1460,16 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    OperationNotFound:
+      description: 요청 키로 원 제어 작업을 찾지 못함. 조회 시점의 검색 부재이며 미수락·미실행의 증거가 아니다
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
     VMExists:
-      description: vm_id 충돌 (단일 의미). 표시 이름 중복은 Spring 이 판정한다
+      description: >-
+        vm_id 충돌(같은 VM 이 이미 있음). 표시 이름 중복은 Spring 이 판정한다. 플랫폼이 발급한 식별이 다른 VM 과 겹친 경우는
+        VMNameConflict 다
       content:
         application/json:
           schema:

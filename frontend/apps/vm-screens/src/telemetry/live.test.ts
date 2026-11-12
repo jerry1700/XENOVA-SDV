@@ -41,7 +41,7 @@ const state = (patch: Partial<DriveStateDto> = {}): DriveStateDto => ({
   apps: {
     autonomous: app({ command_fresh: false, command_ago_ms: 900, command_hz: 0, heartbeat_ago_ms: 5000 }),
     manual: app(),
-    'message-board': app({ command_fresh: null, command_ago_ms: null, command_hz: 0, last_command: null }),
+    interaction: app({ command_fresh: null, command_ago_ms: null, command_hz: 0, last_command: null }),
   },
   perception: {
     valid: true,
@@ -136,6 +136,32 @@ describe('applyEvent', () => {
 });
 
 describe('복구 중 표시 (RC카 시나리오 §4.3)', () => {
+  it.each(['recovery.completed', 'recovery.recovered', 'recovery.cancelled', 'recovery.failed'])(
+    'ends the recovery marker for %s without granting driving control',
+    (type) => {
+      const t = {
+        ...emptyTelemetry(0),
+        appVmIds: { autonomous: 'vm-a' },
+        recoveringApps: { autonomous: true as const },
+      };
+      const next = applyEvent(
+        t,
+        {
+          event_id: type,
+          type,
+          severity: 'INFO',
+          vm_id: 'vm-a',
+          occurred_at: '2026-10-26T00:00:00Z',
+          payload: {},
+        },
+        100,
+      );
+      expect(next.recoveringApps?.autonomous).toBeUndefined();
+      expect(next.mode).toBe(t.mode);
+      expect(next.activeApp).toBe(t.activeApp);
+      expect(next.apps.autonomous.health).not.toBe('ok');
+    },
+  );
   const dead = app({
     vm_id: 'vm-a',
     command_fresh: false,

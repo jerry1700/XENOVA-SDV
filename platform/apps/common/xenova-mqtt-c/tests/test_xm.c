@@ -127,6 +127,7 @@ static int build(const char *fn, int args, char *out, size_t n)
 	}
 	if (!strcmp(fn, "vm")) return xm_topic_vm(out, n, a, b);
 	if (!strcmp(fn, "app_events")) return xm_topic_app_events(out, n, a);
+	if (!strcmp(fn, "vm_app_events")) return xm_topic_vm_app_events(out, n, a, b);
 	if (!strcmp(fn, "manual_input")) return xm_topic_manual_input(out, n);
 	if (!strcmp(fn, "vehicle_control")) return xm_topic_vehicle_control(out, n);
 	if (!strcmp(fn, "vehicle_status")) return xm_topic_vehicle_status(out, n);
@@ -337,6 +338,16 @@ static void test_payloads(void)
 	CHECK(xm_drive_input_parse(sp("{\"keys\":[]}"), &keys) == 0 && keys == 0, "empty keys");
 	CHECK(xm_drive_input_parse(sp("{\"keys\":\"up\"}"), &keys) == -EINVAL, "keys not array");
 	CHECK(xm_drive_input_parse(sp("{}"), &keys) == -EINVAL, "keys missing");
+
+	struct xm_auto_delay_command command;
+	const char *delay="{\"command_id\":\"cmd-1\",\"operation_id\":\"op-1\",\"expected_boot_id\":\"boot\",\"expires_at\":\"2026-11-06T00:00:00Z\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30}}";
+	CHECK(xm_auto_delay_command_parse(sp(delay),&command)==0&&command.delay_ms==20&&command.duration_s==30,
+	      "auto delay command");
+	CHECK(xm_auto_delay_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":101,\"duration_s\":30}}"),&command)==-ERANGE,
+	      "auto delay bounds");
+	CHECK(xm_auto_delay_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_delay\",\"parameters\":{\"delay_ms\":20,\"duration_s\":30,\"extra\":1}}"),&command)==-ERANGE,
+	      "auto delay extra parameter");
+
 }
 
 static void test_uuid(void)
@@ -347,6 +358,17 @@ static void test_uuid(void)
 	xm_uuid4_format(out, r);
 	CHECK(strlen(out) == 36 && out[8] == '-' && out[14] == '4' && (out[19] == 'b' || out[19] == 'a' ||
 		      out[19] == '8' || out[19] == '9'), "uuid %s", out);
+}
+
+static void test_lifecycle(void)
+{
+ char out[256];
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"WAITING","QUALIFIED",NULL)>0,"waiting qualification");
+ CHECK(strstr(out,"\"progress_seq\":\"0\"")&&strstr(out,"\"profile\":\"warm-drive-1\""),"distinct supervision %s",out);
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"EXECUTING","READY",NULL)==-EINVAL,"no fabricated progress");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,1,"WAITING","READY",NULL)==-EINVAL,"waiting is not activation");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,UINT64_MAX,UINT64_MAX,"EXECUTING","READY",NULL)>0,"full counters");
+ CHECK(xm_app_lifecycle_json(out,16,42,1,1,"EXECUTING","READY",NULL)==-ENOSPC,"bounded serialization");
 }
 
 int main(int argc, char **argv)
@@ -360,6 +382,7 @@ int main(int argc, char **argv)
 	test_encode_roundtrip();
 	test_payloads();
 	test_uuid();
+	test_lifecycle();
 	printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

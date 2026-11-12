@@ -64,24 +64,26 @@ xenova:
   template-catalog:
     templates:
       - template-id: ubuntu-24.04-arm64
-        version: "1.0.0"
+        version: "1.0.2"
         display-name: Ubuntu 24.04
         min-memory-mib: 512
         guest-kind: linux
       - template-id: debian-13-arm64
-        version: "1.0.0"
+        version: "1.0.8"
         display-name: Debian 13
         min-memory-mib: 256
         guest-kind: linux
       - template-id: zephyr-xenvm-starter-arm64
-        version: "1.0.0"
-        display-name: Zephyr Starter 1.0.0
-        # 플랫폼 starter 1.0.0은 1 vCPU / 16MiB 고정 프로필이다.
+        version: "1.1.0"
+        display-name: Zephyr Network Starter 1.1.0
+        # 플랫폼 Network Starter 1.1.0은 1 vCPU / 16MiB 고정 프로필이다.
         min-memory-mib: 16
         guest-kind: zephyr
   agent:
     stale-after: ${AGENT_STALE_AFTER:15s}
     offline-after: ${AGENT_OFFLINE_AFTER:30s}
+    # v2 telemetry heartbeat is sent every 2s; past this lease the Publisher state shows STALE (display only)
+    telemetry-heartbeat-lease: ${AGENT_TELEMETRY_HEARTBEAT_LEASE:6s}
   # 에이전트 상태(ONLINE/STALE/OFFLINE) 변화를 이벤트로 남기기 위해 확인하는 주기
   event:
     agent-status-check-interval-ms: ${EVENT_AGENT_STATUS_CHECK_INTERVAL_MS:5000}
@@ -113,6 +115,26 @@ xenova:
     service-token: ${DOM0_MANAGER_SERVICE_TOKEN:}
     connect-timeout: ${DOM0_MANAGER_CONNECT_TIMEOUT:2s}
     query-timeout: ${DOM0_MANAGER_QUERY_TIMEOUT:6s}
-    # Keep long-running VM commands connected for up to 15 minutes.
-    command-timeout: ${DOM0_MANAGER_COMMAND_TIMEOUT:15m}
+    # Keep long-running VM commands connected for up to 20 minutes.
+    command-timeout: ${DOM0_MANAGER_COMMAND_TIMEOUT:20m}
     retry-backoff: ${DOM0_MANAGER_RETRY_BACKOFF:500ms}
+  vm:
+    # GET /api/v1/vms refreshes this snapshot on demand; point reads may reuse it between synchronizations.
+    runtime-cache:
+      enabled: ${VM_RUNTIME_CACHE_ENABLED:true}
+      # Retained for configuration compatibility; there is no background runtime refresh loop.
+      refresh-delay: ${VM_RUNTIME_REFRESH_DELAY:1s}
+      # safety net only: past this age (loop stopped or failing) reads go to dom0-manager again
+      stale-limit: ${VM_RUNTIME_STALE_LIMIT:10s}
+    # Board registry -> VM table, so VMs created or retired with a platform tool follow on the web.
+    registration-sync:
+      enabled: ${VM_REGISTRATION_SYNC_ENABLED:true}
+      # pause after each synchronization
+      interval: ${VM_REGISTRATION_SYNC_INTERVAL:30s}
+      # consecutive reads a VM must be absent from the board before its row is retired
+      missing-threshold: ${VM_REGISTRATION_SYNC_MISSING_THRESHOLD:2}
+      # never retire a row younger than this: create registers on the board only at its end (dom0 command timeout)
+      creation-grace: ${VM_REGISTRATION_SYNC_CREATION_GRACE:20m}
+  vm-registration:
+    # Platform registration sender authentication; separate from user JWT and dom0-manager credentials.
+    service-token: ${VM_REGISTRATION_SERVICE_TOKEN:}

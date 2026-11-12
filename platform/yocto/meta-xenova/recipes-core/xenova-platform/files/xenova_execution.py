@@ -4,12 +4,15 @@
 별도의 짧은 admission 잠금으로 순서를 정한다. snapshot 읽기는 잠금/Xen을 호출하지 않는다.
 """
 from contextlib import contextmanager
+import errno
 import fcntl
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import time
 
 from first_install_contract import uuid4
@@ -25,6 +28,12 @@ class ExecutionError(PlatformError):
         super().__init__(message)
 
 
+class ReadChanged(ExecutionError):
+    """요청 안에서 한 번만 새 관측 회차로 재확인할 수 있는 메타데이터 변경."""
+    def __init__(self):
+        super().__init__('TARGET_CHANGED','read configuration or execution changed during observation')
+
+
 def refuse(code, message, **kwargs):
     raise ExecutionError(code, message, **kwargs)
 
@@ -35,6 +44,132 @@ def canonical(value):
 
 def fingerprint(value):
     return hashlib.sha256(canonical(value).encode()).hexdigest()
+
+
+def same_read_execution(left, right):
+    """Only live scheduler movement may differ between two verified read samples.
+
+    Never substitute the newer sample or its clock. The caller keeps its own
+    validated observation, and must not replace a newer on-disk observation.
+    Paused/shutdown/dying, identity, intent and admission changes still retry.
+    """
+    if left == right:
+        return True
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    for value in (left, right):
+        flags = value.get('xen_state_flags')
+        if (not isinstance(flags, str) or not re.fullmatch(r'[r-][b-]----', flags)
+                or value.get('xen_state') != vm.xen_state(flags)):
+            return False
+    volatile = {'xen_state', 'xen_state_flags'}
+    return ({k:v for k,v in left.items() if k not in volatile}
+            == {k:v for k,v in right.items() if k not in volatile})
+
+
+def read_record(path):
+    """원자 JSON을 검증해 읽는다. host 관측·초기화·저장 없이 부재와 손상을 구분한다."""
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        # The full canonical file check traverses every parent component too.
+        # Repeating plain(parent) resolves that same chain twice per JSON read.
+        # Keep this check on every read (including publication revalidation): no
+        # path/inode/content cache may hide an atomic replacement or a symlink.
+        catalog.plain(path)
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        refuse('RECONCILE_REQUIRED', 'invalid execution record', details={'record':path.name})
+    if not isinstance(value, dict) or value.get('schema_version') != '1.0':
+        refuse('RECONCILE_REQUIRED', 'execution record schema mismatch')
+    return value
+
+
+_DEFAULT_READ_RECORD = read_record
+
+
+@contextmanager
+def _request_parent(root, enabled):
+    """한 전체 읽기 동안만 부모를 고정한다. 교체된 경로에 옛 결과를 반환하지 않는다."""
+    if not enabled:
+        yield None
+        return
+    fd = None
+    try:
+        before = root.stat()
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            refuse('OBSERVATION_UNAVAILABLE', 'control request directory changed during scan')
+        yield fd
+        catalog.plain(root, directory=True)
+        after = root.stat()
+        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+            refuse('OBSERVATION_UNAVAILABLE', 'control request directory changed during scan')
+    except OSError:
+        refuse('OBSERVATION_UNAVAILABLE', 'control request directory could not be inspected')
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _request_raw_at(parent_fd, name, limit=None):
+    """검증한 부모 FD 아래 한 원자 파일만 읽는다. FIFO는 열기부터 대기하지 않는다."""
+    fd = None
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                         dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise PlatformError('linked/noncanonical asset path') from error
+            raise
+        current = os.fstat(fd)
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+            raise PlatformError('unshared regular asset required')
+        with os.fdopen(fd, 'r') as stream:
+            fd = None
+            return stream.buffer.read() if limit is None else stream.buffer.read(limit+1), stream.encoding
+    except (OSError, ValueError):
+        refuse('RECONCILE_REQUIRED', 'invalid execution record', details={'record':name})
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _decode_request(raw, name):
+    try:
+        with io.TextIOWrapper(io.BytesIO(raw[0]), encoding=raw[1]) as stream:
+            value = json.loads(stream.read())
+    except ValueError:
+        refuse('RECONCILE_REQUIRED', 'invalid execution record', details={'record':name})
+    if not isinstance(value, dict) or value.get('schema_version') != '1.0':
+        refuse('RECONCILE_REQUIRED', 'execution record schema mismatch')
+    return value
+
+
+def _read_request_at(parent_fd, name):
+    raw = _request_raw_at(parent_fd, name)
+    return None if raw is None else _decode_request(raw, name)
+
+
+_DEFAULT_REQUEST_AT = _read_request_at
+
+def read_intent(data, identity, *, reader=read_record):
+    """영구 UUID의 저장 의도만 읽는다. 현재 lifecycle 적용 여부는 호출자가 대조한다."""
+    if not isinstance(identity, str) or not vm.UUID.fullmatch(identity):
+        refuse('INVALID_SPEC', 'canonical UUID required')
+    value = reader(data/'control'/(identity+'.json'))
+    if value is not None and (
+            value.get('vm_id') != identity or value.get('desired_state') not in ('running', 'stopped')
+            or type(value.get('intent_revision')) is not int or value['intent_revision'] < 1
+            or type(value.get('lifecycle_generation')) is not int or value['lifecycle_generation'] < 0
+            or not isinstance(value.get('accepted_operation_id'), str)
+            or not vm.UUID.fullmatch(value['accepted_operation_id'])):
+        refuse('RECONCILE_REQUIRED', 'intent identity/revision mismatch')
+    return value
 
 
 def host_boot_id():
@@ -74,6 +209,116 @@ def short_lock(runtime, name, *, deadline=None, clock=time.monotonic, sleep=time
         os.close(fd)
 
 
+def read_requests(data, *, deadline=None, clock=time.monotonic, reader=None):
+    """Complete journal scan within the caller's existing observation budget.
+
+    A partial scan never proves absence or uniqueness. This deadline is not
+    written into any original operation and grants no physical execution.
+    """
+    return _scan_requests(data, deadline=deadline, clock=clock, reader=reader)
+
+
+def _scan_requests(data, *, deadline=None, clock=time.monotonic, reader=None, prevalidated=None):
+    """A hint never skips current full enumeration, safe reads or identity checks."""
+    pinned = reader is None and read_record is _DEFAULT_READ_RECORD
+    if not pinned:prevalidated = None
+    reader = read_record if reader is None else reader
+    from xenova_management import Manager
+    def check():
+        if deadline is not None and clock()>=deadline:
+            refuse('DEADLINE_EXCEEDED','control request scan budget expired')
+    check()
+    root = data/"control-requests"
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        check()
+        return []
+    except OSError:
+        refuse('OBSERVATION_UNAVAILABLE', 'control request directory could not be inspected')
+    catalog.plain(root, directory=True)
+    with _request_parent(root, pinned) as parent_fd:
+        # A partial enumeration cannot establish absence or uniqueness. The
+        # builtin reader uses the pinned parent; custom readers retain paths.
+        try:
+            with os.scandir(parent_fd if pinned else root) as entries:
+                names=[]
+                for entry in entries:
+                    check()
+                    if entry.name.endswith('.json'):names.append(entry.name)
+        except OSError:
+            refuse('OBSERVATION_UNAVAILABLE', 'control request enumeration is incomplete')
+        result, keys = [], set()
+        check()
+        for name in sorted(names):
+            check()
+            identity = name[:-5]  # Enumeration already required the .json suffix.
+            if not vm.UUID.fullmatch(identity):
+                refuse("RECONCILE_REQUIRED", "invalid control request filename")
+            hint = prevalidated.pop(name, None) if prevalidated is not None else None
+            reused = False
+            if hint is not None:
+                raw = _request_raw_at(parent_fd, name)
+                reused = raw == hint[:2]
+                value = hint[2] if reused else None if raw is None else _decode_request(raw, name)
+            else:
+                value = _read_request_at(parent_fd, name) if pinned else reader(root/name)
+            check()
+            if value is None:
+                refuse('OBSERVATION_UNAVAILABLE', 'enumerated control request disappeared')
+            _validate_request(value, identity, Manager._text_token, hash_verified=reused)
+            key = value['idempotency_key']
+            if key is not None:
+                if key in keys:
+                    refuse('RECONCILE_REQUIRED', 'duplicate control request key')
+                keys.add(key)
+            result.append(value)
+    check()
+    return result
+
+
+_DEFAULT_READ_REQUESTS = read_requests
+
+
+def _validate_request(value, identity, token, *, hash_verified=False):
+    if (value.get('operation_id') != identity or not hash_verified and value.get('request_hash') != fingerprint(value.get('request'))
+            or not vm.UUID.fullmatch(value.get('vm_id', '')) or 'idempotency_key' not in value
+            or value['idempotency_key'] is not None and not token(value['idempotency_key'])):
+        refuse('RECONCILE_REQUIRED', 'invalid control request identity')
+
+
+def _prefetch_requests(data, deadline, clock):
+    """Partial hint only: at most128 attempts/1MiB raw; never absence/uniqueness."""
+    from xenova_management import Manager
+    root=data/'control-requests';hints={};size=attempts=0
+    def check():
+        if clock()>=deadline:refuse('DEADLINE_EXCEEDED','control prevalidation budget expired')
+    check()
+    try:root.lstat()
+    except FileNotFoundError:return hints
+    except OSError:refuse('OBSERVATION_UNAVAILABLE','control request directory could not be inspected')
+    catalog.plain(root,directory=True)
+    with _request_parent(root,True) as parent_fd:
+        try:
+            with os.scandir(parent_fd) as entries:
+                for _,entry in zip(range(128),entries):
+                    check()
+                    if attempts>=128 or size>=1048576:break
+                    name=entry.name
+                    if not name.endswith('.json'):continue
+                    attempts+=1;identity=name[:-5]
+                    if not vm.UUID.fullmatch(identity):refuse('RECONCILE_REQUIRED','invalid control request filename')
+                    raw=_request_raw_at(parent_fd,name,1048576-size);check()
+                    if raw is None:refuse('OBSERVATION_UNAVAILABLE','enumerated control request disappeared')
+                    if len(raw[0])>1048576-size:break
+                    value=_decode_request(raw,name);_validate_request(value,identity,Manager._text_token)
+                    hints[name]=(raw[0],raw[1],value);size+=len(raw[0])
+        except OSError:refuse('OBSERVATION_UNAVAILABLE','control request enumeration is incomplete')
+    check()
+    trace_event('request.prevalidation',count=len(hints),size_bytes=size)
+    return hints
+
+
 class Execution:
     def __init__(self, platform):
         self.p = platform
@@ -88,17 +333,9 @@ class Execution:
         return root/folder/(key+".json")
 
     def read(self, path):
-        if not path.exists() and not path.is_symlink():
-            return None
-        try:
-            catalog.plain(path.parent, directory=True)
-            catalog.plain(path)
-            value = json.loads(path.read_text())
-        except (OSError, ValueError) as error:
-            refuse("RECONCILE_REQUIRED", "invalid execution record", details={"record":path.name})
-        if not isinstance(value, dict) or value.get("schema_version") != "1.0":
-            refuse("RECONCILE_REQUIRED", "execution record schema mismatch")
-        return value
+        return read_record(path)
+
+    _default_read = read
 
     def write(self, path, value):
         # Never make a replacement /srv data root. Callers already checked its mount.
@@ -119,15 +356,7 @@ class Execution:
         return (tomb["lifecycle"], tomb["generation"]) if tomb else ("REGISTERED", 0)
 
     def intent(self, record):
-        value = self.read(self._path(self.data, "control", record["uuid"]))
-        if value is not None and (
-                value.get("vm_id") != record["uuid"] or value.get("desired_state") not in ("running", "stopped")
-                or type(value.get("intent_revision")) is not int or value["intent_revision"] < 1
-                or type(value.get("lifecycle_generation")) is not int or value["lifecycle_generation"] < 0
-                or not isinstance(value.get("accepted_operation_id"), str)
-                or not vm.UUID.fullmatch(value["accepted_operation_id"])):
-            refuse("RECONCILE_REQUIRED", "intent identity/revision mismatch")
-        return value
+        return read_intent(self.data, record['uuid'], reader=self.read)
 
     def initialize(self, record, desired, source, operation_id=None):
         with short_lock(self.runtime, 'admission'):
@@ -302,14 +531,45 @@ class Execution:
             refuse("OBSERVATION_UNAVAILABLE", "domain incarnation response is invalid")
         return unique
 
+    def unique_many(self, rows, deadline):
+        """One bounded helper per read phase; no cross-request identity cache."""
+        ids = [row['domid'] for row in rows]
+        if (not 1 <= len(ids) <= 256 or len(set(ids)) != len(ids)
+                or any(type(i) is not int or not 0 < i < 0x7ff0 for i in ids)):
+            refuse('OBSERVATION_UNAVAILABLE', 'invalid identity batch targets')
+        output = self.p.timed_command(['/usr/libexec/xenova-domain-identities-native',
+                                       '--domids', ','.join(map(str, ids))], deadline)
+        try:
+            value = json.loads(output)
+            if (not isinstance(value, dict) or set(value) != {'schema_version', 'items'}
+                    or type(value['schema_version']) is not int or value['schema_version'] != 1
+                    or not isinstance(value['items'], list) or len(value['items']) != len(ids)):
+                raise ValueError()
+            result = {}
+            for item in value['items']:
+                if not isinstance(item, dict) or set(item) != {'domid', 'xen_unique_id', 'state_bits'}:
+                    raise ValueError()
+                domid, unique, state = item['domid'], item['xen_unique_id'], item['state_bits']
+                if (type(domid) is not int or domid not in ids or domid in result
+                        or not isinstance(unique, str) or not re.fullmatch(r'[1-9][0-9]{0,19}', unique)
+                        or int(unique) > 2**64-1 or type(state) is not int
+                        or not 0 < state <= 0xffffffff or not state & 1):
+                    raise ValueError()
+                result[domid] = unique
+            return result
+        except (ValueError, KeyError, TypeError):
+            refuse('OBSERVATION_UNAVAILABLE', 'domain identity batch response is invalid')
+
     def require_launch_available(self, record):
+        from xenova_preparation import guard_asset
+        guard_asset(self.p, record['uuid'])
         previous = self.run_record(record)
         if previous and previous.get("phase") in ("launching", "uncertain"):
             refuse("RECONCILE_REQUIRED", "an earlier launch may still exist; administrator reconciliation required")
 
     @traced('execution.prepare_launch')
     def prepare_launch(self, record, owner=None, *, deadline=None, expected_cpu=None, cpu_evidence=None,
-                       reuse_process_scope=False):
+                       reuse_process_scope=False, reboot_from=None):
         self.require_launch_available(record)
         _, generation = self.lifecycle(record)
         intent = self.intent(record)
@@ -332,6 +592,22 @@ class Execution:
                  'intent_sha256':fingerprint(intent), 'record_sha256':fingerprint(record),
                  "phase":"launching", "owner":owner, "prepared_monotonic_ms":int(self.p.clock()*1000),
                  "configuration_sha256":fingerprint(self.p.config(record)), "domid":None, "xen_unique_id":None}
+        if reboot_from is not None:
+            value['reboot_from'] = reboot_from
+        value['signal_profile']=record.get('provisioning_profile')
+        if vm.guest_kind(record) == 'zephyr':
+            # Capture the verified loader input before submission, never hash the
+            # latest file later and label it as an already running execution.
+            from xenova_zephyr import active_directory, bundle_info
+            directory=self.data/'instances'/record['id']
+            info=bundle_info(active_directory(directory,record),record['active_firmware']['revision'])
+            if record.get('provisioning_profile') is not None and record['provisioning_profile']!=info['provisioning_profile']:
+                refuse('ARTIFACT_INVALID','selected communication declaration differs from verified loader input')
+            value['signal_profile']=info['provisioning_profile']
+            value['loaded_artifact']={'file':'zephyr.bin','artifact_sha256':info['sha256'],
+                'manifest_sha256':info['revision'],'build_id':info['source'].get('build_id'),
+                'display_name':record.get('display_name'),'hostname':record.get('hostname'),
+                'internal_name':record['name']}
         if self.p.process_isolation:
             from xenova_guest_process import scope_name
             previous=self.run_record(record)
@@ -374,6 +650,12 @@ class Execution:
             refuse('TARGET_CHANGED', 'launch record, lifecycle, intent or owner changed')
         if fingerprint(self.p.config(record)) != value['configuration_sha256']:
             refuse('TARGET_CHANGED', 'launch configuration changed')
+        if value.get('loaded_artifact'):
+            from xenova_zephyr import active_directory,bundle_info
+            info=bundle_info(active_directory(self.data/'instances'/record['id'],record),record['active_firmware']['revision'])
+            loaded=value['loaded_artifact']
+            if info['sha256']!=loaded['artifact_sha256'] or info['revision']!=loaded['manifest_sha256']:
+                refuse('TARGET_CHANGED','verified loader artifact changed before submission/binding')
         if self.p.cpu().context(record) != value.get('cpu_policy', {'configured':False}):
             refuse('TARGET_CHANGED', 'launch CPU policy changed')
         if self.p.clock() >= deadline:
@@ -385,10 +667,19 @@ class Execution:
             refuse("TARGET_CHANGED", "launch belongs to a previous host boot")
         current = self.p.resolve_domain(record, expected=row, deadline=deadline)
         unique = self.unique(current, deadline)
+        if row.get('xen_unique_id', unique) != unique:
+            refuse('TARGET_CHANGED', 'candidate incarnation changed before binding')
         self.p.resolve_domain(record, expected={**row, 'xen_unique_id':unique}, deadline=deadline)
-        value = {**value, "phase":"observed", "domid":current["domid"], "xen_unique_id":unique,
-                 "observed_monotonic_ms":int(self.p.clock()*1000)}
-        self.write(self._path(self.runtime, "executions", record["uuid"]), value)
+        observed = {**value, "phase":"observed", "domid":current["domid"], "xen_unique_id":unique,
+                    "observed_monotonic_ms":int(self.p.clock()*1000)}
+        path = self._path(self.runtime, "executions", record["uuid"])
+        if 'reboot_from' in value:
+            with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
+                self.guard_launch(record, value, deadline)
+                self.write(path, observed)
+        else:
+            self.write(path, observed)
+        value = observed
         self.checkpoint("launch-observed", value)
         try:
             self.guard_launch(record, value, deadline)
@@ -417,7 +708,8 @@ class Execution:
         if self.run_record(record) != value or value.get('phase') != 'launching':
             refuse('RECONCILE_REQUIRED','unsubmitted launch owner changed')
         # 만료 뒤에는 원 실행의 부재 확인·기록 종결만 한다. 제출 권한을 연장하지 않는다.
-        end=deadline if self.p.clock()<deadline else self.p.clock()+15
+        end=min(deadline if self.p.clock()<deadline else self.p.clock()+15,
+                getattr(self.p,'response_deadline',float('inf')))
         if self.p.matching(record,self.p.domains(deadline=end)):
             refuse('RECONCILE_REQUIRED','domain exists after pre-submission rejection')
         self.write(self._path(self.runtime,'executions',record['uuid']),
@@ -432,27 +724,37 @@ class Execution:
             self.write(self._path(self.runtime, "executions", record["uuid"]),
                        {**value, "phase":phase, "stopped_monotonic_ms":int(self.p.clock()*1000)})
 
-    def note_probe_error(self, identity, error):
+    def note_probe_error(self, identity, error, *, _started_ms=None):
         """진단 sink의 실패는 원래 오류를 가리지 않는다. 추가 잠금 대기는 하지 않는다."""
         try:
-            self.probe_error(identity, error["code"])
+            if _started_ms is None:self.probe_error(identity, error["code"])
+            else:self.probe_error(identity,error['code'],_started_ms=_started_ms)
         except (PlatformError, OSError, ValueError) as diagnostic:
             error["details"].setdefault("diagnostic_warnings", []).append(
                 {"code":"DIAGNOSTIC_UNAVAILABLE", "sink":"observations", "cause_type":type(diagnostic).__name__})
 
     @traced('execution.observe')
-    def observe(self, record, deadline):
+    def observe(self, record, deadline, *, _read_context=None, identity_only=False):
         """실패를 보존하고 두 목록/unique_id를 대조한다. 실패는 부재가 아니다."""
+        # Binding reads also run concurrently with Manager's verified reads.
+        # Order their failures by when observation began, not when a delayed
+        # helper finally failed. Keep the failing caller's error unchanged.
+        started_ms = (_read_context.started_ms if _read_context is not None else
+                      int(self.p.clock()*1000) if identity_only else None)
         try:
-            return self._observe(record, deadline)
+            if _read_context is None and not identity_only:
+                return self._observe(record, deadline)
+            return self._observe_many([record], deadline, _read_context=_read_context,
+                                      identity_only=identity_only)[record['uuid']]
         except ExecutionError as error:
             failure = error
         except vm.DomainIdentityError as error:
             failure = ExecutionError("TARGET_CHANGED", str(error))
         except (PlatformError, OSError, ValueError) as error:
-            failure = ExecutionError("OBSERVATION_UNAVAILABLE", "Xen observation could not be verified",
+            expired=_read_context is not None and self.p.clock()>=deadline
+            failure = ExecutionError('DEADLINE_EXCEEDED' if expired else "OBSERVATION_UNAVAILABLE", "Xen observation could not be verified",
                                      details={"cause_type":type(error).__name__})
-        self.note_probe_error(record["uuid"], failure.error)
+        self.note_probe_error(record['uuid'], failure.error, _started_ms=started_ms)
         failure.observation_error_handled = True
         raise failure
 
@@ -460,36 +762,65 @@ class Execution:
         return self._observe_many([record], deadline)[record['uuid']]
 
     @traced('execution.observe_many')
-    def observe_many(self, records, deadline):
+    def observe_many(self, records, deadline, *, _lifecycles=None, _read_context=None, _identity_batch=False):
         """명시 목록 조회의 전체 예산과 두 목록을 공유한다. 부분 성공은 반환하지 않는다."""
         records = list(records)
         try:
-            return self._observe_many(records, deadline)
+            return self._observe_many(records, deadline, _lifecycles=_lifecycles,_read_context=_read_context,
+                                      _identity_batch=_identity_batch)
         except ExecutionError as error:
             failure = error
         except vm.DomainIdentityError as error:
             failure = ExecutionError('TARGET_CHANGED', str(error))
         except (PlatformError, OSError, ValueError) as error:
-            failure = ExecutionError('OBSERVATION_UNAVAILABLE', 'Xen list observation could not be verified',
+            expired=_read_context is not None and self.p.clock()>=deadline
+            failure = ExecutionError('DEADLINE_EXCEEDED' if expired else 'OBSERVATION_UNAVAILABLE', 'Xen list observation could not be verified',
                                      details={'cause_type':type(error).__name__})
         for record in records:
-            self.note_probe_error(record['uuid'], failure.error)
+            if _read_context is None:self.note_probe_error(record['uuid'],failure.error)
+            else:self.note_probe_error(record['uuid'],failure.error,_started_ms=_read_context.started_ms)
         failure.observation_error_handled = True
         raise failure
 
-    def _observe_many(self, records, deadline):
+    def _observe_many(self, records, deadline, *, _lifecycles=None, _read_context=None, identity_only=False,
+                      _identity_batch=False):
         if not records:
             return {}
+        # 기존 내부 호출의 명시 수명 근거를 검증한다. 일반 조회는 별도 ReadContext를 사용하며,
+        # 제어 경로는 조회 문맥을 받지 않고 현재 수명/실행 guard를 유지한다.
+        if _lifecycles is not None and (not isinstance(_lifecycles, dict)
+                or set(_lifecycles) != {r['uuid'] for r in records}
+                or any(not isinstance(v, tuple) or len(v) != 2
+                       or v[0] not in ('REGISTERED','RETIRED','PURGING','PURGED')
+                       or type(v[1]) is not int or v[1] < 0 for v in _lifecycles.values())):
+            refuse('RECONCILE_REQUIRED', 'invalid internal list lifecycle snapshot')
         if self.p.boot_id_reader() != self.host:
             refuse('TARGET_CHANGED', 'observation belongs to a previous host boot')
         before = self.p.removal_snapshot(deadline)
-        domains = self.p.domains(deadline=deadline)
+        # 바인딩과 화면 조회는 UUID/name/state만 읽는다. 효과 제출에는 전체 설정 검사가 필요하다.
+        if identity_only or _read_context is not None:
+            domains = [{**row, 'config': {'c_info': {'uuid': row['uuid'], 'name': row['name']}}}
+                       for row in before.values()]
+        else:
+            domains = self.p.domains(deadline=deadline)
         targets = []
         for record in records:
             rows = self.p.matching(record, domains)
             row = rows[0] if rows else None
-            targets.append((record, row, self.unique(row, deadline) if row else None))
+            targets.append((record, row))
+        present = [row for _, row in targets if row is not None]
+        batch = (_read_context is not None and bool(present) and
+                 (_identity_batch or len(present) > 1 and os.environ.get('XENOVA_IDENTITY_BATCH_READS') == '1'))
+        initial = self.unique_many(present, deadline) if batch else None
+        targets = [(record, row, initial[row['domid']] if batch and row else
+                    self.unique(row, deadline) if row else None) for record, row in targets]
         after = self.p.removal_snapshot(deadline)
+        absence_verified_ms=int(self.p.clock()*1000) if _read_context is not None else None
+        # The batch is not an atomic Xen snapshot. Keep both full list checks
+        # and both incarnation reads; date all present rows conservatively from
+        # before the final helper starts, never from its delayed completion.
+        final_started_ms = int(self.p.clock()*1000) if batch else None
+        final = self.unique_many(present, deadline) if batch else None
         verified = []
         for record, row, unique in targets:
             expected = (row['domid'], record['uuid'], record['name']) if row else None
@@ -498,27 +829,50 @@ class Execution:
                 actual = (candidates[0]['domid'], candidates[0]['uuid'], candidates[0]['name']) if len(candidates) == 1 else None
                 if len(candidates) > 1 or actual != expected:
                     refuse('TARGET_CHANGED', 'domain changed during observation')
-            if row and self.unique(row, deadline) != unique:
+            if row and (final[row['domid']] if batch else self.unique(row, deadline)) != unique:
                 refuse('TARGET_CHANGED', 'domain incarnation changed during observation')
             if row:
                 row = {**row, 'xen_state':after[row['domid']]['xen_state'],
                        'xen_state_flags':after[row['domid']]['xen_state_flags']}
+            if _read_context is not None:
+                _read_context.observed_ms[record['uuid']]=(final_started_ms if batch else int(self.p.clock()*1000)) if row else absence_verified_ms
             verified.append((record, row, unique))
         if self.p.boot_id_reader() != self.host:
             refuse('TARGET_CHANGED', 'host boot changed during observation')
-        return {record['uuid']:self.publish_observation(record, row, unique, deadline)
+        if _read_context is not None:
+            _read_context.validate()
+            return {record['uuid']:self.publish_observation(record,row,unique,deadline,
+                    _lifecycle=_read_context.lifecycles[record['uuid']],_read_context=_read_context)
+                    for record,row,unique in verified}
+        if _lifecycles is None:
+            return {record['uuid']:self.publish_observation(record, row, unique, deadline)
+                    for record, row, unique in verified}
+        return {record['uuid']:self.publish_observation(record, row, unique, deadline,
+                                                       _lifecycle=_lifecycles[record['uuid']])
                 for record, row, unique in verified}
 
     @traced('execution.publish_observation')
-    def publish_observation(self, record, row, unique, deadline):
+    def observation_inputs(self, record, lifecycle, *, _common=None):
+        """외부 관측과 분리한 원자 JSON 입력. 공유 memo나 새 권위 원본이 아니다."""
+        common = self.observation_common_inputs() if _common is None else _common
+        return {'lifecycle':lifecycle,'run':self.run_record(record),'intent':self.intent(record),
+                'admission':self.admission(record), **common}
+
+    def observation_common_inputs(self):
+        """한 읽기 회차의 시작 입력만 공유한다. 게시 직전 검증에는 재사용하지 않는다."""
+        return {'barrier':self.barrier(),
+                'shutdown_requested':(self.runtime/'shutdown-requested').exists()}
+
+    def publish_observation(self, record, row, unique, deadline, *, _lifecycle=None, _read_context=None):
         """확인된 한 단계의 사실을 게시한다. 이 함수는 Xen을 조회하지 않는다."""
-        lifecycle, generation = self.lifecycle(record)
-        run = self.run_record(record)
+        lifecycle, generation = self.lifecycle(record) if _lifecycle is None else _lifecycle
+        inputs=_read_context.inputs[record['uuid']] if _read_context is not None else None
+        run = inputs['run'] if inputs is not None else self.run_record(record)
         managed = bool(row and run and run.get("phase") == "observed" and
                        run.get("domid") == row["domid"] and run.get("xen_unique_id") == unique and
                        run.get("lifecycle_generation") == generation and lifecycle == "REGISTERED")
-        intent = self.intent(record)
-        admission = self.admission(record)
+        intent = inputs['intent'] if inputs is not None else self.intent(record)
+        admission = inputs['admission'] if inputs is not None else self.admission(record)
         observation = {"configuration_revision":fingerprint(record),
                        "desired_state":intent["desired_state"] if intent else "unknown",
                        "intent_revision":intent["intent_revision"] if intent else None,
@@ -532,17 +886,32 @@ class Execution:
         path = self._path(self.runtime, "observations", record["uuid"])
         with short_lock(self.runtime, "observation-"+record["uuid"], deadline=deadline,
                         clock=self.p.clock, sleep=self.p.sleep):
+            if _read_context is not None:
+                _read_context.validate_one(record['uuid'])
             previous = self.read(path)
             last = previous.get("last_success") if previous and previous.get("host_boot_id") == self.host else None
             revision = previous["observation_revision"] if last else 0
-            if last is None or fingerprint(last["value"]) != fingerprint(observation):
+            sampled=_read_context.observed_ms.get(record['uuid']) if _read_context is not None else int(self.p.clock()*1000)
+            if type(sampled) is not int:raise ValueError('verified observation clock missing')
+            newer=False
+            if _read_context is not None and previous and previous.get('host_boot_id')==self.host:
+                point=(previous.get('last_attempt_monotonic_ms') if previous.get('last_error') is not None
+                       else last.get('monotonic_ms') if last else None)
+                newer=type(point) is int and point>sampled
+                if newer and (not last or not same_read_execution(last['value'], observation)
+                              or previous.get('last_error') is not None):
+                    raise ReadChanged()
+            # A delayed read does not publish a new revision. Scheduler-only
+            # differences may be returned with its original clock, not a
+            # fabricated revision newer than the already-published sample.
+            if not newer and (last is None or fingerprint(last["value"]) != fingerprint(observation)):
                 revision += 1
             value = {"schema_version":"1.0", "vm_id":record["uuid"], "host_boot_id":self.host,
-                     "observation_revision":revision, "last_success":{"monotonic_ms":int(self.p.clock()*1000),
+                     "observation_revision":revision, "last_success":{"monotonic_ms":sampled,
                      "value":observation}, "last_error":None, "last_attempt_monotonic_ms":int(self.p.clock()*1000)}
             if self.p.clock() >= deadline:
                 refuse("DEADLINE_EXCEEDED", "observation publication deadline expired")
-            self.write(path, value)
+            if not newer:self.write(path, value)
         if self.p.clock() >= deadline:
             refuse("DEADLINE_EXCEEDED", "observation completed after deadline")
         description = {"desired_state":intent['desired_state'] if intent else 'unknown',
@@ -550,17 +919,22 @@ class Execution:
                        'intent_applicable':observation['intent_applicable'],
                        'intent_lifecycle_generation':intent['lifecycle_generation'] if intent else None,
                        'host_boot_id':self.host, 'boot_admission':admission,
-                       'host_admission':self.barrier(),
-                       'shutdown_requested':(self.runtime/'shutdown-requested').exists(),
+                       'host_admission':inputs['barrier'] if inputs is not None else self.barrier(),
+                       'shutdown_requested':inputs['shutdown_requested'] if inputs is not None else (self.runtime/'shutdown-requested').exists(),
                        'execution_id':observation['execution_id'],
                        'execution_context':run if managed else None, 'observation_revision':revision}
         return {**observation, "observation_revision":revision, "host_boot_id":self.host,
                 "observed_monotonic_ms":value["last_success"]["monotonic_ms"], '_description':description}
 
-    def probe_error(self, identity, code):
+    def probe_error(self, identity, code, *, _started_ms=None):
         path = self._path(self.runtime, "observations", identity)
         with short_lock(self.runtime, "observation-"+identity):
             previous = self.read(path)
+            if previous and previous.get('host_boot_id')==self.host and _started_ms is not None:
+                last=previous.get('last_success')
+                point=(previous.get('last_attempt_monotonic_ms') if previous.get('last_error') is not None
+                       else last.get('monotonic_ms') if last else None)
+                if type(point) is int and point>_started_ms:return
             value = previous if previous and previous.get("host_boot_id") == self.host else {
                 "schema_version":"1.0", "vm_id":identity, "host_boot_id":self.host,
                 "observation_revision":0, "last_success":None}
@@ -603,21 +977,31 @@ class Execution:
                 "execution_context":run if observation and observation["execution_status"] == "managed" else None,
                 "observation_revision":observation["observation_revision"] if observation else None}
 
-    def requests(self):
-        root = self.data/"control-requests"
-        if not root.exists() and not root.is_symlink():
-            return []
-        catalog.plain(root, directory=True)
-        result = []
-        for path in sorted(root.glob("*.json")):
-            if not vm.UUID.fullmatch(path.stem):
-                refuse("RECONCILE_REQUIRED", "invalid control request filename")
-            value = self.read(path)
-            if (value.get("operation_id") != path.stem or value.get("request_hash") != fingerprint(value.get("request"))
-                    or not vm.UUID.fullmatch(value.get("vm_id", ""))):
-                refuse("RECONCILE_REQUIRED", "invalid control request identity")
-            result.append(value)
-        return result
+    def requests(self, *, deadline=None):
+        reader = self.read
+        # Capture the original function, not the dynamically patched class
+        # attribute: subclass/instance/class/module hooks must still run.
+        builtin = getattr(reader, '__func__', None) is Execution._default_read and read_record is _DEFAULT_READ_RECORD
+        return read_requests(self.data,deadline=deadline,clock=self.p.clock,reader=None if builtin else reader)
+
+    _default_requests = requests
+
+    def _request_hint_signature(self):
+        from xenova_management import Manager
+        if (getattr(self.read,'__func__',None) is not Execution._default_read or read_record is not _DEFAULT_READ_RECORD
+                or getattr(self.requests,'__func__',None) is not Execution._default_requests or read_requests is not _DEFAULT_READ_REQUESTS
+                or _read_request_at is not _DEFAULT_REQUEST_AT):return None
+        return (read_record,read_requests,_read_request_at,json.loads,fingerprint,Manager._text_token)
+
+    @traced('execution.stop_prevalidation')
+    def _prevalidate_requests(self, deadline):
+        signature=self._request_hint_signature()
+        return None if signature is None else (signature,_prefetch_requests(self.data,deadline,self.p.clock))
+
+    @traced('execution.stop_authoritative_requests')
+    def _requests_prevalidated(self, hint, *, deadline):
+        if hint is None or hint[0]!=self._request_hint_signature():return self.requests(deadline=deadline)
+        return _scan_requests(self.data,deadline=deadline,clock=self.p.clock,prevalidated=hint[1])
 
     @traced('execution.save_request')
     def save_request(self, op, phase):
@@ -643,6 +1027,8 @@ class Execution:
                                        receipt=receipt, deadline=deadline)
 
     def _accept_locked(self, record, request, key=None, *, source="user", previous=None, receipt=None, deadline=None):
+        from xenova_preparation import guard_asset
+        guard_asset(self.p, record['uuid'])
         if deadline is not None and self.p.clock() >= deadline:
             refuse('DEADLINE_EXCEEDED', 'control deadline expired before intent acceptance')
         lifecycle, generation = self.lifecycle(record)
@@ -690,8 +1076,253 @@ class Execution:
                            "EXPLICIT_INTENT" if source == "user" else "APPROVED_BOOT_POLICY")
         return op
 
+    def bind_replayed_reboot(self, record, op, run, deadline):
+        """Settle a returned Linux toolstack reboot without issuing a new command."""
+        source = run.get('reboot_from') if run else None
+        if (not run or run.get('phase') != 'launching' or run.get('reboot_returned') is not True
+                or run.get('owner') != {'kind':'user', 'operation_id':op['operation_id']}
+                or run.get('intent_revision') != op['intent_revision']
+                or run.get('lifecycle_generation') != op['lifecycle_generation']
+                or run.get('cpu_policy') != op.get('cpu_policy')
+                or not isinstance(source, dict) or type(source.get('domid')) is not int or source['domid'] <= 0
+                or not isinstance(source.get('xen_unique_id'), str)
+                or not re.fullmatch(r'[1-9][0-9]{0,19}', source['xen_unique_id'])
+                or int(source['xen_unique_id']) > 2**64-1):
+            return None
+        # This budget covers observation and journal settlement only, even after
+        # the original deadline. No physical action is available on this path.
+        self.guard_launch(record, run, deadline)
+        current = self.p.reboot_candidate(record, source, deadline)
+        if current is None:
+            return None
+        return self.bind_launch(record, run, current, deadline)['observation']
+
+    def _reconcile_superseded_stop(self, record, previous, intent, requests, deadline):
+        """직접 승계한 명시 force의 부재 근거로 옛 graceful 실패만 종결한다."""
+        error = previous.get('error')
+        details = error.get('details') if isinstance(error, dict) else None
+        if not isinstance(error, dict) or not isinstance(details, dict):
+            return None
+        cause = error if error.get('code') in ('XEN_EXECUTION_FAILED', 'DEADLINE_EXCEEDED') else details.get('cause')
+        revision = previous.get('intent_revision')
+        if (previous.get('phase') != 'uncertain'
+                or previous.get('request') != {'vm_id':record['uuid'], 'action':'stop', 'force':False}
+                or previous.get('source') != 'user' or previous.get('desired_state') != 'stopped'
+                or type(previous.get('deadline_monotonic_ms')) is not int
+                or type(revision) is not int or revision < 1
+                or type(previous.get('lifecycle_generation')) is not int
+                or not isinstance(error, dict) or not isinstance(details, dict)
+                or not isinstance(cause, dict)
+                or cause.get('code') not in ('XEN_EXECUTION_FAILED', 'DEADLINE_EXCEEDED')
+                or not intent or intent.get('desired_state') != 'stopped'
+                or intent.get('accepted_host_boot_id') != self.host
+                or intent.get('lifecycle_generation') != previous['lifecycle_generation']
+                or intent.get('intent_revision') != revision+1):
+            return None
+        # Reuse the complete request lookup already owned by this call.
+        successor = next((q for q in requests if q['operation_id'] == intent['accepted_operation_id']), None)
+        request = successor.get('request') if successor else None
+        result = successor.get('result') if successor else None
+        observed = result.get('observation') if isinstance(result, dict) else None
+        forced = bool(isinstance(request, dict) and request.get('force') is True
+                      and request.get('action') in ('stop', 'destroy'))
+        if (not successor or not forced or successor.get('phase') != 'completed'
+                or successor.get('source') != 'user' or successor.get('error') is not None
+                or successor.get('vm_id') != record['uuid'] or request.get('vm_id') != record['uuid']
+                or successor.get('host_boot_id') != self.host
+                or successor.get('lifecycle_generation') != previous['lifecycle_generation']
+                or type(successor.get('base_revision')) is not int or successor['base_revision'] != revision
+                or type(successor.get('intent_revision')) is not int or successor['intent_revision'] != revision+1
+                or successor.get('desired_state') != 'stopped'
+                or not isinstance(result, dict) or result.get('accepted') is not True
+                or not isinstance(observed, dict) or observed.get('presence') != 'absent'
+                or observed.get('execution_status') != 'absent' or observed.get('desired_state') != 'stopped'
+                or observed.get('host_boot_id') != self.host
+                or observed.get('lifecycle_generation') != previous['lifecycle_generation']
+                or observed.get('intent_revision') != successor['intent_revision']):
+            return None
+        events = successor.get('events')
+        if not isinstance(events, list) or any(not isinstance(e, dict) for e in events):
+            return None
+        accepted = [e['monotonic_ms'] for e in events
+                    if e.get('phase') == 'accepted' and e.get('host_boot_id') == self.host
+                    and type(e.get('monotonic_ms')) is int]
+        completed = [e['monotonic_ms'] for e in events
+                     if e.get('phase') == 'completed' and e.get('host_boot_id') == self.host
+                     and type(e.get('monotonic_ms')) is int]
+        run = self.run_record(record)
+        if (not accepted or not completed or not run or run.get('phase') != 'stopped'
+                or run.get('lifecycle_generation') != previous['lifecycle_generation']
+                or type(run.get('intent_revision')) is not int or run['intent_revision'] >= revision
+                or type(run.get('stopped_monotonic_ms')) is not int
+                or not min(accepted) <= run['stopped_monotonic_ms'] <= max(completed)):
+            return None
+        current = self.observe(record, deadline)
+        if current['presence'] != 'absent':
+            refuse('RECONCILE_REQUIRED', 'superseding force no longer has a confirmed absent target',
+                   details={'operation_id':previous['operation_id'], 'replayed':True})
+        if self.p.process_isolation or run.get('process_scope'):
+            from xenova_guest_process import cleanup
+            try:
+                cleanup(self.p, record, run, deadline, observe_only=True)
+            except (PlatformError, OSError, ValueError) as cleanup_error:
+                raise ExecutionError('RECONCILE_REQUIRED', 'superseded stop still has unconfirmed owned processes',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                             'cause_type':type(cleanup_error).__name__}) from cleanup_error
+        path = self._path(self.data, 'control-requests', previous['operation_id'])
+        successor_path = self._path(self.data, 'control-requests', successor['operation_id'])
+        with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
+            if (self.p.boot_id_reader() != self.host
+                    or self.lifecycle(record) != ('REGISTERED', previous['lifecycle_generation'])
+                    or self.intent(record) != intent or self.run_record(record) != run
+                    or self.read(path) != previous or self.read(successor_path) != successor):
+                refuse('TARGET_CHANGED', 'superseded stop reconciliation context changed')
+            try:
+                # Confirm the already-written successor's directory durability.
+                sync_directory(successor_path.parent)
+            except OSError as storage_error:
+                raise ExecutionError('RECONCILE_REQUIRED', 'superseding force durability is unconfirmed',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                             'cause':error, 'storage_cause_type':type(storage_error).__name__,
+                             'storage_errno':getattr(storage_error, 'errno', None)}) from storage_error
+            settled = {**previous, 'events':list(previous.get('events', [])),
+                       'error':{**error, 'code':cause['code'],
+                                'details':{**details, 'stop_reconciliation':{
+                                    'metadata_only':True, 'reason':'completed_force_superseded_stop',
+                                    'superseding_operation_id':successor['operation_id'],
+                                    'execution_id':run['execution_id'], 'presence':'absent',
+                                    'original_error':error}}}}
+            try:
+                self.save_request(settled, 'failed')
+            except OSError as storage_error:
+                rollback_error = None
+                try:
+                    # One bounded rollback under the same operation/admission ownership.
+                    # Never overwrite a different operation or a concurrent settlement.
+                    if self.read(path) not in (previous, settled):
+                        raise ExecutionError('TARGET_CHANGED', 'control journal changed during failed settlement')
+                    self.write(path, previous)
+                except (PlatformError, OSError, ValueError) as restore_error:
+                    rollback_error = {'cause_type':type(restore_error).__name__,
+                                      'errno':getattr(restore_error, 'errno', None),
+                                      **({'code':restore_error.error['code']}
+                                         if isinstance(restore_error, ExecutionError) else {})}
+                raise ExecutionError('RECONCILE_REQUIRED', 'superseded stop settlement was not durably confirmed',
+                    details={'operation_id':previous['operation_id'], 'replayed':True, 'cause':error,
+                             'storage_cause_type':type(storage_error).__name__,
+                             'storage_errno':getattr(storage_error, 'errno', None),
+                             'rollback':'unconfirmed' if rollback_error else 'restored',
+                             **({'rollback_error':rollback_error} if rollback_error else {})}) from storage_error
+        return settled
+
+    def _reconcile_expired_start(self, record, previous, intent, run, observed, deadline):
+        """만료된 같은 start의 부재·정확한 scope 종결만 확인한다. 새 실행은 제출하지 않는다."""
+        from xenova_guest_process import cleanup, scope_name
+        original_end = previous.get('deadline_monotonic_ms')
+        owner = {'kind':'user', 'operation_id':previous['operation_id']}
+        marker = {'operation_id':previous['operation_id'], 'deadline_monotonic_ms':original_end,
+                  'outcome':'expired_absent_start'}
+        resuming = bool(previous.get('phase') == 'failed' and run
+            and run.get('control_reconciliation') == marker
+            and (previous.get('reconciliation') or {}).get('outcome') == marker['outcome'])
+        if (previous.get('request') != {'vm_id':record['uuid'], 'action':'start', 'force':False}
+                or previous.get('vm_id') != record['uuid']
+                or previous.get('source') != 'user' or previous.get('desired_state') != 'running'
+                or type(original_end) is not int or original_end <= 0 or self.p.clock()*1000 < original_end
+                or type(previous.get('intent_revision')) is not int
+                or type(previous.get('lifecycle_generation')) is not int
+                or observed.get('presence') != 'absent' or observed.get('execution_status') != 'absent'
+                or not self.p.process_isolation or not run or run.get('owner') != owner
+                or run.get('phase') not in ('launching', 'uncertain')
+                or run.get('domid') is not None or run.get('xen_unique_id') is not None
+                or run.get('process_scope') != scope_name(record['uuid'], run['execution_id'])
+                or run.get('host_boot_id') != self.host or previous.get('host_boot_id') != self.host
+                or run.get('intent_revision') != previous.get('intent_revision')
+                or run.get('lifecycle_generation') != previous.get('lifecycle_generation')
+                or not intent or intent.get('desired_state') != 'running'
+                or intent.get('accepted_host_boot_id') != self.host
+                or intent.get('accepted_operation_id') != previous['operation_id']
+                or intent.get('intent_revision') != previous.get('intent_revision')
+                or intent.get('lifecycle_generation') != previous.get('lifecycle_generation')):
+            return None
+        if run.get('control_reconciliation') not in (None, marker):
+            refuse('RECONCILE_REQUIRED', 'launch reconciliation marker is invalid')
+        prior_reconciliation = previous.get('reconciliation') or {}
+        original_error = (prior_reconciliation.get('original_error') if resuming else previous.get('error'))
+        details = original_error.get('details', {}) if isinstance(original_error, dict) else {}
+        if not isinstance(details, dict):
+            return None
+        cause = (original_error if isinstance(original_error, dict) and
+                 original_error.get('code') in ('XEN_EXECUTION_FAILED', 'DEADLINE_EXCEEDED') else details.get('cause'))
+        if original_error is not None and (not isinstance(cause, dict) or
+                cause.get('code') not in ('XEN_EXECUTION_FAILED', 'DEADLINE_EXCEEDED')):
+            return None
+        snapshot = {'record':fingerprint(record), 'config':fingerprint(self.p.config(record)),
+                    'intent':fingerprint(intent), 'cpu':self.p.cpu().context(record)}
+        if (run.get('record_sha256') != snapshot['record'] or run.get('configuration_sha256') != snapshot['config']
+                or run.get('intent_sha256') != snapshot['intent']
+                or run.get('cpu_policy') != previous.get('cpu_policy', {'configured':False})
+                or snapshot['cpu'] != previous.get('cpu_policy', {'configured':False})):
+            refuse('TARGET_CHANGED', 'expired start configuration or policy changed')
+        try:
+            cleanup(self.p, record, run, deadline, observe_only=True)
+        except (PlatformError, OSError, ValueError) as error:
+            raise ExecutionError('RECONCILE_REQUIRED', 'expired start still has unconfirmed owned processes',
+                details={'operation_id':previous['operation_id'], 'replayed':True,
+                         'cause_type':type(error).__name__}) from error
+        self.checkpoint('control-start-reconcile-before-guard', previous)
+        final = self.observe(record, deadline)
+        if final.get('presence') != 'absent' or final.get('execution_status') != 'absent':
+            refuse('TARGET_CHANGED', 'domain appeared after expired start cleanup')
+        path = self._path(self.data, 'control-requests', previous['operation_id'])
+        run_path = self._path(self.runtime, 'executions', record['uuid'])
+        with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
+            current = self.p.records(validate_assets=False).get(record['id'])
+            if (self.p.boot_id_reader() != self.host or current != record
+                    or self.lifecycle(record) != ('REGISTERED', previous['lifecycle_generation'])
+                    or self.intent(record) != intent or self.run_record(record) != run
+                    or self.read(path) != previous or fingerprint(self.p.config(record)) != snapshot['config']
+                    or self.p.cpu().context(record) != snapshot['cpu']):
+                refuse('TARGET_CHANGED', 'expired start owner or context changed before settlement')
+            if self.p.clock() >= deadline:
+                refuse('DEADLINE_EXCEEDED', 'expired start reconciliation observation budget expired')
+            code = cause['code'] if cause else 'DEADLINE_EXCEEDED'
+            settled = {**previous, 'events':list(previous.get('events', [])), 'result':None,
+                'reconciliation':{'outcome':marker['outcome'], 'metadata_only':True,
+                                  'original_error':original_error, 'physical_commands':0},
+                'error':{'code':code, 'message':'original start ended without an observed execution',
+                    'retryable':False, 'details':{**details, 'operation_id':previous['operation_id'],
+                        'accepted':True, 'reconciliation_outcome':marker['outcome'],
+                        'next_action':'observe_current_intent_before_any_new_request'}}}
+            pending = {**run, 'phase':'uncertain', 'control_reconciliation':marker}
+            try:
+                # Keep the launch gate closed until the original failure is durable.
+                self.write(run_path, pending)
+                self.save_request(settled, 'failed')
+                self.write(run_path, {**pending, 'phase':'stopped',
+                                     'stopped_monotonic_ms':int(self.p.clock()*1000)})
+            except OSError as error:
+                rollback_error = None
+                try:
+                    current_run = self.run_record(record)
+                    if current_run == run or (current_run and current_run.get('owner') == owner
+                            and current_run.get('execution_id') == run['execution_id']
+                            and current_run.get('control_reconciliation') == marker):
+                        self.write(run_path, pending)
+                    else:
+                        raise ExecutionError('TARGET_CHANGED', 'launch changed during settlement failure')
+                except (PlatformError, OSError, ValueError) as rollback:
+                    rollback_error = {'cause_type':type(rollback).__name__, 'errno':getattr(rollback, 'errno', None)}
+                raise ExecutionError('RECONCILE_REQUIRED', 'expired start settlement durability is unconfirmed',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                        'storage_cause_type':type(error).__name__, 'storage_errno':getattr(error, 'errno', None),
+                        **({'rollback_error':rollback_error} if rollback_error else {})}) from error
+        return settled
+
     @traced('execution.control')
     def control(self, action, record, *, force=False, key=None, deadline=None):
+        from xenova_preparation import guard_asset
+        guard_asset(self.p, record['uuid'])
         end = deadline if deadline is not None else self.p.clock()+90
         diagnostics = []
         def event(*args, **kwargs):
@@ -701,17 +1332,29 @@ class Execution:
         if action not in ("start", "stop", "reboot", "destroy"):
             refuse("INVALID_SPEC", "invalid control action")
         from xenova_management import Manager
-        if any(q["vm_id"] == record["uuid"] and q["status"] != "SUCCEEDED"
-               for q in Manager(self.p)._operations()):
+        from xenova_creation import holds
+        manager=Manager(self.p)
+        if any(q["vm_id"] == record["uuid"] and holds(manager,q)
+               for q in manager._operations()):
             refuse("OPERATION_IN_PROGRESS", "an incomplete asset operation owns this VM", retryable=True)
         if action == "reboot" and vm.guest_kind(record) == "zephyr" and vm.cooperative(record) and not force:
             from xenova_zephyr_control import reboot
             return reboot(self,record,key,deadline=end)
         request = {"vm_id":record["uuid"], "action":action, "force":force}
-        previous = next((q for q in self.requests() if key is not None and q["idempotency_key"] == key), None)
+        requests = self.requests()
+        previous = next((q for q in requests if key is not None and q["idempotency_key"] == key), None)
         if previous and previous["request"] != request:
             refuse("IDEMPOTENCY_CONFLICT", "control key has a different request")
-        reconciliable = previous and previous['phase'] == 'uncertain'
+        prior_reconciliation = previous.get('reconciliation') if previous else None
+        if prior_reconciliation is not None and not isinstance(prior_reconciliation, dict):
+            refuse('RECONCILE_REQUIRED', 'control reconciliation record is invalid')
+        pending_start = (self.run_record(record) if previous and action == 'start' and previous['phase'] == 'failed'
+                         and (prior_reconciliation or {}).get('outcome') == 'expired_absent_start' else None)
+        reconciliable = previous and (previous['phase'] == 'uncertain' or bool(pending_start
+            and pending_start.get('phase') == 'uncertain' and pending_start.get('owner') ==
+                {'kind':'user', 'operation_id':previous['operation_id']}
+            and pending_start.get('control_reconciliation') == {'operation_id':previous['operation_id'],
+                'deadline_monotonic_ms':previous.get('deadline_monotonic_ms'), 'outcome':'expired_absent_start'}))
         if previous and previous["phase"] in ("completed", "failed", "uncertain") and not reconciliable:
             event("control-replayed", record, previous["operation_id"])
             if previous["error"]:
@@ -733,10 +1376,35 @@ class Execution:
                 refuse("TARGET_CHANGED", "control lifecycle changed")
             intent = self.intent(record)
             if not intent or intent["accepted_operation_id"] != previous["operation_id"]:
+                settled = self._reconcile_superseded_stop(record, previous, intent, requests,
+                    min(self.p.clock()+15, getattr(self.p, 'response_deadline', float('inf'))))
+                if settled:
+                    error = settled['error']
+                    refuse(error['code'], error['message'],
+                           details={**error['details'], 'operation_id':previous['operation_id'], 'replayed':True})
                 refuse("TARGET_CHANGED", "control request intent was superseded")
-            readonly_end = self.p.clock()+15
-            observation = self.observe(record, readonly_end)
+            readonly_end = min(self.p.clock()+15,getattr(self.p,'response_deadline',float('inf')))
             run = self.run_record(record)
+            observation = None
+            if action == 'reboot' and not force and vm.guest_kind(record) == 'linux':
+                try:
+                    observation = self.bind_replayed_reboot(record, previous, run, readonly_end)
+                except (PlatformError, OSError, ValueError) as error:
+                    cause = getattr(error, 'error', {'code':'TARGET_CHANGED' if isinstance(error, vm.DomainIdentityError)
+                                                     else 'OBSERVATION_UNAVAILABLE', 'message':str(error)})
+                    refuse('RECONCILE_REQUIRED', 'reboot execution could not be confirmed; command not repeated',
+                           details={'operation_id':previous['operation_id'], 'replayed':True, 'cause':cause})
+            bound_reboot = observation is not None
+            if not bound_reboot:
+                observation = self.observe(record, readonly_end)
+            else:
+                run = self.run_record(record)
+            if action == 'start' and observation['presence'] == 'absent':
+                settled = self._reconcile_expired_start(record, previous, intent, run, observation, readonly_end)
+                if settled:
+                    error = settled['error']
+                    refuse(error['code'], error['message'],
+                           details={**error['details'], 'operation_id':previous['operation_id'], 'replayed':True})
             confirmed = action in ("stop", "destroy") and observation["presence"] == "absent"
             start_owner = bool(run and run.get('owner') == {'kind':'user', 'operation_id':previous['operation_id']})
             prior_observation = (previous.get('result') or {}).get('observation')
@@ -747,7 +1415,7 @@ class Execution:
             if not confirmed:
                 refuse("RECONCILE_REQUIRED", "physical control result is uncertain; command not repeated",
                        details={"operation_id":previous["operation_id"], "replayed":True})
-            if action in ('start', 'reboot'):
+            if action in ('start', 'reboot') and not bound_reboot:
                 self.p.cpu().require(record, readonly_end, expected=previous.get('cpu_policy', {'configured':False}),
                                      present=True, expected_identity=observation)
                 if run.get('cpu_verification') != 'complete':

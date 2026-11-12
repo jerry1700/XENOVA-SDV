@@ -13,9 +13,9 @@
 | dom0 | `xenova-xen-bringup-image` |
 | dom0 설치 | Manager·CLI·복구/신원·CPU 정책, FastAPI/Uvicorn·통계·heartbeat worker, Paho·공용 MQTT 클라이언트, xentop·Mosquitto |
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
-| 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 6개 URL·commit |
+| 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.2, Network Starter 1.1.0 |
+| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.4, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
@@ -122,6 +122,44 @@ EOF
 ```
 
 FastAPI·Pydantic Core·MQTT와 필수 호스트 빌드 도구는 이미지 의존성에 따라 준비된다. 위 설정은 FastAPI의 upstream ptest를 제외하는 정규 빌드 설정이다.
+
+### display 웹 자산과 그래픽 실행 환경
+
+고정 meta-clang·meta-browser 레이어로 X11·Chromium을 빌드한다. FFmpeg x11grab/MJPEG,
+한글 폰트와 Playwright도 이미지에 설치한다. Chromium 빌드는 메모리와 시간이 많이
+필요하므로 download·sstate·hash-equivalence 캐시를 실행 간 공유한다.
+
+display 웹 화면은 Linux Node.js 22.12 이상과 저장소의 npm lockfile로 먼저 빌드한다.
+NODE_ROOT는 기존 도구 캐시의 절대 경로이며, 처음 준비할 때는 공식 archive의
+SHA-256을 확인하고 버전·URL·해시를 RUN에 기록한다.
+
+```bash
+export PATH="$NODE_ROOT/bin:$PATH"
+node --version
+cp -a "$REPO/frontend" "$RUN/frontend-build"
+(
+  cd "$RUN/frontend-build"
+  npm ci --cache "$CACHE/npm"
+  npm run build -w @xenova/vm-screens
+)
+mkdir "$RUN/display-web-input"
+cp -a "$RUN/frontend-build/apps/vm-screens/dist" "$RUN/display-web-input/display-web"
+printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$RUN/display-web-input" \
+  >> "$YOCTO_BUILD_DIR/conf/local.conf"
+```
+
+원본·lockfile·완성 자산 해시를 보관하고, 생성한 dist는 Git에 넣지 않는다.
+xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 user unit을 설치한다.
+피드는 /etc/xenova/display-bindings.json과 root 전용 display.env를 준비한 경우에만
+시작한다. 실제 UUID·EDID·좌표·X11 인증·비-root 그래픽 세션을 설정한 뒤
+[display 실행 절차](../../platform/services/display/router/README.md#4단계-x11-실행과-원격-시연)를
+따른다. 설정 예제는 /usr/share/xenova/display/examples/에 있다.
+공통 이미지에 토큰·장치별 매핑·시연 키를 넣지 않는다.
+
+xenova-gateway는 기존 코드·pyserial·비활성 서비스 템플릿을 포함한다.
+A/B UUID·실행 바인딩·권한 원본·broker·시리얼 장치를 확인한 뒤
+[Gateway 운영 절차](../../platform/services/gateway/README.md#verified-프로필-운영)로 설정한다.
+패키지 포함·ARM 실행과 물리 HDMI·실제 장치 출력 수락은 별개다.
 
 ### ARM64 사용자 공간 실행
 
@@ -231,7 +269,7 @@ PYTHONPATH="$ZEPHYR_TOOLS/python" \
 
 ## 3. Linux·Network Starter 템플릿 준비
 
-현재 선택한 게시본이 `RELEASE_ROOT`에 준비돼 있으면 아래 검증·선택 확정으로 이어간다. 새 게시본을 만드는 실행은 새 출력 경로를 사용한다. Linux의 준비 버전은 각 `recipe.json`, Zephyr의 앱 출처는 `network-starter.lock.json`을 따른다.
+현재 선택한 게시본이 `RELEASE_ROOT`에 준비돼 있으면 아래 검증·선택 확정으로 이어간다. 새 게시본은 새 출력 경로를 사용한다. Linux의 준비 버전은 각 `recipe.json`, 현재 drive 출처는 실제 `BUILD_RECEIPT.json`과 검증한 새 template manifest를 따른다. network-starter.lock은 과거 Starter 재현용이다.
 
 ### Ubuntu·Debian 준비
 
@@ -259,7 +297,39 @@ done
 
 이 경로에서 새 rootfs에 `python3-paho-mqtt`를 설치하고, 저장소의 기존 Agent installer를 호출한다. Python import·Agent enable·설치 영수증·커널/부트 자산을 검사한 번들이 게시된다. `template.json`의 `guest_agent`와 `/etc/xenova/agent-install.json`에 패키지 버전과 실제 소스·deb 해시가 기록된다.
 
-### Zephyr Network Starter 빌드·게시
+### A/B 공통 Zephyr 주행 firmware
+
+두 VM에는 같은 공통 firmware를 선택한다. AUTO/MANUAL은 firmware 내부 모드이고,
+UUID·MAC·인증정보·CPU 정책은 VM별로 유지한다. 현재 factory 선택은
+`zephyr-drive-lattice-lab-arm64`의 `warm-lattice-lab` 프로필이다.
+
+```bash
+run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
+  --app drive --profile warm-lattice-lab \
+  --zephyr-source "$ZEPHYR_SOURCE" --tools "$ZEPHYR_TOOLS" \
+  --output "$RUN/drive-build" --execute
+
+run drive-template-package python3 -B \
+  "$REPO/platform/scripts/package-xenova-drive-template.py" \
+  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version 1.0.8
+```
+
+포장 도구는 현재 source fingerprint·ARM payload·실제 앱 profile과
+`BUILD_RECEIPT.json`을 검사하고 새 manifest hash를 반환한다. 검증한 번들은
+`RELEASE_ROOT/zephyr/<id>/<template_version>/`의 새 경로에 복사하고 파일
+0444·디렉터리 0555로 보존한다. 기존 게시본은 덮어쓰지 않는다.
+실제 manifest와 version은 아래 선택 확정 절차로 기본 lock·A/B 설정에 반영한다.
+A/B seed와 보관 원본의 `zephyr.bin` 해시가 같아야 한다.
+
+공용 seed/firmware에는 VM 암호가 없고 host 첫 등록에서 UUID별로 공급한다.
+`lattice-lab-1`은 시험 차량 프로필이다. ARM 빌드·패키징과 실제 보드·실차 수락은
+구분하며 고정 Zephyr·SDK, ELF/DTS·RAM·스택 검사와 source digest를 함께 보관한다.
+
+### 별도 Network Starter 빌드·게시
+
+Network Starter는 네트워크·진단을 따로 시험하는 별도 firmware다.
+아래 절차는 기존 지원 자산의 재현/호환용이며 현재 공통 주행 앱의 기본 A/B
+선택을 Starter로 대체하는 방법이 아니다.
 
 ```bash
 run network-starter-build python3 -B \
@@ -298,6 +368,14 @@ PY
 
 빌드 영수증의 ELF·DTS·config·앱/런타임 해시와 고정 Zephyr 원본을 함께 보관한다.
 
+불변 게시본과 factory 선택을 유지하면서 변경한 앱 소스를 시험할 때는 빌드에
+`--candidate-version <새 SemVer>`를 추가하고 새 출력 경로를 사용한다. 예를 들어
+`--candidate-version 1.1.1-lifecycle.2`는 해당 후보 영수증의 앱 버전·실제 소스 해시만
+정하며 저장소의 `network-starter.lock.json`이나 기본 선택 lock을 바꾸지 않는다.
+기존 lock의 버전을 재사용하거나, 별도 후보 버전 없이 불일치한 소스로 빌드하면 거절한다.
+패키징은 후보 영수증의 출처를 사용한다. 후보의 게시·factory 채택과 새 이미지 수락은
+빌드·패키징 성공과 구분해 진행한다.
+
 Network Starter의 공통 Diagnostics와 Telemetry Publisher는 `--diagnostics on|off`,
 `--telemetry on|off`로 선택한다. 기본은 둘 다 on이며 Diagnostics off의 기본 Publisher는 off다.
 Publisher는 TCP/MQTT를 사용하고 인스턴스별 private XenStore bootstrap이 있어야 송신한다.
@@ -306,6 +384,11 @@ broker 주소·password·VM UUID를 공유 firmware에 넣지 않는다.
 각 비교는 별도의 새 `--output` 경로에서 빌드하고 옵션·실제 config·RAM·수신 결과를 분리해 기록한다.
 주입 계약, 실제 Core 매핑, native_sim의 격리 broker·독립 수신 시험은
 [Telemetry Publisher](../../platform/guests/zephyr/telemetry/README.md)를 따른다.
+현재 발행은 payload 2.1이다. `build_id`는 소스·설정·고정 도구 입력의 식별자이며,
+완성된 `zephyr.bin`의 SHA-256과 다르다. 패키징 manifest의 두 값을 확인하고,
+실행 시 검증한 로딩 기록을 통해 인스턴스에 주입한다. dom0의 clock/evidence timer와
+필터가 포함된 xenconsoled는 해당 실행의 UTC·제한된 오류 보존을 지원한다.
+타이머·패키지 포함 확인과 실제 보드의 시각 품질·fatal 포착 수락은 구분한다.
 게시한 firmware는 불변 입력으로 보존한다. 실제 보드 적용·전환은 대상 UUID와 자산 백업·복원 절차를 확인한 유지보수 단계에서 수행한다.
 
 ### 실제 manifest로 기본 선택 확정
@@ -328,11 +411,12 @@ for entry in lock["templates"]:
         directory = Path("linux")/entry["id"]/version
         manifest = release/directory/"template.json"
     else:
-        z = json.loads((repo/"platform/guests/zephyr/network-starter.lock.json").read_text())
-        version = z["version"]
-        directory = Path("zephyr")/z["id"]/version
+        directory = Path(entry["directory"])
         manifest = release/directory/"firmware.json"
-        entry["id"] = z["id"]
+        meta = json.loads(manifest.read_text())
+        assert meta["id"] == entry["id"] and meta["template_id"] == entry["template_id"]
+        assert meta["source"]["app"] == "xenova-drive" and meta["source"]["drive_profile"] == "warm-lattice-lab"
+        version = meta["template_version"]
     entry.update(version=version, directory=str(directory),
                  manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest())
     versions[entry["template_id"]] = version
@@ -452,6 +536,53 @@ bzcat "$WIC" >"$RUN/dom0.wic"
 
 빌드 진행은 다른 WSL 창에서 `tail -f "$RUN/logs/dom0-build.stdout"`로 확인한다. 같은 `RUN` 경로를 지정하면 전체 로그를 이어서 볼 수 있다.
 
+부분 패키징은 같은 빌드 환경에서 `bitbake xenova-platform xen-rpi-u-boot-scr`로
+실행할 수 있다. 플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
+`xenova-boot-status.service`와 sysinit enablement를 확인한다. 기존 agetty의
+`/run/issue.d`·reload 기능을 사용하며 새 그래픽 런타임은 필요하지 않다.
+고정 이미지의 getty가 agetty인지도 패키지 manifest와 실제 unit에서 대조한다.
+다른 renderer를 쓰는 설치본의 화면 인계는 [부팅 표시](management-boot-boundaries.md#부팅-진행지연실패-표시)를 따른다.
+
+생성된 `boot.cmd`/`boot.scr`에서 dom0의 `console=hvc0 loglevel=4`,
+`systemd.show_status=error`와 journal target을 확인한다. Xen의 dtuart·메모리 인자는
+별도로 보존한다. `loglevel=4`는 ERR까지의 초기 필터이며 전체 디버그 출력이 아니다.
+정상 경로에는 `/chosen` 전체 덤프가 없어야 한다. 진단 경로의 `fdt print`는
+`xen,xen-bootargs`와 `xen,dom0-bootargs` 두 속성만 대상으로 한다.
+소스 템플릿 검사·부분 패키지 통과와 실제 이미지·HDMI 전원 부팅 수락은 구분한다.
+
+MQTT 운영 설정은 `xenova-mqtt-broker` 패키지로 설치하며, `bitbake xenova-mqtt-broker`로
+부분 패키징·QA를 수행할 수 있다. 같은 이름의 `mosquitto.service` override·Xenova drop-in·설정·enable
+preset과 `xenova-broker`의 설치 바이트를 확인한다. 공통 이미지와 seed에는
+`/srv/xenova/mqtt`의 계정·암호·초기화 흔적을 넣지 않는다. 데이터 마운트와 내부 브리지 뒤에
+기동하며 외부 online 대기를 VM 자동 시작에 연결하지 않는다. 첫 계정 발급은
+[MQTT 최초 설정](cli-manager-spec.md#cmd-mqtt-init), EC2의 MQTT·FastAPI 직접 접속은
+[Tailnet 접속 설정](cli-manager-spec.md#cmd-tailscale-serve)을 따른다. 인증 후 background Serve를
+한 번 설정하며 공통 이미지에 장치 인증자료·개별 Serve 상태를 넣지 않는다.
+계정·ACL 정책은 `platform/deploy/mosquitto/etc/policy.json` 하나를 사용한다.
+로컬 개발 파일의 일치는 `python3 platform/deploy/mosquitto/scripts/render-policy.py --check`로
+검사한다. 제품 패키지는 공통 관리 모듈·정책을 설치하며 개발용 예시 UUID와 비밀번호를
+seed에 넣지 않는다. 새 VM 계정은 이미지 재빌드 없이 `xenova-broker add-account`로 추가한다.
+주행은 VM UUID 계정, Telemetry는 `telemetry-UUID` 계정을 쓴다. Telemetry 계정은 자기 VM의
+v1 `/metrics`와 v2 텔레메트리를 발행한다. 기존 설치에 정책을 교체하면
+[브로커 ACL 갱신 절차](../../platform/deploy/mosquitto/README.md#기존-계정과-업데이트)를 따른다.
+
+고정 meta-networking에는 Tailscale 1.94.2가 있지만, 현재 이미지는 보안 수정이 포함된
+공식 ARM64 정적 릴리스 1.104.2를 meta-xenova recipe로 고정한다. TS-2026-013의 수정은
+Go 1.27.3에 포함되어 기존 고정 Go 1.26.8 빌드와 구분한다. 외부 레이어·공용 컴파일러는 바꾸지 않는다.
+`bitbake-layers show-recipes tailscale`와 `bitbake-layers show-appends`에서 선택된 1.104.2와
+persistence append를 확인한다. archive·공식 checksum·라이선스 해시는 recipe에 고정하며
+`bitbake tailscale`로 부분 패키징할 수 있다.
+이미지에는 `tailscale`·`tailscaled`와 현재 모듈 구성의 TUN·IPv6를 포함한다.
+실제 kernel `.config`의 `CONFIG_TUN=m`, `CONFIG_IPV6=m`, 다중 라우팅 테이블과
+netfilter 설정을 확인하고 모듈 패키지가 이미지에 있는지도 대조한다.
+
+실제 rootfs의 CLI·daemon ARM64 실행, `tailscaled.service`의 enablement와
+`20-xenova-persistence.conf`·`xenova-tailscale-state` 소스 일치를 검사한다.
+`assemble.platform_root_ok()`는 이 내용과 TUN·IPv6 모듈을 검사하지만 파티션 구조는 바꾸지 않는다.
+공통 rootfs·factory seed에는 Tailscale 인증 상태·장치 키·auth key를 넣지 않는다.
+최초 인증과 같은 보드 전용 암호화 백업/복원은 [접속 명세](cli-manager-spec.md#cmd-tailscale)를 따른다.
+실행 환경 패키징 성공을 Tailnet 인증·외부 SSH·재부팅 후 동일 장치 수락으로 대신하지 않는다.
+
 WIC의 실제 FAT에서 `boot.scr`·`xen`·`Image`·U-Boot와 UART/GIC·무선 SDIO PIO 설정을 확인한다. 다음 공통 검사 도구는 실제 ext4를 읽기 전용으로 열어 소스 일치, 패키지, ARM64 import와 unit graph를 확인하며 최종 이미지에서도 재사용한다.
 
 ```bash
@@ -509,6 +640,12 @@ def linux(root, seed):
     result = verify_guest_agent(root, seed=seed, required=True)
     check(result["installed"] and result["enabled"] and result["identity_gate"] == seed,
           "Paho/Agent imports, enable, identity "+root.name)
+    for project, package in (("agent", "xenova_agent"), ("mqtt-client", "xenova_mqtt")):
+        source_root = repo/"platform/services/vm-agent"/project/package
+        target_root = root/"opt/xenova"/project/package
+        for source in source_root.rglob("*.py"):
+            check((target_root/source.relative_to(source_root)).read_bytes() == source.read_bytes(),
+                  "guest source "+project+"/"+source.name)
     graph(root, ["multi-user.target", "ssh.service", "xenova-agent.service"])
     check(not (root/"etc/xenova/agent.env").exists(), "neutral Agent config "+root.name)
     check(not list((root/"etc/ssh").glob("ssh_host_*_key"))
@@ -528,12 +665,69 @@ try:
     work.mount(dev+"p2", root, readonly=True)
     installed = assemble.platform_root_ok(root)
     check(bool(installed), "actual dom0 source, units, cfg, Wi-Fi, identity")
+    check((root/"usr/bin/systemd-run").is_file(), "per-execution scope tool systemd-run")
+    broker_sources = {
+        "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
+        "platform/deploy/mosquitto/etc/policy.json": "usr/share/xenova/mqtt/policy.json",
+        "platform/yocto/meta-xenova/recipes-connectivity/xenova-mqtt-broker/files/xenova-broker": "usr/sbin/xenova-broker",
+        "platform/yocto/meta-xenova/recipes-connectivity/xenova-mqtt-broker/files/xenova-mqtt-init": "usr/sbin/xenova-mqtt-init",
+        "platform/yocto/meta-xenova/recipes-connectivity/xenova-mqtt-broker/files/mosquitto.conf": "etc/xenova/mqtt/mosquitto.conf",
+        "platform/yocto/meta-xenova/recipes-connectivity/xenova-mqtt-broker/files/mosquitto.service": "etc/systemd/system/mosquitto.service",
+        "platform/yocto/meta-xenova/recipes-connectivity/xenova-mqtt-broker/files/20-xenova-broker.conf": "usr/lib/systemd/system/mosquitto.service.d/20-xenova-broker.conf",
+        "platform/yocto/meta-xenova/recipes-connectivity/xenova-mqtt-broker/files/20-xenova-mqtt.preset": "usr/lib/systemd/system-preset/20-xenova-mqtt.preset",
+    }
+    for source_name, installed_name in broker_sources.items():
+        installed_path = assemble.inside(root, installed_name, create_parents=False)
+        check(installed_path.is_file() and installed_path.read_bytes() ==
+              (repo/source_name).read_bytes(), "MQTT installed source "+installed_name)
+    mqtt_root_state = root/"srv/xenova/mqtt"
+    check(not mqtt_root_state.exists() or not list(mqtt_root_state.iterdir()),
+          "no authenticated MQTT state in common rootfs")
+    check((root/"etc/systemd/system/multi-user.target.wants/mosquitto.service").is_symlink(),
+          "MQTT packaged service enablement")
+    command(["timeout", "120", "chroot", root, "/usr/sbin/xenova-broker", "--help"])
     command(["chroot", root, "/usr/bin/python3", "-B", "-c",
         "import fastapi,uvicorn,pydantic,pydantic_core,paho.mqtt.client;"
         "import tty,termios,fcntl,websockets,dom0_manager,xenova_mqtt;"
         "import sys;sys.path.insert(0,'/usr/lib/xenova');"
-        "import xenova_management,xenova_execution,xenova_recovery,xenova_cpu;"
+        "import xenova_management,xenova_execution,xenova_recovery,xenova_cpu,xenova_broker;"
         "import dom0_manager.drivers.xentop,dom0_manager.recovery,dom0_manager.service_token"])
+    sites = list((root/"usr/lib").glob("python3*/site-packages/xenova_display/__init__.py"))
+    check(len(sites) == 1, "one installed display Python package")
+    site = sites[0].parent.parent
+    for folder, package in (("display/router", "xenova_display"), ("gateway", "xenova_gateway")):
+        for source in (repo/"platform/services"/folder/package).rglob("*.py"):
+            target = site/package/source.relative_to(repo/"platform/services"/folder/package)
+            check(target.is_file() and target.read_bytes() == source.read_bytes(),
+                  "installed module "+package+"/"+source.name)
+    for unit, folder in (("xenova-display-feed.service", "xenova-display"),
+                         ("xenova-gateway.service", "xenova-gateway")):
+        source = repo/"platform/yocto/meta-xenova/recipes-core"/folder/"files"/unit
+        check((root/"usr/lib/systemd/system"/unit).read_bytes() == source.read_bytes(), "source unit "+unit)
+    for unit in ("xenova-display-kiosk.service", "xenova-display-stream.service"):
+        source = repo/"platform/services/display/router/deploy"/unit
+        check((root/"usr/lib/systemd/user"/unit).read_text() ==
+              source.read_text().replace("/opt/xenova-display/bin/python", "/usr/bin/python3"),
+              "installed user template "+unit)
+    check((root/"etc/systemd/system/multi-user.target.wants/xenova-display-feed.service").is_symlink(),
+          "conditional display feed enabled")
+    check(not (root/"etc/systemd/system/multi-user.target.wants/xenova-gateway.service").is_symlink(),
+          "gateway not automatically granted device access")
+    for name in ("display.env", "display-bindings.json", "display-runtime.json", "gateway.env"):
+        check(not (root/"etc/xenova"/name).exists(), "per-install configuration deferred "+name)
+    command(["timeout", "120", "chroot", root, "/usr/bin/python3", "-B", "-c",
+             "import serial,playwright,pyee,greenlet;"
+             "import xenova_display.main,xenova_display.kiosk,xenova_display.stream;"
+             "import xenova_gateway.__main__;print('ARM runtime imports OK')"])
+    command(["timeout", "120", "chroot", root, "/usr/bin/node", "--version"])
+    command(["timeout", "120", "chroot", root, "/usr/bin/python3", "-B", "-m", "playwright", "--version"])
+    command(["timeout", "120", "chroot", root, "/usr/bin/chromium", "--version"])
+    check("x11grab" in command(["timeout", "120", "chroot", root, "/usr/bin/ffmpeg", "-hide_banner", "-devices"]),
+          "actual ffmpeg x11grab")
+    check("mjpeg" in command(["timeout", "120", "chroot", root, "/usr/bin/ffmpeg", "-hide_banner", "-encoders"]),
+          "actual ffmpeg MJPEG encoder")
+    check(any((root/"usr/share/fonts").rglob("SourceHanSansKR-Regular.otf")), "Korean graphical font installed")
+    graph(root, ["xenova-display-feed.service", "xenova-gateway.service", "mosquitto.service"])
     graph(root, ["multi-user.target", "sshd.service", "xenova-vms.service",
                  "xenova-dom0-manager.service", "xenova-recovery-worker.service",
                  "xenova-cpu-prepare.service", "xenova-host-admission.service"])
@@ -595,6 +789,20 @@ try:
             check(record["capabilities"] == assemble.zephyr.NET_CAPABILITIES
                   and record["board_shutdown_policy"] == "graceful",
                   "network/cooperative firmware "+record["id"])
+        hashes = []
+        for vm_id in ("zephyr-drive-a", "zephyr-drive-b"):
+            binaries = list((data/"seeds"/vm_id).rglob("zephyr.bin"))
+            check(len(binaries) == 1, "one new seed firmware "+vm_id)
+            hashes.append(assemble.sha(binaries[0]))
+        selected = next(e for e in json.loads((repo/"platform/guests/default-templates.lock.json").read_text())["templates"] if e["guest_kind"] == "zephyr")
+        original = json.loads((data/"rtos-templates"/selected["id"]/"firmware.json").read_text())
+        check(len(set(hashes)) == 1 and hashes[0] == original["files"]["zephyr.bin"]["sha256"],
+              "A/B and retained template contain the same common firmware")
+        tail = data/"tailscale"
+        check(not tail.exists() or not list(tail.iterdir()), "no authenticated Tailscale identity in common data")
+        mqtt = data/"mqtt"
+        check(not mqtt.exists() or not list(mqtt.iterdir()),
+              "no MQTT account/password/state copied into common data")
     (args.output/"RESULT.json").write_text(json.dumps(
         {"image": str(args.image), "layout": layout, "passed": passed}, indent=2)+"\n")
 finally:
@@ -618,12 +826,18 @@ deploy = Path(os.environ["DEPLOY"])
 path = (deploy/"xenova-xen-bringup-image-raspberrypi4-64.rootfs.manifest").resolve()
 names = {line.split()[0] for line in path.read_text().splitlines() if line.strip()}
 required = {"xenova-platform", "xenova-bringup", "xenova-dom0-manager",
-    "xenova-mqtt-client", "python3-fastapi", "python3-uvicorn", "python3-paho-mqtt",
+    "xenova-mqtt-client", "xenova-mqtt-broker", "python3-fastapi", "python3-uvicorn", "python3-paho-mqtt",
     "python3-shell", "python3-terminal", "python3-websockets", "xen-tools-xl",
     "xen-tools-xenstat", "libxenmanage1", "mosquitto", "mosquitto-clients",
-    "qemu-system-i386"}
+    "qemu-system-i386", "systemd-extra-utils", "tailscale", "tailscaled",
+    "xenova-display", "xenova-gateway", "python3-pyserial", "python3-playwright",
+    "nodejs", "chromium-x11", "ffmpeg", "xserver-xorg", "openbox",
+    "source-han-sans-kr-fonts", "xf86-input-libinput", "xf86-video-fbdev"}
 assert required <= names, sorted(required-names)
 assert any(n.startswith("kernel-module-brcmfmac-cyw-") for n in names)
+assert any(n.startswith("kernel-module-v3d-") for n in names)
+assert any(n.startswith("kernel-module-tun-") for n in names)
+assert any(n.startswith("kernel-module-ipv6-") for n in names)
 assert "python3-fastapi-ptest" not in names
 print(path)
 print("PASS", len(required)+1, "required packages including kernel-versioned CYW module")
@@ -830,6 +1044,12 @@ sha256sum "$EXPORT/xenova-first-install.img.zst" \
 
 이미지 인계 이후에는 같은 이미지 해시 기준으로 다음을 확인한다. 자세한 명령·반환값은 [CLI·Manager 명세](cli-manager-spec.md)를 따른다.
 
+`xenova-first-install.img`의 SD 전체 기록은 기존 데이터 파티션도 초기화한다. 인증한 보드에
+반복 기록하기 전에는 [같은 보드 전용 암호화 백업·복원](cli-manager-spec.md#cmd-tailscale-backup)을
+완료하고 복호화·무변경 검사를 통과한 백업을 PC에 보관한다. 이 백업은 개인 운영 자료이며
+위의 공통 이미지·전달 묶음에 포함하지 않는다. 데이터 파티션을 보존하는 갱신과 SD 전체 기록을
+같은 작업으로 취급하지 않는다.
+
 | 확인 대상 | 수락 근거 |
 |---|---|
 | 최초 등록·신원 | 기본 세 VM의 UUID/MAC, Linux machine-id·SSH 공개키, seed 등록 완료 |
@@ -838,12 +1058,15 @@ sha256sum "$EXPORT/xenova-first-install.img.zst" \
 | 서비스 | dom0-manager·recovery worker enable/active, xentop 통계 조회, broker 인증·구독·건강 상태 게시 |
 | 보드별 비밀 | 최초 API 서비스 시작에서 root 전용 HTTP 토큰 생성, 기존 토큰 보존. MQTT 계정과 별도로 취급 |
 | 접속·게스트 | Wi-Fi 자동 재연결·SSH, Paho/Agent import·enable, 실제 broker 종단 연결, A/B Ethernet·협조형 종료 |
+| 외부 원격 관리 | 최초 Tailnet 인증·다른 장치의 SSH, daemon/host 재시작 뒤 같은 장치·IP, SD 재설치 뒤 같은 보드의 상태 복원. 서비스 active만으로 대체하지 않음 |
 
 CPU 정책이 없는 기존 설치의 활성화는 모든 관리 게스트가 정지한 유지보수 창에서 `cpu-policy-set` 계획·실행 → 내부 `cpu-host-prepare` → 실제 배치 조회 순서로 진행한다. 정책 저장과 현재 host 적용은 서로 다른 단계다.
 
-일반 UART 콘솔의 커널 출력은 `loglevel=3`이며 연결 중 채널 진단도 `dmesg`·journal에서 조회한다. 진단용 부팅의 상세 로그 설정은 별도로 유지한다. Wi-Fi 연결 요청 응답과 실제 인증·DHCP 완료는 구분한다.
+일반 UART 콘솔의 초기 커널 출력은 `loglevel=4`로 KERN_ERR(3)까지 허용한다. 실행 중 필터는 `/proc/sys/kernel/printk`로 확인하고 연결 중 채널 진단은 `dmesg`·journal에서 조회한다. Xen의 직접 UART 경고에는 Linux 필터가 적용되지 않는다. 진단용 부팅의 상세 로그 설정은 별도로 유지한다. Wi-Fi 연결 요청 응답과 실제 인증·DHCP 완료는 구분한다.
 
 공통 이미지에는 HTTP 토큰·MQTT 암호·개인 Wi-Fi 설정을 넣지 않는다. 설치 후 `xenova-dom0-manager.service`가 `dom0_manager.service_token`을 실행해 `/etc/xenova/dom0-manager-token.env`를 0600으로 준비한다. `/etc/xenova/dom0-manager.env`의 기존 서비스 토큰은 우선하며 자동 회전하지 않는다. worker는 `/etc/xenova/recovery-worker.env`의 `XENOVA_RECOVERY_*` 설정을 읽고, broker 연결 문제로 VM 자동 시작이나 host admission을 외부 online 대기에 묶지 않는다.
+
+Debian·Ubuntu 게스트의 내부 DHCP는 `192.168.77.1`을 NTP 서버로 전달한다. `xenova-guest-ntp.service`는 `xenbr0`에서만 듣고, dom0의 `systemd-timesyncd`가 첫 동기화를 마치고 커널의 UTC 오차 한도를 확인한 뒤 응답한다. 게스트 자동 시작은 이 동기화를 기다리지 않는다. 보드에서는 `ss -lun 'sport = :123'`, 게스트에서는 `timedatectl timesync-status`와 `timedatectl show -p NTPSynchronized`로 확인한다. Zephyr는 실행별 XenStore UTC 대응을 사용한다.
 
 pinning 기능 수락과 성능 효과는 나누어 기록한다. 동일 펌웨어·입력·broker 설정에서 pinning 전/후 × Debian 부하 유무를 비교하고, guest 계산 주기와 Gateway 지연 각각의 p95/p99·관측 최대·deadline miss·오류/손실을 보관한다. 실제 주행 앱이 없는 경우 타이밍 harness 결과로 범위를 명시한다.
 
@@ -931,3 +1154,24 @@ Connected·ring-ref·도메인 루트 권한을 대신 써 넣어 통과시키�
 
 G1은 Store·권한·transaction·watch·회수를 검증한다. Ethernet packet 송수신·DHCP·
 MQTT·앱 준비는 Network Starter와 해당 앱의 별도 수락 근거로 기록한다.
+
+
+## 2026-11-04 앱 메모리 제공물: 수동 버퍼와 RAM 요약
+
+선택 주행 프로필의 로컬 제공 및 다음 이미지 기본 선택 버전은 `1.0.8`이다. `build-xenova-drive-app.py`의
+`--app drive --profile warm-lattice-lab`과 `package-xenova-drive-template.py --version 1.0.8`을
+사용하며 출력은 기존 release와 다른 새 디렉터리로 지정한다. 기존 source receipt 검증을 유지한다.
+
+이 펌웨어는 기존 AUTO 4영역과 MANUAL 입력·대기·실행·보관 결과 4영역을 같은
+Diagnostics provider로 수집한다. 상단 관리 RAM은 기존 memory 봉투의 total/free를 조합한다.
+[정식 계약](../../platform/guests/zephyr/telemetry/contract/CONTRACT.md)과
+[소비 예제](../../platform/guests/zephyr/telemetry/contract/docs/CONSUMER_HANDOFF.md),
+[최종 후보·명령·실제 대역과 한계](../verification/recovery-scenario-closure-20261030.md)를 함께 확인한다.
+
+새 C 코드와 metadata는 firmware에 링크되며 새 target Python 의존성·daemon·unit은 없다.
+기존 템플릿 선택을 자동 변경하지 않는다. 부분 firmware 포장은 정규 전체 이미지·실보드 설치·
+Spring 저장/화면 수락과 구분한다. 스택 발행 계약은 유지하고 화면 적용은 보류한다.
+
+RAM 상단은 최근 유효 관측과 원 관측 시각을 표시한다. 독립 실행 조회 없이 같은 memory 봉투로 계산하며, 6초 원 lease·같은 표본의 오류/상충 보류·boot/publisher별 그래프 분리를 유지한다. 최신 계약·참조 도구는 `ram-recent-observation-contract-2.1-20261104.tar.gz`로 별도 제공한다. 이번 후속에는 링크되는 C/H·설정 변경이 없으므로 새 firmware 버전을 발급하거나 기존 `1.0.8` manifest를 수정하지 않는다. 자세한 변경·검증은 [최근 관측 후속](../verification/recovery-scenario-closure-20261030.md#ram-recent-observation-20261104)에 기록한다.
+
+2026-11-05에는 검증한 1.0.8 manifest(SHA256 47c8eaedb7032c93bbfb58e003d7bde4fd07b3de8506ccbed76912912b61649a)를 기본 lock·factory A/B·조립 예시에 함께 선택했다. 기존 Linux 선택은 1.0.4다. 실제 release root에 같은 불변 1.0.8 디렉터리를 공급한 뒤 resolve/조립 검사를 수행한다. 전체 이미지 빌드·보드 설치는 별도이며 [선택 검증](../verification/recovery-scenario-closure-20261030.md#image-default108-20261105)에 근거를 둔다.

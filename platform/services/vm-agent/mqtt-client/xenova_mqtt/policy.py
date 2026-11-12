@@ -18,10 +18,11 @@ class Policy:
     retain: bool = False
     # 주행 토픽: 1 KB 제한, 받는 쪽은 최신 1건만 쓴다 (latest-only)
     driving: bool = False
+    limit: int | None = None
 
     @property
     def max_bytes(self) -> int:
-        return MAX_DRIVING_BYTES if self.driving else MAX_BYTES
+        return self.limit if self.limit is not None else MAX_DRIVING_BYTES if self.driving else MAX_BYTES
 
 
 POLICIES: dict[str, Policy] = {
@@ -44,11 +45,20 @@ POLICIES: dict[str, Policy] = {
     "drive.fault.detected": Policy(qos=1),
     # 6.1 앱 생존 신호: 1초마다 다시 오므로 유실돼도 다음 것으로 충분하다
     "app.heartbeat": Policy(qos=0),
+    "app.readiness": Policy(qos=0, driving=True),
+    "app.lifecycle": Policy(qos=0, driving=True),
+    "app.state.snapshot": Policy(qos=1,limit=8192),
+    "app.state.applied": Policy(qos=1,limit=8192),
     # 7장 수동 입력
     "drive.input": Policy(qos=0),
     # 8장 지연 측정
     "probe.ping": Policy(qos=1),
     "probe.pong": Policy(qos=1),
+    # 12장 시뮬레이터 전용 (실차에는 없음)
+    "sim.pose": Policy(qos=0, driving=True),
+    "sim.world": Policy(qos=1, retain=True),
+    "sim.command": Policy(qos=1),
+    "sim.command.result": Policy(qos=1),
 }
 
 # 계약 표에 없는 type. 유실보다 중복이 낫다고 보고 QoS 1 로 둔다.
@@ -57,3 +67,11 @@ DEFAULT = Policy(qos=1)
 
 def for_type(message_type: str) -> Policy:
     return POLICIES.get(message_type, DEFAULT)
+
+
+def for_message(message_type: str,payload) -> Policy:
+    """명시 현대 profile만4KiB envelope를 허용한다. typed 의미 검산은 수신 owner 몫이다."""
+    if isinstance(payload,dict) and ((message_type=='drive.command' and payload.get('profile') in ('drive-command-2','drive-command-3'))
+            or (message_type=='drive.input' and payload.get('profile') in ('manual-input-2','manual-input-3'))):
+        return Policy(qos=0,limit=4096)
+    return for_type(message_type)

@@ -20,7 +20,7 @@ public class VmSyncService {
 
     public synchronized List<Vm> sync() {
         long mark = tracker.mark();
-        List<Vm> vms = vmService.list();
+        List<Vm> vms = vmService.listLive();
         for (Vm vm : vms) {
             if (!tracker.touchedSince(vm.vmId(), mark)) {
                 tracker.observed(vm.vmId(), vm.state());

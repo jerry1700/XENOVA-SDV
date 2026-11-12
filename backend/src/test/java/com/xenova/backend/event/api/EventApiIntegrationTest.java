@@ -19,7 +19,7 @@ import com.xenova.backend.event.application.RecoveryEventMessageHandler;
 import com.xenova.backend.event.domain.ReportedAgentStatusRepository;
 import com.xenova.backend.event.domain.VmEventRepository;
 import com.xenova.backend.event.domain.VmRecoveryHealthRepository;
-import com.xenova.backend.vm.domain.VmControlPort;
+import com.xenova.backend.vm.infrastructure.Dom0ManagerClient;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmRecordRepository;
 import com.xenova.backend.vm.domain.VmRuntime;
@@ -56,7 +56,7 @@ class EventApiIntegrationTest {
     private ObjectMapper objectMapper;
 
     @MockitoBean
-    private VmControlPort vmControlPort;
+    private Dom0ManagerClient vmControlPort;
 
     @Autowired
     private VmRecordRepository vmRecordRepository;
@@ -244,7 +244,7 @@ class EventApiIntegrationTest {
 
     private String createVm(String name) throws Exception {
         String body = """
-                {"name":"%s","template_id":"debian-13-arm64","template_version":"1.0.0","vcpus":1,"memory_mib":256}
+                {"name":"%s","template_id":"debian-13-arm64","template_version":"1.0.8","vcpus":1,"memory_mib":256}
                 """.formatted(name);
         String response = mockMvc.perform(authorized(post("/api/v1/vms"))
                         .contentType(MediaType.APPLICATION_JSON)

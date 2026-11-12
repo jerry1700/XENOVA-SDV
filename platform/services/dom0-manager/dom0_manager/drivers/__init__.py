@@ -43,18 +43,19 @@ def build_driver(settings: Settings) -> Driver:
         return XenDriver(_xl(settings, runner), xentop=_xentop(settings, runner))
     from .platform import PlatformDriver, load_manager, load_records_loader
 
-    manager = load_manager(settings.platform_lib, busy_timeout_s=settings.platform_busy_timeout_s)
+    manager = load_manager(settings.platform_lib, busy_timeout_s=settings.platform_busy_timeout_s, read_fork=settings.platform_read_fork)
     return PlatformDriver(
         manager,
         _xl(settings, runner),
         xentop=_xentop(settings, runner),
         records_loader=load_records_loader(settings.platform_lib, manager),
+        read_timeout_ms=round(settings.platform_read_timeout_s * 1000),
     )
 
 
 def build_provisioner(settings: Settings, driver: Driver | None = None) -> Provisioner:
     if settings.driver == "mock":
-        return MockProvisioner()
+        return MockProvisioner(running=driver.has_domain if isinstance(driver, MockDriver) else None)
     if settings.driver == "xen":
         return UnavailableProvisioner(settings.instance_root)
     from .platform import PlatformDriver, PlatformProvisioner, load_manager
@@ -62,7 +63,7 @@ def build_provisioner(settings: Settings, driver: Driver | None = None) -> Provi
     manager = (
         driver.manager
         if isinstance(driver, PlatformDriver)
-        else load_manager(settings.platform_lib, busy_timeout_s=settings.platform_busy_timeout_s)
+        else load_manager(settings.platform_lib, busy_timeout_s=settings.platform_busy_timeout_s, read_fork=settings.platform_read_fork)
     )
     return PlatformProvisioner(manager)
 

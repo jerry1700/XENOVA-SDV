@@ -5,8 +5,6 @@ Spring Boot 기반 VM 관리 서버입니다.
 ## 요구 사항
 
 - Java 21 이상
-- MySQL 8.4
-- Docker Engine (자동 테스트)
 - 저장소에 포함된 Maven Wrapper 사용
 
 ## 실행
@@ -57,6 +55,19 @@ dom0 콘솔로 연결합니다. `DOM0_MANAGER_BASE_URL`과 `DOM0_MANAGER_SERVICE
 프론트엔드에 서비스 토큰을 전달하지 않습니다. 데이터·종료 규격은
 [웹 터미널 계약](../docs/contracts/browser-console-v1.md)을 참고하세요.
 
+### 보드 등록 동기화
+
+보드에서 콘솔·터미널로 만들거나 지운 VM도 웹에 반영되도록, 서버가 dom0-manager `GET /api/v1/vm-registrations`를
+주기적으로 읽어 VM 테이블을 맞춥니다. 보드에서 연속으로 사라진 VM은 RETIRED로 숨깁니다
+([VM 등록 계약](../docs/contracts/vm-provisioning-v1.md)).
+
+| 환경 변수 | 기본값 | 뜻 |
+| --- | --- | --- |
+| `VM_REGISTRATION_SYNC_ENABLED` | `true` | 주기 동기화 사용 |
+| `VM_REGISTRATION_SYNC_INTERVAL` | `30s` | 동기화 사이 간격 |
+| `VM_REGISTRATION_SYNC_MISSING_THRESHOLD` | `2` | 몇 번 연속 보드에 없으면 숨길지 |
+| `VM_REGISTRATION_SYNC_CREATION_GRACE` | `20m` | 생성 직후 숨기지 않는 시간 (dom0 명령 제한) |
+
 ```text
 POST /api/v1/auth/signup
 POST /api/v1/auth/login
@@ -69,9 +80,9 @@ POST /api/v1/auth/logout
 Refresh Token은 폐기합니다. 이미 폐기된 Refresh Token이 다시 사용되면 탈취로 보고 해당 사용자의
 모든 Refresh Token을 폐기합니다. 로그아웃은 두 토큰을 서버에서 폐기합니다.
 
-로컬 실행과 운영 환경 모두 MySQL을 사용하며, 시작할 때 Flyway가 스키마를 순서대로 적용합니다.
-Hibernate는 스키마를 변경하지 않고 엔티티와 마이그레이션 결과가 일치하는지만 검증합니다.
-다음 환경변수를 환경에 맞게 설정해야 합니다.
+로컬 실행과 운영은 MySQL 8.4를 사용하며, 애플리케이션 시작 시 Flyway가 아직 적용되지 않은
+마이그레이션을 실행합니다. 로컬에서는 저장소 루트의 `compose.yaml`로 MySQL을 먼저 실행하고,
+운영 환경에서는 반드시 다음 환경변수를 설정해야 합니다.
 
 ```text
 JWT_SECRET=<32바이트 이상의 임의 비밀값>
@@ -93,8 +104,8 @@ Token의 JTI, 로그인 실패 횟수를 TTL과 함께 저장합니다. Refresh 
 로그인 실패 횟수 증가는 Redis Lua 스크립트로 원자적으로 처리하므로 백엔드를 여러 대 실행해도
 인증 상태가 공유됩니다. 사용자 이름은 로그인 제한 키에 원문 대신 SHA-256 해시로 저장됩니다.
 자동 테스트는 `AUTH_STATE_STORE=jpa`와 MySQL 8.4 Testcontainers를 사용해 Redis 없이 실행되며,
-운영 기본값은 `redis`입니다. 빈 MySQL DB에 Flyway 마이그레이션 전체를 적용한 뒤 Hibernate가
-엔티티와 스키마의 일치를 검증합니다.
+운영 기본값은 `redis`입니다. 테스트 실행 환경에는 Docker Engine이 필요합니다. 테스트 시작 시
+빈 MySQL DB에 Flyway 마이그레이션 전체를 적용한 뒤 Hibernate가 엔티티와 스키마의 일치를 검증합니다.
 Redis 헬스체크는 Redis가 함께 배포되는 운영 환경에서만 `REDIS_HEALTH_ENABLED=true`로
 활성화합니다.
 
@@ -119,6 +130,158 @@ WS   /ws/v1/display-service                 dom0 표시 서비스 전용 (첫 �
   비어 있으면 표시 서비스 연결을 모두 4401 로 거부합니다. 표시 서비스에도 같은 값을 설정합니다.
 - 배치 상태는 메모리에만 있어 백엔드가 재시작하면 두 모니터 모두 `split` 으로 돌아갑니다.
 
+## 차량 HDMI용 읽기 상태
+
+차량 HDMI 데이터는 전용 `/ws/face/*` 경로를 만들지 않고 기존 읽기 API를 재사용합니다.
+
+```text
+GET /api/v1/display/state    VM 실행·앱·OS·주행 모드·active_vm_id (사용자 JWT)
+WS  /ws/v1/display/state     같은 Display 스냅샷 (첫 프레임 사용자 JWT)
+GET /api/v1/drive/state      속도·조향·전압·경고·앱 명령·복구 재개 상태 (사용자 JWT)
+WS  /ws/v1/drive/state       같은 Drive 스냅샷 (첫 프레임 사용자 JWT)
+```
+
+자율주행 재개와 취소는 운영자 콘솔에서 보냅니다 (MQTT 계약 §5.2·§6, v1.7).
+
+```text
+POST   /api/v1/drive/resume  AUTO_READY 재개, 출력 금지된 MANUAL·AUTO 재무장, SAFE_STOP 재무장(게이트웨이가 준비된 수동 VM 선택) 요청 → console/resume 에 drive.resume.requested (202 = 보냄, 그 밖의 모드 409 NOT_AUTO_READY)
+DELETE /api/v1/drive/resume  3초 카운트다운 취소 → drive.resume.cancel_requested (202, 카운트다운 없으면 409 NO_RESUME_COUNTDOWN)
+```
+
+- 두 요청 모두 envelope `causation_id` 에 지금 받은 `vehicle.control` 의 `message_id`, payload `expected_generation` 에
+  그 세대(취소는 카운트다운을 시작한 세대)를 넣습니다. verified 게이트웨이는 이 문맥이 맞지 않는 요청을 버립니다.
+- 202 는 "보냈다" 입니다. 결과는 게이트웨이의 `drive.resume.accepted` / `drive.resume.cancelled`(운영자 취소면
+  `reason: operator_cancelled`, 모드 유지)로 오고 `GET /api/v1/drive/state` 의 `resume`(`requested_by` 포함)과 이벤트 로그에 반영됩니다.
+- 취소가 오면 `resume` 은 null 이 되고, 10초 동안 `resume_cancel`(`reason`·`requested_by`·`generation`·`received_ago_ms`)이 남아
+  화면이 운영자 취소와 조건이 깨져 끝난 카운트다운을 구분할 수 있습니다.
+
+- VM A/B의 현재 구동 여부는 고정 역할명이 아니라 신선한 `active_vm_id`와의 일치로 판정합니다.
+  일치하는 정상 주행 VM이 Active이고, 나머지 정상 주행 VM이 Standby입니다. source가 `stale`,
+  `disconnected`, `unknown`이면 이전 ID로 현재 구동 VM을 추론하지 않습니다.
+- Drive의 최상위 `source`는 MQTT 연결 경계를, `control.source`와 `vehicle.source`는 각 데이터의
+  `fresh`/`stale`/`disconnected`/`unknown` 상태와 age를 제공합니다. 마지막 값은 장애 분석을 위해
+  남지만 source가 `fresh`가 아니면 현재 값으로 표시하지 않습니다.
+- `apps.*.direction`은 신선한 `drive.command`의 부호로 계산합니다. `v_mps` 양수/음수/0은
+  `FORWARD`/`REVERSE`/`STOPPED`, `steer_rad` 양수/음수/0은 `LEFT`/`RIGHT`/`STRAIGHT`입니다.
+  오래된 명령은 `UNKNOWN`입니다. `STOPPED`는 브레이크와 입력 없음까지 구분하지 못합니다.
+- `vehicle.batt_v`는 전압이며 잔량 퍼센트가 아닙니다. SOC, 네비게이션, 음악 데이터는 아직
+  계약되지 않았으므로 임의 변환값이나 데모값을 반환하지 않습니다.
+- 복구 시작·완료·실패는 기존 `GET /api/v1/events`, `WS /ws/v1/events`를 사용합니다. dom0 로컬
+  presentation 연결은 platform 범위이며 이 백엔드 경로와 별도로 작업합니다.
+- dom0 키오스크의 HttpOnly 쿠키는 Spring 사용자 JWT가 아니므로 위 API와 VM 변경 API에서 모두
+  401로 거부됩니다. 키오스크는 기존 로컬 presentation과 렌더 ACK 범위만 사용합니다.
+
+## Zephyr 지표와 앱 보고 조회
+
+- `GET /api/v1/vms/{vmId}/metrics?source=zephyr_telemetry`와 기존 메트릭 WebSocket에서
+  v1 RX/TX 누적값은 `values[].counter_value`의 uint64 십진 문자열로 제공됩니다. 실제 0은
+  `"0"`이고, 미측정이면 `unavailable_reason`과 `source_rc`가 제공됩니다.
+  누적값을 차분할 때는 VM, `boot_id`, `network.publisher_instance_id`, `labels.iface`,
+  `labels.counter_epoch`가 같고 `network.observed_uptime_ms`가 증가한 두 유효 표본을
+  사용합니다. 수신 시각은 조회 정렬용이며 차분 간격은 관측 업타임으로 구합니다.
+  Telemetry 2.1의 직접 계측 `rx_bytes_per_s`는 기존 지표 조회에서 함께 받을 수 있습니다.
+- 같은 조회와 WebSocket에서 `family="app_memory"`의 지도·경로·탐색·odom 풀과 수동 버퍼를 제공합니다.
+  `labels.region`은 `drive_maps`, `drive_paths`, `drive_search_nodes`, `drive_odometry`,
+  `manual_input`, `manual_pending`, `manual_running`, `manual_result`입니다.
+  `memory.app.*`의 예약·점유·용량·여유·최고 점유·최소 여유 및 확보 실패·경합 누계는
+  `values[].raw_value`에 정확한 uint64 십진 문자열로 보존합니다. 안전 정수 범위에서만
+  `value`에도 숫자를 제공합니다. `status=ok`와 `raw_value`가 있다면 `value=null`이어도
+  미측정이 아닙니다. 유효한 `"0"`과 실패의 `null`을 구분하고 `status`,
+  `unavailable_reason`, `source_rc`를 함께 확인합니다. `counter_value`는 기존 원 누계용입니다.
+- 수동 버퍼의 `telemetry.buffer`는 입력 보관·작업 대기·실제 실행·결과 보관을 구분합니다.
+  `phase`는 `empty/stored/pending/running/retained`, 원 입력 상태는 별도 `input_status`입니다.
+  입력이 만료돼도 보관 중인 bytes는 남을 수 있고, 결과를 읽어도 retained 사본은 해제되지 않습니다.
+  `performed`는 callback 수행 사실, `revoked`는 철회 관측이며 계산 성공·출력 적용·실제 종료를 뜻하지 않습니다.
+  sequence·원 시각의 유효한 0과 null, `performed=false`와 미지원/null을 보존합니다.
+  소유자 관측 실패의 `buffer=null`과 입력 자체의 invalid/expired를 구분합니다.
+  worker 세 버퍼의 경합 누계는 같은 원천이므로 합산하지 않습니다. 입력 경합 원천은 32비트이며
+  감소는 불연속입니다. 원 errno는 플랫폼별 값을 그대로 보존합니다.
+- 선택 필드 `telemetry`는 봉투의 `message_seq`와 원 `source_sample_seq`, `observed_uptime_ms`, 수집 구간,
+  송신 시각·업타임·UTC 품질, publisher와 host/execution/receipt 문맥을 보존합니다.
+  `observed_at`은 기존처럼 송신 UTC 또는 수신 시각이며, 캐시 원 관측 시각과 다릅니다.
+  `family="memory"`의 원 시각 쌍은 firmware/page allocator의 캐시를 가리킵니다.
+  직접 kernel heap의 관측 구간은 `telemetry.collection`입니다. 과거 시각 없는 표본에
+  원 시각을 만들어 넣지 않습니다.
+- 앱 풀의 마지막 값은 region과 원 표본·실행 문맥별로 다룹니다. 다른 region의 수신으로
+  갱신하지 않고, 2초 송신 TTL을 화면 수신 보장으로 해석하지 않습니다. 이 API는 수신한
+  관측을 제공하며 현재 Xen 실행이나 주행 준비를 확인하지 않습니다. 정적 예약에 이미
+  포함된 heap·pool·stack·firmware 영역을 합산해 VM 전체 메모리 사용량으로 만들지 않습니다.
+- Zephyr 상단 **메모리 사용률**은 정적 예약을 포함하며, 같은 `family="memory"` 표본의 선언 관리 RAM에서
+  미할당 물리 RAM을 뺀 값입니다. `ram_region_bytes`, `mapped_bytes`, `static_data_bytes`,
+  `page_allocator.free_bytes` 네 값과 원 시각·수집 상태를 한 봉투 그대로 제공합니다.
+  이는 실제 Xen 할당량·RSS·Linux `MemTotal−MemAvailable`과 다른 범위입니다.
+  이 네 지표의 family·단위·kind·encoding·빈 labels가 계약과 다르면 원 자료는 진단으로 남기고
+  `value=null`, `unavailable_reason=ram_contract_mismatch`로 반환합니다. 원 source가 실패했다면
+  그 원 사유와 errno를 우선 보존합니다. scope가 다른 여유량을 전체 RAM으로 계산하지 않습니다.
+  화면은 마지막으로 받은 유효한 원 관측과 관측 시각을 표시하며, 원 표본 나이와 최초 수신 후
+  경과를 합친 6초가 지나면 만료 처리합니다. 새 boot/publisher 또는 새 원 표본의 실행 문맥
+  변경을 관측하면 그래프 구간을 나눕니다. 이미 퇴역한 세션의 지연 수신으로 이전 값을
+  되살리지 않습니다. 독립적인 현재 실행 확인은
+  RAM 표시의 필수 조건이 아닙니다. FastAPI의 응답 확장이나 추가 조회 없이 이 관측을 소비하며,
+  RAM 숫자를 현재 물리 실행·건강·복구 허가·출력 권한의 증거로 쓰지 않습니다.
+- `GET /api/v1/vms/{vmId}/threads`는 최근 Zephyr 2.1 CPU 표본 한 묶음을 반환합니다.
+  이름과 별개인 `thread_id`, `cpu_percent`, 계측 구간, 페이지 수와 수집 상태를 제공합니다.
+  `complete`는 페이지 전달의 완전성이고, 실제 수집 잘림은 `threads_status=truncated`로
+  별도 표시합니다. 서로 맞지 않는 페이지는 `conflicting_pages`로 표시합니다. 최근에
+  관측한 publisher의 결과이며 Xen의 현재 실행 확인과는 별개입니다.
+- `GET /api/v1/drive/state`와 `/ws/v1/drive/state`의 `vm_apps[vm_id][app_id]`는
+  VM별 토픽의 마지막 `lifecycle`과 `heartbeat`를 각각 제공합니다. 두 신호의 신선도는
+  `lifecycle_source`와 `heartbeat_source`로 확인합니다. `WAITING`은 대기 보고이며
+  heartbeat 수신 여부는 별도입니다. 앱 상태는 출력 권한이나 VM 등록 상태를 바꾸지 않습니다.
+  기존 공용 토픽의 `apps`와 모드 필드도 유지됩니다.
+
+신규 지표는 기존 `vm_metric_samples.metric_values`에 값과 관측 문맥을 함께 저장합니다.
+이 버전은 과거 배열과 객체 형식을 읽습니다. `raw_value`·`status`·`telemetry`를 저장한 뒤에는
+새 필드를 모르는 이전 Spring converter가 읽기를 거절할 수 있습니다. 이전 바이너리로
+되돌릴 때는 DB 읽기 호환을 먼저 확인해야 합니다. 이번 변경은 과거 행을 변환하지 않습니다.
+
+## Linux·Zephyr 수집기 상태
+
+- `GET /api/v1/vms/{vmId}/telemetry/heartbeat`에서 VM별 마지막 v2.1 보고와
+  `received_at`·`age_ms`를 조회합니다. `status=FRESH`일 때만 `publisher_state`의
+  `running`·`degraded`·`stopping`을 현재 상태로 표시합니다. `STALE`은 관측 만료,
+  `UNKNOWN`은 미수신입니다. 만료된 마지막 보고는 진단용으로 남습니다.
+  수신 lease 기본값은 6초이며 `AGENT_TELEMETRY_HEARTBEAT_LEASE`에서 설정합니다.
+- `last_collection_success_uptime_ms`는 게스트 부팅 후 마지막 수집 성공까지의 시간을
+  십진 문자열로 제공합니다. 기존 `last_collection_success_age_ms`는 보고 당시 경과 시간입니다.
+  `collection_failures_total`은 Publisher 세션의 누적 실패 횟수입니다.
+  누계가 남아 있어도 신선한 heartbeat가 `running`이면 화면에는 `running`으로 표시합니다.
+  이 응답은 최신 수신 관측이며 현재 Xen 실행을 확인하는 근거로 쓰지 않습니다.
+  기존 Linux v1 `agent_status` 및 VM 복구 경로와 독립입니다.
+- Flyway V7은 `vm_telemetry_heartbeats`에 VM당 최신 보고 한 건을 저장합니다. 같은 세션의
+  중복·역전과 직전 부팅·Publisher의 지연 보고를 걸러 수신 유효기간 갱신을 방지합니다.
+- 새 v2 지표는 등록 VM의 종류에 따라 `linux_telemetry` 또는 `zephyr_telemetry`로 분류합니다.
+  등록 전 공통 Publisher 지표는 `vm_telemetry`입니다. 과거 저장 행의 출처는 보존합니다.
+  기존 Linux v1 자원 지표는 `guest_agent`를 유지합니다.
+- 브로커의 Spring 계정에는 기존 v1 읽기와 v2 `telemetry/metrics`, `telemetry/heartbeat`
+  읽기 권한이 필요합니다.
+
+## Linux 프로세스 수집 상태
+
+`GET /api/v1/vms/{vmId}/processes`의 `items`와 함께 같은 표본의 `process_collection`을 반환합니다.
+`status`는 `first_sample`, `ok`, `partial`, `read_failed`, `disabled`입니다.
+`discovered`, `read_ok`, `vanished`, `failed`, `truncated`, `error`는 Agent 보고값입니다.
+`truncated`는 Agent의 목록 크기 제한을 나타내며 API 조회의 `limit`과 독립적입니다.
+보고가 없는 구형 Agent나 과거 DB 행의 값은 `null`이며 빈 표만으로 수집 결과를 판단할 수 없습니다.
+표본 만료는 기존 `stale` 필드로 확인합니다. Flyway V8은 기존 프로세스 스냅샷에 nullable 열을 추가합니다.
+
+## VM 부하·장애 주입 명령
+
+Linux VM의 CPU·메모리 부하, Zephyr AUTO 연산 지연, 명령 상태 조회 계약은
+[VM 명령 API v1](../docs/contracts/vm-command-api-v1.md)을 따릅니다.
+
+```text
+POST /api/v1/vms/{vmId}/stress/cpu
+POST /api/v1/vms/{vmId}/stress/memory
+POST /api/v1/vms/{vmId}/faults/auto-delay
+POST /api/v1/vms/{vmId}/faults/agent-exit
+GET  /api/v1/vms/{vmId}/commands/{commandId}
+```
+
+제출 API는 `202`와 `command_id`를 반환합니다. MQTT 결과를 받기 전에는 `PENDING`, 이후에는
+`ACCEPTED/RUNNING/SUCCEEDED/FAILED/REJECTED`입니다. Flyway V9의
+`agent_command_results`가 명령별 최신 상태와 계약 위반을 저장합니다.
+
 ## 테스트
 
 Windows:
@@ -126,6 +289,19 @@ Windows:
 ```powershell
 .\mvnw.cmd test
 ```
+
+앱 메모리 소비 경로만 확인하려면 Java 21에서 다음을 실행합니다.
+
+```powershell
+.\mvnw.cmd '-Dtest=VmTelemetryAppMemoryTest,VmTelemetryManualMemoryTest,AppMemoryMqttConsumerTest,VmTelemetryBooleanTest' test
+```
+
+이 시험은 실제 격리 MQTT 소켓·제품 수신기·handler·JSON converter·조회 service·HTTP controller를
+실행하고 DB repository 경계는 메모리 대역으로 둡니다. HTTP controller 검사는 MockMvc이며
+인증 전체 흐름과 실제 MySQL은 별도입니다. 실보드 원문과 제품 codec fixture의 출처·해시는
+`src/test/resources/telemetry-app-memory/provenance.json`과 `telemetry-manual-memory/provenance.json`에
+있습니다. 수동 제공물은 1.0.8의 native 원문이며 보드 수신으로 재명명하지 않습니다.
+운영 MQTT·EC2 배포 수락을 대신하지 않습니다.
 
 Linux/macOS:
 

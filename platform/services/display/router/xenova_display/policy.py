@@ -43,11 +43,25 @@ def decide_vm(vm):
         return {"kind": "operation", "label": "VM 작업 진행 중", "tone": "warning"}
     if vm["os"]["observed"] and vm["os"]["observed"] != vm["os"]["expected"]:
         return {"kind": "os_mismatch", "label": "OS 보고 불일치 확인 필요", "tone": "warning"}
-    if vm["app_state"] == "failed":
-        return {"kind": "app_error", "label": "앱 오류 · VM 실행 중", "tone": "danger"}
+    apps = list(vm.get("apps", {}).values())
+    if apps and all(a.get("report_profile") == "warm-drive-1" for a in apps):
+        values = [a.get("lifecycle", {}).get("current") for a in apps]
+        if all(v is not None for v in values):
+            if any(v["phase"] == "RESIDUAL" for v in values):
+                return {"kind": "app_error", "label": "앱 정리 미확정 · 상태 확인 필요", "tone": "danger"}
+            if any(v["phase"] == "STOPPING" for v in values):
+                return {"kind": "app_stopping", "label": "앱 종료 중 · VM 실행 중", "tone": "warning"}
+            if any(v["readiness"] == "NOT_READY" for v in values):
+                return {"kind": "app_preparing", "label": "앱 보고 수신 · 일부 준비 대기", "tone": "warning"}
+            if any(v["readiness"] == "QUALIFIED" for v in values):
+                return {"kind": "app_standby", "label": "앱 대기 보고 수신 · 출력 허가는 별도", "tone": "muted"}
     if vm["sources"]["app"].get("subscription_status") in {"pending", "denied", "error", "unavailable"}:
         return {"kind": "app_source_unavailable", "label": "VM 실행 중 · 앱 보고 수신 경로 미확인", "tone": "warning"}
-    if vm["app_state"] != "ready" or vm["sources"]["app"]["status"] != "fresh":
+    if vm["sources"]["app"]["status"] != "fresh":
+        return {"kind": "app_waiting", "label": "VM 실행 중 · 앱 상태 미확인", "tone": "warning"}
+    if vm["app_state"] == "failed":
+        return {"kind": "app_error", "label": "앱 오류 · VM 실행 중", "tone": "danger"}
+    if vm["app_state"] != "ready":
         return {"kind": "app_waiting", "label": "VM 실행 중 · 앱 상태 미확인", "tone": "warning"}
     # Graphics handles are not playable URLs. A capture adapter is a later stage.
     return {"kind": "status", "label": "앱 상태 수신 정상", "tone": "ok"}
@@ -62,6 +76,7 @@ class DisplayPolicy:
         self.selection = "pinned"
         self.selected = str(next(b.vm_id for b in settings.bindings if b.role == "primary_drive"))
         self.registered = {str(b.vm_id) for b in settings.bindings}
+        self.drive_vms = {str(b.vm_id) for b in settings.bindings if b.role in {"primary_drive", "backup_drive"}}
         self.acks = {}
 
     def select(self, request):
@@ -85,22 +100,34 @@ class DisplayPolicy:
         with self.lock:
             drive = state["drive"]
             active = drive["active_vm_id"] if drive["source"]["status"] == "fresh" else None
-            if self.selection == "follow_active" and active in self.registered:
+            if self.selection == "follow_active" and active in self.drive_vms:
                 self.selected = active
+            if self.selection == "pinned":
+                detail_reason = "운영자가 선택한 VM 유지"
+            elif active in self.drive_vms:
+                detail_reason = "제어 담당이 보고한 활성 구동 VM 따라가기"
+            else:
+                detail_reason = "활성 구동 VM 미확인 · 마지막 선택 유지"
             decisions = {v["vm_id"]: decide_vm(v) for v in state["vms"]}
             outputs = [
-                {"output_id": "monitor-1", "view": "overview", "selection": "pinned", "vm_id": None},
-                {"output_id": "monitor-2", "view": "detail", "selection": self.selection, "vm_id": self.selected},
+                {"output_id": "monitor-1", "view": "overview", "screen": "instrument", "selection": "pinned", "vm_id": None,
+                 "reason": "차량 계기판 표시"},
+                {"output_id": "monitor-2", "view": "detail", "screen": "infotainment", "selection": self.selection, "vm_id": self.selected,
+                 "reason": detail_reason},
             ]
             # Content identity excludes continuously changing age/capture time, but includes run/boot/source changes.
             content = {"outputs": outputs, "decisions": decisions, "drive": drive,
                        "vms": state["vms"]}
-            def stable(value):
+            def stable(value, path=()):
                 if isinstance(value, dict):
-                    return {k: stable(v) for k, v in value.items()
-                            if k not in {"age_ms", "received_at", "observed_at"}}
+                    # Per-message source sequence (heartbeat/drive seq) is delivery metadata, not screen content.
+                    # Including it changed the hash on every 1 s app/drive heartbeat and invalidated renderer ACKs.
+                    ignored = {"age_ms", "received_at", "observed_at", "sequence"}
+                    if path[-2:] in {("lifecycle", "reported"), ("lifecycle", "current")}:
+                        ignored.add("check_seq")  # 100ms supervision is not new screen content.
+                    return {k: stable(v, (*path, k)) for k, v in value.items() if k not in ignored}
                 if isinstance(value, list):
-                    return [stable(v) for v in value]
+                    return [stable(v, path) for v in value]
                 return value
             render_revision = hashlib.sha256(json.dumps(stable(content), sort_keys=True).encode()).hexdigest()[:20]
             for output in outputs:

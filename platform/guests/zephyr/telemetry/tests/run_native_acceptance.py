@@ -20,19 +20,43 @@ import subprocess
 import sys
 import time
 import uuid
+import re
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal,ROUND_HALF_UP
 
 BASE = Path(__file__).resolve().parents[1]
+ROOT = BASE.parents[3]
 
 
 def write_private(path, value):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(value if isinstance(value, str) else json.dumps(value))
+        f.write(value if isinstance(value, str) else json.dumps(value,ensure_ascii=False))
 
 
 def public_binding(bootstrap):
     return {"vm_id": bootstrap["vm_id"], "boot_id": bootstrap["boot_id"],
             "publisher_instance_id": bootstrap["publisher_id"]}
+
+
+def collect_network_v1(subscriber, duration):
+    """Capture only the v1 metrics topic through the independent MQTT reader."""
+    rows = []
+    deadline = time.monotonic() + duration
+    subscriber.sock.settimeout(0.25)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                flags, data = subscriber.receive()
+            except socket.timeout:
+                continue
+            assert flags == 0x30, "v1 network metrics must be QoS 0 and non-retained"
+            size = int.from_bytes(data[:2], "big")
+            rows.append((data[2:2 + size].decode(), json.loads(data[2 + size:])))
+    finally:
+        subscriber.close()
+    return rows
 
 
 def main():
@@ -42,6 +66,9 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--execute", action="store_true", required=True)
     parser.add_argument("--extended", action="store_true", help="ACL, disconnect, native boot/session replacement")
+    parser.add_argument("--resources-off",action="store_true",help="paired CPU/pool-disabled candidate; require unsupported CPU, never fake zero")
+    parser.add_argument("--manual-memory",action="store_true",help="actual MANUAL workers + 8-region contract")
+    parser.add_argument("--resource-pressure",action="store_true",help="20 extra real kernel threads per guest")
     args = parser.parse_args()
     if os.geteuid() or os.readlink("/proc/self/ns/net") == os.readlink("/proc/1/ns/net"):
         parser.error("root in a new isolated network namespace required")
@@ -54,6 +81,7 @@ def main():
     commands = []
     children = []
     handles = []
+    readers = ThreadPoolExecutor(max_workers=1)
 
     def run(argv, **kwargs):
         started = time.monotonic()
@@ -82,12 +110,28 @@ def main():
             raise RuntimeError("owned test process failed, pid=" + str(process.pid))
 
     def subscriber(label, duration):
-        return spawn(label, [sys.executable, "-B", BASE / "tools/reference_subscriber.py",
+        process=spawn(label, [sys.executable, "-B", BASE / "tools/reference_subscriber.py",
                      "--host", "192.0.2.1", "--port", "18883", "--credentials", private / "subscriber.json",
                      "--bindings-file", bindings_path, "--output", args.output / label,
                      "--duration", str(duration), "--internal-plaintext"])
+        # The reference subscriber creates received.jsonl only after CONNACK and
+        # SUBACK. A fixed sleep is not evidence that early boot events can arrive.
+        ready=args.output/label/"received.jsonl"
+        end=time.monotonic()+5
+        while not ready.exists():
+            if process.poll() is not None or time.monotonic()>=end:
+                raise RuntimeError("reference subscriber not ready: "+label)
+            time.sleep(.01)
+        return process
 
     try:
+        spec = importlib.util.spec_from_file_location("readonly_peer", BASE / "tools/reference_subscriber.py")
+        peer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(peer)
+        broker_root = ROOT / "platform/deploy/mosquitto"
+        spec = importlib.util.spec_from_file_location("broker_policy", broker_root / "scripts/xenova_broker.py")
+        broker_policy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(broker_policy)
         run(["ip", "link", "set", "lo", "up"])
         run(["ip", "link", "add", "xtbr", "type", "bridge"])
         run(["ip", "address", "add", "192.0.2.1/24", "dev", "xtbr"])
@@ -97,12 +141,19 @@ def main():
             run(["ip", "link", "set", tap, "master", "xtbr"])
             run(["ip", "link", "set", tap, "up"])
         bootstraps = []
+        binary=args.binary.read_bytes()
+        build_ids=set(re.findall(rb'xenova-build:(sha256:[0-9a-f]{64})',binary))
+        assert len(build_ids)==1
+        native_build=next(iter(build_ids)).decode()
+        native_artifact=hashlib.sha256(binary).hexdigest()
         for _ in range(2):
             vm_id = str(uuid.uuid4())
             bootstraps.append({"vm_id": vm_id, "boot_id": str(uuid.uuid4()), "publisher_id": str(uuid.uuid4()),
                                "host_boot_id": "", "execution_id": "", "receipt_id": "",
-                               "broker_ipv4": "192.0.2.1", "port": 18883, "username": vm_id,
-                               "password": secrets.token_urlsafe(32), "trusted_internal_plaintext": True})
+                               "broker_ipv4": "192.0.2.1", "port": 18883, "username": "telemetry-" + vm_id,
+                               "password": secrets.token_urlsafe(32), "trusted_internal_plaintext": True,
+                               "hostname":"native-"+str(_),"display_name":'주행 '+str(_)+' "\\' if _==0 else '🚗'*63,
+                               "build_id":native_build,"artifact_sha256":native_artifact})
         subscriber_password = secrets.token_urlsafe(32)
         audit_password = secrets.token_urlsafe(32)
         write_private(private / "subscriber.json", {"username": "telemetry-reference-subscriber", "password": subscriber_password})
@@ -110,11 +161,10 @@ def main():
         write_private(password_path, "telemetry-reference-subscriber:" + subscriber_password + "\ntelemetry-test-audit:" + audit_password + "\n" +
                       "".join(b["username"] + ":" + b["password"] + "\n" for b in bootstraps))
         run([tools / "usr/bin/mosquitto_passwd", "-U", password_path])
-        acl = "user telemetry-reference-subscriber\ntopic read xenova/v2/vms/+/telemetry/+\nuser telemetry-test-audit\ntopic read xenova/#\n"
-        for b in bootstraps:
-            acl += "user " + b["username"] + "\n"
-            for stream in ("inventory", "heartbeat", "metrics", "events", "snapshot"):
-                acl += f"topic write xenova/v2/vms/{b['vm_id']}/telemetry/{stream}\n"
+        policy = broker_policy.policy(broker_root / "etc/policy.json")
+        profiles = {"telemetry-reference-subscriber": "service",
+                    **{b["username"]: "telemetry" for b in bootstraps}}
+        acl = broker_policy.acl(profiles, policy) + "\nuser telemetry-test-audit\ntopic read xenova/#\n"
         write_private(private / "acl", acl)
         write_private(private / "mosquitto.conf", f"listener 18883 192.0.2.1\nuser root\nallow_anonymous false\npassword_file {password_path}\nacl_file {private / 'acl'}\npersistence false\nlog_type error\n")
         broker = spawn("broker", [tools / "usr/sbin/mosquitto", "-c", private / "mosquitto.conf"])
@@ -123,7 +173,10 @@ def main():
             raise RuntimeError("private broker did not start")
         bindings_path = args.output / "bindings.json"
         bindings_path.write_text(json.dumps([public_binding(b) for b in bootstraps], indent=2))
-        sub = subscriber("initial", 10 if args.extended else 14)
+        sub = subscriber("initial", 34 if args.manual_memory else 10 if args.extended else 14)
+        network_reader = peer.ReadOnlySubscriber("192.0.2.1", 18883,
+            {"username": "telemetry-test-audit", "password": audit_password}, "xenova/v1/vms/+/metrics")
+        network_result = readers.submit(collect_network_v1, network_reader, 8)
         time.sleep(0.3)
         guests = []
         source_runs = []
@@ -133,7 +186,8 @@ def main():
             path = private / (label + ".json")
             write_private(path, bootstrap)
             guest_env = dict(env, XT_TEST_BOOTSTRAP=str(path), XT_TEST_INSTANCE_ID=bootstrap["vm_id"],
-                             XT_TEST_DURATION_MS="32000" if args.extended and index == 0 else "12000", XT_TEST_STALL_MS="6000")
+                             XT_TEST_DURATION_MS="32000" if args.manual_memory or args.extended and index == 0 else "12000", XT_TEST_STALL_MS="6000")
+            if args.resource_pressure:guest_env["XT_TEST_RESOURCE_PRESSURE"]="1"
             if args.extended and index == 0:
                 guest_env.update(XT_TEST_RESTART_MS="25000", XT_TEST_ERROR_BURST="1")
             guests.append(spawn("guest-" + label, [args.binary, "-rt", "-no-color", "-eth-if=xtap" + label,
@@ -142,9 +196,6 @@ def main():
             source_runs.append(("guest-" + label, bootstrap["vm_id"], bootstrap["boot_id"]))
         fault_result = {}
         if args.extended:
-            spec = importlib.util.spec_from_file_location("readonly_peer", BASE / "tools/reference_subscriber.py")
-            peer = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(peer)
             audit = peer.ReadOnlySubscriber("192.0.2.1", 18883,
                      {"username": "telemetry-test-audit", "password": audit_password}, "xenova/#")
             def raw_connect(username, password, anonymous=False):
@@ -167,7 +218,10 @@ def main():
             assert not accepted
             probe = ("xt2-forbidden-probe-" + uuid.uuid4().hex).encode()
             acked_denials = 0
-            for topic in (f"xenova/v2/vms/{bootstraps[1]['vm_id']}/telemetry/metrics", "xenova/v1/vehicles/test/drive/command"):
+            for topic in (f"xenova/v2/vms/{bootstraps[1]['vm_id']}/telemetry/metrics",
+                          f"xenova/v1/vms/{bootstraps[1]['vm_id']}/metrics",
+                          f"xenova/v1/vms/{bootstraps[0]['vm_id']}/heartbeat",
+                          "xenova/v1/vehicles/test/drive/command"):
                 sock, reader, accepted = raw_connect(bootstraps[0]["username"], bootstraps[0]["password"])
                 assert accepted
                 sock.sendall(peer.packet(0x32, peer.utf8(topic) + b"\0\7" + probe))
@@ -230,7 +284,7 @@ def main():
                             "publisher_restart_same_boot": True, "native_process_new_boot": True}
         else:
             for guest in guests:
-                wait(guest, 20)
+                wait(guest, 40 if args.manual_memory else 20)
             wait(sub, 10)
         late = subscriber("retained", 3)
         wait(late, 8)
@@ -243,24 +297,132 @@ def main():
         assert {m["vm_id"] for m in messages} == {b["vm_id"] for b in bootstraps}
         assert {m["type"] for m in messages} == {"telemetry." + s for s in ("inventory", "heartbeat", "metrics", "events", "snapshot")}
         matched = 0
-        sources = {}
+        sources = {};resources={};cpu_matched=0
+        network_sources = {}
         for label, vm_id, boot_id in source_runs:
             for line in (args.output / (label + ".stdout")).read_text().splitlines():
                 if line.startswith("XT_SOURCE "):
                     source = json.loads(line[len("XT_SOURCE "):])
                     sources.setdefault((vm_id, boot_id, source["start_ms"], source["end_ms"]), []).append(source)
+                    network_sources[(vm_id, boot_id, source["net_uptime_ms"])] = source
+                if line.startswith('XT_RESOURCE '):
+                    source=json.loads(line[len('XT_RESOURCE '):]);key=(vm_id,boot_id,source['sample'])
+                    if key in resources:assert resources[key]==source,'same cache sample changed across reads/restart'
+                    resources[key]=source
+        v1_rows = network_result.result()
+        epochs = {b["vm_id"]: set() for b in bootstraps}
+        identities = {b["vm_id"]: b for b in bootstraps}
+        interfaces = {(m["vm_id"], m["boot_id"], m["publisher_instance_id"]):
+                      m["payload"]["interfaces"][0]["name"]
+                      for m in messages if m["type"] == "telemetry.inventory" and m["payload"]["interfaces"]}
+        last_sequences = {}
+        message_ids = set()
+        for topic, message in v1_rows:
+            vm_id = message["vm_id"]
+            binding = identities[vm_id]
+            assert topic == f"xenova/v1/vms/{vm_id}/metrics"
+            assert (message["schema_version"], message["type"]) == ("1.0", "agent.metrics")
+            assert message["boot_id"] == binding["boot_id"]
+            assert message["agent_instance_id"] == binding["publisher_id"]
+            assert message["seq"] > last_sequences.get(vm_id, 0)
+            last_sequences[vm_id] = message["seq"]
+            message_id = uuid.UUID(message["message_id"])
+            assert message_id not in message_ids
+            message_ids.add(message_id)
+            payload = message["payload"]
+            values = {v["name"]: v for v in payload["values"]}
+            assert set(values) == {"net_rx_bytes_total", "net_tx_bytes_total"}
+            assert "processes" not in payload and payload["window_ms"] is None
+            if payload["observed_uptime_ms"] is None:
+                assert all(v["value"] is None and v["unavailable_reason"] for v in values.values())
+                continue
+            raw = network_sources[(vm_id, message["boot_id"], payload["observed_uptime_ms"])]
+            for direction in ("rx", "tx"):
+                value = values[f"net_{direction}_bytes_total"]
+                assert value["value"] == raw[f"{direction}_bytes"] and value["unit"] == "bytes"
+                iface = interfaces[(vm_id, message["boot_id"], message["agent_instance_id"])]
+                assert value["labels"] == {"iface": iface, "counter_epoch": raw["net_epoch"]}
+            epochs[vm_id].add(raw["net_epoch"])
+        assert all(value == {"1", "2"} for value in epochs.values()), epochs
+
+        cpu_pages={}
+        for m in messages:
+            if m['type']=='telemetry.inventory':
+                expected=next(b for b in bootstraps if b['vm_id']==m['vm_id'])
+                assert m['payload']['display_name']==expected['display_name']
+                assert m['payload']['hostname']==expected['hostname']
+                assert m['payload']['firmware']['build_id']==native_build
+                assert m['payload']['firmware']['artifact_sha256']==native_artifact
+            if m['type']=='telemetry.metrics' and m['payload']['family']=='cpu':
+                p=m['payload'];w=p['window']
+                key=(m['vm_id'],m['boot_id'],m['publisher_instance_id'],w['sample_seq'])
+                group=cpu_pages.setdefault(key,{})
+                if group:
+                    first=next(iter(group.values()))
+                    assert first['collection']==p['collection'],'CPU pages changed collection/sample'
+                    assert {k:v for k,v in first['window'].items() if k!='part_index'}=={k:v for k,v in w.items() if k!='part_index'},'CPU pages changed window/coverage'
+                assert int(m['clock']['sent_uptime_ms'])-int(w['end_uptime_ms'])<=2000
+                group[w['part_index']]=p
+                raw=resources[(m['vm_id'],m['boot_id'],m['payload']['window']['sample_seq'])]
+                value=next(s for s in m['payload']['samples'] if s['name']=='cpu.system.percent')
+                if value['status']=='ok':
+                    assert raw['rc']==0 and int(raw['total_delta'])>0
+                    expected=(Decimal(raw['busy_delta'])*100/Decimal(raw['total_delta'])).quantize(Decimal('.001'),rounding=ROUND_HALF_UP)
+                    assert Decimal(str(value['value']))==expected
+                    cpu_matched+=1
+        if args.resources_off:
+            cpu_values=[s for m in messages if m['type']=='telemetry.metrics' and m['payload']['family']=='cpu'
+                        for s in m['payload']['samples']]
+            assert cpu_values and all(s['value'] is None and s['status']=='unsupported' for s in cpu_values)
+            assert cpu_matched==0
+        else:assert cpu_matched>0
         for index, bootstrap in enumerate(bootstraps):
+            app_messages=[m for m in messages if m['vm_id']==bootstrap['vm_id'] and
+                          m['type']=='telemetry.metrics' and m['payload']['family']=='app_memory']
+            regions={s['labels']['region'] for m in app_messages for s in m['payload']['samples']}
+            expected_regions={'drive_maps','drive_paths','drive_search_nodes','drive_odometry'}
+            if args.manual_memory:expected_regions|={'manual_input','manual_pending','manual_running','manual_result'}
+            assert regions==expected_regions,(regions,expected_regions)
+            if args.manual_memory:
+                results=[m for m in app_messages if m['payload']['samples'][0]['labels']['region']=='manual_result'
+                         and m['payload']['buffer'] is not None]
+                assert results and any(m['payload']['buffer']['phase']=='retained' and
+                    int(m['payload']['samples'][1]['value'])>0 for m in results)
+                for region in ('manual_pending','manual_running'):
+                    pages=[m for m in app_messages if m['payload']['samples'][0]['labels']['region']==region
+                           and m['payload']['buffer'] is not None]
+                    assert any(int(m['payload']['samples'][4]['value'])>0 for m in pages),(region,'peak missed')
+                inputs=[m for m in app_messages if m['payload']['samples'][0]['labels']['region']=='manual_input'
+                        and m['payload']['buffer'] is not None]
+                assert inputs and all(m['payload']['buffer']['input_status']=='missing' for m in inputs)
+                # Transport is not started here; the input-owner fixture covers receive/expiry.
+            maps=[{s['name']:s for s in m['payload']['samples']} for m in app_messages
+                  if m['payload']['samples'][0]['labels']['region']=='drive_maps']
+            observed=[v for v in maps if v['memory.app.used_bytes']['status']=='ok']
+            assert any(int(v['memory.app.used_bytes']['value'])>0 for v in observed)
+            assert any(v['memory.app.used_bytes']['value']=='0' and
+                       int(v['memory.app.high_water_bytes']['value'])>0 for v in observed)
+            for values in observed:
+                assert int(values['memory.app.used_bytes']['value'])+int(values['memory.app.free_bytes']['value'])==int(values['memory.app.capacity_bytes']['value'])
             loops = []
+            rx_matched = 0
             for m in messages:
                 if m["vm_id"] != bootstrap["vm_id"] or m["type"] != "telemetry.metrics":
                     continue
                 p = m["payload"]
                 candidates = sources[(m["vm_id"], m["boot_id"], p["collection"]["start_uptime_ms"], p["collection"]["end_uptime_ms"])]
                 values = {s["name"]: s["value"] for s in p.get("samples", [])}
+                assert not {"net_rx_bytes_total", "net_tx_bytes_total"} & values.keys()
                 if p["family"] == "memory":
                     assert any(values["memory.kernel_heap.used_bytes"] == s["heap_used"] and
-                               values["memory.kernel_heap.free_bytes"] == s["heap_free"] for s in candidates)
+                               values["memory.kernel_heap.free_bytes"] == s["heap_free"] and
+                               int(values["memory.kernel_heap.accounted_bytes"]) == int(s["heap_used"]) + int(s["heap_free"])
+                               for s in candidates)
                     matched += 1
+                if p["family"] == "network" and values["rx_bytes_per_s"] is not None:
+                    assert int(values["rx_bytes_per_s"]) > 0
+                    assert any(values["rx_bytes_per_s"] == s["rx_bytes_per_s"] for s in candidates)
+                    rx_matched += 1
                 if p["family"] == "loop_progress":
                     assert any(values["loop.completed_total"] == s["completed"] and
                                values["loop.in_flight"] == s["in_flight"] for s in candidates)
@@ -268,6 +430,7 @@ def main():
                         assert any(values["loop.last_jitter_us"] == s["jitter"] for s in candidates)
                     loops.append((m["boot_id"], int(p["collection"]["end_uptime_ms"]), values))
                     matched += 1
+            assert rx_matched > 0
             for boot in {boot for boot, _, _ in loops}:
                 stalled = [values for b, end, values in loops if b == boot and end > 7500]
                 assert len(stalled) >= 2
@@ -287,7 +450,48 @@ def main():
             assert all(int(m["clock"]["sent_uptime_ms"]) - int(m["payload"]["collection"]["end_uptime_ms"]) <= 2000 for m in messages if m["type"] in ("telemetry.metrics", "telemetry.heartbeat"))
         retained = [json.loads(line) for line in (args.output / "retained/received.jsonl").read_text().splitlines()]
         assert len([r for r in retained if r["retained_delivery"] and r["valid"]]) == 2
+        # Real Zephyr fatal path, then the production host filter/archive. TAP
+        # console bytes model the external reader boundary; this is not Xen
+        # ring delivery or hardware power-loss acceptance.
+        fatal_boot=dict(bootstraps[1],boot_id=str(uuid.uuid4()),publisher_id=str(uuid.uuid4()),
+            host_boot_id=str(uuid.uuid4()),execution_id=str(uuid.uuid4()),receipt_id=str(uuid.uuid4()))
+        write_private(private/'B-fatal.json',fatal_boot)
+        fatal_env=dict(env,XT_TEST_BOOTSTRAP=str(private/'B-fatal.json'),
+            XT_TEST_INSTANCE_ID=fatal_boot['vm_id'],XT_TEST_FATAL_MS='3000',XT_TEST_DURATION_MS='10000')
+        fatal_guest=spawn('guest-B-fatal',[args.binary,'-rt','-no-color','-eth-if=xtapB',
+            '-mac-addr=02:00:5e:00:53:03','-ipv4-addr=192.0.2.3','-ipv4-gw=192.0.2.1',
+            '-ipv4-nm=255.255.255.0'],fatal_env)
+        fatal_guest.wait(timeout=10)
+        fatal_text=(args.output/'guest-B-fatal.stdout').read_bytes()
+        assert b'ZEPHYR FATAL ERROR' in fatal_text and b'XDIAG_BIND ' in fatal_text
+        header=ROOT/'platform/yocto/meta-xenova/recipes-extended/xen/files'
+        c=args.output/'fatal-filter.c';binary=args.output/'fatal-filter'
+        c.write_text('#include "xenova_console_evidence.h"\n'
+            'static int out(void *p,const char *s,size_t n){(void)p;return fwrite(s,1,n,stdout)==n?0:-1;}\n'
+            'int main(void){struct xdlog f={0};char s[17];size_t n;while((n=fread(s,1,17,stdin)))'
+            '{if(xdlog_feed(&f,s,n,out,NULL))return 1;}return 0;}\n')
+        subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I'+str(header),str(c),'-o',str(binary)],check=True)
+        filtered=subprocess.check_output([str(binary)],input=fatal_text)
+        assert b'XDIAG_FATAL ' in filtered and b'pc ' not in filtered
+        from xenova_telemetry_evidence import capture,query
+        source=args.output/'fatal-filtered.log';source.write_bytes(b'');source.chmod(0o600)
+        context={k:fatal_boot[k] for k in ('vm_id','host_boot_id','execution_id')}
+        receipt={'phase':'applied','context':context,'boot_id':fatal_boot['boot_id'],
+            'metadata':{'build_id':native_build,'artifact_sha256':native_artifact}}
+        archive=args.output/'fatal-archive'
+        cursor=capture(source,archive,receipt,storage_guard=lambda:None)
+        source.write_bytes(filtered)
+        capture(source,archive,receipt,cursor=cursor,storage_guard=lambda:None)
+        assert any(e['category']=='fatal_observed' for row in query(archive) for e in row['record']['events'])
         result = {"actual_producer": True, "received": len(records), "source_comparisons": matched,
+                  "v1_network_received": len(v1_rows), "v1_network_vm_ring_epochs": 4,
+                  "cpu_source_comparisons":cpu_matched,"metadata_utf8_roundtrip":True,
+                  "resources_enabled":not args.resources_off,
+                  "cpu_page_groups":len(cpu_pages),
+                  "cpu_page_complete":sum(len(g)==next(iter(g.values()))['window']['part_count'] for g in cpu_pages.values()),
+                  "cpu_page_partial":sum(len(g)<next(iter(g.values()))['window']['part_count'] for g in cpu_pages.values()),
+                  "artifact_scope":"native_executable_only; ARM loader binding tested separately",
+                  "native_default_fatal_filtered_and_archived":True,
                   "streams": 5, "vm_count": 2, "reporter_did_not_advance_stalled_loop": True,
                   "retained_inventory_verified": True, "backend_storage": "not exercised",
                   "environment": "native_sim real-time mode, isolated TAP/bridge, authenticated Mosquitto 2.0.18; not Xen board",
@@ -305,6 +509,7 @@ def main():
                     process.wait()
         for handle in handles:
             handle.close()
+        readers.shutdown()
         for process in children:
             for command in commands:
                 if command.get("pid") == process.pid:

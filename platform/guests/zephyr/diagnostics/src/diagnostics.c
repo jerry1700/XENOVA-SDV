@@ -5,6 +5,7 @@
 #include <zephyr/sys/sys_heap.h>
 #include <errno.h>
 #include <string.h>
+#include <zephyr/sys/printk.h>
 
 static struct xdiag_history history;
 static struct xdiag_loop *watched;
@@ -29,7 +30,15 @@ static int event(const char *stage, int rc, bool boot)
 	if (k_is_in_isr()) { return -EWOULDBLOCK; }
 	if (k_mutex_lock(&diag_lock, K_MSEC(20))) { return -EBUSY; }
 	int result = xdiag_history_record(&history, stage, rc, k_uptime_get(), boot);
+	struct xdiag_event stored={0};
+	if(!result&&rc)stored=history.errors[history.error_entries-1];
 	k_mutex_unlock(&diag_lock);
+	if(!result&&rc){
+	 char hex[XDIAG_STAGE_BYTES*2]={0};
+	 for(size_t i=0;stored.stage[i];i++){static const char digits[]="0123456789abcdef";unsigned c=(unsigned char)stored.stage[i];hex[i*2]=digits[c>>4];hex[i*2+1]=digits[c&15];}
+	 printk("XDIAG_EVENT {\"seq\":%llu,\"uptime_ms\":%llu,\"code\":%d,\"stage_hex\":\"%s\",\"boot\":%s}\n",
+	  stored.event_seq,stored.uptime_ms,stored.code,hex,boot?"true":"false");
+	}
 	return result;
 }
 
@@ -47,6 +56,12 @@ int xdiag_network_register(xdiag_network_provider provider, void *context)
 	if (!rc) { network_provider = provider; network_context = context; }
 	k_mutex_unlock(&diag_lock);
 	return rc;
+}
+int xdiag_network_read(struct xdiag_network *out)
+{
+ if(k_mutex_lock(&diag_lock,K_MSEC(20)))return -EBUSY;
+ xdiag_network_provider provider=network_provider;void *context=network_context;
+ k_mutex_unlock(&diag_lock);return provider?provider(out,context):-ENOENT;
 }
 
 int xdiag_loop_init(struct xdiag_loop *loop, uint64_t period, uint64_t deadline)
@@ -104,8 +119,12 @@ static void thread_row(const struct k_thread *thread, void *context)
 	row->stack_bytes = thread->stack_info.size;
 	if (row->stack_bytes > CONFIG_XENOVA_DIAGNOSTICS_STACK_SCAN_LIMIT) {
 		row->stack_rc = -E2BIG;
-	} else {
-		row->stack_rc = k_thread_stack_space_get(thread, &row->unused_bytes);
+	} else if (IS_ENABLED(CONFIG_ARCH_POSIX)) {
+        /* Frozen POSIX arch executes on pthread stacks, not these K_THREAD_STACK
+         * buffers. A fill scan of the reserved Zephyr buffer would be fiction. */
+        row->stack_rc = -ENOTSUP;
+    } else {
+        row->stack_rc = k_thread_stack_space_get(thread, &row->unused_bytes);
 		if (!row->stack_rc && row->unused_bytes > row->stack_bytes) {
 			row->stack_rc = -EIO;
 		}
@@ -139,6 +158,12 @@ int xdiag_snapshot_get(struct xdiag_snapshot *s, bool include_threads)
 	if (!s) { return -EINVAL; }
 	if (k_is_in_isr()) { return -EWOULDBLOCK; }
 	memset(s, 0, sizeof(*s));
+	int resources_rc=xdiag_resources_get(&s->resources);
+	if (resources_rc) {
+		s->resources.cpu.rc=s->resources.threads_rc=resources_rc;
+        s->resources.firmware_rc=s->resources.page_rc=resources_rc;
+		s->resources.net_bytes_rc=s->resources.net_rate_rc=resources_rc;
+	}
 	s->captured_uptime_ms = k_uptime_get();
 	uint64_t start = 0, end;
 	s->clock_rc = xdiag_clock_us(&start);

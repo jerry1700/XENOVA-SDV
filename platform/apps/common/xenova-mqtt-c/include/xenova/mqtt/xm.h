@@ -20,6 +20,8 @@ extern "C" {
 #define XM_SCHEMA_VERSION    "1.0"
 #define XM_MAX_BYTES         (64u * 1024u)
 #define XM_MAX_DRIVING_BYTES 1024u
+#define XM_MAX_PROFILE_BYTES 4096u /* 명시 input2/3·command2/3 envelope */
+#define XM_COMMAND2_BYTES    1536u /* bounded command payload workspace */
 #define XM_ID_MAX            64   /* vm_id·app_id·source_id 최대 길이 + NUL */
 #define XM_TOPIC_MAX         128
 #define XM_UUID_LEN          36
@@ -35,6 +37,7 @@ extern "C" {
 
 int xm_topic_vm(char *out, size_t n, const char *vm_id, const char *kind); /* kind: heartbeat … command-result */
 int xm_topic_app_events(char *out, size_t n, const char *app_id);
+int xm_topic_vm_app_events(char *out, size_t n, const char *vm_id, const char *app_id);
 int xm_topic_manual_input(char *out, size_t n);
 int xm_topic_vehicle_control(char *out, size_t n);
 int xm_topic_vehicle_status(char *out, size_t n);
@@ -131,11 +134,44 @@ bool xm_seq_accept(struct xm_seq_tracker *t, const char *topic, const struct xm_
 
 int xm_drive_command_json(char *out, size_t n, uint32_t generation, float v_mps, float steer_rad);
 int xm_app_heartbeat_json(char *out, size_t n, const char *state, int64_t uptime_ms);
+/* progress is a decimal uint64 string on the wire, never a transport counter. */
+/* Completed work only; progress is a lossless uint64 decimal string.
+ * READY requires nonzero generation/progress and a null reason. */
+int xm_app_readiness_json(char *out, size_t n, uint32_t applied_generation,
+                         uint64_t progress, const char *readiness, const char *reason);
+/* warm-drive-1 only: checked waiting qualification is not completed work. */
+int xm_app_lifecycle_json(char *out,size_t n,uint32_t generation,uint64_t check,
+                         uint64_t progress,const char *phase,const char *readiness,const char *reason);
+
+/* drive-state-1 complete logical state. This is not vehicle output authority. */
+struct xm_state_context {
+ uint64_t frame,configuration,maneuver,road_revision,route_revision;
+ char odom_epoch[XM_UUID_LEN+1];
+};
+struct xm_state_snapshot {
+ char execution[XM_UUID_LEN+1];
+ uint64_t intent_revision,lifecycle_generation,state_revision;
+ uint32_t source_generation;
+ struct xm_state_context context;
+ char kind[8],side[8],phase[8],merge_segment[65];
+};
+struct xm_state_application {
+ char execution[XM_UUID_LEN+1],copy_message_id[XM_UUID_LEN+1];
+ uint64_t intent_revision,lifecycle_generation,state_revision;
+ struct xm_state_context context;
+ bool rebuilt,applied;
+};
+int xm_state_snapshot_json(char *,size_t,const struct xm_state_snapshot *);
+int xm_state_snapshot_parse(struct xm_span,struct xm_state_snapshot *);
+int xm_state_application_json(char *,size_t,const struct xm_state_application *);
+int xm_state_application_parse(struct xm_span,struct xm_state_application *);
 
 struct xm_vehicle_control {
 	uint32_t generation;
 	char mode[16];
 	char active_app[XM_ID_MAX]; /* null 이면 빈 문자열 */
+	char active_vm_id[XM_UUID_LEN + 1]; /* 기존 vehicle.control 필드, null/생략이면 빈 문자열 */
+ char manual_session[XM_UUID_LEN+1],manual_policy[24]; /* explicit session contract only */
 };
 int xm_vehicle_control_parse(struct xm_span payload, struct xm_vehicle_control *out);
 
@@ -148,6 +184,50 @@ enum xm_key {
 };
 /* keys 배열을 비트마스크로. 모르는 키는 무시. keys 가 배열이 아니면 -EINVAL */
 int xm_drive_input_parse(struct xm_span payload, uint32_t *keys);
+struct xm_manual_sample {
+ char session[XM_UUID_LEN+1];uint64_t sample,action;
+ uint32_t generation,keys,age_ms;bool valid;
+};
+/* Strict manual-session-1 payload; counters are original source evidence. */
+int xm_manual_sample_parse(struct xm_span payload,struct xm_manual_sample *out);
+
+/* input2/3는 원 Pi clock의 불변 입력이다. 수신·복사로 source/E를 갱신하지 않는다.
+ * kind/profile는 parser가 배정하며 legacy keys/session1은 -ENOMSG다. */
+enum xm_manual_kind { XM_MANUAL_NEUTRAL_ONLY, XM_MANUAL_PULSE, XM_MANUAL_HELD };
+struct xm_manual_input {
+ char session[XM_UUID_LEN+1],source_instance[XM_UUID_LEN+1];
+ char input_epoch[XM_UUID_LEN+1],device_instance[XM_UUID_LEN+1];
+ char reason[24];
+ uint64_t sample,action,state,source_pi_us,expires_pi_us,grant_revision,key_event_seq;
+ uint32_t generation,keys;
+ enum xm_manual_kind kind;
+ unsigned profile;
+ bool valid;
+};
+int xm_manual_input_parse(struct xm_span,struct xm_manual_input *);
+
+/* A7의 exact 22 fields. STOP도 전 필드를 명시한다. 출력 권한/clock 변환은
+ * 계산자와 Gateway 책임이고 codec은 유한값·role별 sentinel을 검사한다. */
+struct xm_drive_command2 {
+ uint32_t generation,stop_reason,segment_index,cusp_index;
+ char producer_role[8],command_kind[12],mission_id[XM_UUID_LEN+1],driver_session[XM_UUID_LEN+1];
+ float v_mps,steer_rad;
+ uint64_t mission_revision,grant_revision,calculation_sequence,vehicle_sequence,world_sequence;
+ uint64_t plan_revision,phase_revision,completed_guest_us,valid_until_pi_us,driver_action_seq,driver_state_seq;
+};
+int xm_drive_command2_parse(struct xm_span,struct xm_drive_command2 *);
+int xm_drive_command2_json(char *,size_t,const struct xm_drive_command2 *);
+/* 명시 command3는 원 Pi↔guest clock receipt sequence와 next_direction을 추가한다.
+ * command2의 exact22/API는 유지한다. seq0은 안전 STOP에만 허용한다. */
+struct xm_drive_command3 {
+ struct xm_drive_command2 command;
+ uint64_t clock_probe_sequence;
+ int32_t next_direction; /* AUTO pending cusp STOP/HOLD only; other commands 0 */
+};
+int xm_drive_command3_parse(struct xm_span,struct xm_drive_command3 *);
+int xm_drive_command3_json(char *,size_t,const struct xm_drive_command3 *);
+/* Profile opt-in only; legacy type limits remain unchanged. */
+size_t xm_message_max_bytes(const char *type,struct xm_span payload);
 
 /* perception.result (계약 5.4). 좌표는 차량 기준 지면: x 전방, y 왼쪽 + (m) */
 #define XM_PERCEPTION_MAX_OBSTACLES 8
@@ -165,6 +245,17 @@ struct xm_perception_result {
 int xm_perception_result_parse(struct xm_span payload, struct xm_perception_result *out);
 /* perception.event (계약 6장) {"kind":..,"detail":..} */
 int xm_perception_event_json(char *out, size_t n, const char *kind, const char *detail);
+
+/* Zephyr drive demo command. UTC expiry remains a backend responsibility: the
+ * guest has only a monotonic clock. The parser is strict about the action,
+ * object shape, integer types and bounded delay/duration values. */
+struct xm_auto_delay_command {
+	char command_id[129], operation_id[129], expected_boot_id[XM_UUID_LEN + 1];
+	uint32_t delay_ms, duration_s;
+};
+int xm_auto_delay_command_parse(struct xm_span payload, struct xm_auto_delay_command *out);
+int xm_auto_delay_result_json(char *out, size_t n, const struct xm_auto_delay_command *command,
+			      const char *status, uint64_t duration_ms, const char *error_code);
 
 #ifdef __cplusplus
 }

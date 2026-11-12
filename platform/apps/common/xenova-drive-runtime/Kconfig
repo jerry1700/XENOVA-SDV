@@ -5,8 +5,34 @@ config XENOVA_DRIVE_RUNTIME
 	select XENOVA_MQTT_BOUNDED_IO
 
 if XENOVA_DRIVE_RUNTIME
+config XENOVA_DRIVE_IO_PRIORITY
+	int "v1 communication worker ordinary preemptive priority"
+	range 0 14
+	default 8
+	help
+	  Separate bounded I/O owner, not a real-time scheduling guarantee.
+
+config XENOVA_DRIVE_COMMAND_MAX_AGE_MS
+	int "Maximum unsent command candidate age (ms)"
+	range 1 1000
+	default 200
+	help
+	  Provisional local queue limit, separate from the 20ms release and socket
+	  timeout. Fresh-input motion also expires at the original input deadline.
+	  Final Gateway control/generation validation remains necessary.
+
+config XENOVA_DRIVE_RECORDER
+	bool "Optional bounded experiment recorder and console pages"
+	default y if XENOVA_DRIVE_NATIVE_TEST
+	default n
+	help
+	  Keep source and transmission rows only for an explicitly selected
+	  experiment build. Runtime health, timing and shutdown remain available
+	  without these arrays. This does not enable periodic console output.
+
 config XENOVA_DRIVE_CAPTURE_ROWS
 	int "Bounded source measurement rows (never overwrite)"
+	depends on XENOVA_DRIVE_RECORDER
 	range 128 16384
 	default 12288
 	help
@@ -17,4 +43,64 @@ config XENOVA_DRIVE_NATIVE_TEST
 	bool "Runtime-file bootstrap and bounded native test exit"
 	depends on ARCH_POSIX
 	default n
+
+config XENOVA_DRIVE_WORKERS
+	bool "Independent app calculation-owner foundation"
+	default n
+	help
+	  Local app execution building block. This does not change the verified
+	  MQTT readiness profile or activate warm Standby automatically.
+
+config XENOVA_AUTO_DELAY_INJECTION
+	bool "Test-only AUTO calculation delay injection"
+	depends on XENOVA_DRIVE_WORKERS
+	default n
+	help
+	  Subscribes drive-v1 to the VM command topic for bounded auto_delay demo
+	  commands and adds a busy-wait after the real AUTO calculation. The existing
+	  calculation health/lifecycle restricts the affected app; this injector
+	  does not declare a VM trust failure. This is a test fault
+	  injector, not an operating driving policy, and is excluded from normal builds.
+
+config XENOVA_DRIVE_WARM
+	bool "Explicit warm-drive-1 app lifecycle profile"
+	depends on XENOVA_DRIVE_WORKERS
+	default n
+	help
+	  Requires matching root Bootstrap, per-app binding and Gateway/Worker
+	  consumers. Waiting qualification is not calculation or output permission.
+	  The 100ms supervisor/300ms lease are bounded foundation test settings,
+	  not acceptance of a future stateful driving algorithm or vehicle timing.
+
+config XENOVA_DRIVE_APP_STOP_MS
+	int "Warm profile local app cleanup allowance (ms)"
+	depends on XENOVA_DRIVE_WARM
+	range 20 1000
+	default 500
+	help
+	  Foundation test allowance for a root-requested app reset. Expiry retains
+	  resources and reports failure; it never grants abort or another attempt.
+
+config XENOVA_DRIVE_LATTICE
+	bool "Explicit bounded lattice/tracker product profile"
+	depends on XENOVA_DRIVE_WARM
+	default n
+	help
+	  Requires an explicit generated vehicle/resource profile and separate
+	  binary world/state inputs. No operating vehicle values are inferred.
+
+if XENOVA_DRIVE_WORKERS
+config XENOVA_DRIVE_WORKER_STACK_SIZE
+	int "Reserved stack bytes per calculation owner"
+	range 4096 32768
+	default 8192
+config XENOVA_DRIVE_AUTO_PRIORITY
+	int "Preemptible AUTO calculation priority"
+	range 0 14
+	default 10
+config XENOVA_DRIVE_MANUAL_PRIORITY
+	int "Preemptible MANUAL calculation priority"
+	range 0 14
+	default 6
+endif
 endif

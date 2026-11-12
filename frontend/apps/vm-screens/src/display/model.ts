@@ -20,6 +20,14 @@ export interface Decision {
   label: string;
   tone: 'muted' | 'warning' | 'danger' | 'ok';
 }
+export interface DriveAuthority {
+  selected_vm_id: string;
+  selected_mode: 'AUTO' | 'MANUAL' | 'AUTO_READY' | 'SAFE_STOP';
+  generation: number;
+  phase: 'DISARMED' | 'PENDING' | 'APPLIED' | 'FAILED';
+  output_permitted: boolean;
+  storage_uncertain: boolean;
+}
 export interface Presentation {
   schema_version: 1;
   type: 'display.presentation';
@@ -29,8 +37,10 @@ export interface Presentation {
   outputs: {
     output_id: 'monitor-1' | 'monitor-2';
     view: 'overview' | 'detail';
+    screen: 'instrument' | 'infotainment';
     selection: 'pinned' | 'follow_active';
     vm_id: string | null;
+    reason?: string;
   }[];
   decisions: Record<string, Decision>;
   state: {
@@ -39,7 +49,13 @@ export interface Presentation {
     generated_at: string;
     mqtt_connected: boolean;
     vms: DisplayVm[];
-    drive: { active_vm_id: string | null; mode: string; ai_status: string; source: Source };
+    drive: {
+      active_vm_id: string | null;
+      mode: string;
+      ai_status: string;
+      source: Source;
+      authority?: DriveAuthority | null;
+    };
   };
 }
 
@@ -97,6 +113,7 @@ export function parsePresentation(v: unknown): Presentation {
       typeof vm.agent_supported !== 'boolean' ||
       !object(vm.os) ||
       typeof vm.os.expected !== 'string' ||
+      vm.os.expected !== (vm.role === 'interaction' ? 'debian' : 'zephyr') ||
       !nullableText(vm.os.observed) ||
       typeof vm.os.current_run_verified !== 'boolean' ||
       !object(vm.sources) ||
@@ -125,12 +142,48 @@ export function parsePresentation(v: unknown): Presentation {
       !object(output) ||
       output.output_id !== `monitor-${index + 1}` ||
       output.view !== (index === 0 ? 'overview' : 'detail') ||
+      output.screen !== (index === 0 ? 'instrument' : 'infotainment') ||
       !['pinned', 'follow_active'].includes(String(output.selection)) ||
       !(output.vm_id === null || ids.has(String(output.vm_id))) ||
-      (index === 0 && output.vm_id !== null)
+      (index === 0 && output.vm_id !== null) ||
+      (index === 1 && output.vm_id === null) ||
+      (output.reason !== undefined && typeof output.reason !== 'string')
     )
       throw new Error('출력 매핑이 올바르지 않습니다.');
   }
+  const drive = v.state.drive;
+  const authority = drive.authority;
+  if (authority !== undefined && authority !== null) {
+    if (
+      !object(authority) ||
+      !v.state.vms.some((vm) => vm.vm_id === authority.selected_vm_id && vm.role !== 'interaction') ||
+      !['AUTO', 'MANUAL', 'AUTO_READY', 'SAFE_STOP'].includes(String(authority.selected_mode)) ||
+      !Number.isSafeInteger(authority.generation) ||
+      (authority.generation as number) < 1 ||
+      (authority.generation as number) > 0xffffffff ||
+      !['DISARMED', 'PENDING', 'APPLIED', 'FAILED'].includes(String(authority.phase)) ||
+      typeof authority.output_permitted !== 'boolean' ||
+      typeof authority.storage_uncertain !== 'boolean' ||
+      (drive.source as Record<string, unknown>).status !== 'fresh' ||
+      (authority.storage_uncertain
+        ? drive.mode !== 'unknown' || drive.active_vm_id !== null
+        : drive.mode !== authority.selected_mode) ||
+      (drive.active_vm_id !== null &&
+        (drive.active_vm_id !== authority.selected_vm_id ||
+          authority.phase !== 'APPLIED' ||
+          !authority.output_permitted ||
+          !['AUTO', 'MANUAL'].includes(String(drive.mode))))
+    )
+      throw new Error('Gateway 주행 선택·출력 허가를 확인할 수 없습니다.');
+  }
+  if (
+    !['AUTO', 'MANUAL', 'AUTO_READY', 'SAFE_STOP', 'unknown'].includes(String(drive.mode)) ||
+    (drive.active_vm_id !== null &&
+      !v.state.vms.some((vm) => vm.vm_id === drive.active_vm_id && vm.role !== 'interaction')) ||
+    ((drive.source as Record<string, unknown>).status !== 'fresh' &&
+      (drive.active_vm_id !== null || drive.mode !== 'unknown'))
+  )
+    throw new Error('활성 구동 VM·주행 모드를 확인할 수 없습니다.');
   return v as unknown as Presentation;
 }
 

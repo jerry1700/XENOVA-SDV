@@ -62,3 +62,22 @@ def test_blank_env_value_means_default(tmp_path):
     assert s.broker_host == DEFAULT_BROKER_HOST
     with pytest.raises(ValueError):
         AgentSettings(vm_id=VM_ID, broker_host="")
+
+
+def test_metrics_settings_have_defaults_and_bounds(tmp_path):
+    s = AgentSettings.from_env({"XENOVA_AGENT_VM_ID": VM_ID}, instance_id_path=tmp_path / "missing")
+    assert (s.metrics_interval_s, s.top_processes) == (2.0, 10)
+    s = AgentSettings.from_env({"XENOVA_AGENT_VM_ID": VM_ID, "XENOVA_AGENT_METRICS_INTERVAL": "5", "XENOVA_AGENT_TOP_PROCESSES": "0"},
+                               instance_id_path=tmp_path / "missing")
+    assert (s.metrics_interval_s, s.top_processes) == (5.0, 0)
+    for env in ({"XENOVA_AGENT_METRICS_INTERVAL": "0"}, {"XENOVA_AGENT_TOP_PROCESSES": "51"}, {"XENOVA_AGENT_TOP_PROCESSES": "-1"}):
+        with pytest.raises(ValueError):
+            AgentSettings.from_env({"XENOVA_AGENT_VM_ID": VM_ID, **env}, instance_id_path=tmp_path / "missing")
+
+
+def test_demo_commands_default_off_and_env_switch(tmp_path):
+    base = {"XENOVA_AGENT_VM_ID": VM_ID}
+    assert AgentSettings.from_env(base, instance_id_path=tmp_path / "missing").demo_commands is False
+    assert AgentSettings.from_env({**base, "XENOVA_AGENT_DEMO_COMMANDS": "1"}, instance_id_path=tmp_path / "missing").demo_commands is True
+    with pytest.raises(ValueError, match="expected a boolean"):
+        AgentSettings.from_env({**base, "XENOVA_AGENT_DEMO_COMMANDS": "maybe"}, instance_id_path=tmp_path / "missing")
