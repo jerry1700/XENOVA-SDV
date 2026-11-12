@@ -27,7 +27,7 @@ class TapeProfile:
     y_max_m: float = 1.2
     cell_m: float = 0.005
     saturation_max: int = 85
-    value_min: int = 150
+    value_min: int = 185
     contrast_min: int = 25
     tape_width_min_m: float = 0.010
     tape_width_max_m: float = 0.045
