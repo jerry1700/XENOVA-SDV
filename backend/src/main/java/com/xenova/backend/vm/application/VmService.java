@@ -123,7 +123,7 @@ public class VmService {
             vm = get(record.getVmId());
         }
         eventRecorder.vmCreated(record);
-        // vm.created already tells the story; the state is only remembered so polling does not repeat it.
+        // vm.created already tells the story; the state is only remembered so a later sync does not repeat it.
         stateTracker.remember(record.getVmId(), vm.state());
         return vm;
     }
