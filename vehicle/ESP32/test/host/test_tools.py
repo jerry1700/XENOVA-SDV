@@ -15,7 +15,7 @@ import steer_check
 from cutoff_stress import FAR_FIRST, IN_TURN, ONE, TWINS
 from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, COMMAND3, HELLO,
                  HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, SENSOR, SENSOR3)
-from link_bench import SAMPLE_GAP_US, SENSOR_PERIOD_US, Sample
+from link_bench import SENSOR_PERIOD_US, Sample
 
 checks = failures = 0
 
@@ -283,10 +283,9 @@ def lease_checked(sensors, start=1000000, cutoff=1500000, late=link_bench.BOARD_
 
 def test_bench_sees_broken_sample_order():
     problems = link_bench.stream_problems
-    period, half = SENSOR_PERIOD_US, SENSOR_PERIOD_US // 2
-    good = [Sample(CLOCK_REPLY, 1, 1000), Sample(SENSOR, 2, 1000 + half), Sample(SENSOR, 3, 1000 + half + period),
-            Sample(CLOCK_REPLY, 4, 1000 + half + period + SAMPLE_GAP_US),
-            Sample(SENSOR, 5, 1000 + 2 * half + period + SAMPLE_GAP_US)]
+    period = SENSOR_PERIOD_US
+    good = [Sample(CLOCK_REPLY, 1, 1000), Sample(SENSOR, 2, 1000 + period), Sample(SENSOR, 3, 1000 + 2 * period),
+            Sample(CLOCK_REPLY, 4, 1000 + 3 * period), Sample(SENSOR, 5, 1000 + 4 * period)]
     check(problems(good) == [], f'주기와 간격을 지킨 흐름에는 문제 없음 {problems(good)}')
 
     def moved(index, **change):
@@ -295,10 +294,12 @@ def test_bench_sees_broken_sample_order():
     check(len(problems(moved(2, sequence=4))) == 2, '순번을 건너뛰면 그 앞뒤가 모두 어긋남')
     check(len(problems(moved(1, sequence=1))) == 2, '같은 순번이 다시 오면 어긋남')
     check(len(problems(moved(2, device_us=good[1].device_us + period - 1))) == 1, 'SENSOR 가 한 주기보다 일찍 오면 어긋남')
-    check(len(problems(moved(1, device_us=good[0].device_us + half - 1))) == 1,
-          'CLOCK_REPLY 다음 SENSOR 가 반 주기보다 일찍 오면 어긋남')
-    check(len(problems(moved(3, device_us=good[2].device_us + SAMPLE_GAP_US - 1))) == 1,
-          'CLOCK_REPLY 의 표본이 앞 표본에 붙으면 어긋남')
+    check(len(problems(moved(1, device_us=good[0].device_us + period - 1))) == 1,
+          'CLOCK_REPLY 다음 SENSOR 도 한 주기보다 일찍 오면 어긋남')
+    check(len(problems(moved(3, device_us=good[2].device_us + period - 1))) == 1,
+          'CLOCK_REPLY 의 표본도 앞 표본에서 한 주기보다 일찍 오면 어긋남')
+    wedged = [Sample(SENSOR, 1, 1000), Sample(CLOCK_REPLY, 2, 1000 + period // 2), Sample(SENSOR, 3, 1000 + period)]
+    check(len(problems(wedged)) == 2, 'CLOCK_REPLY 의 표본이 한 주기 떨어진 두 SENSOR 사이에 끼면 앞뒤가 모두 어긋남')
     check(problems(moved(3, device_us=good[2].device_us - 1)) != [], '표본 시각이 거꾸로 가면 어긋남')
     check(problems(good[:1]) == [] and problems([]) == [], '표본이 하나 이하면 견줄 것이 없음')
 
@@ -306,8 +307,8 @@ def test_bench_sees_broken_sample_order():
     check(problems(good, late) == [], '늦지 않은 흐름에는 늦음을 봐도 문제 없음')
     slow = moved(2, device_us=good[1].device_us + period + late + 1)
     check(problems(slow[:3]) == [] and len(problems(slow[:3], late)) == 1, 'SENSOR 가 한 주기보다 늦으면 lease 가 살아 있던 구간에서만 어긋남')
-    slow = moved(1, device_us=good[0].device_us + half + late + 1)
-    check(len(problems(slow[:2], late)) == 1, 'CLOCK_REPLY 다음 SENSOR 가 반 주기보다 늦어도 어긋남')
+    slow = moved(1, device_us=good[0].device_us + period + late + 1)
+    check(len(problems(slow[:2], late)) == 1, 'CLOCK_REPLY 다음 SENSOR 가 한 주기보다 늦어도 어긋남')
     check(problems(moved(2, device_us=good[1].device_us + period + late)[:3], late) == [], '허용한 만큼 늦은 것은 문제 없음')
     check(problems([good[2], good[3]._replace(device_us=good[2].device_us + 10 ** 6)], late) == [],
           'CLOCK_REPLY 는 probe 가 올 때 나오므로 늦음을 보지 않음')
