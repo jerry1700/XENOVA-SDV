@@ -2,6 +2,10 @@
 // 게이트웨이와 USB 시리얼로 feedback-3 프레임을 주고받는다.
 // 세션(HELLO)과 시각 설치(CLOCK)에 답하고, lease 가 살아 있는 동안 엔코더 표본(SENSOR)을 20 ms 마다 보낸다.
 // DRIVE·STOP·HOLD_STEER 명령을 모터와 서보에 걸고 REPORT 로 알리며, 명령의 기한이 지나면 타이머가 모터 출력을 끊는다.
+// 앞·뒤 ToF 거리 센서(VL53L0X)를 따로 도는 task 에서 읽어 TOF_SAMPLE 로 보낸다.
+// 라이브러리: VL53L0X by Pololu 1.3.1 (Library Manager)
+#include <VL53L0X.h>
+#include <Wire.h>
 #include <driver/gptimer.h>
 #include <driver/mcpwm_prelude.h>
 #include <esp_app_desc.h>
@@ -15,6 +19,9 @@
 const int PWM1 = 25, DIR1 = 32, PWM2 = 26, DIR2 = 33;
 const int SERVO = 27, ESTOP = 13;
 const int ENC_LA = 18, ENC_LB = 19, ENC_RA = 22, ENC_RB = 23;
+// ToF 는 두 센서가 I2C 두 선을 같이 쓴다. 22 번은 오른쪽 엔코더가 쓰고 있어 SCL 은 17 이다
+const int TOF_SDA = 21, TOF_SCL = 17;
+const int TOF_XSHUT[FB3_TOF_SENSORS] = {16, 4};  // 앞, 뒤
 
 const uint32_t MOTOR_HZ = 20000;  // MDD10A 최대 20 kHz
 const uint8_t MOTOR_BITS = 10;
@@ -26,7 +33,16 @@ const int32_t SERVO_CENTER_US = 1500, SERVO_MIN_US = 900, SERVO_MAX_US = 2100;
 const int32_t SERVO_US_PER_RAD = 637;
 const uint32_t SERVO_PERIOD_US = 20000;  // 50 Hz
 
+// 켜질 때 두 센서의 주소가 같아서(0x29), XSHUT 으로 하나씩 켜며 이 주소로 옮긴다
+const uint8_t TOF_ADDRESS[FB3_TOF_SENSORS] = {0x30, 0x31};
+const uint32_t TOF_BUDGET_US = 33000;  // 측정 하나에 쓰는 시간 (센서의 timing budget)
+const uint32_t TOF_PERIOD_MS = 100;    // 센서가 측정을 시작하는 간격
+const uint32_t TOF_POLL_MS = 5;        // 측정이 끝났는지 보는 간격
+const uint32_t TOF_RETRY_MS = 1000;    // 센서가 답하지 않으면 이만큼 뒤에 다시 초기화해 본다
+
 const uint8_t VEHICLE_CONFIG_SHA256[32] = XENOVA_VEHICLE_CONFIG_SHA256;
+const uint8_t TOF_FRONT_SHA256[32] = XENOVA_TOF_FRONT_SHA256;
+const uint8_t TOF_REAR_SHA256[32] = XENOVA_TOF_REAR_SHA256;
 
 // 장치 시계이자 cutoff 타이머. 1 µs 씩 세는 64비트 카운터 하나를 같이 쓴다
 gptimer_handle_t deviceClock = nullptr;
@@ -151,6 +167,136 @@ bool driveOutput(void *, int16_t velocityMmps, int16_t steeringMrad) {
   return ledcWrite(PWM2, duty > top ? top : duty) && ok;
 }
 
+// ToF. I2C 는 센서가 답하지 않으면 수십 ms 를 기다리므로 메인 루프에서 읽지 않는다. 다른 코어에서 도는 task 가
+// 읽어서 센서마다 가장 새 관측 하나를 여기에 두고, 메인 루프는 그것을 집어 가기만 한다
+portMUX_TYPE tofMux = portMUX_INITIALIZER_UNLOCKED;
+fb3_tof_reading tofLatest[FB3_TOF_SENSORS];
+bool tofFresh[FB3_TOF_SENSORS] = {false, false};  // 아직 집어 가지 않은 관측이 있다
+
+bool takeTof(void *, unsigned sensor, fb3_tof_reading *out) {
+  bool fresh = false;
+  portENTER_CRITICAL(&tofMux);
+  if (tofFresh[sensor]) {
+    *out = tofLatest[sensor];
+    tofFresh[sensor] = false;
+    fresh = true;
+  }
+  portEXIT_CRITICAL(&tofMux);
+  return fresh;
+}
+
+// 센서의 native 상태(RESULT_RANGE_STATUS 의 bit 3..6)를 wire status 로 바꾼다. ST 의 VL53L0X API 가 쓰는 구분이다
+uint8_t tofStatus(uint8_t native, uint16_t distanceMm) {
+  switch ((native & 0x78) >> 3) {
+    case 11:  // 측정 완료
+      return distanceMm >= 1 && distanceMm < 8190 ? FB3_TOF_VALID : FB3_TOF_OUT_OF_RANGE;
+    case 4:   // 돌아온 신호가 약함
+      return FB3_TOF_NO_TARGET;
+    case 6:
+    case 9:   // 위상이 범위 밖 (거리가 측정 범위를 넘음)
+      return FB3_TOF_OUT_OF_RANGE;
+    case 8:
+    case 10:  // 최소 거리 검사 실패
+      return FB3_TOF_BAD_RETURN;
+    case 1:
+    case 2:
+    case 3:   // VCSEL·VHV 같은 센서 안의 고장
+      return FB3_TOF_SENSOR_ERROR;
+    default:
+      return FB3_TOF_UNKNOWN;
+  }
+}
+
+VL53L0X tofSensor[FB3_TOF_SENSORS];
+
+// 센서 하나를 껐다 켜서 주소를 옮기고 연속 측정을 건다. 답하지 않으면 false
+bool startTof(unsigned sensor) {
+  digitalWrite(TOF_XSHUT[sensor], LOW);
+  delay(10);
+  digitalWrite(TOF_XSHUT[sensor], HIGH);
+  delay(10);
+  tofSensor[sensor] = VL53L0X();  // 주소를 기본값 0x29 로 되돌린다
+  tofSensor[sensor].setBus(&Wire);
+  tofSensor[sensor].setTimeout(50);
+  if (!tofSensor[sensor].init()) return false;
+  tofSensor[sensor].setAddress(TOF_ADDRESS[sensor]);
+  if (tofSensor[sensor].last_status != 0 || !tofSensor[sensor].setMeasurementTimingBudget(TOF_BUDGET_US)) return false;
+  tofSensor[sensor].startContinuous(TOF_PERIOD_MS);
+  return tofSensor[sensor].last_status == 0;
+}
+
+void tofTask(void *) {
+  bool up[FB3_TOF_SENSORS] = {false, false};
+  uint32_t retryAtMs[FB3_TOF_SENSORS] = {0, 0};
+  uint32_t generation[FB3_TOF_SENSORS] = {0, 0};
+  uint8_t instance[FB3_TOF_SENSORS][16];
+  uint64_t lookedUs[FB3_TOF_SENSORS] = {0, 0};  // 그 센서의 측정이 끝났는지 마지막으로 본 시각
+
+  // 리셋 뒤에도 센서 전원은 그대로라 옮긴 주소가 남아 있다. 둘 다 끄고 시작한다
+  for (unsigned i = 0; i < FB3_TOF_SENSORS; i++) {
+    pinMode(TOF_XSHUT[i], OUTPUT);
+    digitalWrite(TOF_XSHUT[i], LOW);
+  }
+  Wire.begin(TOF_SDA, TOF_SCL, 400000);
+  Wire.setTimeOut(20);
+  for (;;) {
+    for (unsigned i = 0; i < FB3_TOF_SENSORS; i++) {
+      if (!up[i]) {
+        if (static_cast<int32_t>(millis() - retryAtMs[i]) < 0) continue;
+        up[i] = startTof(i);
+        if (up[i]) {
+          // 초기화할 때마다 새 instance 와 더 큰 generation. RFC 4122 version 4 UUID 라 NIL 이 될 수 없다
+          generation[i]++;
+          esp_fill_random(instance[i], sizeof instance[i]);
+          instance[i][6] = (instance[i][6] & 0x0F) | 0x40;
+          instance[i][8] = (instance[i][8] & 0x3F) | 0x80;
+          lookedUs[i] = clockNow(nullptr);
+        } else {
+          digitalWrite(TOF_XSHUT[i], LOW);
+          retryAtMs[i] = millis() + TOF_RETRY_MS;
+        }
+        continue;
+      }
+      // 새 측정이 끝났는지 본다. 끝났으면 상태와 거리를 읽고 다음 측정을 위해 표시를 지운다
+      bool ready = (tofSensor[i].readReg(VL53L0X::RESULT_INTERRUPT_STATUS) & 0x07) != 0;
+      uint64_t seenUs = clockNow(nullptr);
+      uint64_t sinceUs = seenUs - lookedUs[i];
+      lookedUs[i] = seenUs;
+      uint8_t native = 0;
+      uint16_t distanceMm = 0;
+      if (ready && tofSensor[i].last_status == 0) {
+        native = tofSensor[i].readReg(VL53L0X::RESULT_RANGE_STATUS);
+        if (tofSensor[i].last_status == 0) distanceMm = tofSensor[i].readReg16Bit(VL53L0X::RESULT_RANGE_STATUS + 10);
+        if (tofSensor[i].last_status == 0) tofSensor[i].writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR, 0x01);
+      }
+      if (tofSensor[i].last_status != 0) {
+        // 센서가 답하지 않는다. 끄고 나중에 다시 초기화한다
+        up[i] = false;
+        digitalWrite(TOF_XSHUT[i], LOW);
+        retryAtMs[i] = millis() + TOF_RETRY_MS;
+        continue;
+      }
+      // 다른 센서를 초기화하느라 오래 못 봤으면 어느 측정의 값인지 알 수 없다. 그 관측은 내지 않는다
+      if (!ready || sinceUs > TOF_PERIOD_MS * 1000) continue;
+      // 측정은 앞서 본 때와 지금 사이에 끝났고, 끝나기 전 TOF_BUDGET_US 동안 이뤄졌다.
+      // 그 구간의 가운데를 관측 시각으로, 구간의 절반에 읽는 시간의 여유를 더해 오차로 낸다
+      fb3_tof_reading reading = {};
+      uint32_t span = TOF_BUDGET_US + static_cast<uint32_t>(sinceUs);
+      reading.device_us = seenUs - span / 2;
+      reading.time_error_us = span / 2 + 1000;
+      memcpy(reading.instance, instance[i], sizeof reading.instance);
+      reading.generation = generation[i];
+      reading.status = tofStatus(native, distanceMm);
+      reading.distance_mm = distanceMm;
+      portENTER_CRITICAL(&tofMux);
+      tofLatest[i] = reading;
+      tofFresh[i] = true;
+      portEXIT_CRITICAL(&tofMux);
+    }
+    vTaskDelay(pdMS_TO_TICKS(TOF_POLL_MS));
+  }
+}
+
 // NC 접점을 13번과 GND 사이에 잇는다. 누르거나 선이 빠지면 HIGH
 bool estopPressed(void *) { return digitalRead(ESTOP) == HIGH; }
 
@@ -191,7 +337,11 @@ void startLink() {
   config.j_apply_us = XENOVA_J_APPLY_US;
   config.max_velocity_mmps = XENOVA_MAX_VELOCITY_MMPS;
   config.max_steering_mrad = XENOVA_MAX_STEERING_MRAD;
-  fb3_link_port port = {nullptr, clockNow, latchSample, driveOutput, estopPressed};
+  config.tof[0].config_revision = XENOVA_TOF_FRONT_REVISION;
+  memcpy(config.tof[0].calibration_sha256, TOF_FRONT_SHA256, sizeof TOF_FRONT_SHA256);
+  config.tof[1].config_revision = XENOVA_TOF_REAR_REVISION;
+  memcpy(config.tof[1].calibration_sha256, TOF_REAR_SHA256, sizeof TOF_REAR_SHA256);
+  fb3_link_port port = {nullptr, clockNow, latchSample, driveOutput, estopPressed, takeTof};
   fb3_link_init(&gatewayLink, &config, &port, &cutoff);
 }
 
@@ -219,7 +369,11 @@ void setup() {
 
   // 시계나 서보 출력을 못 켜면 아무 프레임에도 답하지 않는다
   linkReady = servoReady && startClock();
-  if (linkReady) startLink();
+  if (linkReady) {
+    startLink();
+    // 메인 루프는 코어 1 에서 돈다. ToF 는 코어 0 에서 읽는다. 센서가 없으면 관측이 오지 않을 뿐이다
+    xTaskCreatePinnedToCore(tofTask, "tof", 4096, nullptr, 1, nullptr, 0);
+  }
   fb3_framer_init(&framer);
   Serial.setRxBufferSize(1024);  // begin 전에 정해야 한다
   // 송신 버퍼가 없으면 앞 프레임이 다 나가기 전의 write 가 그만큼 loop 를 세운다

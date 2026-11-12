@@ -19,11 +19,13 @@ import random
 import statistics
 import sys
 import time
+import zlib
 from uuid import UUID, uuid4
 
 from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, COMMAND3,
-                 HELLO, HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, Peer,
-                 add_device_arguments, now_us, open_device, packet, reason_name)
+                 HELLO, HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, TOF3,
+                 TOF_CAP, TOF_CRC_BYTES, TOF_SAMPLE, Peer, add_device_arguments, now_us, open_device, packet,
+                 reason_name)
 
 # CLOCK_INSTALL 을 Pi 와 같은 식으로 만들 때 쓰는 값. 실측값이 아니다
 TIMESTAMP_ERROR_US = 100
@@ -80,7 +82,8 @@ class Flow:
         self.ticks = []    # 그 표본마다 (좌, 우) 엔코더 누계
         self.sensors = []  # SENSOR 필드 11개, 받은 순서
         self.reports = []  # (REPORT 필드 19개, 그 REPORT 바로 앞에 받은 표본), 받은 순서
-        self.odd = 0       # 크기가 틀린 SENSOR·REPORT
+        self.tofs = []     # TOF_SAMPLE 의 payload, 받은 순서
+        self.odd = 0       # 크기가 틀린 SENSOR·REPORT·TOF_SAMPLE
 
     def _next(self, deadline):
         """다음 프레임. 표본을 실었으면 적어 둔다. deadline 까지 오지 않으면 None"""
@@ -101,6 +104,11 @@ class Flow:
                 self.reports.append((REPORT3.unpack(payload), self.samples[-1] if self.samples else None))
             else:
                 self.odd += 1
+        elif kind == TOF_SAMPLE:
+            if len(payload) == TOF3.size:
+                self.tofs.append(bytes(payload))
+            else:
+                self.odd += 1
         elif kind == CLOCK_REPLY and len(payload) == CLOCK3.size:
             fields = CLOCK3.unpack(payload)
             self.samples.append(Sample(kind, fields[7], fields[5]))
@@ -108,11 +116,11 @@ class Flow:
         return frame
 
     def answer(self, timeout=1.0):
-        """SENSOR·REPORT 가 아닌 다음 프레임을 (종류, payload, 받은 시각 us) 로. 시간 안에 오지 않으면 None"""
+        """SENSOR·REPORT·TOF_SAMPLE 이 아닌 다음 프레임을 (종류, payload, 받은 시각 us) 로. 시간 안에 오지 않으면 None"""
         deadline = time.monotonic() + timeout
         while True:
             frame = self._next(deadline)
-            if frame is None or frame[0] not in (SENSOR, REPORT):
+            if frame is None or frame[0] not in (SENSOR, REPORT, TOF_SAMPLE):
                 return frame
 
     def report(self, wanted, timeout=1.0):
@@ -201,6 +209,42 @@ def report_problems(reports):
     return problems
 
 
+def tof_problems(payloads, pi, device, epoch):
+    """받은 순서대로의 TOF_SAMPLE payload 에서 계약(§3·§9.1)과 어긋난 곳을 글로 돌려준다.
+
+    session·clock epoch 는 지금 것이어야 하고, 관측 순번은 센서의 instance 마다 1 씩 는다. instance 가 바뀌면
+    generation 이 커져야 하고 순번은 1 부터다. 관측 시각은 센서마다 늘기만 한다.
+    """
+    problems = []
+    last = {}  # sensor_id → (instance, generation, source_sample, device_sample_us)
+    for payload in payloads:
+        (frame_pi, frame_device, sample, stamp, error, frame_epoch, clock_sequence, sensor, instance, generation,
+         revision, calibration, rows, cols, frame_status, distance, status, quality, crc) = TOF3.unpack(payload)
+        tag = f'센서 {sensor} 관측 {sample}'
+        if (frame_pi, frame_device, frame_epoch) != (pi, device, epoch) or clock_sequence == 0:
+            problems.append(f'{tag}: session 이나 clock epoch 가 지금 것이 아님')
+        if crc != zlib.crc32(payload[:TOF_CRC_BYTES]):
+            problems.append(f'{tag}: sample_crc32 가 앞 {TOF_CRC_BYTES} B 의 CRC32 와 다름')
+        if sensor not in (0, 1) or (rows, cols) != (1, 1) or not any(instance) or generation == 0 or revision == 0:
+            problems.append(f'{tag}: 센서 번호·rows·cols·instance·generation·revision 이 계약 밖')
+        if frame_status & ~7 or status > 7 or quality & ~0x1f or error == 0 or stamp == 0 or sample == 0:
+            problems.append(f'{tag}: frame_status·status·quality·시각 칸이 계약 밖')
+        valid = status == 1
+        if valid != bool(quality & 1) or (valid and distance in (0, 65535)) or (not valid and distance != 0):
+            problems.append(f'{tag}: status {status}, quality {quality:#x}, 거리 {distance} 가 서로 맞지 않음')
+        before = last.get(sensor)
+        if before is not None:
+            if instance == before[0]:
+                if generation != before[1] or sample != before[2] + 1:
+                    problems.append(f'{tag}: 같은 instance 인데 generation 이 바뀌었거나 순번이 {before[2]} 다음이 아님')
+            elif generation <= before[1] or sample != 1:
+                problems.append(f'{tag}: instance 가 바뀌었는데 generation 이 커지지 않았거나 순번이 1 이 아님')
+            if stamp <= before[3]:
+                problems.append(f'{tag}: 관측 시각이 앞 관측보다 뒤가 아님')
+        last[sensor] = (instance, generation, sample, stamp)
+    return problems
+
+
 def drive_report_problems(told, samples, first, cutoff):
     """DRIVE 하나의 APPLIED REPORT 가 표본을 따라왔는지 본다. (어긋난 곳의 글, 꼭 와야 했던 후속 REPORT 수) 를 돌려준다.
 
@@ -254,7 +298,7 @@ def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, la
     return problems
 
 
-def run(flow, lease_us, late_us, drive, report):
+def run(flow, lease_us, late_us, drive, report, tof=False):
     check, note = report.check, report.note
     peer = flow.peer
 
@@ -358,7 +402,8 @@ def run(flow, lease_us, late_us, drive, report):
     wire, ack = install(epoch, 5, 3, terms)
     if not check(ack is not None and ack[5:7] == (INSTALLED, 0), f'CLOCK_INSTALL 에 INSTALLED 로 답함 ({outcome(ack)})'):
         return
-    check(not flow.sensors, f'lease 를 설치하기 전에는 SENSOR 를 보내지 않음 ({len(flow.sensors)}개)')
+    check(not flow.sensors and not flow.tofs,
+          f'lease 를 설치하기 전에는 SENSOR 와 TOF_SAMPLE 을 보내지 않음 ({len(flow.sensors)}개, {len(flow.tofs)}개)')
     check(ack[:5] == (pi, device, epoch, 5, 3) and ack[8] == terms.cutoff, 'session·epoch·순번·probe·cutoff 를 그대로 돌려줌')
     check(d3 < ack[7] < terms.cutoff and ack[9] < terms.expires,
           f'device_now 가 d3 와 cutoff 사이 (cutoff 까지 {terms.cutoff - ack[7]} us), Pi 기한 전에 도착')
@@ -389,7 +434,9 @@ def run(flow, lease_us, late_us, drive, report):
         gaps = [after[3] - before[3] for before, after in zip(during, during[1:])]
         note(f'SENSOR 간격 중앙값 {statistics.median(gaps):.0f} us, 최소 {min(gaps)}, 최대 {max(gaps)} us. '
              f'마지막 표본은 cutoff {terms.cutoff - during[-1][3]} us 전')
-    check(flow.listen(QUIET_S) == 0 and len(flow.sensors) == len(during), '기한이 지난 뒤에는 SENSOR 를 보내지 않음')
+    expired_tofs = len(flow.tofs)
+    check(flow.listen(QUIET_S) == 0 and len(flow.sensors) == len(during) and len(flow.tofs) == expired_tofs,
+          '기한이 지난 뒤에는 SENSOR 와 TOF_SAMPLE 을 보내지 않음')
 
     # 7. 만료 뒤에도 새 lease 를 설치할 수 있고, 지난 순번은 받지 않는다
     four = probe(4)
@@ -580,16 +627,36 @@ def run(flow, lease_us, late_us, drive, report):
         stop, fields = command(number + 2, STOP)
         check(echoed(fields, stop) and fields[6] == APPLIED, f'마지막 STOP 에 APPLIED 로 답함 ({result(fields)})')
 
+    # ToF. lease 가 살아 있는 동안 센서의 새 관측이 TOF_SAMPLE 로 온다
+    if capabilities & TOF_CAP:
+        flow.listen(0.3)
+        problems = tof_problems(flow.tofs, pi, device, epoch)
+        counts = [sum(1 for payload in flow.tofs if payload[76] == sensor) for sensor in (0, 1)]
+        check(not problems, f'TOF_SAMPLE {len(flow.tofs)}개가 배치·CRC·순번 규칙을 지킴 (앞 {counts[0]}개, 뒤 {counts[1]}개)')
+        for text in problems[:3]:
+            note(text)
+        if tof:
+            check(min(counts) >= 5, f'앞·뒤 센서의 관측이 모두 옴 (앞 {counts[0]}개, 뒤 {counts[1]}개)')
+        if flow.tofs:
+            valid = [TOF3.unpack(payload) for payload in flow.tofs]
+            for sensor, name in ((0, '앞'), (1, '뒤')):
+                seen = [row for row in valid if row[7] == sensor]
+                if seen:
+                    distances = [row[15] for row in seen if row[16] == 1]
+                    note(f'{name} 센서: 유효 {len(distances)}개' + (f', 거리 {min(distances)} mm 에서 {max(distances)} mm'
+                                                            if distances else '')
+                         + f', 그 밖의 status {sorted({row[16] for row in seen} - {1})}')
+
     # 10. 새 pi_session 이 오면 앞 session 의 것은 받지 않는다
     newcomer = uuid4().bytes
     peer.send(HELLO, HELLO3.pack(3, newcomer, config))
     reply = flow.answer()
     check(reply is not None and reply[0] == HELLO_ACK and ACK3.unpack(reply[1])[1:3] == (newcomer, device),
           '새 pi_session 의 HELLO 에 같은 device_boot_session 으로 답함')
-    before = len(flow.sensors), len(flow.reports)
+    before = len(flow.sensors), len(flow.reports), len(flow.tofs)
     check(probe(999, wait=QUIET_S) is None, '앞 pi_session 의 CLOCK_PROBE 에는 답하지 않음')
-    check((len(flow.sensors), len(flow.reports)) == before,
-          '새 pi_session 이 온 뒤에는 앞 session 의 lease 와 명령으로 SENSOR·REPORT 를 보내지 않음')
+    check((len(flow.sensors), len(flow.reports), len(flow.tofs)) == before,
+          '새 pi_session 이 온 뒤에는 앞 session 의 lease 와 명령으로 SENSOR·REPORT·TOF_SAMPLE 을 보내지 않음')
 
 
 def main():
@@ -599,6 +666,8 @@ def main():
     parser.add_argument('--drive', action='store_true',
                         help='실보드에 DRIVE·HOLD_STEER 까지 보낸다. 바퀴가 돌고 조향이 움직인다. '
                              '바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
+    parser.add_argument('--tof', action='store_true',
+                        help='실보드에서 앞·뒤 ToF 센서의 관측이 모두 오는지도 본다. 센서가 달려 있을 때 준다')
     args = parser.parse_args()
     sys.stdout.reconfigure(errors='backslashreplace')  # 한글을 못 쓰는 콘솔에서도 멈추지 않게
     report = Report()
@@ -607,7 +676,7 @@ def main():
     flow = Flow(peer)
     try:
         run(flow, args.lease_ms * 1000, SIM_LATE_US if args.sim else BOARD_LATE_US, bool(args.sim or args.drive),
-            report)
+            report, bool(args.sim or args.tof))
     finally:
         device.close()
     problems = stream_problems(flow.samples)
@@ -616,7 +685,7 @@ def main():
     for text in problems[:3]:
         report.note(text)
     if flow.odd:
-        report.note(f'크기가 틀린 SENSOR·REPORT {flow.odd}개')
+        report.note(f'크기가 틀린 SENSOR·REPORT·TOF_SAMPLE {flow.odd}개')
     problems = report_problems(flow.reports)
     report.check(not problems, f'REPORT {len(flow.reports)}개의 순번이 하나씩 늘고 바로 앞에 받은 표본을 가리킴')
     for text in problems[:3]:

@@ -699,6 +699,101 @@ static size_t report_sample(struct fb3_link *link, uint8_t *wire, size_t cap)
 	return send_report(link, &link->active, FB3_REPORT_APPLIED, FB3_REASON_OK, report, wire, cap);
 }
 
+/* 센서가 낸 관측 하나를 TOF_SAMPLE 로 묶는다. 보낼 수 없는 관측은 버리고 0 을 돌려준다 */
+static size_t tof_frame(struct fb3_link *link, unsigned sensor, const struct fb3_tof_reading *reading,
+			uint8_t *wire, size_t cap)
+{
+	struct fb3_tof_source *source = &link->tof[sensor];
+	const struct fb3_lease *lease;
+	struct fb3_tof_sample out;
+	uint8_t payload[FB3_TOF_SAMPLE_SIZE];
+	bool same = memcmp(reading->instance, source->instance, 16) == 0;
+	size_t len;
+
+	if (is_nil(reading->instance) || reading->generation == 0 || !in_range(reading->device_us)
+			|| reading->time_error_us == 0 || reading->status > FB3_TOF_BAD_RETURN
+			|| (reading->status == FB3_TOF_VALID
+			    && (reading->distance_mm == 0 || reading->distance_mm == UINT16_MAX))) {
+		return 0;
+	}
+	/* 센서를 다시 초기화했으면 새 instance 와 더 큰 generation 이어야 한다. 한쪽만 바뀐 것은 받지 않는다 */
+	if (source->generation != 0
+			&& (same ? reading->generation != source->generation : reading->generation <= source->generation)) {
+		return 0;
+	}
+	if (reading->device_us <= source->device_us || (same && source->sample >= FB3_U63_MAX)) {
+		return 0;
+	}
+	if (!same) {
+		memcpy(source->instance, reading->instance, 16);
+		source->generation = reading->generation;
+		source->sample = 0;
+	}
+	source->device_us = reading->device_us;
+	/* 관측 시각을 Pi 시각으로 옮길 lease 가 있어야 한다. 없으면 이 관측은 보내지 않는다 */
+	lease = newest_live_lease(link);
+	if (lease == NULL || reading->device_us >= lease->install.cutoff_device_us) {
+		return 0;
+	}
+
+	memcpy(out.pi_session, link->pi_session, 16);
+	memcpy(out.device_session, link->config.device_boot_session, 16);
+	out.source_sample = source->sample + 1;
+	out.device_sample_us = reading->device_us;
+	out.sample_time_error_us = reading->time_error_us;
+	memcpy(out.clock_epoch, lease->install.clock_epoch, 16);
+	out.clock_sequence = lease->install.clock_sequence;
+	out.sensor_id = (uint8_t)sensor;
+	memcpy(out.sensor_instance, source->instance, 16);
+	out.sensor_generation = source->generation;
+	out.sensor_config_revision = link->config.tof[sensor].config_revision;
+	memcpy(out.sensor_calibration_sha256, link->config.tof[sensor].calibration_sha256, 32);
+	out.rows = 1;
+	out.cols = 1;
+	out.frame_status = FB3_TOF_FRAME_TIMING_VALID;
+	if (reading->status != FB3_TOF_SENSOR_ERROR && reading->status != FB3_TOF_UNKNOWN) {
+		out.frame_status |= FB3_TOF_FRAME_SENSOR_OK;
+	}
+	/* 유효한 거리가 아니면 거리 칸은 0 이고 TARGET_VALID 를 켜지 않는다 */
+	out.distance_mm = reading->status == FB3_TOF_VALID ? reading->distance_mm : 0;
+	out.status = reading->status;
+	out.quality = FB3_TOF_QUALITY_NATIVE | (reading->status == FB3_TOF_VALID ? FB3_TOF_QUALITY_TARGET_VALID : 0u);
+	out.sample_crc32 = 0;
+	if (fb3_pack_tof_sample(&out, payload, sizeof payload) != sizeof payload) {
+		return 0;
+	}
+	fb3_seal_tof_sample(payload);
+	len = fb3_encode_frame(FB3_TOF_SAMPLE_ID, payload, sizeof payload, wire, cap);
+	if (len != 0) {
+		source->sample = out.source_sample;
+	}
+	return len;
+}
+
+/* 새 관측이 있는 ToF 센서 하나의 것을 보낸다. 센서를 번갈아 먼저 본다 */
+static size_t send_tof(struct fb3_link *link, uint8_t *wire, size_t cap)
+{
+	if (!link->open || link->port.tof == NULL || !(link->config.capabilities & FB3_CAP_TOF_SINGLE)) {
+		return 0;
+	}
+	for (unsigned turn = 0; turn < FB3_TOF_SENSORS; turn++) {
+		unsigned sensor = (link->tof_next + turn) % FB3_TOF_SENSORS;
+		struct fb3_tof_reading reading;
+		size_t len;
+
+		if (link->config.tof[sensor].config_revision == 0 || !link->port.tof(link->port.ctx, sensor, &reading)) {
+			continue;
+		}
+		link->tof_next = (sensor + 1) % FB3_TOF_SENSORS;
+		len = tof_frame(link, sensor, &reading, wire, cap);
+		if (len == 0) {
+			link->tof_dropped[sensor]++;
+		}
+		return len;
+	}
+	return 0;
+}
+
 /* 어느 명령의 것도 아닌 장치 고장을 알린다 (계약 §7 의 순번 0·종류 0·FAULT) */
 static size_t report_fault(struct fb3_link *link, enum fb3_reason reason, uint8_t *wire, size_t cap)
 {
@@ -745,10 +840,10 @@ size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap)
 		link->report_due = false;
 		return report_sample(link, wire, cap);
 	}
-	/* 다음 표본을 뜰 때까지 기다린다 */
+	/* 다음 표본을 뜰 때가 아니면 그사이에 ToF 관측을 보낸다 */
 	now = link->port.now_us(link->port.ctx);
 	if (now < link->sensor_due_us) {
-		return 0;
+		return send_tof(link, wire, cap);
 	}
 	/* 비상정지가 눌리면 출력을 끊고, 새 STOP 을 받을 때까지 DRIVE 를 받지 않는다 */
 	if (!link->stop_needed && link->port.estop(link->port.ctx)) {

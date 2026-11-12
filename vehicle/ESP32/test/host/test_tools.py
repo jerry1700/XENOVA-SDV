@@ -5,7 +5,9 @@
 """
 import os
 import random
+import struct
 import sys
+import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import cutoff_stress
@@ -14,7 +16,7 @@ import pi_link_check
 import steer_check
 from cutoff_stress import FAR_FIRST, IN_TURN, ONE, TWINS
 from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, COMMAND3, HELLO,
-                 HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, SENSOR, SENSOR3)
+                 HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, SENSOR, SENSOR3, TOF3, TOF_CRC_BYTES, TOF_SAMPLE)
 from link_bench import SENSOR_PERIOD_US, Sample
 
 checks = failures = 0
@@ -427,6 +429,54 @@ def test_flow_sets_report_aside():
     check(answer is not None and answer[0] == HELLO_ACK and len(flow.reports) == 1, '응답을 기다릴 때 REPORT 는 건너뛰고 적어 둠')
 
 
+def tof_payload(sensor=0, sample=1, stamp=1000, distance=600, status=1, quality=3, instance=b'i' * 16, generation=1,
+                pi=PI, device=DEVICE, epoch=EPOCH, crc=None, rows=1, cols=1, frame_status=3, revision=1, error=17500,
+                clock=5):
+    body = TOF3.pack(pi, device, sample, stamp, error, epoch, clock, sensor, instance, generation, revision, b'c' * 32,
+                     rows, cols, frame_status, distance, status, quality, 0)[:TOF_CRC_BYTES]
+    return body + struct.pack('<I', zlib.crc32(body) if crc is None else crc)
+
+
+def test_bench_checks_tof_samples():
+    def problems(payloads):
+        return link_bench.tof_problems(payloads, PI, DEVICE, EPOCH)
+
+    first = tof_payload()
+    good = [first, tof_payload(1, 1, 1500, 800, instance=b'j' * 16), tof_payload(0, 2, 2000),
+            tof_payload(0, 3, 3000, distance=0, status=3, quality=2), tof_payload(1, 2, 3500, 801, instance=b'j' * 16)]
+    check(problems(good) == [], f'규칙을 지킨 관측에는 문제 없음 {problems(good)}')
+    check(problems([]) == [], '관측이 없으면 견줄 것이 없음')
+    check(problems([tof_payload(crc=1)]) != [], 'sample_crc32 가 틀리면 문제')
+    check(problems([tof_payload(pi=b'x' * 16)]) != [] and problems([tof_payload(device=b'x' * 16)]) != [],
+          '다른 session 의 관측이면 문제')
+    check(problems([tof_payload(epoch=b'x' * 16)]) != [] and problems([tof_payload(clock=0)]) != [],
+          '지금 clock epoch 가 아니거나 lease 순번이 0 이면 문제')
+    check(problems([first, tof_payload(0, 3, 2000)]) != [] and problems([first, tof_payload(0, 1, 2000)]) != [],
+          '순번이 1 씩 늘지 않으면 문제')
+    check(problems([first, tof_payload(0, 1, 2000, instance=b'k' * 16)]) != [], 'instance 만 바뀌면 문제')
+    check(problems([first, tof_payload(0, 2, 2000, generation=2)]) != [], 'generation 만 바뀌면 문제')
+    check(problems([first, tof_payload(0, 1, 2000, instance=b'k' * 16, generation=2)]) == [],
+          '새 instance 와 더 큰 generation 이면 순번은 1 부터')
+    check(problems([first, tof_payload(0, 2, 2000, instance=b'k' * 16, generation=2)]) != [],
+          '새 instance 인데 순번이 1 이 아니면 문제')
+    check(problems([first, tof_payload(0, 2, 1000)]) != [], '관측 시각이 늘지 않으면 문제')
+    check(problems([tof_payload(distance=0)]) != [] and problems([tof_payload(distance=65535)]) != [],
+          '유효한 관측의 거리가 0 이나 65535 면 문제')
+    check(problems([tof_payload(distance=0, status=3, quality=3)]) != [], '유효하지 않은데 TARGET_VALID 가 켜져 있으면 문제')
+    check(problems([tof_payload(distance=500, status=3, quality=2)]) != [], '유효하지 않은데 거리가 실려 있으면 문제')
+    check(problems([tof_payload(quality=2)]) != [], '유효한데 TARGET_VALID 가 꺼져 있으면 문제')
+    for change in (dict(rows=8), dict(cols=0), dict(sensor=2), dict(instance=bytes(16)), dict(generation=0),
+                   dict(revision=0), dict(frame_status=8), dict(status=8, quality=2, distance=0), dict(quality=0x23),
+                   dict(error=0), dict(stamp=0), dict(sample=0)):
+        check(problems([tof_payload(**change)]) != [], f'계약 밖 칸이면 문제 {change}')
+
+    ack = ACK3.pack(3, PI, DEVICE, 0x0df7, bytes(32), bytes(32), 32)
+    flow = link_bench.Flow(FakePeer([(TOF_SAMPLE, first, 9), (TOF_SAMPLE, first[:-1], 10), (HELLO_ACK, ack, 11)]))
+    answer = flow.answer(0.01)
+    check(answer is not None and answer[0] == HELLO_ACK, '응답을 기다릴 때 TOF_SAMPLE 은 건너뜀')
+    check(flow.tofs == [first] and flow.odd == 1, 'TOF_SAMPLE 은 따로 적고 크기가 틀린 것은 따로 셈')
+
+
 class QuietReport(link_bench.Report):
     """도구의 판정만 세고 화면에는 쓰지 않는다."""
 
@@ -580,6 +630,7 @@ def main():
     test_bench_sees_report_out_of_step()
     test_bench_needs_drive_reports_to_follow_samples()
     test_flow_sets_report_aside()
+    test_bench_checks_tof_samples()
     test_steer_check_counts_only_applied_steering()
     print(f'tools: {checks} checks, {failures} failures')
     return 1 if failures else 0

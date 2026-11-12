@@ -8,10 +8,10 @@ RC카의 모터·서보·엔코더를 맡는 ESP32 DevKitC V4 펌웨어다. 게�
 - 세션과 시각 설치에 답한다. HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 이고, 설치한 lease 의 기한(cutoff)은 하드웨어 타이머가 지킨다.
 - 설치한 lease 가 살아 있는 동안 엔코더 표본을 SENSOR 로 20 ms 마다 보낸다.
 - COMMAND 의 DRIVE·STOP·HOLD_STEER 를 모터와 서보에 걸고 REPORT 로 알린다. DRIVE 의 기한이 지나거나 통신이 끊기면 타이머가 모터 출력을 끊는다. HOLD_STEER 는 모터를 돌리지 않고 조향만 건다.
-- 알리는 capability 는 Pi 가 요구하는 `0x01f7` 에 정지 조향(`0x0400`)을 더한 `0x05f7` 이다. develop 의 게이트웨이 코드는 capability 를 채워 넣지 않아도 이 펌웨어의 HELLO_ACK 를 받아들이고 STOP·DRIVE·HOLD_STEER 를 주고받는다(시뮬레이터에서 확인). 실제 Pi 의 USB 로는 아직 연결해 보지 않았다.
+- 알리는 capability 는 Pi 가 요구하는 `0x01f7` 에 정지 조향(`0x0400`)과 단일 존 ToF(`0x0800`)를 더한 `0x0df7` 이다. develop 의 게이트웨이 코드는 capability 를 채워 넣지 않아도 이 펌웨어의 HELLO_ACK 를 받아들이고 STOP·DRIVE·HOLD_STEER 를 주고받는다(시뮬레이터에서 확인). 실제 Pi 의 USB 로는 아직 연결해 보지 않았다.
 - 시리얼 속도는 460800 bps 다. 개발용 기본값이고, 운영값은 실제 Pi 의 USB 에서 SENSOR 와 REPORT 가 함께 흐를 때 확인해서 정한다.
 - 실보드에서 바퀴를 띄운 채 전진·후진·정지와, 명령이 끊겼을 때 출력이 스스로 끊기는 것을 엔코더로 확인했다. 조향은 서보 전원을 넣고 눈으로 봐서 + 가 왼쪽, − 가 오른쪽인 것까지 확인했다. **조향 각도, 바닥 주행, 실제 Pi 의 USB 연결은 아직 확인하지 않았다.** 속도를 PWM 으로, 조향을 서보 펄스로 바꾸는 값은 맞추기 전이다.
-- ToF 는 넣지 않았다. develop 의 계약은 단일 존 `TOF_SAMPLE3`(capability `0x0800`)으로 바뀌었고, 이 펌웨어의 payload 배치에는 아직 없다.
+- 앞·뒤 ToF 거리 센서(VL53L0X)를 읽어 lease 가 살아 있는 동안 TOF_SAMPLE 로 보낸다. 근거리 제동은 아직 없다. ToF 관측으로 모터를 멈추거나 명령을 거절하지 않는다.
 - 실보드(ESP32 DevKitC, USB 시리얼)에서 세션·시각 설치, 기한 만료, SENSOR 흐름, 손으로 굴린 바퀴의 엔코더 누계, 전원을 다시 넣은 뒤의 새 `device_boot_session` 을 확인했다(아래 "확인 기록").
 
 ## 구조
@@ -22,9 +22,9 @@ xenova_esp32/                 Arduino 스케치 폴더 (폴더 이름과 .ino �
   src/device_config.h         HELLO_ACK 로 알리는 설치 설정 (capability, encoder_bits, config digest)
   src/quadrature.h            엔코더 A·B 4체배 해석
   src/feedback3/wire.*        프레임 층
-  src/feedback3/payloads.*    payload 9종 배치
+  src/feedback3/payloads.*    payload 9종과 단일 존 ToF 관측의 배치
   src/feedback3/codes.h       계약이 정한 값 (capability bit, reason 등)
-  src/feedback3/link.*        세션, 시각 설치, 주기 표본, 명령
+  src/feedback3/link.*        세션, 시각 설치, 주기 표본, 명령, ToF 관측 전송
   src/feedback3/cutoff.*      기한을 타이머 alarm 하나로 지키고 출력을 끊는 논리
 test/host/                    PC 호스트 시험 (ESP32 없이)
   CMakeLists.txt
@@ -37,6 +37,7 @@ test/host/                    PC 호스트 시험 (ESP32 없이)
   check.h                     시험이 같이 쓰는 검사 매크로
   gen_vectors.py              고정 vector JSON 을 C 시험 데이터로 바꾼다
   gateway-feedback-3.json     계약 고정 vector 의 복사본
+  gateway-tof-single-1.json   단일 존 ToF vector 의 복사본
 tools/                        PC 쪽 점검 도구 (Python)
   fb3.py                      프레임·payload 와 시리얼·시뮬레이터 통로
   link_bench.py               PC 가 Pi 역할을 하며 세션·시각 설치·주기 표본·명령을 점검
@@ -54,6 +55,8 @@ Arduino IDE 2 에서 `xenova_esp32/xenova_esp32.ino` 를 열고 보드 `ESP32 De
 arduino-cli compile --fqbn esp32:esp32:esp32 vehicle/ESP32/xenova_esp32
 ```
 
+ToF 를 읽는 데 **VL53L0X by Pololu** 라이브러리(1.3.1 로 확인)가 필요하다. Arduino IDE 의 Library Manager 에서 설치한다(조립 안내서 단계 C-1 의 5). 이름이 비슷한 Adafruit_VL53L0X 는 다른 라이브러리다.
+
 ## 세션과 시각 설치
 
 ### HELLO_ACK 로 알리는 것
@@ -61,7 +64,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32 vehicle/ESP32/xenova_esp32
 | 항목 | 값 |
 |---|---|
 | `device_boot_session` | 켤 때마다 `esp_fill_random` 16 B 로 만든 RFC 4122 version 4 UUID. version·variant bit 때문에 NIL 이 될 수 없다. 플래시에 저장하지 않는다. Wi-Fi·BT 를 켜지 않으므로 부트로더가 넣어 둔 entropy 에서 이어지는 난수다 |
-| `capabilities` | `0x05f7`. 구현한 기능만 알린다. Pi 필수 `0x01f7` 과 정지 조향(`0x0400`)이다. 조향 측정(`0x0008`), ToF(`0x0800`)는 없다 |
+| `capabilities` | `0x0df7`. 구현한 기능만 알린다. Pi 필수 `0x01f7` 과 정지 조향(`0x0400`), 단일 존 ToF(`0x0800`)다. 조향 측정(`0x0008`)은 없다 |
 | `encoder_bits` | 32. 누계는 부호 있는 32비트이고 넘치면 돌아간다. Pi 의 `OdometryConfig.encoder_bits` 도 32 여야 한다 |
 | `vehicle_config_sha256`, `firmware_sha256` | 아래 "digest 제안" |
 
@@ -138,6 +141,33 @@ CLOCK_INSTALL 을 거절할 때(status 3)의 reason 이다. session 이 다르�
 - REPORT 는 130 B 이고 표본마다 하나씩 뒤따르므로 SENSOR 와 합쳐 초당 11.6 kB 다. 115200 bps 로는 실을 수 없어 460800 bps 로 올렸다(선의 25 % 쯤). 속도를 올린 것만으로 지연이 보장되지는 않는다. Pi 의 정지 확인은 이웃한 두 표본의 간격에서 두 표본의 시각 오차를 뺀 시간으로 속도를 구하므로, 시각 오차(왕복 시간의 절반쯤)가 표본 간격 20 ms 에 견줘 충분히 작아야 한다. 실제 Pi 의 USB 에서 재서 정한다.
 - 스케치는 송신 버퍼를 1024 B 둔다. 송신 버퍼가 없으면 앞 프레임이 다 나가기 전에 쓴 프레임이 메인 루프를 세운다(확인 기록).
 
+## ToF 관측 (TOF_SAMPLE)
+
+앞·뒤 가운데의 VL53L0X 두 개를 읽어 관측 하나를 TOF_SAMPLE(`0x0f17`, 145 B) 하나로 보낸다(계약 §3·§9.1). Jetson 은 이 관측을 지도에 근거리 장애물로 덧씌운다. **이 펌웨어는 ToF 관측으로 모터를 멈추거나 명령을 거절하지 않는다.** 근거리 제동은 ToF 요청서의 회신 뒤에 넣는다.
+
+- **보내는 때**: SENSOR 와 같다. 현재 session 에 설치돼 있고 기한 전인 lease 가 있을 때만 보내고, 가장 새 lease 의 `clock_epoch`·`clock_sequence` 를 싣는다. lease 가 없을 때 센서가 낸 관측은 버린다. 관측 시각이 그 lease 의 cutoff 와 같거나 뒤여도 버린다.
+- **우선순위**: 표본 뒤의 REPORT, 미뤄 둔 CLOCK_REPLY, SENSOR 가 나갈 때가 아닐 때에만 보낸다. 메인 루프 한 바퀴에 프레임 하나이고, 두 센서에 새 관측이 다 있으면 번갈아 보낸다.
+- **센서 읽기**: I2C 는 센서가 답하지 않으면 수십 ms 를 기다리므로 메인 루프에서 읽지 않는다. 다른 코어에서 도는 task 가 5 ms 마다 두 센서를 보고, 센서마다 가장 새 관측 하나만 남긴다. 메인 루프는 그것을 집어 갈 뿐이라 센서 선이 빠져도 서지 않는다(실보드에서 앞 센서의 SDA 선을 뺀 동안 표본 간격이 그대로였다).
+- **측정**: 센서마다 100 ms 에 한 번, 측정 하나에 33 ms(timing budget)를 쓴다. 센서당 초에 10개쯤이다.
+- **관측 시각**: 측정은 task 가 그 센서를 앞서 본 때와 끝난 것을 본 때 사이에 끝났고, 끝나기 전 33 ms 동안 이뤄졌다. `device_sample_us` 는 그 구간의 가운데이고, `sample_time_error_us` 는 구간의 절반에 읽는 시간 여유 1 ms 를 더한 값이다(평소 20 ms 쯤). 다른 센서를 다시 초기화하느라 100 ms 넘게 못 봤으면 어느 측정의 값인지 알 수 없어 그 관측은 내지 않는다. 엔코더 표본의 시각을 빌려 쓰지 않는다.
+- **순번과 instance**: `source_sample` 은 센서의 instance 마다 1 부터 1 씩 는다. 센서를 초기화할 때마다(켜질 때, 답하지 않다가 다시 붙었을 때) 새 `sensor_instance`(난수 UUID)와 1 큰 `sensor_generation` 을 쓴다. 답하지 않는 센서는 끄고 1초마다 다시 초기화해 본다. 새 `pi_session` 이 와도 센서의 instance 와 순번은 이어진다.
+- **주소**: 두 센서는 켜질 때 주소가 같아서(0x29) XSHUT 으로 하나씩 켜며 앞 0x30, 뒤 0x31 로 옮긴다. EN 리셋은 센서 전원을 끊지 않으므로 켜질 때 둘 다 끄고 시작한다.
+- **등록 profile**: `sensor_config_revision` 은 앞·뒤 모두 1, `sensor_calibration_sha256` 은 임시값이다(`device_config.h`. ASCII 문자열 `xenova-esp32-tof-front-dev-1`, `xenova-esp32-tof-rear-dev-1` 의 SHA-256). Pi 의 ToF 선택에 같은 값을 넣어야 Pi 가 관측을 받는다. 센서를 보정한 값이 아니다.
+
+거리와 상태는 다음과 같이 싣는다. `rows`·`cols` 는 1 이다.
+
+| 센서의 native 상태 (`RESULT_RANGE_STATUS` 의 bit 3..6) | `status` | `distance_mm` | `quality` | `frame_status` |
+|---|---|---|---|---|
+| 11 측정 완료, 거리 1 mm 에서 8189 mm | 1 VALID | 읽은 거리 | `0x03` TARGET_VALID·NATIVE | `0x03` SENSOR_OK·TIMING_VALID |
+| 11 측정 완료인데 거리가 0 이거나 8190 mm 이상 | 3 OUT_OF_RANGE | 0 | `0x02` | `0x03` |
+| 4 돌아온 신호가 약함 | 2 NO_TARGET | 0 | `0x02` | `0x03` |
+| 6, 9 위상이 범위 밖 | 3 OUT_OF_RANGE | 0 | `0x02` | `0x03` |
+| 8, 10 최소 거리 검사 실패 | 7 BAD_RETURN | 0 | `0x02` | `0x03` |
+| 1, 2, 3 센서 안의 고장 | 5 SENSOR_ERROR | 0 | `0x02` | `0x02` TIMING_VALID 만 |
+| 그 밖 | 0 UNKNOWN | 0 | `0x02` | `0x02` |
+
+native 상태의 구분은 ST 의 VL53L0X API 를 따랐다. 실보드에서는 VALID 와 NO_TARGET 만 봤고 나머지 줄은 센서로 확인하지 않았다. 거리 보정(오프셋)은 넣지 않았다.
+
 ## 명령 (COMMAND·REPORT)
 
 DRIVE(1), STOP(2), HOLD_STEER(3)를 받는다. 받아들인 명령은 출력에 적용한 뒤에 APPLIED 로 알린다. 받아들이는 것과 적용이 한 번에 일어나므로 ACCEPTED 는 따로 보내지 않는다.
@@ -190,8 +220,8 @@ ASan 을 쓸 수 없는 환경(Windows 등)에서는 configure 에 `-DFB3_SANITI
 
 시험하는 것:
 
-- `esp32_feedback3`: 고정 vector 의 제품 프레임 20개(payload·raw·wire 바이트, 묶기·풀기, 한 바이트씩 넣은 스트림 분리, 필드 값), 손상 프레임 6개의 거절 이유와 그 뒤 회복, CRC 기준값, COBS 경계, payload 240 B 상한
-- `esp32_link`: 세션·시각 설치의 정상 응답과 위 거절 경우, 같은 바이트 재전송, 새 `pi_session`, lease 두 칸, 기한에 맞춘 만료, 타이머 고장. SENSOR 는 lease 가 있을 때만 나가는지, 주기와 표본 사이 간격, CLOCK_REPLY 와 이어지는 순번, 가리키는 lease, 만료·고장·새 session 에서 멈추는지, lease 를 고르는 사이에 드러난 타이머 고장으로도 멈추는지, 쓸 수 없는 표본을 건너뛰는지 본다. 명령은 STOP·DRIVE·HOLD_STEER 의 검사와 거절, 다시 온 명령, 방향, 기한에 맞춘 출력 차단, 표본마다의 REPORT, 정지 판단, 비상정지, 타이머 고장을 본다. 고정 vector 의 HELLO → CLOCK_PROBE → CLOCK_INSTALL 을 넣으면 vector 의 HELLO_ACK·CLOCK_REPLY·CLOCK_ACK 와 같은 바이트가 나오고, 이어서 vector 의 표본을 뜨게 하면 vector 의 SENSOR 네 개와 같은 바이트가 나오는지도 본다
+- `esp32_feedback3`: 단일 존 ToF vector 의 프레임 2개(payload·wire 바이트, 관측 CRC32)와 고정 vector 의 제품 프레임 20개(payload·raw·wire 바이트, 묶기·풀기, 한 바이트씩 넣은 스트림 분리, 필드 값), 손상 프레임 6개의 거절 이유와 그 뒤 회복, CRC 기준값, COBS 경계, payload 240 B 상한
+- `esp32_link`: 세션·시각 설치의 정상 응답과 위 거절 경우, 같은 바이트 재전송, 새 `pi_session`, lease 두 칸, 기한에 맞춘 만료, 타이머 고장. SENSOR 는 lease 가 있을 때만 나가는지, 주기와 표본 사이 간격, CLOCK_REPLY 와 이어지는 순번, 가리키는 lease, 만료·고장·새 session 에서 멈추는지, lease 를 고르는 사이에 드러난 타이머 고장으로도 멈추는지, 쓸 수 없는 표본을 건너뛰는지 본다. ToF 는 lease 가 있을 때만 나가는지, 관측 순번·instance·generation 규칙, 계약 밖 관측을 버리는지, 표본과 REPORT 뒤에 나가는지 본다. 명령은 STOP·DRIVE·HOLD_STEER 의 검사와 거절, 다시 온 명령, 방향, 기한에 맞춘 출력 차단, 표본마다의 REPORT, 정지 판단, 비상정지, 타이머 고장을 본다. 고정 vector 의 HELLO → CLOCK_PROBE → CLOCK_INSTALL 을 넣으면 vector 의 HELLO_ACK·CLOCK_REPLY·CLOCK_ACK 와 같은 바이트가 나오고, 이어서 vector 의 표본을 뜨게 하면 vector 의 SENSOR 네 개와 같은 바이트가 나오는지도 본다
 - `esp32_quadrature`: 엔코더 해석이 조립 안내서 단계 K 의 bench 스케치와 같은지, 네 가지 A·B 상태 어디서 켜져도 첫 움직임의 방향이 맞는지
 - `esp32_link_bench`: 아래 `link_bench.py` 를 `sim_link` 에 돌린다. 실보드에서 쓰는 것과 같은 도구다
 - `esp32_steer_check`: 아래 `steer_check.py` 를 `sim_link` 에 돌린다. 속도 0 인 DRIVE 가 APPLIED 로 돌아오고, 자리마다 그 뒤에 받은 표본의 엔코더 누계가 그대로인지까지 본다
@@ -221,6 +251,7 @@ python vehicle/ESP32/tools/link_bench.py --port COM8
 - lease 가 살아 있는 동안 CLOCK_PROBE 24개를 SENSOR 주기의 여러 자리에 닿게 보낸다. 모두 답이 와야 하고, 받고 나서 표본을 뜰 때까지 기다린 시간이 한 주기를 넘지 않으며 반 주기 넘게 기다린 것이 하나 이상 있어야 한다. 그동안의 표본은 순번이 1 씩 늘고 위 "표본 사이 간격"을 지켜야 한다.
 - STOP 을 보내 APPLIED 와 그 뒤 표본마다의 REPORT, 멈춘 바퀴를 정지로 알리는지를 본다. 여기까지는 모터와 서보가 움직이지 않는다.
 - `--drive` 를 주면 DRIVE 를 보낸다. **바퀴가 0.2 m/s 로 80 ms 씩 앞으로 한 번, 뒤로 한 번 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다.** 엔코더 누계로 출력이 걸린 것과 기한 뒤에 끊긴 것, 다시 온 DRIVE 가 출력을 켜지 않는 것, STOP 없이 방향을 바꾸는 DRIVE 의 거절을 본다. 장치가 정지 조향을 알리면 그 사이에 HOLD_STEER 를 세 번(+100, −100, 0 mrad) 보내 **조향이 움직인다.** 적용과 표본마다의 REPORT, 그동안 엔코더 누계가 그대로인 것, 속도가 실린 HOLD_STEER 의 거절을 본다. 알리지 않는 장치에는 HOLD_STEER 가 UNSUPPORTED_PROFILE 로 거절되는지 본다. 시뮬레이터에는 늘 여기까지 한다.
+- 장치가 단일 존 ToF 를 알리면 그동안 받은 TOF_SAMPLE 의 배치·CRC·순번·instance 규칙을 본다. lease 를 설치하기 전과 기한 뒤, 새 `pi_session` 뒤에 오지 않는지도 본다. `--tof` 를 주면 앞·뒤 두 센서의 관측이 모두 와야 통과한다(시뮬레이터에는 늘 그렇게 본다). 센서별 유효 관측 수와 거리 범위를 보여 준다.
 - 속도는 460800 bps 가 기본이다. 앞선 펌웨어(115200 bps)에는 `--baud 115200` 을 준다.
 - EN 버튼으로 리셋하고 한 번 더 돌려 `device_boot_session` 이 달라지는지 본다.
 - `firmware_sha256` 이 `sha256sum <빌드 폴더>/xenova_esp32.ino.elf` 와 같은지 본다.
@@ -267,6 +298,7 @@ python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --stationary
 1. 연결: Pi 가 HELLO_ACK 를 받아들이고 lease 를 이어 간다. 첫 lease 뒤로 `--seconds`(기본 3초, 최소 2초) 동안 INSTALLED 응답이 0.8초 넘게, SENSOR 가 0.2초 넘게 끊기지 않는지, Pi 가 쓸 수 있는 lease 가 끊기지 않고 끝날 때에도 있는지, Pi 의 odometry 가 오류 없이 표본을 받는지 본다.
 2. STOP: Pi 가 STOP 을 보내고, 장치의 APPLIED 보고와 그 뒤의 표본으로 정지를 확인한다. Pi 가 DRIVE 를 내보내기 전에 하는 바로 그 검사를 통과해야 한다.
 3. DRIVE: Pi 가 1초 동안 20 ms 마다 DRIVE 를 보내고 APPLIED 를 받는다. 보내기를 멈추면 장치가 스스로 출력을 끊어 속도가 0 이 되는지, 이어서 보낸 STOP 으로 다시 정지를 확인하는지 본다. 실보드에서는 `--drive` 를 줄 때만 한다. **바퀴가 0.2 m/s 로 1초 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다.**
+- ToF: 장치가 단일 존 ToF 를 알리고 TOF_SAMPLE 을 보내면, 그 관측에 실린 sensor profile 로 Pi 의 ToF 선택을 만들어 1초 동안 Pi 가 관측을 받아 넘기는지 본다(1 다음에 한다). Pi 가 버리거나 거절한 관측이 있으면 실패다. 실보드에서 관측이 하나도 오지 않으면 확인하지 못했다고 적고 넘어가며, `--tof` 를 주면 실패로 친다.
 4. HOLD_STEER: 장치가 정지 조향을 알리면, Pi 가 방향을 바꾸는 자리의 STOP 뒤에 0.5초 동안 20 ms 마다 HOLD_STEER 를 보내고 APPLIED 를 받는다. 조향이 왼쪽 0.1 rad 로 움직이고 바퀴는 돌지 않는다. 3 과 같은 때에만 한다. Pi 가 내보내지 않은 HOLD_STEER 의 수와 까닭, 그동안 Pi 의 방향 전환 gate state 를 보여 준다(아래 "HOLD_STEER 를 Pi 와 맞물려 알게 된 것").
 
 그동안 Pi 가 장치를 고장으로 보거나 프레임을 버리면 실패다. 펌웨어의 capability 에 Pi 필수 bit 가 모자라면 Pi 가 HELLO_ACK 를 받지 않는 것을 먼저 확인하고, 중계가 모자란 bit 를 채워 넣은 채 1 만 본다. 그것은 부분 호환성 시험이다.
@@ -347,13 +379,21 @@ develop `841b7bf3` 의 게이트웨이 코드를 시뮬레이터에 물려 본 �
 | 2026-11-12 | 같은 상태에서 HOLD_STEER 60개를 보내며 Pi 가 내보내지 않은 순간의 정지 확인을 다시 계산 | 2개를 내보내지 않음. 두 번 모두 표본 간격은 20.0 ms 에서 21.5 ms, 누계 변화 없음, 시각 오차 5.1 ms 에서 6.2 ms 였고, 걸린 조건은 정지 확인 창의 길이였다(41777 − 5883 − 6196 = 29698 us, 40771 − 5071 − 5825 = 29875 us, 필요한 값 30000 us). 위 "HOLD_STEER 를 Pi 와 맞물려 알게 된 것"의 셋째 항목 |
 | 2026-11-12 | 실보드, 게이트웨이의 창 자르기를 고친 브랜치(S15P31E110-460, `9365344b`)의 코드로 HOLD_STEER 60개와 300개. 순간마다 옛 식으로도 다시 계산함 | 60개: 빠진 것 없음(옛 식으로도 떨어질 순간이 없었음, 시각 오차 3.0 ms 에서 5.3 ms). 300개: 옛 식이면 13번 떨어졌을 순간 가운데 창 길이 때문인 7번은 모두 통과. 나머지 6개는 시각 오차가 8 ms 에서 10 ms 로 뛴 구간에서 잇달아 빠졌고 걸린 조건은 바퀴 속도 한도였다. 장치를 고장으로 보거나 odometry 오류가 난 적은 없음 |
 | 2026-11-12 | 이 PC 에서 최신 platform 의 게이트웨이 코드를 `pi_link_check.py` 의 중계에 물림 | 절반쯤이 `SerialTimeoutException: Write timeout` 으로 중간에 끝남. 게이트웨이가 시리얼을 5 ms 쓰기 기한으로 여는데, pyserial 의 `socket://` 은 보낸 뒤에 기한을 검사해서 Windows 에서 5 ms 넘게 밀리면 보낸 것도 실패로 친다. 도구의 중계 경로에서만 나는 일이다. 쓰기 기한을 1초로 늘려 돌린 실행에서는 나지 않았다 |
+| 2026-11-12 | 호스트 시험, ToF 관측 전송을 넣은 뒤(Windows, zig cc, UBSan) | 일곱 개 통과. `esp32_feedback3` 628 검사(ToF vector 2개가 platform 의 `gateway-tof-single-1.json` 과 같은 바이트), `esp32_link` 3808 검사, `esp32_link_bench` 79 검사, `esp32_tools` 151 검사. ToF 처리를 스물세 군데 고친 변형을 모두 알아챔. 스케치 컴파일 경고 없음(VL53L0X by Pololu 1.3.1) |
+| 2026-11-12 | `pi_link_check.py --sim`(platform `8b6d2c1b` 의 게이트웨이 코드) 여섯 번 | 통과. Pi 가 `0x0df7` 을 채우지 않고 받아들이고, 장치의 sensor profile 로 ToF 선택을 만들자 1초에 센서마다 9개에서 10개의 관측을 받아 넘김. 버리거나 거절한 관측 없음. STOP·DRIVE·HOLD_STEER 는 그대로 통과 |
+| 2026-11-12 | 실보드(USB 전원만, 두 센서는 조립 안내서 단계 K 의 배선 그대로), ToF 를 넣은 빌드. `link_bench.py --port` 와 `--tof`, `pi_link_check.py --port --seconds 30 --tof`, `cutoff_stress.py --trials 500` | 통과. 55 검사, 56 검사. 두 센서가 켜질 때 붙었고 TOF_SAMPLE 51개(앞 25개, 뒤 26개)가 모두 VALID, 규칙에 어긋난 것 없음. 그때 앞 센서는 452 mm 에서 506 mm, 뒤 센서는 284 mm 에서 294 mm 를 봄(책상 위에 놓인 그대로이고 줄자로 견주지 않았다). Pi 쪽 코드가 1초에 센서마다 10개를 받아 넘김. SENSOR 간격은 20008 us 에서 21755 us, 30초에 표본 1499개, 기한 만료 500번에 DEVICE_FAULT 없음 |
+| 2026-11-12 | 실보드, 같은 빌드. 초마다 ToF 관측과 표본 간격을 찍어 봄(25초, 리셋 직후 8초, 다시 올린 직후 6초) | 센서마다 초에 10개에서 11개가 끊기지 않고 옴. 표본 간격은 20020 us 에서 20921 us. TOF_SAMPLE 804개 가운데 규칙에 어긋난 것 없음. 한 번은 켜진 뒤 몇 분 사이에 두 센서가 함께 다시 초기화돼 generation 2 와 새 instance 로 붙어 있었다(그 뒤 25초 동안은 그대로). 언제 왜 떨어졌는지는 보지 못했고, 리셋하거나 다시 올린 뒤에는 generation 1 인 채였다 |
+| 2026-11-12 | 실보드, 같은 빌드. 초마다 찍는 동안(60초) 두 센서 앞을 손으로 두 번 가림(2초, 6초) | 가린 동안 두 센서가 21 mm 에서 41 mm 를 VALID 로 냈고 치우자 앞 390 mm 에서 497 mm, 뒤 276 mm 에서 292 mm 로 돌아옴. 센서마다 초에 10개에서 11개가 끊기지 않고 옴. 표본 3010개의 간격은 가장 긴 것이 21157 us. TOF_SAMPLE 1237개 가운데 규칙에 어긋난 것 없음. 시작할 때 두 센서는 이미 generation 3 이었다(다시 올린 뒤 몇 분 사이에 두 번 함께 다시 초기화된 것이고, 까닭은 보지 못했다) |
+| 2026-11-12 | 실보드, 같은 빌드. 초마다 찍는 동안(60초) 앞 센서의 SDA 선(조립 안내서의 T7, `a50`)을 두 번 뺐다 꽂음 | 뺀 동안(4초, 2초) 앞 센서의 관측이 오지 않았고, 꽂자 새 instance 와 1 큰 generation 으로 순번 1 부터 다시 옴(3 → 4 → 5, 두 번째에는 5 → 6. 첫 번째에는 다시 붙은 지 1초 안에 한 번 더 초기화됨). 뒤 센서는 그동안 generation 3 인 채 초에 10개에서 11개가 끊기지 않고 옴. 표본 3004개의 간격은 가장 긴 것이 21351 us 로 선을 뺀 동안에도 늘지 않았고 lease 를 놓친 적 없음. TOF_SAMPLE 1160개 가운데 규칙에 어긋난 것 없음, 깨진 프레임 없음. 시작한 뒤 3초쯤 앞 센서가 NO_TARGET 을 냄(첫 1초는 10개 모두, 다음 2초는 501 mm 에서 545 mm 의 VALID 와 섞임. 그때 센서 앞이 어땠는지는 확인하지 않았다) |
 
-아직 확인하지 않은 것: 조향했을 때의 바퀴 각도와 왼쪽에서 가운데로 돌아올 때 어긋나는 크기, 기한에 핀에서 PWM 이 실제로 내려가는 시각(로직 분석기로 재야 한다. 장치 안에서 잰 `J_apply`·`J_cutoff` 쪽 값은 2026-11-12 기록에 있다), 바닥 주행, 실제 Pi 의 USB·게이트웨이와의 연결이 남아 있다. 모터로 빠르게 돌 때의 엔코더 누계, 모터로 도는 속도에서 SENSOR 를 Pi 가 받는 것(실보드에서는 손으로 0.16 m/s 쯤까지 굴려 봤고 그보다 빠른 경우는 시뮬레이터로만 봤다), 켜진 직후 첫 움직임 한 칸의 방향(손으로 굴려서는 가릴 수 없어 호스트 시험만 있다), Pi(Linux)의 USB 시리얼, Linux gcc 와 ASan(Jenkins 에서 돈다).
+아직 확인하지 않은 것: 켜 둔 사이에 두 ToF 센서가 함께 다시 초기화된 까닭, 센서가 새 instance 로 다시 붙었을 때 Pi 쪽 코드가 이어 받는지(실보드), ToF 거리의 정확도와 VALID·NO_TARGET 이 아닌 상태들, 모터가 도는 동안의 ToF, 조향했을 때의 바퀴 각도와 왼쪽에서 가운데로 돌아올 때 어긋나는 크기, 기한에 핀에서 PWM 이 실제로 내려가는 시각(로직 분석기로 재야 한다. 장치 안에서 잰 `J_apply`·`J_cutoff` 쪽 값은 2026-11-12 기록에 있다), 바닥 주행, 실제 Pi 의 USB·게이트웨이와의 연결이 남아 있다. 모터로 빠르게 돌 때의 엔코더 누계, 모터로 도는 속도에서 SENSOR 를 Pi 가 받는 것(실보드에서는 손으로 0.16 m/s 쯤까지 굴려 봤고 그보다 빠른 경우는 시뮬레이터로만 봤다), 켜진 직후 첫 움직임 한 칸의 방향(손으로 굴려서는 가릴 수 없어 호스트 시험만 있다), Pi(Linux)의 USB 시리얼, Linux gcc 와 ASan(Jenkins 에서 돈다).
 
 ## 고정 vector 복사본
 
 `test/host/gateway-feedback-3.json` 은 develop 의 `docs/contracts/vectors/gateway-feedback-3.json`(SHA-256 `0a0d35c2edf5da2b…`)과 같은 파일이다. vehicle 브랜치에 원본이 없어서 시험 폴더에 둔다. 원본이 저장소에 있으면 cmake 가 두 파일이 같은지 검사하고, 다르면 configure 를 멈춘다. 원본이 바뀌면 복사본을 다시 복사한다.
 
+`test/host/gateway-tof-single-1.json` 은 platform 의 `docs/contracts/vectors/gateway-tof-single-1.json`(SHA-256 `27ea0b5019d17827…`)과 같은 파일이다. 같은 까닭으로 시험 폴더에 두고, 저장소에 원본이 있으면 configure 때 두 파일이 같은지 본다.
+
 ## 핀
 
-조립 안내서(`docs/vehicle/assembly-guide.md`) 6장의 연결표를 따른다. 모터 PWM 25·26, 방향 32·33, 서보 27, 비상정지 입력 13(눌리면 HIGH), 엔코더 왼쪽 18·19, 오른쪽 22·23 이다.
+조립 안내서(`docs/vehicle/assembly-guide.md`) 6장의 연결표를 따른다. 모터 PWM 25·26, 방향 32·33, 서보 27, 비상정지 입력 13(눌리면 HIGH), 엔코더 왼쪽 18·19, 오른쪽 22·23, ToF 의 SDA 21·SCL 17, XSHUT 앞 16·뒤 4 다.

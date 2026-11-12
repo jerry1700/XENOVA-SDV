@@ -2,9 +2,11 @@
 
 사용: python3 gen_vectors.py <gateway-feedback-3.json> <vectors.inc>
       python3 gen_vectors.py --wires <gateway-feedback-3.json> <link_vectors.inc>
+      python3 gen_vectors.py --tof <gateway-tof-single-1.json> <tof_vectors.inc>
 
 제품 payload 9종의 프레임만 쓴다. 설계 전용 ToF 프레임은 건너뛴다.
 --wires 는 세션·시각 설치 프레임 여섯 개와 SENSOR 프레임 네 개의 wire 바이트만 이름으로 꺼낸다(test_link.c 용).
+--tof 는 단일 존 ToF vector 의 프레임마다 payload·wire 바이트와 관측 값, CRC32 를 꺼낸다.
 """
 import hashlib
 import json
@@ -143,9 +145,35 @@ def wires(source, target):
         f.write('\n'.join(out) + '\n')
 
 
+def tof(source, target):
+    with open(source, 'rb') as f:
+        data = f.read()
+    vectors = json.loads(data)
+    if vectors['format'] != '<16s16sQQI16sQB16sII32sBBHHBBI':
+        raise ValueError(f"ToF 형식 문자열이 다르다: {vectors['format']}")
+    out = [f'/* gen_vectors.py --tof 가 만든 파일이다. 직접 고치지 않는다. 원본 SHA-256 {hashlib.sha256(data).hexdigest()} */',
+           f"static const uint16_t TOF_ID = {integer('H', vectors['opcode'])};",
+           f"static const uint16_t TOF_CAPABILITY = {integer('H', vectors['capability'])};",
+           f"static const size_t TOF_PAYLOAD_BYTES = {vectors['payload_bytes']}u, TOF_CRC_BYTES = {vectors['source_crc_bytes']}u, "
+           f"TOF_WIRE_BYTES = {vectors['maximum_wire_bytes']}u;",
+           'static const struct tof_case TOF_FRAMES[] = {']
+    for frame in vectors['frames']:
+        if frame['source_crc_body_hex'] != frame['payload_hex'][:2 * vectors['source_crc_bytes']]:
+            raise ValueError(f"{frame['name']}: CRC 가 덮는 부분이 payload 의 앞부분이 아니다")
+        out.append(f"\t{{\"{frame['name']}\", {integer('B', frame['sensor_id'])}, {integer('Q', frame['source_sample'])}, "
+                   f"{integer('Q', frame['source_us'])}, {integer('H', frame['distance_mm'])}, {integer('B', frame['status'])}, "
+                   f"{integer('B', frame['quality'])}, {integer('I', frame['source_crc32'])}, "
+                   f"\"{frame['payload_hex']}\", \"{frame['wire_hex']}\"}},")
+    out += ['};', '']
+    with open(target, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(out))
+
+
 if __name__ == '__main__':
     if len(sys.argv) == 4 and sys.argv[1] == '--wires':
         wires(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 4 and sys.argv[1] == '--tof':
+        tof(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 3:
         main(sys.argv[1], sys.argv[2])
     else:

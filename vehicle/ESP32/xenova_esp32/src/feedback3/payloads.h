@@ -1,4 +1,4 @@
-/* feedback-3 payload 9종의 고정 배치. little endian, padding 없음.
+/* feedback-3 payload 9종과 단일 존 ToF 관측의 고정 배치. little endian, padding 없음.
  * 계약 docs/contracts/gateway-feedback-3.md §3 의 표와 Pi struct 형식 문자열을 따른다.
  * 크기와 배치만 다루고 session·기한 같은 의미 검사는 하지 않는다. */
 #ifndef XENOVA_FB3_PAYLOADS_H
@@ -158,6 +158,33 @@ struct fb3_report {
 	uint16_t reason;
 };
 
+/* TOF_SAMPLE, MCU → Pi, <16s16sQQI16sQB16sII32sBBHHBBI. 단일 존 관측 하나가 프레임 하나다 (계약 §3·§9.1) */
+#define FB3_TOF_SAMPLE_ID 0x0f17u
+#define FB3_TOF_SAMPLE_SIZE 145u
+/* sample_crc32 가 덮는 앞부분. sample_crc32 자리 바로 앞까지다 */
+#define FB3_TOF_SAMPLE_CRC_SIZE 141u
+struct fb3_tof_sample {
+	uint8_t pi_session[16];
+	uint8_t device_session[16];
+	uint64_t source_sample;
+	uint64_t device_sample_us;
+	uint32_t sample_time_error_us;
+	uint8_t clock_epoch[16];
+	uint64_t clock_sequence;
+	uint8_t sensor_id;
+	uint8_t sensor_instance[16];
+	uint32_t sensor_generation;
+	uint32_t sensor_config_revision;
+	uint8_t sensor_calibration_sha256[32];
+	uint8_t rows;
+	uint8_t cols;
+	uint16_t frame_status;
+	uint16_t distance_mm;
+	uint8_t status;
+	uint8_t quality;
+	uint32_t sample_crc32;
+};
+
 /* unpack: len 이 그 종류의 크기와 다르면 false.
  * pack: 쓴 바이트 수(그 종류의 크기). cap 이 모자라면 0 */
 bool fb3_unpack_hello(const uint8_t *payload, size_t len, struct fb3_hello *out);
@@ -178,6 +205,14 @@ bool fb3_unpack_command(const uint8_t *payload, size_t len, struct fb3_command *
 size_t fb3_pack_command(const struct fb3_command *in, uint8_t *out, size_t cap);
 bool fb3_unpack_report(const uint8_t *payload, size_t len, struct fb3_report *out);
 size_t fb3_pack_report(const struct fb3_report *in, uint8_t *out, size_t cap);
+bool fb3_unpack_tof_sample(const uint8_t *payload, size_t len, struct fb3_tof_sample *out);
+/* sample_crc32 는 in 의 값을 그대로 쓴다. 관측의 CRC 를 넣으려면 fb3_seal_tof_sample 을 부른다 */
+size_t fb3_pack_tof_sample(const struct fb3_tof_sample *in, uint8_t *out, size_t cap);
+
+/* CRC32/IEEE (reflected 0xedb88320, 처음과 끝에 0xffffffff) */
+uint32_t fb3_crc32(const uint8_t *data, size_t len);
+/* 묶어 둔 TOF_SAMPLE payload 의 앞 141 B 로 sample_crc32 를 구해 그 자리에 쓴다 */
+void fb3_seal_tof_sample(uint8_t payload[FB3_TOF_SAMPLE_SIZE]);
 
 #ifdef __cplusplus
 }

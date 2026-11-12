@@ -28,6 +28,9 @@ struct fake {
 	bool drive_unlocked;  /* lock 없이 출력을 건 적이 있다 */
 	bool estop;           /* 비상정지가 눌려 있다 */
 	struct fb3_sample sample; /* latch 가 내줄 값. device_us 가 0 이면 그때 시각 */
+	bool tof_ready[FB3_TOF_SENSORS]; /* 아직 넘기지 않은 ToF 관측이 있다 */
+	struct fb3_tof_reading tof_reading[FB3_TOF_SENSORS];
+	unsigned tof_asked[FB3_TOF_SENSORS]; /* 그 센서의 관측을 물어본 횟수 */
 };
 
 static void fake_dispatch(struct fake *f)
@@ -148,7 +151,21 @@ static bool fake_latch(void *ctx, struct fb3_sample *out)
 	return !f->sensor_dead;
 }
 
+static bool fake_tof(void *ctx, unsigned sensor, struct fb3_tof_reading *out)
+{
+	struct fake *f = ctx;
+
+	f->tof_asked[sensor]++;
+	if (!f->tof_ready[sensor]) {
+		return false;
+	}
+	f->tof_ready[sensor] = false;
+	*out = f->tof_reading[sensor];
+	return true;
+}
+
 static uint8_t PI_A[16], PI_B[16], BOOT[16], STRANGER[16], EPOCH[16], EPOCH_B[16];
+static uint8_t TOF_A[16], TOF_B[16], TOF_C[16];
 static uint8_t CONFIG[32], OTHER_CONFIG[32], FIRMWARE[32];
 
 struct bench {
@@ -163,7 +180,7 @@ static void start_with(struct bench *b, const struct fb3_link_config *config)
 {
 	struct fb3_cutoff_port cutoff_port = {&b->hw, fake_now, fake_set_alarm, fake_clear_alarm, fake_lock,
 					      fake_unlock, fake_cut};
-	struct fb3_link_port link_port = {&b->hw, fake_now, fake_latch, fake_drive, fake_estop};
+	struct fb3_link_port link_port = {&b->hw, fake_now, fake_latch, fake_drive, fake_estop, fake_tof};
 
 	memset(b, 0, sizeof *b);
 	b->hw.cutoff = &b->cutoff;
@@ -179,6 +196,7 @@ static void start(struct bench *b)
 {
 	struct fb3_link_config config;
 
+	memset(&config, 0, sizeof config);
 	memcpy(config.device_boot_session, BOOT, 16);
 	config.capabilities = FB3_CAP_CLOCK4_LATCH;
 	memcpy(config.vehicle_config_sha256, CONFIG, 32);
@@ -2497,6 +2515,241 @@ static void test_samples_keep_one_period_apart(void)
 	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
 }
 
+/* 앞·뒤 ToF 를 달았다고 알리는 설정으로 시작한다 */
+static void start_tof(struct bench *b)
+{
+	start(b);
+	b->link.config.capabilities |= FB3_CAP_TOF_SINGLE;
+	b->link.config.tof[0].config_revision = 4;
+	memset(b->link.config.tof[0].calibration_sha256, 0xcc, 32);
+	b->link.config.tof[1].config_revision = 5;
+	memset(b->link.config.tof[1].calibration_sha256, 0xdd, 32);
+}
+
+/* 센서가 새 관측을 냈다 */
+static void tof_put(struct bench *b, unsigned sensor, uint64_t device_us, uint16_t distance, uint8_t status,
+		    const uint8_t *instance, uint32_t generation)
+{
+	struct fb3_tof_reading *reading = &b->hw.tof_reading[sensor];
+
+	reading->device_us = device_us;
+	reading->time_error_us = 16500;
+	memcpy(reading->instance, instance, 16);
+	reading->generation = generation;
+	reading->distance_mm = distance;
+	reading->status = status;
+	b->hw.tof_ready[sensor] = true;
+}
+
+/* 메인 루프를 한 바퀴 돌려 TOF_SAMPLE 이 나왔으면 풀어 준다. frame 에는 묶인 payload 가 남는다 */
+static bool tof_sample(struct bench *b, struct fb3_tof_sample *out, struct fb3_frame *frame)
+{
+	memset(out, 0, sizeof *out);
+	if (!spin(b, frame)) {
+		return false;
+	}
+	CHECK(frame->id == FB3_TOF_SAMPLE_ID && fb3_unpack_tof_sample(frame->payload, frame->length, out));
+	CHECK(out->sample_crc32 == fb3_crc32(frame->payload, FB3_TOF_SAMPLE_CRC_SIZE));
+	return true;
+}
+
+/* 메인 루프를 몇 바퀴 돌려도 아무것도 나가지 않는다 */
+static bool nothing_sent(struct bench *b)
+{
+	struct fb3_frame frame;
+
+	return !spin(b, &frame) && !spin(b, &frame) && !spin(b, &frame);
+}
+
+static void test_tof(void)
+{
+	static const uint8_t NIL[16];
+	struct bench b;
+	struct fb3_tof_sample t;
+	struct fb3_frame frame;
+	struct fb3_hello_ack hello_ack;
+	struct fb3_clock_reply reply;
+	struct fb3_clock_install in;
+	struct fb3_clock_ack ack;
+	struct fb3_sensor s;
+	struct fb3_report r;
+	uint64_t at, stamp;
+	bool same;
+
+	current = "tof: 알리지 않은 설정에서는 센서를 읽지 않음";
+	start(&b);
+	b.link.config.tof[0].config_revision = 4;
+	b.link.config.tof[1].config_revision = 5;
+	at = open_with_lease(&b, 900000);
+	tof_put(&b, 0, at + 1000, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b) && b.hw.tof_asked[0] == 0 && b.hw.tof_asked[1] == 0);
+
+	current = "tof: session 이 없으면 센서를 읽지 않음";
+	start_tof(&b);
+	tof_put(&b, 0, 1000, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b) && b.hw.tof_asked[0] == 0);
+
+	current = "tof: 첫 관측이라도 NIL instance 나 generation 0 은 버림";
+	start_tof(&b);
+	at = open_with_lease(&b, 900000);
+	tof_put(&b, 0, at + 100, 600, FB3_TOF_VALID, TOF_A, 0);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, at + 200, 600, FB3_TOF_VALID, NIL, 1);
+	CHECK(nothing_sent(&b) && b.link.tof_dropped[0] == 2 && b.link.tof[0].generation == 0);
+
+	current = "tof: lease 가 있으면 새 관측을 TOF_SAMPLE 로 보냄";
+	start_tof(&b);
+	at = open_with_lease(&b, 900000);
+	CHECK(!spin(&b, &frame) && b.hw.tof_asked[0] == 1 && b.hw.tof_asked[1] == 1);
+	stamp = at + 1000;
+	tof_put(&b, 0, stamp, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame));
+	CHECK(memcmp(t.pi_session, PI_A, 16) == 0 && memcmp(t.device_session, BOOT, 16) == 0);
+	CHECK(t.source_sample == 1 && t.device_sample_us == stamp && t.sample_time_error_us == 16500);
+	CHECK(memcmp(t.clock_epoch, EPOCH, 16) == 0 && t.clock_sequence == 1);
+	CHECK(t.sensor_id == 0 && memcmp(t.sensor_instance, TOF_A, 16) == 0 && t.sensor_generation == 1);
+	same = true;
+	for (unsigned i = 0; i < 32; i++) {
+		same = same && t.sensor_calibration_sha256[i] == 0xcc;
+	}
+	CHECK(t.sensor_config_revision == 4 && same && t.rows == 1 && t.cols == 1);
+	CHECK(t.frame_status == (FB3_TOF_FRAME_SENSOR_OK | FB3_TOF_FRAME_TIMING_VALID));
+	CHECK(t.distance_mm == 600 && t.status == FB3_TOF_VALID
+	      && t.quality == (FB3_TOF_QUALITY_TARGET_VALID | FB3_TOF_QUALITY_NATIVE));
+	CHECK(b.response_len <= 152 && nothing_sent(&b) && b.link.tof_dropped[0] == 0);
+
+	current = "tof: 관측 순번은 센서마다 따로 늘고, 두 센서를 번갈아 먼저 봄";
+	tof_put(&b, 0, stamp + 1000, 610, FB3_TOF_VALID, TOF_A, 1);
+	tof_put(&b, 1, stamp + 1500, 800, FB3_TOF_VALID, TOF_B, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 1 && t.source_sample == 1 && t.distance_mm == 800);
+	CHECK(memcmp(t.sensor_instance, TOF_B, 16) == 0 && t.sensor_config_revision == 5
+	      && t.sensor_calibration_sha256[0] == 0xdd && t.sensor_calibration_sha256[31] == 0xdd);
+	tof_put(&b, 1, stamp + 2500, 801, FB3_TOF_VALID, TOF_B, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 0 && t.source_sample == 2 && t.distance_mm == 610);
+	tof_put(&b, 0, stamp + 3000, 611, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 1 && t.source_sample == 2 && t.distance_mm == 801);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 0 && t.source_sample == 3 && t.distance_mm == 611);
+	CHECK(nothing_sent(&b));
+	stamp += 3000;
+
+	current = "tof: 유효한 거리가 아니면 거리 칸은 0 이고 TARGET_VALID 를 켜지 않음";
+	tof_put(&b, 0, ++stamp, 8190, FB3_TOF_OUT_OF_RANGE, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 4 && t.status == FB3_TOF_OUT_OF_RANGE);
+	CHECK(t.distance_mm == 0 && t.quality == FB3_TOF_QUALITY_NATIVE
+	      && t.frame_status == (FB3_TOF_FRAME_SENSOR_OK | FB3_TOF_FRAME_TIMING_VALID));
+	tof_put(&b, 0, ++stamp, 123, FB3_TOF_SENSOR_ERROR, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 5 && t.status == FB3_TOF_SENSOR_ERROR);
+	CHECK(t.distance_mm == 0 && t.quality == FB3_TOF_QUALITY_NATIVE && t.frame_status == FB3_TOF_FRAME_TIMING_VALID);
+	tof_put(&b, 0, ++stamp, 65534, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 6 && t.distance_mm == 65534 && t.status == FB3_TOF_VALID);
+
+	current = "tof: 계약 밖 관측은 버리고 순번을 쓰지 않음";
+	tof_put(&b, 0, ++stamp, 0, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, UINT16_MAX, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, 600, FB3_TOF_BAD_RETURN + 1, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, 600, FB3_TOF_VALID, NIL, 9);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, 600, FB3_TOF_VALID, TOF_A, 0);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, 0, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, FB3_U63_MAX + 1, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, 600, FB3_TOF_VALID, TOF_A, 1);
+	b.hw.tof_reading[0].time_error_us = 0;
+	CHECK(nothing_sent(&b) && b.link.tof_dropped[0] == 8 && b.link.tof_dropped[1] == 0);
+
+	current = "tof: 시각이 앞 관측보다 뒤가 아니면 버림";
+	tof_put(&b, 0, stamp - 8, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, stamp - 9, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b) && b.link.tof_dropped[0] == 10);
+	tof_put(&b, 0, ++stamp, 620, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 7 && t.distance_mm == 620);
+
+	current = "tof: 센서를 다시 초기화하면 새 instance 와 더 큰 generation 으로 1 부터";
+	tof_put(&b, 0, ++stamp, 630, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 1 && t.sensor_generation == 2);
+	CHECK(memcmp(t.sensor_instance, TOF_C, 16) == 0 && t.distance_mm == 630);
+	tof_put(&b, 0, ++stamp, 631, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 2);
+
+	current = "tof: instance 와 generation 가운데 한쪽만 바뀐 관측은 버림";
+	tof_put(&b, 0, ++stamp, 640, FB3_TOF_VALID, TOF_A, 2);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, 640, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(nothing_sent(&b));
+	tof_put(&b, 0, ++stamp, 640, FB3_TOF_VALID, TOF_C, 3);
+	CHECK(nothing_sent(&b) && b.link.tof_dropped[0] == 13);
+	tof_put(&b, 0, ++stamp, 641, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 3 && t.sensor_generation == 2 && t.distance_mm == 641);
+	/* 다른 센서의 것은 그대로다 */
+	tof_put(&b, 1, ++stamp, 802, FB3_TOF_VALID, TOF_B, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 1 && t.source_sample == 3 && t.sensor_generation == 1);
+
+	current = "tof: 관측 시각이 lease 의 기한과 같거나 뒤면 버림";
+	tof_put(&b, 0, at + 900000, 650, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(nothing_sent(&b) && b.link.tof_dropped[0] == 14);
+
+	current = "tof: lease 가 끝나면 관측을 버리고, 새 lease 가 오면 다음 관측부터 보냄";
+	fake_run(&b.hw, at + 900000);
+	stamp = at + 900100;
+	tof_put(&b, 0, stamp, 660, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(nothing_sent(&b) && b.link.tof_dropped[0] == 15 && !b.hw.tof_ready[0]);
+	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
+	in = lease(PI_A, 2, 2, b.hw.now + 500000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	tof_put(&b, 0, ++stamp, 661, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 4 && t.clock_sequence == 2 && t.distance_mm == 661);
+
+	current = "tof: 새 pi_session 에서도 센서의 instance 와 순번은 이어짐";
+	CHECK(hello(&b, PI_B, CONFIG, &hello_ack));
+	tof_put(&b, 0, ++stamp, 670, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(nothing_sent(&b));
+	pass(&b, 30000);
+	CHECK(probe(&b, PI_B, BOOT, 1, 900000, &reply));
+	in = lease(PI_B, 1, 1, b.hw.now + 500000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	tof_put(&b, 0, ++stamp, 671, FB3_TOF_VALID, TOF_C, 2);
+	CHECK(tof_sample(&b, &t, &frame) && memcmp(t.pi_session, PI_B, 16) == 0 && t.clock_sequence == 1);
+	CHECK(t.source_sample == 5 && memcmp(t.sensor_instance, TOF_C, 16) == 0 && t.sensor_generation == 2);
+
+	current = "tof: 달려 있지 않은 자리의 센서는 읽지 않음";
+	start_tof(&b);
+	b.link.config.tof[1].config_revision = 0;
+	at = open_with_lease(&b, 900000);
+	tof_put(&b, 1, at + 1000, 800, FB3_TOF_VALID, TOF_B, 1);
+	tof_put(&b, 0, at + 1000, 600, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 0);
+	CHECK(nothing_sent(&b) && b.hw.tof_asked[1] == 0 && b.hw.tof_ready[1]);
+
+	current = "tof: 표본과 그 REPORT 가 먼저 나가고 ToF 는 그 뒤에 나감";
+	start_tof(&b);
+	at = ready_to_drive(&b);
+	fake_run(&b.hw, at + 20000);
+	tof_put(&b, 0, at + 15000, 600, FB3_TOF_VALID, TOF_A, 1);
+	tof_put(&b, 1, at + 15000, 800, FB3_TOF_VALID, TOF_B, 1);
+	CHECK(sensor(&b, &s) && s.source_sample == 2);
+	CHECK(next_report(&b, &r) && r.source_sample == 2 && b.hw.tof_ready[0] && b.hw.tof_ready[1]);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 0 && t.device_sample_us == at + 15000);
+	CHECK(tof_sample(&b, &t, &frame) && t.sensor_id == 1);
+	CHECK(nothing_sent(&b));
+
+	current = "tof: 미뤄 둔 CLOCK_PROBE 가 있어도 그 자리가 되기 전에는 ToF 가 나감";
+	fake_run(&b.hw, at + 25000);
+	CHECK(!push_probe(&b, PI_A, 2, &frame) && b.link.probe_held);
+	tof_put(&b, 0, at + 24000, 601, FB3_TOF_VALID, TOF_A, 1);
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 2 && b.link.probe_held);
+	tof_put(&b, 0, at + 39000, 602, FB3_TOF_VALID, TOF_A, 1);
+	fake_run(&b.hw, at + 40000);
+	CHECK(spin(&b, &frame) && frame.id == FB3_CLOCK_REPLY_ID);
+	CHECK(next_report(&b, &r));
+	CHECK(tof_sample(&b, &t, &frame) && t.source_sample == 3);
+}
+
 static void test_command_session_and_lease(void)
 {
 	struct bench b;
@@ -2674,6 +2927,9 @@ int main(void)
 	memset(CONFIG, 0xc1, sizeof CONFIG);
 	memset(OTHER_CONFIG, 0xc2, sizeof OTHER_CONFIG);
 	memset(FIRMWARE, 0xf1, sizeof FIRMWARE);
+	memset(TOF_A, 0x7a, sizeof TOF_A);
+	memset(TOF_B, 0x7b, sizeof TOF_B);
+	memset(TOF_C, 0x7c, sizeof TOF_C);
 
 	test_cutoff_expires_at_deadline();
 	test_cutoff_earliest_first();
@@ -2707,6 +2963,7 @@ int main(void)
 	test_reports_follow_samples();
 	test_hold_steer();
 	test_samples_keep_one_period_apart();
+	test_tof();
 	test_command_session_and_lease();
 	test_vectors();
 	printf("feedback-3 link: %d checks, %d failures\n", checks, failures);
