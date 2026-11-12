@@ -405,7 +405,7 @@ python3 -m xenova_gateway --sink serial --serial-port /dev/ttyUSB0
 | `--host` / `--port` | `XENOVA_GATEWAY_BROKER_HOST` / `_PORT` | `127.0.0.1` / `1883` | dom0 Mosquitto |
 | `--username` / `--password` | `XENOVA_GATEWAY_BROKER_USERNAME` / `_PASSWORD` | `gateway` / 없음 | 비밀번호는 환경변수로 (ps 에 보이지 않게) |
 | `--sink` | `XENOVA_GATEWAY_SINK` | `mock` | `mock`(기록만) / `serial` |
-| `--serial-port` / `--serial-baud` | `XENOVA_GATEWAY_SERIAL_PORT` / `_BAUD` | `/dev/ttyUSB0` / `115200` | |
+| `--serial-port` / `--serial-baud` | `XENOVA_GATEWAY_SERIAL_PORT` / `_BAUD` | `/dev/ttyUSB0` / `115200` | 설치한 펌웨어의 속도를 명시한다. `vehicle/ESP32` feedback-3 펌웨어의 개발용 기본값은 `460800` |
 | `--frame-log` | `XENOVA_GATEWAY_FRAME_LOG` | 없음 | 목 싱크가 프레임을 한 줄씩 기록할 파일, `-` 는 표준출력 |
 | `--start-mode` | `XENOVA_GATEWAY_START_MODE` | `AUTO` | `SAFE_STOP` 이면 수동 명령이 올 때까지 정지 (시나리오 F5 "자동 출발 없음") |
 | `--retained-wait-s` | `XENOVA_GATEWAY_RETAINED_WAIT_S` | `1.0` | 시작 시 이전 `vehicle/control` 을 기다리는 시간 |

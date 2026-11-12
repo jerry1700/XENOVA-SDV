@@ -21,7 +21,7 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 - decoded raw는 payload+5B, payload 최대240B. `packet()`은 240 초과를 거절하고 `unpack()`은 delimiter 포함 frame256B 초과·불일치 길이·CRC·잘못된 COBS를 거절한다. 기본9개 제품 payload 중 최장 REPORT123B/wire상한130B다. 선택형 단일존 ToF는145B/wire상한152B이며 같은 serial adapter에서 소비한다. 별도 thread/serial handle을 만들지 않는다.
 - header raw offset: id0..1, length2, payload3부터, CRC는 `3+payload_length`부터2B. 다음 표의 offset은 **payload 시작 기준**이다. raw offset은 +3.
 - RX는 최대4096B/read, 부분 frame을 유지한다. 중간 손상·oversize는 다음0 delimiter까지 버린다. 빈 delimiter는 frame이 아니다. invalid/oversize 계수는 진단이며 성공 ACK가 아니다.
-- 현 SerialSink 코드 기본 baud는115200이다. baud는 설치 시 명시하고 실제 USB bridge/MCU 지원·전체 트래픽·STOP 지연을 계측한다. 구8×8 설계의460800/8N1 목표를 새 단일존 구성의 필수값으로 계승하지 않는다. USB line 설정 자체를 물리 적용 보증으로 해석하지 않는다.
+- 현 SerialSink 코드 기본 baud는115200이다. baud는 설치 시 명시하고 실제 USB bridge/MCU 지원·전체 트래픽·STOP 지연을 계측한다. 구8×8 설계의460800/8N1 목표를 새 단일존 구성의 필수값으로 계승하지 않는다. USB line 설정 자체를 물리 적용 보증으로 해석하지 않는다. `vehicle/ESP32` 펌웨어의 개발용 기본값은460800이며, 운영값은 실제 USB에서 SENSOR와 REPORT가 함께 흐를 때의 계측으로 확정한다.
 
 ## 3. 정확 payload layout
 
@@ -212,6 +212,8 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 
 Pi HELLO는 version3+새 Pi session+등록 config digest다. MCU는 부팅 session과 실제 지원 cap, 등록 config/firmware digest, 실제 누계 encoder 폭을 ACK한다. ACK의 원 Pi echo/NIL 아닌 device session/등록 SHA/encoder ABI/필수 mask가 모두 맞아야 Pi `ready`가 된다. 이는 출력 허가나 정지 확인이 아니다. ACK만으로 DRIVE를 시작하지 않는다.
 
+Pi는 `ready` 전에는 같은 Pi session의 HELLO를50ms 간격으로 다시 보낸다. handshake 기한은 첫 HELLO부터 세며 재전송으로 늘지 않고, 기한 뒤의 고장은 늦은 ACK로 풀리지 않는다. MCU는 열려 있는 session과 같은 Pi session의 HELLO에 session을 닫지 않고 같은 ACK로 답한다.
+
 현 필수 mask는 **0x01f7**. 기본 u16 의미는 ACCEPT0x1, APPLY0x2, VELOCITY0x4, STEERING0x8, STATIONARY0x10, ODOMETRY0x20, **ABS_EXPIRY0x40, CLOCK4_LATCH0x80, DIRECTION_GATE0x100, STATIONARY_STEER0x400**이다. 선택형 단일존 ToF는 신규 `TOF_CAPABILITY=0x0800`을 검사한다. 구 조각형0x0200은 역사 예약값으로 두며 새 ToF 지원으로 인정하지 않는다. ToF를 쓸 profile에는0x0800, 정지 조향 profile에는0x0400도 필요하다. `tof_profiles: []`는0x0800 없이 정상이며, 선택한 ToF의 cap 부족은 ToF만 unavailable로 남긴다. clock/encoder/STOP의 기존 준비조건을 ToF로 막지 않는다. 0x8은 필수 mask 밖이며 AUTO HOLD의 measured steering sensor quality와 동일 개념이 아니다. 없는 기능을 cap로 광고하지 않는다.
 
 같은 Pi 연결에서 MCU boot session이 바뀌면 DEVICE_RESTARTED fault·ready 철회다. 새 ACK/새 표본이 기존 fault를 자동 해제하지 않는다. clock/session/cumulative counter를 조용히 초기화해 같은 장치로 계속 달리지 않는다. Pi 재기동은 새 pi_session/clock_epoch로 다시 설치한다. boot session 생성·영구 저장 방식은 MCU 제공물에 명시한다.
@@ -264,7 +266,7 @@ AUTO cusp HOLD_READY는 여기서 더 나아가 실제 HOLD APPLIED 이후 연�
 
 MCU는 실제 양쪽 누계 ticks와 실제 latch/sample을 보낸다. 순번은 송신횟수가 아니라 실제 sensor sample ID다. 같은 표본을 다른 시각/ID로 다시 만들지 않는다. signed32/64 범위의 정상 wrap은 Pi가 모듈러 차분한다. source 시각/순번 역전·0·동일 sample 재사용은 sensor 검산에서 거절한다. ticks의 reset을 정상 wrap으로 위장하지 말고 새 boot session/명시 fault와 재설치로 구분한다. **time/command/report/sample/clock은1..2^63-1, generation은1..2^32-1이며 wrap 전 STOP·새 disarmed session 절차가 필요하다.** MCU32bit micros를 atomic64 확장 없이 u64로 포장하지 않는다. encoder modulo와 debug counteru8만 wrap 예외다. Pi의 일부 parser는 이 전체 의미범위를 모든 필드에 똑같이 강제하지 않으므로 최종 codec 회귀에서 계약과 실제 거절 경계를 분리한다.
 
-Pi odometry는 원 Δticks와 source dt·승인 최대속도·Ackermann 일관성을 검사한다. 긴 gap은 새 odom epoch/anchor가 필요하고 잃어버린 이동을0으로 복구하지 않는다. Pi의 별도 absolute meter는 연속 source_sample+1일 때 wrap-aware `max(abs(ΔL),abs(ΔR))`를 누적한다. MCU가 mean/abs(mean)으로 원 누계 wheel 정보를 줄이면 안 된다. 이 meter와 임무 거리예산은 Pi 내부이며 ESP packet을 새로 만들지 않는다.
+Pi odometry는 원 Δticks와 source dt·승인 최대속도·Ackermann 일관성을 검사한다. 좌우가 한 tick씩 정반대로 움직인 표본은 encoder 양자화 폭으로 보아 거절하지 않고 측정대로 제자리 yaw로 적분하며, 두 tick 이상의 정반대 변화는 `ODOM_ACKERMANN_INCONSISTENT`로 거절한다. 긴 gap은 새 odom epoch/anchor가 필요하고 잃어버린 이동을0으로 복구하지 않는다. Pi의 별도 absolute meter는 연속 source_sample+1일 때 wrap-aware `max(abs(ΔL),abs(ΔR))`를 누적한다. MCU가 mean/abs(mean)으로 원 누계 wheel 정보를 줄이면 안 된다. 이 meter와 임무 거리예산은 Pi 내부이며 ESP packet을 새로 만들지 않는다.
 
 시계 불연속, device restart, malformed/과기한/다른 session, partial TX, RX EOF, command ACK timeout은 현재성/출력에 영향을 준다. Pi read는 partial frame을 다음 read까지 유지하지만 incomplete bytes를 ACK로 쓰지 않는다. nonblocking TX가 partial이면 전체 적용 여부 미확정으로 실패하고 serial frame을 성공 처리하지 않는다. readable 이후 빈 read가 EOF이며 idle의 빈 read와 구분한다. 물리 USB 단절 때 Pi가 STOP을 전송할 수 있다고 가정하지 않는다. 독립 MCU cutoff/watchdog/E-stop·brake가 최종 보호다. MCU의 brake/stop 출력 방식·무전원 상태·고장 latch 해제 절차는 실차 공동 수락 항목이다.
 

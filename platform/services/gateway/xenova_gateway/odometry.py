@@ -179,12 +179,16 @@ class VehicleOdometry:
                 self.previous=current;self._source_payload=payload;self.samples.clear();self.latest=None;return None
             modulus=1<<self.config.encoder_bits
             delta=lambda a,b:((a-b+modulus//2)%modulus)-modulus//2
-            dl=delta(left,old[2])*self.config.metres_per_tick
-            dr=delta(right,old[3])*self.config.metres_per_tick
+            left_ticks=delta(left,old[2]);right_ticks=delta(right,old[3])
+            dl=left_ticks*self.config.metres_per_tick
+            dr=right_ticks*self.config.metres_per_tick
             dt=(source_us-old[1])/1e6
             if max(abs(dl),abs(dr))>self.config.maximum_speed_mps*dt:return self.fail('ODOM_ENCODER_DISCONTINUITY')
             distance=(dl+dr)/2;turn=(dr-dl)/self.config.track_width_m
-            if abs(distance)<1e-9 and abs(turn)>1e-6:return self.fail('ODOM_ACKERMANN_INCONSISTENT')
+            # 두 바퀴가 한 칸씩 반대로 움직인 것은 엔코더 양자화 폭 안이다. 거절하지 않고
+            # 측정한 그대로 제자리 회전으로 적분한다. 두 칸부터는 차체가 낼 수 없는 움직임이다.
+            if abs(distance)<1e-9 and abs(turn)>1e-6 and max(abs(left_ticks),abs(right_ticks))>1:
+                return self.fail('ODOM_ACKERMANN_INCONSISTENT')
             if abs(turn)<1e-8:x+=distance*math.cos(yaw);y+=distance*math.sin(yaw)
             else:
                 radius=distance/turn
