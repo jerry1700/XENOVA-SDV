@@ -1,12 +1,15 @@
 """관측 어댑터·MQTT 연결·감시 루프 (S15P31E110-124). 실제 브로커·플랫폼은 없다."""
 
 import queue
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 from dataclasses import replace
 from uuid import UUID
 
 import pytest
 
+from dom0_manager.drivers.platform import SerializedManager
 from dom0_manager.drivers.xl import Xl
 from dom0_manager.errors import PlatformUnavailable
 from dom0_manager.models import VmState
@@ -711,6 +714,41 @@ def test_recovery_intents_falls_back_once_to_the_existing_read_contract():
     observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents")
     assert observer()[0].intent_known and observer()[0].intent_known
     assert [action for action, _ in manager.calls] == ["recovery-intents", "intents", "templates", "intents"]
+
+
+def test_periodic_intent_refresh_continues_during_recover_once():
+    clock = [0.0]
+    started, release = Event(), Event()
+
+    class RecoveringManager(FakeManager):
+        def fork(self):
+            return FakeManager(self.views)
+
+        def call(self, action, spec=None, **kwargs):
+            if action != "recover_once":
+                return super().call(action, spec, **kwargs)
+            started.set()
+            assert release.wait(5)
+            return {"ok": True}
+
+    inner = RecoveringManager([_view(DEBIAN, "debian-dev")])
+    manager = SerializedManager(inner, busy_timeout_s=0.05)
+    observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents", clock=lambda: clock[0])
+    assert observer()[0].desired_state == "running"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        recovery = pool.submit(manager.call, "recover_once", execute=True)
+        try:
+            assert started.wait(5)
+            inner.views[0] = _view(DEBIAN, "debian-dev", desired="stopped", revision=3)
+            clock[0] = 60.0  # 템플릿 갱신도 due인 관측 주기
+            observations = observer()
+            assert observer.intent_known and observations[0].intent_known
+            assert (observations[0].desired_state, observations[0].intent_revision) == ("stopped", 3)
+            assert not recovery.done()
+        finally:
+            release.set()
+        assert recovery.result()["ok"]
 
 
 def test_intent_rows_without_an_applicable_intent_are_valid():
