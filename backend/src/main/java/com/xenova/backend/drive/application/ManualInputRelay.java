@@ -28,8 +28,8 @@ import org.springframework.stereotype.Service;
 //  - While any key is held, the last keys are re-sent every 50 ms (20 Hz). Releasing all keys sends `keys: []`
 //    once. The manual VM treats 200 ms without input as "released", so a lost release is harmless.
 // There is one operator at a time (2026-10-20 decision), so a single shared key state is enough.
-// The repeat runs on its own thread, not Spring's shared @Scheduled thread: a slow dom0-manager call there
-// (VmStateWatcher) stalled the repeat for ~0.5 s and the manual VM stopped the car mid-drive.
+// The repeat runs on its own thread, not Spring's shared @Scheduled thread, so unrelated scheduled work
+// cannot delay manual input long enough for the VM to treat it as released.
 @Service
 public class ManualInputRelay {
 

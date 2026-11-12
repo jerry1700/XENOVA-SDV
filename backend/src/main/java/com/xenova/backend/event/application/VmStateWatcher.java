@@ -6,11 +6,10 @@ import com.xenova.backend.vm.domain.Vm;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
-// Xen does not tell anyone when a VM crashes or shuts itself down, so the VM list is polled and
-// state changes that no user operation explains are recorded as vm.state.changed (cause detected).
+// Checks a VM list on demand and records state changes that no user operation explains as
+// vm.state.changed (cause detected).
 @Component
 public class VmStateWatcher {
 
@@ -24,9 +23,6 @@ public class VmStateWatcher {
         this.tracker = tracker;
     }
 
-    @Scheduled(
-            initialDelayString = "${xenova.event.vm-state-check-interval-ms:5000}",
-            fixedDelayString = "${xenova.event.vm-state-check-interval-ms:5000}")
     public void check() {
         long mark = tracker.mark();
         List<Vm> vms;
