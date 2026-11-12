@@ -109,6 +109,40 @@ class RoadHypothesisTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIn('DASH_CHAIN_AMBIGUOUS', result.reasons)
 
+    def test_adjacent_short_dashes_can_agree_on_direction_across_raster_steps(self):
+        graph = TapeGraph((
+            strip(0, ((.2, .3), (1.2, .3))), strip(1, ((.2, -.3), (1.2, -.3))),
+            strip(2, ((.36, -.05), (.39, -.04))), strip(3, ((.43, -.03), (.46, -.04))),
+            strip(4, ((.50, -.04), (.52, -.04))), strip(5, ((.57, -.04), (.84, -.05)))),
+            profile=TapeProfile(cell_m=.01))
+
+        result = infer_road(graph)
+
+        self.assertEqual(result.status, 'PARTIAL')
+        self.assertEqual(result.hypotheses[0].strip_ids[1], (2, 3, 4, 5))
+        self.assertTrue(any(result.hypotheses[0].inferred))
+
+    def test_outer_line_keeps_forward_span_when_tail_turns_sideways(self):
+        graph = TapeGraph((strip(0, ((.2, .3), (1.2, .3))), strip(1, ((.2, 0.), (1.2, 0.))),
+            strip(2, ((.2, -.3), (.85, -.3), (.86, -.5), (.82, -.65)), end='FOV_clip')))
+
+        result = infer_road(graph)
+
+        self.assertEqual(result.status, 'VALID')
+        self.assertEqual(result.hypotheses[0].strip_ids, ((0,), (1,), (2,)))
+        self.assertLessEqual(result.hypotheses[0].right_outer[-1][0], .85)
+
+    def test_uncertain_heading_at_end_preserves_the_supported_common_run(self):
+        divider = replace(strip(1, ((.2, 0.), (.8, 0.), (.85, .025)), error=.03),
+                          point_error_xy=((.02, .02),) * 3)
+        graph = TapeGraph((strip(0, ((.2, .3), (1.2, .3))), divider, strip(2, ((.2, -.3), (1.2, -.3)))))
+
+        result = infer_road(graph)
+
+        self.assertEqual(result.status, 'VALID')
+        self.assertLessEqual(result.hypotheses[0].divider[-1][0], .8)
+        self.assertGreater(result.hypotheses[0].divider[-1][0], .6)
+
     def test_32_choose_3_does_not_become_unique_after_only_4096_combinations(self):
         graph = straight_graph(tuple(-.05 + i * .003 for i in range(32)))
         result = infer_road(graph)
