@@ -26,8 +26,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-// Board registry -> VM table. Runs periodically (VmRegistrationSynchronizer) and on POST /api/v1/vms/synchronizations,
-// so VMs created or retired with a platform tool follow on the web without a Spring request.
+// Board registry -> VM table. Runs only on POST /api/v1/vms/synchronizations (no periodic loop), so VMs created or
+// retired with a platform tool follow on the web when an operator asks for it.
 @Service
 @EnableConfigurationProperties(VmRegistrationSyncProperties.class)
 public class VmSynchronizationService {

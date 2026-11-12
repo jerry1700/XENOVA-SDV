@@ -62,15 +62,13 @@ xenova:
       enabled: false
       refresh-delay: 1s
       stale-limit: 10s
-    # The loop would race per-test dom0-manager stubs; synchronization itself is covered by unit tests.
     registration-sync:
-      enabled: false
-      interval: 30s
       missing-threshold: 2
       creation-grace: 20m
   event:
-    # Tests call AgentStatusWatcher.check() themselves.
+    # Tests call AgentStatusWatcher.check() and VmStateWatcher.check() themselves.
     agent-status-check-interval-ms: 3600000
+    vm-state-check-interval-ms: 3600000
   report:
     os-evidence:
       required-os-ids:
