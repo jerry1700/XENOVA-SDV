@@ -481,7 +481,7 @@ function SimCard({ sim, drive, board }: { sim: SimView; drive: DriveState | null
 export function DashboardPage() {
   const { drive, socket } = useDrive();
   // 실패해도 카드를 남기고 카드가 '조회 불가' 로 표시한다
-  const vms = useVms(LIVE_POLL_MS, { keepLastData: true });
+  const vms = useVms({ keepLastData: true });
   const events = useEvents({ limit: 30 });
   const now = useNow();
   const items = sortVms(vms.data?.items ?? []);

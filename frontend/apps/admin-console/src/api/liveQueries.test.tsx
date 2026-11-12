@@ -5,7 +5,7 @@ import { ToastProvider } from '@xenova/ui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LiveDataAlert, LiveDataAlertHost } from '../layout/LiveDataAlert';
 import { useNow } from '../useNow';
-import { useMetrics, useTelemetryHeartbeat, useVms } from './queries';
+import { LIVE_POLL_MS, useMetrics, useTelemetryHeartbeat, useVms } from './queries';
 import { memoryFixture } from '../domain/memoryContractFixtures';
 import type { VmListResponse } from './types';
 import { loadVmList } from './vmListCache';
@@ -84,6 +84,18 @@ afterEach(() => {
 });
 
 describe('실시간 조회 실패', () => {
+  it('VM 목록은 시간이 지나도 자동으로 다시 요청하지 않는다', async () => {
+    vi.useFakeTimers();
+    stubBackend();
+    const fetchMock = vi.mocked(fetch);
+    const { result } = renderHook(() => useVmsInRender(), { wrapper: wrapper() });
+    await vi.waitFor(() => expect(result.current.data?.items).toHaveLength(1));
+
+    await act(() => vi.advanceTimersByTimeAsync(LIVE_POLL_MS * 3));
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it.each([false, true])(
     '메트릭의 마지막 응답 유지는 명시 선택=%s일 때만 적용하고 오류·수신 시각을 보존한다',
     async (keepLastData) => {
