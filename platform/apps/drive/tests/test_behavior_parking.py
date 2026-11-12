@@ -110,7 +110,7 @@ def test_parking_publication_and_phase_recovery(parking_writer, case):
     subprocess.run([str(parking_writer), case], check=True)
 
 
-@pytest.mark.parametrize('case', ('budget-current', 'budget-revoked'))
+@pytest.mark.parametrize('case', ('plan-source-retry', 'plan-source-expiry', 'budget-current', 'budget-revoked'))
 def test_planner_publication_keeps_original_authority_and_deadline(parking_writer, case):
     subprocess.run([str(parking_writer), case], check=True)
 

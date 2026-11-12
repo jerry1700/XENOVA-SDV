@@ -1,4 +1,4 @@
-/* Host fault injection at the parking writer's publication boundary. */
+/* Host fault injection at the planner's publication boundary. */
 #include <assert.h>
 #include "engine.c"
 
@@ -191,6 +191,35 @@ static void parking_deadlines(void){
  assert(parking->phase==DP_HOLD&&parking->terminal&&engine.behavior_failed);
 }
 
+static void plan_source_retry(bool expire){
+ parking_fixture();
+ unsigned old_slot=(unsigned)engine.current;
+ const struct lp_path *old=&engine.paths[old_slot].path;
+ feedback.odom_pose=old->points[1].pose;
+ struct lp_path *candidate;
+ assert(reserve(&engine,&engine.planning_path,&candidate)==DE_OK);
+ *candidate=*old;
+ engine.planning=true;engine.planning_snapshot=&snapshot;
+ engine.planning_vehicle_pi_us=feedback.pi_sample_us;
+ engine.search_reason=LP_PATH_FOUND;
+ uint32_t generation=engine.planning_path.generation;
+ source_busy=true;
+ assert(de_plan_slice(&engine,4,1000)==DE_BUSY);
+ assert(engine.planning&&!engine.plan_finalized&&engine.discarded==0);
+ assert(engine.current==(int)old_slot&&engine.planning_path.generation==generation);
+ assert(engine.search_reason==LP_PATH_FOUND&&engine.budget.deadline_us==100);
+
+ source_busy=expire;
+ guest=expire?100:99;
+ assert(de_plan_slice(&engine,4,1001)==(expire?DE_PATH:DE_OK));
+ assert(!engine.planning);
+ if(expire){
+  assert(engine.search_reason==LP_DEADLINE&&engine.discarded==1&&engine.current==(int)old_slot);
+ }else{
+  assert(engine.discarded==0&&engine.paths[engine.current].generation==generation);
+ }
+}
+
 static void budget_reply_requires_current_grant(bool current){
  parking_fixture();
  xenova_drive_MissionGrant old=engine.grant;
@@ -213,6 +242,8 @@ int main(int argc,char **argv){
  if(!strcmp(argv[1],"writer"))writer_contention();
  else if(!strcmp(argv[1],"handoff"))parking_handoff();
  else if(!strcmp(argv[1],"deadlines"))parking_deadlines();
+ else if(!strcmp(argv[1],"plan-source-retry"))plan_source_retry(false);
+ else if(!strcmp(argv[1],"plan-source-expiry"))plan_source_retry(true);
  else if(!strcmp(argv[1],"budget-current"))budget_reply_requires_current_grant(true);
  else if(!strcmp(argv[1],"budget-revoked"))budget_reply_requires_current_grant(false);
  else assert(false);
