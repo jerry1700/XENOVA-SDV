@@ -26,6 +26,7 @@ SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
 CLOCK_PROBE_INTERVAL_US=200000
 CLOCK_INSTALL_RETRY_US=50000
+HELLO_RETRY_US=50000
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
         if type(profile) is not Feedback3Profile or kwargs.get('odometry') is None:raise ValueError('feedback3 measured policy/odometry required')
         self.profile=profile;self.stationary_policy=profile.stationary
         self.clock_epoch=str(uuid4());self.clock_sequence=0;self.probe_sequence=0;self.outstanding=None
+        self.hello_sent_us=0
         self.last_probe_us=0;self.previous_interval=None;self.streak=0;self.leases=OrderedDict();self.install=None
         self.stop_pin=None;self.report_hwm=0;self.gate_revision=0;self.last_motion=False
         self._matched_stop_snapshot=None;self._direction_snapshot=None;self.phase_key=None;self.phase_end=0
@@ -123,6 +125,8 @@ class Feedback3SerialSink(FeedbackSerialSink):
 
     def _poll_deadlines(self):
         yield from super()._poll_deadlines()
+        if self.started is not None and not self.ready and self.fault is None:
+            yield (self.hello_sent_us + HELLO_RETRY_US) / 1_000_000
         if not self.ready or not self._sensor_available():
             return
         if self.outstanding is None:
@@ -140,12 +144,16 @@ class Feedback3SerialSink(FeedbackSerialSink):
 
     def _poll(self,now,*,owned_ready=None):
         if self.started is None:
-            self.started=now;self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
+            self.started=now;self._send_hello()
         invalid=self.framer.invalid+self.framer.oversize
         # feedback3의 시계 처리까지 끝난 최종 view 하나만 게시한다.
         super()._poll(now,owned_ready=owned_ready,publish_view=False)
         if self.framer.invalid+self.framer.oversize!=invalid:self.tof_inbox.reject(reason='outer_frame_loss')
         at=int(self.clock()*1e6)
+        # 부팅 중인 장치나 앞서 끊긴 조각이 HELLO를 삼킬 수 있다. 같은 Pi session으로 다시 보내며
+        # handshake 기한과 그 뒤의 고장 유지는 바꾸지 않는다.
+        if not self.ready and self.fault is None and at-self.hello_sent_us>=HELLO_RETRY_US:
+            self._send_hello()
         if self.ready and self._sensor_available():
             if self.outstanding is not None and at>=self.outstanding[1]+self.profile.probe_timeout_us:
                 self.outstanding=None;self.streak=0
@@ -157,6 +165,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
                     and at - self.install['sent_us'] >= CLOCK_INSTALL_RETRY_US):
                 self._send_install(self.install)
         self.snapshot=self._view()
+
+    def _send_hello(self):
+        self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
+        self.hello_sent_us=int(self.clock()*1e6)
 
     def _send_install(self, lease):
         self._send(lease['wire'])
