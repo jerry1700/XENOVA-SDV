@@ -11,7 +11,7 @@ import threading
 
 from xenova_vehicle.perception.inputs import FrameStamp, ImageFrame, PerceptionInput
 from xenova_vehicle.simulation.pc_input import PcSourceBinding, PcFrameInput, _PcInputIssuer
-from .clock import ClockSource, HilObservationClock, ClockLeaseEvidence
+from .clock import ClockSource, HilObservationClock, ClockLeaseEvidence, HilClockError
 from .transport import SessionScope, ObservationFrame, ReceivedPacket
 
 
@@ -100,10 +100,15 @@ class MappedPcOwner:
         _need(self._head is None or packet.sequence > self._head, 'PC frame sequence cannot be replayed or retimed')
         self._head = packet.sequence  # 매핑 실패도 이미 수신한 원 순번/E를 환급하지 않는다.
         lease = evidence.lease
-        rgb = lease.map_interval(*packet.rgb_pc_interval, now_j_us)
-        depth = lease.map_interval(*packet.depth_pc_interval, now_j_us)
+        try:
+            rgb = lease.map_interval(*packet.rgb_pc_interval, now_j_us)
+            depth = lease.map_interval(*packet.depth_pc_interval, now_j_us)
+            deadline = lease.deadline_lower(packet.expires_pc_us, now_j_us)
+        except HilClockError as error:
+            # 유효 clock으로 이 관측을 매핑할 수 없는 경우 해당 프레임만 폐기한다.
+            raise PcMappingError(str(error)) from error
         full_lower, full_upper = min(rgb[0], depth[0]), max(rgb[1], depth[1])
-        expires = min(lease.deadline_lower(packet.expires_pc_us, now_j_us), full_lower + 500_000)
+        expires = min(deadline, full_lower + 500_000)
         _need(full_upper <= received.received_local_us and full_upper < expires and now_j_us + 1 < expires,
             'mapped capture is future, unavailable, or past its original E')
         fields = self.binding.fields

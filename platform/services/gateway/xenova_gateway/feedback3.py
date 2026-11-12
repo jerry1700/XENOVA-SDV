@@ -24,6 +24,8 @@ PROBE3=struct.Struct('<16s16sQQ');CLOCK3=struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3=struct.Struct('<16s16s16sQQQqqQQ');CLOCK_ACK3=struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
+CLOCK_PROBE_INTERVAL_US=200000
+CLOCK_INSTALL_RETRY_US=50000
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
         self.last_probe_us=0;self.previous_interval=None;self.streak=0;self.leases=OrderedDict();self.install=None
         self.stop_pin=None;self.report_hwm=0;self.gate_revision=0;self.last_motion=False
         self._matched_stop_snapshot=None;self._direction_snapshot=None;self.phase_key=None;self.phase_end=0
+        self._vehicle_wire_cache=OrderedDict()
         self.hold_row=None;self.hold_start=None
         self.tof_inbox=TofInbox();self._tof_selection=None;self._tof_context_snapshot=None
         super().__init__(*args,**kwargs)
@@ -118,24 +121,47 @@ class Feedback3SerialSink(FeedbackSerialSink):
         pad=drift_pad(self.profile.drift_ppm,abs(at-lease['reference']))
         return lease['lower']-pad,lease['upper']+pad
 
+    def _poll_deadlines(self):
+        yield from super()._poll_deadlines()
+        if not self.ready or not self._sensor_available():
+            return
+        if self.outstanding is None:
+            yield (self.last_probe_us + CLOCK_PROBE_INTERVAL_US) / 1_000_000
+        else:
+            yield (self.outstanding[1] + self.profile.probe_timeout_us) / 1_000_000
+        lease_end = self.snapshot.get('clock_valid_until_pi_us', 0)
+        if lease_end:
+            yield lease_end / 1_000_000
+        install = self.install
+        if install is not None and not install['ack']:
+            retry = install['sent_us'] + CLOCK_INSTALL_RETRY_US
+            if retry < install['expires']:
+                yield retry / 1_000_000
+
     def _poll(self,now,*,owned_ready=None):
         if self.started is None:
             self.started=now;self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
         invalid=self.framer.invalid+self.framer.oversize
-        super()._poll(now,owned_ready=owned_ready)
+        # feedback3의 시계 처리까지 끝난 최종 view 하나만 게시한다.
+        super()._poll(now,owned_ready=owned_ready,publish_view=False)
         if self.framer.invalid+self.framer.oversize!=invalid:self.tof_inbox.reject(reason='outer_frame_loss')
         at=int(self.clock()*1e6)
         if self.ready and self._sensor_available():
             if self.outstanding is not None and at>=self.outstanding[1]+self.profile.probe_timeout_us:
                 self.outstanding=None;self.streak=0
-            if self.outstanding is None and at-self.last_probe_us>=200000:
+            if self.outstanding is None and at-self.last_probe_us>=CLOCK_PROBE_INTERVAL_US:
                 if self.probe_sequence>=2**63-1:self._fail('DEVICE_COUNTER_EXHAUSTED');return
                 self.probe_sequence+=1;self.last_probe_us=at;self.outstanding=(self.probe_sequence,at)
                 self._send(packet(CLOCK_PROBE,PROBE3.pack(UUID(self.pi_session).bytes,UUID(self.device_session).bytes,self.probe_sequence,at)))
-            if self.install is not None and at<self.install['expires'] and not self.install['ack']:
-                if at-self.install.get('retry',0)>=50000:
-                    self.install['retry']=at;self._send(self.install['wire'])
+            if (self.install is not None and at < self.install['expires'] and not self.install['ack']
+                    and at - self.install['sent_us'] >= CLOCK_INSTALL_RETRY_US):
+                self._send_install(self.install)
         self.snapshot=self._view()
+
+    def _send_install(self, lease):
+        self._send(lease['wire'])
+        # The first submission and each retransmission start the same ACK wait.
+        lease['sent_us'] = int(self.clock() * 1e6)
 
     def _session(self,pi,device):
         if str(UUID(bytes=pi))!=self.pi_session or str(UUID(bytes=device))!=self.device_session:
@@ -188,13 +214,29 @@ class Feedback3SerialSink(FeedbackSerialSink):
             else:self.streak=1
             self.previous_interval=lower,upper,at
             if self.streak<2:return
+            current=self._lease(at)
+            if current is self.install and current is not None:
+                old_lower,old_upper=self._bounds(current,at)
+                if max(lower,old_lower)>min(upper,old_upper):
+                    self._fail('DEVICE_CLOCK_DISCONTINUITY');self.leases.clear();return
+                max_sensor_width = 2 * self.odometry.config.maximum_clock_error_us
+                old_width = old_upper - old_lower
+                new_width = upper - lower
+                refresh_room = at + CLOCK_PROBE_INTERVAL_US + p.probe_timeout_us < current['expires']
+                # 도착시각으로 상한을 잘라도, 기존 구간의 가장 이른 시각보다 새
+                # 하한이 너무 낮으면 위치 표본의 허용 폭을 넘는다.
+                cannot_map_sensor = old_lower - lower > max_sensor_width
+                if old_width <= max_sensor_width and (
+                        cannot_map_sensor or (old_width <= new_width and refresh_room)):
+                    self._sample(sample,latch,left,right,quality,steer,error,current,at)
+                    return
             self.clock_sequence+=1
             if self.clock_sequence>=2**63:self._fail('DEVICE_COUNTER_EXHAUSTED');return
             expires=p1+p.lease_us;pad_end=drift_pad(p.drift_ppm,expires-at)
             cutoff=expires-(upper+pad_end)-p.j_cutoff_us
             if cutoff<=d3:raise FeedbackError('clock3 cutoff')
             lease=dict(sequence=self.clock_sequence,probe=seq,reference=at,lower=lower,upper=upper,
-                expires=expires,cutoff=cutoff,ack=False)
+                expires=expires,cutoff=cutoff,ack=False,sent_us=at)
             lease['wire']=packet(CLOCK_INSTALL,INSTALL3.pack(pi,device,UUID(self.clock_epoch).bytes,
                 self.clock_sequence,seq,at,lower,upper,expires,cutoff))
             if len(self.leases)>=2:
@@ -202,7 +244,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 if any(row.get('clock')==oldest and row.get('expires',0)>at for row in self.pending.values()):
                     raise FeedbackError('clock3 live lease slot pinned')
                 del self.leases[oldest]
-            self.leases[self.clock_sequence]=lease;self.install=lease;self._send(lease['wire'])
+            self.leases[self.clock_sequence]=lease;self.install=lease;self._send_install(lease)
             # This probe's actual latch is an observation, never a cached sample.
             self._sample(sample,latch,left,right,quality,steer,error,lease,at);return
         if kind==CLOCK_ACK:
@@ -280,9 +322,24 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 or self.odometry.latest['source_sample']!=sample):return None
         # Preserve the original report/sample relation; a newer odom packet does
         # not refresh an older STOP report's stationary evidence.
-        window=tuple(encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':pin['gateway']})) for row in rows)
+        window=tuple(self._vehicle_wire(row,pin['gateway']) for row in rows)
         if len(window)<2:return None
         return MatchedStop(pin['command'],pin['feedback'],window)
+
+    def _vehicle_wire(self,row,gateway):
+        """같은 원 표본의 wire만 재사용한다. 정지 수락·기한은 캐시하지 않는다."""
+        key=id(row)
+        cached=self._vehicle_wire_cache.get(key)
+        if cached is not None and cached[0] is row and cached[1]==row and cached[2]==gateway:
+            self._vehicle_wire_cache.move_to_end(key)
+            return cached[3]
+        wire=encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':gateway}))
+        # Pose까지 사본을 남겨 같은 dict가 변경돼도 옛 wire를 돌려주지 않는다.
+        original={**row,'odom_pose':dict(row['odom_pose'])}
+        self._vehicle_wire_cache[key]=(row,original,gateway,wire)
+        self._vehicle_wire_cache.move_to_end(key)
+        while len(self._vehicle_wire_cache)>128:self._vehicle_wire_cache.popitem(last=False)
+        return wire
 
     def write(self,frame,t):
         if not self.ready:raise SinkError('feedback3 handshake not ready')
@@ -400,10 +457,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
             and all(a.get(k)==b.get(k) for k in keys) and b.get('segment_index')==a.get('segment_index',-2)+1
             and b.get('cusp_index')==a.get('cusp_index',-2)+1 and b.get('next_direction')==0)
 
-    def direction_witness(self,vm,role,machine,now,manual=None):
+    def direction_witness(self,vm,role,machine,now,manual=None,*,view=None):
         # The serial I/O owner publishes one immutable snapshot. Actor reads do
         # not traverse a concurrently mutating pending table/odometry deque.
-        snapshot=self._direction_snapshot
+        snapshot=self._direction_snapshot if view is None else view.get('stop_facts_source')
         if snapshot is None or not snapshot['clock_ready'] or snapshot['moving']:return None
         pin=snapshot['pin'];sample=snapshot['sample'];matched=snapshot['matched']
         if ((role!='manual' and now>=pin['phase_end']) or sample is None
@@ -426,12 +483,12 @@ class Feedback3SerialSink(FeedbackSerialSink):
                     while len(rows)>2 and rows[-1]['pi_sample_us']-rows[1]['pi_sample_us']>=self.stationary_policy.window_us+2*rows[1]['clock_error_us']:rows.pop(0)
                 window=tuple(encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':pin['gateway']})) for row in rows)
                 if len(window)<2:return None
-                check_stationary_window(window,current,self.odometry.host_boot,pin['gateway'],self.pi_session,
-                    self.device_session,self.stationary_policy,now,rows[-1]['source_sample'],rows[-1]['source_us'])
+                check_stationary_window(window,current,self.odometry.host_boot,pin['gateway'],sample['pi_session'],
+                    sample['device_session'],self.stationary_policy,now,rows[-1]['source_sample'],rows[-1]['source_us'])
             else:
                 if matched is None:return None
                 matched.check(current,self.odometry.host_boot,pin['gateway'],machine.generation,
-                    self.pi_session,self.device_session,self.stationary_policy,now)
+                    sample['pi_session'],sample['device_session'],self.stationary_policy,now)
         except ValueError:return None
         source=pin['witness'];command=source.get('command')
         if role=='manual' and manual is not None:
@@ -475,6 +532,6 @@ class Feedback3SerialSink(FeedbackSerialSink):
             mission_id=UUID(command['mission_id']).bytes,mission_revision=int(command['mission_revision']),grant_revision=int(command['grant_revision']),
             driver_session=UUID(command['driver_session']).bytes,driver_action_seq=int(command['driver_action_seq']),
             driver_state_seq=int(command['driver_state_seq']),vehicle_sequence=sample['sequence'],valid_until_pi_us=end,
-            pi_session=self.pi_session,device_session=self.device_session)
+            pi_session=sample['pi_session'],device_session=sample['device_session'])
         value.gate.CopyFrom(schema.DirectionGateRef(gate_revision=revision,stop_command_sequence=pin['sequence'],
             state=state,requested_direction=direction));return value

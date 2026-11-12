@@ -71,6 +71,11 @@ class OutputOwner:
         self._vehicle_maximum_age_us=getattr(getattr(sensor,'config',None),'maximum_sample_age_us',None)
         self._read_fd=getattr(self.device,'_write_fd',None) if os.name=='posix' else None
         self._owned_poll=getattr(self.device,'_poll_owned',None)
+        self._poll_delay = (
+            getattr(self.device, '_next_poll_delay', None)
+            if self._read_fd is not None and self._read_fd == getattr(self.device, '_owned_read_fd', None)
+            else None
+        )
         self._wake_read,self._wake_write=(os.pipe2(os.O_NONBLOCK|os.O_CLOEXEC)
             if self._read_fd is not None else (None,None))
         self.thread = threading.Thread(target=self._loop, name='gateway-device-owner', daemon=True)
@@ -119,12 +124,20 @@ class OutputOwner:
         if self._feedback_timeout is not None and observed is not None and not 0<=now-observed<=self._feedback_timeout:
             for key in ('accepted','applied','physical_stop','reported_velocity_mps','reported_steering_rad'):
                 view[key]=None
-        sample=view.get('vehicle_sample')
-        if sample is not None and self._vehicle_maximum_age_us is not None:
-            age=int(now*1000000)-sample['pi_sample_us']
-            if age<0 or age+sample['clock_error_us']>self._vehicle_maximum_age_us:
-                view['vehicle_sample']=None
+        if 'vehicle_sample' in view:
+            view['vehicle_sample'] = self._fresh_vehicle_sample(view['vehicle_sample'], now)
         return view
+
+    def _fresh_vehicle_sample(self, sample, now=None):
+        if sample is not None and self._vehicle_maximum_age_us is not None:
+            age = int((self.clock() if now is None else now) * 1_000_000) - sample['pi_sample_us']
+            if age < 0 or age + sample['clock_error_us'] > self._vehicle_maximum_age_us:
+                return None
+        return sample
+
+    def vehicle_sample(self):
+        """Read the published vehicle sample and check its age at this read."""
+        return self._fresh_vehicle_sample(self._device_view.get('vehicle_sample'))
 
     def drive_ready_at(self,frame):
         if self.first_failure is not None:return 0.
@@ -213,6 +226,16 @@ class OutputOwner:
                                  'accepted': None, 'applied': None, 'physical_stop': None}
             if 'vehicle_sample' in self._device_view:self._device_view['vehicle_sample']=None
 
+    def _wait_delay(self, now):
+        delay = None
+        if self.device is not None:
+            # Custom backends and failed native links retain the periodic check.
+            delay = self._poll_delay() if self._read_fd is not None and self._poll_delay is not None else .01
+        if self.expiry is not None:
+            command_delay = max(.0001, self.expiry - now)
+            return command_delay if delay is None else min(delay, command_delay)
+        return delay
+
     def _loop(self):
         poll_due = self.device is not None
         read_ready = False
@@ -244,7 +267,7 @@ class OutputOwner:
                     elif poll_due:
                         frame = None
                     else:
-                        delay = .01 if self.expiry is None else max(.0001, min(.01, self.expiry-now))
+                        delay = self._wait_delay(now)
                         if self._read_fd is None:
                             self.condition.wait(delay)
                             poll_due = self.device is not None

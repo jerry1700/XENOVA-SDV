@@ -41,6 +41,8 @@ double db_travel_upper(const struct db_facts *,uint64_t,uint64_t,float);
 /* Ambiguous correspondence never supplies a station or progress proof. */
 bool db_station_bounds(const struct tr_basis *,dw_pose,float,const struct lp_config *,float *,float *);
 bool db_station_point(const struct tr_basis *,dw_point,float,float *);
+/* Bind blocker bounds to the same immutable station basis used for progress. */
+bool db_blocker_locate(const struct tr_basis *,struct db_blocker *,float);
 bool db_blocker_observe(const dw_world *,const struct tr_intent *,dw_pose,float,
  const struct lp_config *,struct db_blocker *);
 bool db_episode_begin(struct db_episode *,const uint8_t[16],uint32_t,uint32_t,

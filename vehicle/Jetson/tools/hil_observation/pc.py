@@ -9,6 +9,7 @@ import argparse
 from hashlib import sha256
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -105,6 +106,29 @@ def wait_bootstrap(path, timeout_s, cancelled):
     _need(not cancelled() and time.monotonic() < deadline, 'bootstrap arrived outside original wait cap')
 
 
+def _capture_attachment(producer, feed, delay_s, *, clock=time.monotonic):
+    """피드백 기동 후 영상만 늦게 시작한다. 표본을 미리 만들거나 시각을 재발급하지 않는다."""
+    _need(type(delay_s) in (int,float) and math.isfinite(delay_s) and delay_s>=0,
+        'finite nonnegative capture start delay required')
+    pending=None;started=False
+    def advance():
+        nonlocal pending,started
+        if pending is not None and clock()>=pending[2]:
+            plant,peer,_=pending
+            producer.attach(plant,peer)
+            pending=None;started=True
+            if feed is not None:feed.offer_state('CAPTURING','RUNNING')
+    def attach(plant,peer):
+        nonlocal pending
+        _need(pending is None and not started,'capture attachment is single-use')
+        pending=(plant,peer,clock()+delay_s)
+        if feed is not None:
+            feed.attach(producer=producer,plant=plant,peer=peer)
+            if delay_s:feed.offer_state('WAITING_CAPTURE','WAITING')
+        advance()
+    return attach,advance
+
+
 def _arguments(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', required=True, help='기존 Feedback3 listener의 명시 loopback IPv4')
@@ -126,6 +150,8 @@ def _arguments(argv):
     parser.add_argument('--capture-epoch', required=True)
     parser.add_argument('--capture-lifetime-us', type=int, required=True)
     parser.add_argument('--render-interval-us', type=int, required=True)
+    parser.add_argument('--capture-start-delay-s',type=float,default=0,
+        help='개발용 피드백 선기동 대기. 이 동안 영상 생성 없이 장치 피드백만 진행한다.')
     parser.add_argument('--observation-host', required=True, help='실제 Nano 또는 기존 SSH forward의 numeric IPv4')
     parser.add_argument('--observation-port', type=int, required=True)
     parser.add_argument('--observation-connect-timeout-s', type=float, required=True)
@@ -181,6 +207,9 @@ def main(argv=None):
         bounded_seconds(args.poll_interval_s, .005)
         bounded_seconds(args.brake_drain_s, 1)
         bounded_seconds(args.join_timeout_s, 5)
+        _need(math.isfinite(args.capture_start_delay_s)
+            and 0<=args.capture_start_delay_s<min(args.duration_s,args.observation_duration_s),
+            'capture start delay must leave time in the explicit experiment')
         host = str(ipaddress.IPv4Address(args.observation_host))
         _need(host == args.observation_host and type(args.observation_port) is int
             and 1 <= args.observation_port <= 65535, 'explicit numeric observation endpoint required')
@@ -216,15 +245,13 @@ def main(argv=None):
         _need(not stopped.is_set() and not state['session_done'] and not state['failed'],
             'original observation session ended before actual feedback attach')
         plant = VirtualPlant(motion, initial_pose=tuple(args.initial_pose), epoch=args.plant_epoch)
+        attach,advance_capture=_capture_attachment(producer,feed,args.capture_start_delay_s)
         def cancelled():
             state = producer.snapshot()
-            return stopped.is_set() or state['session_done'] or state['failed']
+            cancelled=stopped.is_set() or state['session_done'] or state['failed']
+            if not cancelled:advance_capture()
+            return cancelled
         peer_running = True
-        def attach(plant,peer):
-            producer.attach(plant,peer)
-            if feed is not None:
-                feed.attach(producer=producer,plant=plant,peer=peer)
-                feed.offer_state('CAPTURING','RUNNING')
         result = run_peer_session(feedback_connection, plant, protocol, device_session=args.device_session,
             duration_s=args.duration_s, poll_interval_s=args.poll_interval_s, brake_drain_s=args.brake_drain_s,
             on_session=attach, cancelled=cancelled)

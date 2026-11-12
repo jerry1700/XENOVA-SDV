@@ -13,6 +13,7 @@ from uuid import UUID
 import zlib
 
 from ..mapping.odometry import PoseSample
+from ..mapping.wheel_motion import WheelObservation
 from ..perception.calibration import CalibrationProfile,canonical
 from ..perception.inputs import FrameStamp
 
@@ -129,6 +130,7 @@ class VehicleEvidence:
     clock_lease: object
     source_key: tuple
     valid_until_j_us: int
+    wheel: WheelObservation
 
     def message(self):return _decode(self.wire,'VehicleSample')
 
@@ -277,7 +279,11 @@ class SensorSamples:
             'SYNTHETIC_ODOMETRY' if self.context.domain=='DEVELOPMENT_SYNTHETIC' else 'ODOMETRY')
         anchor=VehicleAnchor(sample.sequence,sample.source_sample,sample.source_us,sample.pi_sample_us,sample.odom_epoch,
             (sample.odom_pose.x,sample.odom_pose.y,sample.odom_pose.yaw),sample.calibration)
-        value=VehicleEvidence(raw,sha256(raw).hexdigest(),anchor,pi,interval,pose,clock_lease,(sample.device_session,sample.source_sample,sample.source_us),interval[0]+self.vehicle_age)
+        wheel=WheelObservation((sample.gateway_instance,sample.pi_session,sample.device_session),
+            sample.sequence,sample.source_us,(sample.left_ticks,sample.right_ticks),
+            max(middle-interval[0],interval[1]-middle))
+        value=VehicleEvidence(raw,sha256(raw).hexdigest(),anchor,pi,interval,pose,clock_lease,
+            (sample.device_session,sample.source_sample,sample.source_us),interval[0]+self.vehicle_age,wheel)
         self.latest_vehicle=value
         return value
 

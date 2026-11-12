@@ -22,6 +22,10 @@ struct dp_state {
  unsigned evaluated_in_round,stage,seed,published_phase;atomic_bool boundary_ready;bool resuming_plan;
  struct lp_metrics spent;dw_pose goal,approach_goal;struct lp_space space;struct lp_goal_set goals;
  struct lp_path temporary_approach,best_approach,best_maneuver;
+ const struct lp_path *publish_source;
+ struct lp_budget publish_budget;
+ uint32_t publish_source_generation;
+ bool publish_new_revision,publish_selection,publish_revalidate;
  xenova_drive_MissionGrant original_grant; xenova_drive_MissionBudgetRequest request;
  uint8_t selected_goal_sha256[32],plan_sha256[32],request_sha256[32];
 };

@@ -291,6 +291,8 @@ Spring은 3.1의 네 상태에 `stopped`를 더해 다섯 상태를 공개합니
 | `GET` | `/api/v1/cpu-layout` | `200` CPU 배치 (4.11) | `401`, `500`, `501`, `503`, `504` |
 | `GET` | `/api/v1/vms/{vm_id}/cpu-layout` | `200` CPU 배치 (4.11) | `400`, `401`, `404`, `500`, `501`, `503`, `504` |
 | `PUT` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 변경 결과 (4.12) | `400`, `401`, `404`, `409`, `500`, `501`, `503`, `504` |
+| `GET` | `/api/v1/display/phone-link` | `200` 휴대폰 중계 상태 (4.13) | `401`, `503` |
+| `POST` | `/api/v1/display/phone-link/pairing-code` | `200` 새 연결번호 (4.13) | `401`, `409`, `503` |
 | `GET` | `/healthz` | `200` | `401`, `503` |
 
 `/healthz` 를 뺀 모든 엔드포인트는 선택 헤더 `X-Request-Budget-Ms`(요청 예산, 4.9)를 받는다.
@@ -532,6 +534,51 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 - CPU 배치는 바꾸지 않는다. 플랫폼 CPU 정책이 다음 시작 때 모든 vCPU 에 같은 마스크를 적용·검증한다(4.11 로 확인).
 - 범위 밖: 실행 중 vCPU 핀·스케줄러 가중치·메모리 변경(플랫폼 미지원), CPU 배치 정책 변경(모든 게스트 정지가 필요한 유지보수 작업, 플랫폼 `cpu-policy-set`).
 - mock 드라이버: 등록됐고 실행 중이 아닌 VM 의 값을 바꾸고 `200`(`operation_id: null`). 같은 키·같은 값은 원 결과, 다른 값은 `409 VMExists`.
+
+### 4.13 `GET /api/v1/display/phone-link`, `POST /api/v1/display/phone-link/pairing-code` — USB 휴대폰 화면 중계
+
+휴대폰을 보드에 USB 테더링으로 연결하면 휴대폰 DHCP 가 보드 `usb0` 주소를 정하고, 그 주소는 연결할 때마다 바뀔 수 있습니다. 관리 콘솔에서 지금 접속 주소를 확인하고 연결번호를 발급할 수 있게 dom0-manager 가 중계(`xenova-display-mobile`)의 상태를 읽어 줍니다. 중계 코드는 바꾸지 않고 밖에서 읽습니다.
+
+| 알아내는 것 | 방법 |
+|---|---|
+| 중계 실행 여부 | `systemctl is-active xenova-display-mobile.service` |
+| 접속 주소 | `/run/xenova-display-mobile/endpoint.json` 의 `url` (쓸 수 있는 링크가 없으면 파일 없음) |
+| 연결번호 남은 시간 | `/run/xenova-display-mobile/pairing-code` 수정 시각 + `pairing_ttl_s`(기본 120초). 연결에 성공하면 파일이 지워진다 |
+| 보드 USB 주소·휴대폰 주소 | `ip -j -4 addr/route show dev <usb_interface>`. 기본 경로의 게이트웨이가 휴대폰 |
+| 새 번호 | `systemctl kill --kill-whom=main --signal=USR1` 후 바뀐 `pairing-code` 를 읽는다 |
+
+`GET` 응답 `200`:
+
+```json
+{
+  "configured": true,
+  "relay": "listening",
+  "url": "http://10.117.188.25:8084/display/mobile",
+  "usb": {"interface": "usb0", "present": true, "ipv4": ["10.117.188.25/24"], "gateway": "10.117.188.86"},
+  "configured_phone_ipv4": "10.117.188.86",
+  "subnet_mismatch": false,
+  "pairing": {"active": true, "expires_at": "2026-11-12T08:31:05Z"},
+  "observed_at": "2026-11-12T08:29:10Z"
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `configured` | 중계 설정 파일 `/etc/xenova/display-mobile.json` 이 있음 |
+| `relay` | `listening` 실행 중이고 접속 주소 있음 · `waiting_link` 실행 중이지만 쓸 수 있는 USB 링크 없음(케이블·테더링·주소) · `starting` 시작 중 또는 자동 재시작 대기 · `stopped` 꺼짐(재부팅 뒤 기본값) · `failed` · `unknown` |
+| `url` | 휴대폰 브라우저에서 열 주소. `relay` 가 `listening` 일 때만 값이 있음 |
+| `usb` | 보드 USB 링크. `present` 는 장치 유무, `ipv4` 는 전역 주소(주소/접두어), `gateway` 는 휴대폰 주소(없으면 `null`) |
+| `configured_phone_ipv4` | 중계 설정의 휴대폰 주소 |
+| `subnet_mismatch` | 보드 USB 주소가 설정된 휴대폰 대역 밖이면 `true`. 휴대폰이 테더링 대역을 바꾼 경우이며 중계는 시작하지 못한다. 판단할 수 없으면 `null` |
+| `pairing` | 쓰지 않았고 만료되지 않은 번호가 있는가와 만료 시각. **번호 값은 담지 않는다** |
+
+`POST .../pairing-code` 응답 `200`: `{"code": "123456", "expires_at": "..."}`.
+
+- 이미 연결된 휴대폰의 세션도 끊긴다(중계의 번호 회전 규칙). 콘솔은 누르기 전에 알린다.
+- 번호는 이 응답에만 있다. dom0-manager·Spring·브라우저 모두 저장하거나 로그에 남기지 않는다. 두 응답 모두 `Cache-Control: no-store`.
+- 요청 하나가 번호 하나를 만들고 앞 번호를 무효로 하므로 Spring 은 자동 재시도하지 않는다. 동시 요청은 dom0-manager 안에서 하나씩 처리한다.
+- `409 InvalidState`: 중계가 `listening` 이 아님(신호를 보내지 않음). `503 PlatformUnavailable`: `systemctl`·`ip`·파일 읽기 실패, 신호 거절, 또는 2초 안에 새 번호가 나오지 않음.
+- 번호를 웹에 보여 주는 근거: 로그인한 운영자는 이미 SSH 로 같은 파일을 읽을 수 있고, 번호는 USB 로 연결된 휴대폰에서만(중계가 `usb0` 에 묶임) 2분·5회 안에 쓸 수 있다.
 
 ---
 
@@ -838,3 +885,4 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.18 | 2026-11-04 | 정지한 Linux VM 의 자원 변경 `PUT /api/v1/vms/{vm_id}/resources`(4.12, S15P31E110-368): 필수 `Idempotency-Key`, 범위 vcpus 1..4·memory_mib 128..1024, 다음 시작부터 적용, 자산·제어 원장 키 조회, `TARGET_CHANGED` 뒤 원 작업 재확인. 재시작(4.2)의 자원 비교 기준을 지금 등록 설정으로 바꾼다. 실행 중 핀·가중치·메모리 변경은 범위 밖 |
 | v1.19 | 2026-11-06 | 구현에 맞춤: `role` 값을 `primary_drive`·`backup_drive`·`interaction` 으로(2.2·5·9장, Spring `VmRole`), 복구 이벤트 심각도 `WARN` → `WARNING`(5장), 재보충 `gap` 은 서버 로그 경고일 뿐 이벤트 로그에 남기지 않음(4.7), Spring VM 관리 엔드포인트 수 7 → 8 과 `/api/v1/vms` 아래 그 밖의 공개 엔드포인트 표(5장), 입력 오류 400 예외(로그 조회·등록 통지, 8.2), Spring 명령 응답 대기 100초 → 15분(10장) |
 | v1.20 | 2026-11-06 | 사용자 결정 반영: VM 목록·단건 조회 한도 5초를 하위 `list`·`get` 에 `timeout_ms` 로 명시(4.1·4.9, 초과 `504`), 플랫폼 `VM_NAME_CONFLICT` 를 `VMExists` 에서 분리해 `409 VMNameConflict`(8.1)로 내고 Spring 은 `409 VM_NAME_CONFLICT`(생성·시작에서도 성공 아님, 8.2), API 문서 경로(`/docs`·`/redoc`·`/openapi.json`) 기본 비활성·켜도 토큰 검사(4장) |
+| v1.21 | 2026-11-12 | USB 휴대폰 화면 중계 상태 조회 `GET /api/v1/display/phone-link` 와 연결번호 발급 `POST /api/v1/display/phone-link/pairing-code`(4.13). 번호는 발급 응답에만 담고 저장·로그·자동 재시도 금지, `Cache-Control: no-store` |

@@ -10,8 +10,8 @@
 | ☐ | guest data 서비스 unit | `xenova-display-guest-relay.service`: bridge 성공 후 기동, feed 요청, multi-user enable. recipe 연결 완료; 실제 이미지에서 확인 | 주소정·recipe 담당 |
 | ☐ | guest data 설정 (A안, 프레임 중계 없음) | `/etc/xenova/guest-display.json` ← `guest-display-data-only.json.example` | 주소정 |
 | ☐ | HDMI 런타임 설정: HDMI 1대, `ui_origin`, `page` | `/etc/xenova/display-runtime.json` ← `examples/single-hdmi-plan-a-runtime.json`, **EDID는 설치할 때 실제 값** | 주소정 |
-| ☐ | **guest data 토큰** | `/etc/xenova/guest-display/guest-data.token`, root 0600. 새 보드 최초 공급만 별도 절차. **업데이트·재부팅은 기존 값 보존**, 이미지·Git에 넣지 않음 | 첫 부팅 생성 방식은 박신영과 협의 |
-| ☐ | 방화벽 | `192.168.77.1:8085`는 출발지 `192.168.77.20`만, dom0 → `192.168.77.20:8086` 허용 | 배포 담당 |
+| ☐ | **guest data 토큰** | `/etc/xenova/guest-display/guest-data.token`, root 0600. 새 factory 첫 설치에서 한 번 준비·Debian에 공급. **업데이트·재부팅은 기존 값 보존**, 이미지·Git에 넣지 않음 | 플랫폼 first-boot 공급 |
+| ☐ | 방화벽 | `192.168.77.1:8085`와 선택한 Interaction VM의 실제 할당 IP를 대조. 제한 방화벽을 사용하면 역할 교체 시 해당 규칙도 운영자가 정합화 | 배포 담당 |
 | ☐ | **HDMI KMS (Pi4)** | 10-28 방식대로 `/boot/overlays/vc4-kms-v3d-pi4.dtbo`를 넣고 `/boot/config.txt`에 `dtoverlay=vc4-kms-v3d-pi4,cma-64`를 쓴다. 2026-11-09 이미지에는 이 설정이 빠져 있다. 그래서 `/dev/dri`, HDMI 커넥터, EDID가 없고 `xenova-display-hdmi`를 시작할 수 없다. **11-09 보드에 수동으로 넣었고 재부팅 뒤 HDMI-A-1이 잡혔다(§4)** | 박신영(이미지) |
 | ☐ | **휴대폰 USB 테더링 네트워크** | `/etc/systemd/network/20-xenova-usb-phone.network`: rndis_host·cdc_ncm·cdc_ether 링크는 DHCP로 IP만 받고 gateway·routes·DNS·NTP는 받지 않는다. 이 파일이 없으면 `80-wired.network`가 휴대폰 기본 경로를 metric 10으로 잡아 wlan0(600)보다 우선이 된다. 11-09 보드에 수동으로 넣었다(§4) | 박신영(이미지) |
 | ☐ | **HDMI 모드 guard** | `/usr/lib/systemd/system/xenova-display-hdmi.service.d/60-display-mode.conf`. 레시피는 de4cdf69(11-05)부터 설치하지만 현재 이미지에는 없다. 없으면 `display_mode`가 `DISPLAY_MODE_CHECK_FAILED`로 멈춘다. 11-09 보드에 수동으로 넣었다(§4) | 박신영(이미지 재빌드) |
@@ -31,10 +31,15 @@
 | ☐ | 화면 빌드 결과 | `/opt/xenova/display-web` (`index.html`, `assets/`), **빌드 커밋·해시 기록** | 프론트 담당(빌드)·박신영(설치) |
 | ☐ | 설정 | `/etc/xenova/guest-display-domu.json` ← `domu/guest-display-domu.json.example` | 주소정 |
 | ☐ | unit·target | `xenova-guest-display-app.service`, `xenova-guest-display.target` enable | 박신영 |
-| ☐ | **guest data 토큰** | `/etc/xenova/guest-display/guest-data.token`, xenova-display 0600, **dom0와 같은 값**. 지금 Linux 게스트 자격 공급 채널은 agent만 지원 → 채널 추가 필요 | 박신영 |
+| ☐ | **guest data 토큰** | `/etc/xenova/guest-display/guest-data.token`, xenova-display 0600, **dom0와 같은 값**. 기존 private root 공급자가 실제 할당 IP와 보드 토큰을 전달. 공용 템플릿에는 비밀 없음 | 박신영 |
 | ☐ | 템플릿 버전·lock·`defaults.json`·첫 설치 이미지 재생성 | Debian 1.0.7 템플릿 생성·검증 완료. lock/defaults/조립 예제는 1.0.7과 §6 manifest hash로 정합화. 보드 catalog 게시와 실제 부팅 검증은 별도 | 박신영 |
 
 ## 3. 빌드 뒤 확인
+
+2026-11-11 소스의 조립 검사는 relay/feed/check unit·enable·모듈·설치 도구와 공용 이미지의
+활성 설정/비밀 부재를 확인한다. 새 factory의 토큰·relay·binding 공급과 첫 부팅 뒤 연결 검사는
+[현재 절차](README.md#표시-담당-선택과-설치-확인)를 따른다. 아래 실제 보드 체크는 로컬 통과로 대신하지 않는다.
+
 
 | ✔ | 확인 |
 | --- | --- |
@@ -85,3 +90,23 @@ WSL2 Ubuntu 준비 호스트에서 공식 Debian 13 ARM64 입력의 SHA-512를 `
 - `audio/interaction-theme.mp3`: 289226 bytes, SHA-256 `a5acc1edfd36502a024116fdff8b5b5877763563fb9c29ce172aa31dc662199c`
 
 `verify-xenova-template.py`의 전체 root 해시, read-only ext4 검사, Xenova 준비 상태와 공유 신원 제거 검사를 통과했다. MP3와 `xenova-guest-display.target`, `xenova-guest-display-app.service` enable 링크도 root.raw 내부에서 확인했다. 실제 보드 catalog 게시, VM 부팅, SSH listener와 HDMI 재생 검증은 아직 수행하지 않았다.
+
+## 7. Debian Interaction 1.0.8 빌드
+
+1.0.7 보드 검증에서 음원이 재생되지 않았다. 화면은 `public/`의 고정 경로 `/audio/interaction-theme.mp3`를 불렀지만, VM guest app은 `/assets/` 아래 허용 확장자만 서비스해 404를 냈다. 이미지 안에 MP3가 있는지만 확인하고 실제로 서비스되는지는 확인하지 않아 놓쳤다.
+
+- frontend `40e5980f`: 음원을 import해 `assets/interaction-theme-<hash>.mp3`로 내보낸다.
+- platform: `1a6dec7f`(guest app·휴대폰 relay가 `/assets/*.mp3` 허용)가 들어간 `platform` 기준으로 빌드했다.
+- 템플릿 준비 도구가 guest app의 `ASSET` 허용 규칙을 읽어, 서비스할 수 없는 화면 파일(`index.html`, `favicon.*` 제외)이 있으면 빌드를 거부한다. 1.0.7 화면 빌드(`b4f0d9a1`)는 이 검사에서 `audio/README.txt`로 거부되고, `40e5980f`는 통과한다.
+
+WSL2 Ubuntu 준비 호스트에서 1.0.7과 같은 공식 Debian 입력(`sources.lock.json` 대조)과 명령으로 생성했다. 기존 1.0.7은 수정하지 않았다.
+
+- template manifest SHA-256: `69b5d0677090f57f2ecc2d8aa245c4385a1abbe892e20d5b18209e57ff13b36e`
+- root SHA-256: `da4083afe63ef917e56d0b5712ccd6379c97abf1d7e955a8be13c31223492913`
+- board bundle SHA-256: `97888631cc2fe28e620954f2d961d88cb9c87a4f7441bb58d9855ef1e2f44418` (`debian-13-arm64-1.0.8.tar.gz`, GNU sparse tar, 534267491 bytes). 보드에 zstd가 없어 gzip으로 만들고, busybox tar 대신 키트의 `extract-template.py`(Python tarfile, sparse 유지)로 푼다.
+- frontend revision: `40e5980ff024eedc529c40ccc9e2c8eb57366e6f`
+- frontend tree SHA-256: `0278a688397ef6069151819524670554b7b23496ef9af6cb2cee496661cd15f4`
+- frontend bytes: `931835`
+- `assets/interaction-theme-BL9Fpv_x.mp3`: 289226 bytes, SHA-256 `a5acc1edfd36502a024116fdff8b5b5877763563fb9c29ce172aa31dc662199c`(1.0.7과 같은 음원)
+
+`verify-xenova-template.py`를 통과했다(`xenova_layout`, `shared_guest_identity_absent` true). root.raw 안에서 `/opt/xenova/display-web/assets/interaction-theme-BL9Fpv_x.mp3`, mp3를 허용하는 `guest_app.py`, `xenova-guest-display.target` enable 링크를 확인했다. 번들은 키트 스크립트로 다시 풀어 `template.json`과 root.raw 해시가 위 값과 같음을 확인했다. 보드 catalog 게시, VM 부팅, HDMI 재생 검증은 아직 수행하지 않았다(`guest_boot_tested`, `ssh_listener_tested` false).

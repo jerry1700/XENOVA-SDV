@@ -442,6 +442,32 @@ class HilObservationSessionTests(unittest.TestCase):
         self.assertGreaterEqual(result.counts['clock_rejected'],1)
         self.assertGreaterEqual(result.counts['leases_issued'],1,(result,state))
 
+    def test_expired_frame_keeps_connection_clock_and_next_fresh_frame(self):
+        from test_mapped_pc_observation import make_pc_case
+        from tools.hil_observation.transport import ReceivedPacket
+        owner, original, _, clocks, received, scope = make_pc_case()
+        endpoint, _ = self.pair()
+        offered = []
+        session = _Session(endpoint, scope, 2, lambda: 1_100_110, lambda: False,
+            role='JETSON', binding=owner.binding, clock_policy=clocks.policy,
+            destination_clock_id=owner.binding.clock_id, probe_interval_us=20_000,
+            on_frame=lambda frame, _: offered.append(frame) is None)
+        self.addCleanup(lambda: session.complete('CANCELLED', None))
+        session.clock_owner, session.pc_owner = clocks, owner
+        evidence = clocks.lease_evidence
+        def frame(sequence, expires):
+            return ObservationFrame(scope, sequence, rgb_pc_interval=received.packet.rgb_pc_interval,
+                depth_pc_interval=received.packet.depth_pc_interval, render_completed_pc_us=1_080_200,
+                expires_pc_us=expires, rgb=RGB, depth=DEPTH)
+        session.received(ReceivedPacket(frame(2, 1_090_000), 1_100_100))
+        session.received(ReceivedPacket(frame(3, original.expires_pc_us), 1_100_100))
+        self.assertEqual((session.counts['frames_received'], session.counts['frames_dropped'],
+            session.counts['frames_offered']), (2, 1, 1))
+        self.assertEqual(offered[0].observation.rgb.stamp.sequence, 3)
+        self.assertIs(clocks.lease_evidence, evidence)
+        self.assertEqual(offered[0].expires_pc_us, original.expires_pc_us)
+        self.assertNotEqual(endpoint.fileno(), -1)
+
     def test_hard_original_probe_conflict_is_not_a_transient_lease_branch(self):
         binding, scope, policy = fixtures(); jetson, peer = self.pair(); stop = threading.Event()
         thread, state = self.start(lambda: run_jetson_session(jetson, binding=binding, scope=scope,

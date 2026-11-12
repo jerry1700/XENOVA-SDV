@@ -237,7 +237,7 @@ class DatasetReader:
         if not isinstance(profile, dict):
             raise DatasetError("missing capture profile")
         try:
-            fields = {k: profile[k] for k in CaptureProfile.__dataclass_fields__}
+            fields = {k: profile[k] for k in CaptureProfile.__dataclass_fields__ if k in profile}
             rebuilt = CaptureProfile(**fields).to_dict()
         except (ValueError, TypeError, KeyError) as exc:
             raise DatasetError(f"invalid recorded capture profile: {exc}") from exc

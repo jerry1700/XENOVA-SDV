@@ -29,7 +29,9 @@ C/Gateway가 결과를 소비한다. PC 실행 결과는 실물 보정·정지·
    probe에 응답한다. scope 전달이 늦어 A의 원200ms probe가 만료하면 실패로 남는다.
 5. 기존 Feedback3 listener의 `hil-peer-listening-1` 출력 뒤 caller가 기존 Pi serial bridge와
    실제 Gateway의 한정 HIL 설정을 선택한다. 실제 accepted socket을 받은 뒤에만 가상
-   plant 하나를 만들고 `on_session=producer.attach`로 같은 객체를 renderer에 연결한다.
+   plant 하나를 만들고 같은 객체를 renderer에 연결한다. 선택한
+   `--capture-start-delay-s` 동안은 피드백·물리만 진행하고 영상은 생성하지 않는다.
+   지연 후 현재 plant에서 새 관측을 시작하며, 이 대기는 Gateway/시계/주행 준비 승인이 아니다.
    Pi의 서비스·권한·MQTT·SSH tunnel 설정은 이 CLI가 바꾸지 않는다.
 6. 정상 종료와 오류 모두 원 peer FD를 닫고 renderer/session의 실제 종료를 원 join cap
    안에서 확인한다. source 단절·만료 뒤 자동 재연결, AUTO 재출발, epoch 재발급은 없다.
@@ -48,6 +50,21 @@ bootstrap receipt는 최대4096B의 로컬 복사 선언이며 READY나 source a
 예시의123과 SHA 문자열은 실행 값이 아니다. caller는 실제 이번 S 원본으로 채워야 한다.
 Nano는 자기 descriptor와 실제 clock·frame·source·operation 사실을 다시 검사한다.
 
+## 플랫폼 코스 선택
+
+저장소 루트에서 병합된 코스를 선택하고, 기존 HIL의 개발 프로필을 전달한다.
+
+```powershell
+$env:PYTHONPATH = 'vehicle/Jetson;vehicle/Jetson/src'
+python -m tools.hil_observation.prepare_course --revision origin/platform --track jetson-demo --development-profile 'path/to/development.canonical.json' --output vehicle/Jetson/build/hil-courses/jetson-demo
+```
+
+R55를 선택할 때는 `--track jetson-r55`와 별도 출력 폴더를 사용한다.
+도구는 지정 커밋의 코스 카탈로그를 읽어 장면과 개발 프로필을 생성하고, 해당 파일의 SHA와
+후륜축 초기 자세를 포함한 인자 배열을 출력한다. 저장소 루트에서 PC HIL을 실행하며
+인자 배열로 기존 `--development-profile`·`--scene`·`--initial-pose`와 각 SHA 인자를 교체한다.
+장면에는 코스 원본의 커밋과 SHA가 기록된다. 차량·카메라가 기존 개발 모델과 일치해야 내보낼 수 있다.
+
 ## 명시 실행 인자
 
 일반적인 `--help`는 앱·renderer·연결을 시작하지 않는다. 모든 실험 값은 caller가 지정한다.
@@ -62,6 +79,7 @@ Nano는 자기 descriptor와 실제 clock·frame·source·operation 사실을 �
 | `--scene`, `--scene-sha256` | 기존 canonical scene과 원 SHA |
 | `--capture-epoch` | 이번 renderer의 canonical nonzero UUID |
 | `--capture-lifetime-us`, `--render-interval-us` | 원 capture 수명(최대500000us)과 명시 렌더 간격 |
+| `--capture-start-delay-s` | 개발용 피드백 선기동 시간. 기본 0초, 전체 실험 시간 이내이며 표본·기한을 재사용하지 않음 |
 | `--observation-host`, `--observation-port`, `--observation-connect-timeout-s` | 실제 Nano 또는 기존 SSH forward의 numeric IPv4 연결 |
 | `--bootstrap-receipt`, `--bootstrap-timeout-s` | 이번 공개 metadata copy receipt와 최초 대기 cap |
 | `--observation-duration-s` | 원 PC clock/frame session의 전체 시간 한도 |

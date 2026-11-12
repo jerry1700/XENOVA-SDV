@@ -77,6 +77,16 @@ class MapperProfileTests(unittest.TestCase):
             del target[path[-1]]
             with self.subTest(path=path),self.assertRaises(MapperProfileError): MapperProfile(value)
 
+    def test_legacy_road_profile_keeps_original_bytes_and_uses_course_width_for_inference(self):
+        value = profile_fields()
+        del value['pipeline']['road']['missing_outer_width_bounds_m']
+        original = MapperProfile.from_dict(value)
+        restored = MapperProfile.from_bytes(original.canonical_bytes)
+        self.assertEqual(restored.sha256, original.sha256)
+        self.assertNotIn('missing_outer_width_bounds_m', restored.to_dict()['pipeline']['road'])
+        self.assertAlmostEqual(restored.pipeline.road.missing_outer_width_m, .285)
+        self.assertAlmostEqual(restored.pipeline.road.missing_outer_width_error_m, .025)
+
     def test_original_work_age_shape_and_stopping_bounds_are_enforced(self):
         changes=(('pipeline','free_ttl_us',500001),('pipeline','max_observation_age_us',500001),
                  ('pipeline','max_free_cells',257),('sensors','max_gap_us',1000001),

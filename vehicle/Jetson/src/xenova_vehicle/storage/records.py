@@ -85,6 +85,28 @@ class ProvenanceRecord:
     def encode(self):return struct.pack('<QHHI',self.provenance_id,256,1,0)+self.payload
 
 
+def aggregate_rgb_provenance(current, originals, allocate):
+    """현재 RGB와 누적 형상의 원 부모들을 기존 4-parent record로 연결한다."""
+    pending = (current, *originals)
+    if (not 2 <= len(pending) <= 12 or len({r.provenance_id for r in pending}) != len(pending)
+            or any(not r.source_mask & 1 for r in pending)):
+        raise PersistenceError('distinct bounded original RGB records required')
+    host = PROVENANCE.unpack(current.payload)[5]
+    if any(PROVENANCE.unpack(r.payload)[5] != host for r in pending):
+        raise PersistenceError('RGB provenance belongs to another Pi host')
+    while len(pending) > 1:
+        group, pending = pending[:4], pending[4:]
+        ids = tuple(r.provenance_id for r in group)
+        mask = 0
+        for record in group:
+            mask |= record.source_mask
+        derived = ProvenanceRecord(allocate(ids), PROVENANCE.pack(bytes.fromhex(current.context_sha256),mask,4,0,len(ids),
+            host,min(r.pi_lower for r in group),max(r.pi_upper for r in group),current.observation_sequence,
+            *(ids+(0,)*(4-len(ids))),bytes(128),0,bytes(16)))
+        yield derived
+        pending = (derived,*pending)
+
+
 @dataclass(frozen=True,slots=True)
 class CatalogRecord:
     kind: str

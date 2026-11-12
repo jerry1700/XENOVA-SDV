@@ -1,4 +1,5 @@
 """새 Linux 템플릿에 display domU 계정과 Plan A Python 모듈을 준비한다."""
+import ast
 import hashlib
 import json
 import os
@@ -145,6 +146,20 @@ def apply_permissions(root, *, set_owner=root_owner, mode_of=posix_mode):
             "checked": sorted(checked), "token": "deferred-to-credential-provisioning"}
 
 
+# index.html은 화면 경로로 따로 응답하고, favicon은 404여도 화면에 영향이 없다.
+UNSERVED_WEB_FILES = frozenset({"index.html", "favicon.png", "favicon.ico", "favicon.svg"})
+
+
+def guest_app_asset_pattern():
+    """VM에 설치되는 guest_app.py의 ASSET 허용 규칙을 그대로 읽는다(규칙을 두 곳에 두지 않는다)."""
+    tree = ast.parse((SOURCE / "guest_app.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == ["ASSET"]
+                and isinstance(node.value, ast.Call) and node.value.args):
+            return re.compile(ast.literal_eval(node.value.args[0]))
+    raise ValueError("guest app asset allowlist not found")
+
+
 def install_web_assets(root, source, revision):
     """검증한 vm-screens dist를 복사하고 재현 가능한 파일·트리 해시를 반환한다."""
     if source is None:
@@ -173,6 +188,12 @@ def install_web_assets(root, source, revision):
             files.append((relative, path, size))
     if not files or not any(relative.parts[0] == "assets" for relative, _, _ in files):
         raise ValueError("display web assets directory is empty")
+    served = guest_app_asset_pattern()
+    for relative, _, _ in files:
+        name = relative.as_posix()
+        if name not in UNSERVED_WEB_FILES and not served.fullmatch("/" + name):
+            # 1.0.7은 /audio/*.mp3를 넣었지만 guest app이 404를 내 음원이 재생되지 않았다.
+            raise ValueError(f"display web asset is not servable by the guest app: {name}")
     destination = inside(root, "opt/xenova/display-web")
     if destination.exists():
         raise ValueError("display web destination already exists")

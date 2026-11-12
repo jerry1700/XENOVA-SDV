@@ -31,6 +31,8 @@ class RoadProfile:
     merge_heading_rad: float = .15
     allow_missing_outer: bool = True
     missing_outer_side: str | None = None
+    # 폼보드 코스의 명목 폭 28.5cm와 가려진 경계의 초기 오차 범위다.
+    missing_outer_width_bounds_m: tuple[float, float] = (.26, .31)
 
     def __post_init__(self):
         names = ('lane_width_min_m', 'lane_width_max_m', 'min_usable_length_m', 'max_heading_rad',
@@ -48,6 +50,21 @@ class RoadProfile:
                 or type(self.allow_dashed) is not bool or type(self.allow_missing_outer) is not bool
                 or self.missing_outer_side not in (None, 'LEFT', 'RIGHT')):
             raise ValueError('invalid bounded road profile')
+        bounds = self.missing_outer_width_bounds_m
+        if (type(bounds) is not tuple or len(bounds) != 2
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in bounds)
+                or not 0 < bounds[0] <= bounds[1] <= 2):
+            raise ValueError('invalid missing outer width bounds')
+
+    @property
+    def missing_outer_width_m(self):
+        lower, upper = self.missing_outer_width_bounds_m
+        return (lower + upper) / 2
+
+    @property
+    def missing_outer_width_error_m(self):
+        lower, upper = self.missing_outer_width_bounds_m
+        return (upper - lower) / 2
 
 
 @dataclass(frozen=True)
@@ -333,7 +350,7 @@ def _hypothesis(left, divider, right, profile, local_id, work):
     stations = [length * i / (profile.station_count - 1) for i in range(profile.station_count)]
     values = []
     ambiguous = False
-    prior_pad = (profile.lane_width_max_m - profile.lane_width_min_m) / 2
+    prior_pad = profile.missing_outer_width_error_m
     for station in stations:
         point, index = _at(divider.points, station)
         a, b = divider.points[index:index + 2]
@@ -342,7 +359,7 @@ def _hypothesis(left, divider, right, profile, local_id, work):
         error = divider.error + max(c.error if c is not None else prior_pad for c in (left, right))
         distances = []
         for chain, side in ((left, 1), (right, -1)):
-            hits = ([side * (profile.lane_width_min_m + profile.lane_width_max_m) / 2] if chain is None
+            hits = ([side * profile.missing_outer_width_m] if chain is None
                     else _normal_hits(chain, point, normal, side, profile, error, work))
             if len(hits) > 1:
                 work['ambiguous_normal_stations'] += 1

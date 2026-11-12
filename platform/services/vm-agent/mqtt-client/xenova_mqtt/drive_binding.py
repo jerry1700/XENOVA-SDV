@@ -6,6 +6,7 @@ monotonic fields belong to the same dom0 host_boot_id.
 """
 from __future__ import annotations
 import json,os,stat,threading,time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID,uuid4
 
@@ -36,15 +37,28 @@ def atomic_json(path: Path,value: dict) -> None:
     finally:
         if temp.exists():temp.unlink()
 
-def private_json(path: Path,uid: int=0) -> dict:
-    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:
-        s=os.fstat(stream.fileno())
-        if not stat.S_ISREG(s.st_mode) or s.st_uid!=uid or s.st_mode&0o077 or s.st_size>65536:
+@contextmanager
+def _private_json_file(path: Path,uid: int):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=uid or info.st_mode&0o077 or info.st_size>65536:
             raise ValueError('private owned regular JSON required')
+        yield fd,info
+    finally:
+        os.close(fd)
+
+
+def _load_json_object(fd: int) -> dict:
+    with os.fdopen(fd,closefd=False) as stream:
         value=json.load(stream)
     if not isinstance(value,dict):raise ValueError('JSON object required')
     return value
+
+
+def private_json(path: Path,uid: int=0) -> dict:
+    with _private_json_file(path,uid) as (fd,_):
+        return _load_json_object(fd)
 
 class BindingCache:
     """Published observations for the fixed GIL-enabled CPython target.
@@ -146,10 +160,24 @@ class BindingFile(BindingCache):
     def __init__(self,path: Path,host_boot_id: str,*,clock=time.monotonic,uid=0):
         super().__init__(host_boot_id,clock=clock);self.path=Path(path);self.uid=uid
         self._stop=threading.Event();self._thread=None
+        self._loaded_file=None
 
     def refresh(self):
-        try:self.install(private_json(self.path,self.uid))
-        except (OSError,ValueError):self.invalidate()
+        try:
+            with _private_json_file(self.path,self.uid) as (fd,info):
+                version=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+                # Compare the opened file and keep its original lease. A replace
+                # racing this read is picked up at the next refresh.
+                loaded=self._loaded_file
+                if (loaded is not None and loaded[0]==version and
+                        loaded[1] is not None and loaded[1] is self._value):
+                    return
+                value=_load_json_object(fd)
+            self.install(value)
+            self._loaded_file=(version,self._value)
+        except (OSError,ValueError,KeyError,TypeError):
+            self._loaded_file=None
+            self.invalidate()
 
     def start(self):
         def read():

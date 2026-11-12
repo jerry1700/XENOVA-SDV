@@ -1,0 +1,171 @@
+{
+ "ticket": "S15P31E110-380",
+ "note": "Summaries of passive captures on dom0 (kernel BPF filter on loopback port 8082). Each presentation response the HDMI page triggered is counted once. No token, cookie or pairing code is recorded.",
+ "board": {
+  "image": "Xenova 6.0.4",
+  "kernel": "6.18.33",
+  "dom0_defaults": "dom0_max_vcpus=2, force_turbo=1 (platform a8c2cf4c)"
+ },
+ "hdmi": {
+  "connector": "HDMI-A-1",
+  "mode": "1920x1080@60",
+  "renderer": "dom0 Chromium kiosk, Plan A (UI from the Interaction VM guest display app)",
+  "kiosk_py_sha256_prefix": "84d8834ed7b2",
+  "outputs_py_sha256_prefix": "de14cdaa4224",
+  "session": "temporary KMS session xenova-display-hdmi-1110 (removed after the test)"
+ },
+ "continuous_600s": {
+  "started_local": "2026-11-10T17:20:07+09:00",
+  "window_s": 600.0,
+  "presentation_responses": 506,
+  "http_200": 506,
+  "non_200": {},
+  "all_vms_xen_fresh": 506,
+  "any_vm_xen_not_fresh": 0,
+  "per_vm_xen": {
+   "de113a23": {
+    "fresh": 506
+   },
+   "5002a22d": {
+    "fresh": 506
+   },
+   "17cad3c4": {
+    "fresh": 506
+   }
+  },
+  "drive_source": {
+   "fresh": 506
+  },
+  "sequence_first_last": [
+   1480,
+   1985
+  ],
+  "other_paths": {},
+  "feed_consumers_seen": {},
+  "manager_api_calls_per_min": {},
+  "cpu_pct_of_one_core": {
+   "system.slice": 167.1,
+   "user.slice": 0.0,
+   "xenova-dom0-manager": 15.5,
+   "xenova-recovery-worker": 30.7,
+   "xenova-runtime-log-collector": 4.8,
+   "xenova-gateway": 20.6,
+   "xenova-display-feed": 7.5,
+   "xenova-display-guest-relay": 1.2,
+   "tailscaled": 12.9,
+   "mosquitto": 2.8,
+   "systemd-networkd": 0.0,
+   "xenova-telemetry-clock": 0.1,
+   "xenova-telemetry-evidence": 0.0,
+   "xenova-display-hdmi-1110": 32.2
+  },
+  "dom0_busy_pct": 88.4,
+  "responses_per_min": 50.6,
+  "response_gap_s": {
+   "p50": 1.17,
+   "max": 1.81,
+   "gaps_over_5s": 0
+  },
+  "first_last_response_t": [
+   0.55,
+   599.42
+  ],
+  "mem_used_mb": {
+   "first": 793,
+   "max": 883,
+   "last": 873
+  },
+  "temp_c": {
+   "min": 35.05,
+   "max": 38.946,
+   "last": 37.485
+  },
+  "mobile_service_rss_mb": null,
+  "obs_file_age_s": {
+   "samples": 600,
+   "p50": 0.69,
+   "p90": 1.202,
+   "p99": 1.609,
+   "max": 1.719,
+   "under_3s": 600,
+   "unreadable": 0
+  }
+ },
+ "after_replug_30s": {
+  "started_local": "2026-11-10T17:33+09:00",
+  "window_s": 30.0,
+  "presentation_responses": 25,
+  "http_200": 25,
+  "non_200": {},
+  "all_vms_xen_fresh": 25,
+  "any_vm_xen_not_fresh": 0,
+  "per_vm_xen": {
+   "de113a23": {
+    "fresh": 25
+   },
+   "5002a22d": {
+    "fresh": 25
+   },
+   "17cad3c4": {
+    "fresh": 25
+   }
+  },
+  "drive_source": {
+   "fresh": 25
+  },
+  "sequence_first_last": [
+   2113,
+   2137
+  ],
+  "other_paths": {},
+  "feed_consumers_seen": {},
+  "manager_api_calls_per_min": {},
+  "cpu_pct_of_one_core": {
+   "system.slice": 163.4,
+   "user.slice": 0.0,
+   "xenova-dom0-manager": 15.6,
+   "xenova-recovery-worker": 30.6,
+   "xenova-runtime-log-collector": 5.0,
+   "xenova-gateway": 20.8,
+   "xenova-display-feed": 7.6,
+   "xenova-display-guest-relay": 1.2,
+   "tailscaled": 13.2,
+   "mosquitto": 3.2,
+   "systemd-networkd": 0.0,
+   "xenova-telemetry-clock": 0.6,
+   "xenova-telemetry-evidence": 0.0,
+   "xenova-display-hdmi-1110": 32.1
+  },
+  "dom0_busy_pct": 86.5,
+  "responses_per_min": 50.0,
+  "response_gap_s": {
+   "p50": 1.17,
+   "max": 1.37,
+   "gaps_over_5s": 0
+  },
+  "first_last_response_t": [
+   0.99,
+   29.25
+  ],
+  "mem_used_mb": {
+   "first": 804,
+   "max": 804,
+   "last": 798
+  },
+  "temp_c": {
+   "min": 37.485,
+   "max": 37.972,
+   "last": 37.972
+  },
+  "mobile_service_rss_mb": null,
+  "obs_file_age_s": {
+   "samples": 30,
+   "p50": 0.294,
+   "p90": 1.18,
+   "p99": 1.341,
+   "max": 1.341,
+   "under_3s": 30,
+   "unreadable": 0
+  }
+ }
+}

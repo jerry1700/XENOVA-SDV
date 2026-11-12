@@ -302,8 +302,9 @@ class PcFrameAdmission:
             and (owned.context.write_key.slot != seal.write_key.slot or owned.context.write_key.generation > seal.write_key.generation)
             and descriptor.nn_key == owned.nn_key and owned.nn_input is not None and owned.nn_output is not None,
             'PC_ORIGINAL_EARLY_NN_SLOT_JOIN_DIFFERS')
-        # completed는 syscall 뒤 상한이다. peer NN 표본과 두 상한의 순서를 강제하지 않는다.
-        _need(snapshot_ack_sent.started_us <= min(owned.nn_input.received_j_us, owned.nn_output.received_j_us)
+        # NN 후보 계산은 EARLY/snapshot 준비와 병행할 수 있다. 실제 ACK는 채택 전에 완료돼야 한다.
+        _need(original_early.frame_received_j_us <= min(owned.nn_input.received_j_us, owned.nn_output.received_j_us)
+            and snapshot_ack_sent.started_us <= owned.expected.original_filled_info.completed_us
             and snapshot_ack_sent.completed_us <= now_us, 'PC_ORIGINAL_SNAPSHOT_ACK_SEND_DIFFERS')
         result = _fact(PcNnAdmission, frame=original_early, job_id=owned.job_id, purpose=purpose,
             expires_j_us=owned.expires_j_us, nn_input=owned.nn_input, nn_output=owned.nn_output, nn_key=owned.nn_key,

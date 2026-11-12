@@ -6,9 +6,11 @@ The app/actor bridge is a separate integration boundary in the same Nano cohort.
 import ctypes as C
 import json
 import math
+import subprocess
 import pytest
-from test_lattice import library, Product, FOUND
+from test_lattice import HOME, library, Product, CFG, FOUND, STOP, obstacle
 from test_engine import modern_world
+from test_signed_lattice import ports as tracking_ports, sample
 from world_codec import schema
 
 
@@ -35,6 +37,7 @@ def placed_world(count=1,*,shared_entry=True):
 def ports(lib):
     lib.probe_parking_goal_set.argtypes=[C.c_void_p,C.c_uint32,C.c_uint,C.POINTER(C.c_float)]
     lib.probe_parking_search.argtypes=[C.c_void_p,C.c_uint32,C.c_float,C.c_float,C.c_float]
+    lib.probe_parking_search_strategy.argtypes=[C.c_void_p,C.c_uint32,C.c_float,C.c_float,C.c_float,C.c_uint]
     lib.probe_parking_trace.argtypes=[C.c_void_p,C.POINTER(C.c_double)]
     lib.probe_parking_trace.restype=None
     lib.probe_parking_terminal.argtypes=[C.c_void_p,C.c_uint32,C.c_float,C.c_float,C.c_float,C.c_float]
@@ -55,6 +58,56 @@ def test_unknown_occupied_and_clear_region_have_distinct_actual_eligibility(libr
         assert (count>0)==(kind==2)
         assert count<=27
     finally: product.close()
+
+
+@pytest.mark.parametrize('strategy,entry_gear', ((1,-1), (2,1)))
+def test_parking_cusp_outside_slot_requires_gate_before_entering(library, strategy, entry_gear):
+    tracking_ports(library)
+    library.probe_parking_cusp_fixture.argtypes = [C.c_void_p, C.c_uint]
+    library.probe_prepare_tracking.argtypes = [C.c_void_p]
+    library.probe_prepare_tracking.restype = C.c_bool
+    world = placed_world()
+    slot = world.parking_slots[0]
+    slot.goal_mask = 3
+    slot.forward_goal.CopyFrom(schema.Pose(x=1.5,y=.4,yaw=-math.pi/2))
+    traces = []
+    for prepared in (False, True):
+        product = Product(library,world)
+        try:
+            cusp = library.probe_parking_cusp_fixture(product.handle, strategy)
+            assert cusp > 0 and library.probe_valid(product.handle) == FOUND
+            if prepared:
+                assert library.probe_prepare_tracking(product.handle)
+            rc, stopped = sample(library, product, cusp)
+            assert rc == STOP and stopped[:5] == [0., 0., 1., 0., entry_gear]
+            assert library.probe_gate(product.handle, 2) == 0  # No acknowledged serial STOP
+            assert library.probe_gate(product.handle, 0) == 1
+            rc, entering = sample(library, product, cusp+1, 1020000)
+            assert rc == FOUND and entering[0]*entry_gear > 0 and entering[2:4] == [0., 1.]
+            traces.append(stopped + entering)
+        finally:
+            product.close()
+    assert traces[1] == pytest.approx(traces[0], abs=1e-6)
+
+
+@pytest.fixture(scope='module')
+def parking_writer(library, tmp_path_factory):
+    world = HOME/'world'
+    executable = tmp_path_factory.mktemp('parking-writer')/'probe'
+    subprocess.run([
+        'cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=undefined',
+        *[f'-I{directory}' for directory in (HOME/'planner', world, world/'generated', world/'nanopb')],
+        *[f'-Wl,--wrap={symbol}' for symbol in (
+            'dw_acquire', 'dw_source_valid', 'dw_release', 'dw_current_pose', 'lp_validate_path',
+        )],
+        str(HOME/'tests/parking_writer_probe.c'), library._name, '-lm', '-o', str(executable),
+    ], check=True, capture_output=True, text=True)
+    return executable
+
+
+@pytest.mark.parametrize('case', ('writer', 'handoff', 'deadlines'))
+def test_parking_publication_and_phase_recovery(parking_writer, case):
+    subprocess.run([str(parking_writer), case], check=True)
 
 
 def parking_trace(library,product,tmp_path,validation=None):
@@ -85,8 +138,36 @@ def test_actual_signed_goal_set_enters_only_the_selected_known_slot(library,tmp_
     finally: product.close()
 
 
+def test_forward_parking_tracks_at_low_speed_and_stops_for_new_occupancy(library):
+    ports(library)
+    world=placed_world()
+    slot=world.parking_slots[0]
+    slot.goal_mask=3
+    slot.forward_goal.CopyFrom(schema.Pose(x=1.5,y=.4,yaw=-math.pi/2))
+    product=Product(library,world)
+    try:
+        goals=(C.c_float*81)()
+        assert library.probe_parking_goal_set(product.handle,1,2,goals)>0
+        # A straight approach two test primitives from the first parking seed.
+        approach=2*CFG['primitive_speed']*CFG['primitive_duration']
+        pose=(goals[0],goals[1]+approach,goals[2])
+        assert library.probe_parking_search_strategy(product.handle,1,*pose,2)==FOUND
+        rc,command=product.track(pose,.16,0.)
+        assert rc==FOUND and command[0]==pytest.approx(.16)
+        ix=int(pose[0]/world.resolution_m)
+        iy=int(pose[1]/world.resolution_m)
+        obstacle(world,ix,ix+1,iy,iy+1)
+        product.update(world)
+        rc,command=product.track(pose,.16,0.)
+        assert rc==10 and command[0]==0.
+    finally:
+        product.close()
+
+
 def test_signed_parking_rejects_padded_root_across_the_forbidden_divider(library,tmp_path):
-    ports(library); product=Product(library,placed_world())
+    ports(library); world=placed_world()
+    world.lane_model.crossing=bytes(len(world.lane_model.crossing))
+    product=Product(library,world)
     try:
         # Preserve cohort01's original root as a negative. The root footprint
         # fails before graph expansion or occupancy-cell work, not a timeout.
@@ -95,6 +176,29 @@ def test_signed_parking_rejects_padded_root_across_the_forbidden_divider(library
         assert result==10 and trace['root_union']==0,trace
         measured=product.metrics()
         assert measured[0]==0 and measured[2]==1 and measured[3]==0
+    finally: product.close()
+
+
+def test_signed_parking_can_use_the_permitted_adjacent_lane(library,tmp_path):
+    ports(library); product=Product(library,placed_world())
+    try:
+        result=library.probe_parking_search(product.handle,1,1.5,1.2,math.pi/2)
+        valid=library.probe_valid(product.handle) if result==FOUND else None
+        trace=parking_trace(library,product,tmp_path,valid)
+        assert result==valid==FOUND,trace
+        assert trace['root_union']==trace['actual_goal_contains']==1
+    finally: product.close()
+
+
+def test_signed_parking_still_checks_the_cells_across_the_divider(library,tmp_path):
+    ports(library); world=placed_world()
+    obstacle(world,14,16,16,17)
+    product=Product(library,world)
+    try:
+        result=library.probe_parking_search(product.handle,1,1.5,1.2,math.pi/2)
+        trace=parking_trace(library,product,tmp_path)
+        assert trace['root_union']==1 and result==10,trace
+        assert trace['cells']>0 and trace['expanded']==0,trace
     finally: product.close()
 
 
@@ -142,6 +246,26 @@ def test_original_episode_budgets_do_not_follow_path_or_wait_counters(library,ca
         assert library.probe_behavior_deadline(behavior,1)==41000000
         assert library.probe_behavior_deadline(behavior,0)==11000000
     finally: library.probe_behavior_free(behavior); product.close()
+
+
+def test_episode_corners_keep_the_local_station_interval(library):
+    library.probe_episode_station.argtypes = [C.c_int, C.POINTER(C.c_float)]
+    bounds = (C.c_float * 2)()
+    assert library.probe_episode_station(0, bounds) == 1
+    assert bounds[0] <= 0 and bounds[1] >= .39
+    assert library.probe_episode_station(1, bounds) == 0
+
+
+def test_occupied_cell_far_past_lane_end_is_not_a_blocker(library):
+    library.probe_observed_blocker.argtypes = [C.c_void_p]
+    for column, expected in ((63, 0), (59, 1)):
+        world = modern_world()
+        obstacle(world, column, column + 1, 12, 13)
+        product = Product(library, world)
+        try:
+            assert library.probe_observed_blocker(product.handle) == expected
+        finally:
+            product.close()
 
 
 def test_stable_id_pending_survives_same_snapshot_metric_reordering(library):

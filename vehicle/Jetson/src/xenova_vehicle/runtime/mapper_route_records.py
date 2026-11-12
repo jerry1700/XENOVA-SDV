@@ -112,16 +112,17 @@ def _accepted_roots(draft, state):
     identity = collector._reference_geometry.get(capture, collector._rgb_refs.get(capture))
     alignment = collector._alignment_record
     pin = collector._propagation_anchor_record
+    current_pin = collector._current_anchor_record or pin
     _need(identity is not None and alignment is not None and pin is not None,
           'original frame/registration/propagation anchor provenance missing')
     _need(alignment[0] == sha256(canonical(draft.pipeline._alignment.fields())).hexdigest() and
           draft.pipeline._propagation_anchor is not None and
-          pin[0] == sha256(canonical(draft.pipeline._propagation_anchor.fields())).hexdigest(),
+          current_pin[0] == sha256(canonical(draft.pipeline._propagation_anchor.fields())).hexdigest(),
           'original alignment registration pin changed')
     records = {row.provenance_id: row for row in state.evidence.provenance}
     contexts = {row.sha256: row for row in state.evidence.contexts}
     ids = tuple(dict.fromkeys((identity, alignment[1], pin[1])))
-    for key in ids:
+    for key in tuple(dict.fromkeys((*ids,current_pin[1]))):
         row = records.get(key)
         _need(row is not None and row == collector._records.get(key) and row.context_sha256 in contexts,
               'original accepted provenance is not in catalog closure')
@@ -132,6 +133,9 @@ def _accepted_roots(draft, state):
           'frame provenance differs from original observation')
     _need(PROVENANCE.unpack(registration.payload)[2] == PROVENANCE.unpack(anchor.payload)[2] == 5 and
           sha256(anchor.payload).hexdigest() == pin[2], 'original registration/anchor bytes differ')
+    current_anchor=records[current_pin[1]]
+    _need(PROVENANCE.unpack(current_anchor.payload)[2]==5
+          and sha256(current_anchor.payload).hexdigest()==current_pin[2], 'current propagation anchor bytes differ')
     birth = _birth_geometry_context(contexts[anchor.context_sha256], draft.context)
     context_ids = tuple(dict.fromkeys(records[key].context_sha256 for key in ids))
     return (root, registration, pin[2], birth, tuple(records[key].encode() for key in ids),

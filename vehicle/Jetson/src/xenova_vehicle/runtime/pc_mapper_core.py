@@ -7,7 +7,7 @@ actor/thread/요청 UUID를 만들지 않으며 LIVE/Scene 경계를 넓히지 �
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import get_ident
 
 from .mapper_catalogs import CatalogNotReady
@@ -74,7 +74,8 @@ class PcMapperCore:
         self.motion_profile,self.profile,self.binding,self.context,self.storage=motion_profile,mapper_profile,binding,context,storage
         self.calibration,self.clock,self._source_bytes=motion_profile.bound_calibration,clock,source_bytes
         self._pc_owner_token=pc_owner_token;self._thread=get_ident()
-        self._pipeline=PerceptionPipeline(self.calibration,mapper_profile.pipeline,targets=mapper_profile.targets)
+        self._pipeline=PerceptionPipeline(self.calibration,mapper_profile.pipeline,targets=mapper_profile.targets,
+                                          parking_entrance_diagnostics=False)
         self._staged=self._retired=None;self._terminal_token=None;self._world_sequence=0
 
     def _owner(self):
@@ -173,7 +174,15 @@ class PcMapperCore:
                     and alignment.has_metadata and alignment.valid_at(now)
                     and result.summary.get('quarantined') is False
                     and result.summary.get('input_odom_origin')=='SYNTHETIC_ODOMETRY')
-                mapped=alignment.apply(inputs.pose) if qualified else inputs.pose
+                mapped=inputs.pose
+                if qualified:
+                    if result.registration is not None and result.registration.status=='BOUNDED':
+                        fit=result.registration
+                        x,y,yaw=fit.representative
+                        mapped=replace(inputs.pose,sample=replace(inputs.pose.sample,x=x,y=y,yaw=yaw,
+                            position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
+                    else:
+                        _,mapped=core._propagate_odometry(inputs.pose)
                 spec=core.grid.spec;low=spec.bounds(0,0);high=spec.bounds(spec.width-1,spec.height-1)
                 try:
                     if current_provider is not None:refresh()

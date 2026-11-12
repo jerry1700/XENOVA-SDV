@@ -225,7 +225,7 @@ Manager().call("cpu-host-prepare", {"timeout_ms":15000}, execute=True)
 준비는 별도 내부 action이며 공개 CPU 정책 변경 action은 cpu-policy-set 하나다.
 정책 파일 저장과 host.ready는 별개다. 사용자·unit 모두 Manager의 공통 잠금과 같은 준비 코드를 사용한다.
 
-이미 저장된 정책의 `cpu-host-prepare`는 실패한 Linux create의 private 자산만 남은 경우를
+이미 저장된 정책의 `cpu-host-prepare`는 지원 VM의 실패 create private 자산만 남은 경우를
 별도로 확인한다. `RECOVERY_REQUIRED`이고 수습이 진행 중이지 않은 원 작업에 한해, 등록·공개 부재와
 현재 준비 소유자·Xen 연결·mount·loop·열린 inode의 사용 부재를 기존 수습 진단으로 확인한다.
 느린 관측은 공통 잠금 밖에서 수행하고, 잠금을 다시 얻은 뒤 원 작업·registry·부팅·종료 gate·CPU 정책과

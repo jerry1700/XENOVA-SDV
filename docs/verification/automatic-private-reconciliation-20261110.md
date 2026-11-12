@@ -1,6 +1,68 @@
 # 실패 private 생성의 자동 수습 — 2026-11-10
 
-## 후보와 제공 범위
+## 현재 후속 후보 — 지원 OS 공통·기본 활성
+
+사용자가 OS에 따른 수습 대상 제한과 별도 활성 설정의 필요성을 지적해, MR !556 병합 뒤
+`349d2415` 위 `feat/platform/common-vm-create-cleanup` 작업트리에서 후속 보완했다.
+아래 Linux opt-in 후보의 시험은 이력이며 이번 변경 전체의 통과 증거로 재사용하지 않는다.
+
+- 신규 Debian·Ubuntu·Zephyr create는 설정 파일 없이도 `bounded-1-plus-1`에 등록한다.
+  원장이 없는 factory 등록이나 과거 실패를 새 create로 꾸미거나 일괄 삭제하지 않는다.
+- 기존 명시 수습의 원 key·신원·고정 삭제 계획·Xen/mount/loop/FD 사용 부재·내구 반환 보호를
+  모든 지원 VM에 적용한다. 자산 목록만 Linux 디스크와 Zephyr firmware revision/staging으로 나눈다.
+  실패 사본을 지우기 위해 원 template/firmware 전체를 다시 해시하지 않는다.
+- Linux의 기존 linux-prepare 슬롯과 Zephyr의 기존 lifecycle-io 슬롯을 재사용한다.
+  기존 per-operation owner receipt를 공통 수습에 사용하고 Zephyr의 실제 asset lease도 대조한다.
+  새 전역 잠금은 없으며, 기존 I/O 슬롯이 busy인 생성/수습은 무대기 거절할 수 있다.
+  조회·다른 VM stop·조건부 복구는 이 슬롯을 기다리지 않는다.
+- 재관측은 최초 1회·작은 조건 변화 시 추가 최대 1회다. 새 version 2 metadata에 원 수습 예산도 고정한다.
+  Linux는 원 creation.cleanup_ms, Zephyr는 기존 명시 수습 기본 15000ms와 원 budget_ms 중 작은 값이다.
+  이는 기존 예산의 재사용이며 생성 기한·운영 측정값·E4 예산을 변경하지 않는다.
+- 옛 trial 설정과 version 1 metadata는 계속 읽는다. 신규 요청에만 기본 등록하며 과거 원장에
+  허용을 소급 기록하지 않는다. 새 호출자가 journal 버전을 고르거나 raw 원장을 읽을 필요는 없다.
+- 기본 활성화에 따른 재전달 경합도 확인한다. Zephyr는 원 상태를 바꾸기 전에 기존 준비 슬롯을
+  확보하며, 자동 수습이 관측 중일 때 같은 key 재전달이 원장·기한·첫 오류를 덮어쓰지 않아야 한다.
+  수습 대상이 된 실패 요청은 다시 firmware 준비를 실행하지 않고 원 실패를 반환한다.
+  자산 생성 전의 실패와 이미 게시된 사본의 등록 미완료는 기존 원 요청 재개 경로를 유지한다.
+
+최종 영향 회귀는 **413개 통과, 실패/오류/skip 0**이다. 이 중 자동 수습 제품 시험은 33개이며,
+Debian·Ubuntu·Zephyr의 설정 없는 기본 등록, 실제 부분 복사 실패→자동 정리→새 정상 생성,
+network firmware의 optional 입력 동등성, active lease·Xen 실행·열린 FD·미확인 파일 거절,
+Zephyr 수습 중 별도 프로세스의 같은-key 재전달, 원 실패/계획/횟수의 재시작·boot 보존,
+느린 필수 기록·정리 fsync 중 다른 VM 조회/stop/조건부 복구 진행을 포함한다.
+CPU 준비는 Zephyr의 실패 사본을 보존한 채 진행하고, 새 CPU 정책 변경의 보호는 유지한다.
+
+실제 실행 명령·입력 파일별 SHA-256·전체 case ID·결과는
+`/home/ssafy/xenova-common-cleanup-20261110/logs/unittest-platform.{command,source,result}.json`과
+`unittest-platform.log`에 보존한다. 실행 도구는 기존 Python 3.12 표준 `unittest`의
+`loadTestsFromNames`·`TextTestRunner`이며, 별도 실행기는
+`C:/Users/SSAFY/Documents/Codex/2026-11-10/common-vm-create-cleanup/run-local.py`다.
+대상은 creation_auto/reconcile/failure, preparation_concurrency, lifecycle_ownership/read_progress,
+cpu/asset_isolation/cross/pinning, recovery_foundation, management, spring_followup,
+network_zephyr, g1_handoff, default_deployment, display_sync의 기존 시험 파일이다.
+
+중간 후보의 pytest 410개 통과와 Worker E4·상태·재합류 기록 83개 통과도 별도 로그에 남겼다.
+최종 실행 중 WSL의 `/tmp` 시험 도구 경로가 사라진 실행은 완료 증거로 세지 않는다.
+이후 제품 의존성 설치 없이 표준 unittest로 최종 413개를 실행했다. Worker 83개는 이 도구 경로
+소실 전의 결과이며, 최종 후속 수정 뒤 같은 pytest 묶음을 다시 실행한 결과로 주장하지 않는다.
+Worker/E4 소스와 정책은 변경하지 않았다. 초기 실패·중단·기대값 정합화 이력도 삭제하지 않았다.
+
+recipe의 실제 Python 설치 부분으로 임시 설치본을 만들고 변경 핵심 5개 모듈의 source/payload
+바이트·0644를 대조했다. 개발 PYTHONPATH 없이 `python3 -I -B`로 설치본만 import하고,
+thread 1개·active config 파일 부재 상태에서 기본 등록을 확인했다.
+`logs/installed-payload.json`에 SHA-256과 결과를 보존한다. ARM/systemd 259의 고정 QEMU unit loader
+경로는 기존 default_deployment 회귀에 포함된다. 새 ARM Python/RPM·전체 이미지 빌드/설치나
+QEMU 게스트 기동으로 확대하지 않는다. 생성 helper·preparation·Manager는 같은 후보로 교체해야 한다.
+
+실제 Manager·파일·원장·flock·FD·별도 자식 프로세스를 쓰며 Xen·mount/loop·작은 firmware 내용은 fixture다.
+위 구현·검증 단계에서는 실보드·운영 서비스·기존 VM·운영 설정·commit/push를 변경하지 않았다.
+
+2026-11-11 제출 전 같은 17개 시험 파일을 표준 unittest로 다시 실행해 **413개 통과,
+실패/오류/skip 0, 184.247초**를 확인했다. 원 명령·입력 해시·case ID·결과는 같은 로그 디렉터리의
+`precommit-20261111.{command,source,result}.json`과 `precommit-20261111.log`에 별도로 보존했다.
+`management-boundaries.md`에 남아 있던 Linux 전용 수습·슬롯 설명도 현재 공통 구현과 맞췄다.
+
+## 이전 Linux opt-in 후보의 검증 이력
 
 아래 구현 검증은 `0969f566` 위 미커밋 작업트리에서 수행했다.
 검증한 구현·시험은 `e9500282`, 포장·인계 보완은 `f0f57126`에 기록했다.

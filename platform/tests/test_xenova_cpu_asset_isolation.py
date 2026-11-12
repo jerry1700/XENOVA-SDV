@@ -74,6 +74,16 @@ class CPUAssetIsolationTest(unittest.TestCase):
     def test_ubuntu_failed_private_copy_does_not_block_host_prepare_or_release_reservations(self):
         self.isolated_failure('ubuntu')
 
+    def test_zephyr_failed_private_firmware_does_not_block_host_prepare(self):
+        from test_xenova_creation_auto import AutomaticCreationTest
+        op=AutomaticCreationTest.firmware_failure(self)
+        before=self.snapshot(op)
+        self.ok(self.prepare())
+        self.assertEqual(self.snapshot(op),before)
+        self.assertTrue(creation.holds(self.m,op))
+        self.ok(self.m.call('operation-reconcile',self.case.request(op),execute=True))
+        self.assertFalse(creation.holds(self.m,self.m._operations()[0]))
+
     def test_open_fd_loop_and_incomplete_observation_block_then_recover(self):
         op = self.case.fail_copy()
         disk = self.p.data/op['owned_workspace']/op['assigned']['internal_name']/'root.raw'
@@ -219,6 +229,7 @@ class CPUAssetIsolationTest(unittest.TestCase):
         path = self.p.data/'operations'/(op['operation_id']+'.json')
         before = path.read_bytes()
         running = dict(op, status='RUNNING')
+        running['automatic_cleanup']={**op['automatic_cleanup'],'state':'enrolled'}
         path.write_text(json.dumps(running))
         self.case.error(self.prepare(), 'OPERATION_IN_PROGRESS')
         path.write_bytes(before)

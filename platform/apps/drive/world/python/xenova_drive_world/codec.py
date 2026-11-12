@@ -69,8 +69,9 @@ def _finite(message):
     cap=_MESSAGE_CAPS.get(message.DESCRIPTOR.name,MAX_BYTES)
     if message.ByteSize()>cap:raise ValueError('message size cap '+message.DESCRIPTOR.name)
     for field,value in message.ListFields():
-        values=value if _repeated(field) else (value,)
-        if _repeated(field) and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
+        repeated=_repeated(field)
+        values=value if repeated else (value,)
+        if repeated and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
             raise ValueError('repeated field cap '+field.name)
         if field.type in (field.TYPE_FLOAT,field.TYPE_DOUBLE):
             if not all(math.isfinite(item) for item in values):raise ValueError('nonfinite field '+field.name)
@@ -79,7 +80,9 @@ def _finite(message):
         elif field.type==field.TYPE_STRING:
             limit=64 if field.name in _STR64 else 36
             for item in values:
-                if not item or len(item.encode('utf-8'))>limit or any(ord(c)<33 or ord(c)>126 for c in item):raise ValueError('bounded identifier '+field.name)
+                # ASCII 33..126은 문자 수=byte 수다. 같은 범위를 C 문자열 검사로 검산한다.
+                if (not 0<len(item)<=limit or not item.isascii() or not item.isprintable() or ' ' in item):
+                    raise ValueError('bounded identifier '+field.name)
         elif field.type==field.TYPE_BYTES:
             limit,exact=_bytes_bound(field)
             if any(len(item)>limit or exact and len(item)!=limit for item in values):raise ValueError('bounded bytes '+field.name)
@@ -662,6 +665,16 @@ class PreparedClock(bytes):
 
 def decode(data,message_type=schema.WorldSnapshot):
     if not isinstance(data,bytes) or len(data)>MAX_BYTES:raise ValueError('bounded bytes required')
+    if message_type is schema.VehicleSample and type(data) is bytes and len(data)<=1024:
+        # 정지 창에서 반복되는 원 wire의 정적 검산만 재사용한다. mutable message나
+        # 현재 출처/나이/정지 수락은 저장하지 않으며 반환 객체는 매번 새로 만든다.
+        value=message_type()
+        value.ParseFromString(_validated_vehicle_wire(data))
+        return value
+    return _decode_original(data,message_type)
+
+
+def _decode_original(data,message_type):
     _audit(data,message_type.DESCRIPTOR)
     value=message_type()
     try:value.ParseFromString(data)
@@ -670,6 +683,13 @@ def decode(data,message_type=schema.WorldSnapshot):
     # retain them in a duplicate-copy fingerprint or relay unexamined bytes.
     value.DiscardUnknownFields()
     return validate(value)
+
+
+@lru_cache(maxsize=128)
+def _validated_vehicle_wire(data):
+    # 입력·출력 각 최대 1KiB, 성공한 immutable bytes만 보유한다. 예외는 저장되지 않는다.
+    if type(data) is not bytes or len(data)>1024:raise ValueError('bounded original Vehicle bytes required')
+    return _decode_original(data,schema.VehicleSample).SerializeToString(deterministic=True)
 
 
 def _audit(data,descriptor,depth=0):
