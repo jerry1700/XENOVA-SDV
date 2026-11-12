@@ -24,7 +24,8 @@ from typing import ClassVar
 from uuid import UUID
 
 from ..errors import NotSupportedByPlatform, VMNotFound
-from ..models import ControlOperation, CpuLayout, ResourceUpdate, StatsSource, UnavailableReason, Vm, VmState, VmStats
+from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, ResourceUpdate, StatsSource, UnavailableReason,
+                      UpdateCpuPolicyRequest, Vm, VmState, VmStats)
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,10 @@ class Driver(ABC):
     def cpu_layout(self, vm_id: UUID | None = None) -> CpuLayout:  # S15P31E110-353
         """정책 CPU 배치와 실제 Xen hard affinity 조회. 플랫폼 CPU 정책이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not report CPU layout")
+
+    def update_cpu_policy(self, request: UpdateCpuPolicyRequest, *, key: str) -> CpuPolicyUpdate:
+        """전체 CPU 정책을 revision 조건부로 교체한다. 지원하지 않는 드라이버는 501."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not update CPU policy")
 
     def request_reboot(self, vm_id: UUID, *, key: str) -> ControlOperation:
         """키 있는 재부팅(S15P31E110-208). tracks_control_operations 인 드라이버만 구현한다."""
