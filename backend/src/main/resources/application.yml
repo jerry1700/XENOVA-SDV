@@ -126,11 +126,8 @@ xenova:
       refresh-delay: ${VM_RUNTIME_REFRESH_DELAY:1s}
       # safety net only: past this age (loop stopped or failing) reads go to dom0-manager again
       stale-limit: ${VM_RUNTIME_STALE_LIMIT:10s}
-    # Board registry -> VM table, so VMs created or retired with a platform tool follow on the web.
+    # Board registry -> VM table on POST /api/v1/vms/synchronizations only (no periodic loop).
     registration-sync:
-      enabled: ${VM_REGISTRATION_SYNC_ENABLED:true}
-      # pause after each synchronization
-      interval: ${VM_REGISTRATION_SYNC_INTERVAL:30s}
       # consecutive reads a VM must be absent from the board before its row is retired
       missing-threshold: ${VM_REGISTRATION_SYNC_MISSING_THRESHOLD:2}
       # never retire a row younger than this: create registers on the board only at its end (dom0 command timeout)
