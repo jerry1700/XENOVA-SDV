@@ -2945,7 +2945,7 @@ xenova-boot-status --json
 
 **정상 응답**
 
-기본 평문은 `Xenova startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
+기본 평문은 `XENOVA startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
 진행 중인 서비스는 `[START]`, 아직 미시작인 서비스는 `[WAIT; reason unconfirmed]`로 묶어 표시한다.
 `--details`의 `COMPLETE/PROGRESS/WAITING/DELAYED/DEFERRED/FAILED/UNKNOWN/UNAVAILABLE`은
 같은 snapshot의 표시 상태다. 지연·실패·미확정은 기본 출력에도 남는다.

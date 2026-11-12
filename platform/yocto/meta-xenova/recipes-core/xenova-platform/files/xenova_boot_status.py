@@ -214,7 +214,7 @@ def render(value, *, ascii_only=False, width=100, details=False):
     def line(text):
         # 줄당 출력 제한. 전체 식별자/명령은 details의 별도 줄에서 보존한다.
         return clean(text, width-3, ascii_only)
-    lines = ['Xenova boot status (recorded facts; not a readiness gate)' if details else 'Xenova startup',
+    lines = ['XENOVA boot status (recorded facts; not a readiness gate)' if details else 'XENOVA startup',
              ('Observed boot=' if details else 'Boot ')+clean(value['host_boot_id'][:8], 8)+' t='+str(value['observed_monotonic_ms']//1000)+'s']
     def registration(mode):
         return {'existing-install-verification':'existing installation',
