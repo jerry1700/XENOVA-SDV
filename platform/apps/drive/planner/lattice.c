@@ -645,6 +645,8 @@ static enum lp_result reference_obstruction(struct lp_search *s,struct lp_road_s
  return obstruction(s->world,&s->task,s->start,goal,s->config,s->budget,&s->metrics,&s->reference_obstructed);
 }
 
+static enum lp_result guide_terminal(struct lp_search *s,float clearance);
+
 static enum lp_result local_terminal(struct lp_search *s) {
  const struct lp_config *c=s->config;
  float dt=c->primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
@@ -655,6 +657,8 @@ static enum lp_result local_terminal(struct lp_search *s) {
  if(rc!=LP_COLLISION)return rc;
  float clearance=hypotf(c->front+c->margin+c->tracking_guard+.5f*c->primitive_speed*dt,
                        c->half_width+c->margin+c->tracking_guard+.5f*c->primitive_speed*dt);
+ rc=guide_terminal(s,clearance);
+ if(rc!=LP_COLLISION)return rc;
  dw_pose previous=s->goal;
  /* A persistent merge milestone can be blocked in the new map. First consider
   * the full current local horizon, then retreat by the existing grid resolution.
@@ -794,6 +798,50 @@ static bool make_lane_guide(const struct tr_view *view,const struct lp_config *c
   g->heading[i]=dw_angle(before+.5f*dw_angle(next-before));before=next;
  }
  return true;
+}
+
+static enum lp_result guide_terminal(struct lp_search *s,float clearance){
+ const struct lp_config *c=s->config;
+ struct tr_view view;
+ if(!narrow_lane(s->world,&s->task,c,&view))return LP_COLLISION;
+ struct lp_road_state start,goal;
+ if(lp_task_project(s->world,&s->task,s->start,&start)!=LP_PATH_FOUND||
+    lp_task_project(s->world,&s->task,s->goal,&goal)!=LP_PATH_FOUND)return LP_COLLISION;
+ struct lane_guide guide;
+ if(!make_lane_guide(&view,c,&guide))return LP_COLLISION;
+
+ /* Leave room for the front corner along the inset guide at the observed end. */
+ float last_station=goal.length;
+ for(unsigned i=guide.count-1;i>0&&clearance>0;i--){
+  float length=guide.length[i-1];
+  if(length<=1e-5f)return LP_COLLISION;
+  dw_point a=view.points[i-1],b=view.points[i];
+  last_station-=fminf(1,clearance/length)*hypotf(b.x-a.x,b.y-a.y);
+  clearance-=length;
+ }
+ /* Match the nominal station when visible, then try one nearer station. */
+ float station=fminf(goal.arc,last_station);
+ for(unsigned attempt=0;attempt<2;attempt++,station-=c->resolution){
+  float arc=0;
+  if(station<=start.arc+c->goal_distance)break;
+  for(unsigned i=0;i+1<guide.count;i++){
+   dw_point a=view.points[i],b=view.points[i+1];
+   float length=hypotf(b.x-a.x,b.y-a.y);
+   if(station>arc+length&&i+2<guide.count){arc+=length;continue;}
+   float t=clamp((station-arc)/length,0,1);
+   dw_point p=guide.points[i],q=guide.points[i+1];
+   dw_pose candidate={p.x+t*(q.x-p.x),p.y+t*(q.y-p.y),
+    dw_angle(guide.heading[i]+t*dw_angle(guide.heading[i+1]-guide.heading[i]))};
+   if(distance(s->start,candidate)<=c->goal_distance)break;
+   dw_pose center={a.x+t*(b.x-a.x),a.y+t*(b.y-a.y),atan2f(b.y-a.y,b.x-a.x)};
+   if(distance(center,candidate)<1e-5f&&fabsf(dw_angle(center.yaw-candidate.yaw))<1e-5f)break;
+   enum lp_result rc=footprint(s->world,candidate,c->tracking_guard,c,&s->metrics,&s->budget,false,NULL,&s->task,&s->space);
+   if(rc==LP_PATH_FOUND){s->goal=candidate;return rc;}
+   if(rc!=LP_COLLISION)return rc;
+   break;
+  }
+ }
+ return LP_COLLISION;
 }
 
 static float guide_curvature(const struct lane_guide *g,dw_pose pose,float response){
