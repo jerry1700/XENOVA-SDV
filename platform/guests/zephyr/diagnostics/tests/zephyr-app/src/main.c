@@ -288,6 +288,18 @@ ZTEST(diagnostics,test_runtime_source_and_lifetime_reuse)
  }
  zassert_true(saw_busy);zassert_true(peak<=100000);k_sleep(K_MSEC(220));
  uint64_t first=measured_id();zassert_true(first>0);
+ zassert_ok(k_thread_name_set(&measured_thread,""));
+ zassert_ok(xdiag_resources_get(&a));next_resource(&a);
+ bool saw_unnamed=false;
+ for(size_t i=0;i<a.rows;i++){
+  if(a.threads[i].lifetime!=first)continue;
+  zassert_equal(strcmp(a.threads[i].name,"unnamed"),0);
+  zassert_false(a.threads[i].name_truncated);
+  zassert_ok(a.threads[i].rc);
+  saw_unnamed=true;
+  break;
+ }
+ zassert_true(saw_unnamed);
  k_thread_abort(&measured_thread);zassert_ok(k_thread_join(&measured_thread,K_MSEC(200)));
  k_thread_create(&measured_thread,measured_stack,K_THREAD_STACK_SIZEOF(measured_stack),measured,NULL,NULL,NULL,5,0,K_FOREVER);
  zassert_ok(k_thread_name_set(&measured_thread,"same-name"));k_thread_start(&measured_thread);
