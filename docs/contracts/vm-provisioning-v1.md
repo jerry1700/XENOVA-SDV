@@ -157,8 +157,8 @@ plan/execute_required는 합의된 wire 요소이며 읽기 API의 실행 요구
 201(신규)/200(동일 UUID)의 `{"vm_id":"…","registration":"confirmed"}`를 검증한다.
 단건은 기존 행을 덮지 않는다. 관리자 `POST /api/v1/vms/synchronizations`가 이 GET을 읽어
 지정 필드를 갱신하는 별도 기능이다. create/start 역호출·실패 fallback으로 사용하지 않는다.
-Spring은 같은 동기화를 30초(`VM_REGISTRATION_SYNC_INTERVAL`)마다 스스로 실행한다. 이 GET에 연속 2회
-(`VM_REGISTRATION_SYNC_MISSING_THRESHOLD`) 없는 REGISTERED 행은 플랫폼 도구로 retire·제거된 것으로 보고
+Spring은 이 동기화를 주기적으로 스스로 실행하지 않는다. 동기화 요청이 올 때만 GET을 읽는다. 연속된 동기화 2회
+(`VM_REGISTRATION_SYNC_MISSING_THRESHOLD`)에서 이 GET에 없는 REGISTERED 행은 플랫폼 도구로 retire·제거된 것으로 보고
 RETIRED로 바꾸며 `vm.deleted`(`source: platform`)를 남긴다. Spring 작업 중이거나 생성 후 20분
 (`VM_REGISTRATION_SYNC_CREATION_GRACE`, dom0 명령 제한) 이내인 행은 제외하고, GET 실패 시에는 아무것도 바꾸지 않는다.
 응답에는 `retired` 개수와 `results[].action: "retired"`(reason `missing_from_board`)가 추가된다.

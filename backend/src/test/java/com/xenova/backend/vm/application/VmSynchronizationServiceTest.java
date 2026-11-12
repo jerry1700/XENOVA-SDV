@@ -62,7 +62,7 @@ class VmSynchronizationServiceTest {
     void setUp() {
         service = new VmSynchronizationService(inventoryPort, repository, stateTracker, runtimeCache,
                 eventRecorder, inventoryCleaner,
-                new VmRegistrationSyncProperties(true, Duration.ofSeconds(30), 2, Duration.ofMinutes(20)),
+                new VmRegistrationSyncProperties(2, Duration.ofMinutes(20)),
                 Clock.fixed(Instant.parse("2026-11-02T00:00:00Z"), ZoneOffset.UTC));
     }
 

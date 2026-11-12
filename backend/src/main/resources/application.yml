@@ -87,6 +87,8 @@ xenova:
   # 에이전트 상태(ONLINE/STALE/OFFLINE) 변화를 이벤트로 남기기 위해 확인하는 주기
   event:
     agent-status-check-interval-ms: ${EVENT_AGENT_STATUS_CHECK_INTERVAL_MS:5000}
+    # 사용자 조작 없이 바뀐 VM 상태(크래시 등)를 찾으려고 dom0-manager 목록을 조회하는 주기
+    vm-state-check-interval-ms: ${EVENT_VM_STATE_CHECK_INTERVAL_MS:5000}
   report:
     os-evidence:
       # 에이전트 보고로 증명할 수 있는 Linux만 필수로 둔다. Zephyr는 에이전트가 없어 판정 방법 미정이다.
@@ -126,11 +128,8 @@ xenova:
       refresh-delay: ${VM_RUNTIME_REFRESH_DELAY:1s}
       # safety net only: past this age (loop stopped or failing) reads go to dom0-manager again
       stale-limit: ${VM_RUNTIME_STALE_LIMIT:10s}
-    # Board registry -> VM table, so VMs created or retired with a platform tool follow on the web.
+    # Board registry -> VM table on POST /api/v1/vms/synchronizations only (no periodic loop).
     registration-sync:
-      enabled: ${VM_REGISTRATION_SYNC_ENABLED:true}
-      # pause after each synchronization
-      interval: ${VM_REGISTRATION_SYNC_INTERVAL:30s}
       # consecutive reads a VM must be absent from the board before its row is retired
       missing-threshold: ${VM_REGISTRATION_SYNC_MISSING_THRESHOLD:2}
       # never retire a row younger than this: create registers on the board only at its end (dom0 command timeout)
