@@ -726,6 +726,7 @@ class TemporalRoadMap:
         self._links = {}
         self._roles = {}
         self._map_roles = {}
+        self._normal_traces = {}
         self._last_source = None
         self.parking_branches = ()
         self._entrance_recheck = 0
@@ -743,6 +744,7 @@ class TemporalRoadMap:
         clone._links = self._links.copy()
         clone._roles = {key:roles.copy() for key,roles in self._roles.items()}
         clone._map_roles = {key:roles.copy() for key,roles in self._map_roles.items()}
+        clone._normal_traces = self._normal_traces.copy()
         clone._last_source = self._last_source
         clone._parking_entrance_diagnostics = self._parking_entrance_diagnostics
         clone.parking_branches = self.parking_branches
@@ -828,7 +830,7 @@ class TemporalRoadMap:
             return sections
         roles = {key: set(self._roles.get(key,())) | set(self._map_roles.get(key,()))
                  for key in self._roles.keys() | self._map_roles.keys()}
-        observations = ReferenceObservations(self._markings,roles,profile)
+        observations = ReferenceObservations(self._markings,roles,profile,trace_cache=self._normal_traces)
         # 새로 생긴 긴 단면 하나가 기존 코너의 지도를 밀어내지 않도록 몇 개의 시작점을 비교한다.
         seeds = sorted(sections,key=_section_length,reverse=True)[:3]
         seed,reference = max(((seed,_follow_reference(seed,observations,profile)) for seed in seeds),
@@ -886,13 +888,16 @@ class TemporalRoadMap:
                     dx = b[0]-a[0]
                     if dx <= 1e-6:
                         continue
-                    heading = math.atan2(b[1]-a[1],dx)
-                    if abs(heading) > road_profile.max_heading_rad:
-                        continue
                     begin = max(first, math.ceil(a[0]/_STATION_STEP_M))
                     end = min(last, math.floor(b[0]/_STATION_STEP_M))
+                    if begin > end:
+                        continue
+                    dy = b[1]-a[1]
+                    heading = math.atan2(dy,dx)
+                    if abs(heading) > road_profile.max_heading_rad:
+                        continue
                     for i in range(begin,end+1):
-                        y = a[1]+(b[1]-a[1])*(i*_STATION_STEP_M-a[0])/dx
+                        y = a[1]+dy*(i*_STATION_STEP_M-a[0])/dx
                         if abs(y) <= lateral_range:
                             stations[i].append((y,heading,strip.error_m,strip.source,strip.identity,yaw_error))
         previous = None
@@ -977,7 +982,7 @@ class TemporalRoadMap:
                 self._map_roles[key] = roles
         sections = normal_samples(history,seeds,width_m=profile.missing_outer_width_m,
             radius_m=3*profile.missing_outer_width_bounds_m[1]+_BAND_SPREAD_M,
-            step_m=_STATION_STEP_M,heading_limit=.55,curvature=profile.max_curvature_1pm)
+            step_m=_STATION_STEP_M,heading_limit=.55,curvature=profile.max_curvature_1pm,trace_cache=self._normal_traces)
         for seed,stations in sections:
             previous = None
             run = []

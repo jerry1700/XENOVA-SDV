@@ -16,6 +16,7 @@ from .tape import TapeProfile, extract_tape
 from .road import RoadProfile, infer_road
 from .lane_tracking import mapped_lane_ahead, track_lane
 from .registration_history import HISTORY_FRAMES, RegistrationObservation, combined_constraints
+from .yaw_bias import YawBias
 from .temporal_road import MappedRoad, TemporalRoadMap
 from .parking_entrance import entrance_summary
 from .depth import DepthConfig
@@ -27,6 +28,9 @@ from ..mapping.alignment import MapOdomAlignment
 from ..mapping.free_schedule import FreeScheduler,StoppingRegion
 
 
+_MIN_REGISTRATION_STRIP_M = .08
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
@@ -34,12 +38,15 @@ def _digest(value):
 def _physical_registration_strip(strip):
     # 영상/가림 경계는 실제 유한 paint 끝이 아니므로 양쪽 생산 경로에서 제외한다.
     ends=('physical_junction','observed_paint_end')
-    return strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+    return (strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+            and strip.length_m + 1e-9 >= _MIN_REGISTRATION_STRIP_M)
 
 
 def _observed_registration_strip(strip):
     ends=('physical_junction','observed_paint_end','FOV_clip','occluded')
     return (strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+            # 짧은 점선은 차선 연결에 쓰며 개별 조각으로 위치 정합을 걸지 않는다.
+            and strip.length_m + 1e-9 >= _MIN_REGISTRATION_STRIP_M
             and math.dist(strip.points_xy[0],strip.points_xy[-1])>1e-9)
 
 
@@ -120,11 +127,13 @@ class PerceptionResult:
     neural: object = None
     mapped_road: MappedRoad | None = None
     temporal_rgb_sources: frozenset = frozenset()
+    mapped_odometry: PoseEstimate | None = None
+    yaw_bias: dict | None = None
 
 
 @dataclass(frozen=True)
 class MapEvidenceUpdate:
-    """같은 compute 호출의 실제 적용 사실. observer는 원 source proof와 즉시 결합한다."""
+    """HIT는 depth의 box, FREE는 rays와 certificate로 원 source proof를 남긴다."""
     grid: EvidenceGrid
     mutation: object
     observation: PerceptionInput
@@ -141,7 +150,7 @@ class PerceptionPipeline:
     """단일 M 또는 offline runner 소유. 원본 1개와 유한 grid/reference만 유지한다."""
 
     def __init__(self, calibration, profile=None, *, targets=(),rolling_policy=None,
-                 parking_entrance_diagnostics=True):
+                 parking_entrance_diagnostics=True,estimate_yaw_bias=True):
         from .calibration import CalibrationProfile
         if type(calibration) is not CalibrationProfile:
             raise ValueError('pipeline requires CalibrationProfile')
@@ -158,11 +167,13 @@ class PerceptionPipeline:
         self.rgb_gate,self.depth_gate,self.nn_gate = SourceGate(),SourceGate(),SourceGate()
         self.grid = self.reference = self._context = None
         self._alignment = None
+        self._startup_odometry = None
         # 현재 match의 사용 기한과 다음 prior의 물리 전파 기준은 서로 다른 수명이다.
         # 여러 원 관측으로 전파 오차가 실제 줄어들 때만 기준점을 교체한다.
         self._propagation_anchor = None
         self._previous_propagation_anchor = None
         self._registration_history = ()
+        self._yaw_bias = YawBias() if estimate_yaw_bias else None
         self._restore_pending = False
         self._domain_cache = None
         self._last_tape = self._last_road = self._last_rgb = None
@@ -329,10 +340,22 @@ class PerceptionPipeline:
     def _propagate_odometry(self, raw):
         alignment = self._alignment
         anchor = self._propagation_anchor or alignment
-        prior = anchor.apply(raw)
+        bias = self._yaw_bias
+        if bias is None:
+            prior = anchor.apply(raw)
+            earlier_corrected = False
+        else:
+            bias.applied = False
+            prior = bias.project(anchor,raw,self.profile.registration)
+            earlier_corrected = bias.applied
+            earlier_rate = bias.applied_rate
         if anchor is alignment:
             return prior, prior
-        latest = alignment.apply(raw)
+        if bias is None:
+            latest = alignment.apply(raw)
+        else:
+            bias.applied = False
+            latest = bias.project(alignment,raw,self.profile.registration)
         # 약한 새 정합의 넓은 오차를 이전의 더 정밀한 오도메트리 전파에 누적하지 않는다.
         earlier = prior.sample
         current = latest.sample
@@ -340,6 +363,9 @@ class PerceptionPipeline:
                 and earlier.yaw_error_rad <= current.yaw_error_rad
                 and math.hypot(earlier.x-current.x, earlier.y-current.y) <= earlier.position_error_m
                 and abs(wrap_yaw(earlier.yaw-current.yaw)) <= earlier.yaw_error_rad):
+            if bias is not None:
+                bias.applied = earlier_corrected
+                bias.applied_rate = earlier_rate
             return prior, prior
         return prior, latest
 
@@ -362,6 +388,7 @@ class PerceptionPipeline:
         from .depth import analyze_depth
         from .free_space import certify_cell
         from .geometry import TimingDiagnostics
+        from .motion import bind_motion_pose, widen_motion_rays
         if diagnostics is not None and type(diagnostics) is not TimingDiagnostics:
             raise ValueError('expected optional elapsed-only TimingDiagnostics')
         import numpy as np
@@ -461,15 +488,23 @@ class PerceptionPipeline:
                 clock_id=observation.rgb.stamp.clock_id,kind=observation.kind,free_ttl_us=self.profile.free_ttl_us)
             self.reference=None
             self._alignment=None
+            self._startup_odometry=None
             self._propagation_anchor=None
             self._previous_propagation_anchor=None
             self._registration_history=()
+            if self._yaw_bias is not None:
+                self._yaw_bias = YawBias()
             self._free_scheduler=None
             same_startup = (self._context is not None and self._context[:3] == context[:3]
                             and self._context[-1].startswith('frame:'))
             self._temporal_road.clear(keep_startup=same_startup)
             self._context=context
         raw_pose=pose
+        yaw_bias = self._yaw_bias
+        if yaw_bias is not None:
+            yaw_bias.applied=False
+            if raw_pose is not None and localization_configured and localization_yaw_drift_rps:
+                yaw_bias.add_pose(raw_pose)
         registration_pose=pose
         alignment_invalid=False
         if pose is not None and self._alignment is not None:
@@ -484,14 +519,40 @@ class PerceptionPipeline:
                 alignment_invalid=True
                 pose=None
                 registration_pose=None
+        elif (pose is not None and operational_localization and not self._restore_pending
+                and (raw_pose.wheel_capture is not None or localization_position_drift_mps or localization_yaw_drift_rps)):
+            initial = self._startup_odometry
+            if initial is None or initial.sample.context != raw_pose.sample.context:
+                self._startup_odometry = raw_pose
+            elif raw_pose.captured_us[1] >= initial.captured_us[1]:
+                registration_pose = pose = MapOdomAlignment.project_startup(initial, raw_pose,
+                    position_drift_mps=localization_position_drift_mps,
+                    yaw_drift_rps=localization_yaw_drift_rps)
+            else:
+                alignment_invalid=True
+                pose=registration_pose=None
         input_done=perf_counter_ns()
         step('INPUT_COMPLETED')
+        capture_interval=observation.capture_interval
+        instantaneous_synthetic=(observation.kind=='SYNTHETIC' and capture_interval is not None
+            and capture_interval[0]==capture_interval[1])
         evidence=None
+        ray_inputs=None
+        motion_pose=None
+        targets_qualified=bool(self.targets and all(target.qualified for target in self.targets))
         if depth_new:
+            if not instantaneous_synthetic and capture_interval is not None and motion_qualified and raw_pose is not None:
+                motion_pose=bind_motion_pose(observation.depth.stamp,self.calibration,raw_pose,
+                    observation.kind,True,capture_interval)
+            ray_candidate=bool(targets_qualified and self.calibration.free_qualified and self.profile.permission_polygon
+                and (instantaneous_synthetic or (motion_pose is not None and completed_clock is not None
+                    and (needed_mask is not None or needed_region_factory is not None))))
+            config=self.profile.depth if ray_candidate else replace(self.profile.depth,max_patches=0)
             evidence=analyze_depth(observation.depth.array(),self.calibration.right,self.calibration.plane,
                 stamp=observation.depth.stamp,calibration_id=self.calibration.sha256,
-                input_kind=observation.kind,profile=self.calibration,config=self.profile.depth,
+                input_kind=observation.kind,profile=self.calibration,config=config,defer_patches=True,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
+            evidence,ray_inputs=evidence.take_ray_inputs()
         depth_done=perf_counter_ns()
         step('DEPTH_COMPLETED')
         if rgb_new:
@@ -613,6 +674,10 @@ class PerceptionPipeline:
                     if operational_localization and not candidate_alignment.valid_at(now_us):
                         quarantined=True
                     else:
+                        if yaw_bias is not None and operational_localization:
+                            yaw_bias.observe(self._last_rgb,self.calibration,raw_pose,candidate_pose,
+                                common,reference,localization_yaw_drift_rps)
+                            yaw_bias.applied=False
                         if registration_method=='MULTI_FRAME':
                             # 새 기준점에 남는 원 엔코더 오차까지 포함해 실제 전파 이득을 비교한다.
                             projected=candidate_alignment.apply(raw_pose).sample
@@ -624,7 +689,9 @@ class PerceptionPipeline:
                                 self._previous_propagation_anchor=self._propagation_anchor
                                 self._propagation_anchor=candidate_alignment
                         pose=candidate_pose;self._alignment=candidate_alignment;self._restore_pending=False
-                        if self._propagation_anchor is None:self._propagation_anchor=candidate_alignment
+                        if self._propagation_anchor is None:
+                            self._propagation_anchor=candidate_alignment
+                            self._startup_odometry=None
                         quarantined=False
                 elif registration.status != 'NO_OVERLAP' and any(not p.normal_only for p in common):
                     estimate = (pose.sample.x, pose.sample.y, pose.sample.yaw)
@@ -681,7 +748,7 @@ class PerceptionPipeline:
                 p=pose.sample
                 origin=transform_point(origin,(p.x,p.y,p.yaw))
             hit_observer=None if evidence_observer is None else lambda delta:evidence_observer(
-                MapEvidenceUpdate(grid,delta,observation,evidence,raw_pose,pose,evidence.patches))
+                MapEvidenceUpdate(grid,delta,observation,evidence,raw_pose,pose,()))
             grid.add_hits(boxes,observation.depth.stamp,view_id=observation.depth.stamp.stream_id,origin_xy=origin,observer=hit_observer)
         hits_done=perf_counter_ns()
         step('HITS_COMPLETED')
@@ -699,23 +766,14 @@ class PerceptionPipeline:
                 raise ValueError('needed-region factory must return an original StoppingRegion or None')
         remaining=self.profile.max_free_ray_tests
         depth_age=None if observation.depth is None else observation.depth.stamp.age_us(now_us,observation.rgb.stamp.clock_id)
-        capture_interval=observation.capture_interval
-        instantaneous_synthetic=(observation.kind=='SYNTHETIC' and capture_interval is not None
-            and capture_interval[0]==capture_interval[1])
         free_patches=() if evidence is None else evidence.patches
         temporal_free_status=('INSTANTANEOUS_SYNTHETIC' if instantaneous_synthetic else
             'CAPTURE_TIME_UNKNOWN' if capture_interval is None else 'MOTION_UNQUALIFIED' if not motion_qualified
-            else 'FULL_CAPTURE_POSE_UNAVAILABLE' if raw_pose is None else 'MOTION_RAY_TUBE_UNAVAILABLE')
-        if (not instantaneous_synthetic and evidence is not None and capture_interval is not None and motion_qualified):
-            from .motion import widen_motion_rays
-            # registration이 좁힌 error가 원 exposure의 motion hull을 줄이지 않게 한다.
-            free_patches=widen_motion_rays(evidence.patches,observation.depth.stamp,self.calibration,raw_pose,
-                input_kind=observation.kind,motion_qualified=True,capture_interval=capture_interval)
-            if bool(np.any(free_patches.qualified)):temporal_free_status='FULL_CAPTURE_MOTION_RAY_TUBE'
-        temporal_bound=instantaneous_synthetic or temporal_free_status=='FULL_CAPTURE_MOTION_RAY_TUBE'
-        if temporal_bound and not instantaneous_synthetic and completed_clock is None:
-            temporal_bound=False;temporal_free_status='ACTUAL_COMPLETION_CLOCK_REQUIRED'
-        can_free=bool(evidence is not None and self.targets and self.calibration.free_qualified and temporal_bound
+            else 'FULL_CAPTURE_POSE_UNAVAILABLE' if raw_pose is None else
+            'MOTION_RAY_TUBE_UNAVAILABLE' if motion_pose is None else
+            'ACTUAL_COMPLETION_CLOCK_REQUIRED' if completed_clock is None else 'MOTION_RAYS_NOT_NEEDED')
+        temporal_possible=instantaneous_synthetic or (motion_pose is not None and completed_clock is not None)
+        can_free=bool(evidence is not None and targets_qualified and self.calibration.free_qualified and temporal_possible
             and depth_age is not None and depth_age<=self.profile.max_observation_age_us
             and observation.rgb.stamp.captured_us is not None and self.profile.permission_polygon
             and (instantaneous_synthetic or not quarantined))
@@ -743,7 +801,22 @@ class PerceptionPipeline:
             needed=needed_mask.copy()
         selected=()
         legacy_positions=None
-        if needed is not None and cycle_bound_us is not None and completion_bound_us is not None:
+        scheduled=needed is not None and cycle_bound_us is not None and completion_bound_us is not None
+        # 원 pose/time, 정합, corridor와 작업량이 허용된 frame에서만 FREE ray를 만든다.
+        use_rays=can_free and ((instantaneous_synthetic and needed is None) or
+            (scheduled and grid.spec.width*grid.spec.height<=4096 and bool(np.any(needed))))
+        if use_rays:
+            if ray_inputs is not None:
+                evidence=ray_inputs.materialize(evidence,diagnostics)
+                free_patches=evidence.patches
+            if not instantaneous_synthetic:
+                # 정합이 좁힌 자세 대신 원 exposure의 pose bound를 사용한다.
+                free_patches=widen_motion_rays(free_patches,observation.depth.stamp,self.calibration,motion_pose,
+                    input_kind=observation.kind,motion_qualified=True,capture_interval=capture_interval)
+                can_free=temporal_possible=bool(np.any(free_patches.qualified))
+                temporal_free_status='FULL_CAPTURE_MOTION_RAY_TUBE' if can_free else 'MOTION_RAY_TUBE_UNAVAILABLE'
+        del ray_inputs
+        if scheduled:
             if grid.spec.width*grid.spec.height>4096:
                 scheduling_status='SCHEDULER_GRID_LIMIT';can_free=False
             else:
@@ -893,9 +966,9 @@ class PerceptionPipeline:
             elif pose is not None and visual_status=='ALIGNMENT_EXPIRED':
                 localization_status='ODOMETRY_CONTINUED'
         free_status=('NO_NEW_DEPTH_EVIDENCE' if evidence is None else
-            'TARGET_PROFILE_UNQUALIFIED' if not self.targets or any(not target.qualified for target in self.targets) else
+            'TARGET_PROFILE_UNQUALIFIED' if not targets_qualified else
             'CALIBRATION_UNQUALIFIED' if not self.calibration.free_qualified else
-            temporal_free_status if not temporal_bound else
+            temporal_free_status if not temporal_possible else
             'REGISTRATION_QUARANTINED' if quarantined and not instantaneous_synthetic else
             visual_status if localization_blocks_free or operational_localization and not alignment_current(now_us) else
             'PERMISSION_POLICY_UNCONFIGURED' if not self.profile.permission_polygon else
@@ -954,7 +1027,8 @@ class PerceptionPipeline:
                 snapshot=(ended-free_done)//1000,total=(ended-started)//1000))
         if diagnostics is not None: summary['diagnostic_timings']=diagnostics.snapshot()
         return PerceptionResult(summary,self._last_tape,self._last_road,evidence,registration,snapshot,
-                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys)
+                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys,
+                                pose,None if yaw_bias is None else yaw_bias.summary())
 
 
 def render_diagnostics(result, calibration):

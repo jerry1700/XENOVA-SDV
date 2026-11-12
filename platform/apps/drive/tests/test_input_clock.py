@@ -130,9 +130,36 @@ void test_log(const char *fmt,...){
  }
  va_end(args);
 }
+static void budget_handoff(void){
+ uint64_t now=1001000;
+ const uint8_t owner[16]={0x11,0x11,0x11,0x11,0x11,0x11,0x41,0x11,0x81,0x11,0x11,0x11,0x11,0x11,0x11,0x11};
+ strcpy(active_vm,vm);control_generation=5;context_available=clock_available=mission_available=true;
+ current_clock.expires_guest=fake_now+100000;
+ current_mission=(xenova_drive_MissionGrant){.major=1,.admitted=true,.kind=2,.control_generation=5,
+  .issued_pi_us=1000000,.mission_deadline_pi_us=1100000,.grant_revision=8};
+ memcpy(current_mission.owner_vm.bytes,owner,sizeof(owner));
+ budget_reply=(xenova_drive_MissionBudgetReply){.result=1,.has_grant=true,.grant=current_mission};
+ budget_pending=budget_reply_available=true;
+ xenova_drive_MissionBudgetReply reply;
+ xenova_drive_MissionGrant grant={0};
+ mutex_rc=-EBUSY;
+ assert(dl_budget_take(&reply,&grant,now)==-EBUSY&&budget_pending&&budget_reply_available);
+ mutex_rc=0;
+ assert(dl_budget_take(&reply,&grant,now)==0);
+ assert(!budget_pending&&!budget_reply_available&&reply.result==1&&grant.grant_revision==8);
+ mutex_rc=-EBUSY;
+ /* This contention used to land on the separate lookup after dequeuing. */
+ assert(dl_mission_get(&grant,now)==-EBUSY&&grant.grant_revision==reply.grant.grant_revision);
+ mutex_rc=0;
+ budget_pending=budget_reply_available=true;
+ assert(dl_budget_take(&reply,&grant,current_mission.mission_deadline_pi_us)==0);
+ assert(!grant.major&&!budget_pending&&!budget_reply_available);
+ puts("{\"paired\":true}");
+}
 int main(int argc,char **argv){
  assert(argc==3);uint8_t wire[DW_WIRE_MAX];FILE *f=fopen(argv[1],"rb");assert(f);
  size_t length=fread(wire,1,sizeof(wire),f);fclose(f);const char *scenario=argv[2];
+ if(!strcmp(scenario,"budget-handoff")){budget_handoff();return 0;}
  engine=&fixture_engine;dw_pool_init(&engine->maps);context_available=true;strcpy(gateway,gateway_id);
  probe_sent=1000000;auto_probe_sequence=1;
  if(!strcmp(scenario,"network-slow"))fake_now=1040001;
@@ -267,6 +294,11 @@ def native(request,tmp_path_factory):
         assert not result.stderr
         return json.loads(result.stdout)
     return request.param,run
+
+
+def test_budget_reply_and_grant_survive_contention_as_one_snapshot(native):
+    _, run = native
+    assert run('budget-handoff') == {'paired': True}
 
 
 def test_entry_clock_excludes_known_decode_context_work_without_renewing_lease(native):

@@ -65,6 +65,21 @@ class RelativeWheelMotionTests(unittest.TestCase):
         self.assertLess(propagated.position_error_m,fallback.position_error_m)
         self.assertLess(propagated.yaw_error_rad,fallback.yaw_error_rad)
 
+    def test_startup_pose_includes_wheel_quantization_missing_from_upstream_bound(self):
+        self.sample(1,100_000,0.,0)
+        self.sample(2,120_000,.01,10)
+        start, now = (replace(capture,sample=replace(capture.sample,
+            position_error_m=.0001,yaw_error_rad=.0001))
+            for capture in (self.capture(100_000),self.capture(120_000)))
+        wheel_position, wheel_yaw = relative_wheel_bounds(start,now)
+
+        pose = MapOdomAlignment.project_startup(start,now,
+            position_drift_mps=.001,yaw_drift_rps=.001).sample
+
+        self.assertGreaterEqual(pose.position_error_m,start.sample.position_error_m+wheel_position+.00002)
+        self.assertGreaterEqual(pose.yaw_error_rad,start.sample.yaw_error_rad+wheel_yaw+.00002)
+        self.assertEqual((pose.x,pose.y,pose.yaw),(now.sample.x,now.sample.y,now.sample.yaw))
+
     def test_straight_motion_does_not_pay_full_tick_quantization_at_every_sample(self):
         for index in range(9):
             self.sample(index+1,100_000+index*20_000,index*.001,index)

@@ -191,8 +191,24 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
             if retained is not None:snapshot=retained.snapshot
         snapshot_us = result.summary['now_us']
         _need(capture[1] <= snapshot_us <= completed_j_us <= published_j_us)
-        mapped = alignment.apply(PoseEstimate(current_vehicle.pose_sample,
-            current_vehicle.j_interval, current_vehicle.j_interval)).sample
+        raw_capture = draft.inputs.pose
+        mapped_capture = result.mapped_odometry
+        _need(type(mapped_capture) is PoseEstimate and mapped_capture.captured_us == capture
+              and mapped_capture.sample.context == raw_capture.sample.context)
+        vehicle_odom = PoseEstimate(current_vehicle.pose_sample,current_vehicle.j_interval,current_vehicle.j_interval)
+        propagation = draft.pipeline._propagation_anchor
+        if mapped_capture == alignment.apply(raw_capture):
+            mapped = alignment.apply(vehicle_odom).sample
+        elif propagation is not None and mapped_capture == propagation.apply(raw_capture):
+            mapped = propagation.apply(vehicle_odom).sample
+        else:
+            # A corrected capture need not match either rigid transform. Move that
+            # exact pose only by the relative odometry to the wire sample.
+            capture_anchor = MapOdomAlignment.from_match(raw_capture,mapped_capture,
+                observed_j_interval=capture,registration_revision=alignment.registration_revision,
+                valid_for_us=alignment.valid_for_us,position_drift_mps=alignment.position_drift_mps,
+                yaw_drift_rps=alignment.yaw_drift_rps)
+            mapped = capture_anchor.project_neighbor(vehicle_odom).sample
         from xenova_drive_world import schema
         spec = snapshot['spec']
         upper, lower, grid_error = _domain(spec, len(basis.points))
@@ -233,14 +249,13 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         if tof_overlay is not None:
             snapshot, static = tof_overlay.apply(snapshot, sensor_snapshot=sensor_snapshot,
                 alignment=alignment, snapshot_us=snapshot_us, now_us=published_j_us, static_retained=static)
-        built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         inventory = catalog_state.view.parking
         if inventory is not None:
             _need(inventory.context == context and inventory.input_kind == 'LIVE'
                   and inventory.source_clock == snapshot['clock_id'])
             # 원 publication 후보의 geometry/age/UNKNOWN/cap을 다시 산출하지 않는다.
-            value = inventory.apply(built.message())
-            built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
+            value = inventory.apply_to_template(value)
+        built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         _need(b''.join(struct.pack('<ff', p.x, p.y) for p in built.message().reference) == basis.points_f32)
         return built
     except (_NotReady, ValueError, KeyError, OverflowError):

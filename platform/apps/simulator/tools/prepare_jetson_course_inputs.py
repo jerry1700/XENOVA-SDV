@@ -8,6 +8,7 @@ from pathlib import Path
 from generate_jetson_tracks import VARIANTS, generate, read_geometry
 from tools.hil_observation.resident import load_motion_profile
 from xenova_vehicle.perception.calibration import canonical as canonical_calibration
+from xenova_vehicle.perception.tape import TapeProfile
 from xenova_vehicle.runtime.mapper_profile import MapperProfile
 from xenova_vehicle.simulation.profile import DevelopmentProfile
 from xenova_vehicle.simulation.scene import Scene, canonical, demo_scene
@@ -61,6 +62,11 @@ def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sh
         raise ValueError('base mapper must be bound to the parent calibration')
     mapper_fields = original_mapper.to_dict()
     mapper_fields['calibration_profile_sha256'] = motion.bound_calibration.sha256
+    tape = TapeProfile()
+    mapper_fields['pipeline']['tape'].update(
+        value_min=tape.value_min, min_strip_length_m=tape.min_strip_length_m)
+    # R45 replay acceptance limit for the measured-course development profile.
+    mapper_fields['pipeline']['registration']['max_position_error_m'] = .065
     width, tolerance = geometry['lane_width_m'], geometry['lane_width_tolerance_m']
     mapper_fields['pipeline']['road'].update(lane_width_min_m=width - tolerance, lane_width_max_m=width + tolerance)
     mapper = MapperProfile.from_dict(mapper_fields)

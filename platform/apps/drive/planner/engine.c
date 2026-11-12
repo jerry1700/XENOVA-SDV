@@ -627,9 +627,19 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
 enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t now){
  if(!e->planning)return DE_WAITING;
  if(e->parking.active&&e->parking.stage)return parking_slice(e,expansions,now);
- enum dw_result scene=dw_scene_generation(&e->maps,e->paths[e->planning_path.slot].scene_generation,now,NULL);
- if(scene==DW_BUSY)return DE_BUSY;
- if(e->stopping||scene)e->search_reason=LP_CANCELLED;
+ if(e->stopping)e->search_reason=LP_CANCELLED;
+ else if(e->search_reason==LP_PATH_FOUND){
+  /* A completed candidate may wait for a lock, but keeps its search deadline. */
+  uint64_t guest;
+  if(e->budget.cancelled&&e->budget.cancelled(e->budget.context))e->search_reason=LP_CANCELLED;
+  else if(!e->budget.clock||e->budget.clock(e->budget.context,&guest))e->search_reason=LP_CLOCK;
+  else if(guest>=e->budget.deadline_us)e->search_reason=LP_DEADLINE;
+ }
+ if(e->search_reason==LP_SEARCHING||e->search_reason==LP_PATH_FOUND){
+  enum dw_result scene=dw_scene_generation(&e->maps,e->paths[e->planning_path.slot].scene_generation,now,NULL);
+  if(scene==DW_BUSY)return DE_BUSY;
+  if(scene)e->search_reason=LP_CANCELLED;
+ }
  struct lp_path *path=&e->paths[e->planning_path.slot].path;
  if(e->search_reason==LP_SEARCHING)e->search_reason=lp_advance(&e->search,expansions,path);
  search_memory_publish(e);
@@ -658,8 +668,9 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
      struct lp_metrics checked={0};enum lp_result result=lp_validate_path(path,&snapshot->world,e->config,&checked,&current_budget);
      if(result!=LP_PATH_FOUND){e->search_reason=result;valid=false;}
     }
+    enum de_result input=DE_OK;
     if(valid){
-     dw_pose pose;dw_vehicle vehicle;enum de_result input=inputs(e,snapshot,now,&pose,&vehicle,NULL);
+     dw_pose pose;dw_vehicle vehicle;input=inputs(e,snapshot,now,&pose,&vehicle,NULL);
      struct lp_tracker probe={0};struct lp_command command;struct lp_metrics measured={0};
      if(input)valid=false;
      else{
@@ -667,8 +678,10 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
       if(result!=LP_PATH_FOUND&&result!=LP_STOP){e->search_reason=result;valid=false;}
      }
     }
-    if(valid&&dw_source_valid(&e->maps,current))valid=false;
+    enum dw_result source=valid?dw_source_valid(&e->maps,current):DW_OK;
     (void)dw_release(&e->maps,current);
+    if(input==DE_BUSY||source==DW_BUSY)return DE_BUSY;
+    if(source)valid=false;
    }
   }
   if(valid){
@@ -706,9 +719,12 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
   if(!expired)return DE_BUSY;
   e->episode_request_ready=e->episode_receipt_pending=false;e->plan_valid=false;e->behavior_failed=true;db_episode_hold(&e->episode,DB_TIME);
  }
- scene=dw_scene_generation(&e->maps,e->paths[e->planning_path.slot].scene_generation,now,NULL);
- if(scene==DW_BUSY)return DE_BUSY;
- bool valid=e->plan_valid&&!e->stopping&&!scene;
+ bool valid=e->plan_valid&&!e->stopping&&e->search_reason==LP_PATH_FOUND;
+ if(valid){
+  enum dw_result scene=dw_scene_generation(&e->maps,e->paths[e->planning_path.slot].scene_generation,now,NULL);
+  if(scene==DW_BUSY)return DE_BUSY;
+  if(scene)valid=false;
+ }
  if(valid&&initial_correspondence_pending(e,path)){
   enum de_result context=initial_correspondence_context(e,path,now,&e->budget);
   if(context)valid=false;
@@ -725,7 +741,10 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
    dw_pose pose;dw_vehicle vehicle;enum de_result current=inputs(e,map,now,&pose,&vehicle,NULL);
    struct lp_budget current_budget=e->budget;current_budget.collision_index=&e->map_indices[fresh.slot];
    if(!current)current=initial_correspondence_validate(e,path,e->planning_path.generation,&map->world,pose,&vehicle,now,&current_budget);
-   if(!current&&dw_source_valid(&e->maps,fresh))current=DE_CHANGED;
+   if(!current){
+    enum dw_result source=dw_source_valid(&e->maps,fresh);
+    if(source)current=source==DW_BUSY?DE_BUSY:DE_CHANGED;
+   }
    enum dw_result released=dw_release(&e->maps,fresh);
    if(current==DE_BUSY||released==DW_BUSY)return DE_BUSY;
    if(current||released)valid=false;
@@ -1714,7 +1733,7 @@ enum de_result de_budget_reply(struct drive_engine *e,const xenova_drive_Mission
  struct dp_state *p=&e->parking;
  if(memcmp(reply->request_nonce.bytes,p->request.request_nonce.bytes,16)||memcmp(reply->request_sha256.bytes,p->request_sha256,32))return DE_STATE;
  p->budget_pending=false;
- bool valid=now<p->request.valid_until_pi_us&&reply->result==1&&reply->has_grant&&grant_same(&e->grant,&reply->grant)&&
+ bool valid=e->has_grant&&now<p->request.valid_until_pi_us&&reply->result==1&&reply->has_grant&&grant_same(&e->grant,&reply->grant)&&
   e->grant.has_locked_goal_sha256&&!memcmp(e->grant.locked_goal_sha256.bytes,p->request.selected_goal_sha256.bytes,32)&&
   e->grant.grant_revision==p->request.expected_grant_revision+1&&
   e->grant.mission_deadline_pi_us==p->original_grant.mission_deadline_pi_us&&e->grant.search_deadline_pi_us==p->original_grant.search_deadline_pi_us&&

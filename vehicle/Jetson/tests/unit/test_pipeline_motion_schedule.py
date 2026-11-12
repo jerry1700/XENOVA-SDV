@@ -18,6 +18,7 @@ from xenova_vehicle.perception.free_space import TargetClass
 from xenova_vehicle.perception.inputs import FrameStamp,ImageFrame,PerceptionInput
 from xenova_vehicle.perception.motion import widen_motion_rays
 from xenova_vehicle.perception.pipeline import PerceptionPipeline,PipelineProfile
+from xenova_vehicle.perception.tape import TapeGraph
 
 import test_depth_evidence as depth_fixture
 
@@ -31,7 +32,7 @@ class PipelineMotionScheduleTests(unittest.TestCase):
             permission_source='EXPLICIT_SOFTWARE_FIXTURE')
         self.targets=(TargetClass(.5,.5,.5,qualified=True),)
         self.needed=np.array([[False,True]],dtype=np.bool_)
-        self.graph=SimpleNamespace(status='UNKNOWN',strips=(),reasons=(),work={})
+        self.graph=TapeGraph(())
         self.road=SimpleNamespace(status='UNKNOWN',hypotheses=(),reasons=(),semantic_scored=0)
 
     def observation(self,sequence=1):
@@ -108,7 +109,8 @@ class PipelineMotionScheduleTests(unittest.TestCase):
                 (600_001,1_000_000,'OBSERVATION_EXPIRED_DURING_COMPUTE')):
             with self.subTest(completed=completed):
                 core=PerceptionPipeline(self.calibration,self.profile,targets=self.targets)
-                value=self.process(core,self.observation(),now_us=150_000,completed_clock=lambda:completed,
+                clock=iter((150_000,completed))
+                value=self.process(core,self.observation(),now_us=150_000,completed_clock=lambda:next(clock),
                     pose=self.pose(),motion_qualified=True,needed_mask=self.needed,
                     cycle_bound_us=10_000,completion_bound_us=bound)
                 self.assertEqual(value.summary['free_certificates'][0]['status'],'CLEAR_REGION')
@@ -135,9 +137,12 @@ class PipelineMotionScheduleTests(unittest.TestCase):
         self.assertEqual(attempted,[[0,0],[1,0]])
 
     def test_actual_registration_narrowing_does_not_replace_raw_full_capture_motion_hull(self):
+        import numpy as np
         import test_alignment_flow as alignment_fixture
         fixture=alignment_fixture.AlignmentFlowTests(methodName='runTest');fixture.setUp()
-        core=PerceptionPipeline(fixture.calibration,fixture.profile)
+        profile=replace(fixture.profile,permission_polygon=fixture.calibration.support_polygon,
+            permission_source='EXPLICIT_SOFTWARE_FIXTURE')
+        core=PerceptionPipeline(fixture.calibration,profile,targets=self.targets)
         fixture.process(core,1,fixture.graph(alignment_fixture.CORNER_GT,0.),fixture.pose(1))
         original=fixture.observation(2)
         observation=replace(original,
@@ -154,7 +159,9 @@ class PipelineMotionScheduleTests(unittest.TestCase):
         with patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=graph), \
                 patch('xenova_vehicle.perception.depth.analyze_depth',side_effect=depth), \
                 patch('xenova_vehicle.perception.motion.widen_motion_rays',side_effect=motion):
-            result=core.process(observation,pose=raw,motion_qualified=True,completed_clock=lambda:205_000)
+            result=core.process(observation,pose=raw,motion_qualified=True,completed_clock=lambda:205_000,
+                needed_mask=np.ones((profile.grid.height,profile.grid.width),dtype=bool),
+                cycle_bound_us=10_000,completion_bound_us=20_000)
         self.assertEqual(result.registration.status,'BOUNDED')
         self.assertLess(result.registration.position_error_m,raw.sample.position_error_m)
         self.assertAlmostEqual(result.summary['mapped_pose'][0],.1,delta=.03)
@@ -162,6 +169,28 @@ class PipelineMotionScheduleTests(unittest.TestCase):
         self.assertIs(expanded[0][0],raw)
         self.assertLessEqual(expanded[0][1][0].origin_lower[0],-.16)
         self.assertGreaterEqual(expanded[0][1][0].origin_upper[0],.16)
+
+    def test_no_required_cells_skips_ray_work_without_dropping_real_depth_hits(self):
+        import numpy as np
+        original=self.observation()
+        data=np.full((3,3),1000,dtype='<u2')
+        data[1,1]=500
+        observation=replace(original,depth=replace(original.depth,payload=data.tobytes()))
+        for mask,status in ((None,'NEEDED_REGION_UNKNOWN'),(np.zeros_like(self.needed),'NO_REQUIRED_CELLS')):
+            with self.subTest(status=status), \
+                    patch('xenova_vehicle.perception.depth.axial_ray_bounds_many',
+                          side_effect=AssertionError('unused rays were built')), \
+                    patch('xenova_vehicle.perception.motion.widen_motion_rays',
+                          side_effect=AssertionError('unused rays were widened')):
+                core=PerceptionPipeline(self.calibration,self.profile,targets=self.targets)
+                result=core.process(observation,now_us=150_000,completed_clock=lambda:160_000,
+                    pose=self.pose(),motion_qualified=True,needed_mask=mask,
+                    cycle_bound_us=10_000,completion_bound_us=20_000)
+                self.assertEqual(result.summary['free_status'],status)
+                self.assertEqual(result.summary['free_ray_tests'],0)
+                self.assertEqual(len(result.depth.hit_boxes),1)
+                self.assertGreater(result.summary['map_counts']['occupied'],0)
+                self.assertEqual(result.depth.valid_count,9)
 
     def test_stopping_region_uses_actual_admitted_vehicle_lease_and_whole_cells_without_capacity_promise(self):
         import numpy as np

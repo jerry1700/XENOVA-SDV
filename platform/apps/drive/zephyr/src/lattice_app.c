@@ -671,9 +671,9 @@ static void behavior_io(const struct dl_clock *clock,uint64_t now,uint64_t guest
   k_mutex_unlock(&app_metadata);
  }
  if(registered)dl_snapshot_request();
- if(!dl_budget_take(&budget_request,&budget_reply)){
-  xenova_drive_MissionGrant grant;
-  if(!dl_mission_get(&grant,now))(void)de_mission(&engine,&grant,now);
+ xenova_drive_MissionGrant grant;
+ if(!dl_budget_take(&budget_reply,&grant,now)){
+  if(!grant.major||de_mission(&engine,&grant,now)!=DE_OK)(void)de_mission(&engine,NULL,now);
   if(de_budget_reply(&engine,&budget_reply,now)==DE_OK)dl_snapshot_request();
  }
  if(de_budget_request(&engine,&budget_request)&&de_registration_state(&engine,&registration_state)){

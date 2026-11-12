@@ -154,8 +154,11 @@ def _simplify(chain, profile):
     """raster 잔꺾임을 관측 오차 규모에서 줄인다. 제거된 편차는 tube 오차에 더한다."""
     if len(chain.points) <= 2:
         return chain
+    # Joined dash endpoints can move by one raster cell. Fit them over the observed
+    # span and keep the removed deviation in the geometry error below.
+    error_fraction = .5 if len(chain.ids) > 1 else .25
     tolerance = max(profile.station_error_m, min(profile.max_geometry_error_m / 4,
-        max(math.hypot(*e) for e in chain.point_error_xy) / 4))
+        max(math.hypot(*e) for e in chain.point_error_xy) * error_fraction))
     selected = {0, len(chain.points) - 1}
     pending = [(0, len(chain.points) - 1)]
     while pending:
@@ -204,9 +207,62 @@ def _heading_error(chain, index):
         for x in (dx - ex, dx + ex) for y in (dy - ey, dy + ey)))
 
 
+def _forward_span(points, profile, work):
+    """Keep a single usable forward span when a strip turns out of the forward view."""
+    runs = []
+    first = 0
+    previous = None
+    for i, (a, b) in enumerate(zip(points, points[1:])):
+        heading = _angle(a, b)
+        if b[0] - a[0] <= 1e-8 or abs(heading) > profile.max_heading_rad:
+            reason = 'nonmonotonic_strips' if b[0] - a[0] <= 1e-8 else 'heading_rejected_strips'
+            work[reason] += 1
+            runs.append((first, i))
+            first, previous = i + 1, None
+            continue
+        if previous is not None and abs(heading - previous) > profile.max_curvature_1pm * (
+                math.dist(points[i - 1], a) + math.dist(a, b)) / 2:
+            work['curvature_rejected_strips'] += 1
+            runs.append((first, i))
+            first = i
+        previous = heading
+    if not runs:
+        return 0, len(points) - 1
+    runs.append((first, len(points) - 1))
+    lengths = _arc(points)
+    usable = [(a, b) for a, b in runs if lengths[b] - lengths[a] >= profile.min_usable_length_m]
+    return usable[0] if len(usable) == 1 else None
+
+
+def _join_lateral(first, second, profile, first_short, second_short):
+    """Match paint ends, allowing a few raster cells to establish direction together."""
+    a, b = first.points[-1], second.points[0]
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    if dx <= 0:
+        return None
+    incoming = _angle(*first.points[-2:])
+    outgoing = _angle(*second.points[:2])
+    lateral = abs(-dx * math.sin(incoming) + dy * math.cos(incoming))
+    along = dx * math.cos(incoming) + dy * math.sin(incoming)
+    if (0 < along <= profile.max_gap_m and lateral <= profile.merge_lateral_m
+            and abs(outgoing - incoming) <= profile.merge_heading_rad):
+        return lateral
+
+    if not (first_short or second_short) or math.hypot(dx, dy) > min(profile.max_gap_m, profile.min_usable_length_m / 2):
+        return None
+    start, end = first.points[-2], second.points[1]
+    heading = _angle(start, end)
+    if ((not first_short and abs(incoming - heading) > profile.merge_heading_rad)
+            or (not second_short and abs(outgoing - heading) > profile.merge_heading_rad)):
+        return None
+    deviation = max(_distance(a, start, end)[0], _distance(b, start, end)[0])
+    return deviation if deviation <= profile.merge_lateral_m else None
+
+
 def _chains(graph, profile):
     usable = []
     kinds = {}
+    short_dashes = set()
     work = dict(short_or_closed_strips=0, nonmonotonic_strips=0, heading_rejected_strips=0,
                 curvature_rejected_strips=0, dashed_merges=0)
     for strip in graph.strips:
@@ -219,43 +275,54 @@ def _chains(graph, profile):
             errors, segment_errors = tuple(reversed(errors)), tuple(reversed(segment_errors))
         chain = _simplify(_Chain((strip.local_id,), points, strip.error_m, (), errors, segment_errors), profile)
         points = chain.points
-        if strip.closed or strip.length_m < profile.min_usable_length_m:
+        short = strip.length_m < profile.min_usable_length_m
+        if strip.closed or (short and not (profile.allow_dashed and strip.observed and strip.width_complete
+                           and start == end == 'observed_paint_end')):
             work['short_or_closed_strips'] += 1
             continue
-        if any(b[0] - a[0] <= 1e-8 for a, b in zip(points, points[1:])):
-            work['nonmonotonic_strips'] += 1
+        span = _forward_span(points, profile, work)
+        if span is None:
             continue
-        if any(abs(_angle(a, b)) > profile.max_heading_rad for a, b in zip(points, points[1:])):
-            work['heading_rejected_strips'] += 1
-            continue
-        if any(abs(_angle(b, c) - _angle(a, b)) / max(1e-9, (math.dist(a, b) + math.dist(b, c)) / 2)
-               > profile.max_curvature_1pm for a, b, c in zip(points, points[1:], points[2:])):
-            work['curvature_rejected_strips'] += 1
-            continue
+        first, last = span
+        if first or last != len(points) - 1:
+            chain = _Chain(chain.ids, points[first:last + 1], chain.error, (),
+                           chain.point_error_xy[first:last + 1], chain.segment_error_xy[first:last])
+            if first:
+                start = None
+            if last != len(points) - 1:
+                end = None
+        if short:
+            short_dashes.add(len(usable))
         usable.append(chain)
         kinds[strip.local_id] = start, end
     if not profile.allow_dashed:
         return usable, False, work
+    short_heading_limit = min(profile.min_usable_length_m, 4 * graph.profile.cell_m)
+    short_headings = tuple(_arc(chain.points)[-1] <= short_heading_limit for chain in usable)
     nexts = {i: [] for i in range(len(usable))}
-    previous = {i: [] for i in range(len(usable))}
+    link_lateral = {}
     for i, first in enumerate(usable):
         if kinds[first.ids[0]][1] != 'observed_paint_end':
             continue
-        heading = _angle(first.points[-2], first.points[-1])
-        c, s = math.cos(heading), math.sin(heading)
         for j, second in enumerate(usable):
             if i == j or kinds[second.ids[0]][0] != 'observed_paint_end':
                 continue
-            dx = second.points[0][0] - first.points[-1][0]
-            dy = second.points[0][1] - first.points[-1][1]
-            along, lateral = dx * c + dy * s, -dx * s + dy * c
-            if (0 < along <= profile.max_gap_m and abs(lateral) <= profile.merge_lateral_m
-                    and abs(_angle(second.points[0], second.points[1]) - heading) <= profile.merge_heading_rad):
+            lateral = _join_lateral(first, second, profile, short_headings[i], short_headings[j])
+            if lateral is not None:
                 nexts[i].append(j)
-                previous[j].append(i)
+                link_lateral[i, j] = lateral
+    if short_dashes:
+        # 연속 점선에서 중간 조각을 거쳐 같은 선에 닿으면 그 조각을 건너뛰는 연결은 빼준다.
+        nexts = {i: [j for j in candidates if not any(
+            middle in short_dashes and j in nexts[middle] for middle in candidates)]
+            for i, candidates in nexts.items()}
+    previous = {i: [] for i in range(len(usable))}
+    for i, candidates in nexts.items():
+        for j in candidates:
+            previous[j].append(i)
     ambiguous = any(len(v) > 1 for v in nexts.values()) or any(len(v) > 1 for v in previous.values())
     if ambiguous:
-        return usable, True, work
+        return [chain for i, chain in enumerate(usable) if i not in short_dashes], True, work
     output = []
     visited = set()
     for index in range(len(usable)):
@@ -275,9 +342,7 @@ def _chains(graph, profile):
             added = usable[other]
             beginning = _arc(points)[-1]
             gap = math.dist(points[-1], added.points[0])
-            heading = _angle(points[-2], points[-1])
-            dx, dy = added.points[0][0] - points[-1][0], added.points[0][1] - points[-1][1]
-            lateral = abs(-dx * math.sin(heading) + dy * math.cos(heading))
+            lateral = link_lateral[current, other]
             gaps.append((beginning, beginning + gap))
             points.extend(added.points)
             ids.extend(added.ids)
@@ -287,10 +352,11 @@ def _chains(graph, profile):
             segment_errors.extend((gap_error,) + added.segment_error_xy)
             error = max(error, added.error + lateral + profile.max_curvature_1pm * gap * gap / 8)
             current = other
-        output.append(_simplify(_Chain(tuple(ids), tuple(points), error, tuple(gaps),
-                                     tuple(point_errors), tuple(segment_errors)), profile))
+        if _arc(points)[-1] >= profile.min_usable_length_m:
+            output.append(_simplify(_Chain(tuple(ids), tuple(points), error, tuple(gaps),
+                                         tuple(point_errors), tuple(segment_errors)), profile))
     if len(visited) != len(usable):
-        return usable, True, work
+        return [chain for i, chain in enumerate(usable) if i not in short_dashes], True, work
     return output, False, work
 
 
@@ -345,6 +411,18 @@ def _normal_hits(chain, point, normal, side, profile, error, work):
     return hits
 
 
+def _common_runs(values, minimum_length):
+    runs, current = [], []
+    for value in [*values, None]:
+        if value is not None:
+            current.append(value)
+        else:
+            if len(current) >= 2 and current[-1][0] - current[0][0] >= minimum_length:
+                runs.append(current)
+            current = []
+    return runs
+
+
 def _hypothesis(left, divider, right, profile, local_id, work):
     length = _arc(divider.points)[-1]
     stations = [length * i / (profile.station_count - 1) for i in range(profile.station_count)]
@@ -376,17 +454,9 @@ def _hypothesis(left, divider, right, profile, local_id, work):
         outers = [tuple(point[k] + normal[k] * distance for k in (0, 1)) for distance in distances]
         inferred = (left is None or right is None or any(lo < station < hi for lo, hi in divider.gaps)
                     or _in_gap(left, outers[0]) or _in_gap(right, outers[1]))
-        values.append((station, point, outers[0], outers[1], inferred, distances))
+        values.append((station, point, outers[0], outers[1], inferred, distances, index))
     # 관측된 공통 범위만 쓴다. 분리된 여러 범위를 하나의 연속 도로로 만들지 않는다.
-    runs, current = [], []
-    for value in values + [None]:
-        if value is None:
-            if current:
-                runs.append(current)
-                current = []
-        else:
-            current.append(value)
-    eligible = [run for run in runs if len(run) >= 2 and run[-1][0] - run[0][0] >= profile.min_usable_length_m]
+    eligible = _common_runs(values, profile.min_usable_length_m)
     if len(eligible) != 1:
         work['no_usable_common_run' if not eligible else 'multiple_common_runs'] += 1
         return None, ambiguous or len(eligible) > 1
@@ -395,10 +465,20 @@ def _hypothesis(left, divider, right, profile, local_id, work):
     error = max(c.error for c in used) + profile.station_error_m
     if left is None or right is None:
         error += prior_pad
-    yaw_error = max(_heading_error(divider, _at(divider.points, row[0])[1]) for row in run)
+    heading_errors = tuple(_heading_error(divider, i) for i in range(len(divider.points) - 1))
+    yaw_error = max(heading_errors[row[6]] for row in run)
     max_width = max(abs(distance) for row in run for distance in row[5])
     step = max(b[0] - a[0] for a, b in zip(run, run[1:]))
-    error += max_width * math.sin(yaw_error) + profile.max_curvature_1pm * step * step / 8
+    error += profile.max_curvature_1pm * step * step / 8
+    if error + max_width * math.sin(yaw_error) > profile.max_geometry_error_m:
+        # 방향이 불확실한 끝부분을 빼도 연속 구간 하나가 충분히 길 때만 쓴다.
+        stable = _common_runs((row if error + max_width * math.sin(heading_errors[row[6]])
+                               <= profile.max_geometry_error_m else None for row in run),
+                              profile.min_usable_length_m)
+        if len(stable) == 1:
+            run = stable[0]
+            yaw_error = max(heading_errors[row[6]] for row in run)
+    error += max_width * math.sin(yaw_error)
     divider_points = tuple(row[1] for row in run)
     left_outer, right_outer = tuple(row[2] for row in run), tuple(row[3] for row in run)
     centers = [tuple(tuple((p[k] + q[k]) / 2 for k in (0, 1)) for p, q in zip(divider_points, outer))

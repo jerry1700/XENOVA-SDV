@@ -130,6 +130,10 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
 
+흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
+
+실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 개발용 `mapper-profile.json`에 기록한다. 이 프로필은 R45 재생 결과를 바탕으로 `pipeline.registration.max_position_error_m`에 `0.065`m를 적용한다. 같은 개발 시험에 기존 mapper 프로필을 재사용할 때도 세 값을 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
+
 `pipeline.road.missing_outer_width_bounds_m`는 가려진 도로 바깥 경계를 추정할 차로 폭 범위(m)다. 폼보드 코스의 초기값은 `[0.26, 0.31]`로, 명목 폭은 0.285m다. 이 항목이 없던 schema1 파일도 원본 바이트를 유지하며 이 초기값을 쓴다. `lane_width_min_m`·`lane_width_max_m`은 영상에 보인 경계 간격을 검사하는 범위다. 인지 요약의 `current_lane`은 지도에 연결한 차로 중심과 원 관측 키·시각을 제공한다. `MAPPED`는 현재 위치에서 앞서 관측한 지도 조각을 사용한다는 뜻이고, `HELD`는 마지막 차로 정보를 보존하는 상태다.
 
 선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": [0]}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 통로별 index는 관측 divider 방향의 왼쪽 차로0·오른쪽 차로1이며 `parking_aisles`와 같은 순서/개수다. 실제 lane ID는 D의 원 내구 예약 뒤 결박하므로 이 정책을 쓸 때 각 aisle의 `approach_lane_id`는0이어야 한다. 생략/null은 미설정이며 자동 횡단·주차 역할을 추정하지 않는다. 이 설정은 FREE/기하/센서 자격이나 추진 승인을 대신하지 않는다.
