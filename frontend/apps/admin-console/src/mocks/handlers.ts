@@ -146,6 +146,8 @@ function authorized(request: Request): boolean {
 }
 
 const unauthorized = () => error(401, 'INVALID_TOKEN', '인증이 필요합니다.');
+/** mock 휴대폰 연결번호의 만료 시각(ms). 번호 값은 남기지 않는다 */
+let mockPairingExpiresAt: number | null = null;
 /** 자율주행 VM 은 시연 시나리오(강제 종료 → 재시작)를 따른다 */
 const live = (vm: Vm): Vm => ({ ...vm, state: vmStateOf(vm.vm_id) ?? vm.state });
 const find = (id: string) => {
@@ -564,6 +566,37 @@ export const handlers = [
     vms = vms.filter((vm) => vm.vm_id !== params.vmId);
     pinningByVm.delete(String(params.vmId));
     return new HttpResponse(null, { status: 204 });
+  }),
+
+  // ---- USB 휴대폰 화면 연결 (REST-38·REST-39). 테더링이 켜져 중계가 듣고 있는 상태 ----
+  http.get('*/api/v1/display/phone-link', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const active = mockPairingExpiresAt !== null && mockPairingExpiresAt > Date.now();
+    return HttpResponse.json(
+      {
+        configured: true,
+        relay: 'listening',
+        url: 'http://10.117.188.25:8084/display/mobile',
+        usb: { interface: 'usb0', present: true, ipv4: ['10.117.188.25/24'], gateway: '10.117.188.86' },
+        configured_phone_ipv4: '10.117.188.86',
+        subnet_mismatch: false,
+        pairing: { active, expires_at: active ? new Date(mockPairingExpiresAt!).toISOString() : null },
+        observed_at: new Date().toISOString(),
+      },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
+  }),
+
+  http.post('*/api/v1/display/phone-link/pairing-code', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    mockPairingExpiresAt = Date.now() + 120_000;
+    const code = String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
+    return HttpResponse.json(
+      { code, expires_at: new Date(mockPairingExpiresAt).toISOString() },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
   }),
 
   // ---- 화면 배치 (REST-23·REST-24, 백엔드 -129) ----
