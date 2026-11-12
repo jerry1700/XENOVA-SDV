@@ -8,6 +8,7 @@ import { ApiError } from './api/client';
 import { RequireAuth } from './auth';
 import { ConsoleLayout } from './layout/ConsoleLayout';
 import { DashboardLayout } from './layout/DashboardLayout';
+import { KeepQueryRedirect } from './layout/KeepQueryRedirect';
 import { ConsolePage } from './pages/ConsolePage';
 import { ControlVmDetailPage } from './pages/ControlVmDetailPage';
 import { DashboardPage, LegacyDashboardPage } from './pages/DashboardPage';
@@ -58,6 +59,7 @@ const router = createBrowserRouter([
           { path: 'memory', element: <ResourcesPage view="memory" /> },
           { path: 'network', element: <ResourcesPage view="network" /> },
           { path: 'console', element: <ConsolePage /> },
+          { path: 'events', element: <EventsPage /> },
         ],
       },
       { path: '/dashboard/vms/:vmId', element: <VmDetailPage /> },
@@ -77,7 +79,7 @@ const router = createBrowserRouter([
       { path: '/resources', element: <Navigate to="/dashboard/cpu" replace /> },
       { path: '/demo', element: <Navigate to="/simulator" replace /> },
       { path: '/console', element: <Navigate to="/dashboard/console" replace /> },
-      { path: '/events', element: <EventsPage /> },
+      { path: '/events', element: <KeepQueryRedirect to="/dashboard/events" /> },
       { path: '/phone-link', element: <PhoneLinkPage /> },
       { path: '/components', element: <ShowcasePage /> },
     ],

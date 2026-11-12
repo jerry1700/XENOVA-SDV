@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ToastProvider } from '@xenova/ui';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DriveState } from '../api/drive';
 import type { MetricSample } from '../api/types';
@@ -182,6 +182,11 @@ function fixture(stackSupported = true) {
   return fetch;
 }
 
+function EventsRouteProbe() {
+  const { search } = useLocation();
+  return <p>events route {search}</p>;
+}
+
 function renderPage(path = '/dashboard/memory') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const page = render(
@@ -192,6 +197,7 @@ function renderPage(path = '/dashboard/memory') {
             <Route path="/dashboard/overview" element={<DashboardPage />} />
             <Route path="/dashboard/vms/:vmId" element={<VmDetailPage />} />
             <Route path="/dashboard/memory" element={<ResourcesPage view="memory" />} />
+            <Route path="/dashboard/events" element={<EventsRouteProbe />} />
           </Routes>
         </MemoryRouter>
       </ToastProvider>
@@ -265,15 +271,15 @@ describe('VM telemetry dashboard', () => {
       return Response.json({ items: [sample] });
     });
     const page = renderPage('/dashboard/overview');
-    const autonomous = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const autonomous = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(await autonomous.findByLabelText('Memory 25.000%')).toBeInTheDocument();
     expect(autonomous.getByText(/정적 예약 포함/)).toBeInTheDocument();
     expect(autonomous.queryByText('Kernel heap')).not.toBeInTheDocument();
     expect(
-      await within(screen.getByRole('link', { name: /manual/ })).findByLabelText('Memory 0.000%'),
+      await within(screen.getByRole('article', { name: /manual/ })).findByLabelText('Memory 0.000%'),
     ).toBeInTheDocument();
     expect(
-      await within(screen.getByRole('link', { name: /interaction/ })).findByLabelText('Memory 0%'),
+      await within(screen.getByRole('article', { name: /interaction/ })).findByLabelText('Memory 0%'),
     ).toBeInTheDocument();
     page.unmount();
     renderPage();
@@ -298,7 +304,7 @@ describe('VM telemetry dashboard', () => {
         : original(url),
     );
     const page = renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const card = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(await card.findByLabelText('Memory 25.000%')).toBeInTheDocument();
     now += 6001;
     act(() => vi.advanceTimersByTime(1000));
@@ -333,7 +339,7 @@ describe('VM telemetry dashboard', () => {
         return Response.json({ items });
       });
       renderPage('/dashboard/overview');
-      const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+      const card = within(await screen.findByRole('article', { name: /autonomous/ }));
       const reason =
         state === 'heap-only'
           ? '관리 RAM 표본을 확인할 수 없습니다.'
@@ -394,16 +400,16 @@ describe('VM telemetry dashboard', () => {
   it('shows VM / APP / LINK and uses Agent for Linux and telemetry heartbeat for Zephyr', async () => {
     const fetch = fixture();
     renderPage('/dashboard/overview');
-    const autonomous = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const autonomous = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(autonomous.getByText('대기')).toBeInTheDocument();
     const aLink = within(autonomous.getByTitle('Zephyr Telemetry heartbeat (v2)').parentElement!);
     expect(await aLink.findByText('연결됨')).toBeInTheDocument();
     expect(aLink.getByText('Telemetry')).toBeInTheDocument();
     expect(autonomous.queryByText('앱 HB')).not.toBeInTheDocument();
-    const manual = within(screen.getByRole('link', { name: /manual/ }));
+    const manual = within(screen.getByRole('article', { name: /manual/ }));
     expect(within(manual.getByText('APP').parentElement!).getByText('실행 중')).toBeInTheDocument();
     expect(await within(manual.getByText('LINK').parentElement!).findByText('미수신')).toBeInTheDocument();
-    const linux = within(screen.getByRole('link', { name: /interaction/ }));
+    const linux = within(screen.getByRole('article', { name: /interaction/ }));
     const agentLink = within(linux.getByTitle('Linux Agent heartbeat (v1)').parentElement!);
     expect(agentLink.getByText('연결됨')).toBeInTheDocument();
     expect(agentLink.getByText('Agent')).toBeInTheDocument();
@@ -446,7 +452,7 @@ describe('VM telemetry dashboard', () => {
         });
       });
       const page = renderPage('/dashboard/overview');
-      const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+      const card = within(await screen.findByRole('article', { name: /autonomous/ }));
       const row = card.getByText('LINK').parentElement!;
       expect(await within(row).findByText('연결됨')).toBeInTheDocument();
       expect(row).toHaveAttribute('data-tone', 'ok');
@@ -478,7 +484,7 @@ describe('VM telemetry dashboard', () => {
       );
     });
     renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const card = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(within(card.getByText('VM').parentElement!).getByText('실행 중')).toBeInTheDocument();
     expect(within(card.getByText('APP').parentElement!).getByText('대기')).toBeInTheDocument();
     const link = within(card.getByText('LINK').parentElement!);
@@ -492,9 +498,36 @@ describe('VM telemetry dashboard', () => {
     stale.vm_apps![VM_IDS.autonomous]!.drive!.lifecycle_source.status = 'stale';
     useDrive.mockReturnValue({ drive: stale, socket: 'open' });
     renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const card = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(within(card.getByText('APP').parentElement!).getByText('관측 만료')).toBeInTheDocument();
     expect(await within(card.getByText('LINK').parentElement!).findByText('연결됨')).toBeInTheDocument();
+  });
+
+  it('keeps the overview card clickable without nesting the recent event link inside another link', async () => {
+    fixture();
+    renderPage('/dashboard/overview');
+    const article = await screen.findByRole('article', { name: /autonomous/ });
+    // 카드 자체는 링크가 아니고, 안쪽 링크끼리도 중첩되지 않는다
+    expect(article.closest('a')).toBeNull();
+    expect(article.querySelector('a a')).toBeNull();
+    const card = within(article);
+    const links = card.getAllByRole('link');
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      `/dashboard/vms/${VM_IDS.autonomous}`,
+      `/dashboard/events?vm=${VM_IDS.autonomous}`,
+    ]);
+    // 이벤트 줄은 해당 VM 필터가 켜진 이벤트 화면으로
+    fireEvent.click(links[1]!);
+    expect(await screen.findByText(`events route ?vm=${VM_IDS.autonomous}`)).toBeInTheDocument();
+  });
+
+  it('opens the VM detail when the card body is clicked, as the whole-card link did', async () => {
+    fixture();
+    renderPage('/dashboard/overview');
+    const article = await screen.findByRole('article', { name: /autonomous/ });
+    fireEvent.click(within(article).getByText('RECENT SIGNAL'));
+    const name = vms.find((vm) => vm.vm_id === VM_IDS.autonomous)!.name;
+    expect(await screen.findByRole('heading', { level: 1, name })).toBeInTheDocument();
   });
 
   it('does not present cached Linux Agent status as a current connection when VM lookup fails', async () => {
@@ -505,7 +538,7 @@ describe('VM telemetry dashboard', () => {
       failList && url === '/api/v1/vms' ? Response.json({}, { status: 503 }) : original(url),
     );
     const page = renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /interaction/ }));
+    const card = within(await screen.findByRole('article', { name: /interaction/ }));
     const link = within(card.getByText('LINK').parentElement!);
     expect(await link.findByText('연결됨')).toBeInTheDocument();
     failList = true;
@@ -542,7 +575,11 @@ describe('VM telemetry dashboard', () => {
     // 왼쪽 "운영 상태" 타일 2×2, 오른쪽 "구성" 타일 3개 + 짧은 목록
     const ops = within(screen.getByRole('heading', { name: '운영 상태' }).closest('section')!);
     for (const label of ['VM 상태', '제어권', '주행 모드']) expect(ops.getByText(label)).toBeInTheDocument();
-    expect(ops.getByText('앱 상태').querySelector('small')).toHaveTextContent(/^· drive$/);
+    // 머리말에는 앱 ID 를 붙이지 않고, 줄마다 앞에 앱 라벨 (모르는 앱 ID 는 원문)
+    expect(ops.getByText('앱 상태').querySelector('small')).toBeNull();
+    expect(ops.getByText('앱 상태').nextElementSibling).toHaveTextContent(
+      /^drive · 대기 · 준비 미충족 · awaiting_input$/,
+    );
     expect(ops.getByText('자율주행')).toBeInTheDocument();
     const config = within(screen.getByRole('heading', { name: 'VM 구성' }).closest('section')!);
     for (const label of ['vCPU', '메모리', '예약 IPv4', '역할', '템플릿', '버전', 'VM ID'])
@@ -603,7 +640,11 @@ describe('VM telemetry dashboard', () => {
     // 페이지 누락은 이상 경고라 주의 색, 계측 구간 문구는 화면에서 뺐다
     expect(screen.getByText(/페이지 1\/2 수신/)).toHaveAttribute('data-warn', 'true');
     expect(screen.queryByText(/계측 구간/)).not.toBeInTheDocument();
-    expect(screen.getByText(/대기 · 준비 미충족 · awaiting_input/)).toBeInTheDocument();
+    // 모르는 사유 코드는 원문 그대로 (title 도 원문)
+    expect(screen.getByTitle('awaiting_input')).toHaveTextContent(/^awaiting_input$/);
+    expect(screen.getByTitle('awaiting_input').closest('strong')).toHaveTextContent(
+      /^drive · 대기 · 준비 미충족 · awaiting_input$/,
+    );
     expect(screen.queryByText(/실행 중 · 계산 준비 확인/)).not.toBeInTheDocument();
     expect(screen.getByText('192.168.77.2')).toBeInTheDocument();
     expect(await screen.findByText('KiB/s')).toBeInTheDocument();
@@ -653,8 +694,33 @@ describe('VM telemetry dashboard', () => {
     renderPage(`/dashboard/vms/${VM_IDS.manual}`);
     const ops = within((await screen.findByRole('heading', { name: '운영 상태' })).closest('section')!);
     const value = ops.getByText('앱 상태').nextElementSibling!;
-    expect(value).toHaveTextContent(/^대기heartbeat 기준 · 단계 미수신$/);
+    expect(value).toHaveTextContent(/^drive · 대기heartbeat 기준 · 단계 미수신$/);
     expect(ops.getByText('heartbeat 기준 · 단계 미수신')).toBeInTheDocument();
+  });
+
+  it('labels each app line in Korean and shows the reason in Korean with the raw code as title', async () => {
+    fixture();
+    const labelled = structuredClone(drive);
+    const report = (reason: string) => ({
+      lifecycle: { phase: 'WAITING' as const, readiness: 'NOT_READY' as const, reason },
+      lifecycle_source: { status: 'fresh' as const, age_ms: 100 },
+      heartbeat: null,
+      heartbeat_source: { status: 'unknown' as const, age_ms: null },
+    });
+    labelled.vm_apps![VM_IDS.autonomous] = {
+      autonomous: report('STATE_PREPARING'),
+      manual: report('RESOURCE_RETAINED'),
+    };
+    useDrive.mockReturnValue({ drive: labelled, socket: 'open' });
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const ops = within((await screen.findByRole('heading', { name: '운영 상태' })).closest('section')!);
+    const lines = ops.getByText('앱 상태').parentElement!.querySelectorAll('strong[data-app]');
+    expect([...lines].map((line) => line.textContent)).toEqual([
+      '자율주행 · 대기 · 준비 미충족 · 상태 준비 중',
+      '수동주행 · 대기 · 준비 미충족 · 자원 회수 대기',
+    ]);
+    expect(ops.getByText('상태 준비 중')).toHaveAttribute('title', 'STATE_PREPARING');
+    expect(ops.getByText('자원 회수 대기')).toHaveAttribute('title', 'RESOURCE_RETAINED');
   });
 
   it('sorts threads by CPU, shows ten rows first and expands the rest', async () => {
