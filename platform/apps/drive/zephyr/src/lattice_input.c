@@ -453,12 +453,12 @@ static bool same_receipt(const xenova_drive_GuestClockReceipt *a,const xenova_dr
 }
 static int clock_get_role(unsigned role,struct dl_clock *out,uint64_t *now_pi){
  if(!out||!now_pi||role>1)return -EINVAL;
- struct xt_bootstrap boot;if(xd_context_get(&boot))return -EAGAIN;
+ struct xt_bootstrap boot;int rc=xd_context_get(&boot);if(rc)return rc==-EBUSY?-EBUSY:-EAGAIN;
  uint64_t guest=clock_us();if(!guest||guest>INT64_MAX)return -EIO;
  if(k_mutex_lock(&input_context_lock,K_NO_WAIT))return -EBUSY;
  const struct guest_clock_slot *slot=&guest_clocks[role];
  const char *app=role?boot.manual_instance_id:boot.auto_instance_id;
- int rc=context_available&&slot->confirmed_valid&&guest<slot->confirmed.expires_guest&&
+ rc=context_available&&slot->confirmed_valid&&guest<slot->confirmed.expires_guest&&
   !strcmp(slot->confirmed.vm,boot.identity.vm_id)&&!strcmp(slot->confirmed.execution,boot.identity.execution_id)&&
   !strcmp(slot->confirmed.app_instance,app)&&!strcmp(slot->confirmed.host_boot,boot.identity.host_boot_id)&&
   !strcmp(slot->confirmed.gateway,gateway)?0:-EAGAIN;
@@ -650,7 +650,7 @@ int dl_auto_preflight_set(const xenova_drive_AutoInputPreflight *p){
  uint64_t checked=(uint64_t)((int64_t)p->checked_guest_us+mapping.lower);
  if(checked>INT64_MAX-100000||p->valid_until_pi_us>checked+100000)return preflight_report_rejected(2,-ESTALE,p,0);
  struct dw_handle handle;const struct dw_snapshot *map;
- enum dw_result detail=dw_acquire(&engine->maps,&handle,&map);if(detail)return -EAGAIN;
+ enum dw_result detail=dw_acquire(&engine->maps,&handle,&map);if(detail)return detail==DW_BUSY?-EBUSY:-ESTALE;
  uint64_t world_end=0,scene_end=0;dw_vehicle vehicle;dw_pose pose;
  unsigned stage=3;
  detail=dw_snapshot_time(map,now,lp_selected_config.live_age_us,&world_end);
@@ -663,7 +663,8 @@ int dl_auto_preflight_set(const xenova_drive_AutoInputPreflight *p){
  if(!detail){stage=10;uint64_t vehicle_end=vehicle.pi_sample_us+lp_selected_config.pose_age_us;
   if(vehicle.clock_error_us>=vehicle_end||p->valid_until_pi_us>vehicle_end-vehicle.clock_error_us||
      p->valid_until_pi_us>world_end||p->valid_until_pi_us>scene_end)detail=DW_TIME;}
- (void)dw_release(&engine->maps,handle);if(detail)return preflight_report_rejected(stage,-ESTALE,p,detail);
+ (void)dw_release(&engine->maps,handle);
+ if(detail)return preflight_report_rejected(stage,detail==DW_BUSY?-EBUSY:-ESTALE,p,detail);
  if(k_mutex_lock(&input_context_lock,K_NO_WAIT))return -EBUSY;
  rc=0;stage=11;
  if(!context_available||control_generation!=p->control_generation||!clock_available||

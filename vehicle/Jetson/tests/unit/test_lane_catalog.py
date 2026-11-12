@@ -50,6 +50,18 @@ def associate(catalog, sequence=1, *, prior=FIXED, crossing=b'\0', **kwargs):
     return catalog.observe(road, source, prior, prior_qualified=True, crossing=crossing)
 
 
+def test_new_lane_uses_original_circular_position_error():
+    catalog = owner()
+    road, source = observed(catalog)
+    road = replace(road,hypotheses=(replace(road.hypotheses[0],error_m=.012),))
+    prior = PoseBox((-.03,.03),(-.03,.03),(0.,0.))
+    args = dict(prior_qualified=True,crossing=b'\0')
+    assert catalog.observe(road,source,prior,**args).reasons == ('GEOMETRY_ENVELOPE_TOO_WIDE',)
+    fit = catalog.observe(road,source,prior,position_radius_m=.03,**args)
+    assert fit.status == 'NEW'
+    assert fit.position_error_m == .03
+
+
 def reserve(catalog, association, *, hwm=1, count=64):
     job = StorageJob(catalog.context, uid(1), 1_100_000, 2_100_000)
     head = CatalogHeadSnapshot(job.job_id, catalog.context.sha256, catalog.context.database_uuid,

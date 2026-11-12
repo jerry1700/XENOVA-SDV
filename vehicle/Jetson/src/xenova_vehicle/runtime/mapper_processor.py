@@ -628,10 +628,13 @@ class ResidentMapperProcessor:
                 self._scene.revoke('RESOURCE',now_j_us=now);self._scene_status=hazard.reason
             else:
                 self._scene.hazard(hazard.revision,now_j_us=now)
-                self._scene_draft=self._scene.prepare_frame(draft,draft.result,sensors,
-                    world_sequence=sequence,hazard_revision=hazard.revision,now_j_us=now,
-                    restore_source=self._durable_source,restore_archive=self._scene_restore_archive)
-                self._scene_status=self._scene_draft.reason
+                if draft.result.summary.get('localization_status')=='ODOMETRY_CONTINUED':
+                    self._scene_status='WAIT_VISUAL_REGISTRATION'
+                else:
+                    self._scene_draft=self._scene.prepare_frame(draft,draft.result,sensors,
+                        world_sequence=sequence,hazard_revision=hazard.revision,now_j_us=now,
+                        restore_source=self._durable_source,restore_archive=self._scene_restore_archive)
+                    self._scene_status=self._scene_draft.reason
         except SceneError:
             self._scene.revoke('ALIGNMENT',now_j_us=now);self._scene_status='SCENE_FRAME_NOT_READY'
         return _FrameCandidate(sequence,self._scene_draft,hazard,self._scene_row)

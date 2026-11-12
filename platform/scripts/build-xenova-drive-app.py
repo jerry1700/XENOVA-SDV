@@ -20,17 +20,24 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 BASE = ROOT / "platform/guests/zephyr"
 LATTICE_PROFILES = ('warm-lattice-lab', 'warm-lattice-development')
+DEVELOPMENT_BUNDLE = Path('platform/apps/drive/profiles/course-development-1')
+DEVELOPMENT_SOURCE_FILES = frozenset(('motion.canonical.json', 'development.canonical.json',
+    'calibration-bound.json', 'motion-metadata-receipt.json', 'grid.json', 'lattice-lab-policy.json'))
+COURSE_CLEARANCE = 'course-clearance.json'
 
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def lattice_inputs(name):
+def lattice_inputs(name, bundle=None):
     """선택한 C/config/generated asset과 원 development 입력의 지문을 검산한다."""
     home = ROOT / 'platform/apps/drive'
     development = name == 'warm-lattice-development'
-    folder = home / ('profiles/course-development-1' if development else 'planner/generated')
+    if bundle is not None and (not development or not bundle.is_absolute() or bundle.resolve() != bundle):
+        raise ValueError('canonical bundle path requires warm-lattice-development')
+    folder = (bundle or ROOT / DEVELOPMENT_BUNDLE) if development else home / 'planner/generated'
+    members = bundle_members(folder) if development else {}
     profile_path = folder / 'profile.json' if development else home / 'profiles/lattice-lab-1.json'
     profile = json.loads(profile_path.read_text())
     generated = json.loads((folder / 'primitive-manifest.json').read_text())
@@ -47,8 +54,8 @@ def lattice_inputs(name):
         if (profile['kind'] != 'test' or provenance['scope'] != 'RPi_DEVELOPMENT_PRIMITIVE_INPUT_ONLY'
                 or provenance['physical_admission'] is not False):
             raise ValueError('explicit development-only profile required')
-        if set(provenance['source_files']) != {'motion.canonical.json', 'development.canonical.json',
-                'calibration-bound.json', 'motion-metadata-receipt.json', 'grid.json', 'lattice-lab-policy.json'}:
+        source_names = {path.name for path in members.values() if path.parent.name == 'sources'}
+        if set(provenance['source_files']) != source_names:
             raise ValueError('complete original development sources required')
         for member, expected in provenance['source_files'].items():
             if Path(member).name != member or member in ('.', '..'):
@@ -65,12 +72,37 @@ def lattice_inputs(name):
             folder / 'sources', folder / 'sources/grid.json', provenance['metadata_receipt_sha256'])
         policy_raw, policy = tool.read(folder / 'sources/lattice-lab-policy.json')
         expected, _ = tool.profile_values(motion, development_model, grid, policy, motion_sha)
+        if COURSE_CLEARANCE in source_names:
+            spec = importlib.util.spec_from_file_location('course_clearance', home / 'tools/prepare_course_profile.py')
+            course_tool = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(course_tool)
+            _, tuning = tool.read(folder / 'sources' / COURSE_CLEARANCE)
+            expected = course_tool.tuned_profile(expected, tuning)
+            if extra := course_tool.lane_source(tuning):
+                source = (folder / 'primitives.c').read_bytes()
+                if not source.partition(b'const struct lp_config lp_selected_config={\n')[2].startswith(extra):
+                    raise ValueError('compiled course lane settings differ from their input')
         if (expected != profile or provenance['motion_bundle_sha256'] != motion_sha
                 or provenance['local_calibration_sha256'] != calibration_sha
                 or provenance['grid'] != grid or provenance['policy_sha256'] != hashlib.sha256(policy_raw).hexdigest()
                 or policy != json.loads((home / 'profiles/lattice-lab-1.json').read_text())):
             raise ValueError('selected development model/policy binding differs')
     return profile, generated, provenance
+
+
+def bundle_members(folder):
+    """대체 bundle은 snapshot 내 기존 CMake 경로에 있는 동일 역할의 파일만 공급한다."""
+    names = {'profile.json', 'primitive-manifest.json', 'primitives.c', 'source-receipt.json'}
+    names.update('sources/' + name for name in DEVELOPMENT_SOURCE_FILES)
+    if (folder / 'sources' / COURSE_CLEARANCE).exists():
+        names.add('sources/' + COURSE_CLEARANCE)
+    paths = {name: folder / name for name in sorted(names)}
+    if any(path.resolve() != path or not path.is_file() for path in paths.values()):
+        raise ValueError('complete plain development bundle required')
+    if ({path.name for path in folder.iterdir()} != {Path(name).parts[0] for name in names}
+            or {path.name for path in (folder / 'sources').iterdir()} != {Path(name).name for name in names if '/' in name}):
+        raise ValueError('unexpected development bundle members')
+    return {(DEVELOPMENT_BUNDLE / name).as_posix(): path for name, path in paths.items()}
 
 
 def selected_primitive_source(commands, home, profile):
@@ -83,7 +115,7 @@ def selected_primitive_source(commands, home, profile):
     return expected
 
 
-def fingerprint(app):
+def source_paths(app, bundle=None):
     groups = [f"platform/apps/{app}/zephyr", "platform/apps/common/xenova-mqtt-c",
               "platform/apps/common/xenova-drive-runtime"]
     groups += ["platform/guests/zephyr/" + name for name in ("xen-store", "xen-runtime", "diagnostics", "telemetry")]
@@ -106,7 +138,20 @@ def fingerprint(app):
         "platform/yocto/meta-xenova/recipes-core/xenova-platform/files/xenova_trace.py")]
     if any(p.is_symlink() for p in paths):
         raise ValueError("source snapshot must not contain linked inputs")
-    return {str(p.relative_to(ROOT)): {"sha256": sha(p), "bytes": p.stat().st_size} for p in paths}
+    inputs = {p.relative_to(ROOT).as_posix(): p for p in paths}
+    if bundle is not None:
+        inputs = {name: path for name, path in inputs.items() if not Path(name).is_relative_to(DEVELOPMENT_BUNDLE)}
+        inputs.update(bundle_members(bundle))
+    return inputs
+
+
+def fingerprint(app, bundle=None):
+    return source_fingerprint(source_paths(app, bundle))
+
+
+def source_fingerprint(paths):
+    return {name: {"sha256": sha(path), "bytes": path.stat().st_size}
+            for name, path in paths.items()}
 
 
 def source_member(root, name):
@@ -240,16 +285,20 @@ def build_candidate(resources):
     p.add_argument("--zephyr-source", type=Path, required=True)
     p.add_argument("--tools", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument('--development-bundle', type=Path,
+                   help='prepared course bundle for explicit drive/warm-lattice-development')
     p.add_argument('--incremental-workspace', type=Path,
                    help='optional owned stable workspace; only warm-lattice-development, every --output remains new')
     p.add_argument("--execute", action="store_true")
     args = p.parse_args()
     if args.incremental_workspace is not None and (args.app, args.profile) != ('drive', 'warm-lattice-development'):
         p.error('incremental workspace requires explicit drive/warm-lattice-development')
+    if args.development_bundle is not None and (args.app, args.profile) != ('drive', 'warm-lattice-development'):
+        p.error('development bundle requires explicit drive/warm-lattice-development')
     if args.profile.startswith('warm-') and args.app!='drive':p.error('warm profiles require the common drive firmware')
     is_lattice = args.profile in LATTICE_PROFILES
     if is_lattice:
-        profile, generated, provenance = lattice_inputs(args.profile)
+        profile, generated, provenance = lattice_inputs(args.profile, args.development_bundle)
     for path in (args.zephyr_source, args.tools, args.output, *([args.incremental_workspace] if args.incremental_workspace else [])):
         if not path.is_absolute() or path.resolve() != path or path.is_symlink():
             raise ValueError("canonical absolute paths required")
@@ -272,7 +321,8 @@ def build_candidate(resources):
     compiler = args.tools / "aarch64-zephyr-elf/bin/aarch64-zephyr-elf-gcc"
     if not all(path.is_file() for path in (cmake, ninja, compiler)):
         raise ValueError("existing fixed CMake/Ninja/AArch64 toolchain required")
-    source = fingerprint(args.app)
+    paths = source_paths(args.app, args.development_bundle)
+    source = source_fingerprint(paths)
     digest = hashlib.sha256(json.dumps({"profile": args.profile, "files": source},
                                       sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     plan = {"action": "build-drive-candidate" if args.execute else "plan", "app": args.app,
@@ -288,9 +338,12 @@ def build_candidate(resources):
     for name in source:
         target = snapshot / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / name, target)
+        shutil.copyfile(paths[name], target)
         if sha(target) != source[name]["sha256"]:
             raise ValueError("source changed during snapshot: " + name)
+    if args.development_bundle is not None and lattice_inputs(args.profile, snapshot / DEVELOPMENT_BUNDLE) != (
+            profile, generated, provenance):
+        raise ValueError('selected development bundle changed during snapshot')
     frozen_home = snapshot / f"platform/apps/{args.app}/zephyr"
     inputs, build = snapshot, args.output / 'build'
     workspace_identity = None
@@ -451,6 +504,8 @@ def build_candidate(resources):
             'output_authority':'Gateway','operating_vehicle_limits_verified':False}
         if provenance is not None:
             receipt['drive_contract']['development_inputs']=provenance
+        if args.development_bundle is not None:
+            receipt['drive_contract']['explicit_development_bundle'] = True
         receipt['drive_contract']['compiled_primitive_source']={
             'path':str(selected_primitive.relative_to(inputs)).replace('\\','/'),
             'sha256':sha(selected_primitive)}

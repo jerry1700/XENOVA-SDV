@@ -19,7 +19,7 @@ from xenova_vehicle.runtime.map_checkpoint import FrameEvidence, MapCheckpointCo
 from xenova_vehicle.runtime.mapper_profile import MapperProfile
 from xenova_vehicle.runtime.mapper_route_records import (
     RoadRecordNotReady, prepare_observed_road_records, _section_record, _original_reply,
-    _capture_hull, _birth_geometry_context, _geometry_scope)
+    _accepted_roots, _capture_hull, _birth_geometry_context, _geometry_scope)
 from xenova_vehicle.storage.contracts import StorageJob, ProvenanceRange, canonical, json_bytes
 from xenova_vehicle.storage.records import EvidenceTable
 
@@ -207,6 +207,46 @@ class MapperRouteRecordsTests(unittest.TestCase):
         prepared = self.prepare()
         section = decode(prepared.records[1].body, schema.RoadSection)
         self.assertEqual(section.origin.origin_context_sha256, bytes.fromhex(self.draft.context.sha256))
+
+    def test_new_propagation_proof_preserves_the_original_geometry_scope(self):
+        draft = self.draft
+        collector, pipeline, frame = draft.collector, draft.pipeline, draft.frame
+        _,_,original_hash,birth,_,_ = _accepted_roots(draft,self.state)
+        original_pin = collector._propagation_anchor_record
+        original = pipeline._propagation_anchor
+        capture = sha256(canonical(frame.observation.rgb.stamp.key)).hexdigest()
+        old_root = collector._reference_geometry[capture]
+        # The first registered RGB normally gains this parent when its geometry is collected.
+        collector._reference_geometry[capture] = collector._record(
+            frame,(old_root,original_pin[1]),17,3,(frame.raw_keys[0],))
+
+        def next_image(image):
+            stamp = image.stamp
+            return replace(image,stamp=replace(stamp,sequence=stamp.sequence+1,
+                captured_us=tuple(at+1 for at in stamp.captured_us),available_us=stamp.available_us+1))
+
+        observation = replace(frame.observation,rgb=next_image(frame.observation.rgb),
+            depth=next_image(frame.observation.depth))
+        capture = sha256(canonical(observation.rgb.stamp.key)).hexdigest()
+        revision = pipeline.reference.revision+1
+        first = pipeline.reference.segments[0]
+        pipeline.reference = replace(pipeline.reference,revision=revision,
+            segments=(first,replace(first,capture_id=capture)))
+        pipeline._previous_propagation_anchor = original
+        new = replace(original,registration_revision=revision,
+            observed_j_interval=observation.capture_interval)
+        pipeline._alignment = pipeline._propagation_anchor = new
+        frame = replace(frame,observation=observation,observation_sequence=frame.observation_sequence+1,
+            raw_keys=tuple((stream,seq+1,at+1) for stream,seq,at in frame.raw_keys),
+            pi_interval=frame.clock_lease.j_interval_to_pi(observation.capture_interval,self.world.now))
+        result = replace(draft.result,summary=dict(draft.result.summary,rgb_source_key=observation.rgb.stamp.key))
+        self.assertTrue(collector.observe_result(frame,result,pipeline,raw_pose=self.inputs.pose))
+        self.assertEqual(collector._propagation_anchor_record,original_pin)
+        self.assertNotEqual(collector._current_anchor_record,original_pin)
+        state = replace(self.state,evidence=EvidenceTable(tuple(collector._records.values()),
+            tuple(collector._contexts.values())))
+        _,_,new_hash,new_birth,_,_ = _accepted_roots(replace(draft,frame=frame),state)
+        self.assertEqual((new_hash,new_birth),(original_hash,birth))
 
     def test_changed_map_frame_calibration_and_primitive_are_not_same_birth_geometry(self):
         for key, value in (('map_epoch', world_fixture.uid(82)), ('frame_epoch', world_fixture.uid(83)),

@@ -38,6 +38,34 @@ def test_canonical_geometry_is_reproducible():
     assert CANONICAL.read_bytes() == generator["generated_bytes"]()
 
 
+def test_geometry_parameters_move_road_obstacles_and_rear_axle_start(tmp_path):
+    generator = runpy.run_path(str(GENERATOR))
+    settings = json.loads((GENERATOR.parent / "jetson-course-measured.json").read_bytes())
+    settings["lane_width_m"] = .27
+    path = tmp_path / "course.json"
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    tracks = json.loads(generator["generated_bytes"](generator["read_geometry"](path)))
+    track = next(value for value in tracks if value["id"] == "jetson-r55")
+    assert track["lane_width_m"] == pytest.approx(.54)
+    assert track["centerline"][0] == pytest.approx([2.14, .37])
+    layout = track["layout"]
+    assert layout["vehicle"]["length_m"] == .38
+    assert layout["vehicle"]["width_m"] == .21
+    assert layout["vehicle"]["min_turn_radius_m"] == pytest.approx(.20 / math.tan(math.radians(40)))
+    assert layout["tape_width_m"] == .012
+    assert layout["camera"]["height_m"] == .14
+    assert layout["start_pose"] == pytest.approx([2.43, .505, math.pi])
+    assert [cone["y"] for cone in layout["obstacle_seeds"]] == pytest.approx([.505, .235])
+    rendered = Track(replace(sources()["jetson-r55"], centerline=track["centerline"],
+                             lane_width_m=track["lane_width_m"], layout=layout))
+    x, y, yaw = rendered.start_pose()
+    car = placement.Car(x, y, yaw, 0, 0, rendered.start_index)
+    polygon = placement.car_polygon(rendered, car)
+    assert min(px for px, _ in polygon) == pytest.approx(x - .29)
+    assert max(px for px, _ in polygon) == pytest.approx(x + .09)
+    assert max(py for _, py in polygon) - min(py for _, py in polygon) == pytest.approx(.21)
+
+
 @pytest.mark.parametrize("track_id,digest", LEGACY_PAYLOADS.items())
 def test_original_payload_bytes_are_unchanged(track_id, digest):
     payload = json.dumps(load(track_id).payload(), sort_keys=True, separators=(",", ":")).encode()

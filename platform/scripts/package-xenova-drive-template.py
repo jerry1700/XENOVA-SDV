@@ -26,18 +26,19 @@ def package(build,output,*,version=None):
     receipt=json.loads(zephyr.asset(build,'BUILD_RECEIPT.json').read_text())
     spec=importlib.util.spec_from_file_location('drive_builder',ROOT/'platform/scripts/build-xenova-drive-app.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    development=receipt.get('profile')=='warm-lattice-development'
+    contract=receipt.get('drive_contract',{})
+    bundle=build/'input'/module.DEVELOPMENT_BUNDLE if development and contract.get('explicit_development_bundle') is True else None
     if (receipt.get('app')!='drive' or receipt.get('profile') not in module.LATTICE_PROFILES
-            or receipt.get('source_files')!=module.fingerprint('drive')
+            or receipt.get('source_files')!=module.fingerprint('drive',bundle)
             or receipt.get('acceptance',{}).get('M1_arm_build') is not True):
         raise ValueError('current real drive build/profile/source receipt required')
-    development=receipt['profile']=='warm-lattice-development'
     if version is None and development:
         raise ValueError('new explicit development release version required; legacy defaults are unchanged')
     version=VERSION if version is None else version
     if not isinstance(version,str) or not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",version):
         raise ValueError("plain major.minor.patch firmware version required")
-    profile,generated,provenance=module.lattice_inputs(receipt['profile'])
-    contract=receipt.get('drive_contract',{})
+    profile,generated,provenance=module.lattice_inputs(receipt['profile'],bundle)
     if (contract.get('world_profile')!=profile['id'] or contract.get('primitive_sha256')!=generated['asset_sha256']
             or (development and contract.get('development_inputs')!=provenance)):
         raise ValueError('selected profile differs from actual ARM build receipt')

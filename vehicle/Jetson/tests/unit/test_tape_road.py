@@ -87,6 +87,8 @@ class RoadHypothesisTests(unittest.TestCase):
         self.assertTrue(all(partial.hypotheses[0].inferred))
         self.assertEqual(partial.hypotheses[0].strip_ids[2], ())
         self.assertGreater(partial.hypotheses[0].error_m, graph.strips[0].error_m)
+        for divider, outer in zip(partial.hypotheses[0].divider, partial.hypotheses[0].right_outer):
+            self.assertAlmostEqual(math.dist(divider, outer), .285)
 
     def test_unique_dashed_chain_marks_unobserved_gap_stations_as_inferred(self):
         graph = TapeGraph((strip(0, ((.2, .3), (1.4, .3))), strip(1, ((.2, -.3), (1.4, -.3))),

@@ -50,6 +50,21 @@ bootstrap receipt는 최대4096B의 로컬 복사 선언이며 READY나 source a
 예시의123과 SHA 문자열은 실행 값이 아니다. caller는 실제 이번 S 원본으로 채워야 한다.
 Nano는 자기 descriptor와 실제 clock·frame·source·operation 사실을 다시 검사한다.
 
+## 플랫폼 코스 선택
+
+저장소 루트에서 병합된 코스를 선택하고, 기존 HIL의 개발 프로필을 전달한다.
+
+```powershell
+$env:PYTHONPATH = 'vehicle/Jetson;vehicle/Jetson/src'
+python -m tools.hil_observation.prepare_course --revision origin/platform --track jetson-demo --development-profile 'path/to/development.canonical.json' --output vehicle/Jetson/build/hil-courses/jetson-demo
+```
+
+R55를 선택할 때는 `--track jetson-r55`와 별도 출력 폴더를 사용한다.
+도구는 지정 커밋의 코스 카탈로그를 읽어 장면과 개발 프로필을 생성하고, 해당 파일의 SHA와
+후륜축 초기 자세를 포함한 인자 배열을 출력한다. 저장소 루트에서 PC HIL을 실행하며
+인자 배열로 기존 `--development-profile`·`--scene`·`--initial-pose`와 각 SHA 인자를 교체한다.
+장면에는 코스 원본의 커밋과 SHA가 기록된다. 차량·카메라가 기존 개발 모델과 일치해야 내보낼 수 있다.
+
 ## 명시 실행 인자
 
 일반적인 `--help`는 앱·renderer·연결을 시작하지 않는다. 모든 실험 값은 caller가 지정한다.

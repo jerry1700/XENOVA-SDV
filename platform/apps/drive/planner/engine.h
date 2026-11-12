@@ -11,7 +11,8 @@ enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
  DE_EXPIRED,DE_CHANGED,DE_STATE,DE_LIMIT,DE_CANCELLED,DE_CLOCK,DE_FRAME,DE_CONFIGURATION,DE_REFERENCE };
 /* Tracker, supervisor, state exporter and one planner preparation probe. */
 #define DE_READERS 4
-struct de_path_slot {struct lp_path path;atomic_uint generation,leases[DE_READERS];bool writing;uint64_t scene_generation;};
+struct de_path_slot {struct lp_path path;struct lp_tracking_geometry tracking_geometry;
+ atomic_uint generation,leases[DE_READERS];atomic_bool writing;bool tracking_prepared;uint64_t scene_generation;};
 struct de_reference {unsigned slot;uint32_t generation,lease;};
 /* Actual successful tracker sample, separate from immutable registered Core/ref.
  * Missing/exact-meter mismatch withholds a progress export, not numeric clock
@@ -35,9 +36,13 @@ struct drive_engine {
  atomic_uint search_used,search_peak;
  atomic_ullong search_exhausted;
  struct dw_pool maps;struct dw_odometry odometry;
+ /* Built by the receive owner before publishing the corresponding map slot. */
+ struct lp_collision_index map_indices[DW_MAP_SLOTS];
  struct de_path_slot paths[DE_PATH_SLOTS];atomic_flag lock;
  const struct lp_config *config;const struct lp_assets *assets;
  struct lp_search search;struct lp_tracker tracker;struct lp_metrics tracking,planned;
+ struct lp_parking_cache tracking_parking;
+ uint32_t tracking_parking_map,tracking_parking_path;
  struct tr_intent task;struct tr_basis basis;
  struct lp_tracker progress_snapshot;uint32_t progress_generation;uint64_t planning_vehicle_pi_us;
  struct dw_handle planning_map;const struct dw_snapshot *planning_snapshot;
@@ -63,7 +68,8 @@ struct drive_engine {
  struct db_limits behavior_limits;struct dp_limits parking_limits;struct db_facts facts;
  struct db_episode episode,restore_episode;struct dp_state parking;
  struct lp_config parking_work_config;
- atomic_bool parking_stop_event,parking_boundary_pending;
+ atomic_uint parking_stop_generation;
+ atomic_bool parking_boundary_pending;
  atomic_uint snapshot_requested_generation;
  xenova_drive_DriveControlFacts control_facts;
  xenova_drive_EpisodeSnapshot episode_state,episode_candidate;

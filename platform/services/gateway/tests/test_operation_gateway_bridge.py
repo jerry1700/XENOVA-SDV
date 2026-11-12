@@ -167,6 +167,10 @@ def test_actual_c_grantless_input_preflight_precedes_explicit_departure(operatin
                 command('meta')
             assert confirmed and reports and view['auto_ready']
             assert w.o.missions.current() is None and not provider.copies
+            # One contended app-metadata turn preserves the already-admitted
+            # report and its original check time and deadline.
+            assert command('preflight-busy')[0] == 0
+            milestones['metadata_contention'] = 'original report retained'
 
             # Actual invalid new steering observations cause an omission. It
             # withdraws the app report at Pi while its numeric proof survives.
@@ -234,6 +238,8 @@ def test_actual_c_grantless_input_preflight_precedes_explicit_departure(operatin
             ready_start=w.o.now;ready_until=time.monotonic()+1.
             while time.monotonic()<ready_until:
                 produce_inputs();clock();w.o.tick();view=w.o.operation_status()
+                if not view['auto_ready']:
+                    command('meta')
                 assert view['auto_ready'],(view,seen[-6:])
                 record(seen,('continuous-ready',w.o.now,view['valid_until_pi_us']))
                 time.sleep(.003)
