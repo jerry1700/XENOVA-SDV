@@ -156,7 +156,8 @@ def platform_root(root):
                'usr/lib/xenova/xenova_runtime.py': FILES / 'xenova_runtime.py',
                'usr/lib/xenova/xenova_zephyr.py': FILES / 'xenova_zephyr.py',
                'etc/systemd/journald.conf.d/20-xenova.conf': FILES / 'xenova-journald.conf',
-               'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf'}
+               'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf',
+               'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
                  'xenova_creation.py','xenova_creation_auto.py',
@@ -218,9 +219,16 @@ def platform_root(root):
     early = root/'etc/systemd/system/sysinit.target.wants'
     early.mkdir(parents=True, exist_ok=True)
     (early/'xenova-boot-status.service').symlink_to('/usr/lib/systemd/system/xenova-boot-status.service')
+    (root/'var/volatile/log').mkdir(parents=True)
+    (root/'var/log').symlink_to('volatile/log')
+    (root/'var/log-persistent/journal').mkdir(parents=True)
+    units = root/'usr/lib/systemd/system'
+    (units/'systemd-journal-flush.service').write_text('[Service]\nExecStart=/bin/true\n')
+    (units/'sysinit.target.wants').mkdir(exist_ok=True)
+    (units/'sysinit.target.wants/systemd-journal-flush.service').symlink_to('../systemd-journal-flush.service')
     tools = root / 'usr/bin'
     tools.mkdir(parents=True)
-    for name in ('sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'qemu-system-i386', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl', 'python3'):
+    for name in ('sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'qemu-system-i386', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl', 'journalctl', 'python3'):
         (tools / name).write_text('fixture: not executed')
         (tools / name).chmod(0o755)
     for relative in ('brcm/brcmfmac43455-sdio.bin','brcm/brcmfmac43455-sdio.clm_blob',

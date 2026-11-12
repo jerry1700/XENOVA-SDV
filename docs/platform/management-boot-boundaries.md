@@ -100,6 +100,13 @@ UTF-8 표시 이름을 보존한다. 한글 렌더러가 없는 VT에서 실제 
 [agetty 구현](https://github.com/util-linux/util-linux/blob/v2.41.5/term-utils/agetty.c)의
 입력 전 issue 갱신 경계다.
 
+### 재부팅 뒤 dom0 저널 확인
+
+Pi 4 이미지는 `/var/log/journal`을 dom0 rootfs의 `/var/log-persistent/journal`에
+연결한 뒤 기존 `systemd-journal-flush.service`로 초기 로그를 옮긴다.
+저널 보관 상한은 64MiB, 파일 단위 상한은 8MiB다. 다음 부팅에서
+`journalctl -b -1`로 이전 부팅을 확인한다.
+
 ### 자세히 확인하기
 
 ```bash

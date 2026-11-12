@@ -19,6 +19,7 @@ SRC_URI += " file://xenova_domain_identity_native.c"
 SRC_URI += " file://xenova_domain_identities_native.c"
 SRC_URI += " file://xenova_guest_profile.py file://xenova_provisioning.py file://xenova_registration.py file://xenova_registration_hook.py file://xenova_display_sync.py file://xenova-world-install"
 inherit systemd
+SRC_URI += " file://var-volatile-log-journal.mount file://xenova-journal-flush.conf"
 SRC_URI += " file://xenova_display_setup.py file://xenova-display-setup file://xenova-display-check.service"
 
 # 기존 이미지의 Python 코어에 사용자 승인한 표준 JSON 패키지를 추가한다.
@@ -68,6 +69,9 @@ do_install() {
         install -m 0644 "${S}/$module" "${D}${libdir}/xenova/$module"
     done
     install -d "${D}${sysconfdir}/systemd/journald.conf.d" "${D}${sysconfdir}/systemd/system.conf.d"
+    install -d "${D}${localstatedir}/log-persistent/journal" "${D}${systemd_system_unitdir}/systemd-journal-flush.service.d"
+    install -m 0644 "${S}/var-volatile-log-journal.mount" "${D}${systemd_system_unitdir}/var-volatile-log-journal.mount"
+    install -m 0644 "${S}/xenova-journal-flush.conf" "${D}${systemd_system_unitdir}/systemd-journal-flush.service.d/20-xenova-persistence.conf"
     install -m 0644 "${S}/xenova-journald.conf" "${D}${sysconfdir}/systemd/journald.conf.d/20-xenova.conf"
     install -m 0644 "${S}/xenova-system.conf" "${D}${sysconfdir}/systemd/system.conf.d/20-xenova.conf"
     install -m 0644 "${S}/defaults.json" "${D}${sysconfdir}/xenova/defaults.json"
@@ -118,6 +122,7 @@ FILES:${PN} += "${systemd_system_unitdir}/xenova-boot-status.service ${systemd_s
     ${systemd_system_unitdir}/xenova-vm-shutdown.service \
     ${systemd_system_unitdir}/xenova-vms.service ${systemd_system_unitdir}/xenova-wifi@.service"
 FILES:${PN} += "${systemd_system_unitdir}/xenova-telemetry-clock.service ${systemd_system_unitdir}/xenova-telemetry-clock.timer"
+FILES:${PN} += "${systemd_system_unitdir}/var-volatile-log-journal.mount ${systemd_system_unitdir}/systemd-journal-flush.service.d/20-xenova-persistence.conf"
 FILES:${PN} += "${systemd_system_unitdir}/xenova-display-check.service"
 FILES:${PN} += "${systemd_system_unitdir}/xenova-telemetry-evidence.service ${systemd_system_unitdir}/xenova-telemetry-evidence.timer ${sysconfdir}/systemd/system/xenconsoled.service.d/20-xenova-evidence.conf"
 CONFFILES:${PN} += "${sysconfdir}/xenova/cpu-policy-preset.json ${sysconfdir}/modprobe.d/xenova-wifi.conf ${sysconfdir}/xenova/execution-policy.json ${sysconfdir}/xenova/defaults.json ${sysconfdir}/ssh/xenova-auth.conf ${sysconfdir}/systemd/journald.conf.d/20-xenova.conf ${sysconfdir}/systemd/system.conf.d/20-xenova.conf"
