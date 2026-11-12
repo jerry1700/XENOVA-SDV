@@ -167,6 +167,7 @@ class PerceptionPipeline:
         self.rgb_gate,self.depth_gate,self.nn_gate = SourceGate(),SourceGate(),SourceGate()
         self.grid = self.reference = self._context = None
         self._alignment = None
+        self._startup_odometry = None
         # 현재 match의 사용 기한과 다음 prior의 물리 전파 기준은 서로 다른 수명이다.
         # 여러 원 관측으로 전파 오차가 실제 줄어들 때만 기준점을 교체한다.
         self._propagation_anchor = None
@@ -486,6 +487,7 @@ class PerceptionPipeline:
                 clock_id=observation.rgb.stamp.clock_id,kind=observation.kind,free_ttl_us=self.profile.free_ttl_us)
             self.reference=None
             self._alignment=None
+            self._startup_odometry=None
             self._propagation_anchor=None
             self._previous_propagation_anchor=None
             self._registration_history=()
@@ -516,6 +518,18 @@ class PerceptionPipeline:
                 alignment_invalid=True
                 pose=None
                 registration_pose=None
+        elif (pose is not None and operational_localization and not self._restore_pending
+                and (raw_pose.wheel_capture is not None or localization_position_drift_mps or localization_yaw_drift_rps)):
+            initial = self._startup_odometry
+            if initial is None or initial.sample.context != raw_pose.sample.context:
+                self._startup_odometry = raw_pose
+            elif raw_pose.captured_us[1] >= initial.captured_us[1]:
+                registration_pose = pose = MapOdomAlignment.project_startup(initial, raw_pose,
+                    position_drift_mps=localization_position_drift_mps,
+                    yaw_drift_rps=localization_yaw_drift_rps)
+            else:
+                alignment_invalid=True
+                pose=registration_pose=None
         input_done=perf_counter_ns()
         step('INPUT_COMPLETED')
         evidence=None
@@ -660,7 +674,9 @@ class PerceptionPipeline:
                                 self._previous_propagation_anchor=self._propagation_anchor
                                 self._propagation_anchor=candidate_alignment
                         pose=candidate_pose;self._alignment=candidate_alignment;self._restore_pending=False
-                        if self._propagation_anchor is None:self._propagation_anchor=candidate_alignment
+                        if self._propagation_anchor is None:
+                            self._propagation_anchor=candidate_alignment
+                            self._startup_odometry=None
                         quarantined=False
                 elif registration.status != 'NO_OVERLAP' and any(not p.normal_only for p in common):
                     estimate = (pose.sample.x, pose.sample.y, pose.sample.yaw)

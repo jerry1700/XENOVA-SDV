@@ -14,7 +14,7 @@ _MIN_SPAN_M = .36
 _ANGLE_ERROR_RAD = .0035
 _PAIR_MIN_S = 1.5
 _MAX_AGE_US = 15_000_000
-_RATE_WALK = .000025
+_RATE_WALK = .000025  # Assumed maximum rate change in rad/s², pending wheel validation.
 _MAX_LINES = 24
 
 
@@ -104,6 +104,10 @@ class YawBias:
             if optical_error >= math.pi:
                 continue
             error = 2 * _ANGLE_ERROR_RAD * max(1.,.45/span) + optical_error + wheel_angle + limit*clock_pad
+            # The pair measures a moving-time average. Its earliest possible
+            # moving interval gives the largest mean age at the new observation.
+            mean_age = (at-first_us)/1e6-moving/2
+            error += _RATE_WALK*(mean_age+clock_pad)*moving
             measurements.append(((change-error)/moving,(change+error)/moving,change/moving,optical_error/moving))
             self.paired_us[segment.component] = at
         if not measurements:
@@ -187,15 +191,18 @@ class YawBias:
         steps = self._steps(start, raw)
         if not steps or not any(travel>0 for _,_,_,travel in steps):
             return legacy
-        width = _RATE_WALK*age_us/1e6
-        if age_us <= _MAX_AGE_US:
+        fresh = age_us <= _MAX_AGE_US
+        if fresh:
+            width = _RATE_WALK*age_us/1e6
             lo, hi = max(-limit,self.interval[0]-width), min(limit,self.interval[1]+width)
             centered = (lo+hi)/2
             estimate = self.rate if abs(self.rate) >= math.sqrt(self.variance+width**2) else centered
         else:
             # An old rate estimate cannot move the pose. The wheel path still allows
             # propagation with the full configured interval around zero.
-            lo,hi,centered,estimate = -limit,limit,0.,0.
+            centered = estimate = 0.
+        observed = self.interval if fresh else (-limit,limit)
+        history = tuple(self._rate_history(start,steps,limit,fresh))
         def bound_score(candidate):
             pose = candidate.sample
             return max(pose.position_error_m/max(profile.max_position_error_m,1e-12),
@@ -204,7 +211,7 @@ class YawBias:
         legacy_score = bound_score(legacy)
         # Try a damped correction before giving up the signed estimate entirely.
         for rate in dict.fromkeys((estimate,(estimate+centered)/2,centered)):
-            projected = self._project_rate(alignment,raw,start,steps,lo,hi,rate)
+            projected = self._project_rate(alignment,raw,start,history,observed,age_us/1e6,rate)
             if (math.hypot(projected.sample.x-legacy.sample.x,projected.sample.y-legacy.sample.y)
                     <= legacy.sample.position_error_m+projected.sample.position_error_m
                     and abs(wrap_yaw(projected.sample.yaw-legacy.sample.yaw))
@@ -219,40 +226,102 @@ class YawBias:
         self.applied = self.applied_rate is not None
         return selected
 
+    def _rate_history(self,start,steps,limit,fresh):
+        """Expand the measured rate interval over the wall time of each wheel step."""
+        offset = (start.sample.at_us-self.updated_us)/1e6
+        for dx,dy,dt,travel in steps:
+            end_offset = offset+dt
+            lo,hi = -limit,limit
+            if fresh and travel:
+                width = _RATE_WALK*max(abs(offset),abs(end_offset))
+                lo = max(lo,self.interval[0]-width)
+                hi = min(hi,self.interval[1]+width)
+            yield dx,dy,dt,travel,lo,hi
+            offset = end_offset
+
     @staticmethod
-    def _project_rate(alignment,raw,start,steps,lo,hi,correction):
+    def _project_rate(alignment,raw,start,history,observed,observation_age,correction):
         limit = alignment.yaw_drift_rps
-        residual = max(abs(lo-correction),abs(hi-correction))
-        moving = stationary = sx = sy = derivative_x = derivative_y = remainder = timing_error = 0.
-        max_rate = max(abs(lo),abs(hi),abs(correction))
-        for dx, dy, dt, travel in steps:
-            if travel == 0.:
-                stationary += dt
-                sx += dx
-                sy += dy
-                continue
-            middle = moving + dt/2
+        duration = (raw.sample.at_us-start.sample.at_us)/1e6
+        capture_pad = max(0.,(raw.captured_us[1]-start.captured_us[0])/1e6-duration)
+        angle_lo,angle_hi = -limit*capture_pad,limit*capture_pad
+        moving = sx = sy = position_pad = 0.
+        rate_x = rate_y = remainder = timing_error = 0.
+        displacements = []
+        for dx,dy,dt,travel,lo,hi in history:
+            moving_dt = dt if travel else 0.
+            middle = moving+moving_dt/2
             u, v = transform_point((dx,dy),(0.,0.,-correction*middle))
             sx += u
             sy += v
-            derivative_x += middle*v
-            derivative_y -= middle*u
-            remainder += math.hypot(u,v)*middle**2
-            timing_error += max_rate*dt*travel/2
-            moving += dt
+            delta_lo = lo*dt-correction*moving_dt
+            delta_hi = hi*dt-correction*moving_dt
+            # Use the average of each step's two endpoint angles. The heading
+            # anywhere in the step differs from that average by at most rate*dt/2.
+            midpoint_error = max(abs(angle_lo+delta_lo/2),abs(angle_hi+delta_hi/2))
+            length = math.hypot(dx,dy)
+            position_pad += length*min(2.,midpoint_error)
+            remainder += .5*midpoint_error**2*length
+            timing_error += max(abs(lo),abs(hi))*dt*travel/2
+            rate_x += middle*u
+            rate_y += middle*v
+            displacements.append((u,v,dt,moving_dt,lo,hi))
+            angle_lo += delta_lo
+            angle_hi += delta_hi
+            moving += moving_dt
+        # The linearized rotation error has a common rate term and a rate-walk
+        # term. A heading change affects the remaining displacement as a vector.
+        # Try different reference times to limit the rate-walk contribution.
+        total_x,total_y = rate_x,rate_y
+        total = math.hypot(total_x,total_y)
+        def common_rate_error(seconds_before_end):
+            width = _RATE_WALK*abs(observation_age-seconds_before_end)
+            lo = max(-limit,observed[0]-width)
+            hi = min(limit,observed[1]+width)
+            return total*max(correction-lo,hi-correction)
+        common = common_rate_error(0.)
+        tail_x = tail_y = 0.
+        prefix, suffix = total,0.
+        variation = reference_shift = elapsed = 0.
+        independent_x = independent_y = independent_radius = 0.
+        for u,v,dt,moving_dt,lo,hi in reversed(displacements):
+            chord_x,chord_y = tail_x+u/2,tail_y+v/2
+            chord = math.hypot(chord_x,chord_y)
+            midpoint_delta = (lo+hi)/2*dt-correction*moving_dt
+            independent_x += midpoint_delta*chord_x
+            independent_y += midpoint_delta*chord_y
+            independent_radius += (hi-lo)/2*dt*chord
+            rate_x -= moving_dt*chord_x
+            rate_y -= moving_dt*chord_y
+            earlier_prefix = math.hypot(rate_x,rate_y)
+            earlier_suffix = math.hypot(total_x-rate_x,total_y-rate_y)
+            # Each sensitivity is a linear vector inside the step, so the
+            # trapezoid of its endpoint norms bounds its integral.
+            prefix_walk = _RATE_WALK*dt*(prefix+earlier_prefix)/2
+            suffix_walk = _RATE_WALK*dt*(suffix+earlier_suffix)/2
+            variation += prefix_walk
+            if not moving_dt:
+                variation += limit*dt*chord
+            reference_shift += suffix_walk-prefix_walk
+            elapsed += dt
+            common = min(common,common_rate_error(elapsed)+reference_shift)
+            prefix,suffix = earlier_prefix,earlier_suffix
+            tail_x += u
+            tail_y += v
+        independent = math.hypot(independent_x,independent_y)+independent_radius
+        linear = min(independent,common+variation)+limit*capture_pad*math.hypot(sx,sy)
+        position_pad = min(position_pad,linear+remainder)+timing_error
         sample = raw.sample
         dx, dy = sx-(sample.x-start.sample.x), sy-(sample.y-start.sample.y)
         dx, dy = transform_point((dx,dy),(0.,0.,alignment.pose[2]))
-        capture_pad = max(0., (raw.captured_us[1]-start.captured_us[0])/1e6-moving-stationary)
-        base = alignment.apply(raw, yaw_drift_rad=limit*(stationary+capture_pad))
+        base = alignment.apply(raw, yaw_drift_rad=0.)
         pose = base.sample
-        bias_position = (residual*math.hypot(derivative_x,derivative_y)
-                         + .5*residual**2*remainder + timing_error
-                         + math.hypot(dx,dy)*pose.yaw_error_rad)
+        bias_position = position_pad+math.hypot(dx,dy)*pose.yaw_error_rad
+        yaw_pad = max(abs(angle_lo),abs(angle_hi))
         return replace(base,sample=replace(pose,x=pose.x+dx,y=pose.y+dy,
             yaw=wrap_yaw(pose.yaw-correction*moving),
             position_error_m=math.nextafter(pose.position_error_m+bias_position,math.inf),
-            yaw_error_rad=min(math.pi,math.nextafter(pose.yaw_error_rad+residual*moving,math.inf))))
+            yaw_error_rad=min(math.pi,math.nextafter(pose.yaw_error_rad+yaw_pad,math.inf))))
 
     def summary(self):
         return dict(rate_rps=None if self.interval is None else self.rate,

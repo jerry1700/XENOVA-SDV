@@ -7,7 +7,7 @@ from xenova_vehicle.mapping.alignment import MapOdomAlignment
 from xenova_vehicle.mapping.odometry import PoseEstimate, PoseSample
 from xenova_vehicle.mapping.registration import RegistrationProfile
 from xenova_vehicle.mapping.wheel_motion import WheelCapture, WheelMotionProfile, WheelObservation, WheelProgress
-from xenova_vehicle.perception.yaw_bias import YawBias
+from xenova_vehicle.perception.yaw_bias import YawBias, _RATE_WALK
 
 
 class YawBiasProjectionTests(unittest.TestCase):
@@ -45,3 +45,34 @@ class YawBiasProjectionTests(unittest.TestCase):
         self.assertLessEqual(abs(corrected.yaw),corrected.yaw_error_rad)
         self.assertLessEqual(math.dist((corrected.x,corrected.y),(1.,0.)),corrected.position_error_m)
         self.assertLess(corrected.position_error_m,raw.sample.position_error_m)
+
+    def test_recent_rate_interval_bounds_a_changing_rate_over_an_old_wheel_path(self):
+        model = WheelMotionProfile(32,1e-5,1e-5,.15,.0001,.0001)
+        bias = YawBias()
+        for step in range(301):
+            stamp = 1_000_000+step*100_000
+            raw = PoseSample('odom','clock','calibration',stamp,step*.02,0.,0.,0.,0.)
+            wheel = WheelObservation(('wheel',),step+1,stamp,(step*2000,step*2000),0)
+            progress = WheelProgress(('continuous',),wheel,model,step*.02,step*.04)
+            bias.add_pose(PoseEstimate(raw,(stamp,stamp),(stamp,stamp),WheelCapture(progress,0.,0.)))
+        start,end = bias.path[0],bias.path[-1]
+        alignment = MapOdomAlignment.from_match(start,start,observed_j_interval=start.captured_us,
+            registration_revision=1,valid_for_us=500_000,position_drift_mps=.001,yaw_drift_rps=.001)
+        bias.interval = (.00095,.001)
+        bias.rate = .001
+        bias.variance = .00002**2
+        bias.updates = 2
+        bias.updated_us = end.sample.at_us
+
+        # The rate climbs at the allowed walk and reaches .001 rad/s at the last
+        # observation. Integrate the physical heading independently of the filter.
+        def true_yaw(seconds):
+            return -((.001-30*_RATE_WALK)*seconds + .5*_RATE_WALK*seconds**2)
+
+        actual_x = .002*math.fsum(math.cos(true_yaw((i+.5)*.01)) for i in range(3000))
+        actual_y = .002*math.fsum(math.sin(true_yaw((i+.5)*.01)) for i in range(3000))
+        corrected = bias.project(alignment,end,RegistrationProfile()).sample
+        self.assertTrue(bias.applied)
+        self.assertLessEqual(abs(corrected.yaw-true_yaw(30)),corrected.yaw_error_rad)
+        self.assertLessEqual(math.dist((corrected.x,corrected.y),(actual_x,actual_y)),
+                             corrected.position_error_m)

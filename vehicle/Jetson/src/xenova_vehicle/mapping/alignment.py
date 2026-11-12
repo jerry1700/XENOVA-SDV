@@ -124,17 +124,31 @@ class MapOdomAlignment:
         start,end = odom.captured_us
         return self._project(odom,max(abs(end-lo),abs(hi-start)))
 
-    def _project(self, odom, elapsed_us, *, yaw_drift_rad=None):
+    @classmethod
+    def project_startup(cls, initial, odom, *, position_drift_mps, yaw_drift_rps):
+        """Propagate from the first odometry capture before a visual match exists."""
+        if initial.sample.context != odom.sample.context or odom.captured_us[1] < initial.captured_us[1]:
+            raise ValueError('startup projection requires the original odometry context and time order')
+        return cls.from_match(initial, initial)._project(odom, odom.captured_us[1] - initial.captured_us[0],
+            drift_rates=(position_drift_mps, yaw_drift_rps))
+
+    def _project(self, odom, elapsed_us, *, yaw_drift_rad=None, drift_rates=None):
         raw=odom.sample
         if self._matched_poses is not None:
             original, fitted = self._matched_poses
             if odom == original and fitted.captured_us == odom.captured_us:
                 return replace(odom,sample=fitted.sample,wheel_capture=None)
         transform_angle=self.yaw_error_rad;position_drift=yaw_drift=0.
+        # Before the first visual anchor, the upstream pose budget can omit
+        # encoder quantization. Retain the wheel bound when it is wider.
+        combine_wheel_bound = max if drift_rates is not None else min
         if self.has_metadata:
+            drift_rates = self.position_drift_mps, self.yaw_drift_rps
+        if drift_rates is not None:
             seconds=math.nextafter(elapsed_us/1_000_000,math.inf)
-            position_drift=math.nextafter(self.position_drift_mps*seconds,math.inf) if self.position_drift_mps else 0.
-            yaw_drift=math.nextafter(self.yaw_drift_rps*seconds,math.inf) if self.yaw_drift_rps else 0.
+            position_rate, yaw_rate = drift_rates
+            position_drift=math.nextafter(position_rate*seconds,math.inf) if position_rate else 0.
+            yaw_drift=math.nextafter(yaw_rate*seconds,math.inf) if yaw_rate else 0.
             if yaw_drift_rad is not None:
                 yaw_drift = yaw_drift_rad
             transform_angle=math.nextafter(transform_angle+yaw_drift,math.inf)
@@ -154,11 +168,11 @@ class MapOdomAlignment:
             if wheel_bounds is not None:
                 position, yaw = wheel_bounds
                 anchor_rotation = 2*math.sin(min(math.pi,goal.yaw_error_rad+yaw_drift)/2)
-                error = min(error,goal.position_error_m+position+distance*anchor_rotation+position_drift)
-                angle = min(angle,goal.yaw_error_rad+yaw+yaw_drift)
-        if angle>math.pi and not self.has_metadata:
+                error = combine_wheel_bound(error,goal.position_error_m+position+distance*anchor_rotation+position_drift)
+                angle = combine_wheel_bound(angle,goal.yaw_error_rad+yaw+yaw_drift)
+        if angle>math.pi and drift_rates is None:
             raise ValueError('alignment no longer bounds a usable heading')
-        if self.has_metadata:
+        if drift_rates is not None:
             error=math.nextafter(error,math.inf);angle=min(math.pi,math.nextafter(angle,math.inf))
         sample=replace(raw,x=x,y=y,yaw=wrap_yaw(raw.yaw+self.pose[2]),position_error_m=error,yaw_error_rad=angle)
         return PoseEstimate(sample,odom.captured_us,odom.bracket_us)
