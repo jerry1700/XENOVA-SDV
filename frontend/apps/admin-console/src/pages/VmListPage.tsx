@@ -1,6 +1,7 @@
 import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router';
+import { ApiError } from '../api/client';
 import { useVms, type VmAction } from '../api/queries';
 import type { Vm } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
@@ -20,12 +21,25 @@ const VM_ACCENTS = ['var(--x-app-autonomous)', 'var(--x-app-manual)', 'var(--x-a
 
 /** VM 생명주기와 할당 자원을 관리하는 목록. 주행 모드·제어권은 Overview에서만 다룬다. */
 export function VmListPage() {
-  const vms = useVms();
+  const vms = useVms({ keepLastData: true });
   const vmOperations = useVmOperationProgress();
   const toast = useToast();
   const navigate = useNavigate();
   const [deleting, setDeleting] = useState<Vm | null>(null);
   const pendingCreations = usePendingVmCreations();
+
+  const synchronize = async () => {
+    const result = await vms.refetch();
+    if (result.isError) {
+      const message =
+        result.error instanceof ApiError
+          ? `${result.error.message} (${result.error.code})`
+          : String(result.error);
+      toast.show(`VM 목록 동기화에 실패했습니다. ${message}`, 'fault', 5000);
+      return;
+    }
+    toast.show('VM 목록을 동기화했습니다.', 'ok');
+  };
 
   const run = (vm: Vm, kind: VmAction) =>
     vmOperations.run(vm, kind, {
@@ -69,7 +83,7 @@ export function VmListPage() {
               refreshing={!vms.isFetchedAfterMount}
             />
           )}
-          <Button variant="secondary" onClick={() => void vms.refetch()} disabled={vms.isFetching}>
+          <Button variant="secondary" onClick={() => void synchronize()} disabled={vms.isFetching}>
             {vms.isFetching ? '동기화 중…' : 'VM 동기화'}
           </Button>
           <Button onClick={() => navigate('/control/vms/new')}>+ VM 생성</Button>
