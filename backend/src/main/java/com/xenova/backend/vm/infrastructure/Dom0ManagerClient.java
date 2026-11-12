@@ -68,6 +68,27 @@ public class Dom0ManagerClient implements VmControlPort {
                 .body(JsonNode.class)));
     }
 
+    /** USB phone display relay state on the board (dom0 contract 4.13). Read-only, so retried like other reads. */
+    public JsonNode phoneLink() {
+        return requireBody(executeQuery(() -> queryClient.get()
+                .uri("/api/v1/display/phone-link")
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(JsonNode.class)));
+    }
+
+    /**
+     * Issues a new phone pairing code (dom0 contract 4.13). Each call invalidates the previous code and the paired
+     * phone, so it is retried only when the request never reached dom0-manager. The code is never logged.
+     */
+    public JsonNode issuePhonePairingCode() {
+        return requireBody(executeCommand(() -> queryClient.post()
+                .uri("/api/v1/display/phone-link/pairing-code")
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(JsonNode.class)));
+    }
+
     @Override
     public List<VmRuntime> list() {
         VmRuntime[] response = executeQuery(() -> queryClient.get()

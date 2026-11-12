@@ -6,7 +6,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
-// Runs the board registry synchronization on its own thread, like VmRuntimeRefresher: a registration
+// Runs the board registration synchronization on its own thread: a registration
 // read crosses Tailscale and must not hold up the shared @Scheduled thread.
 @Component
 @EnableConfigurationProperties(VmRegistrationSyncProperties.class)
