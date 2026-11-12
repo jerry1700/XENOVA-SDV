@@ -28,6 +28,9 @@ from ..mapping.alignment import MapOdomAlignment
 from ..mapping.free_schedule import FreeScheduler,StoppingRegion
 
 
+_MIN_REGISTRATION_STRIP_M = .08
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
@@ -35,12 +38,15 @@ def _digest(value):
 def _physical_registration_strip(strip):
     # 영상/가림 경계는 실제 유한 paint 끝이 아니므로 양쪽 생산 경로에서 제외한다.
     ends=('physical_junction','observed_paint_end')
-    return strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+    return (strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+            and strip.length_m + 1e-9 >= _MIN_REGISTRATION_STRIP_M)
 
 
 def _observed_registration_strip(strip):
     ends=('physical_junction','observed_paint_end','FOV_clip','occluded')
     return (strip.observed and not strip.closed and strip.start_kind in ends and strip.end_kind in ends
+            # 짧은 점선은 차선 연결에 쓰며 개별 조각으로 위치 정합을 걸지 않는다.
+            and strip.length_m + 1e-9 >= _MIN_REGISTRATION_STRIP_M
             and math.dist(strip.points_xy[0],strip.points_xy[-1])>1e-9)
 
 

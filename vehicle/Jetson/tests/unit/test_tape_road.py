@@ -217,6 +217,32 @@ class TapeImageTests(unittest.TestCase):
         self.assertTrue(all(all(v is not None and v >= s.error_m for v in s.endpoint_error_m)
                             for s in graph.strips))
 
+    def test_four_and_five_cm_dash_tape_survives_and_forms_a_divider(self):
+        from xenova_vehicle.perception.calibration import CameraModel
+
+        np = self.np
+        # Independent pinhole renderer for 12mm tape, with the 1cm live birdview grid.
+        camera = CameraModel(640, 360, ((400., 0., 320.), (0., 400., 180.), (0., 0., 1.)),
+            self.camera.rotation, (.8, 0., 1.), pixel_error=0.)
+        forward = .8 + (180 - np.arange(360))[:, None] / 400.
+        lateral = (320 - np.arange(640))[None, :] / 400.
+        white = (forward >= .43) & (forward <= 1.17) & (abs(abs(lateral) - .285) <= .006)
+        for start, length in zip((.48, .59, .70, .81, .92, 1.03), (.04, .05) * 3):
+            white |= (forward >= start) & (forward <= start + length) & (abs(lateral) <= .006)
+        white |= (forward >= .55) & (forward <= .60) & (abs(lateral - .14) <= .006)
+        image = np.repeat(np.where(white, 245, 30).astype(np.uint8)[:, :, None], 3, axis=2)
+        graph = extract_tape(image, camera, self.plane,
+            TapeProfile(x_min_m=.36, x_max_m=1.24, y_min_m=-.5, y_max_m=.5, cell_m=.01))
+        divider = [s for s in graph.strips if all(abs(y) < .04 for _, y in s.points_xy)]
+        self.assertEqual(len(divider), 6)
+        isolated = [s for s in graph.strips if all(.1 < y < .2 for _, y in s.points_xy)]
+        self.assertEqual(len(isolated), 1)
+        road = infer_road(graph)
+        self.assertEqual(road.status, 'PARTIAL')
+        self.assertEqual(set(road.hypotheses[0].strip_ids[1]), {s.local_id for s in divider})
+        self.assertTrue(any(road.hypotheses[0].inferred))
+        self.assertTrue(all(isolated[0].local_id not in ids for ids in road.hypotheses[0].strip_ids))
+
     def test_t_and_x_junctions_are_split_instead_of_fit_as_one_line(self):
         for cross in (False, True):
             with self.subTest(cross=cross):

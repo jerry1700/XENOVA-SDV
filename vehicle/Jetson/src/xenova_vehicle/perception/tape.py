@@ -31,7 +31,8 @@ class TapeProfile:
     contrast_min: int = 25
     tape_width_min_m: float = 0.010
     tape_width_max_m: float = 0.045
-    min_strip_length_m: float = 0.08
+    # 4~5cm 점선은 중심선을 가늘게 만들 때 끝이 짧아질 수 있다.
+    min_strip_length_m: float = 0.02
     simplify_error_m: float = 0.004
     extraction_error_m: float = 0.005
     max_projection_error_m: float = 0.10
@@ -323,8 +324,12 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
     for path, start, end in paths:
         points = [(profile.x_min_m + p[0] * profile.cell_m, profile.y_min_m + p[1] * profile.cell_m) for p in path]
         length = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
-        if length < profile.min_strip_length_m:
+        if length + 1e-9 < profile.min_strip_length_m:
             work['short_paths'] += 1
+            continue
+        short_dash = length + 1e-9 < .08
+        if short_dash and (start == end or kinds[start] != 'observed_paint_end'
+                           or kinds[end] != 'observed_paint_end'):
             continue
         widths = []
         center_pad = 0.
@@ -335,11 +340,12 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
         arc = [0.]
         for a, b in zip(points, points[1:]):
             arc.append(arc[-1] + math.dist(a, b))
-        for index in range(2, len(path) - 2):
+        tangent_step = 1 if len(path) < 5 else 2
+        for index in range(tangent_step, len(path) - tangent_step):
             if ((kinds[start] == 'physical_junction' and arc[index] < 2 * profile.tape_width_max_m)
                     or (kinds[end] == 'physical_junction' and length - arc[index] < 2 * profile.tape_width_max_m)):
                 continue
-            first, last = path[index - 2], path[index + 2]
+            first, last = path[index - tangent_step], path[index + tangent_step]
             dy, dx = last[0] - first[0], last[1] - first[1]
             norm = math.hypot(dx, dy)
             if norm <= 1e-9:
@@ -385,7 +391,8 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
                 if 'internal' in causes:
                     work['edge_pair_internal'] += 1
                     internal_sections += 1
-                    complete = False
+                    if not short_dash:
+                        complete = False
                 else:
                     work['edge_pair_censored'] += 1
                     censored_sections += 1
@@ -393,6 +400,8 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
             work['edge_budget_exhausted'] = 1
             complete = False
             break
+        if short_dash and (not widths or internal_sections or censored_sections):
+            continue
         if not widths:
             work['no_width_paths'] += 1
             complete = False

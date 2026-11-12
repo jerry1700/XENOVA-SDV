@@ -207,6 +207,7 @@ def _heading_error(chain, index):
 def _chains(graph, profile):
     usable = []
     kinds = {}
+    short_dashes = set()
     work = dict(short_or_closed_strips=0, nonmonotonic_strips=0, heading_rejected_strips=0,
                 curvature_rejected_strips=0, dashed_merges=0)
     for strip in graph.strips:
@@ -219,7 +220,9 @@ def _chains(graph, profile):
             errors, segment_errors = tuple(reversed(errors)), tuple(reversed(segment_errors))
         chain = _simplify(_Chain((strip.local_id,), points, strip.error_m, (), errors, segment_errors), profile)
         points = chain.points
-        if strip.closed or strip.length_m < profile.min_usable_length_m:
+        short = strip.length_m < profile.min_usable_length_m
+        if strip.closed or (short and not (profile.allow_dashed and strip.observed and strip.width_complete
+                           and start == end == 'observed_paint_end')):
             work['short_or_closed_strips'] += 1
             continue
         if any(b[0] - a[0] <= 1e-8 for a, b in zip(points, points[1:])):
@@ -232,12 +235,13 @@ def _chains(graph, profile):
                > profile.max_curvature_1pm for a, b, c in zip(points, points[1:], points[2:])):
             work['curvature_rejected_strips'] += 1
             continue
+        if short:
+            short_dashes.add(len(usable))
         usable.append(chain)
         kinds[strip.local_id] = start, end
     if not profile.allow_dashed:
         return usable, False, work
     nexts = {i: [] for i in range(len(usable))}
-    previous = {i: [] for i in range(len(usable))}
     for i, first in enumerate(usable):
         if kinds[first.ids[0]][1] != 'observed_paint_end':
             continue
@@ -252,10 +256,18 @@ def _chains(graph, profile):
             if (0 < along <= profile.max_gap_m and abs(lateral) <= profile.merge_lateral_m
                     and abs(_angle(second.points[0], second.points[1]) - heading) <= profile.merge_heading_rad):
                 nexts[i].append(j)
-                previous[j].append(i)
+    if short_dashes:
+        # 연속 점선에서 중간 조각을 거쳐 같은 선에 닿으면 그 조각을 건너뛰는 연결은 빼준다.
+        nexts = {i: [j for j in candidates if not any(
+            middle in short_dashes and j in nexts[middle] for middle in candidates)]
+            for i, candidates in nexts.items()}
+    previous = {i: [] for i in range(len(usable))}
+    for i, candidates in nexts.items():
+        for j in candidates:
+            previous[j].append(i)
     ambiguous = any(len(v) > 1 for v in nexts.values()) or any(len(v) > 1 for v in previous.values())
     if ambiguous:
-        return usable, True, work
+        return [chain for i, chain in enumerate(usable) if i not in short_dashes], True, work
     output = []
     visited = set()
     for index in range(len(usable)):
@@ -287,10 +299,11 @@ def _chains(graph, profile):
             segment_errors.extend((gap_error,) + added.segment_error_xy)
             error = max(error, added.error + lateral + profile.max_curvature_1pm * gap * gap / 8)
             current = other
-        output.append(_simplify(_Chain(tuple(ids), tuple(points), error, tuple(gaps),
-                                     tuple(point_errors), tuple(segment_errors)), profile))
+        if _arc(points)[-1] >= profile.min_usable_length_m:
+            output.append(_simplify(_Chain(tuple(ids), tuple(points), error, tuple(gaps),
+                                         tuple(point_errors), tuple(segment_errors)), profile))
     if len(visited) != len(usable):
-        return usable, True, work
+        return [chain for i, chain in enumerate(usable) if i not in short_dashes], True, work
     return output, False, work
 
 
