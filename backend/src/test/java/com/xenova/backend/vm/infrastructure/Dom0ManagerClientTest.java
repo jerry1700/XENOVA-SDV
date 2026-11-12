@@ -449,6 +449,65 @@ class Dom0ManagerClientTest {
     }
 
     @Test
+    void phoneLinkReadsRelayStateWithServiceToken() {
+        AtomicReference<String> method = new AtomicReference<>();
+        server.createContext("/api/v1/display/phone-link", exchange -> {
+            method.set(exchange.getRequestMethod());
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            respond(exchange, 200, """
+                    {"configured":true,"relay":"listening","url":"http://10.117.188.25:8084/display/mobile",
+                     "usb":{"interface":"usb0","present":true,"ipv4":["10.117.188.25/24"],"gateway":"10.117.188.86"},
+                     "configured_phone_ipv4":"10.117.188.86","subnet_mismatch":false,
+                     "pairing":{"active":false,"expires_at":null},"observed_at":"2026-11-12T08:29:10Z"}
+                    """);
+        });
+
+        JsonNode status = client.phoneLink();
+
+        assertThat(method).hasValue("GET");
+        assertThat(authorization.get()).isEqualTo("Bearer service-secret");
+        assertThat(status.path("url").asText()).isEqualTo("http://10.117.188.25:8084/display/mobile");
+        assertThat(status.path("usb").path("gateway").asText()).isEqualTo("10.117.188.86");
+    }
+
+    @Test
+    void phonePairingCodeIsPostedAndNotRetriedAfterTheRequestWasSent() {
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/api/v1/display/phone-link/pairing-code", exchange -> {
+            requests.incrementAndGet();
+            try {
+                Thread.sleep(800); // longer than the 300 ms query read timeout
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            respond(exchange, 200, """
+                    {"code":"123456","expires_at":"2026-11-12T08:31:05Z"}
+                    """);
+        });
+
+        assertThatThrownBy(() -> client.issuePhonePairingCode())
+                .isInstanceOfSatisfying(ApiException.class,
+                        exception -> assertThat(exception.getStatus()).isEqualTo(HttpStatus.GATEWAY_TIMEOUT));
+        assertThat(requests).hasValue(1);
+    }
+
+    @Test
+    void phonePairingCodeReturnsTheIssuedCode() {
+        AtomicReference<String> method = new AtomicReference<>();
+        server.createContext("/api/v1/display/phone-link/pairing-code", exchange -> {
+            method.set(exchange.getRequestMethod());
+            respond(exchange, 200, """
+                    {"code":"123456","expires_at":"2026-11-12T08:31:05Z"}
+                    """);
+        });
+
+        JsonNode issued = client.issuePhonePairingCode();
+
+        assertThat(method).hasValue("POST");
+        assertThat(issued.path("code").asText()).isEqualTo("123456");
+    }
+
+    @Test
     void driverErrorsAreNotRetried() {
         AtomicInteger requests = new AtomicInteger();
 
