@@ -1,10 +1,13 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { playChime } from './chime';
 import { CombinedPage } from './CombinedPage';
 import { presentationFixture } from './fixture';
 import type { Presentation } from './model';
 import { themeAt } from './theme';
 import { DISPLAY_PROBLEM_TEXT, useDisplay, type DisplayProblem } from './useDisplay';
+
+vi.mock('./chime', () => ({ playChime: vi.fn() }));
 
 vi.mock('./useDisplay', async (original) => ({
   ...(await original<typeof import('./useDisplay')>()),
@@ -406,5 +409,61 @@ describe('운전자 화면 공통', () => {
   it('theme.ts 의 시각 규칙은 그대로 둔다 (이 화면은 쓰지 않음)', () => {
     expect(themeAt(new Date(2026, 10, 5, 12))).toBe('light');
     expect(themeAt(new Date(2026, 10, 5, 21))).toBe('dark');
+  });
+});
+
+describe('모드 전환 안내 (운전자용 전면 오버레이)', () => {
+  const modeOf = (p: Presentation, mode: 'AUTO' | 'MANUAL' | 'AUTO_READY' | 'SAFE_STOP') => {
+    p.state.drive.mode = mode;
+    if (mode === 'SAFE_STOP') p.state.drive.active_vm_id = null;
+    return p;
+  };
+
+  it('처음 그릴 때는 안내하지 않고, 자율 → 수동이 되면 3초 동안 "수동 전환 · 조종기를 잡으세요" 와 알림음', () => {
+    vi.useFakeTimers();
+    const { rerender } = show(driving());
+    expect(screen.queryByTestId('handoff')).toBeNull();
+    expect(playChime).not.toHaveBeenCalled();
+
+    next(modeOf(driving(), 'MANUAL'), rerender);
+    const notice = screen.getByTestId('handoff');
+    expect(notice.getAttribute('data-tone')).toBe('manual');
+    expect(screen.getByTestId('handoff-title').textContent).toBe('수동 전환');
+    expect(screen.getByTestId('handoff-detail').textContent).toBe('조종기를 잡으세요');
+    expect(playChime).toHaveBeenCalledWith('manual');
+
+    act(() => vi.advanceTimersByTime(2900));
+    expect(screen.getByTestId('handoff')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(200));
+    expect(screen.queryByTestId('handoff')).toBeNull();
+  });
+
+  it('안전 정지는 위험색 + 경고 아이콘, 자율 복귀는 2초짜리 자율색 안내', () => {
+    vi.useFakeTimers();
+    const { rerender } = show(modeOf(driving(), 'MANUAL'));
+    next(modeOf(driving(), 'SAFE_STOP'), rerender);
+    expect(screen.getByTestId('handoff').getAttribute('data-tone')).toBe('danger');
+    expect(screen.getByTestId('handoff-title').textContent).toBe('안전 정지');
+    expect(screen.getByTestId('handoff').querySelector('svg')).not.toBeNull(); // 경고 아이콘
+    expect(playChime).toHaveBeenLastCalledWith('danger');
+
+    next(modeOf(driving(), 'AUTO'), rerender);
+    expect(screen.getByTestId('handoff').getAttribute('data-tone')).toBe('auto');
+    expect(screen.getByTestId('handoff-title').textContent).toBe('자율 주행 복귀');
+    act(() => vi.advanceTimersByTime(2100));
+    expect(screen.queryByTestId('handoff')).toBeNull();
+  });
+
+  it('연결이 끊겼다 같은 모드로 돌아오면 안내하지 않고, 끊긴 사이 바뀌었으면 돌아온 순간 안내한다', () => {
+    vi.useFakeTimers();
+    const { rerender } = show(driving());
+    next(driving(), rerender, false, 'network'); // 끊김 → 미확인
+    expect(screen.queryByTestId('handoff')).toBeNull();
+    next(driving(), rerender); // 같은 AUTO 로 복귀
+    expect(screen.queryByTestId('handoff')).toBeNull();
+
+    next(driving(), rerender, false, 'network');
+    next(modeOf(driving(), 'MANUAL'), rerender); // 끊긴 사이 수동으로 바뀜
+    expect(screen.getByTestId('handoff-title').textContent).toBe('수동 전환');
   });
 });

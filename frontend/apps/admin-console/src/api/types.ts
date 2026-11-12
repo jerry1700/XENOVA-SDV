@@ -72,6 +72,21 @@ export interface VmListResponse {
   observed_at: string;
 }
 
+/** POST /api/v1/vms/synchronizations — 보드 등록 목록 ↔ DB VM 테이블 등록 동기화 결과 */
+export interface VmSynchronizationResult {
+  /** 보드에 등록된 VM 수 */
+  discovered: number;
+  registered: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  incomplete: number;
+  /** DB 에는 있는데 이번에 보드에 없던 VM (연속으로 없으면 retired) */
+  missing_from_board: number;
+  retired: number;
+  results: { vm_id: string; action: string; reason: string | null }[];
+}
+
 /** §5 POST /api/v1/vms 요청 (§9 입력값 규칙) */
 export interface CreateVmRequest {
   /** 1~63자, 앞뒤 공백·제어문자 금지 */
@@ -125,16 +140,27 @@ export interface UpdateVcpuPinningRequest {
   mappings: VcpuPinning[];
 }
 
-export interface UpdateMemoryRequest {
+export interface UpdateVmResourcesRequest {
+  vcpus: number;
   memory_mib: number;
 }
 
+/** Mock 핀닝 계약의 기존 개별 필드 타입. */
 export interface UpdateVcpusRequest {
   vcpus: number;
 }
 
-export type VmResourceUpdate =
-  { kind: 'memory'; body: UpdateMemoryRequest } | { kind: 'vcpus'; body: UpdateVcpusRequest };
+export interface UpdateMemoryRequest {
+  memory_mib: number;
+}
+
+export interface VmResourceUpdateResult {
+  vm_id: string;
+  operation_id: string | null;
+  before: { vcpus: number; memory_mib: number };
+  after: { vcpus: number; memory_mib: number };
+  applies_on_next_start: boolean;
+}
 
 /** POST /api/v1/vms/{id}/stress/cpu — workers 1~4, duration_s 1~120 */
 export interface CpuStressRequest {

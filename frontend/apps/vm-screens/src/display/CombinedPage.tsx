@@ -21,6 +21,7 @@ import {
   vehicleOf,
   type DriverModeTone,
 } from './driveExtras';
+import { useHandoffNotice } from './handoff';
 import { driveSummary } from './presentation';
 import { averageSpeed, useSpeedHistory } from './speedHistory';
 import { SpeedTrend } from './SpeedTrend';
@@ -146,6 +147,7 @@ export function CombinedPage() {
   const { presentation: p, connected, problem, error } = useDisplay();
   const summary = driveSummary(p, connected);
   const mode = driverMode(summary);
+  const handoff = useHandoffNotice(summary.mode);
   const vehicle = connected ? vehicleOf(p) : null;
   const live = vehicle?.source.status === 'fresh' ? vehicle : null;
   const speed = live?.v_mps ?? null;
@@ -167,6 +169,24 @@ export function CombinedPage() {
   return (
     <main className={styles.screen} data-theme="xenova" data-testid="combined" data-connected={connected}>
       <h1 className={styles.srOnly}>차량 화면</h1>
+
+      {/* 모드 전환 안내: 운전자가 보는 화면은 이것뿐이라 전환 순간 2~3초 전면에 크게 (2026-11-12 결정) */}
+      {handoff && (
+        <div
+          key={handoff.key}
+          className={styles.handoff}
+          data-tone={handoff.tone}
+          role="status"
+          aria-live="assertive"
+          data-testid="handoff"
+        >
+          <div className={styles.handoffCard}>
+            {handoff.tone === 'danger' && <WarningIcon className={styles.handoffIcon} />}
+            <strong data-testid="handoff-title">{handoff.title}</strong>
+            <span data-testid="handoff-detail">{handoff.detail}</span>
+          </div>
+        </div>
+      )}
 
       {/* 오른쪽: 주행 상태 · 음악 */}
       <section className={styles.panel} data-panel="status" aria-label="주행 상태와 음악">

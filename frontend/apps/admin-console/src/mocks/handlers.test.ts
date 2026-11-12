@@ -178,20 +178,28 @@ describe('MSW mock API', () => {
     await login();
     const id = VM_IDS.interaction;
     await expect(
-      request(`/api/v1/vms/${id}/resources/vcpus`, { method: 'PUT', body: { vcpus: 2 } }),
+      request(`/api/v1/vms/${id}/resources`, {
+        method: 'PUT',
+        body: { vcpus: 2, memory_mib: 768 },
+      }),
     ).rejects.toMatchObject({ status: 409, code: 'INVALID_VM_STATE' });
 
     await request(`/api/v1/vms/${id}/stop`, { method: 'POST' });
-    await request(`/api/v1/vms/${id}/resources/vcpus`, { method: 'PUT', body: { vcpus: 2 } });
-    await request(`/api/v1/vms/${id}/resources/memory`, {
+    const result = await request<{
+      after: { vcpus: number; memory_mib: number };
+      applies_on_next_start: boolean;
+    }>(`/api/v1/vms/${id}/resources`, {
       method: 'PUT',
-      body: { memory_mib: 768 },
+      body: { vcpus: 2, memory_mib: 768 },
     });
 
     const resources = await request<VmResources>(`/api/v1/vms/${id}/resources`);
     const vm = await request<Vm>(`/api/v1/vms/${id}`);
+    expect(result).toMatchObject({
+      after: { vcpus: 2, memory_mib: 768 },
+      applies_on_next_start: true,
+    });
     expect(resources).toMatchObject({ vcpus: 2, memory_mib: 768 });
-    expect(resources.vcpu_pinning).toHaveLength(2);
     expect(vm).toMatchObject({ vcpus: 2, memory_mib: 768 });
   });
 

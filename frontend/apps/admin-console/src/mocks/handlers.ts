@@ -20,6 +20,7 @@ import {
   type UpdateMemoryRequest,
   type UpdateVcpuPinningRequest,
   type UpdateVcpusRequest,
+  type UpdateVmResourcesRequest,
   type VcpuPinning,
   type Vm,
   type VmResources,
@@ -321,6 +322,43 @@ export const handlers = [
     return HttpResponse.json(resourcesOf(vm) as unknown as JsonBodyType);
   }),
 
+  http.put('*/api/v1/vms/:vmId/resources', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind === 'zephyr') {
+      return error(400, 'RESOURCE_UPDATE_UNSUPPORTED', 'Zephyr VM은 고정 리소스 프로필을 사용합니다.');
+    }
+    if (vm.state !== 'stopped') {
+      return error(409, 'INVALID_VM_STATE', '자원은 정지된 VM에서만 변경할 수 있습니다.');
+    }
+    const body = (await request.json()) as Partial<UpdateVmResourcesRequest>;
+    const limits = resourcesOf(vm).limits;
+    if (!Number.isInteger(body.vcpus) || body.vcpus! < 1 || body.vcpus! > 4) {
+      return error(400, 'INVALID_ARGUMENT', 'vCPU 수는 1~4 정수여야 합니다.');
+    }
+    if (
+      !Number.isInteger(body.memory_mib) ||
+      body.memory_mib! < limits.memory_mib_min ||
+      body.memory_mib! > limits.memory_mib_max ||
+      body.memory_mib! % limits.memory_mib_step !== 0
+    ) {
+      return error(400, 'INVALID_ARGUMENT', '메모리 용량이 허용 범위와 단위에 맞지 않습니다.');
+    }
+    const before = { vcpus: vm.vcpus, memory_mib: vm.memory_mib };
+    vms = vms.map((item) =>
+      item.vm_id === vm.vm_id ? { ...item, vcpus: body.vcpus!, memory_mib: body.memory_mib! } : item,
+    );
+    return HttpResponse.json({
+      vm_id: vm.vm_id,
+      operation_id: 'mock-resource-update',
+      before,
+      after: { vcpus: body.vcpus!, memory_mib: body.memory_mib! },
+      applies_on_next_start: true,
+    });
+  }),
+
   http.put('*/api/v1/vms/:vmId/resources/vcpus', async ({ request, params }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
@@ -502,6 +540,23 @@ export const handlers = [
           ? '명령 실행이 완료되었습니다.'
           : 'VM에서 명령을 실행하고 있습니다.',
       updated_at: new Date().toISOString(),
+    });
+  }),
+
+  http.post('*/api/v1/vms/synchronizations', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    // mock 은 보드 목록과 DB 가 같다고 본다
+    return HttpResponse.json({
+      discovered: vms.length,
+      registered: 0,
+      updated: 0,
+      unchanged: vms.length,
+      conflicts: 0,
+      incomplete: 0,
+      missing_from_board: 0,
+      retired: 0,
+      results: vms.map((vm) => ({ vm_id: vm.vm_id, action: 'unchanged', reason: null })),
     });
   }),
 

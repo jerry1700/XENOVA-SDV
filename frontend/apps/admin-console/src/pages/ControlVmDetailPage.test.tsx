@@ -48,9 +48,9 @@ describe('VM Control 상세 자원 패널', () => {
     expect(screen.getByText('할당 자원')).toBeInTheDocument();
   });
 
-  it('Linux VM은 조정·핀닝 패널을 그대로 보인다', () => {
+  it('Linux VM은 자원 조정과 핀닝 미연결 상태를 보인다', () => {
     renderDetail(VM_IDS.interaction);
     expect(screen.getByLabelText('vCPU 및 메모리 조정')).toBeInTheDocument();
-    expect(screen.getByLabelText('vCPU 핀닝 설정')).toBeInTheDocument();
+    expect(screen.getByText('vCPU 핀닝 변경 API가 아직 연결되지 않았습니다.')).toBeInTheDocument();
   });
 });
