@@ -4,11 +4,32 @@
 
 #include "feedback3/codes.h"
 
-/* 구현한 기능만 알린다. Pi 가 요구하는 0x01f7 에 정지 조향(STATIONARY_STEER)을 더한 0x05f7 이다.
- * 조향 측정(STEERING)과 ToF 는 없다 */
+/* 구현한 기능만 알린다. Pi 가 요구하는 0x01f7 에 정지 조향(STATIONARY_STEER)과 단일 존 ToF(TOF_SINGLE)를
+ * 더한 0x0df7 이다. 조향 측정(STEERING)은 없다 */
 #define XENOVA_CAPABILITIES \
 	(FB3_CAP_ACCEPT | FB3_CAP_APPLY | FB3_CAP_VELOCITY | FB3_CAP_STATIONARY | FB3_CAP_ODOMETRY \
-	 | FB3_CAP_ABS_EXPIRY | FB3_CAP_CLOCK4_LATCH | FB3_CAP_DIRECTION_GATE | FB3_CAP_STATIONARY_STEER)
+	 | FB3_CAP_ABS_EXPIRY | FB3_CAP_CLOCK4_LATCH | FB3_CAP_DIRECTION_GATE | FB3_CAP_STATIONARY_STEER \
+	 | FB3_CAP_TOF_SINGLE)
+
+/* ToF 의 등록 sensor profile. Pi 의 설치 profile 에 같은 revision 과 digest 를 넣어야 관측을 받는다.
+ * 무엇을 해시할지 정해지기 전까지 쓰는 임시값으로, ASCII 문자열 "xenova-esp32-tof-front-dev-1",
+ * "xenova-esp32-tof-rear-dev-1" 의 SHA-256 이다. 센서를 보정한 값이 아니다 */
+#define XENOVA_TOF_FRONT_REVISION 1
+#define XENOVA_TOF_FRONT_SHA256 \
+	{ \
+		0x45, 0xa1, 0x72, 0x91, 0x71, 0x8e, 0x3f, 0xb9, \
+		0xdc, 0x4d, 0xa0, 0x71, 0xd5, 0x5b, 0x08, 0xb5, \
+		0x7a, 0x3f, 0x38, 0x40, 0x7c, 0x43, 0x3a, 0x14, \
+		0x24, 0xbe, 0xf4, 0x84, 0xaf, 0xee, 0x40, 0xf5, \
+	}
+#define XENOVA_TOF_REAR_REVISION 1
+#define XENOVA_TOF_REAR_SHA256 \
+	{ \
+		0x00, 0xb4, 0x0f, 0x11, 0x72, 0x96, 0x62, 0x2d, \
+		0xdd, 0xdc, 0xa3, 0x42, 0xaf, 0x98, 0xe6, 0xca, \
+		0xe0, 0x7b, 0x9a, 0x61, 0xdb, 0x53, 0x79, 0x01, \
+		0x40, 0x33, 0x01, 0x17, 0xb1, 0x79, 0x63, 0x77, \
+	}
 
 /* 시리얼 속도. 개발용 기본값이고, 게이트웨이와 PC 점검 도구도 같은 값을 쓴다 */
 #define XENOVA_SERIAL_BAUD 460800

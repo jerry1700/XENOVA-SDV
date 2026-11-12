@@ -16,6 +16,10 @@ PC 에서 게이트웨이 코드를 돌리는 것이므로 실제 Pi 의 USB 와
      그런 것이 하나라도 있으면 실패다. Pi 가 방향 전환을 허락하는 단계(gate state 4)까지 가는지는 판정하지 않고 값만
      보여 준다. 조향 측정이 없는 장치에서는 그 단계에 이르지 않는다.
 
+  ToF: 장치가 단일 존 ToF(capability 0x0800)를 알리고 TOF_SAMPLE 을 보내면, 그 관측에 실린 sensor profile 로
+     Pi 의 ToF 선택을 만들어 1초 동안 Pi 가 관측을 받아 넘기는지 본다. 1 다음에 한다. 모터와 서보는 움직이지 않는다.
+     실보드에서 관측이 하나도 오지 않으면 확인하지 못한 것으로 적고 넘어간다. --tof 를 주면 그때 실패로 친다.
+
 펌웨어가 알리는 capability 에 Pi 필수 bit 가 모자라면 Pi 가 HELLO_ACK 를 받지 않는 것을 먼저 확인하고,
 중계가 모자란 bit 를 채워 넣은 채로 1 만 본다. 그것은 부분 호환성 시험이다.
 
@@ -26,15 +30,17 @@ PC 에서 게이트웨이 코드를 돌리는 것이므로 실제 Pi 의 USB 와
 """
 import argparse
 import os
+import collections
 import socket
+import struct
 import sys
 import threading
 import time
 from uuid import UUID, uuid4
 
 from fb3 import (ACK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, HELLO, HELLO3,
-                 HELLO_ACK, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, Peer, Splitter, add_device_arguments,
-                 open_device, packet, unpack)
+                 HELLO_ACK, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, TOF3, TOF_CAP, TOF_SAMPLE, Peer, Splitter,
+                 add_device_arguments, open_device, packet, unpack)
 
 HANDSHAKE_TIMEOUT_MS = 1000
 LEASE_WAIT_S = 5.0
@@ -49,12 +55,15 @@ DRIVE_LIFE_US = 90000       # DRIVE 하나의 기한
 STATIONARY_STEER = 0x0400   # HELLO_ACK capabilities 가운데 HOLD_STEER 를 받는다는 bit
 HOLD_S = .5                 # HOLD_STEER 를 이어 보내는 시간
 HOLD_RAD = .1               # 그 HOLD_STEER 의 조향. 왼쪽이 +
+TOF_S = 1.0                 # Pi 가 ToF 관측을 받아 넘기는지 보는 시간
+TOF_MAX_AGE_US = 500000     # Pi 의 ToF 선택에 주는 관측 수명과 시각 오차 한도. 실측값이 아니다
+TOF_MAX_CLOCK_ERROR_US = 100000
 # Pi odometry 에 주는 차체 값. 조립 안내서에서 잰 치수 언저리이고 보정한 값이 아니다
 METRES_PER_TICK = .000164
 MAXIMUM_SPEED_MPS = 1.
 NAMES = {HELLO: 'HELLO', HELLO_ACK: 'HELLO_ACK', CLOCK_PROBE: 'CLOCK_PROBE', CLOCK_REPLY: 'CLOCK_REPLY',
          CLOCK_INSTALL: 'CLOCK_INSTALL', CLOCK_ACK: 'CLOCK_ACK', SENSOR: 'SENSOR', COMMAND: 'COMMAND',
-         REPORT: 'REPORT'}
+         REPORT: 'REPORT', TOF_SAMPLE: 'TOF_SAMPLE'}
 
 
 class Relay:
@@ -170,8 +179,42 @@ def make_sink(gateway, relay, config, firmware, encoder_bits):
     policy = StationaryPolicy(30000, 100000, 200000, METRES_PER_TICK, .05, 1., 0., 0.)
     profile = Feedback3Profile(config, firmware, 100, 100, 200000, LEASE_US, 200000, 100, 100, policy, 10000000,
                                .02, 20000)
-    return Feedback3SerialSink(f'socket://127.0.0.1:{relay.port}', timeout_ms=HANDSHAKE_TIMEOUT_MS,
+    sink = Feedback3SerialSink(f'socket://127.0.0.1:{relay.port}', timeout_ms=HANDSHAKE_TIMEOUT_MS,
                                odometry=odometry, profile=profile)
+    # 게이트웨이는 시리얼을 5 ms 쓰기 기한으로 연다. pyserial 의 socket:// 은 보낸 뒤에 그 기한을 검사해서,
+    # Windows 에서 5 ms 넘게 밀리면 이미 보낸 것도 Write timeout 으로 친다. 이 중계에서만 나는 일이라 기한을 늘린다
+    sink._serial.write_timeout = 1.0
+    return sink
+
+
+def tof_profiles(relay):
+    """장치가 지금까지 보낸 TOF_SAMPLE 에서 센서별 (sensor_id, calibration digest, revision) 을 꺼낸다."""
+    seen = {}
+    for kind, payload, _ in list(relay.from_device):
+        if kind == TOF_SAMPLE and len(payload) == TOF3.size:
+            seen[payload[76]] = (payload[76], payload[101:133].hex(), struct.unpack_from('<I', payload, 97)[0])
+    return tuple(seen[sensor] for sensor in sorted(seen))
+
+
+def watch_tof(sink, profiles, seconds):
+    """Pi 의 ToF 선택을 profiles 로 정하고 seconds 동안 Pi 가 받아 넘긴 관측을 센다.
+    (센서별 넘긴 수, Pi actor 쪽 집계, Pi 수신 쪽 집계) 를 돌려준다."""
+    from xenova_drive_world import decode, schema
+    from xenova_gateway.tof_feedback3 import TofReceiver, TofSelection
+    selection = TofSelection(profiles, TOF_MAX_AGE_US, TOF_MAX_CLOCK_ERROR_US, 'esp32-link-check',
+                             sink.odometry.host_boot, str(uuid4()))
+    sink.configure_tof(selection)
+    receiver = TofReceiver(selection)
+    published = collections.Counter()
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        poll(sink)
+        loss, items, context = sink.tof_inputs()
+        observations, _ = receiver.process(loss, items, context, int(sink.clock() * 1e6))
+        for raw in observations:
+            published[decode(raw, schema.TofObservation).sensor_id] += 1
+        time.sleep(0.001)
+    return published, dict(receiver.counts), dict(sink.tof_inbox.counts)
 
 
 def poll(sink):
@@ -321,6 +364,8 @@ def main():
     parser.add_argument('--drive', action='store_true',
                         help='실보드에 DRIVE·HOLD_STEER 까지 보낸다. 바퀴가 돌고 조향이 움직인다. '
                              '바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
+    parser.add_argument('--tof', action='store_true',
+                        help='실보드에서 ToF 관측이 오지 않으면 실패로 친다. 센서가 달려 있을 때 준다')
     args = parser.parse_args()
     if args.seconds < 2 * LEASE_US / 1e6:
         parser.error('--seconds 는 lease 길이의 두 배(2초) 이상이어야 중간에 끊긴 것이 드러난다')
@@ -407,6 +452,25 @@ def main():
                     expected = args.ticks_per_second * METRES_PER_TICK
                     check(abs(vehicle['velocity_mps'] - expected) <= abs(expected) / 10,
                           f'그 속도가 시뮬레이터의 엔코더 속도 {expected:.3f} m/s 와 10 % 안에서 같음')
+
+            if capabilities & TOF_CAP:
+                print('ToF: 장치가 보낸 TOF_SAMPLE 을 Pi 가 관측으로 받아 넘김')
+                profiles = tof_profiles(relay)
+                if not profiles:
+                    if args.sim or args.tof:
+                        check(False, '장치가 TOF_SAMPLE 을 보냄 (0개)')
+                    else:
+                        print('      TOF_SAMPLE 이 오지 않아 확인하지 못함. 센서가 달려 있으면 --tof 를 주고 다시 본다')
+                else:
+                    published, counts, inbox = watch_tof(sink, profiles, TOF_S)
+                    sensors = ', '.join(f"{'앞' if row[0] == 0 else '뒤'} {published[row[0]]}개" for row in profiles)
+                    check(all(published[row[0]] >= 3 for row in profiles), f'Pi 가 센서마다 관측을 받아 넘김 ({sensors})')
+                    check((args.sim or args.tof) is False or len(profiles) == 2,
+                          f'앞·뒤 두 센서의 관측이 옴 ({len(profiles)}개 센서)')
+                    bad = {name: count for name, count in counts.items() if name not in ('completed', 'duplicate')}
+                    check(not bad and not inbox, f'Pi 가 버리거나 거절한 ToF 관측 없음 (actor {bad or "없음"}, 수신 {inbox or "없음"})')
+                    check(sink.fault is None and sink.rejected == 0,
+                          f'그동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음 (fault {sink.fault}, 버린 프레임 {sink.rejected}개)')
 
             if not missing:
                 def clean(text):

@@ -40,8 +40,14 @@ struct sim {
 	int32_t drive_mmps;       /* 출력에 걸려 있는 속도. 끊겨 있으면 0 */
 	int64_t driven_um;        /* 출력으로 굴러간 거리 */
 	uint64_t driven_us;       /* 그 거리를 셈한 시각 */
+	uint64_t tof_due_us[FB3_TOF_SENSORS]; /* 가짜 ToF 가 다음 관측을 낼 시각 */
+	uint8_t tof_instance[FB3_TOF_SENSORS][16];
 	struct fb3_cutoff cutoff;
 };
+
+/* 가짜 ToF. 측정 하나에 걸리는 시간과 관측을 내는 간격 */
+#define SIM_TOF_MEASURE_US 33000u
+#define SIM_TOF_PERIOD_US 100000u
 
 static uint64_t host_us(void)
 {
@@ -123,6 +129,25 @@ static bool sim_estop(void *ctx)
 {
 	(void)ctx;
 	return false;
+}
+
+/* 앞은 600 mm, 뒤는 800 mm 의 물체를 100 ms 마다 본다. 측정 구간의 가운데를 관측 시각으로 낸다 */
+static bool sim_tof(void *ctx, unsigned sensor, struct fb3_tof_reading *out)
+{
+	struct sim *s = ctx;
+	uint64_t now = sim_now(s);
+
+	if (now < s->tof_due_us[sensor]) {
+		return false;
+	}
+	s->tof_due_us[sensor] = now + SIM_TOF_PERIOD_US;
+	out->device_us = now - SIM_TOF_MEASURE_US / 2;
+	out->time_error_us = SIM_TOF_MEASURE_US / 2 + 1000;
+	memcpy(out->instance, s->tof_instance[sensor], 16);
+	out->generation = 1;
+	out->distance_mm = sensor == 0 ? 600 : 800;
+	out->status = FB3_TOF_VALID;
+	return true;
 }
 
 static bool sim_latch(void *ctx, struct fb3_sample *out)
@@ -213,6 +238,7 @@ static void make_session(uint8_t out[16])
 int main(int argc, char **argv)
 {
 	static const uint8_t config_sha256[32] = XENOVA_VEHICLE_CONFIG_SHA256;
+	static const uint8_t tof_front_sha256[32] = XENOVA_TOF_FRONT_SHA256, tof_rear_sha256[32] = XENOVA_TOF_REAR_SHA256;
 	/* ASCII 문자열 "xenova-esp32-host-sim" 의 SHA-256. 실제 펌웨어의 digest 가 아니다 */
 	static const uint8_t firmware_sha256[32] = {
 		0x99, 0xb6, 0xed, 0xce, 0xf8, 0x58, 0xec, 0xad, 0x1d, 0xdf, 0x43, 0x83, 0x85, 0x75, 0x49, 0x28,
@@ -224,7 +250,7 @@ int main(int argc, char **argv)
 	static struct fb3_frame frame;
 	struct fb3_cutoff_port cutoff_port = {&sim, sim_now, sim_set_alarm, sim_clear_alarm, sim_lock, sim_unlock,
 					      sim_cut};
-	struct fb3_link_port link_port = {&sim, sim_now, sim_latch, sim_drive, sim_estop};
+	struct fb3_link_port link_port = {&sim, sim_now, sim_latch, sim_drive, sim_estop, sim_tof};
 	struct fb3_link_config config;
 	uint8_t wire[FB3_MAX_WIRE], input[256];
 	int got;
@@ -237,8 +263,17 @@ int main(int argc, char **argv)
 	sim.origin = host_us();
 	sim.driven_us = sim_now(&sim);
 	fb3_cutoff_init(&sim.cutoff, &cutoff_port);
+	memset(&config, 0, sizeof config);
 	make_session(config.device_boot_session);
 	config.capabilities = XENOVA_CAPABILITIES;
+	config.tof[0].config_revision = XENOVA_TOF_FRONT_REVISION;
+	memcpy(config.tof[0].calibration_sha256, tof_front_sha256, sizeof tof_front_sha256);
+	config.tof[1].config_revision = XENOVA_TOF_REAR_REVISION;
+	memcpy(config.tof[1].calibration_sha256, tof_rear_sha256, sizeof tof_rear_sha256);
+	make_session(sim.tof_instance[0]);
+	make_session(sim.tof_instance[1]);
+	sim.tof_due_us[0] = sim_now(&sim) + SIM_TOF_PERIOD_US;
+	sim.tof_due_us[1] = sim_now(&sim) + SIM_TOF_PERIOD_US * 3 / 2;
 	memcpy(config.vehicle_config_sha256, config_sha256, sizeof config_sha256);
 	memcpy(config.firmware_sha256, firmware_sha256, sizeof firmware_sha256);
 	config.encoder_bits = XENOVA_ENCODER_BITS;

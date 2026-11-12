@@ -2,7 +2,8 @@
  * HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 를 처리하고,
  * 살아 있는 lease 가 있는 동안 엔코더 표본을 SENSOR 로 보낸다.
  * COMMAND 의 DRIVE·STOP·HOLD_STEER 를 검사해 출력에 걸고 REPORT 로 알린다.
- * 계약 docs/contracts/gateway-feedback-3.md §3·§4·§5·§6·§7·§8.
+ * ToF 센서의 새 관측이 있으면 다른 프레임이 나갈 때가 아닐 때 TOF_SAMPLE 로 보낸다.
+ * 계약 docs/contracts/gateway-feedback-3.md §3·§4·§5·§6·§7·§8·§9.1.
  * 시계·센서·타이머는 port 로 받아 PC 호스트 시험에서도 그대로 돈다. */
 #ifndef XENOVA_FB3_LINK_H
 #define XENOVA_FB3_LINK_H
@@ -35,6 +36,9 @@ extern "C" {
 /* 양쪽 엔코더 누계가 이만큼 그대로면 멈춘 것으로 본다 */
 #define FB3_STILL_US 100000u
 
+/* ToF 센서 자리. 0 은 앞 가운데, 1 은 뒤 가운데다 */
+#define FB3_TOF_SENSORS 2u
+
 /* 실제로 뜬 표본 하나. 양쪽 누계와 시각을 같은 순간에 읽은 값이어야 한다 */
 struct fb3_sample {
 	uint64_t device_us;
@@ -43,6 +47,16 @@ struct fb3_sample {
 	uint8_t quality;
 	int32_t steering_mrad;
 	uint16_t steering_error_mrad;
+};
+
+/* ToF 센서가 낸 새 관측 하나 */
+struct fb3_tof_reading {
+	uint64_t device_us;     /* 측정 구간을 대표하는 장치 시각. 엔코더 표본의 시각을 빌려 쓰지 않는다 */
+	uint32_t time_error_us; /* 그 시각의 오차. 측정 구간과 센서에서 읽어 오는 데 걸린 시간을 모두 감싼다 */
+	uint8_t instance[16];   /* 센서를 초기화할 때마다 새로 만드는 UUID. NIL 이 아니다 */
+	uint32_t generation;    /* 센서를 초기화할 때마다 1 씩 는다. 1 부터 */
+	uint16_t distance_mm;   /* status 가 FB3_TOF_VALID 일 때의 거리 */
+	uint8_t status;         /* FB3_TOF_* */
 };
 
 struct fb3_link_port {
@@ -56,6 +70,15 @@ struct fb3_link_port {
 	bool (*drive)(void *ctx, int16_t velocity_mmps, int16_t steering_mrad);
 	/* 비상정지 입력이 눌려 있으면 true */
 	bool (*estop)(void *ctx);
+	/* sensor 번 ToF 에 아직 넘기지 않은 관측이 있으면 out 에 채우고 true, 없으면 false. 센서를 기다리지 않는다.
+	 * 메인 루프가 돌 때마다 불린다. ToF 가 없는 빌드는 NULL 로 둔다 */
+	bool (*tof)(void *ctx, unsigned sensor, struct fb3_tof_reading *out);
+};
+
+/* 등록 sensor profile. Pi 의 설치 profile 과 같아야 한다 */
+struct fb3_tof_profile {
+	uint32_t config_revision; /* 0 이면 그 자리에 센서가 없다 */
+	uint8_t calibration_sha256[32];
 };
 
 struct fb3_link_config {
@@ -68,6 +91,15 @@ struct fb3_link_config {
 	uint64_t j_apply_us;        /* 출력을 거는 데 걸리는 시간의 상한. 기한까지 이보다 많이 남아야 건다 */
 	int16_t max_velocity_mmps;  /* 받아들이는 속도와 조향의 크기 */
 	int16_t max_steering_mrad;
+	struct fb3_tof_profile tof[FB3_TOF_SENSORS]; /* capabilities 에 TOF_SINGLE 이 있을 때 쓴다 */
+};
+
+/* 센서 하나가 지금까지 보낸 관측 */
+struct fb3_tof_source {
+	uint8_t instance[16];
+	uint32_t generation; /* 0 이면 아직 받은 관측이 없다 */
+	uint64_t sample;     /* 이 instance 에서 보낸 관측 순번 */
+	uint64_t device_us;  /* 마지막으로 받은 관측의 시각 */
 };
 
 struct fb3_reply_mark {
@@ -128,6 +160,10 @@ struct fb3_link {
 	bool stop_needed;         /* 비상정지가 눌렸었다. 새 STOP 을 받기 전에는 DRIVE 를 받지 않는다 */
 	bool fault_reported;      /* 타이머 고장을 REPORT 로 알렸다 */
 	uint64_t report_sequence; /* 부팅 뒤 보낸 REPORT 순번 */
+	/* ToF */
+	struct fb3_tof_source tof[FB3_TOF_SENSORS];
+	unsigned tof_next;        /* 다음에 먼저 볼 센서. 한 센서가 다른 센서를 굶기지 않게 한다 */
+	uint32_t tof_dropped[FB3_TOF_SENSORS]; /* 받았지만 보내지 않은 관측 수 */
 	uint32_t refused[FB3_REASON_COUNT]; /* 받아들이지 않은 프레임 수, 이유별 */
 };
 
@@ -140,7 +176,8 @@ size_t fb3_link_receive(struct fb3_link *link, const struct fb3_frame *frame, ui
 			uint8_t *wire, size_t cap);
 
 /* 메인 루프가 돌 때마다 부른다. 표본에 따라붙는 REPORT, 미뤄 둔 CLOCK_REPLY, 주기 표본 SENSOR 가운데
- * 보낼 때가 된 것이 있으면 wire 에 구분자까지 쓰고 그 길이를, 아니면 0 을 돌려준다. 한 번에 프레임 하나다 */
+ * 보낼 때가 된 것이 있으면 wire 에 구분자까지 쓰고 그 길이를, 아니면 0 을 돌려준다. 한 번에 프레임 하나다.
+ * 그 셋 가운데 보낼 것이 없을 때에만 ToF 의 새 관측을 TOF_SAMPLE 로 보낸다 */
 size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap);
 
 /* 그 lease 가 설치돼 있고 아직 기한 전인지 */

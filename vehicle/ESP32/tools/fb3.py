@@ -13,6 +13,7 @@ import time
 HELLO, HELLO_ACK = 0x0f00, 0x0f01
 CLOCK_PROBE, CLOCK_REPLY, CLOCK_INSTALL, CLOCK_ACK = 0x0f10, 0x0f11, 0x0f12, 0x0f13
 SENSOR = 0x0f15
+TOF_SAMPLE = 0x0f17
 COMMAND, REPORT = 0x0111, 0x0f14
 HELLO3 = struct.Struct('<B16s32s')
 ACK3 = struct.Struct('<B16s16sH32s32sB')
@@ -23,8 +24,11 @@ CLOCK_ACK3 = struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3 = struct.Struct('<16s16sQQqqBiH16sQ')
 COMMAND3 = struct.Struct('<16s16sQ16sQQQQIBBQhhBB')
 REPORT3 = struct.Struct('<16s16sQIBBBQQQBiiB16sQQQH')
+TOF3 = struct.Struct('<16s16sQQI16sQB16sII32sBBHHBBI')
+TOF_CRC_BYTES = 141  # sample_crc32 가 덮는 앞부분
 BAUD = 460800  # 펌웨어의 XENOVA_SERIAL_BAUD 와 같은 개발용 기본값
 REQUIRED_CAPS = 0x01f7  # Pi 가 ready 로 받는 최소 capability
+TOF_CAP = 0x0800        # 단일 존 ToF 를 보낸다는 capability
 MAX_FRAME = 256
 REASONS = (
     'OK', 'BAD_LENGTH', 'BAD_CRC', 'SESSION_MISMATCH', 'SEQUENCE_REPLAY', 'IDEMPOTENCY_CONFLICT',
