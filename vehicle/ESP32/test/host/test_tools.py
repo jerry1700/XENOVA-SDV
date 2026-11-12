@@ -441,18 +441,22 @@ class QuietReport(link_bench.Report):
 class SteerDevice:
     """steer_check 가 말을 거는 장치의 대역. Peer 자리에 들어간다.
 
-    drive    DRIVE 에 돌려줄 (status, reason). None 이면 답이 없다
+    drive    DRIVE·HOLD_STEER 에 돌려줄 (status, reason). None 이면 답이 없다
     sensors  보내는 SENSOR 수의 한도. lease 를 설치할 때와 DRIVE 를 받을 때 하나씩 보낸다. None 이면 한도가 없다
     after    DRIVE 에 답한 뒤 조용할 때 이어서 보내는 SENSOR 수
     creep    DRIVE 를 받을 때마다 엔코더 누계가 이만큼 늘어난다 (바퀴가 돈 경우)
     wobble   DRIVE 를 받으면 누계가 한 칸 늘었다가 제자리로 돌아온다
     drift    DRIVE 에 답한 뒤 이어서 보내는 SENSOR 에서만 누계가 한 칸 늘어 있다
     jump     CLOCK_REPLY 에 실린 누계만 한 칸 늘어 있다
+    caps     HELLO_ACK 로 알리는 capabilities
+    echo     REPORT 에 돌려주는 command_kind. None 이면 받은 그대로다
     """
 
-    def __init__(self, drive=(2, 0), sensors=None, after=2, creep=0, wobble=False, drift=False, jump=False):
+    def __init__(self, drive=(2, 0), sensors=None, after=2, creep=0, wobble=False, drift=False, jump=False,
+                 caps=0x05f7, echo=None):
         self.drive, self.sensors, self.after, self.creep, self.wobble = drive, sensors, after, creep, wobble
-        self.drift, self.jump = drift, jump
+        self.drift, self.jump, self.caps, self.echo = drift, jump, caps, echo
+        self.kinds = []  # 받은 DRIVE·HOLD_STEER 의 command_kind
         self.pending = 0  # 조용할 때 이어서 보낼 SENSOR 수
         self.pi = None
         self.frames = []
@@ -467,7 +471,7 @@ class SteerDevice:
     def send(self, kind, payload):
         if kind == HELLO:
             pi = HELLO3.unpack(payload)[1]
-            self._reply(HELLO_ACK, ACK3.pack(3, pi, DEVICE, 0x01f7, b'c' * 32, b'f' * 32, 32))
+            self._reply(HELLO_ACK, ACK3.pack(3, pi, DEVICE, self.caps, b'c' * 32, b'f' * 32, 32))
         elif kind == CLOCK_PROBE:
             pi, device, sequence, p1 = PROBE3.unpack(payload)
             self.sample += 1
@@ -481,8 +485,9 @@ class SteerDevice:
         elif kind == COMMAND:
             fields = COMMAND3.unpack(payload)
             status, reason = (2, 0)
-            if fields[10] == steer_check.DRIVE:
+            if fields[10] != steer_check.STOP:
                 self.steered.append(fields[12:14])
+                self.kinds.append(fields[10])
                 self.pi, self.pending = fields[0], self.after
                 self.ticks += self.creep
                 if self.wobble:
@@ -494,7 +499,8 @@ class SteerDevice:
                     return
                 status, reason = self.drive
             self.reports += 1
-            self._reply(REPORT, REPORT3.pack(fields[0], fields[1], fields[2], fields[8], fields[9], fields[10], status,
+            self._reply(REPORT, REPORT3.pack(fields[0], fields[1], fields[2], fields[8], fields[9],
+                                             fields[10] if self.echo is None else self.echo, status,
                                              self.reports, self.sample, 3000, 0, 0, 0, 0, fields[3], fields[4],
                                              fields[7], fields[11], reason))
 
@@ -516,9 +522,9 @@ class SteerDevice:
         return self.frames.pop(0) if self.frames else None
 
 
-def steered(device, steps=(0, 200, -200)):
+def steered(device, steps=(0, 200, -200), kind=steer_check.DRIVE):
     report = QuietReport()
-    steer_check.run(link_bench.Flow(device), steps, 0.01, report)
+    steer_check.run(link_bench.Flow(device), steps, 0.01, report, kind)
     return report
 
 
@@ -527,6 +533,20 @@ def test_steer_check_counts_only_applied_steering():
     report = steered(device)
     check(report.failed == 0 and report.checks == 18, f'모두 APPLIED 면 통과 ({report.checks} 검사, 실패 {report.failed})')
     check(device.steered == [(0, 0), (0, 200), (0, -200)], f'속도는 0 이고 조향만 차례로 보냄 {device.steered}')
+    check(device.kinds == [steer_check.DRIVE] * 3, f'따로 고르지 않으면 DRIVE 로 보냄 {device.kinds}')
+    device = SteerDevice()
+    report = steered(device, kind=steer_check.HOLD_STEER)
+    check(report.failed == 0 and report.checks == 19 and device.kinds == [steer_check.HOLD_STEER] * 3
+          and device.steered == [(0, 0), (0, 200), (0, -200)],
+          f'--stationary 면 HOLD_STEER 로 보냄 ({report.checks} 검사, 실패 {report.failed}, {device.kinds})')
+    device = SteerDevice(caps=0x01f7)
+    report = steered(device, kind=steer_check.HOLD_STEER)
+    check(report.failed == 1 and device.kinds == [], '정지 조향을 알리지 않는 장치에는 HOLD_STEER 를 보내지 않고 실패')
+    check(steered(SteerDevice(caps=0x01f7)).failed == 0, 'DRIVE 로 보낼 때는 정지 조향을 알리지 않아도 됨')
+    check(steered(SteerDevice(drive=(3, 16)), kind=steer_check.HOLD_STEER).failed == 3, 'HOLD_STEER 가 거절되면 그 자리마다 실패')
+    check(steered(SteerDevice(echo=steer_check.DRIVE), kind=steer_check.HOLD_STEER).failed == 3,
+          'REPORT 가 다른 종류의 명령을 돌려주면 실패')
+    check(steered(SteerDevice(creep=1), kind=steer_check.HOLD_STEER).failed == 3, 'HOLD_STEER 에 엔코더 누계가 바뀌면 실패')
     check(steered(SteerDevice(drive=(3, 9))).failed == 3, 'DRIVE 가 거절되면 그 자리마다 실패')
     check(steered(SteerDevice(drive=None)).failed >= 3, 'DRIVE 에 답이 없으면 그 자리마다 실패')
     check(steered(SteerDevice(creep=1)).failed == 3, '엔코더 누계가 바뀌면 그 자리마다 실패')
