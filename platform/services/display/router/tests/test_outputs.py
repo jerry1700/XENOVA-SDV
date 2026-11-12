@@ -131,3 +131,49 @@ def test_stream_420_dimensions_must_be_even():
     raw = config().model_dump()
     raw["stream_width"] = 1279
     with pytest.raises(ValueError): RuntimeConfig.model_validate(raw)
+
+
+def test_layout_reprobes_monitors_only_on_kernel_hotplug_change_or_every_30_s(tmp_path):
+    # `xrandr --query` makes Xorg re-read EDID over DDC (about 50 ms of Xorg CPU each on the
+    # Pi). The 1 s layout loop uses X's cached state unless the kernel connector state moved.
+    edid = "00"*16
+    text = f"HDMI-1 connected 1280x720+0+0\n\tEDID:\n\t\t{edid}\n   1280x720 60.00*\n"
+    c = config("x11")
+    c.outputs = c.outputs[:1]
+    c.outputs[0].edid_sha256 = hashlib.sha256(bytes.fromhex(edid)).hexdigest()
+    connector = tmp_path / "card0-HDMI-A-1"
+    connector.mkdir()
+    (connector / "status").write_text("connected\n")
+    (connector / "edid").write_bytes(bytes.fromhex(edid))
+    now = [100.0]
+    modes = []
+    def run(args, **kwargs):
+        if args[3] in ("--query", "--current"): modes.append(args[3])
+        return subprocess.CompletedProcess(args, 0, text, "")
+    layout = X11Layout(c, runner=run, sysfs=tmp_path, clock=lambda: now[0])
+    for _ in range(3):
+        assert layout.reconcile()["monitor-1"]["physical_verified"] is True
+        now[0] += 1
+    # first pass: probe, apply the mode, probe again to verify; then X's cached state
+    assert modes == ["--query", "--query", "--current", "--current"]
+    (connector / "status").write_text("disconnected\n")  # kernel hot-plug event
+    layout.reconcile()
+    assert modes[-1] == "--query"
+    now[0] += 30
+    layout.reconcile()
+    assert modes[-1] == "--query"
+    layout.reconcile()
+    assert modes[-1] == "--current"
+
+
+def test_failed_probe_is_retried_as_a_full_probe(tmp_path):
+    c = config("x11")
+    modes, fail = [], [True]
+    def run(args, **kwargs):
+        modes.append(args[3])
+        return subprocess.CompletedProcess(args, 1 if fail[0] else 0, "", "")
+    layout = X11Layout(c, runner=run, sysfs=tmp_path / "missing", clock=lambda: 5.0)
+    with pytest.raises(RuntimeError): layout.reconcile()
+    fail[0] = False
+    layout.reconcile()
+    assert modes == ["--query", "--query"]
