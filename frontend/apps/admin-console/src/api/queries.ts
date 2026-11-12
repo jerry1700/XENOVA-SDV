@@ -26,9 +26,10 @@ import type {
   ThreadsResponse,
   TokenResponse,
   UpdateVcpuPinningRequest,
+  UpdateVmResourcesRequest,
   Vm,
   VmListResponse,
-  VmResourceUpdate,
+  VmResourceUpdateResult,
   VmResources,
 } from './types';
 import { clearVmList, loadVmList, saveVmList } from './vmListCache';
@@ -153,16 +154,16 @@ export function useUpdateVcpuPinning(vmId: string) {
   });
 }
 
-export function useUpdateVmResource(vmId: string) {
+export function useUpdateVmResources(vmId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ kind, body }: VmResourceUpdate) =>
-      request<VmResources>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources/${kind}`, {
+    mutationFn: (body: UpdateVmResourcesRequest) =>
+      request<VmResourceUpdateResult>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources`, {
         method: 'PUT',
         body,
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
       }),
     onSettled: () => {
-      void client.invalidateQueries({ queryKey: keys.vmResources(vmId) });
       void client.invalidateQueries({ queryKey: keys.vm(vmId) });
       void client.invalidateQueries({ queryKey: keys.vms });
     },
