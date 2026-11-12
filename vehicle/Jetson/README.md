@@ -132,6 +132,8 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
 
+바닥 투영 마스크에서 양쪽에 흰선이 검출된 틈은 빈 구간이 약 1.41cm(1cm 격자의 대각선 한 셀) 이하이고 그 안의 모든 셀이 시야 안에 있으며 가려지지 않았을 때 선 조각 추출 전에 메운다. 대각선 셀 길이도 실제 거리로 계산한다.
+
 실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 개발용 `mapper-profile.json`에 기록한다. 이 프로필은 R45 재생 결과를 바탕으로 `pipeline.registration.max_position_error_m`에 `0.065`m를 적용한다. 같은 개발 시험에 기존 mapper 프로필을 재사용할 때도 세 값을 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
 
 `pipeline.road.missing_outer_width_bounds_m`는 가려진 도로 바깥 경계를 추정할 차로 폭 범위(m)다. 폼보드 코스의 초기값은 `[0.26, 0.31]`로, 명목 폭은 0.285m다. 이 항목이 없던 schema1 파일도 원본 바이트를 유지하며 이 초기값을 쓴다. `lane_width_min_m`·`lane_width_max_m`은 영상에 보인 경계 간격을 검사하는 범위다. 인지 요약의 `current_lane`은 지도에 연결한 차로 중심과 원 관측 키·시각을 제공한다. `MAPPED`는 현재 위치에서 앞서 관측한 지도 조각을 사용한다는 뜻이고, `HELD`는 마지막 차로 정보를 보존하는 상태다.
