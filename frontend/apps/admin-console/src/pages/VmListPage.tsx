@@ -20,7 +20,7 @@ const VM_ACCENTS = ['var(--x-app-autonomous)', 'var(--x-app-manual)', 'var(--x-a
 
 /** VM 생명주기와 할당 자원을 관리하는 목록. 주행 모드·제어권은 Overview에서만 다룬다. */
 export function VmListPage() {
-  const vms = useVms(1000);
+  const vms = useVms();
   const vmOperations = useVmOperationProgress();
   const toast = useToast();
   const navigate = useNavigate();
