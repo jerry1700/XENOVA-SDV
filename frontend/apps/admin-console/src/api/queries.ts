@@ -13,6 +13,8 @@ import type {
   EventListResponse,
   LoginRequest,
   MetricHistoryResponse,
+  PhoneLinkStatus,
+  PhonePairingCode,
   ProcessesResponse,
   RouteRequest,
   SignupRequest,
@@ -43,6 +45,7 @@ export const keys = {
   telemetryHeartbeat: (id: string) => ['vms', id, 'telemetry-heartbeat'] as const,
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
+  phoneLink: ['display', 'phone-link'] as const,
 };
 
 /**
@@ -324,6 +327,33 @@ export function useRouteDisplay() {
     mutationFn: ({ displayId, body }: { displayId: string; body: RouteRequest }) =>
       request<Display>(`/api/v1/displays/${encodeURIComponent(displayId)}/route`, { method: 'PUT', body }),
     onSettled: () => client.invalidateQueries({ queryKey: keys.displays }),
+  });
+}
+
+/** USB 휴대폰 화면 연결 상태 (REST-38). 케이블·테더링 변화가 보이게 몇 초마다 다시 읽는다 */
+export function usePhoneLink() {
+  return useQuery({
+    queryKey: keys.phoneLink,
+    queryFn: ({ signal }) => request<PhoneLinkStatus>('/api/v1/display/phone-link', { signal }),
+    refetchInterval: 5000,
+    retry: false,
+  });
+}
+
+/**
+ * 새 연결번호 발급 (REST-39). 이미 연결된 휴대폰이 끊기고 앞 번호가 무효가 되므로 재시도하지 않는다.
+ * 번호는 호출한 컴포넌트의 상태에만 둔다 (쿼리 캐시에 넣지 않음).
+ */
+export function useIssuePhonePairingCode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<PhonePairingCode>('/api/v1/display/phone-link/pairing-code', { method: 'POST' }),
+    retry: false,
+    // 상태를 다시 읽는 것은 기다리지 않는다 (보드 왕복 동안 번호 표시가 늦어지지 않게)
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.phoneLink });
+    },
   });
 }
 

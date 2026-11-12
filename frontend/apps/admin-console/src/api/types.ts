@@ -468,3 +468,35 @@ export interface RouteRequest {
   view: DisplayView;
   expected_revision: number;
 }
+
+// ---- USB 휴대폰 화면 연결 (REST-38·REST-39, docs/contracts/phone-link-v1.md) ----
+
+export type PhoneRelayState = 'listening' | 'waiting_link' | 'starting' | 'stopped' | 'failed' | 'unknown';
+
+export interface PhoneLinkStatus {
+  /** 보드에 휴대폰 중계 설정이 있음 */
+  configured: boolean;
+  relay: PhoneRelayState;
+  /** 휴대폰 브라우저에서 열 주소. relay 가 listening 일 때만 */
+  url: string | null;
+  usb: {
+    interface: string;
+    present: boolean;
+    /** 보드 쪽 주소(주소/접두어) */
+    ipv4: string[];
+    /** 휴대폰 주소 */
+    gateway: string | null;
+  };
+  configured_phone_ipv4: string | null;
+  /** 휴대폰이 테더링 대역을 바꿔 중계가 시작하지 못함. 판단할 수 없으면 null */
+  subnet_mismatch: boolean | null;
+  /** 번호 값은 없다 */
+  pairing: { active: boolean; expires_at: string | null };
+  observed_at: string;
+}
+
+/** 새 연결번호. 화면 상태에만 두고 저장·로그·URL 에 넣지 않는다 */
+export interface PhonePairingCode {
+  code: string;
+  expires_at: string;
+}
