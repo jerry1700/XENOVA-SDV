@@ -30,6 +30,7 @@ import type {
   Vm,
   VmListResponse,
   VmResourceUpdateResult,
+  VmSynchronizationResult,
   VmResources,
 } from './types';
 import { clearVmList, loadVmList, saveVmList } from './vmListCache';
@@ -89,9 +90,10 @@ function useWithoutStaleData<TData, TError>(
 }
 
 /**
+ * pollMs: VM Control 은 1초 (관측 시각이 초 단위로 바뀌게), 나머지는 LIVE_POLL_MS.
  * keepLastData: 실패해도 마지막 목록을 남긴다 — 화면이 직접 "조회 불가" 로 표시할 때만 (대시보드 Overview 카드)
  */
-export function useVms({ keepLastData = false }: { keepLastData?: boolean } = {}) {
+export function useVms(pollMs = LIVE_POLL_MS, { keepLastData = false }: { keepLastData?: boolean } = {}) {
   return useWithoutStaleData(
     useQuery({
       queryKey: keys.vms,
@@ -106,12 +108,7 @@ export function useVms({ keepLastData = false }: { keepLastData?: boolean } = {}
           throw error;
         }
       },
-      // VM 목록 조회는 dom0-manager 동기화를 포함하므로 사용자 요청 없이 반복하지 않는다.
-      refetchInterval: false,
-      refetchOnMount: false,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      staleTime: Infinity,
+      refetchInterval: pollMs,
       // 새로고침 직후에는 이 탭이 마지막으로 받은 목록을 먼저 보여 주고 곧바로 다시 읽는다 (S15P31E110-345)
       initialData: () => loadVmList()?.data,
       initialDataUpdatedAt: () => loadVmList()?.savedAt,
@@ -368,6 +365,19 @@ export function useVmAction() {
       action === 'delete'
         ? request<void>(`/api/v1/vms/${encodeURIComponent(vmId)}`, { method: 'DELETE' })
         : request<Vm>(`/api/v1/vms/${encodeURIComponent(vmId)}/${action}`, { method: 'POST' }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+/**
+ * 보드 등록 목록과 DB VM 테이블을 맞춘다 (보드에만 있는 VM 등록, 보드에서 사라진 VM 은퇴).
+ * 서버가 주기적으로 돌리지 않으므로 사용자가 버튼으로 요청한다. 끝나면 VM 목록을 다시 읽는다.
+ */
+export function useSynchronizeVms() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => request<VmSynchronizationResult>('/api/v1/vms/synchronizations', { method: 'POST' }),
+    retry: false,
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }

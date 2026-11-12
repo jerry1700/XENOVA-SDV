@@ -543,6 +543,23 @@ export const handlers = [
     });
   }),
 
+  http.post('*/api/v1/vms/synchronizations', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    // mock 은 보드 목록과 DB 가 같다고 본다
+    return HttpResponse.json({
+      discovered: vms.length,
+      registered: 0,
+      updated: 0,
+      unchanged: vms.length,
+      conflicts: 0,
+      incomplete: 0,
+      missing_from_board: 0,
+      retired: 0,
+      results: vms.map((vm) => ({ vm_id: vm.vm_id, action: 'unchanged', reason: null })),
+    });
+  }),
+
   http.post('*/api/v1/vms', async ({ request }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();

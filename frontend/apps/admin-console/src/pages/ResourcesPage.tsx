@@ -33,7 +33,7 @@ const MIB_BYTES = 1024 * 1024;
 
 /** Dashboard CPU·Memory·Network 탭 (/dashboard/cpu·/dashboard/memory·/dashboard/network) */
 export function ResourcesPage({ view }: { view: 'cpu' | 'memory' | 'network' }) {
-  const vms = useVms({ keepLastData: view === 'memory' });
+  const vms = useVms(LIVE_POLL_MS, { keepLastData: view === 'memory' });
   const { drive } = useDrive();
   if (view === 'cpu') {
     return <CpuDashboard items={vms.data?.items} drive={drive} pending={vms.isPending} />;
