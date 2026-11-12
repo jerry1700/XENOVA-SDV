@@ -1,6 +1,7 @@
 package com.xenova.backend.event.application;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
@@ -148,12 +149,14 @@ class VmSyncServiceIntegrationTest {
     }
 
     @Test
-    void nothingIsRecordedWhenDom0ManagerIsUnreachable() throws Exception {
+    void failureIsPropagatedWithoutRecordingWhenDom0ManagerIsUnreachable() throws Exception {
         String vmId = createVm("watch-down-01");
         when(vmControlPort.list()).thenThrow(new ApiException(
                 HttpStatus.SERVICE_UNAVAILABLE, "VM_CONTROL_UNAVAILABLE", "VM 제어 서비스에 연결할 수 없습니다."));
 
-        syncService.sync();
+        assertThatThrownBy(syncService::sync)
+                .isInstanceOf(ApiException.class)
+                .hasMessage("VM 제어 서비스에 연결할 수 없습니다.");
 
         assertThat(stateChanges(vmId)).isEmpty();
     }
