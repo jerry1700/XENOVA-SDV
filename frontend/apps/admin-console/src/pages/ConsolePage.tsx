@@ -1,7 +1,7 @@
 import { StatusBadge } from '@xenova/ui';
 import { lazy, Suspense } from 'react';
 import { useSearchParams } from 'react-router';
-import { useVms } from '../api/queries';
+import { LIVE_POLL_MS, useVms } from '../api/queries';
 import { osLabel, roleOf, sortVms } from '../domain/roles';
 import { vmAuthorityOf } from '../domain/vmAuthority';
 import { STATE_HEALTH, STATE_LABEL } from '../format';
@@ -24,7 +24,7 @@ const ConsolePanel = lazy(() =>
 export function ConsolePage() {
   // 목록 조회가 잠깐 실패해도 열린 터미널(ConsolePanel)이 언마운트되어 끊기지 않게 마지막 목록을 남긴다.
   // 실패는 LiveDataAlert 가 따로 알린다.
-  const vms = useVms({ keepLastData: true });
+  const vms = useVms(LIVE_POLL_MS, { keepLastData: true });
   const { drive, socket } = useDrive();
   // Overview·VM 상세와 같은 제어권 판정 (소켓 open + control fresh 일 때만)
   const activeVmId = observedControl(drive, socket)?.active_vm_id;
