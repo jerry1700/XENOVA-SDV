@@ -13,6 +13,8 @@ import type {
   EventListResponse,
   LoginRequest,
   MetricHistoryResponse,
+  PhoneLinkStatus,
+  PhonePairingCode,
   ProcessesResponse,
   RouteRequest,
   SignupRequest,
@@ -43,6 +45,7 @@ export const keys = {
   telemetryHeartbeat: (id: string) => ['vms', id, 'telemetry-heartbeat'] as const,
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
+  phoneLink: ['display', 'phone-link'] as const,
 };
 
 /**
@@ -85,10 +88,9 @@ function useWithoutStaleData<TData, TError>(
 }
 
 /**
- * pollMs: VM Control 은 1초 (관측 시각이 초 단위로 바뀌게), 나머지는 LIVE_POLL_MS.
  * keepLastData: 실패해도 마지막 목록을 남긴다 — 화면이 직접 "조회 불가" 로 표시할 때만 (대시보드 Overview 카드)
  */
-export function useVms(pollMs = LIVE_POLL_MS, { keepLastData = false }: { keepLastData?: boolean } = {}) {
+export function useVms({ keepLastData = false }: { keepLastData?: boolean } = {}) {
   return useWithoutStaleData(
     useQuery({
       queryKey: keys.vms,
@@ -103,7 +105,12 @@ export function useVms(pollMs = LIVE_POLL_MS, { keepLastData = false }: { keepLa
           throw error;
         }
       },
-      refetchInterval: pollMs,
+      // VM 목록 조회는 dom0-manager 동기화를 포함하므로 사용자 요청 없이 반복하지 않는다.
+      refetchInterval: false,
+      refetchOnMount: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      staleTime: Infinity,
       // 새로고침 직후에는 이 탭이 마지막으로 받은 목록을 먼저 보여 주고 곧바로 다시 읽는다 (S15P31E110-345)
       initialData: () => loadVmList()?.data,
       initialDataUpdatedAt: () => loadVmList()?.savedAt,
@@ -320,6 +327,33 @@ export function useRouteDisplay() {
     mutationFn: ({ displayId, body }: { displayId: string; body: RouteRequest }) =>
       request<Display>(`/api/v1/displays/${encodeURIComponent(displayId)}/route`, { method: 'PUT', body }),
     onSettled: () => client.invalidateQueries({ queryKey: keys.displays }),
+  });
+}
+
+/** USB 휴대폰 화면 연결 상태 (REST-38). 케이블·테더링 변화가 보이게 몇 초마다 다시 읽는다 */
+export function usePhoneLink() {
+  return useQuery({
+    queryKey: keys.phoneLink,
+    queryFn: ({ signal }) => request<PhoneLinkStatus>('/api/v1/display/phone-link', { signal }),
+    refetchInterval: 5000,
+    retry: false,
+  });
+}
+
+/**
+ * 새 연결번호 발급 (REST-39). 이미 연결된 휴대폰이 끊기고 앞 번호가 무효가 되므로 재시도하지 않는다.
+ * 번호는 호출한 컴포넌트의 상태에만 둔다 (쿼리 캐시에 넣지 않음).
+ */
+export function useIssuePhonePairingCode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<PhonePairingCode>('/api/v1/display/phone-link/pairing-code', { method: 'POST' }),
+    retry: false,
+    // 상태를 다시 읽는 것은 기다리지 않는다 (보드 왕복 동안 번호 표시가 늦어지지 않게)
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.phoneLink });
+    },
   });
 }
 
