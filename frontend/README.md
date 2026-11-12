@@ -45,8 +45,8 @@ docker run --rm -p 8080:8080 xenova-admin-console
 docker run --rm -p 8081:8080 xenova-vm-screens
 ```
 
-두 이미지는 Nginx에서 SPA 경로 새로고침을 지원하고 `/healthz`로 상태를 확인합니다. 관리 콘솔의
-모니터 링크 주소는 이미지 빌드 시 `--build-arg VITE_SCREENS_ORIGIN=...`으로 지정할 수 있습니다.
+두 이미지는 Nginx에서 SPA 경로 새로고침을 지원하고 `/healthz`로 상태를 확인합니다.
+(관리 콘솔은 모니터 화면 링크를 더 두지 않아 `VITE_SCREENS_ORIGIN` 빌드 인자를 쓰지 않습니다.)
 API·WebSocket 프록시와 운영 도메인은 배포 Nginx 설정에서 연결합니다.
 
 - 콘솔 환경변수는 `apps/admin-console/.env.example` 을 `.env.local` 로 복사해 바꿉니다 (`VITE_BACKEND_ORIGIN`, `VITE_API_BASE_URL`, `VITE_MOCK`).
