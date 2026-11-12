@@ -777,8 +777,10 @@ class Execution:
             failure = ExecutionError('DEADLINE_EXCEEDED' if expired else 'OBSERVATION_UNAVAILABLE', 'Xen list observation could not be verified',
                                      details={'cause_type':type(error).__name__})
         for record in records:
-            if _read_context is None:self.note_probe_error(record['uuid'],failure.error)
-            else:self.note_probe_error(record['uuid'],failure.error,_started_ms=_read_context.started_ms)
+            if _read_context is not None and self.p.clock() >= deadline:
+                break
+            started_ms = _read_context.started_ms if _read_context is not None else None
+            self.note_probe_error(record['uuid'], failure.error, _started_ms=started_ms)
         failure.observation_error_handled = True
         raise failure
 
@@ -938,8 +940,10 @@ class Execution:
             value = previous if previous and previous.get("host_boot_id") == self.host else {
                 "schema_version":"1.0", "vm_id":identity, "host_boot_id":self.host,
                 "observation_revision":0, "last_success":None}
+            # 조회 실패의 순서는 종료 시점이 아니라 관측을 시작한 시점으로 비교한다.
+            attempt_ms = _started_ms if _started_ms is not None else int(self.p.clock()*1000)
             self.write(path, {**value, "last_error":{"code":code},
-                             "last_attempt_monotonic_ms":int(self.p.clock()*1000)})
+                             "last_attempt_monotonic_ms":attempt_ms})
 
     def snapshot(self, identity, max_age_ms):
         if type(max_age_ms) is not int or not 0 < max_age_ms <= 120000:

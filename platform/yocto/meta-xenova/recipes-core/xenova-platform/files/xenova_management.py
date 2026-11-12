@@ -2150,7 +2150,8 @@ class Manager:
             if action in ('get','list','intents','registrations','recovery-intents','probe','execution-context','templates','operation','control-operation','recovery-operation'):
                 self.p.response_deadline=min(self.p.response_deadline,deadline)
                 if action in ('get','list','probe','execution-context'):
-                    with observation_slot(self.p.runtime,deadline=deadline,clock=self.p.clock) as fd:
+                    with observation_slot(self.p.runtime, deadline=deadline, clock=self.p.clock,
+                                          whole_registry=action=='list') as fd:
                         previous_fds=_output.fds
                         _output.fds=(*previous_fds,fd)
                         try:result=self._query(action,spec,context,deadline)
