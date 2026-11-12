@@ -217,6 +217,28 @@ class TapeImageTests(unittest.TestCase):
         self.assertTrue(all(all(v is not None and v >= s.error_m for v in s.endpoint_error_m)
                             for s in graph.strips))
 
+    def test_dim_tape_edge_joins_bright_core_without_joining_the_carpet(self):
+        from xenova_vehicle.perception.tape import _white_band
+
+        np = self.np
+        hsv = np.zeros((32, 40, 3), dtype=np.uint8)
+        hsv[..., 2] = 35
+        hsv[5:27, 4:6, 2] = (165, 245)
+        hsv[4:28, 20:34, 2] = 170
+        hsv[5:27, 19, 2] = 245
+        hsv[5:27, 37, 2] = 165
+        visible = np.ones(hsv.shape[:2], dtype=np.bool_)
+        visible[15, 4] = False
+
+        mask = _white_band(np, self.cv2, hsv, visible, replace(self.profile, cell_m=.01))
+
+        self.assertTrue(mask[16, 4])
+        self.assertTrue(mask[16, 5])
+        self.assertTrue(mask[16, 19])
+        self.assertFalse(mask[16, 20])
+        self.assertFalse(mask[16, 37])
+        self.assertFalse(mask[15, 4])
+
     def test_four_and_five_cm_dash_tape_survives_and_forms_a_divider(self):
         from xenova_vehicle.perception.calibration import CameraModel
 

@@ -130,7 +130,7 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
 
-흰선 추출은 `pipeline.tape.value_min`에 HSV 밝기 하한 `185`(0–255)를 적용해 밝은 카펫과 테이프가 한 영역으로 붙는 것을 줄인다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
+흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
 
 실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 `mapper-profile.json`에 기록한다. 폼보드 코스에서 기존 mapper 프로필을 재사용할 때는 `pipeline.tape`의 `value_min`을 `185`, `min_strip_length_m`을 `0.02`로 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
 

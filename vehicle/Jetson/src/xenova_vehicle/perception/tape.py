@@ -15,6 +15,7 @@ from .geometry import timing_start, timing_finish
 
 
 ENDPOINT_KINDS = frozenset(('physical_junction', 'observed_paint_end', 'FOV_clip', 'occluded', 'predicted'))
+_EDGE_VALUE_MIN = 150
 
 
 @dataclass(frozen=True)
@@ -459,6 +460,33 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
     return strips, junctions, complete
 
 
+def _white_band(np, cv2, hsv, visible, profile):
+    """Recover dim tape edges next to bright paint when the local band is narrow."""
+    values = hsv[..., 2]
+    eligible = visible & (hsv[..., 1] <= profile.saturation_max)
+    strong = eligible & (values >= profile.value_min)
+    weak = eligible & (values >= _EDGE_VALUE_MIN) & ~strong
+    if profile.value_min <= _EDGE_VALUE_MIN or not strong.any() or not weak.any():
+        return strong
+    # Only an immediately adjacent pixel can extend the bright core.
+    connected = cv2.dilate(strong.astype(np.uint8), np.ones((3, 3), np.uint8)) != 0
+    weak &= connected
+    if not weak.any():
+        return strong
+
+    # Opening across the strip estimates the brightness around a narrow band.
+    # Unobserved pixels must never supply a dark background at a clipped edge.
+    luminance = np.where(visible, values, 255).astype(np.uint8)
+    background = luminance.copy()
+    half_width_cells = profile.tape_width_max_m / (2 * profile.cell_m)
+    horizontal = np.ones((1, 2 * int(half_width_cells) + 3), dtype=np.uint8)
+    diagonal = np.eye(2 * int(half_width_cells / math.sqrt(2)) + 3, dtype=np.uint8)
+    for kernel in (horizontal, horizontal.T, diagonal, np.fliplr(diagonal).copy()):
+        opened = cv2.morphologyEx(luminance, cv2.MORPH_OPEN, kernel)
+        np.minimum(background, opened, out=background)
+    return strong | (weak & (cv2.subtract(values, background) >= profile.contrast_min))
+
+
 def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None, nn_candidates=None, diagnostics=None):
     """원 RGB만으로 white-band 후보를 만들고 가림/경계 tip을 보존한다. NN은 mask gate가 아니다."""
     timing=timing_start(diagnostics,'tape.birdview_remap')
@@ -486,7 +514,7 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
     timing_finish(diagnostics,timing)
     timing=timing_start(diagnostics,'tape.mask')
     hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
-    white = valid & ~occ & (hsv[..., 1] <= profile.saturation_max) & (hsv[..., 2] >= profile.value_min)
+    white = _white_band(np, cv2, hsv, valid & ~occ, profile)
     work = dict(grid_cells=int(white.size), components=0, component_cells=0, thin_iterations=0,
                 graph_pixels=0, projection_checks=0, projection_batches=0,
                 projection_unbounded=0, projection_limited=0, edge_tests=0)
