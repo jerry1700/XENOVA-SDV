@@ -110,7 +110,8 @@ class MapperWorldTests(unittest.TestCase):
         summary = dict(kind='LIVE', calibration_id=self.calibration.sha256, rgb_source_key=stamp.key,
             now_us=self.now, localization_qualified=True, quarantined=False, alignment_metadata=self.alignment.fields())
         result = PerceptionResult(summary, TapeGraph((), source_key=stamp.key), road, None, None,
-            self.grid.snapshot(self.now, clock_id=stamp.clock_id), None)
+            self.grid.snapshot(self.now, clock_id=stamp.clock_id), None,
+            mapped_odometry=self.alignment.apply(self.inputs.pose))
         catalog = CatalogDraft(self.item, self.context, 0, self.state)
         self.draft = MappingFrameDraft(self.item, self.context, self.pipeline, None, self.inputs, frame,
             None, 0, True, 'READY', catalog, result)
@@ -145,6 +146,7 @@ class MapperWorldTests(unittest.TestCase):
         self.assertEqual((loc.registration_revision, loc.observed_mapper_us, loc.valid_for_us, loc.timestamp_error_us),
             (9, 1_000_000, 100_000, 200))
         self.assertGreaterEqual(loc.anchor_position_bound_m, expected.position_error_m)
+        self.assertAlmostEqual(loc.anchor_position_bound_m, expected.position_error_m, places=7)
         self.assertGreaterEqual(loc.position_drift_bound_mps, self.alignment.position_drift_mps)
         self.assertEqual(value.calibration, self.calibration.vehicle_bundle_sha256)
         self.assertEqual(built.source.calibration_id, self.calibration.sha256)
@@ -185,6 +187,35 @@ class MapperWorldTests(unittest.TestCase):
         self.assertEqual(value.localization.observed_mapper_us,1_000_000)
         self.assertEqual(value.localization.valid_for_us,100_000)
         self.assertGreaterEqual(value.localization.anchor_position_bound_m,.018)
+
+    def test_uncorrected_capture_uses_the_same_earlier_anchor_as_the_grid(self):
+        latest = replace(self.alignment, position_error_m=.045, yaw_error_rad=.01)
+        earlier = replace(latest, pose=(latest.pose[0]-.025, *latest.pose[1:]),
+                          position_error_m=.035, yaw_error_rad=.002,
+                          registration_revision=latest.registration_revision-1)
+        self.pipeline._alignment = latest
+        self.pipeline._propagation_anchor = earlier
+        _, mapped_capture = self.pipeline._propagate_odometry(self.inputs.pose)
+        self.assertEqual(mapped_capture, earlier.apply(self.inputs.pose))
+        bias = self.pipeline._yaw_bias.summary()
+        self.assertFalse(bias['applied'])
+        summary = dict(self.draft.result.summary, alignment_metadata=latest.fields())
+        result = replace(self.draft.result, summary=summary, mapped_odometry=mapped_capture, yaw_bias=bias)
+        value = self.build(draft=replace(self.draft, result=result)).message()
+        wire_sample = PoseEstimate(self.vehicle.pose_sample, self.vehicle.j_interval, self.vehicle.j_interval)
+        expected = earlier.apply(wire_sample).sample
+        self.assertAlmostEqual(latest.apply(wire_sample).sample.x-expected.x, .025, places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.x, expected.x, places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.y, expected.y, places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.yaw, expected.yaw, places=7)
+        self.assertAlmostEqual(value.localization.anchor_position_bound_m, expected.position_error_m, places=7)
+        self.assertEqual(value.reference_odom_seq, self.vehicle.anchor.sequence)
+        self.assertEqual(value.localization.registration_revision, latest.registration_revision)
+        self.assertEqual(value.localization.valid_for_us, latest.valid_for_us)
+
+    def test_missing_capture_pose_holds_world_publication(self):
+        result = replace(self.draft.result, mapped_odometry=None)
+        self.assertIsNone(self.build(draft=replace(self.draft, result=result)))
 
     def test_original_alignment_expiry_and_completion_order_cannot_be_renewed(self):
         self.assertIsNone(self.build(published_j_us=self.alignment.observed_j_interval[0]+self.alignment.valid_for_us))
