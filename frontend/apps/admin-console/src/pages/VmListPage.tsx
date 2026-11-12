@@ -48,9 +48,11 @@ export function VmListPage() {
     });
 
   const items = useMemo(() => sortVms(vms.data?.items ?? []), [vms.data?.items]);
-  const running = items.filter((vm) => vm.state === 'running').length;
-  const vcpus = items.reduce((sum, vm) => sum + vm.vcpus, 0);
-  const memory = items.reduce((sum, vm) => sum + vm.memory_mib, 0);
+  const runningVms = items.filter((vm) => vm.state === 'running');
+  const running = runningVms.length;
+  // 사용 중 = 실행 중 VM 의 할당 합계. 등록된 VM 전체 합계는 보조 줄
+  const usage = resourceTotals(runningVms);
+  const registered = resourceTotals(items);
   const visiblePendingCreations = useMemo(
     () =>
       pendingCreations.filter(
@@ -98,8 +100,16 @@ export function VmListPage() {
       <section className={styles.controlSummary} aria-label="VM 자원 요약">
         <SummaryItem label="TOTAL VMS" value={`${items.length}대`} />
         <SummaryItem label="RUNNING" value={`${running}대`} tone="ok" />
-        <SummaryItem label="ALLOCATED VCPU" value={`${vcpus} / 4 cores`} />
-        <SummaryItem label="ALLOCATED MEMORY" value={`${memory} MiB`} />
+        <SummaryItem
+          label="VCPU IN USE"
+          value={`${usage.vcpus} vCPU`}
+          note={`등록 ${registered.vcpus} vCPU · 물리 4코어 공유`}
+        />
+        <SummaryItem
+          label="MEMORY IN USE"
+          value={formatMiB(usage.memoryMib)}
+          note={`등록 ${formatMiB(registered.memoryMib)}`}
+        />
       </section>
 
       <LiveDataAlert />
@@ -265,14 +275,36 @@ export function VmListPage() {
   );
 }
 
-function SummaryItem({ label, value, tone }: { label: string; value: string; tone?: 'ok' }) {
+function SummaryItem({
+  label,
+  value,
+  tone,
+  note,
+}: {
+  label: string;
+  value: string;
+  tone?: 'ok';
+  /** 값 아래 작은 보조 줄 */
+  note?: string;
+}) {
   return (
     <div className={styles.controlSummaryItem} data-tone={tone}>
       <span>{label}</span>
       <strong>{value}</strong>
+      {note && <small>{note}</small>}
     </div>
   );
 }
+
+/** VM 들의 vCPU·메모리 할당 합계 */
+function resourceTotals(vms: readonly Pick<Vm, 'vcpus' | 'memory_mib'>[]) {
+  return vms.reduce(
+    (sum, vm) => ({ vcpus: sum.vcpus + vm.vcpus, memoryMib: sum.memoryMib + vm.memory_mib }),
+    { vcpus: 0, memoryMib: 0 },
+  );
+}
+
+const formatMiB = (mib: number) => `${mib.toLocaleString('ko-KR')} MiB`;
 
 /** 등록 동기화 결과를 한 줄로. 바뀐 것이 없으면 그렇게 말한다 */
 function synchronizationSummary(result: VmSynchronizationResult): string {

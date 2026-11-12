@@ -141,3 +141,28 @@ describe('VM 등록 동기화 버튼', () => {
     expect(screen.getByText('debian-dev')).toBeInTheDocument();
   });
 });
+
+describe('VM 자원 요약', () => {
+  it('vCPU·메모리는 실행 중 VM 만 합산하고, 등록 VM 전체 합계는 보조 줄로 보인다', async () => {
+    const items = [
+      { ...VM, vm_id: 'vm-1', name: 'a', state: 'running', vcpus: 1, memory_mib: 512 },
+      { ...VM, vm_id: 'vm-2', name: 'b', state: 'running', vcpus: 2, memory_mib: 1024 },
+      { ...VM, vm_id: 'vm-3', name: 'c', state: 'stopped', vcpus: 1, memory_mib: 256 },
+    ] as VmListResponse['items'];
+    stubBackend(
+      () => Response.json({ items, observed_at: new Date().toISOString() }),
+      () => Promise.resolve(Response.json(sync())),
+    );
+    renderPage();
+    const summary = await screen.findByRole('region', { name: 'VM 자원 요약' });
+    await waitFor(() => expect(summary).toHaveTextContent('VCPU IN USE3 vCPU'));
+    const vcpu = screen.getByText('VCPU IN USE').parentElement!;
+    expect(vcpu.querySelector('strong')).toHaveTextContent(/^3 vCPU$/);
+    expect(vcpu.querySelector('small')).toHaveTextContent(/^등록 4 vCPU · 물리 4코어 공유$/);
+    const memory = screen.getByText('MEMORY IN USE').parentElement!;
+    expect(memory.querySelector('strong')).toHaveTextContent(/^1,536 MiB$/);
+    expect(memory.querySelector('small')).toHaveTextContent(/^등록 1,792 MiB$/);
+    expect(summary).not.toHaveTextContent('/ 4 cores');
+    expect(screen.queryByText('ALLOCATED VCPU')).not.toBeInTheDocument();
+  });
+});
