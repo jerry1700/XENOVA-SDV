@@ -140,16 +140,27 @@ export interface UpdateVcpuPinningRequest {
   mappings: VcpuPinning[];
 }
 
-export interface UpdateMemoryRequest {
+export interface UpdateVmResourcesRequest {
+  vcpus: number;
   memory_mib: number;
 }
 
+/** Mock 핀닝 계약의 기존 개별 필드 타입. */
 export interface UpdateVcpusRequest {
   vcpus: number;
 }
 
-export type VmResourceUpdate =
-  { kind: 'memory'; body: UpdateMemoryRequest } | { kind: 'vcpus'; body: UpdateVcpusRequest };
+export interface UpdateMemoryRequest {
+  memory_mib: number;
+}
+
+export interface VmResourceUpdateResult {
+  vm_id: string;
+  operation_id: string | null;
+  before: { vcpus: number; memory_mib: number };
+  after: { vcpus: number; memory_mib: number };
+  applies_on_next_start: boolean;
+}
 
 /** POST /api/v1/vms/{id}/stress/cpu — workers 1~4, duration_s 1~120 */
 export interface CpuStressRequest {
