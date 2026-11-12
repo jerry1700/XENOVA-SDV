@@ -65,6 +65,8 @@ def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sh
     tape = TapeProfile()
     mapper_fields['pipeline']['tape'].update(
         value_min=tape.value_min, min_strip_length_m=tape.min_strip_length_m)
+    # R45 replay acceptance limit for the measured-course development profile.
+    mapper_fields['pipeline']['registration']['max_position_error_m'] = .065
     width, tolerance = geometry['lane_width_m'], geometry['lane_width_tolerance_m']
     mapper_fields['pipeline']['road'].update(lane_width_min_m=width - tolerance, lane_width_max_m=width + tolerance)
     mapper = MapperProfile.from_dict(mapper_fields)
