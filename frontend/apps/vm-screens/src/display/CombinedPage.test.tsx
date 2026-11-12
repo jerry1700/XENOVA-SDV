@@ -4,9 +4,12 @@ import { CombinedPage } from './CombinedPage';
 import { presentationFixture } from './fixture';
 import type { Presentation } from './model';
 import { themeAt } from './theme';
-import { useDisplay } from './useDisplay';
+import { DISPLAY_PROBLEM_TEXT, useDisplay, type DisplayProblem } from './useDisplay';
 
-vi.mock('./useDisplay', () => ({ useDisplay: vi.fn() }));
+vi.mock('./useDisplay', async (original) => ({
+  ...(await original<typeof import('./useDisplay')>()),
+  useDisplay: vi.fn(),
+}));
 
 /** 음원은 jsdom 에서 재생되지 않으므로 이벤트만 흉내 낸다 */
 class AudioFake extends EventTarget {
@@ -65,13 +68,24 @@ function driving(o: Overrides = {}): Presentation {
   return p;
 }
 
-function show(p: Presentation | null, connected = true) {
-  vi.mocked(useDisplay).mockReturnValue({ presentation: p, connected, error: connected ? null : '끊김' });
+function displayOf(p: Presentation | null, connected: boolean, problem: DisplayProblem = 'network') {
+  return connected
+    ? { presentation: p, connected, problem: null, error: null }
+    : { presentation: p, connected, problem, error: DISPLAY_PROBLEM_TEXT[problem] };
+}
+
+function show(p: Presentation | null, connected = true, problem?: DisplayProblem) {
+  vi.mocked(useDisplay).mockReturnValue(displayOf(p, connected, problem));
   return render(<CombinedPage />);
 }
 
-function next(p: Presentation, rerender: (ui: React.ReactElement) => void, connected = true) {
-  vi.mocked(useDisplay).mockReturnValue({ presentation: p, connected, error: connected ? null : '끊김' });
+function next(
+  p: Presentation,
+  rerender: (ui: React.ReactElement) => void,
+  connected = true,
+  problem?: DisplayProblem,
+) {
+  vi.mocked(useDisplay).mockReturnValue(displayOf(p, connected, problem));
   rerender(<CombinedPage />);
 }
 
@@ -347,7 +361,8 @@ describe('운전자 화면 공통', () => {
   it('표시 연결이 끊기면 알리고 값을 지운다. 시각은 계속 보인다', () => {
     const { rerender } = show(driving());
     next(driving(), rerender, false);
-    expect(screen.getByRole('alert')).toHaveTextContent('현재 값은 미확인');
+    expect(screen.getByRole('alert')).toHaveTextContent('수집기에 연결할 수 없습니다');
+    expect(screen.getByRole('alert')).toHaveAttribute('title', expect.stringContaining('현재 값은 미확인'));
     expect(screen.getByTestId('link')).toHaveTextContent('연결 끊김');
     expect(screen.getByTestId('speed-value')).toHaveTextContent('—');
     expect(screen.getByTestId('speed-max')).toHaveTextContent('MAX —');
@@ -355,6 +370,21 @@ describe('운전자 화면 공통', () => {
     expect(screen.getByTestId('steer-value')).toHaveTextContent('—');
     expect(screen.getByTestId('drive-mode')).toHaveTextContent('미확인');
     expect(screen.getByTestId('clock').textContent).not.toBe('');
+  });
+
+  it('오류 표시는 한 줄 고정 문구만 (원문·여러 줄 상자 없음)', () => {
+    show(driving(), false, 'timeout');
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(/^표시 데이터 응답이 늦습니다$/);
+    expect(alert.querySelector('br')).toBeNull();
+    expect(screen.getByTestId('combined')).not.toHaveTextContent(/signal|abort|fetch/i);
+  });
+
+  it('갱신 멈춤이면 연결 줄에 갱신 멈춤, 값은 미확인', () => {
+    show(driving(), false, 'stalled');
+    expect(screen.getByTestId('link')).toHaveTextContent('갱신 멈춤');
+    expect(screen.getByRole('alert')).toHaveTextContent('데이터 갱신이 멈췄습니다');
+    expect(screen.getByTestId('speed-value')).toHaveTextContent('—');
   });
 
   it('처음부터 수신 전이어도 빈 값으로 같은 화면을 그린다', () => {

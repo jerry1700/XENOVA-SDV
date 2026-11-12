@@ -110,9 +110,11 @@
 }
 
 /* 파형 진행 바: 막대 여러 개, 진행된 부분만 강조색 (보기 전용) */
+/* 높이가 모자라면(휴대폰 주소창 등) 파형이 먼저 줄어든다 (최소 16px) */
 .wave {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
+  min-height: 16px;
   align-items: center;
   gap: max(1px, calc(2 * var(--u, 1px)));
   width: calc(100% - var(--g, 10px));

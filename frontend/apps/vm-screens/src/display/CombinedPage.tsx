@@ -143,7 +143,7 @@ function SideBar({ id, fraction, tone }: { id: string; fraction: number | null; 
 export function CombinedPage() {
   const audio = useDisplayAudio();
   const now = useClock();
-  const { presentation: p, connected, error } = useDisplay();
+  const { presentation: p, connected, problem, error } = useDisplay();
   const summary = driveSummary(p, connected);
   const mode = driverMode(summary);
   const vehicle = connected ? vehicleOf(p) : null;
@@ -183,11 +183,17 @@ export function CombinedPage() {
           </ModeChip>
           <span className={styles.link} data-connected={connected} data-testid="link">
             <LinkIcon className={styles.inlineIcon} />
-            {connected ? '연결됨' : '연결 끊김'}
+            {connected ? '연결됨' : problem === 'stalled' ? '갱신 멈춤' : '연결 끊김'}
           </span>
           {!connected && (
-            <p role="alert" className={styles.alert}>
-              {error ?? '연결 대기'} · 현재 값은 미확인입니다.
+            // 카드를 밀어내지 않게 한 줄 (넘치면 말줄임). 문구는 실패 종류별 고정 한국어 문구, 값은 모두 "—"·미확인
+            <p
+              role="alert"
+              className={styles.alert}
+              title={`${error ?? '연결 대기'} · 현재 값은 미확인입니다`}
+              data-testid="link-alert"
+            >
+              {error ?? '연결 대기'}
             </p>
           )}
         </div>
