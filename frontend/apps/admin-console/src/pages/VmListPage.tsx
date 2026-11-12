@@ -76,9 +76,7 @@ export function VmListPage() {
           <p className={styles.headingDescription}>VM 생성과 생명주기, 할당 자원을 관리합니다.</p>
         </div>
         <div className={styles.controlHeadingActions}>
-          {vms.data && (
-            <ObservedClock at={observedAt(vms.data.observed_at, vms.dataUpdatedAt)} />
-          )}
+          {vms.data && <ObservedClock at={observedAt(vms.data.observed_at, vms.dataUpdatedAt)} />}
           <Button variant="secondary" onClick={() => void synchronize()} disabled={vms.isFetching}>
             {vms.isFetching ? '동기화 중…' : 'VM 동기화'}
           </Button>
