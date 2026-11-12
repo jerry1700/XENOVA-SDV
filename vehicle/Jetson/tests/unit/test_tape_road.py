@@ -273,6 +273,35 @@ class TapeImageTests(unittest.TestCase):
         self.assertFalse(mask[16, 37])
         self.assertFalse(mask[15, 4])
 
+    def test_closing_respects_metric_gap_length_and_the_entire_occlusion_mask(self):
+        from xenova_vehicle.perception.tape import _close_tape_gaps
+
+        np = self.np
+        white = np.zeros((20, 25), dtype=np.bool_)
+        white[[2, 5], 2] = True
+        white[[2, 5], 7] = True
+        white[[2, 6], 12] = True
+        white[10, [2, 5]] = True
+        white[[12, 14], [12, 14]] = True
+        white[[12, 14], [22, 20]] = True
+        eligible = np.ones_like(white)
+        eligible[3, 7] = False
+
+        filled = _close_tape_gaps(white, eligible, .005)
+
+        expected = white.copy()
+        expected[3:5, 2] = expected[10, 3:5] = True
+        expected[13, [13, 21]] = True
+        np.testing.assert_array_equal(filled, expected)
+        self.assertFalse(white[3, 2])
+
+        white[17, [2, 4]] = True
+        one_cm_grid = _close_tape_gaps(white, eligible, .01)
+        self.assertTrue(one_cm_grid[17, 3])
+        self.assertTrue(one_cm_grid[13, 13])
+        self.assertFalse(one_cm_grid[3:5, 2].any())
+        np.testing.assert_array_equal(_close_tape_gaps(white, eligible, .02), white)
+
     def test_four_and_five_cm_dash_tape_survives_and_forms_a_divider(self):
         from xenova_vehicle.perception.calibration import CameraModel
 

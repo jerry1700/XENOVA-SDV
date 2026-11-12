@@ -135,8 +135,9 @@ def _ground_raster(scene):
         j = (i + 1) % len(center)
         cv2.fillPoly(raster, [pixels((left[i], left[j], right[j], right[i]))], (35, 35, 35))
     thickness = max(1, round(.025 / resolution))
+    road_edges = np.zeros((height, width), np.uint8)
     for edge in (left, right):
-        cv2.polylines(raster, [pixels(edge)], True, (245, 245, 245), thickness)
+        cv2.polylines(road_edges, [pixels(edge)], True, 1, thickness)
     # 누적 arc의 ON 구간과 교차한 부분만 칠한다. raster/선 두께의 끝점 양자화는 남는다.
     station = 0.0
     for a, b in zip(center, np.roll(center, -1, axis=0)):
@@ -154,7 +155,13 @@ def _ground_raster(scene):
     paved = np.zeros((height, width), np.uint8)
     for polygon in layout['paved_areas']:
         cv2.fillPoly(paved, [pixels(polygon)], 1)
-    raster[cv2.dilate(paved, np.ones((3, 3), np.uint8)) > 0] = (35, 35, 35)
+    opening = cv2.dilate(paved, np.ones((3, 3), np.uint8)) != 0
+    raster[opening] = (35, 35, 35)
+    # 직접 맞닿은 칸은 도로 경계 테이프를 공유한다. 별도 연결 마당의 개구부는 유지한다.
+    bay_edges = np.zeros_like(paved)
+    for bay in layout.get('parking_slots', ()):
+        cv2.polylines(bay_edges, [pixels(bay['outline'])], True, 1, thickness + 2)
+    raster[(road_edges != 0) & (~opening | (bay_edges != 0))] = (245, 245, 245)
     for line in layout['paint_lines']:
         cv2.polylines(raster, [pixels(line)], False, (245, 245, 245), thickness)
     cv2.line(raster, tuple(pixels(left[0])), tuple(pixels(right[0])), (245, 245, 245), thickness)

@@ -132,11 +132,15 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
 
+바닥 투영 마스크에서 양쪽에 흰선이 검출된 틈은 빈 구간이 약 1.41cm(1cm 격자의 대각선 한 셀) 이하이고 그 안의 모든 셀이 시야 안에 있으며 가려지지 않았을 때 선 조각 추출 전에 메운다. 대각선 셀 길이도 실제 거리로 계산한다.
+
 실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 개발용 `mapper-profile.json`에 기록한다. 이 프로필은 R45 재생 결과를 바탕으로 `pipeline.registration.max_position_error_m`에 `0.065`m를 적용한다. 같은 개발 시험에 기존 mapper 프로필을 재사용할 때도 세 값을 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
 
 `pipeline.road.missing_outer_width_bounds_m`는 가려진 도로 바깥 경계를 추정할 차로 폭 범위(m)다. 폼보드 코스의 초기값은 `[0.26, 0.31]`로, 명목 폭은 0.285m다. 이 항목이 없던 schema1 파일도 원본 바이트를 유지하며 이 초기값을 쓴다. `lane_width_min_m`·`lane_width_max_m`은 영상에 보인 경계 간격을 검사하는 범위다. 인지 요약의 `current_lane`은 지도에 연결한 차로 중심과 원 관측 키·시각을 제공한다. `MAPPED`는 현재 위치에서 앞서 관측한 지도 조각을 사용한다는 뜻이고, `HELD`는 마지막 차로 정보를 보존하는 상태다.
 
-선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": [0]}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 통로별 index는 관측 divider 방향의 왼쪽 차로0·오른쪽 차로1이며 `parking_aisles`와 같은 순서/개수다. 실제 lane ID는 D의 원 내구 예약 뒤 결박하므로 이 정책을 쓸 때 각 aisle의 `approach_lane_id`는0이어야 한다. 생략/null은 미설정이며 자동 횡단·주차 역할을 추정하지 않는다. 이 설정은 FREE/기하/센서 자격이나 추진 승인을 대신하지 않는다.
+선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": []}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 미리 정한 `parking_aisles`가 있다면 같은 순서로 왼쪽 차로 0·오른쪽 차로 1을 지정하고, 각 통로의 `approach_lane_id`는 0으로 둔다. 실제 ID는 카탈로그가 차로를 채택할 때 결정한다. `catalog_policy`를 생략하면 횡단 정책이 없어 주행용 차로를 발행하지 않는다.
+
+`parking_aisles`와 `aisle_lane_indices`를 빈 목록으로 두면 누적 흰선에서 입구 후보를 찾고, 주행용으로 채택된 차로의 바깥 경계와 연결한다. 현재 영상에서 입구와 주차칸 경계가 확인되면 기존 `WorldSnapshot.parking_slots`에 넣는다. 깊이로 칸 전체의 빈 공간이 확인되기 전에는 점유를 `UNKNOWN`으로 둔다. 깊이 처리에서는 현재 정지에 필요한 셀을 먼저 확인한다. 최종 접근·주차 경로와 차량 통과 여부는 Pi가 판단한다.
 
 선택 항목 `survey`는 `SurveyProfile`의 12개 필드를 모두 명시한다. 원 coverage profile SHA·필수 센서 mask·셀 용량·정지 관측 창과 간격·이동/회전 오차·pose 간격·anchor 오차·관측 최대 나이·입력 종류를 설정하며 `input_kind`는 `LIVE`만 허용한다. 생략/null이면 조사 기능을 만들지 않는다. 설정만으로 Scene을 승인하지 않으며 실제 Pi grant, 원 시계·정합·정지 창·FREE 증거와 D commit을 별도로 대조한다.
 
