@@ -305,6 +305,59 @@ class RecoveryEventsResponse(BaseModel):
     gap: bool = Field(description="after_event_id 가 보관 범위 밖이거나 커서 뒤의 보관 줄이 손상돼 그 이후 이력을 잃었을 수 있음")
 
 
+# ---- USB 휴대폰 화면 중계 (계약 4.13) ----
+
+
+class PhoneRelayState(str, Enum):
+    listening = "listening"  # 실행 중이고 접속 주소가 있음
+    waiting_link = "waiting_link"  # 실행 중이지만 쓸 수 있는 USB 링크가 없음(케이블·테더링·주소)
+    starting = "starting"  # 시작 중 또는 실패 뒤 자동 재시작 대기
+    stopped = "stopped"  # 꺼짐. 재부팅 뒤 기본값(opt-in)
+    failed = "failed"
+    unknown = "unknown"
+
+
+class PhoneUsbLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interface: str
+    present: bool = Field(description="USB 네트워크 장치가 있는가(테더링 켜짐)")
+    ipv4: list[str] = Field(description="보드 쪽 주소(주소/접두어). 휴대폰 DHCP 가 준 값")
+    gateway: str | None = Field(default=None, description="DHCP 기본 경로의 게이트웨이 = 휴대폰 주소. 없으면 null")
+
+
+class PhonePairingStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active: bool = Field(description="아직 쓰지 않았고 만료되지 않은 연결번호가 있음. 번호 값은 담지 않는다")
+    expires_at: datetime | None = None
+
+
+class PhoneLinkStatus(BaseModel):
+    """계약 4.13. 연결번호 값은 담지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool = Field(description="중계 설정 파일이 있음")
+    relay: PhoneRelayState
+    url: str | None = Field(default=None, description="휴대폰 브라우저에서 열 주소. relay 가 listening 일 때만")
+    usb: PhoneUsbLink
+    configured_phone_ipv4: str | None = Field(default=None, description="중계 설정의 휴대폰 주소")
+    subnet_mismatch: bool | None = Field(
+        default=None, description="보드 USB 주소가 설정된 휴대폰 대역 밖(휴대폰이 테더링 대역을 바꿈). 판단할 수 없으면 null")
+    pairing: PhonePairingStatus
+    observed_at: datetime
+
+
+class PhonePairingCode(BaseModel):
+    """새로 발급한 연결번호. 이 응답에만 번호가 있다(저장·로그 금지)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    expires_at: datetime
+
+
 # ---- CPU 배치 조회 (S15P31E110-353, 계약 4.11) ----
 # 플랫폼 cpu-layout 응답의 공개 필드만 옮긴다(모르는 필드는 버린다). null 은 '해당 없음·모름'이며 true/false 로 채우지 않는다.
 

@@ -160,6 +160,8 @@ curl -i -X POST localhost:8081/api/v1/vms/11111111-1111-4111-8111-111111111111/s
 | `XENOVA_INSTANCE_ROOT` | `/srv/xenova/instances` | 인스턴스 루트 (xen 모드의 등록 확인용. platform 모드는 Manager의 data 경로를 씀) |
 | `XENOVA_RESPONSE_RESERVE` | `0.5` | 요청 예산(`X-Request-Budget-Ms`)이 있을 때 하위 호출에 넘기기 전에 응답 몫으로 남길 초. 실측 전 임시값, 0 이상 |
 | `XENOVA_MOCK_SAMPLES` | `0` | Mock 샘플 VM 3종 미리 생성 |
+| `XENOVA_PHONE_RUNTIME_DIR` | `/run/xenova-display-mobile` | USB 휴대폰 화면 중계의 런타임 폴더(`endpoint.json`·`pairing-code`). `GET/POST /api/v1/display/phone-link`(계약 4.13)가 읽는다 |
+| `XENOVA_PHONE_CONFIG` | `/etc/xenova/display-mobile.json` | 같은 중계의 설정(`usb_interface`·`phone_ipv4`). 없으면 `configured: false` |
 | `XENOVA_LOG_LEVEL` | `INFO` | |
 
 ## 구조

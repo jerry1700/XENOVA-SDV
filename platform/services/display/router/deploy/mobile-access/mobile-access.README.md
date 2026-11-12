@@ -108,6 +108,17 @@ cat /run/xenova-display-mobile/pairing-code
 ```
 
 코드를 다시 발급해도 feed·VM·Gateway를 재시작하지 않는다.
+
+관리 콘솔에서도 같은 일을 할 수 있다(2026-11-12). dom0-manager 가 이 서비스를 밖에서 읽고 신호를 보낸다
+(계약 `docs/contracts/vm-api-contract-v1.md` 4.13, 이 서비스 코드는 바뀌지 않음).
+
+- `GET /api/v1/display/phone-link`: 실행 상태, `endpoint.json`의 URL, `usb0` 실제 주소와 휴대폰(게이트웨이) 주소,
+  휴대폰 대역 불일치, 번호 남은 시간. 번호 값은 담지 않는다.
+- `POST /api/v1/display/phone-link/pairing-code`: 위의 `systemctl kill ... USR1` 과 같다. 새 번호를 그 응답에만 담는다.
+
+번호를 로그인한 운영자에게 웹으로 보여 주는 것은 허용한다. 운영자는 이미 SSH로 같은 파일을 읽을 수 있고, 번호는
+USB로 연결된 휴대폰에서만 2분·5회 안에 쓸 수 있기 때문이다. 대신 dom0-manager·Spring·브라우저 어디에도 저장하거나
+로그·URL·채팅·Git 에 남기지 않는다(응답은 `Cache-Control: no-store`).
 폰 세션은 최대 8시간이며 서비스 재시작 시 무효화된다. 만료되면 통합 화면에서 인증 필요를
 표시하고, 브라우저 새로고침으로 번호 입력 화면을 다시 연다.
 
