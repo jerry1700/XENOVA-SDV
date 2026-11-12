@@ -3,6 +3,7 @@ package com.xenova.backend.event.application;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.xenova.backend.vm.application.VmService;
@@ -30,5 +31,6 @@ class VmStateWatcherTest {
         InOrder order = inOrder(tracker, vmService);
         order.verify(tracker).mark();
         order.verify(vmService).list();
+        verifyNoMoreInteractions(vmService);
     }
 }
