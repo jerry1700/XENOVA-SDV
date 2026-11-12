@@ -17,14 +17,14 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.springframework.scheduling.annotation.Scheduled;
 
-class VmStateWatcherTest {
+class VmSyncServiceTest {
 
     private static final Vm VM = new Vm(
             "vm-1", "drive-1", GuestKind.LINUX, VmState.RUNNING, "debian", "1.0.0", 1, 256);
 
     @Test
     void checkIsNotScheduledAutomatically() throws NoSuchMethodException {
-        assertThat(VmStateWatcher.class.getMethod("check").getAnnotation(Scheduled.class)).isNull();
+        assertThat(VmSyncService.class.getMethod("sync").getAnnotation(Scheduled.class)).isNull();
     }
 
     @Test
@@ -32,9 +32,9 @@ class VmStateWatcherTest {
         VmService vmService = mock(VmService.class);
         VmStateTracker tracker = mock(VmStateTracker.class);
         when(vmService.list()).thenReturn(List.of());
-        VmStateWatcher watcher = new VmStateWatcher(vmService, tracker);
+        VmSyncService syncService = new VmSyncService(vmService, tracker);
 
-        watcher.check();
+        syncService.sync();
 
         InOrder order = inOrder(tracker, vmService);
         order.verify(tracker).mark();
@@ -50,7 +50,7 @@ class VmStateWatcherTest {
         when(vmService.list()).thenReturn(List.of(VM));
         when(tracker.touchedSince("vm-1", 7L)).thenReturn(true);
 
-        new VmStateWatcher(vmService, tracker).check();
+        new VmSyncService(vmService, tracker).sync();
 
         verify(tracker, never()).observed("vm-1", VmState.RUNNING);
     }
@@ -62,8 +62,9 @@ class VmStateWatcherTest {
         when(tracker.mark()).thenReturn(7L);
         when(vmService.list()).thenReturn(List.of(VM));
 
-        new VmStateWatcher(vmService, tracker).check();
+        List<Vm> result = new VmSyncService(vmService, tracker).sync();
 
         verify(tracker).observed("vm-1", VmState.RUNNING);
+        assertThat(result).containsExactly(VM);
     }
 }

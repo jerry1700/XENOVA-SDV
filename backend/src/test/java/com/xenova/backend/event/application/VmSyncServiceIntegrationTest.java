@@ -34,7 +34,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 
 @SpringBootTest
 @AutoConfigureMockMvc
-class VmStateWatcherIntegrationTest {
+class VmSyncServiceIntegrationTest {
 
     private static final String CREDENTIALS = """
             {"username":"vm-state-watcher-user","nickname":"VM 상태 테스트","password":"password123!"}
@@ -59,7 +59,7 @@ class VmStateWatcherIntegrationTest {
     private ReportedVmStateRepository reportedVmStateRepository;
 
     @Autowired
-    private VmStateWatcher watcher;
+    private VmSyncService syncService;
 
     private String accessToken;
 
@@ -88,8 +88,8 @@ class VmStateWatcherIntegrationTest {
         String vmId = createVm("watch-crash-01");
         when(vmControlPort.list()).thenReturn(List.of(new VmRuntime(vmId, VmState.CRASHED, 1, 256)));
 
-        watcher.check();
-        watcher.check();
+        syncService.sync();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -105,7 +105,7 @@ class VmStateWatcherIntegrationTest {
         String vmId = createVm("watch-off-01");
         when(vmControlPort.list()).thenReturn(List.of());
 
-        watcher.check();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -122,7 +122,7 @@ class VmStateWatcherIntegrationTest {
         mockMvc.perform(authorized(post("/api/v1/vms/" + vmId + "/stop"))).andExpect(status().isOk());
         when(vmControlPort.list()).thenReturn(List.of());
 
-        watcher.check();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -135,11 +135,11 @@ class VmStateWatcherIntegrationTest {
         // As after a server restart: the last reported state is unknown.
         reportedVmStateRepository.deleteAll();
         when(vmControlPort.list()).thenReturn(List.of(new VmRuntime(vmId, VmState.CRASHED, 1, 256)));
-        watcher.check();
+        syncService.sync();
         assertThat(stateChanges(vmId)).isEmpty();
 
         when(vmControlPort.list()).thenReturn(List.of(new VmRuntime(vmId, VmState.RUNNING, 1, 256)));
-        watcher.check();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -153,7 +153,7 @@ class VmStateWatcherIntegrationTest {
         when(vmControlPort.list()).thenThrow(new ApiException(
                 HttpStatus.SERVICE_UNAVAILABLE, "VM_CONTROL_UNAVAILABLE", "VM 제어 서비스에 연결할 수 없습니다."));
 
-        watcher.check();
+        syncService.sync();
 
         assertThat(stateChanges(vmId)).isEmpty();
     }
