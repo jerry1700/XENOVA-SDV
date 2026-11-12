@@ -18,7 +18,7 @@ public class VmSyncService {
         this.tracker = tracker;
     }
 
-    public List<Vm> sync() {
+    public synchronized List<Vm> sync() {
         long mark = tracker.mark();
         List<Vm> vms = vmService.list();
         for (Vm vm : vms) {

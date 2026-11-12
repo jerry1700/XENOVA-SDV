@@ -12,6 +12,7 @@ import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.vm.application.VmService;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmState;
+import java.lang.reflect.Modifier;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -25,6 +26,11 @@ class VmSyncServiceTest {
     @Test
     void checkIsNotScheduledAutomatically() throws NoSuchMethodException {
         assertThat(VmSyncService.class.getMethod("sync").getAnnotation(Scheduled.class)).isNull();
+    }
+
+    @Test
+    void syncRequestsAreSerialized() throws NoSuchMethodException {
+        assertThat(Modifier.isSynchronized(VmSyncService.class.getMethod("sync").getModifiers())).isTrue();
     }
 
     @Test
