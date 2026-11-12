@@ -83,7 +83,7 @@ public class VmService {
         return combine(runtimeCache.read());
     }
 
-    // Always asks dom0-manager; the state check uses it so the cache is refreshed by one caller.
+    // Always asks dom0-manager; the on-demand VM synchronization uses it.
     public List<Vm> listLive() {
         return combine(runtimeCache.refresh()).vms();
     }
@@ -165,7 +165,7 @@ public class VmService {
             throw exception;
         }
         eventRecorder.vmCreated(record);
-        // vm.created already tells the story; the state is only remembered so polling does not repeat it.
+        // vm.created already tells the story; the state is only remembered so a later sync does not repeat it.
         stateTracker.remember(record.getVmId(), vm.state());
         return vm;
     }
@@ -285,7 +285,7 @@ public class VmService {
         inventoryCleaner.vmDeleted(vmId);
     }
 
-    // Marks the VM busy so the periodic state check does not report this operation's
+    // Marks the VM busy so an overlapping on-demand state sync does not report this operation's
     // intermediate states as detected changes.
     private <T> T underOperation(String vmId, Supplier<T> operation) {
         stateTracker.beginOperation(vmId);

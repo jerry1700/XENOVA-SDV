@@ -90,7 +90,7 @@ class VmServiceTest {
         when(vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
                 .thenReturn(List.of(running, stopped));
         when(vmControlPort.list()).thenReturn(List.of(
-                new VmRuntime("vm-1", VmState.RUNNING, 1, 256),
+                new VmRuntime("vm-1", VmState.RUNNING, 2, 512),
                 new VmRuntime("unknown-domain", VmState.RUNNING, 1, 128)));
 
         List<Vm> vms = service.list();
@@ -98,8 +98,14 @@ class VmServiceTest {
         assertThat(vms).extracting(Vm::vmId).containsExactly("vm-1", "vm-2");
         assertThat(vms.get(0).state()).isEqualTo(VmState.RUNNING);
         assertThat(vms.get(0).name()).isEqualTo("alpine-1");
+        assertThat(vms.get(0).templateId()).isEqualTo("alpine");
+        assertThat(vms.get(0).vcpus()).isEqualTo(2);
+        assertThat(vms.get(0).memoryMib()).isEqualTo(512);
         assertThat(vms.get(1).state()).isEqualTo(VmState.STOPPED);
         assertThat(vms.get(1).templateId()).isEqualTo("alpine");
+        assertThat(vms.get(1).vcpus()).isEqualTo(1);
+        assertThat(vms.get(1).memoryMib()).isEqualTo(256);
+        verify(vmRecordRepository).findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED);
     }
 
     @Test

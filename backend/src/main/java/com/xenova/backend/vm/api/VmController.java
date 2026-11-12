@@ -3,6 +3,7 @@ package com.xenova.backend.vm.api;
 import com.xenova.backend.agent.application.AgentDataService;
 import com.xenova.backend.agent.domain.AgentInventory;
 import com.xenova.backend.agent.domain.AgentStatus;
+import com.xenova.backend.event.application.VmSyncService;
 import com.xenova.backend.vm.application.VmService;
 import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.Vm;
@@ -31,20 +32,23 @@ import org.springframework.web.bind.annotation.RestController;
 public class VmController {
 
     private final VmService vmService;
+    private final VmSyncService vmSyncService;
     private final AgentDataService agentDataService;
     private final Clock clock;
 
-    public VmController(VmService vmService, AgentDataService agentDataService, Clock clock) {
+    public VmController(
+            VmService vmService, VmSyncService vmSyncService, AgentDataService agentDataService, Clock clock) {
         this.vmService = vmService;
+        this.vmSyncService = vmSyncService;
         this.agentDataService = agentDataService;
         this.clock = clock;
     }
 
     @GetMapping
     public VmListResponse list() {
+        var vms = vmSyncService.sync();
         Instant now = clock.instant();
-        VmService.VmList list = vmService.listObserved();
-        return new VmListResponse(list.vms().stream().map(vm -> withAgentStatus(vm, now)).toList(), list.observedAt());
+        return new VmListResponse(vms.stream().map(vm -> withAgentStatus(vm, now)).toList(), now);
     }
 
     // 201 for a new VM, 200 when the same name and spec were already created (retry).

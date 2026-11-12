@@ -68,8 +68,12 @@ class Dom0ManagerClientTest {
     }
 
     @Test
-    void listReadsXenDomainsAndSendsServiceToken() {
+    void listGetsVmCollectionOnceAndSendsServiceToken() {
+        AtomicInteger requests = new AtomicInteger();
+        AtomicReference<String> method = new AtomicReference<>();
         server.createContext("/api/v1/vms", exchange -> {
+            requests.incrementAndGet();
+            method.set(exchange.getRequestMethod());
             authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
             respond(exchange, 200, """
                     [{"vm_id":"%s","state":"running","vcpus":1,"memory_mib":256}]
@@ -78,8 +82,9 @@ class Dom0ManagerClientTest {
 
         List<VmRuntime> result = client.list();
 
-        assertThat(result).containsExactly(
-                new VmRuntime(VM_ID, VmState.RUNNING, 1, 256));
+        assertThat(result).containsExactly(new VmRuntime(VM_ID, VmState.RUNNING, 1, 256));
+        assertThat(requests).hasValue(1);
+        assertThat(method).hasValue("GET");
         assertThat(authorization.get()).isEqualTo("Bearer service-secret");
     }
 
