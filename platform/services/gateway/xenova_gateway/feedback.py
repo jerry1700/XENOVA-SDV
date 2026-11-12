@@ -5,6 +5,7 @@ session and declares a device boot session/capabilities; it never grants output.
 """
 from collections import OrderedDict
 import errno
+import math
 import os
 import struct
 import time
@@ -214,6 +215,35 @@ class FeedbackSerialSink(SerialSink):
 
     def poll(self,now):
         return self._poll(now)
+
+    def _poll_deadlines(self):
+        if self.started is None:
+            yield 0.
+            return
+        if self.fault is None:
+            if not self.ready:
+                yield self.started + self.timeout
+            for row in self.pending.values():
+                if not row['applied']:
+                    yield row['deadline']
+        view = self.snapshot
+        observed = view.get('observed_monotonic')
+        if observed is not None and view.get('applied') is not None:
+            yield math.nextafter(observed + self.timeout, math.inf)
+        if self.odometry is not None:
+            sample = view.get('vehicle_sample')
+            if sample is not None:
+                expires = sample['pi_sample_us'] + self.odometry.config.maximum_sample_age_us - sample['clock_error_us']
+                yield (expires + 1) / 1_000_000
+            if self.ready and self._sensor_available():
+                probe = self.odometry.next_probe_us()
+                if probe is not None:
+                    yield probe / 1_000_000
+
+    def _next_poll_delay(self):
+        """The native RX owner may sleep until new bytes or this timer."""
+        deadline = min(self._poll_deadlines(), default=None)
+        return None if deadline is None else max(.0001, deadline - self.clock())
 
     def _poll(self,now,*,owned_ready=None,publish_view=True):
         if self.started is None:

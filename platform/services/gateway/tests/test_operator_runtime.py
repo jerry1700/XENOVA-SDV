@@ -175,6 +175,28 @@ def test_busy_actual_fsync_does_not_delay_ram_stop_or_query(world,monkeypatch):
     w.pump(lambda:not pending.empty());assert pending.get_nowait()['ok']
 
 
+def test_idle_tick_does_not_scan_retired_stop_ledger(world, monkeypatch):
+    call = world.call('stop')
+    key = call['request_id']
+    assert world.send(call)['ok']
+    world.pump(lambda: world.o._known(key)['terminal'] and key not in world.o.pending)
+    recorded = world.w.auth.path.read_bytes()
+    reads = []
+    rows = world.o._rows
+
+    def observed_rows():
+        reads.append(True)
+        return rows()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world.o, '_rows', observed_rows)
+        world.tick()
+    assert reads == []
+    assert world.w.auth.path.read_bytes() == recorded
+    assert world.send(call)['data']['original'] == world.o._known(key)['original']
+    assert not world.w.m.output_permitted
+
+
 def test_unconsumed_original_control_ack_cannot_apply_old_generation_readiness(world):
     """실제 저장은 끝났지만 actor callback 전인 창에서 old READY를 섞지 않는다."""
     w=world;m=w.w.m;original_generation=m.generation;done=[]

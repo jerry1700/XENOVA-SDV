@@ -91,7 +91,7 @@ class ManagerLike(Protocol):
 # 넘기면 Linux 생성이 끝나지 못한다. 헤더 상한·정책 값·Spring timeout 을 정한 뒤 연결한다
 _BUDGET_ACTIONS = frozenset({
     "start", "stop", "reboot", "destroy", "get", "list", "intents", "probe", "execution-context", "templates", "operation",
-    "control-operation", "recovery-operation", "recovery-reconcile", "operation-reconcile",
+    "control-operation", "recovery-operation", "recovery-reconcile", "operation-reconcile", "recovery-intents",
     "provision", "provisioning", "registrations",
 })
 # spec timeout_ms(1..15000) 를 받는 action. templates 는 받지 않는다
@@ -104,7 +104,7 @@ _TIMEOUT_ACTIONS = frozenset({
 # cpu-layout 은 공통 operation lock 을 기다리지 않고 시도해 경합이면 바로 OPERATION_IN_PROGRESS 다. 그래서 여기서도 줄 세우지 않는다
 _READ_ACTIONS = frozenset({
     "list", "get", "intents", "probe", "execution-context", "templates", "operation", "control-operation", "recovery-operation",
-    "provisioning", "registrations", "cpu-layout",
+    "provisioning", "registrations", "recovery-intents", "cpu-layout",
 })
 # budget_ms 는 받지 않고 spec timeout_ms(1..15000) 만 받는 조회. 요청 예산은 timeout_ms 로만 줄인다
 _TIMEOUT_ONLY_ACTIONS = frozenset({"cpu-layout"})

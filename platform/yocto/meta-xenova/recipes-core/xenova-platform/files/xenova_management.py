@@ -92,9 +92,10 @@ class PrivateProvision:
 
 
 class PendingRegistration:
-    """Published create whose initial intent is waiting for short admission."""
-    def __init__(self,operation,tomb,host,tombstone):
+    """Published create waiting to record its lifecycle or initialize its intent."""
+    def __init__(self,operation,tomb,host,tombstone,dhcp_applied=None):
         self.operation,self.tomb,self.host,self.tombstone=operation,tomb,host,tombstone
+        self.dhcp_applied=dhcp_applied
 
 
 class ReadContext:
@@ -107,7 +108,8 @@ class ReadContext:
         self.m,self.action,self.spec,self.deadline=manager,action,spec,deadline
         self.started_ms=int(manager.p.clock()*1000)
         self.observed_ms={}
-        self.e=None if action in ('intents','registrations') else manager.p.execution()
+        self.pending_creations=set()
+        self.e=None if action in ('intents','registrations','recovery-intents') else manager.p.execution()
         self.check()
         self.states,self.tombs=manager._read_states(action,spec,deadline)
         self.by_id={s['vm_id']:s for s in self.states}
@@ -158,7 +160,18 @@ class ReadContext:
         creation=record.get('creation_operation_id')
         if creation and state['lifecycle']=='REGISTERED':
             op=self.optional(self.m.data/'operations'/(creation+'.json'))
-            if not op or op.get('vm_id')!=identity or op.get('status')!='SUCCEEDED':raise ReadChanged()
+            if not op or op.get('vm_id')!=identity:raise ReadChanged()
+            if op.get('status')!='SUCCEEDED':
+                template=op.get('template')
+                if (self.action!='recovery-intents' or op.get('action')!='create'
+                        or op.get('operation_id')!=creation or op.get('initial_spec')!=record.get('creation_spec')
+                        or not isinstance(template,dict)
+                        or template.get('manifest_sha256')!=record.get('template_manifest_sha256')
+                        or any(template.get(k)!=record.get(k) for k in ('template_id','template_version','guest_kind'))
+                        or op.get('status') not in ('RUNNING','RECOVERY_REQUIRED')
+                        or op.get('phase') not in ('preparing','published','dhcp-pending','dhcp-applied')):
+                    raise ReadChanged()
+                self.pending_creations.add(identity)
         current=None
         if self.action!='registrations':
             current=(read_intent(self.m.data,identity) if self.e is None else
@@ -169,7 +182,7 @@ class ReadContext:
 
     def validate(self):
         self.check()
-        if self.action=='list' or self.action in ('intents','registrations') and 'vm_id' not in self.spec:
+        if self.action=='list' or self.action in ('intents','registrations','recovery-intents') and 'vm_id' not in self.spec:
             states,_=self.m._read_states(self.action,self.spec,self.deadline)
             if self.revision(states)!=self.revision(self.states):raise ReadChanged()
         # 각 항목은 바로 이어지는 관측 게시 잠금 안에서 한 번 대조한다. 같은 검사를 중복하지 않는다.
@@ -363,7 +376,7 @@ class Manager:
                                'reboot', 'destroy', 'autostart-set', 'board-shutdown-set', 'config',
                                'recover_once', 'recovery-operation', 'recovery-reconcile', 'control-operation', 'snapshot', 'probe',
                                'execution-context', 'host-resume', 'cpu-layout', 'cpu-policy-set', 'cpu-host-prepare'}
-        actions.update(('operation-reconcile','provision','provisioning','registrations'))
+        actions.update(('operation-reconcile','provision','provisioning','registrations','recovery-intents'))
         if not isinstance(action, str) or action not in actions:
             fail('INVALID_SPEC', 'unsupported management action')
         if type(execute) is not bool:
@@ -376,6 +389,10 @@ class Manager:
             spec = {}
         if not isinstance(spec, dict):
             fail('INVALID_SPEC', 'request must be an object')
+        if action=='recovery-intents':
+            if execute or key is not None or spec:
+                fail('INVALID_SPEC','recovery-intents is an internal read-only registry query')
+            return spec
         if action=='registrations':
             if execute or key is not None or set(spec)-{'vm_id','timeout_ms'}:
                 fail('INVALID_SPEC','registrations is a read-only UUID query')
@@ -895,12 +912,13 @@ class Manager:
                 self._prepare_dhcp(context)
             self._save_op(op, 'dhcp-applied')
 
-    def _prepare_dhcp(self, context=None):
+    def _prepare_dhcp(self, context=None, *, deadline=None):
         records=self.p.records(validate_assets=False)
         # DHCP는 service 대기 뒤 직접 최신 registry를 얻는다. reload 뒤에는 더 소비하지 않는다.
         outside=(lambda:self._lifecycle_io(context,records,refresh_records=False)) if context and context.get('asset_lease') else None
-        if outside is None:self.p.prepare_dhcp(records)
-        else:self.p.prepare_dhcp(records,_outside=outside)
+        kwargs={} if deadline is None else {'deadline':deadline}
+        if outside is None:self.p.prepare_dhcp(records,**kwargs)
+        else:self.p.prepare_dhcp(records,_outside=outside,**kwargs)
 
     def _allocate_ip(self, spec, records, *, operations=None, pending=None):
         pool, held = self._ip_inventory(records,operations=operations,pending=pending)
@@ -1104,13 +1122,7 @@ class Manager:
             except ExecutionError as error:
                 if error.error['code']!='OPERATION_IN_PROGRESS' or error.error['details'].get('lock')!='admission':raise
                 if not context or 'output_stack' not in context:raise
-                if not context.get('asset_lease'):
-                    context['asset_lease']=context['output_stack'].enter_context(
-                        AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
-                    context['asset_lease'].bind({**op,'expected_generation':tomb['generation']})
-                path=self.data/'tombstones'/(op['vm_id']+'.json')
-                saved=self._read(path) if path.exists() or path.is_symlink() else None
-                return PendingRegistration(op,tomb,execution.host,saved)
+                return self._defer_registration(op,tomb,context)
         result = self._view(tomb)
         if op['action']=='create' and op.get('error') is not None:
             op.setdefault('first_error',op['error'])
@@ -1121,14 +1133,26 @@ class Manager:
         if notice:self._registration_events.append(tomb['record'])
         return result
 
-    def _complete_registration(self,pending,context):
-        """Wait without a common lock; retry only this original published create.
+    def _defer_registration(self,op,tomb,context,dhcp_applied=None):
+        """기존 원 생성과 대상 lease를 유지해 등록의 같은 단계만 재개한다."""
+        if not context.get('asset_lease'):
+            context['asset_lease']=context['output_stack'].enter_context(
+                AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
+            context['asset_lease'].bind({**op,'expected_generation':tomb['generation']})
+        path=self.data/'tombstones'/(op['vm_id']+'.json')
+        saved=self._read(path) if path.exists() or path.is_symlink() else None
+        return PendingRegistration(op,tomb,self.p.boot_id_reader(),saved,dhcp_applied)
 
-        The existing preparation/asset owner remains alive. No copying, new
-        acceptance, intent overwrite or physical action is performed here.
+    def _complete_registration(self,pending,context):
+        """공통 잠금 밖에서 기다리고 원 등록 단계만 재개한다.
+
+        복사·수락·원 기한·기존 의도를 새로 만들지 않는다. 아직 필요한 DHCP 효과는
+        기존 생성 실행 기한 안에서만 수행한다.
         """
-        end=self.p.response_deadline
         while isinstance(pending,PendingRegistration):
+            end=self.p.response_deadline
+            if pending.dhcp_applied is False and pending.operation['template']['guest_kind']=='linux':
+                with creation.work(self,pending.operation,context) as physical_end:end=min(end,physical_end)
             with span('registration.admission_wait'):
                 with short_lock(self.p.runtime,'admission',deadline=end,clock=self.p.clock,sleep=self.p.sleep):pass
             with operation_lock(self.p.runtime,blocking=True,deadline=end,clock=self.p.clock,sleep=self.p.sleep) as fd:
@@ -1144,7 +1168,8 @@ class Manager:
                         or self._read(self.data/'instances'/tomb['record']['id']/'instance.json')!=tomb['record']):
                     fail('TARGET_CHANGED','original registration changed while waiting')
                 if context.get('asset_lease'):context['asset_lease'].guard()
-                pending=self._finish(op,tomb,context)
+                pending=(self._finish(op,tomb,context) if pending.dhcp_applied is None else
+                         self._register_created(op,tomb['record'],context,pending.dhcp_applied))
         return pending
 
     def _save_tomb(self, tomb, op, lifecycle, generation, **extra):
@@ -1365,17 +1390,21 @@ class Manager:
     def _register_created(self,op,record,context,dhcp_applied):
         tomb = {'schema_version':'1.0','vm_id':record['uuid'],'name':record['name'],'generation':0,
                 'lifecycle':'REGISTERED','record':record,'history':[]}
-        tomb = self._save_tomb(tomb, op, 'REGISTERED', 0)
+        try:tomb = self._save_tomb(tomb, op, 'REGISTERED', 0)
+        except ExecutionError as error:
+            if error.error['code']!='OPERATION_IN_PROGRESS' or error.error['details'].get('lock')!='admission':raise
+            if not context or 'output_stack' not in context:raise
+            return self._defer_registration(op,tomb,context,dhcp_applied)
         if vm.has_network(record):
             if not dhcp_applied:
                 if record['guest_kind']=='linux':
                     # DHCP 재제출은 결과 조회가 아닌 외부 효과다. 원 생성 기한 밖에서 반복하지 않는다.
                     with creation.work(self,op,context) as end:
                         self._save_op(op, 'dhcp-pending')
-                        with tool_output():self.p.prepare_dhcp(self.p.records(validate_assets=False),deadline=end)
+                        with tool_output():self._prepare_dhcp(context,deadline=end)
                 else:
                     self._save_op(op, 'dhcp-pending')
-                    with tool_output():self.p.prepare_dhcp(self.p.records(validate_assets=False))
+                    with tool_output():self._prepare_dhcp(context)
             self._save_op(op, 'dhcp-applied')
         return self._finish(op, tomb, context)
 
@@ -1938,7 +1967,7 @@ class Manager:
             with span('read.round',count=attempt+1):
                 if self.p.clock()>=deadline:fail('DEADLINE_EXCEEDED','query budget expired')
                 try:
-                    if action in ('get','list','probe','execution-context','intents','registrations'):
+                    if action in ('get','list','probe','execution-context','intents','registrations','recovery-intents'):
                         read=ReadContext(self,action,spec,deadline)
                         records=[s['record'] for s in read.states]
                         if action=='registrations':
@@ -1947,10 +1976,16 @@ class Manager:
                             for state in read.states:read.validate_one(state['vm_id'])
                             views=[registration(s['record']) for s in read.states]
                             result={'registration':views[0]} if 'vm_id' in spec else {'registrations':views}
-                        elif action=='intents':
+                        elif action in ('intents','recovery-intents'):
                             read.validate()
-                            for state in read.states:read.validate_one(state['vm_id'])
-                            views=[self._intent_view(s,read.inputs[s['vm_id']]) for s in read.states]
+                            views=[]
+                            for state in read.states:
+                                identity=state['vm_id']
+                                read.validate_one(identity)
+                                pending=identity in read.pending_creations
+                                view=self._intent_view(state,None if pending else read.inputs[identity])
+                                if pending:view['registration_pending']=True
+                                views.append(view)
                             result={'vm':views[0]} if 'vm_id' in spec else {'vms':views}
                         elif action in ('get','probe','execution-context'):
                             observed=read.e.observe(records[0],deadline,_read_context=read)
@@ -2072,11 +2107,11 @@ class Manager:
         try:
             if budget_ms is not None and (type(budget_ms) is not int or not 0<budget_ms<=(creation.MAX_CALL_MS if action=='create' else 105000)):
                 fail('INVALID_SPEC','budget_ms must be 1..'+str(creation.MAX_CALL_MS if action=='create' else 105000))
-            if budget_ms is not None and action not in ('create','operation-reconcile','start','stop','reboot','destroy','get','list','intents','registrations','probe','execution-context','templates','operation','control-operation','recovery-operation','recovery-reconcile','provision','provisioning'):
+            if budget_ms is not None and action not in ('create','operation-reconcile','start','stop','reboot','destroy','get','list','intents','registrations','recovery-intents','probe','execution-context','templates','operation','control-operation','recovery-operation','recovery-reconcile','provision','provisioning'):
                 fail('INVALID_SPEC','budget_ms is supported only for control and bounded reads')
             spec = self._validate_call(action, spec, execute, idempotency_key, request_id)
             trace_bind(vm_id=spec.get('vm_id'), recovery_attempt_id=spec.get('recovery_attempt_id'))
-            if action not in ('intents','provisioning','registrations'):
+            if action not in ('intents','provisioning','registrations','recovery-intents'):
                 try:
                     trace_bind(host_boot_id=self.p.boot_id_reader())
                 except Exception:
@@ -2107,7 +2142,7 @@ class Manager:
             if action=='operation-reconcile':
                 result=creation.reconcile(self,spec,execute,context,deadline,_output)
                 return {**response,'ok':True,'data':result,'operation_id':context['operation_id']}
-            if action in ('get','list','intents','registrations','probe','execution-context','templates','operation','control-operation','recovery-operation'):
+            if action in ('get','list','intents','registrations','recovery-intents','probe','execution-context','templates','operation','control-operation','recovery-operation'):
                 self.p.response_deadline=min(self.p.response_deadline,deadline)
                 if action in ('get','list','probe','execution-context'):
                     with observation_slot(self.p.runtime,deadline=deadline,clock=self.p.clock) as fd:

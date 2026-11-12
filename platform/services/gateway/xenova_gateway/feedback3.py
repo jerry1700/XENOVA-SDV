@@ -121,6 +121,23 @@ class Feedback3SerialSink(FeedbackSerialSink):
         pad=drift_pad(self.profile.drift_ppm,abs(at-lease['reference']))
         return lease['lower']-pad,lease['upper']+pad
 
+    def _poll_deadlines(self):
+        yield from super()._poll_deadlines()
+        if not self.ready or not self._sensor_available():
+            return
+        if self.outstanding is None:
+            yield (self.last_probe_us + CLOCK_PROBE_INTERVAL_US) / 1_000_000
+        else:
+            yield (self.outstanding[1] + self.profile.probe_timeout_us) / 1_000_000
+        lease_end = self.snapshot.get('clock_valid_until_pi_us', 0)
+        if lease_end:
+            yield lease_end / 1_000_000
+        install = self.install
+        if install is not None and not install['ack']:
+            retry = install['sent_us'] + CLOCK_INSTALL_RETRY_US
+            if retry < install['expires']:
+                yield retry / 1_000_000
+
     def _poll(self,now,*,owned_ready=None):
         if self.started is None:
             self.started=now;self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
