@@ -180,6 +180,26 @@ def test_lane_change_tape_limits_both_road_edges_and_keeps_crossing_permission(l
         product.close()
 
 
+def test_straight_narrow_lane_guide_tries_both_directions_without_tape_allowance(library):
+    library.probe_lane_guide.argtypes = [C.c_void_p, C.c_uint32, C.c_uint32, C.c_float, C.c_float]
+    library.probe_lane_guide.restype = C.c_int
+    world = modern_world()
+    for boundary, y in ((world.left_boundary, 2.1), (world.right_boundary, 1.1)):
+        for point in boundary:
+            point.y = y
+    for lane, y in zip(world.lane_model.lanes, (1.35, 1.85)):
+        for point in lane.centerline:
+            point.y = y
+    product = Product(library, world)
+    try:
+        for start, target, y, goal_y in ((1, 2, 1.35, 1.85), (2, 1, 1.85, 1.35)):
+            assert library.probe_lane_guide(product.handle, start, target, y, goal_y) == FOUND
+            assert library.probe_valid(product.handle) == FOUND
+            assert abs(product.path()[-1][1] - goal_y) < abs(y - goal_y)
+    finally:
+        product.close()
+
+
 def test_lane_change_captures_a_near_goal_only_after_whole_body_arrives(library):
     ports(library)
     library.probe_lane_change_terminal_path.argtypes = [C.c_void_p, C.c_float]

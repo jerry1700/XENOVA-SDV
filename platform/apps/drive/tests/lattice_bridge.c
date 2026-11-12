@@ -345,6 +345,16 @@ uint32_t probe_task_lane(void *pointer,float x,float y,float yaw,float error){
 void probe_task_tape(void *pointer,float half_width){
  ((struct probe *)pointer)->config.lane_tape_half_width_m=half_width;
 }
+int probe_lane_guide(void *pointer,uint32_t from,uint32_t to,float y,float goal_y){
+ struct probe *p=pointer;const dw_world *w=&p->snapshot.world;
+ if(p->decoded||!tr_basis_accept(&p->basis,w))return LP_INPUT;
+ struct tr_intent task={true,true,to,from,from,0};
+ uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,NULL};
+ struct lp_metrics metrics={0};
+ return lp_lane_guide(&p->search,&p->path,w,(dw_pose){.6f,y,0},0,(dw_pose){2.f,goal_y,0},
+  &p->config,budget,&task,&p->basis,&metrics);
+}
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;
  return tr_open(&p->snapshot.world,&task,&view)&&tr_contains(&view,(dw_pose){x,y,yaw},error,&p->config);

@@ -426,10 +426,11 @@ enum lp_result lp_task_goal(const dw_world *w,const struct tr_intent *task,dw_po
  return entered?LP_PATH_FOUND:LP_INPUT;
 }
 static void integrate(dw_pose *pose,float steer,float velocity,float dt,float wheelbase) {
- float turn=velocity/wheelbase*tanf(steer)*dt,ds=velocity*dt;
- if(fabsf(turn)<1e-7f){pose->x+=ds*cosf(pose->yaw);pose->y+=ds*sinf(pose->yaw);}
- else {float radius=ds/turn;pose->x+=radius*(sinf(pose->yaw+turn)-sinf(pose->yaw));
-       pose->y-=radius*(cosf(pose->yaw+turn)-cosf(pose->yaw));}
+ float ds=velocity*dt,turn=ds/wheelbase*tanf(steer),half_turn=.5f*turn;
+ /* Use the arc chord to avoid cancellation between nearly equal trig values. */
+ float chord=ds*(fabsf(half_turn)<1e-4f?1.f:sinf(half_turn)/half_turn);
+ pose->x+=chord*cosf(pose->yaw+half_turn);
+ pose->y+=chord*sinf(pose->yaw+half_turn);
  pose->yaw=dw_angle(pose->yaw+turn);
 }
 static void quantize(struct lp_search *s,struct lp_node *n) {
@@ -732,7 +733,7 @@ static bool narrow_lane(const dw_world *w,const struct tr_intent *task,const str
  /* Use the arrival lane's width. Footprint still checks the full change corridor. */
  struct tr_intent selected=*task;
  selected.changing=false;selected.from_lane_id=selected.selected_lane_id;
- if(lp_lane_boundary_allowance_m(c)<=0||!task->active||!tr_open(w,&selected,view))return false;
+ if(!task->active||!tr_open(w,&selected,view))return false;
  float half=FLT_MAX;
  for(unsigned i=0;i<view->count;i++){
   dw_point a=view->points[i],b=w->lane_model.divider[i];
@@ -746,23 +747,6 @@ struct lane_guide {
  float heading[32],length[32];
  unsigned count;
 };
-
-/* Select the curvature guide when the arrival lane lies outside the observed bend. */
-static bool change_toward_outside(const struct tr_view *view){
- const dw_point *points=view->points,*divider=view->world->lane_model.divider;
- bool outside=false;
- for(unsigned i=1;i+1<view->count;i++){
-  float ax=points[i].x-points[i-1].x,ay=points[i].y-points[i-1].y;
-  float bx=points[i+1].x-points[i].x,by=points[i+1].y-points[i].y;
-  float scale=hypotf(ax,ay)*hypotf(bx,by)*hypotf(ax+bx,ay+by);
-  float turn=2*(ax*by-ay*bx);
-  if(scale<=1e-9f||fabsf(turn)<=.15f*scale)continue;
-  float side=(ax+bx)*(points[i].y-divider[i].y)-(ay+by)*(points[i].x-divider[i].x);
-  if(turn*side>=0)return false;
-  outside=true;
- }
- return outside;
-}
 
 static bool make_lane_guide(const struct tr_view *view,const struct lp_config *c,struct lane_guide *g){
  const dw_point *p=view->points;
@@ -837,7 +821,6 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  struct tr_view view;
  if(!narrow_lane(w,task,c,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
     fabsf(steer)>c->max_steer)return LP_NOT_FOUND;
- if(task->changing&&!change_toward_outside(&view))return LP_NOT_FOUND;
  struct lane_guide guide;
  if(!make_lane_guide(&view,c,&guide))return LP_NOT_FOUND;
  struct lp_road_state first,last;
@@ -1233,7 +1216,8 @@ static enum lp_result project(const dw_world *w,dw_pose pose,float current_veloc
  if(current_velocity*velocity<0)return LP_INPUT;
  float maximum=fmaxf(c->max_velocity,c->max_reverse_velocity);
  struct tr_view view;
- bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||narrow_lane(w,task,c,&view));
+ bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||
+  (lp_lane_boundary_allowance_m(c)>0&&narrow_lane(w,task,c,&view)));
  float interval=fminf(tight?.01f:.025f,c->resolution/(4*fmaxf(maximum,.01f)));
  float time=0,v=current_velocity,delta=current_steer;*known=0;
  float horizon=c->reaction_s+fmaxf(fabsf(v),fabsf(velocity))/c->max_brake+.1f;
@@ -1536,7 +1520,8 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
  bool ordinary_episode=!path->has_episode||path->episode.core.state==1;
  bool avoidance_episode=path->has_episode&&path->episode.core.state==2;
  bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode||live_task.changing)&&
-  !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,&narrow_view);
+  !path->space.parking&&!path->space.exiting&&!path->has_route&&lp_lane_boundary_allowance_m(c)>0&&
+  narrow_lane(w,&live_task,c,&narrow_view);
  if(narrow||parking_entry){
   dw_pose reference_pose=carrot(path,geometry,segment,tracker->progress);
   dw_pose error=dw_compose(dw_inverse(reference_pose),pose);
