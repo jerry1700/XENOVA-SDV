@@ -52,7 +52,7 @@ class AlignmentFlowTests(unittest.TestCase):
         return TapeGraph(strips, calibration_qualified=True)
 
     def process(self, pipeline, sequence, graph, pose, *, truth_x=0.):
-        def depth(_array, _camera, _plane, *, stamp, calibration_id, input_kind, profile, config):
+        def depth(_array, _camera, _plane, *, stamp, calibration_id, input_kind, **_):
             x, y = HIT_GT[0] - truth_x, HIT_GT[1]
             box = PointBounds((x - .005, y - .005, .05), (x + .005, y + .005, .07), True)
             return DepthEvidence(stamp, calibration_id, input_kind, (box,), (), 1, 0, 0, 0, 0, 0, True, 'HIT_ONLY')

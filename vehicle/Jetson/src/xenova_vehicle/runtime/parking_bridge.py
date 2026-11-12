@@ -184,7 +184,12 @@ class ParkingPublication:
     live_authority: bool = field(default=False, init=False)
 
     def apply(self, template):
-        from xenova_drive_world import schema, encode, decode
+        from xenova_drive_world import encode, decode
+        return decode(encode(self.apply_to_template(template)))
+
+    def apply_to_template(self, template):
+        """원 주차 정보를 World 초안에 붙인다. 최종 검증은 World 빌더가 맡는다."""
+        from xenova_drive_world import schema
         if type(template) is not schema.WorldSnapshot or template.required_features not in (11, 15):
             raise ValueError('original supported Lane/Localization world template required')
         for name, expected in (('map_epoch', self.context.map_epoch), ('frame_epoch', self.context.frame_epoch),
@@ -199,7 +204,7 @@ class ParkingPublication:
         for raw in self.slots:
             value.parking_slots.add().ParseFromString(raw)
         value.parking_set.ParseFromString(self.meta)
-        return decode(encode(value))
+        return value
 
 
 def _source_fields(source):

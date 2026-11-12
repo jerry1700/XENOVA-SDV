@@ -11,7 +11,7 @@ import unittest
 
 import test_mapper_sensor_state as sensors_fixture
 import test_world_adapter as road_fixture
-from xenova_drive_world import schema, decode
+from xenova_drive_world import schema, decode, encode
 from xenova_vehicle.mapping.alignment import MapOdomAlignment
 from xenova_vehicle.mapping.lane_catalog import LaneCatalog, LaneSource
 from xenova_vehicle.mapping.local_map import EvidenceGrid, GridSpec
@@ -282,7 +282,9 @@ class MapperWorldTests(unittest.TestCase):
             self.source['clock_epoch'], self.context)
         state = replace(self.state, view=replace(self.state.view, parking=inventory))
         draft = replace(self.draft, catalog_draft=replace(self.draft.catalog_draft, state=state))
-        value = self.build(draft=draft, state=state).message()
+        built = self.build(draft=draft, state=state)
+        self.assertEqual(built.payload, encode(inventory.apply(baseline)))
+        value = built.message()
         self.assertEqual(value.required_features, 15)
         self.assertEqual(value.parking_set, meta)
         self.assertFalse(value.HasField('scene'))

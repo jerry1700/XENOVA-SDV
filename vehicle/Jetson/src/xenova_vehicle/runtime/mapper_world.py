@@ -249,14 +249,13 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         if tof_overlay is not None:
             snapshot, static = tof_overlay.apply(snapshot, sensor_snapshot=sensor_snapshot,
                 alignment=alignment, snapshot_us=snapshot_us, now_us=published_j_us, static_retained=static)
-        built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         inventory = catalog_state.view.parking
         if inventory is not None:
             _need(inventory.context == context and inventory.input_kind == 'LIVE'
                   and inventory.source_clock == snapshot['clock_id'])
             # 원 publication 후보의 geometry/age/UNKNOWN/cap을 다시 산출하지 않는다.
-            value = inventory.apply(built.message())
-            built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
+            value = inventory.apply_to_template(value)
+        built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         _need(b''.join(struct.pack('<ff', p.x, p.y) for p in built.message().reference) == basis.points_f32)
         return built
     except (_NotReady, ValueError, KeyError, OverflowError):

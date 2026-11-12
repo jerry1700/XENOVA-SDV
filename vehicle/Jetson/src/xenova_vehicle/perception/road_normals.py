@@ -67,10 +67,16 @@ def _trace(strip, curvature):
     return _Trace(points,tuple(arc),tuple(headings),tuple(errors))
 
 
+def _trace_entry(strip, curvature, cached):
+    if cached is not None and cached[0] is strip and cached[1] == curvature:
+        return cached
+    return strip,curvature,_trace(strip,curvature)
+
+
 class ReferenceObservations:
     """기준선의 다음 법선과 교차하는 실제 흰선과 관측 ID를 조회한다."""
 
-    def __init__(self, strips, roles, profile):
+    def __init__(self, strips, roles, profile, *, trace_cache=None):
         self._cell_m = profile.missing_outer_width_m
         self._edges = []
         self._cells = {}
@@ -79,7 +85,8 @@ class ReferenceObservations:
             role = roles.get(key, ())
             if strip.original.closed or len(role) > 1:
                 continue
-            path = _trace(strip, profile.max_curvature_1pm)
+            cached = None if trace_cache is None else trace_cache.get(key)
+            path = _trace_entry(strip,profile.max_curvature_1pm,cached)[2]
             for a,b,heading,yaw in zip(path.points,path.points[1:],path.headings,path.errors):
                 index = len(self._edges)
                 self._edges.append((a,b,heading,strip.error_m,yaw,key,next(iter(role),None)))
@@ -138,13 +145,21 @@ class ReferenceObservations:
         return result
 
 
-def normal_samples(strips, seeds, *, width_m, radius_m, step_m, heading_limit, curvature):
+def normal_samples(strips, seeds, *, width_m, radius_m, step_m, heading_limit, curvature, trace_cache=None):
     """선 끝의 모양과 무관하게 주변 선이 법선과 만나는 위치와 원 오차를 돌려준다."""
-    traces = {(s.source,s.identity):_trace(s,curvature) for s in strips}
+    traces = {}
+    for strip in strips:
+        key = strip.source,strip.identity
+        cached = None if trace_cache is None else trace_cache.get(key)
+        traces[key] = _trace_entry(strip,curvature,cached)
+    if trace_cache is not None:
+        # 보존 중인 관측만 남긴다. 동일 ID라도 재배치된 관측은 다시 계산한다.
+        trace_cache.clear()
+        trace_cache.update(traces)
     cells = {}
     edges = []
     for strip in strips:
-        path = traces[strip.source,strip.identity]
+        path = traces[strip.source,strip.identity][2]
         for i,(a,b) in enumerate(zip(path.points,path.points[1:])):
             if path.arc[i+1] <= path.arc[i]:
                 continue
@@ -154,9 +169,10 @@ def normal_samples(strips, seeds, *, width_m, radius_m, step_m, heading_limit, c
                 for y in range(math.floor(min(a[1],b[1])/width_m),math.floor(max(a[1],b[1])/width_m)+1):
                     cells.setdefault((x,y),[]).append(index)
     for seed in seeds:
-        path = traces.get((seed.source,seed.identity))
-        if path is None or path.arc[-1] < step_m:
+        entry = traces.get((seed.source,seed.identity))
+        if entry is None or entry[2].arc[-1] < step_m:
             continue
+        path = entry[2]
         count = min(32,math.ceil(path.arc[-1]/step_m))
         stations = []
         for i in range(count+1):

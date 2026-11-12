@@ -133,7 +133,7 @@ class PerceptionResult:
 
 @dataclass(frozen=True)
 class MapEvidenceUpdate:
-    """같은 compute 호출의 실제 적용 사실. observer는 원 source proof와 즉시 결합한다."""
+    """HIT는 depth의 box, FREE는 rays와 certificate로 원 source proof를 남긴다."""
     grid: EvidenceGrid
     mutation: object
     observation: PerceptionInput
@@ -388,6 +388,7 @@ class PerceptionPipeline:
         from .depth import analyze_depth
         from .free_space import certify_cell
         from .geometry import TimingDiagnostics
+        from .motion import bind_motion_pose, widen_motion_rays
         if diagnostics is not None and type(diagnostics) is not TimingDiagnostics:
             raise ValueError('expected optional elapsed-only TimingDiagnostics')
         import numpy as np
@@ -532,12 +533,26 @@ class PerceptionPipeline:
                 pose=registration_pose=None
         input_done=perf_counter_ns()
         step('INPUT_COMPLETED')
+        capture_interval=observation.capture_interval
+        instantaneous_synthetic=(observation.kind=='SYNTHETIC' and capture_interval is not None
+            and capture_interval[0]==capture_interval[1])
         evidence=None
+        ray_inputs=None
+        motion_pose=None
+        targets_qualified=bool(self.targets and all(target.qualified for target in self.targets))
         if depth_new:
+            if not instantaneous_synthetic and capture_interval is not None and motion_qualified and raw_pose is not None:
+                motion_pose=bind_motion_pose(observation.depth.stamp,self.calibration,raw_pose,
+                    observation.kind,True,capture_interval)
+            ray_candidate=bool(targets_qualified and self.calibration.free_qualified and self.profile.permission_polygon
+                and (instantaneous_synthetic or (motion_pose is not None and completed_clock is not None
+                    and (needed_mask is not None or needed_region_factory is not None))))
+            config=self.profile.depth if ray_candidate else replace(self.profile.depth,max_patches=0)
             evidence=analyze_depth(observation.depth.array(),self.calibration.right,self.calibration.plane,
                 stamp=observation.depth.stamp,calibration_id=self.calibration.sha256,
-                input_kind=observation.kind,profile=self.calibration,config=self.profile.depth,
+                input_kind=observation.kind,profile=self.calibration,config=config,defer_patches=True,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
+            evidence,ray_inputs=evidence.take_ray_inputs()
         depth_done=perf_counter_ns()
         step('DEPTH_COMPLETED')
         if rgb_new:
@@ -733,7 +748,7 @@ class PerceptionPipeline:
                 p=pose.sample
                 origin=transform_point(origin,(p.x,p.y,p.yaw))
             hit_observer=None if evidence_observer is None else lambda delta:evidence_observer(
-                MapEvidenceUpdate(grid,delta,observation,evidence,raw_pose,pose,evidence.patches))
+                MapEvidenceUpdate(grid,delta,observation,evidence,raw_pose,pose,()))
             grid.add_hits(boxes,observation.depth.stamp,view_id=observation.depth.stamp.stream_id,origin_xy=origin,observer=hit_observer)
         hits_done=perf_counter_ns()
         step('HITS_COMPLETED')
@@ -751,23 +766,14 @@ class PerceptionPipeline:
                 raise ValueError('needed-region factory must return an original StoppingRegion or None')
         remaining=self.profile.max_free_ray_tests
         depth_age=None if observation.depth is None else observation.depth.stamp.age_us(now_us,observation.rgb.stamp.clock_id)
-        capture_interval=observation.capture_interval
-        instantaneous_synthetic=(observation.kind=='SYNTHETIC' and capture_interval is not None
-            and capture_interval[0]==capture_interval[1])
         free_patches=() if evidence is None else evidence.patches
         temporal_free_status=('INSTANTANEOUS_SYNTHETIC' if instantaneous_synthetic else
             'CAPTURE_TIME_UNKNOWN' if capture_interval is None else 'MOTION_UNQUALIFIED' if not motion_qualified
-            else 'FULL_CAPTURE_POSE_UNAVAILABLE' if raw_pose is None else 'MOTION_RAY_TUBE_UNAVAILABLE')
-        if (not instantaneous_synthetic and evidence is not None and capture_interval is not None and motion_qualified):
-            from .motion import widen_motion_rays
-            # registration이 좁힌 error가 원 exposure의 motion hull을 줄이지 않게 한다.
-            free_patches=widen_motion_rays(evidence.patches,observation.depth.stamp,self.calibration,raw_pose,
-                input_kind=observation.kind,motion_qualified=True,capture_interval=capture_interval)
-            if bool(np.any(free_patches.qualified)):temporal_free_status='FULL_CAPTURE_MOTION_RAY_TUBE'
-        temporal_bound=instantaneous_synthetic or temporal_free_status=='FULL_CAPTURE_MOTION_RAY_TUBE'
-        if temporal_bound and not instantaneous_synthetic and completed_clock is None:
-            temporal_bound=False;temporal_free_status='ACTUAL_COMPLETION_CLOCK_REQUIRED'
-        can_free=bool(evidence is not None and self.targets and self.calibration.free_qualified and temporal_bound
+            else 'FULL_CAPTURE_POSE_UNAVAILABLE' if raw_pose is None else
+            'MOTION_RAY_TUBE_UNAVAILABLE' if motion_pose is None else
+            'ACTUAL_COMPLETION_CLOCK_REQUIRED' if completed_clock is None else 'MOTION_RAYS_NOT_NEEDED')
+        temporal_possible=instantaneous_synthetic or (motion_pose is not None and completed_clock is not None)
+        can_free=bool(evidence is not None and targets_qualified and self.calibration.free_qualified and temporal_possible
             and depth_age is not None and depth_age<=self.profile.max_observation_age_us
             and observation.rgb.stamp.captured_us is not None and self.profile.permission_polygon
             and (instantaneous_synthetic or not quarantined))
@@ -795,7 +801,22 @@ class PerceptionPipeline:
             needed=needed_mask.copy()
         selected=()
         legacy_positions=None
-        if needed is not None and cycle_bound_us is not None and completion_bound_us is not None:
+        scheduled=needed is not None and cycle_bound_us is not None and completion_bound_us is not None
+        # 원 pose/time, 정합, corridor와 작업량이 허용된 frame에서만 FREE ray를 만든다.
+        use_rays=can_free and ((instantaneous_synthetic and needed is None) or
+            (scheduled and grid.spec.width*grid.spec.height<=4096 and bool(np.any(needed))))
+        if use_rays:
+            if ray_inputs is not None:
+                evidence=ray_inputs.materialize(evidence,diagnostics)
+                free_patches=evidence.patches
+            if not instantaneous_synthetic:
+                # 정합이 좁힌 자세 대신 원 exposure의 pose bound를 사용한다.
+                free_patches=widen_motion_rays(free_patches,observation.depth.stamp,self.calibration,motion_pose,
+                    input_kind=observation.kind,motion_qualified=True,capture_interval=capture_interval)
+                can_free=temporal_possible=bool(np.any(free_patches.qualified))
+                temporal_free_status='FULL_CAPTURE_MOTION_RAY_TUBE' if can_free else 'MOTION_RAY_TUBE_UNAVAILABLE'
+        del ray_inputs
+        if scheduled:
             if grid.spec.width*grid.spec.height>4096:
                 scheduling_status='SCHEDULER_GRID_LIMIT';can_free=False
             else:
@@ -945,9 +966,9 @@ class PerceptionPipeline:
             elif pose is not None and visual_status=='ALIGNMENT_EXPIRED':
                 localization_status='ODOMETRY_CONTINUED'
         free_status=('NO_NEW_DEPTH_EVIDENCE' if evidence is None else
-            'TARGET_PROFILE_UNQUALIFIED' if not self.targets or any(not target.qualified for target in self.targets) else
+            'TARGET_PROFILE_UNQUALIFIED' if not targets_qualified else
             'CALIBRATION_UNQUALIFIED' if not self.calibration.free_qualified else
-            temporal_free_status if not temporal_bound else
+            temporal_free_status if not temporal_possible else
             'REGISTRATION_QUARANTINED' if quarantined and not instantaneous_synthetic else
             visual_status if localization_blocks_free or operational_localization and not alignment_current(now_us) else
             'PERMISSION_POLICY_UNCONFIGURED' if not self.profile.permission_polygon else

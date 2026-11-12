@@ -56,7 +56,8 @@ def _interval(value):
     return value[0] <= value[1]
 
 
-def _bind(stamp, calibration, pose, input_kind, motion_qualified, capture_interval):
+def bind_motion_pose(stamp, calibration, pose, input_kind, motion_qualified, capture_interval):
+    """원 노출 구간의 pose 계약만 확인한다. 광선 배열은 읽거나 만들지 않는다."""
     if type(stamp) is not FrameStamp or type(calibration) is not CalibrationProfile:
         raise ValueError('motion requires original FrameStamp and CalibrationProfile')
     if input_kind not in ('LIVE', 'REPLAY', 'SYNTHETIC') or type(motion_qualified) is not bool:
@@ -96,7 +97,7 @@ def widen_motion_rays(rays, stamp, calibration, pose, *, input_kind, motion_qual
         rays = RayBundleBatch.from_rays(rays)
     if type(rays) is not RayBundleBatch:
         raise ValueError('expected bounded original ray batch or tuple')
-    bound = _bind(stamp, calibration, pose, input_kind, motion_qualified, capture_interval)
+    bound = bind_motion_pose(stamp, calibration, pose, input_kind, motion_qualified, capture_interval)
     qualified = np.zeros(len(rays), dtype=bool)
     if bound is None:
         return _copy(rays, qualified)

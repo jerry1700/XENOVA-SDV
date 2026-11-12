@@ -4,7 +4,7 @@
 보존하고 생략된 hit/patch 수를 보고한다. depth0/plane/도로색에서 FREE를 만들지 않는다.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 import math
 
@@ -134,10 +134,17 @@ class DepthEvidence:
     omitted_patch_count: int
     metric_qualified: bool
     mode: str
+    _ray_inputs: "_RayInputs | None" = field(default=None, repr=False, compare=False)
 
     @property
     def rays(self):
         return self.patches
+
+    def take_ray_inputs(self):
+        """계산 중에만 필요한 ray 입력을 결과와 분리한다."""
+        if self._ray_inputs is None:
+            return self, None
+        return replace(self, _ray_inputs=None), self._ray_inputs
 
 
 def _selected(indices, maximum):
@@ -188,13 +195,50 @@ def _stratified(indices, floors, maximum, width):
     return chosen
 
 
+@dataclass(frozen=True)
+class _RayInputs:
+    depth: object
+    indices: object
+    floors: object
+    camera: CameraModel
+    maximum: int
+    absolute: float
+    relative: float
+    qualified: bool
+
+    def materialize(self, evidence, diagnostics=None):
+        import numpy as np
+        timing=timing_start(diagnostics,'depth.selection')
+        indices = _stratified(self.indices,self.floors,self.maximum,self.camera.width)
+        timing_finish(diagnostics,timing)
+        if not len(indices):
+            return evidence
+        values = self.depth[indices].astype(np.float64)
+        u,v = indices % self.camera.width, indices // self.camera.width
+        timing=timing_start(diagnostics,'depth.ray_geometry')
+        bounds = axial_ray_bounds_many(u,v,values,self.camera,
+            depth_error_m=self.absolute + self.relative * values * .001,diagnostics=diagnostics)
+        timing_finish(diagnostics,timing)
+        origin_lo, origin_hi, direction_lo, direction_hi, range_lo, range_hi, near, far, valid = bounds
+        timing=timing_start(diagnostics,'depth.ray_batch')
+        if np.any(valid):
+            pixels = np.column_stack((u[valid],v[valid]))
+            patches = RayBundleBatch(origin_lo[valid], origin_hi[valid], direction_lo[valid], direction_hi[valid],
+                range_lo[valid], range_hi[valid], near[valid], far[valid], self.qualified,
+                None if evidence.stamp is None else evidence.stamp.key,pixels)
+            evidence = replace(evidence,patches=patches,omitted_patch_count=evidence.valid_count-len(patches))
+        timing_finish(diagnostics,timing)
+        return evidence
+
+
 def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
-                  input_kind='LIVE', profile=None, config=DepthConfig(), diagnostics=None):
+                  input_kind='LIVE', profile=None, config=DepthConfig(), diagnostics=None, defer_patches=False):
     """전체 nominal 분류는 8192픽셀 block, hit/patch는 명시 cap의 immutable 기록이다.
 
     고정 camera의 norm/q_error 두 열만 최대4.6875MiB 캐시한다. 출력 선택용
     int32 index 두 개와 floor bool은 최대9B/pixel이며 선택 뒤 해제한다.
-    입력/출력 소유 메모리와 실제 RSS 수락은 별도다.
+    입력/출력 소유 메모리와 실제 RSS 수락은 별도다. defer_patches는 같은 호출의
+    FREE 단계까지 원 입력을 빌린다. 그동안 호출자는 depth를 변경하지 않는다.
     """
     timing=timing_start(diagnostics,'depth.prepare')
     import numpy as np
@@ -297,15 +341,16 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
             hit_indices[hit_count:hit_count + current_hits] = indices[hits]
         hit_count += current_hits
         if config.max_patches:
-            chosen = valid & (indices % camera.width % config.stride == 0)
-            chosen &= indices // camera.width % config.stride == 0
+            chosen = valid if config.stride == 1 else (valid
+                & (indices % camera.width % config.stride == 0) & (indices // camera.width % config.stride == 0))
             current_patches = int(np.count_nonzero(chosen))
             patch_indices[patch_count:patch_count + current_patches] = indices[chosen]
             patch_floors[patch_count:patch_count + current_patches] = floor[chosen]
             patch_count += current_patches
     timing=timing_start(diagnostics,'depth.selection')
     chosen_hits = _selected(hit_indices[:hit_count], config.max_hit_boxes)
-    selected = _stratified(patch_indices[:patch_count], patch_floors[:patch_count], config.max_patches, camera.width)
+    ray_inputs = (_RayInputs(flat_depth,patch_indices[:patch_count],patch_floors[:patch_count],
+                            camera,config.max_patches,absolute,relative,bool(free)) if patch_count else None)
     del hit_indices, patch_indices, patch_floors, points, radii, valid, floor, hits, indices
     timing_finish(diagnostics,timing)
 
@@ -319,24 +364,9 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
         hit_boxes = PointBoundsBatch(lower, upper, bool(metric), None if stamp is None else stamp.key)
         del points, radii, valid, floor, hits
         timing_finish(diagnostics,timing)
-    patches = ()
-    source_key = None if stamp is None else stamp.key
-    for start in range(0, len(selected), BLOCK_PIXELS):
-        indices = selected[start:start + BLOCK_PIXELS]
-        values = flat_depth[indices].astype(np.float64)
-        timing=timing_start(diagnostics,'depth.ray_geometry')
-        bounds = axial_ray_bounds_many(indices % camera.width, indices // camera.width, values, camera,
-            depth_error_m=absolute + relative * values * .001,diagnostics=diagnostics)
-        timing_finish(diagnostics,timing)
-        origin_lo, origin_hi, direction_lo, direction_hi, range_lo, range_hi, near, far, valid = bounds
-        timing=timing_start(diagnostics,'depth.ray_batch')
-        if np.any(valid):
-            # 원 행 순서와 bounds를 유지하며 전체 scalar DTO 생성을 피한다.
-            pixels = np.column_stack((indices[valid] % camera.width, indices[valid] // camera.width))
-            patches = RayBundleBatch(origin_lo[valid], origin_hi[valid], direction_lo[valid], direction_hi[valid],
-                range_lo[valid], range_hi[valid], near[valid], far[valid], bool(free), source_key, pixels)
-        timing_finish(diagnostics,timing)
-    return DepthEvidence(stamp, calibration_id, input_kind, hit_boxes, patches,
+    evidence = DepthEvidence(stamp, calibration_id, input_kind, hit_boxes, (),
         valid_count, floor_count, total - floor_count - len(hit_boxes), total - valid_count,
-        hit_count - len(hit_boxes), valid_count - len(patches), bool(metric),
-        'QUALIFIED_RAYS' if free else 'HIT_ONLY' if metric else 'UNKNOWN')
+        hit_count - len(hit_boxes), valid_count, bool(metric),
+        'QUALIFIED_RAYS' if free else 'HIT_ONLY' if metric else 'UNKNOWN',
+        ray_inputs if defer_patches else None)
+    return evidence if defer_patches or ray_inputs is None else ray_inputs.materialize(evidence,diagnostics)
