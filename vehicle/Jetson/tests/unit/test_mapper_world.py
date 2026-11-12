@@ -5,6 +5,7 @@
 """
 
 from dataclasses import replace
+import math
 import struct
 import unittest
 
@@ -166,6 +167,24 @@ class MapperWorldTests(unittest.TestCase):
         self.assertGreaterEqual(value.left_boundary[-1].x, x0+value.width*value.resolution_m)
         self.assertGreaterEqual(value.left_boundary[0].y, y0+value.height*value.resolution_m)
         self.assertNotAlmostEqual(value.left_boundary[0].y, self.model.road.hypotheses[0].left_outer[0][1])
+
+    def test_corrected_capture_is_carried_to_the_original_vehicle_sample(self):
+        raw = self.inputs.pose.sample
+        vehicle = self.vehicle.pose_sample
+        mapped = replace(raw,x=raw.x+.02,y=raw.y-.01,yaw=raw.yaw+.025,
+                         position_error_m=.018,yaw_error_rad=.02)
+        result = replace(self.draft.result,mapped_odometry=replace(self.inputs.pose,sample=mapped),
+                         yaw_bias={'applied':True})
+        value = self.build(draft=replace(self.draft,result=result)).message()
+        dx,dy = vehicle.x-raw.x,vehicle.y-raw.y
+        c,s = math.cos(.025),math.sin(.025)
+        self.assertAlmostEqual(value.reference_vehicle_pose.x,mapped.x+c*dx-s*dy,places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.y,mapped.y+s*dx+c*dy,places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.yaw,vehicle.yaw+.025,places=7)
+        self.assertEqual(value.reference_odom_seq,self.vehicle.anchor.sequence)
+        self.assertEqual(value.localization.observed_mapper_us,1_000_000)
+        self.assertEqual(value.localization.valid_for_us,100_000)
+        self.assertGreaterEqual(value.localization.anchor_position_bound_m,.018)
 
     def test_original_alignment_expiry_and_completion_order_cannot_be_renewed(self):
         self.assertIsNone(self.build(published_j_us=self.alignment.observed_j_interval[0]+self.alignment.valid_for_us))

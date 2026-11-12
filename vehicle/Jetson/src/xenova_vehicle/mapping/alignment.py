@@ -92,7 +92,7 @@ class MapOdomAlignment:
         object.__setattr__(alignment, '_matched_poses', (odom, fitted))
         return alignment
 
-    def apply(self, odom):
+    def apply(self, odom, *, yaw_drift_rad=None):
         if type(odom) is not PoseEstimate or odom.sample.context!=self.context:
             raise ValueError('alignment cannot cross odom epoch/calibration/clock/origin')
         elapsed_us=0
@@ -100,6 +100,8 @@ class MapOdomAlignment:
             _interval(odom.captured_us)
             if odom.captured_us[1]<self.observed_j_interval[1]:raise ValueError('alignment cannot apply to an older original capture')
             elapsed_us=odom.captured_us[1]-self.observed_j_interval[0]
+        if yaw_drift_rad is not None:
+            return self._project(odom,elapsed_us,yaw_drift_rad=yaw_drift_rad)
         return self._project(odom,elapsed_us)
 
     def project_history(self, odom):
@@ -112,7 +114,17 @@ class MapOdomAlignment:
             raise ValueError('historical observation overlaps the alignment capture')
         return self._project(odom,self.observed_j_interval[1]-odom.captured_us[0])
 
-    def _project(self, odom, elapsed_us):
+    def project_neighbor(self, odom):
+        """Carry a fitted capture pose to a nearby raw sample, including overlapping intervals."""
+        if (type(odom) is not PoseEstimate or odom.sample.context!=self.context
+                or not self.has_metadata or self._matched_poses is None):
+            raise ValueError('neighbor projection requires an original matched odom context')
+        _interval(odom.captured_us)
+        lo,hi = self.observed_j_interval
+        start,end = odom.captured_us
+        return self._project(odom,max(abs(end-lo),abs(hi-start)))
+
+    def _project(self, odom, elapsed_us, *, yaw_drift_rad=None):
         raw=odom.sample
         if self._matched_poses is not None:
             original, fitted = self._matched_poses
@@ -123,6 +135,8 @@ class MapOdomAlignment:
             seconds=math.nextafter(elapsed_us/1_000_000,math.inf)
             position_drift=math.nextafter(self.position_drift_mps*seconds,math.inf) if self.position_drift_mps else 0.
             yaw_drift=math.nextafter(self.yaw_drift_rps*seconds,math.inf) if self.yaw_drift_rps else 0.
+            if yaw_drift_rad is not None:
+                yaw_drift = yaw_drift_rad
             transform_angle=math.nextafter(transform_angle+yaw_drift,math.inf)
         x,y=transform_point((raw.x,raw.y),self.pose)
         rotation_scale=2*math.sin(min(math.pi,transform_angle)/2)

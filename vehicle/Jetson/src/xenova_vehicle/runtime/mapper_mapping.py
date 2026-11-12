@@ -557,11 +557,14 @@ class MapperMapping:
                         temporal_root=collector.temporal_lane_root(temporal)
                     evidence=EvidenceTable(tuple(collector._records[key] for key in sorted(collector._records)),
                         tuple(collector._contexts[key] for key in sorted(collector._contexts)))
-                    pose=draft.inputs.pose
-                    if result.registration is not None and result.registration.status=='BOUNDED':
+                    pose=result.mapped_odometry
+                    if pose is None:
+                        pose=draft.inputs.pose
+                    if result.mapped_odometry is None and result.registration is not None and result.registration.status=='BOUNDED':
                         fit=result.registration;pose=replace(pose,sample=replace(pose.sample,x=fit.representative[0],
                             y=fit.representative[1],yaw=fit.representative[2],position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
-                    elif draft.pipeline._alignment is not None:_,pose=draft.pipeline._propagate_odometry(pose)
+                    elif result.mapped_odometry is None and draft.pipeline._alignment is not None:
+                        _,pose=draft.pipeline._propagate_odometry(pose)
                     if list((pose.sample.x,pose.sample.y,pose.sample.yaw))!=result.summary.get('mapped_pose'):
                         raise MappingNotReady('catalog pose differs from actual mapped result')
                     grid=draft.pipeline.grid;spec=grid.spec;x,y=spec.origin_xy

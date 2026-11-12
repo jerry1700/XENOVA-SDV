@@ -16,6 +16,7 @@ from .tape import TapeProfile, extract_tape
 from .road import RoadProfile, infer_road
 from .lane_tracking import mapped_lane_ahead, track_lane
 from .registration_history import HISTORY_FRAMES, RegistrationObservation, combined_constraints
+from .yaw_bias import YawBias
 from .temporal_road import MappedRoad, TemporalRoadMap
 from .parking_entrance import entrance_summary
 from .depth import DepthConfig
@@ -120,6 +121,8 @@ class PerceptionResult:
     neural: object = None
     mapped_road: MappedRoad | None = None
     temporal_rgb_sources: frozenset = frozenset()
+    mapped_odometry: PoseEstimate | None = None
+    yaw_bias: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -141,7 +144,7 @@ class PerceptionPipeline:
     """단일 M 또는 offline runner 소유. 원본 1개와 유한 grid/reference만 유지한다."""
 
     def __init__(self, calibration, profile=None, *, targets=(),rolling_policy=None,
-                 parking_entrance_diagnostics=True):
+                 parking_entrance_diagnostics=True,estimate_yaw_bias=True):
         from .calibration import CalibrationProfile
         if type(calibration) is not CalibrationProfile:
             raise ValueError('pipeline requires CalibrationProfile')
@@ -163,6 +166,7 @@ class PerceptionPipeline:
         self._propagation_anchor = None
         self._previous_propagation_anchor = None
         self._registration_history = ()
+        self._yaw_bias = YawBias() if estimate_yaw_bias else None
         self._restore_pending = False
         self._domain_cache = None
         self._last_tape = self._last_road = self._last_rgb = None
@@ -329,10 +333,22 @@ class PerceptionPipeline:
     def _propagate_odometry(self, raw):
         alignment = self._alignment
         anchor = self._propagation_anchor or alignment
-        prior = anchor.apply(raw)
+        bias = self._yaw_bias
+        if bias is None:
+            prior = anchor.apply(raw)
+            earlier_corrected = False
+        else:
+            bias.applied = False
+            prior = bias.project(anchor,raw,self.profile.registration)
+            earlier_corrected = bias.applied
+            earlier_rate = bias.applied_rate
         if anchor is alignment:
             return prior, prior
-        latest = alignment.apply(raw)
+        if bias is None:
+            latest = alignment.apply(raw)
+        else:
+            bias.applied = False
+            latest = bias.project(alignment,raw,self.profile.registration)
         # 약한 새 정합의 넓은 오차를 이전의 더 정밀한 오도메트리 전파에 누적하지 않는다.
         earlier = prior.sample
         current = latest.sample
@@ -340,6 +356,9 @@ class PerceptionPipeline:
                 and earlier.yaw_error_rad <= current.yaw_error_rad
                 and math.hypot(earlier.x-current.x, earlier.y-current.y) <= earlier.position_error_m
                 and abs(wrap_yaw(earlier.yaw-current.yaw)) <= earlier.yaw_error_rad):
+            if bias is not None:
+                bias.applied = earlier_corrected
+                bias.applied_rate = earlier_rate
             return prior, prior
         return prior, latest
 
@@ -464,12 +483,19 @@ class PerceptionPipeline:
             self._propagation_anchor=None
             self._previous_propagation_anchor=None
             self._registration_history=()
+            if self._yaw_bias is not None:
+                self._yaw_bias = YawBias()
             self._free_scheduler=None
             same_startup = (self._context is not None and self._context[:3] == context[:3]
                             and self._context[-1].startswith('frame:'))
             self._temporal_road.clear(keep_startup=same_startup)
             self._context=context
         raw_pose=pose
+        yaw_bias = self._yaw_bias
+        if yaw_bias is not None:
+            yaw_bias.applied=False
+            if raw_pose is not None and localization_configured and localization_yaw_drift_rps:
+                yaw_bias.add_pose(raw_pose)
         registration_pose=pose
         alignment_invalid=False
         if pose is not None and self._alignment is not None:
@@ -613,6 +639,10 @@ class PerceptionPipeline:
                     if operational_localization and not candidate_alignment.valid_at(now_us):
                         quarantined=True
                     else:
+                        if yaw_bias is not None and operational_localization:
+                            yaw_bias.observe(self._last_rgb,self.calibration,raw_pose,candidate_pose,
+                                common,reference,localization_yaw_drift_rps)
+                            yaw_bias.applied=False
                         if registration_method=='MULTI_FRAME':
                             # 새 기준점에 남는 원 엔코더 오차까지 포함해 실제 전파 이득을 비교한다.
                             projected=candidate_alignment.apply(raw_pose).sample
@@ -954,7 +984,8 @@ class PerceptionPipeline:
                 snapshot=(ended-free_done)//1000,total=(ended-started)//1000))
         if diagnostics is not None: summary['diagnostic_timings']=diagnostics.snapshot()
         return PerceptionResult(summary,self._last_tape,self._last_road,evidence,registration,snapshot,
-                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys)
+                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys,
+                                pose,None if yaw_bias is None else yaw_bias.summary())
 
 
 def render_diagnostics(result, calibration):

@@ -15,7 +15,7 @@ from xenova_gateway import feedback, feedback3
 from xenova_gateway.odometry import OdometryConfig, VehicleOdometry
 from xenova_vehicle.mapping.local_map import OCCUPIED, GridSpec
 from xenova_vehicle.mapping.odometry import PoseBuffer
-from xenova_vehicle.mapping.registration import wrap_yaw
+from xenova_vehicle.mapping.registration import transform_point, wrap_yaw
 from xenova_vehicle.mapping.wheel_motion import WheelMotionProfile
 from xenova_vehicle.oak.calibration_snapshot import full_sensor_rgb_geometry
 from xenova_vehicle.perception.calibration import CalibrationProfile
@@ -36,11 +36,12 @@ BODY_WIDTH_M = .21
 
 
 class EncoderReplay:
-    def __init__(self, calibration, route, profile, *, wheel_speed_limit_mps):
+    def __init__(self, calibration, route, profile, *, wheel_speed_limit_mps, start_at_zero=False):
         encoder = profile['encoder']
         bundle = calibration.vehicle_bundle_sha256
         self.host, self.gateway, self.device = (str(UUID(int=i)) for i in (10, 11, 12))
         self.route, self.at, self.calibration = route, None, calibration
+        self.initial_odom = (0.,0.,0.) if start_at_zero else route[0]
         self.sent, self.accepted, self.probes = 0, 0, 0
         odometry = dict(profile['odometry'])
         odometry['maximum_speed_mps'] = wheel_speed_limit_mps
@@ -100,7 +101,7 @@ class EncoderReplay:
                     self.sink.poll(self.clock())
                     # The test defines the route origin once, before the first wheel sample.
                     assert self.odom.previous is None
-                    self.odom.pose = self.route[0]
+                    self.odom.pose = self.initial_odom
                 elif kind == feedback3.CLOCK_PROBE:
                     probed = True
                     self.probes += 1
@@ -193,15 +194,24 @@ def wheel_speed_limit(samples, encoder):
     return math.ceil(100*(max_distance + encoder['metres_per_tick'])/(DRIVE_STEP_US/1e6))/100
 
 
-def _cone_cells(track, spec):
+def _cone_cells(track, spec, world_from_map=None):
     resolution = spec.resolution_m
     ox, oy = spec.origin_xy
     cells = {}
     for cone in track['layout']['obstacle_seeds']:
         half = cone['w'] / 2
-        cells[cone['id']] = {row*spec.width+col for row in range(spec.height) for col in range(spec.width)
-            if ox+(col+1)*resolution > cone['x']-half and ox+col*resolution < cone['x']+half
-            and oy+(row+1)*resolution > cone['y']-half and oy+row*resolution < cone['y']+half}
+        if world_from_map is None:
+            cells[cone['id']] = {row*spec.width+col for row in range(spec.height) for col in range(spec.width)
+                if ox+(col+1)*resolution > cone['x']-half and ox+col*resolution < cone['x']+half
+                and oy+(row+1)*resolution > cone['y']-half and oy+row*resolution < cone['y']+half}
+        else:
+            cells[cone['id']] = set()
+            for row in range(spec.height):
+                for col in range(spec.width):
+                    center = ox+(col+.5)*resolution,oy+(row+.5)*resolution
+                    x,y = transform_point(center,world_from_map)
+                    if abs(x-cone['x']) < half and abs(y-cone['y']) < half:
+                        cells[cone['id']].add(row*spec.width+col)
     return cells
 
 
@@ -213,7 +223,7 @@ def _cone_metrics(expected, observations, last):
         for identity,hits in observations.items()}
 
 
-def run(route, scene_path, profiles, rgb_eeprom, make_encoder):
+def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_bias=False, map_local_origin=False):
     """Feed only RGB, depth and encoder samples into the unchanged mapping entry point."""
     cv2.setNumThreads(1)
     mapper = MapperProfile.from_bytes((profiles/'mapper-profile.json').read_bytes())
@@ -246,6 +256,9 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder):
     track = scene.fields['track']
     x0,y0,x1,y1 = track['layout']['bounds']
     cell = mapper.pipeline.grid.resolution_m
+    if map_local_origin:
+        # Fixed test canvas only. Camera rendering and post-run scoring own the scene coordinates.
+        x0,y0,x1,y1 = -3.,-3.,3.,3.
     spec = GridSpec(math.ceil((x1-x0)/cell),math.ceil((y1-y0)/cell),cell,(x0,y0))
     road = mapper.pipeline.road
     half_width = track['lane_width_m']/2
@@ -254,10 +267,12 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder):
     width_error = road.missing_outer_width_error_m
     road = replace(road,missing_outer_width_bounds_m=(half_width-width_error,half_width+width_error))
     profile = replace(mapper.pipeline,grid=spec,road=road,tape=replace(mapper.pipeline.tape,x_max_m=1.5))
-    core = PerceptionPipeline(live_calibration,profile,targets=mapper.targets)
+    core = PerceptionPipeline(live_calibration,profile,targets=mapper.targets,
+                              estimate_yaw_bias=estimate_yaw_bias)
     encoder = make_encoder(live_calibration,[pose for _,pose in route])
     policy = mapper.localization
-    expected = _cone_cells(track,spec)
+    origin = route[0][1] if map_local_origin else None
+    expected = _cone_cells(track,spec,origin)
     occupied_by_cone = {identity:[] for identity in expected}
     frames = []
     try:
@@ -273,9 +288,13 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder):
                 localization_yaw_drift_rps=policy.yaw_drift_rps)
             summary = result.summary
             seconds = elapsed_us/1e6
+            if origin is not None:
+                x,y = transform_point((truth[0]-origin[0],truth[1]-origin[1]),(0.,0.,-origin[2]))
+                truth = x,y,wrap_yaw(truth[2]-origin[2])
             frames.append(dict(elapsed_s=seconds,truth=truth,mapped=summary['mapped_pose'],
                 status=summary['localization_status'],position_error_m=summary['mapped_position_error_m'],
-                yaw_error_rad=summary['mapped_yaw_error_rad'],qualified=summary['localization_qualified']))
+                yaw_error_rad=summary['mapped_yaw_error_rad'],qualified=summary['localization_qualified'],
+                yaw_bias=result.yaw_bias))
             snapshot = core.grid.snapshot(at,clock_id=core.grid.clock_id)
             occupied = set(np.flatnonzero(snapshot['arrays']['state']==OCCUPIED).tolist())
             for identity,cells in expected.items():
