@@ -143,14 +143,14 @@ static bool sample_valid(const struct fb3_link *link, const struct fb3_sample *s
 	return true;
 }
 
-/* 앞 표본에서 FB3_SAMPLE_GAP_US 가 지났는지 */
+/* 다음 표본을 뜰 때가 됐는지. 앞 표본에서 한 주기가 지나야 한다 */
 static bool gap_passed(const struct fb3_link *link, uint64_t now)
 {
-	return link->sample_sequence == 0 || now >= link->sample_us + FB3_SAMPLE_GAP_US;
+	return link->sample_sequence == 0 || now >= link->sample_us + FB3_SENSOR_PERIOD_US;
 }
 
-/* 받아 둔 CLOCK_PROBE 에 답한다. 앞 표본과 아직 가까우면 답하지 않고 0 을 돌려준다.
- * 그때는 fb3_link_poll 이 간격이 찬 뒤에 답한다 */
+/* 받아 둔 CLOCK_PROBE 에 답한다. 아직 다음 표본을 뜰 때가 아니면 답하지 않고 0 을 돌려준다.
+ * 그때는 fb3_link_poll 이 그 자리에서 SENSOR 대신 답한다 */
 static size_t answer_probe(struct fb3_link *link, uint8_t *wire, size_t cap)
 {
 	const struct fb3_clock_probe *probe = &link->probe;
@@ -201,8 +201,7 @@ static size_t answer_probe(struct fb3_link *link, uint8_t *wire, size_t cap)
 	link->sample_sequence = reply.source_sample;
 	link->sample_us = sample.device_us;
 	link->report_due = link->reporting;
-	/* 다음 probe 는 200 ms 뒤에 온다. 그 앞뒤로 SENSOR 가 반 주기씩 떨어지게 한다 */
-	link->sensor_due_us = sample.device_us + FB3_SENSOR_PERIOD_US / 2;
+	link->sensor_due_us = sample.device_us + FB3_SENSOR_PERIOD_US;
 	link->probe_fence = probe->probe_sequence;
 	link->replies[link->reply_next].probe_sequence = probe->probe_sequence;
 	link->replies[link->reply_next].d3_us = d3;
@@ -692,7 +691,7 @@ static size_t report_sample(struct fb3_link *link, uint8_t *wire, size_t cap)
 	/* 기한이 지나 출력이 끊긴 DRIVE·HOLD_STEER 는 더 알리지 않는다. 기한이 코앞인 것도 그 REPORT 가 Pi 의
 	 * 기한 뒤에 닿을 수 있어 알리지 않는다 */
 	if (link->active.command_kind != FB3_COMMAND_STOP
-			&& (link->active.cutoff_device_us <= link->sample_us + FB3_SAMPLE_GAP_US
+			&& (link->active.cutoff_device_us <= link->sample_us + FB3_REPORT_MARGIN_US
 			    || fb3_cutoff_query(link->cutoff, FB3_CUTOFF_OUTPUT) != FB3_CUTOFF_LIVE)) {
 		link->reporting = false;
 		return 0;
@@ -741,15 +740,12 @@ size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap)
 {
 	uint64_t now;
 
-	/* 답을 미뤄 둔 CLOCK_PROBE 가 있으면 간격이 찼는지 본다. 그 응답의 표본이 다음 표본이다 */
-	if (link->probe_held) {
-		return answer_probe(link, wire, cap);
-	}
 	/* 방금 보낸 표본에 대한 REPORT 가 그 표본 바로 뒤에 간다 */
 	if (link->report_due) {
 		link->report_due = false;
 		return report_sample(link, wire, cap);
 	}
+	/* 다음 표본을 뜰 때까지 기다린다 */
 	now = link->port.now_us(link->port.ctx);
 	if (now < link->sensor_due_us) {
 		return 0;
@@ -766,6 +762,10 @@ size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap)
 		link->fault_reported = true;
 		link->reporting = false;
 		return report_fault(link, FB3_REASON_DEVICE_FAULT, wire, cap);
+	}
+	/* 답을 미뤄 둔 CLOCK_PROBE 가 있으면 이 자리의 표본은 그 응답에 싣는다 */
+	if (link->probe_held) {
+		return answer_probe(link, wire, cap);
 	}
 	return send_sensor(link, now, wire, cap);
 }

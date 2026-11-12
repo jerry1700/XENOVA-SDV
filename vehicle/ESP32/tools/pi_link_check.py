@@ -13,7 +13,7 @@ PC 에서 게이트웨이 코드를 돌리는 것이므로 실제 Pi 의 USB 와
   4. HOLD_STEER: 장치가 정지 조향(capability 0x0400)을 알리면, Pi 가 방향을 바꾸는 자리의 STOP 뒤에 0.5초 동안
      HOLD_STEER 를 보내고 APPLIED 를 받는다. 바퀴는 돌지 않고 조향이 왼쪽 0.1 rad 로 움직인다. 3 과 같은 때에만 한다.
      Pi 는 HOLD_STEER 를 내보낼 때마다 정지 확인 창을 다시 검사하고, 통과하지 못한 순간의 것은 내보내지 않는다.
-     그 수와 까닭을 보여 준다. Pi 가 방향 전환을 허락하는 단계(gate state 4)까지 가는지는 판정하지 않고 값만
+     그런 것이 하나라도 있으면 실패다. Pi 가 방향 전환을 허락하는 단계(gate state 4)까지 가는지는 판정하지 않고 값만
      보여 준다. 조향 측정이 없는 장치에서는 그 단계에 이르지 않는다.
 
 펌웨어가 알리는 capability 에 Pi 필수 bit 가 모자라면 Pi 가 HELLO_ACK 를 받지 않는 것을 먼저 확인하고,
@@ -457,8 +457,8 @@ def main():
                         steer = dict(cusp, command=dict(cusp['command'], command_kind='HOLD_STEER'))
                         tried, held, declined, states = keep_holding(sink, DriveFrame, counter + 1, steer, HOLD_S)
                         check(held >= HOLD_S / DRIVE_PERIOD_S * 6 // 10, f'Pi 가 HOLD_STEER {held}개를 내보냄')
-                        if declined:
-                            print(f'      Pi 가 내보내지 않은 HOLD_STEER {len(declined)}개: ' + ', '.join(sorted(set(declined))))
+                        check(not declined, f'Pi 가 내보내지 않은 HOLD_STEER 가 없음 ({len(declined)}개'
+                              + (': ' + ', '.join(sorted(set(declined))) if declined else '') + ')')
                         told = len(applied_commands(relay, 3))
                         check(told >= held * 9 // 10 > 0, f'장치가 그 가운데 {told}개를 APPLIED 로 알림')
                         row = sink.hold_row

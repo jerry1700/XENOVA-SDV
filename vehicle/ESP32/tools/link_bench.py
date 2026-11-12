@@ -40,9 +40,10 @@ HOLD_MRAD = (100, -100, 0)  # --drive 로 보내는 HOLD_STEER 의 조향
 DRIVE_MMPS = 200       # --drive 로 보내는 DRIVE 의 속도
 DRIVE_LIFE_US = 80000  # 그 DRIVE 의 기한까지 시간
 QUIET_S = 0.3  # 답이 없어야 할 때 기다리는 시간
-# 펌웨어가 표본 사이에 두는 간격 (link.h 의 FB3_SENSOR_PERIOD_US, FB3_SAMPLE_GAP_US)
+# 펌웨어가 표본 사이에 두는 간격과, 기한이 이 안으로 남으면 REPORT 를 보내지 않는 여유
+# (link.h 의 FB3_SENSOR_PERIOD_US, FB3_REPORT_MARGIN_US)
 SENSOR_PERIOD_US = 20000
-SAMPLE_GAP_US = 5000
+REPORT_MARGIN_US = 5000
 # 표본이 제때보다 이만큼 넘게 늦으면 끊긴 것으로 본다. 시뮬레이터는 PC 가 멈칫하는 만큼 늦으므로 느슨하게 본다
 BOARD_LATE_US = 3000
 SIM_LATE_US = 80000
@@ -161,19 +162,15 @@ def lease_terms(p1, p4, d2, d3, lease_us):
 def stream_problems(samples, late_us=None):
     """받은 순서대로의 표본에서 순번·시각·간격이 어긋난 곳을 글로 돌려준다.
 
-    순번은 CLOCK_REPLY 와 SENSOR 를 통틀어 하나씩 늘어야 한다. 간격은 SENSOR 다음 SENSOR 가 한 주기,
-    CLOCK_REPLY 다음 SENSOR 가 반 주기, CLOCK_REPLY 는 앞 표본에서 SAMPLE_GAP_US 이상이어야 한다.
-    late_us 를 주면 lease 가 내내 살아 있던 구간으로 보고, SENSOR 가 그 간격보다 late_us 넘게 늦은 것도 어긋난 것으로 본다.
+    순번은 CLOCK_REPLY 와 SENSOR 를 통틀어 하나씩 늘어야 하고, 어느 종류든 앞 표본에서 한 주기 이상 떨어져야 한다.
+    late_us 를 주면 lease 가 내내 살아 있던 구간으로 보고, SENSOR 가 한 주기보다 late_us 넘게 늦은 것도 어긋난 것으로 본다.
     """
     problems = []
     for before, after in zip(samples, samples[1:]):
         if after.sequence != before.sequence + 1:
             problems.append(f'표본 {before.sequence} 다음에 {after.sequence}')
             continue
-        if after.kind == CLOCK_REPLY:
-            least = SAMPLE_GAP_US
-        else:
-            least = SENSOR_PERIOD_US if before.kind == SENSOR else SENSOR_PERIOD_US // 2
+        least = SENSOR_PERIOD_US
         gap = after.device_us - before.device_us
         if gap < least:
             problems.append(f'표본 {after.sequence} 가 앞 표본에서 {gap} us 뒤 (적어도 {least} us)')
@@ -208,16 +205,16 @@ def drive_report_problems(told, samples, first, cutoff):
     """DRIVE 하나의 APPLIED REPORT 가 표본을 따라왔는지 본다. (어긋난 곳의 글, 꼭 와야 했던 후속 REPORT 수) 를 돌려준다.
 
     told 는 그 DRIVE 의 REPORT 필드를 받은 순서대로, first 는 명령에 바로 답한 REPORT, cutoff 는 명령의 기한(장치 시각)이다.
-    장치는 표본을 보낸 다음 loop 에서, 출력이 걸려 있고 기한까지 SAMPLE_GAP_US 넘게 남았으면 그 표본의 REPORT 를 보낸다.
+    장치는 표본을 보낸 다음 loop 에서, 출력이 걸려 있고 기한까지 REPORT_MARGIN_US 넘게 남았으면 그 표본의 REPORT 를 보낸다.
     그 loop 는 다음 표본을 뜨기 전이다. 그래서 다음 표본도 기한 전이면 앞 표본의 REPORT 는 PC 나 장치가 얼마나 늦든
     꼭 와야 하고, 기한 전의 마지막 표본은 REPORT 를 만들 때 이미 기한 뒤일 수 있어 와도 되고 안 와도 된다.
     """
     if first is None or told[:1] != [first]:
         return ['DRIVE 에 바로 답한 APPLIED 가 그 DRIVE 의 첫 REPORT 가 아님'], 0
     after = [sample for sample in samples if sample.sequence > first[8]]
-    due = [sample.sequence for sample in after if sample.device_us + SAMPLE_GAP_US < cutoff]
+    due = [sample.sequence for sample in after if sample.device_us + REPORT_MARGIN_US < cutoff]
     sure = [sample.sequence for sample, following in zip(after, after[1:])
-            if sample.device_us + SAMPLE_GAP_US < cutoff and following.device_us < cutoff]
+            if sample.device_us + REPORT_MARGIN_US < cutoff and following.device_us < cutoff]
     got = [fields[8] for fields in told[1:]]
     problems = []
     if got != due[:len(got)]:
@@ -407,7 +404,7 @@ def run(flow, lease_us, late_us, drive, report):
               f'새 lease 를 가리키는 SENSOR 가 다시 옴 (0.2초에 {len(renewed)}개)')
 
     # 8. lease 가 살아 있는 동안 CLOCK_PROBE 를 여러 번 보낸다. 표본은 CLOCK_REPLY 와 SENSOR 를 오가며 이어지고,
-    #    SENSOR 의 표본에 붙어 온 probe 에는 간격이 찬 뒤에 답한다. 도중에 설치한 새 lease 로 SENSOR 가 넘어간다
+    #    probe 에는 다음 표본 자리에서 SENSOR 대신 답한다. 도중에 설치한 새 lease 로 SENSOR 가 넘어간다
     spread = random.Random(453)
     first = probe(5)
     if not check(first is not None, 'lease 가 살아 있는 동안에도 CLOCK_PROBE 에 답함'):
@@ -435,9 +432,11 @@ def run(flow, lease_us, late_us, drive, report):
             switched = len(flow.sensors)
     flow.listen(0.05)
     check(answered == SWEEP_PROBES, f'그동안 보낸 CLOCK_PROBE {SWEEP_PROBES}개에 모두 답함 ({answered}개)')
-    held = [wait for wait in waits if wait >= SAMPLE_GAP_US // 10]
-    check(held and max(held) <= SAMPLE_GAP_US + late_us,
-          f'SENSOR 의 표본에 붙어 온 probe 에는 간격이 찬 뒤에 답함 ({len(held)}개, 받고 나서 표본까지 가장 길게 {max(waits, default=0)} us)')
+    # 주기의 아무 자리에나 닿게 보냈으므로, 다음 표본 자리까지 기다린 시간은 0 에서 한 주기 사이에 고루 퍼진다
+    held = [wait for wait in waits if wait >= SENSOR_PERIOD_US // 2]
+    check(held and max(waits) <= SENSOR_PERIOD_US + late_us,
+          f'probe 에는 다음 표본 자리에서 답함 (받고 나서 표본까지 {min(waits, default=0)} us 에서 {max(waits, default=0)} us, '
+          f'반 주기 넘게 기다린 것 {len(held)}개)')
     if switched is not None:
         old, new = flow.sensors[pointed_from:switched], flow.sensors[switched:]
         check(old and new and all(fields[10] == 7 for fields in old) and all(fields[10] == 8 for fields in new),

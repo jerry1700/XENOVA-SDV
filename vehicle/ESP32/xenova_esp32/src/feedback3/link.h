@@ -24,10 +24,11 @@ extern "C" {
  * Pi 는 200 ms 마다 probe 를 보내고 lease 는 길어야 1 s 다 */
 #define FB3_LINK_REPLIES 8u
 
-/* SENSOR 를 보내는 간격. 계약 §5 의 50 Hz */
+/* 표본을 뜨는 간격. 계약 §5 의 50 Hz. SENSOR 와 CLOCK_REPLY 를 통틀어 이웃한 표본은 이보다 가깝지 않다.
+ * 앞 표본에서 이만큼 지나기 전에 온 CLOCK_PROBE 는 그때까지 응답을 미루고, 그 자리의 표본을 CLOCK_REPLY 로 보낸다 */
 #define FB3_SENSOR_PERIOD_US 20000u
-/* 표본과 표본 사이를 적어도 이만큼 띄운다. CLOCK_PROBE 가 앞 표본에 바짝 붙어 오면 응답을 그때까지 미룬다 */
-#define FB3_SAMPLE_GAP_US 5000u
+/* 기한이 이 안으로 남은 DRIVE·HOLD_STEER 는 표본마다의 REPORT 로 알리지 않는다. Pi 의 기한 뒤에 닿을 수 있다 */
+#define FB3_REPORT_MARGIN_US 5000u
 
 /* 다시 온 명령인지 가려내려고 기억해 두는 최근 명령 수. 마지막 STOP 은 여기서 밀려도 따로 남는다 */
 #define FB3_LINK_RESULTS 8u
@@ -96,7 +97,7 @@ struct fb3_link {
 	bool open; /* HELLO 로 맺은 Pi session 이 있다 */
 	uint8_t pi_session[16];
 	uint64_t probe_fence; /* 이 session 에서 답한 가장 큰 probe_sequence */
-	bool probe_held;      /* 받았지만 표본 간격 때문에 아직 답하지 않은 CLOCK_PROBE 가 있다 */
+	bool probe_held;      /* 받았지만 다음 표본을 뜰 때가 아니라서 아직 답하지 않은 CLOCK_PROBE 가 있다 */
 	struct fb3_clock_probe probe;
 	uint64_t probe_received_us;
 	struct fb3_reply_mark replies[FB3_LINK_REPLIES];
@@ -138,7 +139,7 @@ void fb3_link_init(struct fb3_link *link, const struct fb3_link_config *config,
 size_t fb3_link_receive(struct fb3_link *link, const struct fb3_frame *frame, uint64_t received_us,
 			uint8_t *wire, size_t cap);
 
-/* 메인 루프가 돌 때마다 부른다. 미뤄 둔 CLOCK_REPLY, 표본에 따라붙는 REPORT, 주기 표본 SENSOR 가운데
+/* 메인 루프가 돌 때마다 부른다. 표본에 따라붙는 REPORT, 미뤄 둔 CLOCK_REPLY, 주기 표본 SENSOR 가운데
  * 보낼 때가 된 것이 있으면 wire 에 구분자까지 쓰고 그 길이를, 아니면 0 을 돌려준다. 한 번에 프레임 하나다 */
 size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap);
 
