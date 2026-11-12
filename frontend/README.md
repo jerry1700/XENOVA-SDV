@@ -56,17 +56,18 @@ API·WebSocket 프록시와 운영 도메인은 배포 Nginx 설정에서 연결
 
 관리자 웹은 **VM Dashboard · Vision · VM Control · Simulator** 네 영역으로 구성합니다. 주행 상태는 전역 띠로 반복하지 않고 Dashboard Overview와 Simulator 안에서 맥락에 맞게 보여 줍니다.
 
-| 경로                                                 | 화면                              | 데이터                              |
-| ---------------------------------------------------- | --------------------------------- | ----------------------------------- |
-| `/login`                                             | 로그인                            | auth                                |
-| `/dashboard/overview`                                | VM 3대 통합 현황                  | drive state, vms, events            |
-| `/dashboard/cpu`, `/dashboard/memory`                | CPU·Memory 자원 현황              | vms, metrics                        |
-| `/dashboard/console`                                 | VM별 웹 콘솔                      | WS `/ws/v1/vms/{id}/console`        |
-| `/dashboard/vms/:vmId`                               | Overview에서 진입하는 VM 상세     | vms, metrics, processes, 콘솔 WS-03 |
-| `/vision`                                            | Jetson 카메라·인지 현황           | 후속 이슈 -306                      |
-| `/control`, `/control/vms/new`, `/control/vms/:vmId` | VM 목록·생성·생명주기 제어        | vms, templates                      |
-| `/simulator`                                         | 실차 전 시뮬레이터·장애/복구 시연 | drive state, input, display route   |
-| `/events`, `/screens`, `/components`                 | 기존 보조·개발 화면               | events 또는 —                       |
+| 경로                                                 | 화면                                            | 데이터                              |
+| ---------------------------------------------------- | ----------------------------------------------- | ----------------------------------- |
+| `/login`                                             | 로그인                                          | auth                                |
+| `/dashboard/overview`                                | VM 3대 통합 현황                                | drive state, vms, events            |
+| `/dashboard/cpu`, `/dashboard/memory`                | CPU·Memory 자원 현황                            | vms, metrics                        |
+| `/dashboard/console`                                 | VM별 웹 콘솔                                    | WS `/ws/v1/vms/{id}/console`        |
+| `/dashboard/vms/:vmId`                               | Overview에서 진입하는 VM 상세                   | vms, metrics, processes, 콘솔 WS-03 |
+| `/vision`                                            | Jetson 카메라·인지 현황                         | 후속 이슈 -306                      |
+| `/control`, `/control/vms/new`, `/control/vms/:vmId` | VM 목록·생성·생명주기 제어                      | vms, templates                      |
+| `/simulator`                                         | 실차 전 시뮬레이터·장애/복구 시연               | drive state, input, display route   |
+| `/screens`                                           | 휴대폰 화면 연결(주소·연결번호)·모니터 바로가기 | REST-38·REST-39 phone-link          |
+| `/events`, `/components`                             | 기존 보조·개발 화면                             | events 또는 —                       |
 
 기존 `/vms`, `/resources`, `/demo`, `/console` 주소는 북마크 호환을 위해 새 주소로 이동시킵니다.
 
