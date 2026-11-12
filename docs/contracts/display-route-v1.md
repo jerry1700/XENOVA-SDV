@@ -25,6 +25,9 @@ HDMI 빌드(`VITE_TELEMETRY` 비움 또는 `display`)에서 `/split`은 monitor-
 
 ## 기존 Spring 화면 배치 인터페이스의 경계
 
+> **2026-11-12 폐기 예정 표시 (S15P31E110-132).** HDMI 가 모니터 2대 합친 한 화면(`/display/combined`)으로 바뀌어 모니터별 배치 선택은 쓰임이 없어졌고, 실보드에는 아래 WebSocket 에 연결하는 어댑터가 배포된 적이 없다(관리 콘솔 "화면 배치" 카드는 항상 "모니터 꺼짐 · rev 1"). 관리 콘솔의 화면 배치 카드는 같은 날 제거했다. 백엔드 `GET /api/v1/displays`·`PUT …/route`·`WS /ws/v1/displays`·`WS /ws/v1/display-service` 는 호출자 없이 남아 있으며, 외부 화면 제어가 다시 필요해지면 아래 "별도 어댑터" 합의를 먼저 한다. 그 전까지 새 코드가 이 인터페이스에 의존하지 않는다.
+
+
 기존 129번은 `GET /api/v1/displays`, `PUT /api/v1/displays/{display_id}/route`(사용자 JWT), `WS /ws/v1/displays`(사용자), `WS /ws/v1/display-service`(서비스 토큰)를 제공한다. `display-0`/`display-1`, `view=split|os-face`, `vm_id`, `expected_revision`을 사용하며 서비스와 `service.hello`, `route.set`, `route.applied`, `route.failed`, `display.status`를 교환한다.
 
 이 경로의 `screen_path=/split|/detail/{app}`와 legacy `role`은 기존 앱 미리보기 계약이다. **현재 dom0 키오스크가 이 WebSocket에 연결해 로컬 정책으로 변환하는 어댑터는 없다.** 프론트 `DisplayFollower`는 console mock에서만 그 서비스를 흉내 낸다. 실제 적용 ACK로 사용하지 않는다. 이 MR은 129번의 허용 view나 legacy role 동작을 임의 변경하지 않는다.
