@@ -191,10 +191,29 @@ static void parking_deadlines(void){
  assert(parking->phase==DP_HOLD&&parking->terminal&&engine.behavior_failed);
 }
 
+static void budget_reply_requires_current_grant(bool current){
+ parking_fixture();
+ xenova_drive_MissionGrant old=engine.grant;
+ old.admitted=true;old.grant_revision=7;old.execution_deadline_pi_us=0;
+ xenova_drive_MissionGrant grant=old;
+ grant.grant_revision=8;grant.has_locked_goal_sha256=true;grant.execution_deadline_pi_us=4000000;
+ xenova_drive_MissionBudgetReply reply={.result=1,.has_grant=true,.grant=grant};
+ engine.grant=grant;engine.has_grant=current;engine.parking.original_grant=old;
+ engine.parking.phase=DP_EVALUATE;engine.parking.budget_pending=true;
+ engine.parking.request.action=1;engine.parking.request.valid_until_pi_us=2000;
+ engine.parking.request.expected_grant_revision=7;
+ engine.parking.best_approach=engine.parking.best_maneuver;
+ assert(de_budget_reply(&engine,&reply,1001)==(current?DE_OK:DE_STATE));
+ assert(!engine.parking.budget_pending&&engine.parking.terminal==!current);
+ assert(engine.parking.phase==(current?DP_TARGET_LOCKED:DP_HOLD));
+}
+
 int main(int argc,char **argv){
  assert(argc==2);
  if(!strcmp(argv[1],"writer"))writer_contention();
  else if(!strcmp(argv[1],"handoff"))parking_handoff();
  else if(!strcmp(argv[1],"deadlines"))parking_deadlines();
+ else if(!strcmp(argv[1],"budget-current"))budget_reply_requires_current_grant(true);
+ else if(!strcmp(argv[1],"budget-revoked"))budget_reply_requires_current_grant(false);
  else assert(false);
 }

@@ -110,6 +110,11 @@ def test_parking_publication_and_phase_recovery(parking_writer, case):
     subprocess.run([str(parking_writer), case], check=True)
 
 
+@pytest.mark.parametrize('case', ('budget-current', 'budget-revoked'))
+def test_planner_publication_keeps_original_authority_and_deadline(parking_writer, case):
+    subprocess.run([str(parking_writer), case], check=True)
+
+
 def parking_trace(library,product,tmp_path,validation=None):
     out=(C.c_double*24)();library.probe_parking_trace(product.handle,out)
     names=('root_union','start_result','search_result','goal_count','selected_goal','path_count',

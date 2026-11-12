@@ -1714,7 +1714,7 @@ enum de_result de_budget_reply(struct drive_engine *e,const xenova_drive_Mission
  struct dp_state *p=&e->parking;
  if(memcmp(reply->request_nonce.bytes,p->request.request_nonce.bytes,16)||memcmp(reply->request_sha256.bytes,p->request_sha256,32))return DE_STATE;
  p->budget_pending=false;
- bool valid=now<p->request.valid_until_pi_us&&reply->result==1&&reply->has_grant&&grant_same(&e->grant,&reply->grant)&&
+ bool valid=e->has_grant&&now<p->request.valid_until_pi_us&&reply->result==1&&reply->has_grant&&grant_same(&e->grant,&reply->grant)&&
   e->grant.has_locked_goal_sha256&&!memcmp(e->grant.locked_goal_sha256.bytes,p->request.selected_goal_sha256.bytes,32)&&
   e->grant.grant_revision==p->request.expected_grant_revision+1&&
   e->grant.mission_deadline_pi_us==p->original_grant.mission_deadline_pi_us&&e->grant.search_deadline_pi_us==p->original_grant.search_deadline_pi_us&&

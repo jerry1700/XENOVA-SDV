@@ -552,14 +552,18 @@ int dl_direction_get(bool manual,xenova_drive_DirectionGateWitness *out,uint64_t
     now-vehicle.pi_sample_us+vehicle.clock_error_us>lp_selected_config.pose_age_us)return -EXDEV;
  return 0;
 }
+/* Caller holds input_context_lock. */
+static bool mission_current(uint64_t now){
+ uint64_t guest=clock_us();
+ return guest&&guest<=current_clock.expires_guest&&context_available&&clock_available&&mission_available&&
+  current_mission.control_generation==control_generation&&current_mission.issued_pi_us<=now&&
+  bytes_hex(current_mission.owner_vm.bytes,16,active_vm,true)&&
+  (current_mission.kind!=2||now<current_mission.mission_deadline_pi_us);
+}
 int dl_mission_get(xenova_drive_MissionGrant *out,uint64_t now){
  if(!out)return -EINVAL;
  if(k_mutex_lock(&input_context_lock,K_NO_WAIT))return -EBUSY;
- uint64_t guest=clock_us();
- int rc=!guest||guest>current_clock.expires_guest||!context_available||!clock_available||!mission_available||
-  current_mission.control_generation!=control_generation||current_mission.issued_pi_us>now||
-  !bytes_hex(current_mission.owner_vm.bytes,16,active_vm,true)||
-  (current_mission.kind==2&&now>=current_mission.mission_deadline_pi_us)?-EAGAIN:0;
+ int rc=mission_current(now)?0:-EAGAIN;
  if(!rc)*out=current_mission;
  k_mutex_unlock(&input_context_lock);return rc;
 }
@@ -602,11 +606,16 @@ int dl_budget_submit(const xenova_drive_MissionBudgetRequest *request,const uint
  }
  k_mutex_unlock(&input_context_lock);return rc;
 }
-int dl_budget_take(xenova_drive_MissionBudgetRequest *request,xenova_drive_MissionBudgetReply *reply){
- if(!request||!reply)return -EINVAL;
+int dl_budget_take(xenova_drive_MissionBudgetReply *reply,xenova_drive_MissionGrant *grant,uint64_t now){
+ if(!reply||!grant)return -EINVAL;
  if(k_mutex_lock(&input_context_lock,K_NO_WAIT))return -EBUSY;
  int rc=budget_pending&&budget_reply_available?0:-EAGAIN;
- if(!rc){*request=budget_request;*reply=budget_reply;budget_pending=budget_send_pending=budget_reply_available=false;}
+ if(!rc){
+  *reply=budget_reply;
+  if(mission_current(now))*grant=current_mission;
+  else memset(grant,0,sizeof(*grant));
+  budget_pending=budget_send_pending=budget_reply_available=false;
+ }
  k_mutex_unlock(&input_context_lock);return rc;
 }
 void dl_snapshot_request(void){atomic_set(&snapshot_requested,1);}
