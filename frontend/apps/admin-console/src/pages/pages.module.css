@@ -434,11 +434,6 @@
   border-radius: 4px;
   display: inline-block;
 }
-.linkList {
-  margin: 0;
-  padding-left: var(--x-space-5);
-  line-height: 2;
-}
 .pad {
   display: grid;
   grid-template-columns: repeat(3, 64px);

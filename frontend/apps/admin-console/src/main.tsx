@@ -14,8 +14,8 @@ import { DashboardPage, LegacyDashboardPage } from './pages/DashboardPage';
 import { DemoPage } from './pages/DemoPage';
 import { EventsPage } from './pages/EventsPage';
 import { LoginPage } from './pages/LoginPage';
+import { PhoneLinkPage } from './pages/PhoneLinkPage';
 import { ResourcesPage } from './pages/ResourcesPage';
-import { ScreensPage } from './pages/ScreensPage';
 import { SignupPage } from './pages/SignupPage';
 import { ShowcasePage } from './pages/ShowcasePage';
 import { SimulatorStressLab } from './pages/SimulatorStressLab';
@@ -78,7 +78,7 @@ const router = createBrowserRouter([
       { path: '/demo', element: <Navigate to="/simulator" replace /> },
       { path: '/console', element: <Navigate to="/dashboard/console" replace /> },
       { path: '/events', element: <EventsPage /> },
-      { path: '/screens', element: <ScreensPage /> },
+      { path: '/phone-link', element: <PhoneLinkPage /> },
       { path: '/components', element: <ShowcasePage /> },
     ],
   },
