@@ -72,6 +72,21 @@ export interface VmListResponse {
   observed_at: string;
 }
 
+/** POST /api/v1/vms/synchronizations — 보드 등록 목록 ↔ DB VM 테이블 등록 동기화 결과 */
+export interface VmSynchronizationResult {
+  /** 보드에 등록된 VM 수 */
+  discovered: number;
+  registered: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  incomplete: number;
+  /** DB 에는 있는데 이번에 보드에 없던 VM (연속으로 없으면 retired) */
+  missing_from_board: number;
+  retired: number;
+  results: { vm_id: string; action: string; reason: string | null }[];
+}
+
 /** §5 POST /api/v1/vms 요청 (§9 입력값 규칙) */
 export interface CreateVmRequest {
   /** 1~63자, 앞뒤 공백·제어문자 금지 */

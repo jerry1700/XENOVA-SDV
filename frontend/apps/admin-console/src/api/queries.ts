@@ -28,6 +28,7 @@ import type {
   UpdateVcpuPinningRequest,
   Vm,
   VmListResponse,
+  VmSynchronizationResult,
   VmResourceUpdate,
   VmResources,
 } from './types';
@@ -363,6 +364,19 @@ export function useVmAction() {
       action === 'delete'
         ? request<void>(`/api/v1/vms/${encodeURIComponent(vmId)}`, { method: 'DELETE' })
         : request<Vm>(`/api/v1/vms/${encodeURIComponent(vmId)}/${action}`, { method: 'POST' }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+/**
+ * 보드 등록 목록과 DB VM 테이블을 맞춘다 (보드에만 있는 VM 등록, 보드에서 사라진 VM 은퇴).
+ * 서버가 주기적으로 돌리지 않으므로 사용자가 버튼으로 요청한다. 끝나면 VM 목록을 다시 읽는다.
+ */
+export function useSynchronizeVms() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => request<VmSynchronizationResult>('/api/v1/vms/synchronizations', { method: 'POST' }),
+    retry: false,
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }
