@@ -422,8 +422,8 @@ static size_t on_clock_install(struct fb3_link *link, const struct fb3_frame *fr
 	/* 기한을 실제 타이머에 건 뒤에만 INSTALLED 로 답한다 */
 	slot = pick_slot(link);
 	lease = &link->leases[slot];
-	/* 출력에 걸려 있는 DRIVE 가 쓰는 lease 는 밀어내지 않는다 */
-	if (lease->installed && link->reporting && link->active.command_kind == FB3_COMMAND_DRIVE
+	/* 출력에 걸려 있는 DRIVE·HOLD_STEER 가 쓰는 lease 는 밀어내지 않는다 */
+	if (lease->installed && link->reporting && link->active.command_kind != FB3_COMMAND_STOP
 			&& link->active.clock_sequence == lease->install.clock_sequence
 			&& fb3_cutoff_query(link->cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_LIVE) {
 		return reject(link, &install, FB3_REASON_CLOCK_UNAVAILABLE, wire, cap);
@@ -530,7 +530,8 @@ static bool apply_drive(void *arg)
 					 request->command->steering_mrad);
 }
 
-/* DRIVE 를 검사하고 출력에 건다. 걸었으면 FB3_REASON_OK, 아니면 받아들이지 않는 이유 */
+/* DRIVE·HOLD_STEER 를 검사하고 출력에 건다. 걸었으면 FB3_REASON_OK, 아니면 받아들이지 않는 이유.
+ * HOLD_STEER 는 속도 칸이 0 이어야 하는 것 말고는 DRIVE 와 같은 검사를 거친다 */
 static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_command *command)
 {
 	struct drive_request request = {link, command};
@@ -550,7 +551,8 @@ static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_comm
 			|| (direction != 0 && link->direction != 0 && direction != link->direction)) {
 		return FB3_REASON_DIRECTION_STOP_REQUIRED;
 	}
-	if (command->velocity_mmps > link->config.max_velocity_mmps
+	if ((command->command_kind == FB3_COMMAND_HOLD_STEER && command->velocity_mmps != 0)
+			|| command->velocity_mmps > link->config.max_velocity_mmps
 			|| command->velocity_mmps < -link->config.max_velocity_mmps
 			|| command->steering_mrad > link->config.max_steering_mrad
 			|| command->steering_mrad < -link->config.max_steering_mrad
@@ -601,13 +603,16 @@ static enum fb3_reason accept(struct fb3_link *link, const struct fb3_command *c
 			|| command->reason > FB3_COMMAND_REASON_MAX) {
 		return FB3_REASON_RANGE;
 	}
-	if (command->command_kind != FB3_COMMAND_DRIVE && command->command_kind != FB3_COMMAND_STOP) {
+	/* HOLD_STEER 는 정지 조향을 한다고 알린 설정에서만 받는다 */
+	if (command->command_kind != FB3_COMMAND_DRIVE && command->command_kind != FB3_COMMAND_STOP
+			&& (command->command_kind != FB3_COMMAND_HOLD_STEER
+			    || !(link->config.capabilities & FB3_CAP_STATIONARY_STEER))) {
 		return FB3_REASON_UNSUPPORTED_PROFILE;
 	}
 	if (command->command_sequence <= link->command_fence) {
 		return FB3_REASON_SEQUENCE_REPLAY;
 	}
-	if (command->command_kind == FB3_COMMAND_DRIVE) {
+	if (command->command_kind != FB3_COMMAND_STOP) {
 		return accept_drive(link, command);
 	}
 	/* STOP 은 시각 lease 없이 온다. 기한·속도·조향 칸은 모두 0 이다 */
@@ -684,9 +689,9 @@ static size_t report_sample(struct fb3_link *link, uint8_t *wire, size_t cap)
 	if (!link->reporting) {
 		return 0;
 	}
-	/* 기한이 지나 출력이 끊긴 DRIVE 는 더 알리지 않는다. 기한이 코앞인 것도 그 REPORT 가 Pi 의 기한 뒤에
-	 * 닿을 수 있어 알리지 않는다 */
-	if (link->active.command_kind == FB3_COMMAND_DRIVE
+	/* 기한이 지나 출력이 끊긴 DRIVE·HOLD_STEER 는 더 알리지 않는다. 기한이 코앞인 것도 그 REPORT 가 Pi 의
+	 * 기한 뒤에 닿을 수 있어 알리지 않는다 */
+	if (link->active.command_kind != FB3_COMMAND_STOP
 			&& (link->active.cutoff_device_us <= link->sample_us + FB3_SAMPLE_GAP_US
 			    || fb3_cutoff_query(link->cutoff, FB3_CUTOFF_OUTPUT) != FB3_CUTOFF_LIVE)) {
 		link->reporting = false;

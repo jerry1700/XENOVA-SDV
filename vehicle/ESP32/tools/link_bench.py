@@ -34,7 +34,9 @@ SESSION_MISMATCH, SEQUENCE_REPLAY, IDEMPOTENCY_CONFLICT, CLOCK_UNAVAILABLE, CLOC
 DEVICE_FAULT, TIMESTAMP_ORDER = 11, 17
 DRIVE, STOP, HOLD_STEER = 1, 2, 3                      # COMMAND command_kind
 APPLIED = 2                                            # REPORT status
-DIRECTION_STOP_REQUIRED, UNSUPPORTED_PROFILE = 10, 16  # REPORT reason
+RANGE, DIRECTION_STOP_REQUIRED, UNSUPPORTED_PROFILE = 9, 10, 16  # REPORT reason
+STATIONARY_STEER = 0x0400  # HELLO_ACK capabilities 가운데 HOLD_STEER 를 받는다는 bit
+HOLD_MRAD = (100, -100, 0)  # --drive 로 보내는 HOLD_STEER 의 조향
 DRIVE_MMPS = 200       # --drive 로 보내는 DRIVE 의 속도
 DRIVE_LIFE_US = 80000  # 그 DRIVE 의 기한까지 시간
 QUIET_S = 0.3  # 답이 없어야 할 때 기다리는 시간
@@ -531,18 +533,42 @@ def run(flow, lease_us, late_us, drive, report):
         flow.listen(0.2)
         check(echoed(fields, back) and fields[6] == REJECTED and fields[18] == DIRECTION_STOP_REQUIRED and ticks() == moved,
               f'STOP 없이 방향을 바꾸는 DRIVE 는 REJECTED DIRECTION_STOP_REQUIRED 이고 움직이지 않음 ({result(fields)})')
-        hold, fields = command(3, HOLD_STEER, stop_sequence=1, steering=100)
-        check(echoed(fields, hold) and fields[6] == REJECTED and fields[18] == UNSUPPORTED_PROFILE,
-              f'HOLD_STEER 는 REJECTED UNSUPPORTED_PROFILE ({result(fields)})')
+        number = 3  # 다음 명령의 순번. 거절된 명령은 순번을 쓰지 않는다
+        if capabilities & STATIONARY_STEER:
+            # HOLD_STEER 는 모터를 돌리지 않고 조향만 건다. DRIVE 처럼 기한까지 표본마다 알린다
+            sure_hold = 0
+            for mrad in HOLD_MRAD:
+                hold, fields = command(number, HOLD_STEER, stop_sequence=1, steering=mrad)
+                check(echoed(fields, hold) and fields[6] == APPLIED and fields[18] == 0,
+                      f'HOLD_STEER {mrad} mrad 에 APPLIED 로 답하고 명령의 칸을 그대로 돌려줌 ({result(fields)})')
+                flow.listen(0.15)
+                told = [row for row, _ in flow.reports if row[2] == number and row[6] == APPLIED]
+                problems, sure = drive_report_problems(told, flow.samples, fields, COMMAND3.unpack(hold)[7])
+                check(not problems, f'그 HOLD_STEER 의 REPORT 가 기한 전의 표본마다 차례로 옴 ({len(told)}개, 꼭 와야 하는 후속 {sure}개)')
+                for text in problems:
+                    note(text)
+                sure_hold += sure
+                number += 1
+            check(sure_hold >= 1, f'HOLD_STEER 의 후속 REPORT 가 꼭 와야 하는 표본이 있었음 ({sure_hold}개)')
+            check(ticks() == moved, 'HOLD_STEER 동안 엔코더 누계가 그대로임 (모터 출력을 켜지 않음)')
+            hold, fields = command(number, HOLD_STEER, stop_sequence=1, velocity=DRIVE_MMPS)
+            flow.listen(0.2)
+            check(echoed(fields, hold) and fields[6] == REJECTED and fields[18] == RANGE and ticks() == moved,
+                  f'속도가 실린 HOLD_STEER 는 REJECTED RANGE 이고 움직이지 않음 ({result(fields)})')
+            check(renew(11, 42), '반대 방향 DRIVE 가 쓸 lease 를 새로 설치')
+        else:
+            hold, fields = command(number, HOLD_STEER, stop_sequence=1, steering=100)
+            check(echoed(fields, hold) and fields[6] == REJECTED and fields[18] == UNSUPPORTED_PROFILE,
+                  f'정지 조향을 알리지 않은 장치는 HOLD_STEER 를 REJECTED UNSUPPORTED_PROFILE 로 답함 ({result(fields)})')
 
-        stop, fields = command(3, STOP)
+        stop, fields = command(number, STOP)
         check(echoed(fields, stop) and fields[6] == APPLIED, f'새 STOP 에 APPLIED 로 답함 ({result(fields)})')
-        back, fields = command(4, DRIVE, stop_sequence=3, velocity=-DRIVE_MMPS)
+        back, fields = command(number + 1, DRIVE, stop_sequence=number, velocity=-DRIVE_MMPS)
         flow.listen(0.5)
         reversed_to = ticks()
         check(echoed(fields, back) and fields[6] == APPLIED and reversed_to[0] < moved[0] and reversed_to[1] < moved[1],
               f'새 STOP 뒤의 반대 방향 DRIVE 는 적용되고 누계가 줄어듦 ({moved} → {reversed_to}, {result(fields)})')
-        told = [row for row, _ in flow.reports if row[2] == 4 and row[6] == APPLIED]
+        told = [row for row, _ in flow.reports if row[2] == number + 1 and row[6] == APPLIED]
         problems, sure_back = drive_report_problems(told, flow.samples, fields, COMMAND3.unpack(back)[7])
         check(not problems, f'반대 방향 DRIVE 의 REPORT 도 표본마다 차례로 옴 ({len(told)}개, 꼭 와야 하는 후속 {sure_back}개)')
         for text in problems:
@@ -552,7 +578,7 @@ def run(flow, lease_us, late_us, drive, report):
               f'후속 REPORT 가 꼭 와야 하는 표본이 있었음 (앞으로 {sure_forward}개, 뒤로 {sure_back}개)')
         flow.listen(0.1)
         check(ticks() == reversed_to, '그 DRIVE 도 기한 뒤에 멈춤')
-        stop, fields = command(5, STOP)
+        stop, fields = command(number + 2, STOP)
         check(echoed(fields, stop) and fields[6] == APPLIED, f'마지막 STOP 에 APPLIED 로 답함 ({result(fields)})')
 
     # 10. 새 pi_session 이 오면 앞 session 의 것은 받지 않는다
@@ -572,7 +598,8 @@ def main():
     add_device_arguments(parser)
     parser.add_argument('--lease-ms', type=int, default=500, help='설치할 lease 길이 (기본 500)')
     parser.add_argument('--drive', action='store_true',
-                        help='실보드에 DRIVE 까지 보낸다. 바퀴가 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
+                        help='실보드에 DRIVE·HOLD_STEER 까지 보낸다. 바퀴가 돌고 조향이 움직인다. '
+                             '바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
     args = parser.parse_args()
     sys.stdout.reconfigure(errors='backslashreplace')  # 한글을 못 쓰는 콘솔에서도 멈추지 않게
     report = Report()

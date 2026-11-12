@@ -1,7 +1,7 @@
 /* feedback-3 세션, 시각 설치, 주기 표본, 명령.
  * HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 를 처리하고,
  * 살아 있는 lease 가 있는 동안 엔코더 표본을 SENSOR 로 보낸다.
- * COMMAND 의 DRIVE·STOP 을 검사해 출력에 걸고 REPORT 로 알린다. HOLD_STEER 는 받지 않는다.
+ * COMMAND 의 DRIVE·STOP·HOLD_STEER 를 검사해 출력에 걸고 REPORT 로 알린다.
  * 계약 docs/contracts/gateway-feedback-3.md §3·§4·§5·§6·§7·§8.
  * 시계·센서·타이머는 port 로 받아 PC 호스트 시험에서도 그대로 돈다. */
 #ifndef XENOVA_FB3_LINK_H
@@ -49,8 +49,9 @@ struct fb3_link_port {
 	uint64_t (*now_us)(void *ctx);
 	/* 지금 표본을 새로 뜬다. 센서를 읽지 못하면 false */
 	bool (*latch)(void *ctx, struct fb3_sample *out);
-	/* 속도와 조향을 모터·서보 출력에 건다. 걸지 못하면 false. cutoff 의 lock 을 쥔 채 불리므로
-	 * 오래 걸리면 그동안 기한의 alarm 이 밀린다 */
+	/* 속도와 조향을 모터·서보 출력에 건다. true 를 돌려줄 때는 두 출력이 모두 그 값으로 바뀌어 있어야 한다.
+	 * 이 반환값으로 APPLIED 를 알리므로, 나중에 쓰려고 값만 적어 두고 true 를 돌려주면 안 된다.
+	 * 걸지 못하면 false. cutoff 의 lock 을 쥔 채 불리므로 오래 걸리면 그동안 기한의 alarm 이 밀린다 */
 	bool (*drive)(void *ctx, int16_t velocity_mmps, int16_t steering_mrad);
 	/* 비상정지 입력이 눌려 있으면 true */
 	bool (*estop)(void *ctx);
@@ -58,7 +59,7 @@ struct fb3_link_port {
 
 struct fb3_link_config {
 	uint8_t device_boot_session[16];
-	uint16_t capabilities;
+	uint16_t capabilities;      /* HELLO_ACK 로 알린다. STATIONARY_STEER 가 있어야 HOLD_STEER 를 받는다 */
 	uint8_t vehicle_config_sha256[32];
 	uint8_t firmware_sha256[32];
 	uint8_t encoder_bits;
@@ -119,7 +120,7 @@ struct fb3_link {
 	struct fb3_result results[FB3_LINK_RESULTS];
 	unsigned result_next;
 	struct fb3_result stop;   /* 마지막으로 적용한 STOP */
-	struct fb3_command active; /* 표본마다 보고하는 명령. 출력에 걸려 있는 DRIVE 이거나 마지막 STOP 이다 */
+	struct fb3_command active; /* 표본마다 보고하는 명령. 출력에 걸려 있는 DRIVE·HOLD_STEER 이거나 마지막 STOP 이다 */
 	bool reporting;           /* active 가 있다 */
 	bool report_due;          /* 방금 보낸 표본에 대한 REPORT 를 아직 보내지 않았다 */
 	int8_t direction;         /* 마지막 STOP 뒤로 간 방향. 아직 없으면 0 */

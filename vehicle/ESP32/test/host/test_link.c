@@ -1640,6 +1640,15 @@ static struct fb3_command drive_command(uint64_t sequence, uint64_t stop_sequenc
 	return c;
 }
 
+static struct fb3_command hold_command(uint64_t sequence, uint64_t stop_sequence, uint64_t clock_sequence,
+				       uint64_t cutoff, int16_t steering)
+{
+	struct fb3_command c = drive_command(sequence, stop_sequence, clock_sequence, cutoff, 0, steering);
+
+	c.command_kind = FB3_COMMAND_HOLD_STEER;
+	return c;
+}
+
 /* COMMAND 를 넣는다. REPORT 가 나왔으면 풀어 준다 */
 static bool command(struct bench *b, const struct fb3_command *in, struct fb3_report *out)
 {
@@ -2200,6 +2209,196 @@ static void test_reports_follow_samples(void)
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 4);
 }
 
+/* 정지 조향을 한다고 알리는 설정으로 시작한다 */
+static void start_steering(struct bench *b)
+{
+	start(b);
+	b->link.config.capabilities |= FB3_CAP_STATIONARY_STEER;
+}
+
+static void test_hold_steer(void)
+{
+	struct bench b;
+	struct fb3_hello_ack hello_ack;
+	struct fb3_clock_reply reply;
+	struct fb3_clock_install in;
+	struct fb3_clock_ack ack;
+	struct fb3_command hold, drive, stop;
+	struct fb3_report r;
+	struct fb3_sensor s;
+	struct fb3_frame frame;
+	uint8_t first[FB3_MAX_WIRE];
+	size_t first_len;
+	unsigned cuts;
+	uint64_t at, cutoff, last;
+
+	current = "hold: 정지 조향을 알리지 않은 설정에서는 받지 않음";
+	start(&b);
+	ready_to_drive(&b);
+	hold = hold_command(2, 1, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_UNSUPPORTED_PROFILE) && b.hw.drives == 0 && b.link.command_fence == 1);
+
+	current = "hold: 조향을 건 뒤 APPLIED 로 알림";
+	start_steering(&b);
+	at = ready_to_drive(&b);
+	cutoff = b.hw.now + 80000;
+	hold = hold_command(2, 1, 1, cutoff, 150);
+	CHECK(command(&b, &hold, &r));
+	CHECK(r.status == FB3_REPORT_APPLIED && r.reason == FB3_REASON_OK && echoes(&r, &hold));
+	CHECK(r.command_kind == FB3_COMMAND_HOLD_STEER && r.report_sequence == 2 && r.source_sample == 1
+	      && r.source_device_us == at);
+	CHECK(r.flags == FB3_REPORT_STATIONARY && r.stationary == 0 && r.velocity_mmps == 0 && r.steering_mrad == 0);
+	CHECK(b.hw.velocity == 0 && b.hw.steering == 150 && b.hw.drives == 1 && !b.hw.drive_unlocked);
+	CHECK(b.hw.alarm_set && b.hw.alarm_at == cutoff && b.link.command_fence == 2);
+
+	current = "hold: 같은 명령이 다시 와도 다시 걸지 않고 기한을 늘리지 않음";
+	first_len = b.response_len;
+	memcpy(first, b.response, first_len);
+	pass(&b, 30000);
+	CHECK(command(&b, &hold, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(b.hw.drives == 1 && b.hw.alarm_at == cutoff && b.link.report_sequence == 2);
+	drive = hold;
+	drive.steering_mrad = 160;
+	CHECK(turned_down(&b, &drive, FB3_REASON_IDEMPOTENCY_CONFLICT));
+	CHECK(b.hw.steering == 150 && b.hw.drives == 1 && b.hw.alarm_at == cutoff);
+
+	current = "hold: 기한이 되면 타이머가 출력의 기한을 끝내고, 다시 온 명령이 되살리지 않음";
+	fake_run(&b.hw, cutoff - 1);
+	cuts = b.hw.cuts;
+	CHECK(b.hw.output_on && fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_LIVE);
+	fake_run(&b.hw, cutoff);
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_EXPIRED && !b.cutoff.fault);
+	CHECK(command(&b, &hold, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(!b.hw.output_on && b.hw.drives == 1);
+
+	current = "hold: 속도 칸이 0 이 아니면 거절";
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, 150);
+	hold.velocity_mmps = 1;
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold.velocity_mmps = -1;
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	CHECK(b.hw.drives == 1 && b.link.command_fence == 2);
+
+	current = "hold: STOP 참조·범위·lease·기한 검사는 DRIVE 와 같음";
+	hold = hold_command(3, 9, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	hold = hold_command(3, 0, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, 501);
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, -501);
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, 150);
+	hold.expires_pi_us = hold.issued_pi_us + FB3_COMMAND_LIFE_US + 1;
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold = hold_command(3, 1, 2, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_CLOCK_UNAVAILABLE));
+	hold = hold_command(3, 1, 1, at + 900001, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DEADLINE_MISMATCH));
+	hold = hold_command(3, 1, 1, b.hw.now + 200, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_COMMAND_EXPIRED));
+	CHECK(b.hw.drives == 1 && b.link.command_fence == 2 && !b.hw.output_on);
+
+	current = "hold: 가던 방향으로 치지 않음";
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, -200);
+	CHECK(applied(&b, &hold) && b.hw.steering == -200 && b.hw.drives == 2 && b.link.direction == 0);
+	drive = drive_command(4, 1, 1, b.hw.now + 80000, -300, -200);
+	CHECK(applied(&b, &drive) && b.hw.velocity == -300 && b.link.direction == -1);
+
+	current = "hold: 걸려 있던 DRIVE 의 모터 출력을 내리고 기한을 제 것으로 바꿈";
+	hold = hold_command(5, 1, 1, b.hw.now + 60000, 100);
+	CHECK(applied(&b, &hold));
+	CHECK(b.hw.velocity == 0 && b.hw.steering == 100 && b.hw.drives == 4 && b.hw.alarm_at == hold.cutoff_device_us);
+
+	current = "hold: 뒤에도 방향을 바꾸려면 새 STOP 이 있어야 함";
+	drive = drive_command(6, 1, 1, b.hw.now + 50000, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED) && b.hw.velocity == 0 && b.hw.drives == 4);
+	stop = stop_command(PI_A, 6, 1);
+	CHECK(applied(&b, &stop) && !b.hw.output_on);
+	hold = hold_command(7, 1, 1, b.hw.now + 80000, 0);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	hold = hold_command(7, 6, 1, b.hw.now + 80000, 0);
+	CHECK(applied(&b, &hold) && b.hw.steering == 0);
+	drive = drive_command(8, 6, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive) && b.hw.velocity == 300);
+
+	current = "hold: 표본마다 그 표본을 가리켜 알리고 기한까지만 알림";
+	start_steering(&b);
+	at = ready_to_drive(&b);
+	hold = hold_command(2, 1, 1, at + 40000, 150);
+	CHECK(applied(&b, &hold));
+	fake_run(&b.hw, at + 10000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 2 && r.command_kind == FB3_COMMAND_HOLD_STEER);
+	CHECK(r.status == FB3_REPORT_APPLIED && echoes(&r, &hold) && r.source_sample == s.source_sample
+	      && r.source_device_us == s.source_device_us);
+	fake_run(&b.hw, at + 30000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 2 && r.source_sample == s.source_sample);
+	fake_run(&b.hw, at + 50000);
+	CHECK(!b.hw.output_on && sensor(&b, &s));
+	CHECK(!spin(&b, &frame) && !b.link.reporting);
+	fake_run(&b.hw, at + 70000);
+	CHECK(sensor(&b, &s) && !spin(&b, &frame));
+
+	current = "hold: 기한이 5 ms 안으로 남았으면 알리지 않음";
+	last = s.source_device_us;
+	hold = hold_command(3, 1, 1, last + 20000 + FB3_SAMPLE_GAP_US, 150);
+	CHECK(applied(&b, &hold));
+	fake_run(&b.hw, last + 20000);
+	CHECK(sensor(&b, &s) && b.hw.output_on && !spin(&b, &frame) && !b.link.reporting);
+	hold = hold_command(4, 1, 1, last + 40000 + FB3_SAMPLE_GAP_US + 1, 150);
+	CHECK(applied(&b, &hold));
+	fake_run(&b.hw, last + 40000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 4);
+
+	current = "hold: 걸려 있는 HOLD_STEER 가 쓰는 lease 는 새 lease 가 밀어내지 않음";
+	start_steering(&b);
+	CHECK(hello(&b, PI_A, CONFIG, &hello_ack) && (hello_ack.capabilities & FB3_CAP_STATIONARY_STEER));
+	pass(&b, 1000);
+	CHECK(probe(&b, PI_A, BOOT, 1, 900000, &reply));
+	pass(&b, 6000);
+	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
+	at = reply.latch_device_us;
+	in = lease(PI_A, 1, 1, at + 800000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	in = lease(PI_A, 2, 2, at + 900000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	stop = stop_command(PI_A, 1, 1);
+	CHECK(applied(&b, &stop));
+	hold = hold_command(2, 1, 1, at + 80000, 150);
+	CHECK(applied(&b, &hold));
+	pass(&b, 6000);
+	CHECK(probe(&b, PI_A, BOOT, 3, 1300000, &reply));
+	in = lease(PI_A, 3, 3, at + 1000000);
+	CHECK(install(&b, &in, &ack) && rejected(&ack, FB3_REASON_CLOCK_UNAVAILABLE));
+	CHECK(fb3_link_lease_live(&b.link, EPOCH, 1) && fb3_link_lease_live(&b.link, EPOCH, 2) && b.hw.output_on);
+	fake_run(&b.hw, at + 80000);
+	CHECK(!b.hw.output_on);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	CHECK(!fb3_link_lease_live(&b.link, EPOCH, 1) && fb3_link_lease_live(&b.link, EPOCH, 3));
+
+	current = "hold: 비상정지가 눌려 있으면 거절하고, 풀어도 새 STOP 이 있어야 함";
+	start_steering(&b);
+	ready_to_drive(&b);
+	b.hw.estop = true;
+	hold = hold_command(2, 1, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_E_STOP) && b.hw.drives == 0);
+	b.hw.estop = false;
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED) && b.hw.drives == 0);
+	stop = stop_command(PI_A, 2, 1);
+	CHECK(applied(&b, &stop));
+
+	current = "hold: 조향을 걸지 못하면 FAULT 로 알림";
+	b.hw.drive_fails = true;
+	cuts = b.hw.cuts;
+	hold = hold_command(3, 2, 1, b.hw.now + 80000, 150);
+	CHECK(command(&b, &hold, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
+	CHECK(echoes(&r, &hold) && r.flags == 0);
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1 && b.link.command_fence == 2 && !b.cutoff.fault);
+	b.hw.drive_fails = false;
+	CHECK(applied(&b, &hold) && b.hw.steering == 150);
+}
+
 static void test_command_session_and_lease(void)
 {
 	struct bench b;
@@ -2408,6 +2607,7 @@ int main(void)
 	test_drive_rejects();
 	test_drive_faults();
 	test_reports_follow_samples();
+	test_hold_steer();
 	test_command_session_and_lease();
 	test_vectors();
 	printf("feedback-3 link: %d checks, %d failures\n", checks, failures);

@@ -7,8 +7,8 @@ RC카의 모터·서보·엔코더를 맡는 ESP32 DevKitC V4 펌웨어다. 게�
 - feedback-3 프레임 층(CRC-16/CCITT-FALSE, COBS, 프레임 묶기·풀기, 수신 스트림 분리)과 payload 9종(HELLO, HELLO_ACK, CLOCK_PROBE, CLOCK_REPLY, CLOCK_INSTALL, CLOCK_ACK, SENSOR, COMMAND, REPORT)의 pack/unpack 이 있다.
 - 세션과 시각 설치에 답한다. HELLO → HELLO_ACK, CLOCK_PROBE → CLOCK_REPLY, CLOCK_INSTALL → CLOCK_ACK 이고, 설치한 lease 의 기한(cutoff)은 하드웨어 타이머가 지킨다.
 - 설치한 lease 가 살아 있는 동안 엔코더 표본을 SENSOR 로 20 ms 마다 보낸다.
-- COMMAND 의 DRIVE·STOP 을 모터와 서보에 걸고 REPORT 로 알린다. DRIVE 의 기한이 지나거나 통신이 끊기면 타이머가 모터 출력을 끊는다. HOLD_STEER 는 받지 않는다.
-- 알리는 capability 는 Pi 가 요구하는 `0x01f7` 이다. develop 의 게이트웨이 코드는 capability 를 채워 넣지 않아도 이 펌웨어의 HELLO_ACK 를 받아들이고 STOP·DRIVE 를 주고받는다(시뮬레이터에서 확인). 실제 Pi 의 USB 로는 아직 연결해 보지 않았다.
+- COMMAND 의 DRIVE·STOP·HOLD_STEER 를 모터와 서보에 걸고 REPORT 로 알린다. DRIVE 의 기한이 지나거나 통신이 끊기면 타이머가 모터 출력을 끊는다. HOLD_STEER 는 모터를 돌리지 않고 조향만 건다.
+- 알리는 capability 는 Pi 가 요구하는 `0x01f7` 에 정지 조향(`0x0400`)을 더한 `0x05f7` 이다. develop 의 게이트웨이 코드는 capability 를 채워 넣지 않아도 이 펌웨어의 HELLO_ACK 를 받아들이고 STOP·DRIVE·HOLD_STEER 를 주고받는다(시뮬레이터에서 확인). 실제 Pi 의 USB 로는 아직 연결해 보지 않았다.
 - 시리얼 속도는 460800 bps 다. 개발용 기본값이고, 운영값은 실제 Pi 의 USB 에서 SENSOR 와 REPORT 가 함께 흐를 때 확인해서 정한다.
 - 실보드에서 바퀴를 띄운 채 전진·후진·정지와, 명령이 끊겼을 때 출력이 스스로 끊기는 것을 엔코더로 확인했다. **조향이 실제로 움직이는 방향과 각도, 바닥 주행, 실제 Pi 의 USB 연결은 아직 확인하지 않았다.** 속도를 PWM 으로, 조향을 서보 펄스로 바꾸는 값은 맞추기 전이다.
 - ToF 는 넣지 않았다. develop 의 계약은 단일 존 `TOF_SAMPLE3`(capability `0x0800`)으로 바뀌었고, 이 펌웨어의 payload 배치에는 아직 없다.
@@ -61,7 +61,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32 vehicle/ESP32/xenova_esp32
 | 항목 | 값 |
 |---|---|
 | `device_boot_session` | 켤 때마다 `esp_fill_random` 16 B 로 만든 RFC 4122 version 4 UUID. version·variant bit 때문에 NIL 이 될 수 없다. 플래시에 저장하지 않는다. Wi-Fi·BT 를 켜지 않으므로 부트로더가 넣어 둔 entropy 에서 이어지는 난수다 |
-| `capabilities` | `0x01f7`. 구현한 기능만 알린다. 조향 측정(`0x0008`), 정지 조향(`0x0400`), ToF(`0x0800`)는 없다 |
+| `capabilities` | `0x05f7`. 구현한 기능만 알린다. Pi 필수 `0x01f7` 과 정지 조향(`0x0400`)이다. 조향 측정(`0x0008`), ToF(`0x0800`)는 없다 |
 | `encoder_bits` | 32. 누계는 부호 있는 32비트이고 넘치면 돌아간다. Pi 의 `OdometryConfig.encoder_bits` 도 32 여야 한다 |
 | `vehicle_config_sha256`, `firmware_sha256` | 아래 "digest 제안" |
 
@@ -138,12 +138,13 @@ Pi 는 CLOCK_PROBE 를 200 ms 마다 보낸다. CLOCK_REPLY 뒤 첫 SENSOR 를 1
 
 ## 명령 (COMMAND·REPORT)
 
-DRIVE(1)와 STOP(2)만 받는다. 받아들인 명령은 출력에 적용한 뒤에 APPLIED 로 알린다. 받아들이는 것과 적용이 한 번에 일어나므로 ACCEPTED 는 따로 보내지 않는다.
+DRIVE(1), STOP(2), HOLD_STEER(3)를 받는다. 받아들인 명령은 출력에 적용한 뒤에 APPLIED 로 알린다. 받아들이는 것과 적용이 한 번에 일어나므로 ACCEPTED 는 따로 보내지 않는다.
 
 - **STOP**: 현재 session 의 STOP 이면 검사에 앞서 모터 출력부터 끊는다. 시각 lease 가 없어도 받는다. 기한·속도·조향 칸이 0 이 아니면 거절하지만 출력은 이미 끊겨 있다. 낮은 `generation` 의 STOP 도 적용하고 `generation` 은 내리지 않는다. 마지막으로 적용한 STOP 은 따로 기억한다.
 - **DRIVE**: 마지막으로 적용한 STOP 을 `stop_command_sequence` 로 가리켜야 한다. 그 STOP 뒤로 가던 방향과 반대면 거절한다(새 STOP 이 있어야 한다). 속도 0 인 DRIVE 는 방향으로 치지 않는다. 가리키는 lease 가 설치돼 있어야 하고, 명령의 `expires_pi_us`·`cutoff_device_us` 가 그 lease 의 것을 넘지 못한다. 기한까지 `J_apply` 넘게 남아 있을 때만 출력에 걸고 그 기한을 타이머에 건다. 거절된 DRIVE 는 앞서 걸려 있던 출력과 기한을 건드리지 않는다.
+- **HOLD_STEER**: 멈춘 채 조향만 바꾸는 명령이다. 속도 칸이 0 이어야 하고(아니면 RANGE), 그 밖의 검사는 DRIVE 와 같다. 마지막으로 적용한 STOP 을 가리켜야 하고 lease 와 기한을 본다. 모터 PWM 은 0 으로 두고 서보 펄스만 바꾸며, 명령의 기한을 출력의 타이머에 건다. 가던 방향으로 치지 않으므로 STOP 뒤의 HOLD_STEER 다음에는 어느 방향의 DRIVE 든 받는다. 걸려 있던 DRIVE 뒤에 오면 모터 출력을 내리고 기한을 제 것으로 바꾼다. 정지 조향을 알리지 않게 설정한 빌드(`capabilities` 에 `0x0400` 이 없음)는 UNSUPPORTED_PROFILE 로 거절한다.
 - **다시 온 명령**: 받아들인 명령 여덟 개와 마지막 STOP 을 기억한다. 같은 순번에 같은 바이트면 처음 보낸 REPORT 만 그대로 다시 보내고, 출력에 다시 걸거나 기한을 늘리지 않는다. 같은 순번에 다른 바이트면 거절한다. 거절한 명령은 기억하지 않고 순번도 쓰지 않는다.
-- **표본마다 REPORT**: 지금 명령(출력에 걸려 있는 DRIVE, 없으면 마지막 STOP)의 APPLIED 를 SENSOR 나 CLOCK_REPLY 를 보낼 때마다 그 표본을 가리켜 다시 보낸다. Pi 는 STOP 의 APPLIED 보고가 가리키는 표본이 자기가 받은 가장 새 표본일 때 정지를 확인한다. DRIVE 는 기한까지만 알리고, 기한이 5 ms 안으로 남았으면 그 REPORT 가 Pi 의 기한 뒤에 닿을 수 있어 알리지 않는다.
+- **표본마다 REPORT**: 지금 명령(출력에 걸려 있는 DRIVE·HOLD_STEER, 없으면 마지막 STOP)의 APPLIED 를 SENSOR 나 CLOCK_REPLY 를 보낼 때마다 그 표본을 가리켜 다시 보낸다. Pi 는 STOP 의 APPLIED 보고가 가리키는 표본이 자기가 받은 가장 새 표본일 때 정지를 확인한다. DRIVE 와 HOLD_STEER 는 기한까지만 알리고, 기한이 5 ms 안으로 남았으면 그 REPORT 가 Pi 의 기한 뒤에 닿을 수 있어 알리지 않는다. 기한이 지난 뒤에는 새 명령이 올 때까지 REPORT 를 보내지 않는다.
 - **측정**: REPORT 가 가리키는 표본은 마지막으로 보낸 표본이다. 속도는 그 표본과 앞 표본의 누계 차이에서 구하고(칸당 0.164 mm, 보정 전), 양쪽 누계가 100 ms 동안 그대로면 `stationary` 를 1 로 알린다. 표본이 100 ms 넘게 끊겼다 이어지면 다시 잰다. 조향 센서가 없어 조향은 싣지 않는다(flags 5). 거절과 고장 보고에는 측정을 싣지 않는다.
 - **비상정지 입력**(13번): 눌려 있으면 출력을 끊고 DRIVE 를 거절하며, 풀린 뒤에도 새 STOP 을 받기 전에는 DRIVE 를 받지 않는다. 눌린 것을 순번 0·종류 0 의 FAULT(14 E_STOP)로 한 번 알린다. 지금 차에는 이 입력이 GND 에 묶여 있고 비상정지는 릴레이로 모터 전원을 끊는다.
 - **타이머 고장**: 순번 0·종류 0 의 FAULT(11 DEVICE_FAULT)로 한 번 알린다. 그 뒤로는 DRIVE 를 받지 않는다.
@@ -153,8 +154,8 @@ DRIVE(1)와 STOP(2)만 받는다. 받아들인 명령은 출력에 적용한 뒤
 
 | 경우 | reason |
 |---|---|
-| 순번·generation 이 0 이거나 범위 밖, reserved 가 0 이 아님, 계약 밖 reason, STOP 의 0 이어야 할 칸, 속도·조향·기한이 범위 밖 | 9 RANGE |
-| DRIVE·STOP 이 아닌 종류(HOLD_STEER 포함) | 16 UNSUPPORTED_PROFILE |
+| 순번·generation 이 0 이거나 범위 밖, reserved 가 0 이 아님, 계약 밖 reason, STOP 의 0 이어야 할 칸, 속도·조향·기한이 범위 밖, 속도가 실린 HOLD_STEER | 9 RANGE |
+| DRIVE·STOP·HOLD_STEER 가 아닌 종류 | 16 UNSUPPORTED_PROFILE |
 | 받아들인 것보다 크지 않은, 기억에 없는 순번 | 4 SEQUENCE_REPLAY |
 | 기억하고 있는 순번인데 바이트가 다름 | 5 IDEMPOTENCY_CONFLICT |
 | 받아들인 것보다 낮은 generation 의 DRIVE | 15 GENERATION_REPLAY |
@@ -168,9 +169,10 @@ DRIVE(1)와 STOP(2)만 받는다. 받아들인 명령은 출력에 적용한 뒤
 ### 출력
 
 - 모터(MDD10A): PWM 25·26(20 kHz, 10비트), 방향 32·33. 속도를 듀티로 바꾸는 것은 엔코더로 되먹이지 않는 개루프이고, 1150 mm/s 를 듀티 100 % 로 어림한 값이다. 받아들이는 속도는 600 mm/s 까지로 낮게 잡았다. 바퀴를 띄운 시험에서 재서 바꿔야 한다.
-- 서보: 27번(50 Hz, 14비트). 조향 0 이 1500 us 이고 1 rad 에 637 us 로 어림했다. 조향은 왼쪽이 + 이고(MQTT 계약 v1 의 `left` 는 `steer_rad` +), 이 차의 서보는 펄스가 짧을수록 왼쪽이라(조립 안내서 9.2 의 왼쪽 한계 900 us) + 일수록 펄스를 짧게 낸다. 한계는 900 us 에서 2100 us 이고 받아들이는 조향은 ±500 mrad 까지다. 방향은 문서의 실측값으로 맞춘 것이고 기울기는 어림값이다. 둘 다 `tools/steer_check.py` 로 실보드에서 확인하기 전이다.
-- 서보 채널에는 50 ms 에 한 번만, 메인 루프에서 쓴다. LEDC 는 앞서 쓴 값이 자리 잡기 전에 다시 쓰면 그때까지 멈춰서 기다리는데, 이 보드에서 재 보니 PWM 두 주기(50 Hz 에서 40 ms)였다. DRIVE 를 받을 때는 낼 펄스만 적어 두므로 조향은 명령보다 길게는 50 ms 늦게 서보에 나간다. 모터 채널(20 kHz)에서는 그 시간이 0.1 ms 라 인터럽트를 막은 채로 써도 된다.
-- 켜지면 모터 PWM 은 0 이고 서보에는 펄스를 내지 않는다. 첫 DRIVE 가 올 때 서보가 움직인다. 출력을 끊을 때는 모터 PWM 만 0 으로 내리고 서보는 마지막 자리에 둔다.
+- 서보: 27번(50 Hz, MCPWM 1 us 단위). 조향 0 이 1500 us 이고 1 rad 에 637 us 로 어림했다. 조향은 왼쪽이 + 이고(MQTT 계약 v1 의 `left` 는 `steer_rad` +), 이 차의 서보는 펄스가 짧을수록 왼쪽이라(조립 안내서 9.2 의 왼쪽 한계 900 us) + 일수록 펄스를 짧게 낸다. 한계는 900 us 에서 2100 us 이고 받아들이는 조향은 ±500 mrad 까지다. 방향은 문서의 실측값으로 맞춘 것이고 기울기는 어림값이다. 둘 다 `tools/steer_check.py` 로 실보드에서 확인하기 전이다.
+- 서보 펄스는 MCPWM 으로 낸다. 명령을 출력에 걸 때 모터 PWM 과 같은 자리에서(타이머 인터럽트를 막은 채) 펄스 폭을 쓰고, 그 쓰기가 성공한 뒤에 APPLIED 를 알린다. 새 폭은 다음 주기의 처음부터 나가므로 펄스가 중간에 잘리지 않고, 길어야 20 ms 뒤의 펄스부터 바뀐다. 거절됐거나 기한이 모자란 명령의 조향은 쓰지 않는다. 쓰는 데 걸리는 시간은 실보드에서 2 us 에서 19 us 였다(확인 기록).
+- 서보에 LEDC 를 쓰지 않는 까닭: LEDC 는 앞서 쓴 값이 자리 잡기 전에 다시 쓰면 PWM 두 주기(50 Hz 에서 40 ms)를 멈춰 기다린다(확인 기록). 타이머 인터럽트를 막은 채로는 쓸 수 없고, 메인 루프로 미뤄 쓰면 서보에 쓰기 전에 APPLIED 가 나가며 그사이 기한이 지난 명령의 조향이 뒤늦게 나간다. 모터 채널(20 kHz)은 LEDC 그대로다. 그 주파수에서는 쓰기가 0.1 ms 를 넘지 않는다.
+- 켜지면 모터 PWM 은 0 이고 서보에는 펄스를 내지 않는다. 첫 DRIVE 나 HOLD_STEER 가 올 때 서보가 움직인다. 출력을 끊을 때는 모터 PWM 만 0 으로 내리고 서보는 마지막 자리에 둔다.
 
 ## 호스트 시험
 
@@ -187,10 +189,11 @@ ASan 을 쓸 수 없는 환경(Windows 등)에서는 configure 에 `-DFB3_SANITI
 시험하는 것:
 
 - `esp32_feedback3`: 고정 vector 의 제품 프레임 20개(payload·raw·wire 바이트, 묶기·풀기, 한 바이트씩 넣은 스트림 분리, 필드 값), 손상 프레임 6개의 거절 이유와 그 뒤 회복, CRC 기준값, COBS 경계, payload 240 B 상한
-- `esp32_link`: 세션·시각 설치의 정상 응답과 위 거절 경우, 같은 바이트 재전송, 새 `pi_session`, lease 두 칸, 기한에 맞춘 만료, 타이머 고장. SENSOR 는 lease 가 있을 때만 나가는지, 주기와 표본 사이 간격, CLOCK_REPLY 와 이어지는 순번, 가리키는 lease, 만료·고장·새 session 에서 멈추는지, lease 를 고르는 사이에 드러난 타이머 고장으로도 멈추는지, 쓸 수 없는 표본을 건너뛰는지 본다. 명령은 STOP·DRIVE 의 검사와 거절, 다시 온 명령, 방향, 기한에 맞춘 출력 차단, 표본마다의 REPORT, 정지 판단, 비상정지, 타이머 고장을 본다. 고정 vector 의 HELLO → CLOCK_PROBE → CLOCK_INSTALL 을 넣으면 vector 의 HELLO_ACK·CLOCK_REPLY·CLOCK_ACK 와 같은 바이트가 나오고, 이어서 vector 의 표본을 뜨게 하면 vector 의 SENSOR 네 개와 같은 바이트가 나오는지도 본다
+- `esp32_link`: 세션·시각 설치의 정상 응답과 위 거절 경우, 같은 바이트 재전송, 새 `pi_session`, lease 두 칸, 기한에 맞춘 만료, 타이머 고장. SENSOR 는 lease 가 있을 때만 나가는지, 주기와 표본 사이 간격, CLOCK_REPLY 와 이어지는 순번, 가리키는 lease, 만료·고장·새 session 에서 멈추는지, lease 를 고르는 사이에 드러난 타이머 고장으로도 멈추는지, 쓸 수 없는 표본을 건너뛰는지 본다. 명령은 STOP·DRIVE·HOLD_STEER 의 검사와 거절, 다시 온 명령, 방향, 기한에 맞춘 출력 차단, 표본마다의 REPORT, 정지 판단, 비상정지, 타이머 고장을 본다. 고정 vector 의 HELLO → CLOCK_PROBE → CLOCK_INSTALL 을 넣으면 vector 의 HELLO_ACK·CLOCK_REPLY·CLOCK_ACK 와 같은 바이트가 나오고, 이어서 vector 의 표본을 뜨게 하면 vector 의 SENSOR 네 개와 같은 바이트가 나오는지도 본다
 - `esp32_quadrature`: 엔코더 해석이 조립 안내서 단계 K 의 bench 스케치와 같은지, 네 가지 A·B 상태 어디서 켜져도 첫 움직임의 방향이 맞는지
 - `esp32_link_bench`: 아래 `link_bench.py` 를 `sim_link` 에 돌린다. 실보드에서 쓰는 것과 같은 도구다
 - `esp32_steer_check`: 아래 `steer_check.py` 를 `sim_link` 에 돌린다. 속도 0 인 DRIVE 가 APPLIED 로 돌아오고, 자리마다 그 뒤에 받은 표본의 엔코더 누계가 그대로인지까지 본다
+- `esp32_steer_check_stationary`: 같은 도구를 `--stationary` 로 돌린다. HOLD_STEER 가 APPLIED 로 돌아오고 엔코더 누계가 그대로인지 본다
 - `esp32_tools`: 점검 도구의 판정을 가짜 장치로 본다. `steer_check.py` 는 DRIVE 가 거절되거나 답이 없을 때, 누계가 바뀌었다가 제자리로 돌아왔을 때, CLOCK_REPLY 에 실린 누계만 바뀌었을 때, DRIVE 뒤로 표본이 끊겼을 때 통과로 끝나지 않는지 본다. `link_bench.py` 의 DRIVE REPORT 판정은 후속 REPORT 가 빠지거나 순서가 다르거나 기한 뒤의 표본에 붙었을 때 문제로 보는지 본다. `cutoff_stress.py` 와 `pi_link_check.py` 는 답이 끊기거나, 타이머에 걸린 기한이 하나도 없거나, 초반 lease 뒤로 새 lease 가 없을 때 통과로 끝나지 않는지 본다. `link_bench.py` 는 SENSOR 가 없거나 도중에 끊기거나, 순번·간격·가리키는 lease 가 어긋난 흐름을 알아채는지 본다
 - gcc 12 이상이면 `analyze_unpack.c` 를 `-fanalyzer` 로 컴파일해, 출력 구조체를 초기화하지 않고 unpack 해도 그 값을 읽지 않는지 본다
 
@@ -215,7 +218,7 @@ python vehicle/ESP32/tools/link_bench.py --port COM8
 - SENSOR 는 lease 를 설치하기 전과 기한이 지난 뒤, 새 `pi_session` 이 온 뒤에는 오지 않아야 하고, lease 가 살아 있는 동안에는 그 lease 를 가리키며 끊기지 않고 와야 한다. 실보드에서는 한 주기보다 3 ms 넘게 늦은 표본을 끊긴 것으로 본다. 시뮬레이터는 PC 가 멈칫하는 만큼 늦으므로 80 ms 까지 봐 준다.
 - lease 가 살아 있는 동안 CLOCK_PROBE 24개를 SENSOR 주기의 여러 자리에 닿게 보낸다. 모두 답이 와야 하고, SENSOR 의 표본에 붙어 닿은 probe 의 응답이 간격을 채운 뒤에 온 것이 하나 이상 있어야 한다. 그동안의 표본은 순번이 1 씩 늘고 위 "표본 사이 간격"을 지켜야 한다.
 - STOP 을 보내 APPLIED 와 그 뒤 표본마다의 REPORT, 멈춘 바퀴를 정지로 알리는지를 본다. 여기까지는 모터와 서보가 움직이지 않는다.
-- `--drive` 를 주면 DRIVE 를 보낸다. **바퀴가 0.2 m/s 로 80 ms 씩 앞으로 한 번, 뒤로 한 번 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다.** 엔코더 누계로 출력이 걸린 것과 기한 뒤에 끊긴 것, 다시 온 DRIVE 가 출력을 켜지 않는 것, STOP 없이 방향을 바꾸는 DRIVE 와 HOLD_STEER 의 거절을 본다. 시뮬레이터에는 늘 여기까지 한다.
+- `--drive` 를 주면 DRIVE 를 보낸다. **바퀴가 0.2 m/s 로 80 ms 씩 앞으로 한 번, 뒤로 한 번 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다.** 엔코더 누계로 출력이 걸린 것과 기한 뒤에 끊긴 것, 다시 온 DRIVE 가 출력을 켜지 않는 것, STOP 없이 방향을 바꾸는 DRIVE 의 거절을 본다. 장치가 정지 조향을 알리면 그 사이에 HOLD_STEER 를 세 번(+100, −100, 0 mrad) 보내 **조향이 움직인다.** 적용과 표본마다의 REPORT, 그동안 엔코더 누계가 그대로인 것, 속도가 실린 HOLD_STEER 의 거절을 본다. 알리지 않는 장치에는 HOLD_STEER 가 UNSUPPORTED_PROFILE 로 거절되는지 본다. 시뮬레이터에는 늘 여기까지 한다.
 - 속도는 460800 bps 가 기본이다. 앞선 펌웨어(115200 bps)에는 `--baud 115200` 을 준다.
 - EN 버튼으로 리셋하고 한 번 더 돌려 `device_boot_session` 이 달라지는지 본다.
 - `firmware_sha256` 이 `sha256sum <빌드 폴더>/xenova_esp32.ino.elf` 와 같은지 본다.
@@ -247,10 +250,12 @@ python vehicle/ESP32/tools/cutoff_stress.py --port COM8 --trials 1000
 - 실보드에는 `--drive` 를 줄 때만 보낸다. 서보 전원(UBEC)이 들어와 있어야 움직인다. 앞바퀴가 바닥에 닿지 않게 차를 올려 두고, 조립 안내서 단계 K 의 서보 확인과 같은 자세로 본다.
 - 볼 것: + 에 바퀴가 왼쪽으로 꺾이는지, 0 에서 곧은지, 같은 크기의 + 와 − 가 좌우로 같은 만큼 꺾이는지. 바퀴 각도를 재면 `SERVO_US_PER_RAD` 를 고칠 수 있다(각도 = 보낸 mrad 가 되도록).
 - ±500 mrad 를 넘는 값은 펌웨어가 `RANGE` 로 거절한다.
+- `--stationary` 를 주면 속도 0 인 DRIVE 대신 HOLD_STEER 로 보낸다. 장치가 정지 조향(`0x0400`)을 알리지 않으면 보내지 않고 실패로 끝난다. 서보가 움직이는 것은 같다.
 
 ```sh
 python vehicle/ESP32/tools/steer_check.py --port COM8 --drive
 python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --mrad 100 300 500 --hold 5
+python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --stationary
 ```
 
 ### Pi Gateway 코드와 맞물려 보기 (`tools/pi_link_check.py`)
@@ -260,6 +265,7 @@ python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --mrad 100 300 500
 1. 연결: Pi 가 HELLO_ACK 를 받아들이고 lease 를 이어 간다. 첫 lease 뒤로 `--seconds`(기본 3초, 최소 2초) 동안 INSTALLED 응답이 0.8초 넘게, SENSOR 가 0.2초 넘게 끊기지 않는지, Pi 가 쓸 수 있는 lease 가 끊기지 않고 끝날 때에도 있는지, Pi 의 odometry 가 오류 없이 표본을 받는지 본다.
 2. STOP: Pi 가 STOP 을 보내고, 장치의 APPLIED 보고와 그 뒤의 표본으로 정지를 확인한다. Pi 가 DRIVE 를 내보내기 전에 하는 바로 그 검사를 통과해야 한다.
 3. DRIVE: Pi 가 1초 동안 20 ms 마다 DRIVE 를 보내고 APPLIED 를 받는다. 보내기를 멈추면 장치가 스스로 출력을 끊어 속도가 0 이 되는지, 이어서 보낸 STOP 으로 다시 정지를 확인하는지 본다. 실보드에서는 `--drive` 를 줄 때만 한다. **바퀴가 0.2 m/s 로 1초 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다.**
+4. HOLD_STEER: 장치가 정지 조향을 알리면, Pi 가 방향을 바꾸는 자리의 STOP 뒤에 0.5초 동안 20 ms 마다 HOLD_STEER 를 보내고 APPLIED 를 받는다. 조향이 왼쪽 0.1 rad 로 움직이고 바퀴는 돌지 않는다. 3 과 같은 때에만 한다. Pi 가 내보내지 않은 HOLD_STEER 의 수와 까닭, 그동안 Pi 의 방향 전환 gate state 를 보여 준다(아래 "HOLD_STEER 를 Pi 와 맞물려 알게 된 것").
 
 그동안 Pi 가 장치를 고장으로 보거나 프레임을 버리면 실패다. 펌웨어의 capability 에 Pi 필수 bit 가 모자라면 Pi 가 HELLO_ACK 를 받지 않는 것을 먼저 확인하고, 중계가 모자란 bit 를 채워 넣은 채 1 만 본다. 그것은 부분 호환성 시험이다.
 
@@ -270,6 +276,13 @@ python vehicle/ESP32/tools/pi_link_check.py --platform <platform 폴더> --sim <
 `protobuf==6.33.6`, `paho-mqtt`, `pyserial` 이 필요하다. vehicle 브랜치에는 아직 feedback-3 게이트웨이 코드가 없어서 develop 을 따로 꺼낸 폴더의 `platform` 을 `--platform` 으로 준다. `--sim` 대신 `--port` 를 주면 실보드와 맞물린다. 오래 보려면 `--seconds 30` 처럼 준다.
 
 Pi odometry 에는 조립 안내서에서 잰 차체 치수 언저리의 값(칸당 0.164 mm, 속도 상한 1 m/s)을 준다. 보정한 값이 아니다. 시뮬레이터에 `--ticks-per-second 3000` 을 주면 바퀴가 도는 표본을 Pi 가 받는 것까지 보고, Pi 가 구한 속도가 그 속도와 10 % 안에서 같은지 본다. 실보드에서는 그동안 바퀴를 손으로 굴리면 Pi 가 본 속도와 누계가 끝줄 앞에 찍힌다.
+
+### HOLD_STEER 를 Pi 와 맞물려 알게 된 것
+
+develop `841b7bf3` 의 게이트웨이 코드를 시뮬레이터에 물려 본 것이다. 둘 다 플랫폼 파트와 맞춰야 한다.
+
+- **조향 측정이 없으면 자동 주행의 방향 전환이 열리지 않는다.** Pi 는 HOLD_STEER 가 APPLIED 된 뒤 `measured` 로 표시된 조향 표본이 목표에 머무는 것을 보고 방향 전환을 허락한다(gate state 4, 계약 §7). 이 차에는 조향 센서가 없어 표본에 조향을 싣지 않으므로 state 는 2 에 머문다. 이 펌웨어가 HOLD_STEER 를 받게 된 것만으로는 자동 주행의 전진 → 후진이 되지 않는다. 수동 주행의 방향 전환은 조향 표본을 보지 않는다(게이트웨이 코드를 읽은 것이고 돌려 보지는 않았다).
+- **가까이 붙은 표본 둘이 있으면 Pi 가 그 순간의 HOLD_STEER 를 내보내지 않는다.** Pi 는 HOLD_STEER 를 내보낼 때마다 최근 표본으로 정지를 다시 확인하고, 이웃한 두 표본마다 `(누계 차이 + 1) × 칸당 거리 ÷ (표본 간격 − 두 표본의 시각 오차)` 가 정지 한도 아래인지 본다. CLOCK_REPLY 의 표본은 앞 SENSOR 에서 5 ms 까지 붙을 수 있어서, 그 쌍이 확인 창에 든 동안(40 ms 쯤) 이 값이 한도를 넘는다. 이 도구가 준 값(칸당 0.164 mm, 한도 0.05 m/s, 시각 오차 1.7 ms)으로는 간격 7 ms 인 쌍이 0.051 m/s 로 계산돼, 0.5초 동안 낸 HOLD_STEER 24개쯤 가운데 4개에서 5개를 Pi 가 내보내지 않았다. 시각 오차가 3.4 ms 로 나온 실보드(PC 중계)라면 간격 6.8 ms 아래인 쌍은 뺀 값이 0 아래라 한도와 무관하게 통과하지 못한다(계산한 것이고, 실보드에 HOLD_STEER 를 보내 본 것은 아니다). STOP 뒤 첫 DRIVE 를 내보낼 때의 정지 확인도 같은 계산이다. 한도와 시각 오차는 설치값이라 실제 Pi 에서 다시 봐야 하고, 펌웨어 쪽에서는 표본 간격을 고르게 하는 방법이 있다(아직 하지 않았다).
 
 ## 확인 기록
 
@@ -309,8 +322,18 @@ Pi odometry 에는 조립 안내서에서 잰 차체 치수 언저리의 값(칸
 | 2026-11-11 | 같은 상태에서 `pi_link_check.py --port --drive`, 고친 뒤 | 통과. Pi 가 1초 동안 DRIVE 48개를 보내 APPLIED 를 받았고 바퀴 속도를 0.229 m/s 까지 봄(보낸 속도 0.2 m/s). 보내기를 멈추자 바퀴가 멈췄고 이어진 STOP 으로 0.08초 뒤에 다시 정지 검사를 통과. Pi 가 버린 프레임과 고장 없음 |
 | 2026-11-11 | platform `1dd1ba43` 의 게이트웨이 코드(쓰던 lease 를 이어 쓰는 판)로 `pi_link_check.py --sim` | 통과. capability 를 채우지 않고 STOP 정지 확인, DRIVE 48개 APPLIED, 출력 차단, 다시 정지 확인까지 같음. HELLO 를 다시 보내는 게이트웨이 판(S15P31E110-457 브랜치)으로도 같고, capability 가 모자란 앞선 펌웨어에는 HELLO_ACK 를 20번 거절한 뒤 handshake 실패로 끝남 |
 | 2026-11-11 | `steer_check.py --sim` 과 호스트 시험 6개 | 통과. 속도 0 인 DRIVE 다섯 개(0, +200, 0, −200, 0 mrad)가 APPLIED 로 돌아오고, 자리마다 그 뒤 표본의 엔코더 누계가 그대로임. 바퀴가 도는 시뮬레이터(`--ticks-per-second 100`)에는 실패로 끝남. ±500 mrad 를 넘는 값은 `RANGE` 로 거절됨. 시뮬레이터에는 서보가 없어서 방향과 각도는 확인한 것이 아니다. 조향 부호를 바꾼 스케치는 컴파일까지만 봄 |
+| 2026-11-12 | 실보드, 조향 부호를 고친 빌드. `link_bench.py --port`, `pi_link_check.py --port --seconds 30`(develop `4ac49509` 의 게이트웨이 코드), `cutoff_stress.py --trials 500`. DRIVE 는 보내지 않음 | 통과. 54 검사. Pi 쪽 코드가 SENSOR 1495개를 odometry 오류 없이 받고 STOP 뒤 0.06초에 정지를 확인(시각 오차 3.1 ms). 기한 만료 500번에 DEVICE_FAULT 와 잃은 프레임 없음 |
+| 2026-11-12 | 실보드 `steer_check.py --port --drive` 두 번(자리마다 3초, 5초) | 장치 쪽은 통과. 다섯 DRIVE 가 APPLIED 이고 자리마다 표본 160개, 268개의 엔코더 누계가 그대로임. **서보는 움직이지 않았다.** 배터리가 과방전돼(셀 합 3.5 V) 서보 전원이 없었다. 조향이 실제로 움직이는 방향과 각도는 여전히 확인하지 못했다 |
+| 2026-11-12 | 실보드, 서보 핀(27)의 수준을 되읽는 시험용 빌드. 핀 인터럽트로 펄스 폭을 재고, 조향 0·±20 mrad 를 13번씩 두 차례 보냄 | 펄스 412개, 417개가 20.01 ms 에서 20.05 ms 간격으로 빠짐없이 나옴. 폭은 조향 0 에 1500 us, +20 mrad 에 1489 us, −20 mrad 에 1513 us. 조향을 바꾸는 때에도 1482 us 에서 1516 us 를 벗어난 펄스가 없음. ±200 mrad 에는 1372 us, 1626 us(이 값은 loop 에서 읽은 것) |
+| 2026-11-12 | 같은 시험용 빌드로 속도 0 인 DRIVE 140개의 시각을 장치 시계로 잼(모터 PWM 은 0 인 채) | 프레임의 끝을 읽은 때부터 출력에 걸기 시작할 때까지 74 us 에서 89 us, 방향과 PWM 두 채널을 쓰는 데 13 us 에서 14 us. 기한부터 alarm 인터럽트에 들어갈 때까지 3 us 에서 8 us, PWM 두 채널에 0 을 다 쓸 때까지 20 us 에서 26 us. 핀에서 PWM 이 실제로 내려가는 때와, 엔코더가 도는 동안의 값은 재지 않았다 |
+| 2026-11-12 | 호스트 시험, HOLD_STEER 를 넣은 뒤(Windows, zig cc, UBSan) | 일곱 개 통과. `esp32_link` 2691 검사, `esp32_link_bench` 77 검사, `esp32_steer_check` 27 검사, `esp32_steer_check_stationary` 28 검사, `esp32_tools` 121 검사. HOLD_STEER 처리를 일곱 군데 고친 변형을 모두 알아챔. 스케치 컴파일 경고 없음 |
+| 2026-11-12 | `pi_link_check.py --sim`(develop `841b7bf3` 의 게이트웨이 코드) | 통과. Pi 가 capability `0x05f7` 을 채우지 않고 받아들임. HOLD_STEER 는 0.5초에 18개에서 19개를 내보내 모두 APPLIED 를 받았고, 4개에서 5개는 Pi 가 정지 확인을 통과하지 못해 내보내지 않음. 그동안 Pi 의 방향 전환 gate state 는 2 였고 4 에 이르지 않음. Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음 |
+| 2026-11-12 | 실보드, HOLD_STEER 를 넣은 빌드. `link_bench.py --port`, `pi_link_check.py --port --seconds 30`(develop `841b7bf3`). DRIVE 와 HOLD_STEER 는 보내지 않음 | 통과. 장치가 `0x05f7` 을 알리고 Pi 쪽 코드가 그대로 받아들임. 54 검사. SENSOR 1495개, Pi 가 본 시각 오차 3.4 ms. **실보드에 HOLD_STEER 를 보내 보지는 않았다** |
+| 2026-11-12 | 실보드, 서보를 MCPWM 으로 내는 빌드에 서보 핀(27)과 시각을 되읽는 코드를 더한 시험용 빌드. 속도 0 인 DRIVE 와 HOLD_STEER 를 번갈아 12개(0, ±20, ±150, 300 mrad). 서보 전원은 없음 | 첫 명령 전에는 펄스가 없음. 펄스 208개가 19998 us 에서 20002 us 간격으로 빠짐없이 나오고, 모든 펄스의 폭이 그 펄스가 오르기 전에 마지막으로 쓴 값과 4 us 안에서 같음(1500, 1488, 1512, 1405, 1595, 1309 us). 쓴 뒤 그 폭의 첫 펄스까지 1.4 ms 에서 19.3 ms. 출력을 거는 데 14 us 에서 41 us(첫 명령이 41 us), 그 가운데 서보 쓰기까지 2 us 에서 19 us |
+| 2026-11-12 | 같은 빌드에 20 ms 마다 조향을 바꾼 DRIVE 를 100개, 300개 이어 보냄(LEDC 때 쓰기가 9 ms 에서 40 ms 멈추던 경우) | 모두 걸리고 APPLIED, FAULT 없음. 출력을 거는 데 14 us 에서 15 us. 기한부터 PWM 두 채널에 0 을 다 쓸 때까지는 18 us 에서 23 us 로 앞 기록과 같음 |
+| 2026-11-12 | 실보드, 서보를 MCPWM 으로 내는 정식 빌드. `link_bench.py --port`, `pi_link_check.py --port --seconds 30`, `cutoff_stress.py --trials 500`. DRIVE 와 HOLD_STEER 는 보내지 않음 | 통과. 54 검사, SENSOR 1494개, STOP 뒤 0.07초에 Pi 가 정지를 확인, 기한 만료 500번에 DEVICE_FAULT 없음 |
 
-아직 확인하지 않은 것: 조향이 실제로 움직이는 방향과 각도(서보에는 가운데 펄스만 나갔다), 기한에 PWM 이 실제로 내려가는 시각과 `J_apply`·`J_cutoff`(로직 분석기로 재야 한다), 바닥 주행, 실제 Pi 의 USB·게이트웨이와의 연결이 남아 있다. 모터로 빠르게 돌 때의 엔코더 누계, 모터로 도는 속도에서 SENSOR 를 Pi 가 받는 것(실보드에서는 손으로 0.16 m/s 쯤까지 굴려 봤고 그보다 빠른 경우는 시뮬레이터로만 봤다), 켜진 직후 첫 움직임 한 칸의 방향(손으로 굴려서는 가릴 수 없어 호스트 시험만 있다), Pi(Linux)의 USB 시리얼, Linux gcc 와 ASan(Jenkins 에서 돈다).
+아직 확인하지 않은 것: 서보 전원을 넣었을 때 HOLD_STEER 와 DRIVE 에 서보가 움직이는 것, 조향이 실제로 움직이는 방향과 각도(핀에서 펄스가 나가는 것까지만 봤고 서보는 전원이 없었다), 기한에 핀에서 PWM 이 실제로 내려가는 시각(로직 분석기로 재야 한다. 장치 안에서 잰 `J_apply`·`J_cutoff` 쪽 값은 2026-11-12 기록에 있다), 바닥 주행, 실제 Pi 의 USB·게이트웨이와의 연결이 남아 있다. 모터로 빠르게 돌 때의 엔코더 누계, 모터로 도는 속도에서 SENSOR 를 Pi 가 받는 것(실보드에서는 손으로 0.16 m/s 쯤까지 굴려 봤고 그보다 빠른 경우는 시뮬레이터로만 봤다), 켜진 직후 첫 움직임 한 칸의 방향(손으로 굴려서는 가릴 수 없어 호스트 시험만 있다), Pi(Linux)의 USB 시리얼, Linux gcc 와 ASan(Jenkins 에서 돈다).
 
 ## 고정 vector 복사본
 
