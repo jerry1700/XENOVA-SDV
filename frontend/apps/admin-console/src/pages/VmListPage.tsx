@@ -69,6 +69,9 @@ export function VmListPage() {
               refreshing={!vms.isFetchedAfterMount}
             />
           )}
+          <Button variant="secondary" onClick={() => void vms.refetch()}>
+            VM 동기화
+          </Button>
           <Button onClick={() => navigate('/control/vms/new')}>+ VM 생성</Button>
         </div>
       </header>
