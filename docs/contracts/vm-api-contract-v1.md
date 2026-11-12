@@ -612,7 +612,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 
 모든 공개 API는 `Authorization: Bearer {access_token}`이 필요합니다. 생성·시작·정지·삭제가 성공하면 이벤트(`vm.created`, `vm.state.changed`, `vm.deleted`)가 기록됩니다.
 
-Xen은 VM 상태 변화를 누구에게도 알리지 않으므로, Spring 공개 `GET /api/v1/vms` 요청이 들어올 때 dom0-manager `GET /api/v1/vms`를 한 번 조회합니다. Spring은 DB의 등록 VM과 런타임을 결합해 최신 목록을 반환하고, 사용자 조작 없이 바뀐 상태(크래시, 스스로 종료 등)를 `vm.state.changed`(`cause: detected`)로 기록합니다. 조회와 겹친 조작이 있는 VM은 건너뛰고, dom0-manager에 닿지 않으면 요청을 실패시키며 기존 상태와 이벤트를 바꾸지 않습니다. 서버가 처음 보는 VM은 기준값만 저장합니다. 동시 동기화 요청은 Spring 프로세스 안에서 순차 실행합니다.
+Xen은 VM 상태 변화를 누구에게도 알리지 않으므로, Spring은 dom0-manager `GET /api/v1/vms`를 주기적으로(기본 5초, `EVENT_VM_STATE_CHECK_INTERVAL_MS`) 조회하고, 공개 `GET /api/v1/vms` 요청이 들어올 때도 한 번 조회합니다. 두 경우 모두 같은 동기화이며 VM 실행 상태만 다룹니다(VM 추가·은퇴는 `POST /api/v1/vms/synchronizations`의 등록 동기화). Spring은 DB의 등록 VM과 런타임을 결합해 최신 목록을 반환하고, 사용자 조작 없이 바뀐 상태(크래시, 스스로 종료 등)를 `vm.state.changed`(`cause: detected`)로 기록합니다. 조회와 겹친 조작이 있는 VM은 건너뛰고, dom0-manager에 닿지 않으면 기존 상태와 이벤트를 바꾸지 않습니다(공개 요청은 실패, 주기 조회는 그 회차를 건너뜀). 서버가 처음 보는 VM은 기준값만 저장합니다. 동시 동기화 요청은 Spring 프로세스 안에서 순차 실행합니다.
 
 **xentop 통계의 저장과 사용률 계산.** Spring은 4.6절 응답의 VM마다 `MetricSample(source = "xen", boot_id = null, window_ms = null, observed_at = sampled_at)`을 저장합니다. 값 이름과 단위는 다음과 같고, `unavailable`에 있는 필드는 값 `null`에 `unavailableReason`을 그대로 둡니다.
 
@@ -885,3 +885,4 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.20 | 2026-11-06 | 사용자 결정 반영: VM 목록·단건 조회 한도 5초를 하위 `list`·`get` 에 `timeout_ms` 로 명시(4.1·4.9, 초과 `504`), 플랫폼 `VM_NAME_CONFLICT` 를 `VMExists` 에서 분리해 `409 VMNameConflict`(8.1)로 내고 Spring 은 `409 VM_NAME_CONFLICT`(생성·시작에서도 성공 아님, 8.2), API 문서 경로(`/docs`·`/redoc`·`/openapi.json`) 기본 비활성·켜도 토큰 검사(4장) |
 | v1.21 | 2026-11-12 | USB 휴대폰 화면 중계 상태 조회 `GET /api/v1/display/phone-link` 와 연결번호 발급 `POST /api/v1/display/phone-link/pairing-code`(4.13). 번호는 발급 응답에만 담고 저장·로그·자동 재시도 금지, `Cache-Control: no-store` |
 | v1.22 | 2026-11-12 | v1.17의 런타임 자동 갱신 루프를 제거하고 공개 `GET /api/v1/vms` 요청 시 단일 동기화로 변경. 등록 VM과 dom0 런타임을 결합하고 상태 이벤트를 반영한 최신 목록을 반환하며, 경합 VM 제외·조회 실패 시 기존 상태 보존·프로세스 내 동시 요청 직렬화를 명시 |
+| v1.23 | 2026-11-12 | VM 상태 5초 주기 조회(`EVENT_VM_STATE_CHECK_INTERVAL_MS`)를 되살린다. 공개 `GET /api/v1/vms` 요청 시 동기화와 함께 동작하며 실행 상태만 다룬다. 보드 등록 목록 → VM 테이블 등록 동기화는 주기 실행 없이 `POST /api/v1/vms/synchronizations` 요청 때만 실행한다 |
