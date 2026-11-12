@@ -2,8 +2,8 @@ import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router';
 import { ApiError } from '../api/client';
-import { useVms, type VmAction } from '../api/queries';
-import type { Vm } from '../api/types';
+import { useSynchronizeVms, useVms, type VmAction } from '../api/queries';
+import type { Vm, VmSynchronizationResult } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
 import { canStartVm, canStopVm, STATE_HEALTH, STATE_LABEL, VM_ACTION_LABEL } from '../format';
 import styles from './pages.module.css';
@@ -21,24 +21,24 @@ const VM_ACCENTS = ['var(--x-app-autonomous)', 'var(--x-app-manual)', 'var(--x-a
 
 /** VM 생명주기와 할당 자원을 관리하는 목록. 주행 모드·제어권은 Overview에서만 다룬다. */
 export function VmListPage() {
-  const vms = useVms({ keepLastData: true });
+  const vms = useVms(1000, { keepLastData: true });
   const vmOperations = useVmOperationProgress();
   const toast = useToast();
   const navigate = useNavigate();
   const [deleting, setDeleting] = useState<Vm | null>(null);
   const pendingCreations = usePendingVmCreations();
 
+  const registrationSync = useSynchronizeVms();
+
+  // 보드 등록 목록 ↔ DB 등록 동기화. VM 실행 상태는 목록 자동 갱신이 따로 맡는다.
   const synchronize = async () => {
-    const result = await vms.refetch();
-    if (result.isError) {
-      const message =
-        result.error instanceof ApiError
-          ? `${result.error.message} (${result.error.code})`
-          : String(result.error);
-      toast.show(`VM 목록 동기화에 실패했습니다. ${message}`, 'fault', 5000);
-      return;
+    try {
+      const result = await registrationSync.mutateAsync();
+      toast.show(synchronizationSummary(result), 'ok', 5000);
+    } catch (error) {
+      const message = error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
+      toast.show(`VM 동기화에 실패했습니다. ${message}`, 'fault', 5000);
     }
-    toast.show('VM 목록을 동기화했습니다.', 'ok');
   };
 
   const run = (vm: Vm, kind: VmAction) =>
@@ -76,9 +76,20 @@ export function VmListPage() {
           <p className={styles.headingDescription}>VM 생성과 생명주기, 할당 자원을 관리합니다.</p>
         </div>
         <div className={styles.controlHeadingActions}>
-          {vms.data && <ObservedClock at={observedAt(vms.data.observed_at, vms.dataUpdatedAt)} />}
-          <Button variant="secondary" onClick={() => void synchronize()} disabled={vms.isFetching}>
-            {vms.isFetching ? '동기화 중…' : 'VM 동기화'}
+          {vms.data && (
+            <ObservedClock
+              at={observedAt(vms.data.observed_at, vms.dataUpdatedAt)}
+              receivedAt={vms.dataUpdatedAt}
+              refreshing={!vms.isFetchedAfterMount}
+            />
+          )}
+          <Button
+            variant="secondary"
+            onClick={() => void synchronize()}
+            disabled={registrationSync.isPending}
+            title="보드에 등록된 VM과 서버 목록을 맞춥니다 (보드에만 있는 VM 추가, 보드에서 사라진 VM 정리)"
+          >
+            {registrationSync.isPending ? '동기화 중…' : 'VM 동기화'}
           </Button>
           <Button onClick={() => navigate('/control/vms/new')}>+ VM 생성</Button>
         </div>
@@ -263,21 +274,46 @@ function SummaryItem({ label, value, tone }: { label: string; value: string; ton
   );
 }
 
+/** 등록 동기화 결과를 한 줄로. 바뀐 것이 없으면 그렇게 말한다 */
+function synchronizationSummary(result: VmSynchronizationResult): string {
+  const parts = [
+    result.registered && `추가 ${result.registered}`,
+    result.updated && `갱신 ${result.updated}`,
+    result.retired && `정리 ${result.retired}`,
+    result.missing_from_board && `보드에 없음 ${result.missing_from_board}`,
+    result.conflicts && `충돌 ${result.conflicts}`,
+    result.incomplete && `정보 부족 ${result.incomplete}`,
+  ].filter(Boolean);
+  return parts.length === 0
+    ? `VM 동기화 완료: 보드 ${result.discovered}대, 바뀐 것 없음`
+    : `VM 동기화 완료: 보드 ${result.discovered}대 · ${parts.join(' · ')}`;
+}
+
 /** 서버가 dom0 목록을 받은 시각(observed_at). 읽을 수 없으면 화면이 응답을 받은 시각 */
 function observedAt(iso: string | undefined, fallback: number): number {
   const parsed = iso ? Date.parse(iso) : NaN;
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-/** 서버가 마지막 단일 동기화 요청에서 dom0 목록을 받은 시각 */
-function ObservedClock({ at }: { at: number }) {
+/** at: 서버가 dom0 목록을 받은 시각, receivedAt: 화면이 그 응답을 받은 시각 (둘의 차이가 서버 목록의 나이) */
+function ObservedClock({
+  at,
+  receivedAt,
+  refreshing,
+}: {
+  at: number;
+  receivedAt: number;
+  refreshing: boolean;
+}) {
   const time = new Date(at).toTimeString().slice(0, 8);
+  const ageSeconds = Math.max(0, Math.round((receivedAt - at) / 1000));
   return (
     <span className={styles.observedTime}>
-      마지막 동기화
+      마지막 확인
       <b key={time} className={styles.tick}>
         {time}
       </b>
+      {refreshing ? ' · 갱신 중' : ageSeconds >= 3 ? ` · ${ageSeconds}초 전` : ''}
     </span>
   );
 }
