@@ -42,6 +42,8 @@
   overflow: hidden;
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 0.95fr);
+  /* 행 높이를 화면 높이에 고정: 내용이 많아도 행이 늘어나 화면 아래로 잘리지 않고, 패널 안에서 줄어든다 */
+  grid-template-rows: minmax(0, 1fr);
   grid-template-areas: 'speed vehicle status';
   gap: var(--g);
   padding: var(--g);
@@ -280,13 +282,18 @@
 }
 
 .alert {
+  /* 카드를 밀어내지 않는 한 줄 (넘치면 말줄임, 전체 문구는 툴팁) */
+  flex: none;
   margin: 0;
-  padding: var(--g-half) var(--g);
-  border-radius: calc(8 * var(--u));
+  overflow: hidden;
+  padding: calc(3 * var(--u)) var(--g-half);
+  border-radius: calc(6 * var(--u));
   background: var(--x-fault-soft);
   color: var(--x-fault);
-  font-size: var(--fs-sm);
-  line-height: 1.3;
+  font-size: var(--fs-xs);
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── 가운데: 시각 · 차량 · 양옆 막대 ── */
