@@ -1,5 +1,11 @@
 import type { MetricSample } from '../api/types';
-import { buildManagedRamSeries, managedRamReason } from '../domain/managedRam';
+import {
+  buildManagedRamSeries,
+  formatManagedRamPart,
+  MANAGED_RAM_PART_LABEL,
+  managedRamParts,
+  managedRamReason,
+} from '../domain/managedRam';
 import { MemoryUsageSummary } from './MemoryUsageSummary';
 import { useNow } from '../useNow';
 
@@ -19,6 +25,13 @@ export function ManagedRamSummary({
   const display = recentObservation ?? current;
   const usable = display.status === 'ok';
   const expired = usable && current.status !== 'ok';
+  // 사용 중 구성(정적 데이터·펌웨어 이미지·할당 페이지) 큰 순서 한 줄. 표시 중인 관측값 기준, 검증 실패·값 없음이면 생략
+  const parts = usable ? managedRamParts(display) : null;
+  const detail = parts?.length
+    ? parts
+        .map((part) => `${MANAGED_RAM_PART_LABEL[part.key]} ${formatManagedRamPart(part.bytes)}`)
+        .join(' · ')
+    : null;
   return (
     <MemoryUsageSummary
       label="메모리 사용률"
@@ -30,6 +43,7 @@ export function ManagedRamSummary({
       freeText={formatRamMiB(usable ? display.freeBytes : null)}
       expired={expired}
       notice={expired ? '관측 만료 · 최근 관측값' : usable ? null : managedRamReason(current.reason)}
+      detail={detail}
     />
   );
 }
