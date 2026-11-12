@@ -13,7 +13,8 @@ from .machine import (ControlMachine,Mode,Timing,DRIVE_APPS,AUTONOMOUS,MANUAL_AP
 
 TRUST_REASONS=frozenset(('AUTO_DEADLINE_MISS',))
 INPUT_FAILURES=frozenset(('INPUT_UNAVAILABLE','INPUT_STALE','INPUT_INVALID','MAP_UNAVAILABLE',
-                         'WORLD_UNAVAILABLE','OBSERVATION_EXPIRED'))
+                         'WORLD_UNAVAILABLE','POSE_UNAVAILABLE','OBSERVATION_EXPIRED',
+                         'CLOCK_ERROR','STEERING_UNAVAILABLE'))
 
 def valid_untrusted_payload(payload):
     """Validate legacy FW32 evidence, not its former VM-wide interpretation."""
@@ -58,6 +59,7 @@ class VerifiedDriveMachine(ControlMachine):
         self.continuous_handoff=False;self._handoff_grace_until=0.;self._resume_auto=False
         self.durable_write_available=lambda:True
         self._deferred_authority=None;self._authority_transition_deferred=False
+        self._last_forwarded_t=None
         self._resume_vm=self.active_vm
         # Restart restores preference, never output permission, even if the last
         # process persisted an in-flight command with arm_after_apply=true.
@@ -254,6 +256,7 @@ class VerifiedDriveMachine(ControlMachine):
         """Adopt an already durable authority change; never issues another generation."""
         old_mode,old_vm=self.mode,self.active_vm
         self._handoff_grace_until=0.
+        self._last_forwarded_t=None
         self._resume_auto=False
         self.mode=mode;self.active_vm=vm;self.apps=self.nodes[vm];self.generation=self.authority.value['generation']
         self.delivered=False;self.failure=None;self.transitions+=1
@@ -310,6 +313,18 @@ class VerifiedDriveMachine(ControlMachine):
         track=self.apps.get(self.active_app)
         return bool(track and track.last_command_t is not None and 0<=now-track.last_command_t<=self.timing.command_timeout_s)
 
+    def _function_failure_confirmed(self,vm,app,now):
+        """기본 verified 정책. warm 프로필은 결과 거절과 기능 상실 관찰을 분리한다."""
+        return True
+
+    def _waiting_function_output(self,now):
+        """복구 판정 대기 중에도 원 명령 수명은 연장하지 않는다."""
+        previous_live=self._last_forwarded_t is not None and 0<=now-self._last_forwarded_t<=self.timing.command_timeout_s
+        if not previous_live and (self._last_stop_t is None or now-self._last_stop_t>=self.timing.stop_resend_s):
+            self._last_stop_t=now
+            return [ForwardStop(self.generation)]
+        return []
+
     def _output(self,now):
         if self._authority_transition_deferred:
             if self._last_stop_t is None or now-self._last_stop_t>=self.timing.stop_resend_s:
@@ -321,6 +336,8 @@ class VerifiedDriveMachine(ControlMachine):
         if not self.authority.error and self.output_permitted and pending and self._command_fresh(now) and self._ready(self.active_vm,self.active_app,now):
             ref=self.references[self.active_vm,self.active_app]
             self.forwarded+=1
+            # 거절된 뒤 도착한 명령의 수신으로 이전 출력의 수명을 갱신하지 않는다.
+            self._last_forwarded_t=pending[3]
             return [ForwardDrive(self.active_app,self.generation,pending[1],pending[2],source=ref)]
         grace=(self.continuous_handoff and self.phase=='PENDING' and self._authorized and self.transport_ok and
                not self.failure and not self.authority.error and now<self._handoff_grace_until)
@@ -368,7 +385,8 @@ class VerifiedDriveMachine(ControlMachine):
         cancelled=self._operator_cancel(now)
         if app and self.output_permitted:
             p=self.prepared[self.active_vm,app]
-            if self.mode is Mode.AUTO and p.state!='READY':
+            if (self.mode is Mode.AUTO and p.state!='READY'
+                    and self._function_failure_confirmed(self.active_vm,app,now)):
                 actions=self._autonomous_failure(self.active_vm,'autonomous_unavailable',now)
             elif not self._ready(self.active_vm,app,now) or not self._command_fresh(now):
                 track=self.apps[app];p=self.prepared[self.active_vm,app]
@@ -376,20 +394,25 @@ class VerifiedDriveMachine(ControlMachine):
                     'binding':self._bound(self.active_vm,now),'readiness_state':p.state,'readiness_reason':p.reason,
                     'readiness_age_ms':None if p.observed is None else (now-p.observed)*1000,
                     'command_age_ms':None if track.last_command_t is None else (now-track.last_command_t)*1000}))
-                if self._qualified(other,app,now,held=True):actions+=self._change(self.mode,other,'command_timeout',now,arm=True)
+                if not self._function_failure_confirmed(self.active_vm,app,now):
+                    actions+=self._waiting_function_output(now)
+                elif self._qualified(other,app,now,held=True):actions+=self._change(self.mode,other,'command_timeout',now,arm=True)
                 else:actions+=self._change(Mode.SAFE_STOP,self.active_vm,'no_fresh_standby',now);self._authorized=False
             elif self.mode is Mode.MANUAL and not self.authority.value.get('manual_hold',False) and self._qualified(self.active_vm,AUTONOMOUS,now,held=True):
                 actions=self._change(Mode.AUTO_READY,self.active_vm,'autonomous_ready',now,arm=True)
-            elif self.mode is Mode.AUTO_READY and not self._qualified(self.active_vm,AUTONOMOUS,now):
+            elif (self.mode is Mode.AUTO_READY and not self._qualified(self.active_vm,AUTONOMOUS,now)
+                    and self._function_failure_confirmed(self.active_vm,AUTONOMOUS,now)):
                 actions=self._change(Mode.MANUAL,self.active_vm,'autonomous_lost',now,arm=True)
         elif self.mode is Mode.SAFE_STOP and self.transport_ok and not self.failure:
             candidate=next((vm for vm in (self.active_vm,other) if self._qualified(vm,MANUAL_APP,now,held=True)),None)
             if candidate:actions=self._change(Mode.MANUAL,candidate,'manual_fresh',now,arm=False)
         if self._countdown:
             expected_app=AUTONOMOUS if self.mode is Mode.AUTO_READY or self._resume_auto else app or MANUAL_APP
-            if self._countdown.generation!=self.generation or not self._qualified(self._resume_vm,expected_app,now,held=True):
+            qualified=self._qualified(self._resume_vm,expected_app,now,held=True)
+            if (self._countdown.generation!=self.generation or not qualified and
+                    self._function_failure_confirmed(self._resume_vm,expected_app,now)):
                 actions+=self._cancel_countdown('readiness_lost',now)
-            elif now-self._countdown.start_t>=self.timing.resume_countdown_s:
+            elif qualified and now-self._countdown.start_t>=self.timing.resume_countdown_s:
                 self._authorized=True
                 target_mode=Mode.AUTO if self.mode is Mode.AUTO_READY or self._resume_auto else Mode.MANUAL if self.mode is Mode.SAFE_STOP else self.mode
                 actions=self._change(target_mode,self._resume_vm,'resume_requested',now,arm=True)

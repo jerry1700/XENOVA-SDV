@@ -1,8 +1,10 @@
 """유한 world/state 계약의 형식·기하 검증. 권위·시계·센서 수락을 발급하지 않는다."""
 import math
+from functools import lru_cache
 from uuid import UUID
 from google.protobuf.message import DecodeError
 from . import world_pb2 as schema
+from .route import ROUTE_CAPS,ROUTE_BYTE_FIELDS,ROUTE_UUID_FIELDS,ROUTE_REPEATED_CAPS,ROUTE_MESSAGES,validate_one as validate_route,validate_parent as validate_route_parent
 
 MAX_BYTES=32768
 MAX_CELLS=4096
@@ -10,35 +12,52 @@ ROAD_PRIORITY=1
 LANE_MODEL=2
 PARKING_MODEL=4
 LOCALIZATION_BOUNDS=8
-WORLD_FEATURES=15
+WORLD_FEATURES=31
+WORLD_ROUTE=16
 STATE_FEATURES=7
 STATE_TASK_REFERENCE=8
-STATE_KNOWN_FEATURES=STATE_FEATURES|STATE_TASK_REFERENCE
+STATE_EPISODE=16
+STATE_OPERATION=32
+STATE_ROUTE=64
+STATE_KNOWN_FEATURES=STATE_FEATURES|STATE_TASK_REFERENCE|STATE_EPISODE|STATE_OPERATION|STATE_ROUTE
 CELL_ROAD=8
 MAX_U63=(1<<63)-1
 NIL_UUID=bytes(16)
 _STR64={'vehicle','configuration','calibration','primitive','reference_id','reason','device','mapper_device'}
 _UUID_BYTES={'admission_id','survey_id','mission_id','scene_admission_id','operator_request_nonce','sensor_instance',
              'request_nonce','nonce','pi_host_boot','gateway_instance','owner_vm','owner_execution','app_instance',
-             'driver_session'}
+             'driver_session','episode_id','birth_snapshot_id','meter_epoch','registry_epoch',
+             'origin_vm','origin_execution','origin_app_instance','expected_registry_epoch',
+             'expected_episode_id','phase_state_message_id','state_message_id',
+             'source_vm','source_execution','source_app_instance','service_epoch','departure_nonce','active_request_nonce'}
 _REPEATED_CAPS={'DriveState.path':512,'DriveState.segments':3,'LaneModel.lanes':2,
     'LaneGeometry.centerline':32,'LaneModel.divider':32,'WorldSnapshot.parking_slots':8,
     'ParkingSlot.corners':4,'MissionExecution.selected_slot_polygon':4,
-    'TaskReferenceState.basis_prefix':64}
+    'TaskReferenceState.basis_prefix':64,'EpisodeCore.blocker':8}
 _MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneModel':1408,
     'ParkingSlot':256,'MapLocalization':96,'SceneAdmissionRef':96,'ParkingSetMeta':64,
     'MissionGrant':1024,'MissionBudgetRequest':512,'MissionBudgetReply':1536,
     'MapperClockProbe':1024,'MapperClockReply':1024,'SurveySummary':288,'SceneGrant':1024,
-    'TofObservation':1024,'TaskReferenceState':1024,'GuestClockReceipt':64,'DirectionGateWitness':512}
+    'TofObservation':1024,'TaskReferenceState':1024,'GuestClockReceipt':64,'DirectionGateWitness':512,
+    'EpisodeCore':768,'EpisodeProgress':128,'EpisodeAcceptanceRef':256,'EpisodeSnapshot':1024,
+    'EpisodeSourceContext':768,'EpisodeRequest':2048,'EpisodeReceipt':1536,'EpisodeStatus':2048,
+    'PiAbsoluteMeter':128,'StopFacts':768,'DriveControlFacts':1024,
+    'OperationBinding':128,'OperationStatus':256,'AutoInputPreflight':768,'PiOperationGate':96}
+_MESSAGE_CAPS.update(ROUTE_CAPS)
+_REPEATED_CAPS.update(ROUTE_REPEATED_CAPS)
+_OPERATION_MESSAGES=frozenset(('OperationBinding','OperationStatus','AutoInputPreflight','PiOperationGate',
+    'ClockProbe','ClockReply','MapperClockProbe','MapperClockReply','MissionGrant'))
 
 
 def _bytes_bound(field):
+    key=field.containing_type.name+'.'+field.name
+    if key in ROUTE_BYTE_FIELDS:return ROUTE_BYTE_FIELDS[key],True
     name=field.name
     if name in _UUID_BYTES:return 16,True
     if name.endswith('_sha256') or name=='primitive':return 32,True
     return {'occupancy':(4096,False),'cell_flags':(4096,False),'age_le32':(16384,False),
         'point_state':(32,False),'crossing':(31,False),'divider_state':(32,False),
-        'distance_mm_le':(128,True),'status':(64,True),'quality':(64,True),
+        'distance_mm_le':(2,True),'status':(1,True),'quality':(1,True),
         'drivable_permission':(512,False)}.get(name,(MAX_BYTES,False))
 
 def _repeated(field):
@@ -50,8 +69,9 @@ def _finite(message):
     cap=_MESSAGE_CAPS.get(message.DESCRIPTOR.name,MAX_BYTES)
     if message.ByteSize()>cap:raise ValueError('message size cap '+message.DESCRIPTOR.name)
     for field,value in message.ListFields():
-        values=value if _repeated(field) else (value,)
-        if _repeated(field) and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
+        repeated=_repeated(field)
+        values=value if repeated else (value,)
+        if repeated and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
             raise ValueError('repeated field cap '+field.name)
         if field.type in (field.TYPE_FLOAT,field.TYPE_DOUBLE):
             if not all(math.isfinite(item) for item in values):raise ValueError('nonfinite field '+field.name)
@@ -60,7 +80,9 @@ def _finite(message):
         elif field.type==field.TYPE_STRING:
             limit=64 if field.name in _STR64 else 36
             for item in values:
-                if not item or len(item.encode('utf-8'))>limit or any(ord(c)<33 or ord(c)>126 for c in item):raise ValueError('bounded identifier '+field.name)
+                # ASCII 33..126은 문자 수=byte 수다. 같은 범위를 C 문자열 검사로 검산한다.
+                if (not 0<len(item)<=limit or not item.isascii() or not item.isprintable() or ' ' in item):
+                    raise ValueError('bounded identifier '+field.name)
         elif field.type==field.TYPE_BYTES:
             limit,exact=_bytes_bound(field)
             if any(len(item)>limit or exact and len(item)!=limit for item in values):raise ValueError('bounded bytes '+field.name)
@@ -96,13 +118,28 @@ def _intersects(a,b,c,d):
         for value,p,q,r in ((values[0],a,b,c),(values[1],a,b,d),(values[2],c,d,a),(values[3],c,d,b)))
 
 
-def _simple(points,closed=False):
+def _simple_check(points,closed):
     edges=list(zip(points,points[1:]+points[:1] if closed else points[1:]))
     if any(math.hypot(a[0]-b[0],a[1]-b[1])<1e-6 for a,b in edges):raise ValueError('degenerate geometry edge')
     for i,(a,b) in enumerate(edges):
         for j in range(i+2,len(edges)):
             if closed and i==0 and j==len(edges)-1:continue
             if _intersects(a,b,*edges[j]):raise ValueError('self-intersecting geometry')
+
+
+@lru_cache(maxsize=8)
+def _simple_success(points,closed):
+    # 예외는 저장되지 않는다. 원 좌표의 단순성만 재사용하며 메시지 수락을 저장하지 않는다.
+    return _simple_check(points,closed)
+
+
+def _simple(points,closed=False):
+    # 새 관측에도 같은 불변 Task/road 기하가 반복된다. 원 cap 밖 입력은 원 검사를 유지한다.
+    if len(points)>128 or type(closed) is not bool:return _simple_check(points,closed)
+    coordinates=tuple((point[0],point[1]) for point in points)
+    if not all(type(value) is float and math.isfinite(value) for point in coordinates for value in point):
+        return _simple_check(points,closed)
+    return _simple_success(coordinates,closed)
 
 
 def _open_basis(points):
@@ -181,7 +218,7 @@ def _parking_set(value):
 
 
 def _mission(value,grant=False):
-    if value.kind not in (0,1,2) or value.strategy not in (0,1,2) or value.correction_attempts_used>2:
+    if value.kind not in (0,1,2,3) or value.strategy not in (0,1,2) or value.correction_attempts_used>2:
         raise ValueError('mission kind/strategy/correction')
     _scene_pair(value,'scene_revision' if grant else 'scene_admission_revision')
     _nonnegative(value,'execution_travel_m','search_travel_m')
@@ -206,9 +243,9 @@ def _mission(value,grant=False):
         if grant and (value.HasField('locked_goal_sha256')!=bool(value.execution_deadline_pi_us)):
             raise ValueError('locked goal/execution deadline')
     if grant:return
-    if value.result>3 or value.phase not in ((0,) if value.kind==0 else (0,10) if value.kind==1 else range(10)):
+    if value.result>3 or value.phase not in ((0,) if value.kind==0 else (0,10) if value.kind==1 else range(1,7) if value.kind==3 else range(10)):
         raise ValueError('mission phase/result')
-    if value.result==1 and (value.kind!=2 or value.phase!=0):raise ValueError('PARKED must be parking HOLD')
+    if value.result==1 and not (value.kind==2 and value.phase==0 or value.kind==3 and value.phase==5):raise ValueError('successful terminal mission phase')
     names=('slot_id','slot_revision','goal','goal_revision','goal_position_bound_m','goal_heading_bound_rad')
     present=[value.HasField(name) for name in names]
     locked=value.kind==2 and value.phase in (3,4,5,6,7)
@@ -261,7 +298,24 @@ def validate(message):
     return message
 
 
+# These exact generated subtrees have no _validate_one semantics. Required
+# presence, bytes/caps and every float still pass _finite on each validate().
+# Any schema extension disables all three shortcuts, including nested Pose.
+# A new semantic rule for these types must also remove/update this shortcut.
+_NUMERIC_TREE_TYPES=(schema.Point,schema.Pose,schema.PathPoint)
+_NUMERIC_TREE_FIELDS=(
+    ((1,'x',2,2,None),(2,'y',2,2,None)),
+    ((1,'x',2,2,None),(2,'y',2,2,None),(3,'yaw',2,2,None)),
+    ((1,'pose',11,2,schema.Pose.DESCRIPTOR),(2,'steering_rad',2,2,None),(3,'velocity_mps',2,2,None)))
+if any(kind.DESCRIPTOR.extension_ranges or
+       tuple((f.number,f.name,f.type,f.label,f.message_type) for f in kind.DESCRIPTOR.fields)!=expected or
+       any(f.containing_oneof is not None for f in kind.DESCRIPTOR.fields)
+       for kind,expected in zip(_NUMERIC_TREE_TYPES,_NUMERIC_TREE_FIELDS)):
+    _NUMERIC_TREE_TYPES=()
+
+
 def _validate_tree(message):
+    if type(message) in _NUMERIC_TREE_TYPES:return
     for field,value in message.ListFields():
         if field.type==field.TYPE_MESSAGE:
             for child in value if _repeated(field) else (value,):_validate_tree(child)
@@ -270,20 +324,25 @@ def _validate_tree(message):
 
 def _validate_one(message):
     name=message.DESCRIPTOR.name
+    if name in ROUTE_MESSAGES:validate_route(message)
+    if name in ('WorldSnapshot','DriveState','MissionExecution','MissionGrant','ClockReply'):validate_route_parent(message)
+    if name in _OPERATION_MESSAGES:
+        from .operations import validate_one as validate_operation
+        validate_operation(message)
     major=2 if name in ('DriveState','DriveLink') else 1
     if getattr(message,'major',major)!=major:raise ValueError('unsupported schema major')
     if isinstance(message,schema.WorldSnapshot):
         n=message.width*message.height
         if not 2<=message.width<=64 or not 2<=message.height<=64 or n>MAX_CELLS:raise ValueError('grid dimensions')
         if (len(message.occupancy),len(message.cell_flags),len(message.age_le32))!=(n,n,n*4):raise ValueError('grid arrays incomplete')
-        if not message.complete or message.truncated or message.required_features not in (0,1,11,15) or message.inflation_policy:raise ValueError('unsupported map features')
+        if not message.complete or message.truncated or message.required_features not in (0,1,11,15,27,31) or message.inflation_policy:raise ValueError('unsupported map features')
         if not 2<=len(message.reference)<=64 or len(message.left_boundary)!=len(message.reference) or len(message.right_boundary)!=len(message.reference):raise ValueError('road arrays')
         if message.resolution_m<.001 or message.resolution_m>10:raise ValueError('resolution')
         if message.observed_us>message.completed_us or message.completed_us>message.published_us:raise ValueError('source time ordering')
         allowed=15 if message.required_features&ROAD_PRIORITY else 7
         if any(v>100 and v!=255 for v in message.occupancy) or any(v&~allowed for v in message.cell_flags):raise ValueError('cell encoding')
         if message.required_features&ROAD_PRIORITY and not any(v&CELL_ROAD for v in message.cell_flags):raise ValueError('missing preferred road')
-        new=message.required_features in (11,15)
+        new=message.required_features in (11,15,27,31)
         if not new and any(flags&2 for flags in message.cell_flags):
             raise ValueError('legacy world supports live-only cells')
         if new and message.minor!=2:raise ValueError('world minor2 required')
@@ -292,7 +351,8 @@ def _validate_one(message):
             _simple([_xy(p) for p in message.left_boundary]+[_xy(p) for p in reversed(message.right_boundary)],True)
         for field,required in (('lane_model',bool(message.required_features&LANE_MODEL)),
                 ('localization',bool(message.required_features&LOCALIZATION_BOUNDS)),
-                ('parking_set',bool(message.required_features&PARKING_MODEL)),('drivable_permission',new)):
+                ('parking_set',bool(message.required_features&PARKING_MODEL)),('drivable_permission',new),
+                ('route_view',bool(message.required_features&WORLD_ROUTE))):
             if message.HasField(field)!=required:raise ValueError('feature presence '+field)
         if message.parking_slots and not message.required_features&PARKING_MODEL:raise ValueError('parking feature missing')
         if new:
@@ -311,12 +371,17 @@ def _validate_one(message):
             if retained and not message.HasField('scene'):raise ValueError('retained clearance requires scene reference')
         elif message.HasField('scene'):raise ValueError('scene requires new world profile')
     elif isinstance(message,schema.DriveState):
-        if message.world_features not in (0,1,11,15):raise ValueError('unsupported state world features')
+        if message.world_features not in (0,1,11,15,27,31):raise ValueError('unsupported state world features')
         features=message.state_features
         if (not message.HasField('state_features') or features&STATE_FEATURES!=STATE_FEATURES
                 or features&~STATE_KNOWN_FEATURES or not message.HasField('mission')):
             raise ValueError('state features/mission required')
         task=message.HasField('task_reference')
+        if bool(features&STATE_OPERATION)!=message.mission.HasField('operation_binding'):
+            raise ValueError('operation feature/presence')
+        if bool(features&STATE_EPISODE)!=message.HasField('episode'):raise ValueError('episode feature/presence')
+        from .episodes import validate_state
+        validate_state(message)
         if bool(features&STATE_TASK_REFERENCE)!=task or task and not message.world_features&LANE_MODEL:
             raise ValueError('state task feature/presence/world profile')
         if task and message.task_reference.basis_revision>message.reference_revision:
@@ -382,8 +447,10 @@ def _validate_one(message):
         if message.state and (not message.gate_revision or not message.stop_command_sequence):raise ValueError('direction gate provenance')
     elif name=='GuestClockReceipt':
         _positive(message,'probe_sequence','guest_receive_us')
-    elif name=='ClockProbe' and message.HasField('receipt'):
-        if (message.receipt.probe_sequence>=message.sequence
+    elif name=='ClockProbe':
+        if message.HasField('supported_state_features') and message.supported_state_features&~STATE_KNOWN_FEATURES:
+            raise ValueError('unsupported declared state capabilities')
+        if message.HasField('receipt') and (message.receipt.probe_sequence>=message.sequence
                 or message.receipt.guest_receive_us>message.guest_send_us):
             raise ValueError('clock receipt order')
     elif name=='DirectionGateWitness':
@@ -404,6 +471,9 @@ def _validate_one(message):
                 raise ValueError('MANUAL direction gate source')
         else:raise ValueError('direction gate producer role')
     elif name=='ClockReply':
+        if message.pi_receive_us>message.pi_send_us:raise ValueError('Pi clock order')
+        from .episodes import validate_clock
+        validate_clock(message)
         if message.HasField('guest_clock_valid_until_pi_us') and message.guest_clock_valid_until_pi_us<=message.pi_receive_us:
             raise ValueError('guest clock original expiry')
         if message.HasField('accepted_receipt') and not message.HasField('guest_clock_valid_until_pi_us'):
@@ -454,8 +524,6 @@ def _validate_one(message):
     elif name=='MapperClockReply':
         _positive(message,'probe_seq','pi_send_us','j2','j3')
         if message.j2>message.j3:raise ValueError('mapper clock order')
-    elif name=='ClockReply':
-        if message.pi_receive_us>message.pi_send_us:raise ValueError('Pi clock order')
     elif name=='SurveySummary':
         _nonnegative(message,'anchor_position_bound_m','anchor_heading_bound_rad')
         if (message.status>4 or message.observed_slot_count>64 or message.observation_station_count>24
@@ -481,11 +549,19 @@ def _validate_one(message):
             raise ValueError('scene frozen/restore evidence presence')
     elif name=='TofObservation':
         _positive(message,'source_sample','source_us','pi_sample_us','sensor_config_revision','clock_seq','sensor_generation')
-        if (not message.complete or message.sensor_id not in (0,1) or message.rows!=8 or message.cols!=8
+        if (not message.complete or message.sensor_id not in (0,1) or message.rows!=1 or message.cols!=1
                 or message.frame_status&~7 or any(value>7 for value in message.status)
                 or any(value&~31 for value in message.quality)
                 or len(message.calibration)!=64 or any(c not in '0123456789abcdefABCDEF' for c in message.calibration)):
             raise ValueError('ToF bounded frame semantics')
+        distance=int.from_bytes(message.distance_mm_le,'little')
+        if (message.status[0]==1 and distance in (0,65535)
+                or message.quality[0]&1 and message.status[0]!=1):
+            raise ValueError('ToF single valid-distance/status consistency')
+    elif name in ('EpisodeCore','EpisodeProgress','EpisodeAcceptanceRef','EpisodeSnapshot','EpisodeSourceContext',
+                  'EpisodeRequest','EpisodeReceipt','EpisodeStatus','PiAbsoluteMeter','StopFacts','DriveControlFacts'):
+        from .episodes import validate_one
+        validate_one(message)
 
 def encode(message):
     validate(message)
@@ -589,6 +665,16 @@ class PreparedClock(bytes):
 
 def decode(data,message_type=schema.WorldSnapshot):
     if not isinstance(data,bytes) or len(data)>MAX_BYTES:raise ValueError('bounded bytes required')
+    if message_type is schema.VehicleSample and type(data) is bytes and len(data)<=1024:
+        # 정지 창에서 반복되는 원 wire의 정적 검산만 재사용한다. mutable message나
+        # 현재 출처/나이/정지 수락은 저장하지 않으며 반환 객체는 매번 새로 만든다.
+        value=message_type()
+        value.ParseFromString(_validated_vehicle_wire(data))
+        return value
+    return _decode_original(data,message_type)
+
+
+def _decode_original(data,message_type):
     _audit(data,message_type.DESCRIPTOR)
     value=message_type()
     try:value.ParseFromString(data)
@@ -597,6 +683,13 @@ def decode(data,message_type=schema.WorldSnapshot):
     # retain them in a duplicate-copy fingerprint or relay unexamined bytes.
     value.DiscardUnknownFields()
     return validate(value)
+
+
+@lru_cache(maxsize=128)
+def _validated_vehicle_wire(data):
+    # 입력·출력 각 최대 1KiB, 성공한 immutable bytes만 보유한다. 예외는 저장되지 않는다.
+    if type(data) is not bytes or len(data)>1024:raise ValueError('bounded original Vehicle bytes required')
+    return _decode_original(data,schema.VehicleSample).SerializeToString(deterministic=True)
 
 
 def _audit(data,descriptor,depth=0):
@@ -619,9 +712,13 @@ def _audit(data,descriptor,depth=0):
         tag=varint();fieldno=tag>>3;kind=tag&7
         if not 0<fieldno<=0x1fffffff:raise ValueError('field number')
         field=descriptor.fields_by_number.get(fieldno)
+        # These explicitly declared repeated float arrays have one packed
+        # canonical body. Count actual elements, not the number of chunks.
+        packed_float=bool(field is not None and _repeated(field)
+            and field.type==field.TYPE_FLOAT and field.GetOptions().packed)
         if field is not None and _repeated(field):
             limit=_REPEATED_CAPS.get(descriptor.name+'.'+field.name,64)
-            counts[fieldno]=counts.get(fieldno,0)+1
+            counts[fieldno]=counts.get(fieldno,0)+(0 if packed_float else 1)
             if counts[fieldno]>limit:raise ValueError('repeated field cap '+field.name)
         if field is not None and not _repeated(field):
             if fieldno in seen:raise ValueError('duplicate singular field')
@@ -631,7 +728,7 @@ def _audit(data,descriptor,depth=0):
                 if name in unions:raise ValueError('multiple oneof fields')
                 unions.add(name)
         if field is not None:
-            expected=2 if field.type in (field.TYPE_STRING,field.TYPE_BYTES,field.TYPE_MESSAGE) else 1 if field.type in (field.TYPE_DOUBLE,field.TYPE_FIXED64,field.TYPE_SFIXED64) else 5 if field.type in (field.TYPE_FLOAT,field.TYPE_FIXED32,field.TYPE_SFIXED32) else 0
+            expected=2 if packed_float or field.type in (field.TYPE_STRING,field.TYPE_BYTES,field.TYPE_MESSAGE) else 1 if field.type in (field.TYPE_DOUBLE,field.TYPE_FIXED64,field.TYPE_SFIXED64) else 5 if field.type in (field.TYPE_FLOAT,field.TYPE_FIXED32,field.TYPE_SFIXED32) else 0
             if kind!=expected:raise ValueError('field wire type '+field.name)
         if kind==0:
             value=varint()
@@ -647,6 +744,10 @@ def _audit(data,descriptor,depth=0):
         elif kind==5:size=4
         else:raise ValueError('wire type')
         if size>len(data)-at:raise ValueError('partial field')
+        if packed_float:
+            if size%4:raise ValueError('partial packed float '+field.name)
+            counts[fieldno]+=size//4
+            if counts[fieldno]>limit:raise ValueError('repeated field cap '+field.name)
         if field is not None and field.type==field.TYPE_STRING:
             limit=64 if field.name in _STR64 else 36
             if kind!=2 or size>limit:raise ValueError('string cap '+field.name)
@@ -660,3 +761,12 @@ def _audit(data,descriptor,depth=0):
         if descriptor.name=='DriveState' and fieldno>=29:
             metadata+=at-start
             if metadata>4096:raise ValueError('state metadata cap')
+
+    if descriptor.name in ROUTE_MESSAGES:
+        # New management hashes commit to exact canonical known bytes. Preserve
+        # legacy optional-field handling outside these explicitly new subtrees.
+        value=getattr(schema,descriptor.name)()
+        try:value.ParseFromString(data)
+        except DecodeError as error:raise ValueError('invalid route protobuf') from error
+        value.DiscardUnknownFields()
+        if value.SerializeToString(deterministic=True)!=data:raise ValueError('noncanonical route bytes')

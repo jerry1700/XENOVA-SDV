@@ -1,4 +1,4 @@
-"""서킷 트랙: 관리 콘솔 mock(simEngine.ts buildTrack)과 같은 계산인지, 계약 v1.4 §11 sim.world.track 형식인지."""
+"""서킷 트랙: 관리 콘솔 mock(simEngine.ts buildTrack)과 같은 계산인지, 계약 §12 sim.world.track 형식인지."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ T = load("spielberg")
 
 
 def test_ten_tracks_from_the_console_mock():
-    assert track_ids() == ["spielberg", "monza", "silverstone", "spa", "melbourne",
-                           "hungaroring", "catalunya", "mexico", "bahrain", "interlagos"]
+    assert track_ids()[:10] == ["spielberg", "monza", "silverstone", "spa", "melbourne",
+                                "hungaroring", "catalunya", "mexico", "bahrain", "interlagos"]
+    assert track_ids()[10:] == ["jetson-demo", "jetson-r40", "jetson-r45", "jetson-r50", "jetson-r55", "jetson-r60"]
     assert len(sources()["spa"].centerline) == 681  # 계약 v1.4: 가장 긴 스파 681점
 
 

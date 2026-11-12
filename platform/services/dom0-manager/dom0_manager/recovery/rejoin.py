@@ -127,7 +127,15 @@ class RejoinCoordinator:
     def _record(self,vm,value):
         with self._lock:
             records={**self.records,vm:value}
-            atomic_json(self.path,{'schema_version':'1.0-drive-rejoin','vms':records})
+            payload={'schema_version':'1.0-drive-rejoin','vms':records}
+            if vm in self.records and self.records[vm]==value:
+                # 같은 실패/대기 행의 반복 관측은 새 내구 전이가 아니다. 원 파일을
+                # 매회 확인하고, 없거나 달라졌으면 기존 atomic write/retry를 유지한다.
+                # timestamp를 제외한 비교나 binding lease 갱신은 하지 않는다.
+                try:unchanged=private_json(self.path,self.uid)==payload
+                except (OSError,ValueError):unchanged=False
+                if unchanged:return
+            atomic_json(self.path,payload)
             self.records=records
 
     def _work(self,vm,*,initial_row=None):
@@ -220,7 +228,14 @@ class RejoinCoordinator:
                             self._futures[vm]=self._executor.submit(self._work,vm,initial_row=rows[vm])
             if self.observe_many is not None:
                 if not self._stop.is_set() and self._batch is None:
-                    targets=tuple(vm for vm in self.vm_ids if vm not in self._futures and now>=self._due.get(vm,0))
+                    idle=tuple(vm for vm in self.vm_ids if vm not in self._futures)
+                    targets=tuple(vm for vm in idle if now>=self._due.get(vm,0))
+                    if len(targets)==1 and len(idle)==2 and all(
+                            self._rows.get(vm,{}).get('status')=='observed' and
+                            self._due.get(vm,0)<=now+1 for vm in idle):
+                        # After a split, bring the idle healthy peer into this round.
+                        # The due VM never waits, and failed or busy peers keep their own cadence.
+                        targets=idle
                     if targets:
                         # One request-local snapshot uses the existing executor;
                         # due subsets preserve each VM's failure backoff.

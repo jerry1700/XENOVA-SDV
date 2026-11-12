@@ -9,6 +9,7 @@ from collections import deque
 import math
 import struct
 from uuid import UUID,uuid4
+from .absolute_meter import AbsoluteWheelMeter
 
 ODOM_PROBE=0x0f04
 ODOM_REPORT=0x0f03
@@ -34,6 +35,7 @@ class OdometryConfig:
     heading_error_rad: float
     distance_error_ratio: float
     heading_error_per_m: float
+    metres_per_tick_upper: float | None = None
 
     def __post_init__(self):
         for key in ('vehicle','calibration'):
@@ -46,6 +48,9 @@ class OdometryConfig:
         for key in ('maximum_clock_error_us','maximum_sample_age_us','sample_period_ms'):
             if type(getattr(self,key)) is not int or not 0<getattr(self,key)<=2**31-1:raise OdometryError('ODOM_CONFIG_TIME')
         if self.encoder_bits not in (32,64) or type(self.encoder_bits) is not int:raise OdometryError('ODOM_CONFIG_COUNTER')
+        if (self.metres_per_tick_upper is not None and (type(self.metres_per_tick_upper) not in (int,float)
+                or not math.isfinite(self.metres_per_tick_upper) or self.metres_per_tick_upper<self.metres_per_tick)):
+            raise OdometryError('ODOM_CONFIG_SCALE_UPPER')
 
     @classmethod
     def load(cls,path,*,uid=0):
@@ -57,7 +62,8 @@ class OdometryConfig:
             if not stat.S_ISREG(info.st_mode) or info.st_uid!=uid or info.st_mode&0o077 or info.st_size>2048:
                 raise OdometryError('ODOM_CONFIG_STORAGE')
             value=decode(stream.read(2049))
-        if set(value)!=set(cls.__dataclass_fields__):raise OdometryError('ODOM_CONFIG_FIELDS')
+        fields=set(cls.__dataclass_fields__)
+        if not fields-{'metres_per_tick_upper'}<=set(value)<=fields:raise OdometryError('ODOM_CONFIG_FIELDS')
         return cls(**value)
 
 class VehicleOdometry:
@@ -67,19 +73,22 @@ class VehicleOdometry:
         self.samples=deque(maxlen=128);self.pending={};self.last_probe=None
         self.errors={};self.first_error=None;self.latest=None
         self.travel=0.
+        self._source_payload=None
+        self.absolute=AbsoluteWheelMeter(config,self.host_boot)
 
     def fail(self,code,*,invalidate_sample=True):
         # Only finite product reason codes, never per-input state or raw body.
         self.errors[code]=self.errors.get(code,0)+1
         if self.first_error is None:self.first_error=code
-        if invalidate_sample:self.latest=None
+        if invalidate_sample:self.latest=None;self.absolute.invalidate()
         raise OdometryError(code)
 
     def device_session(self,session):
         if session==self.device:return
-        self.device=session;self.epoch=str(uuid4());self.previous=None
+        self.device=session;self.epoch=str(uuid4());self.previous=None;self._source_payload=None
         self.pose=(0.,0.,0.);self.sequence=0;self.samples.clear();self.pending.clear();self.latest=None
         self.travel=0.
+        self.absolute.invalidate()
 
     def probe(self,pi_session,now_us):
         if getattr(self,'clock_profile3',False):return None
@@ -89,6 +98,14 @@ class VehicleOdometry:
         if len(self.pending)>=2:return None
         self.pending[now_us]=None;self.last_probe=now_us
         return PROBE.pack(UUID(pi_session).bytes,UUID(self.device).bytes,now_us)
+
+    def next_probe_us(self):
+        if getattr(self, 'clock_profile3', False) or not self.device:
+            return None
+        due = 0 if self.last_probe is None else self.last_probe + self.config.sample_period_ms * 1_000
+        if len(self.pending) >= 2:
+            due = max(due, min(self.pending) + self.config.maximum_sample_age_us + 1)
+        return due
 
     def mark_submitted(self,echo,sent_us):
         """Bind the original probe to its first pre-write time, not a send ACK.
@@ -140,9 +157,16 @@ class VehicleOdometry:
             return self.fail('ODOM_COUNTER_RANGE')
         pi_us=(lower_pi_us+upper_pi_us)//2
         current=(sample,source_us,left,right,pi_us)
+        payload=(pi_session,sample,source_us,left,right,quality,steer_mrad,steer_error_mrad)
         x,y,yaw=self.pose;velocity=0.;steering=None
         if self.previous is not None:
             old=self.previous
+            # 늦은 정상 packet은 더 최신의 pose/meter를 철회할 근거가 아니다.
+            # 최신 ID의 내용 충돌과 시간/번호 모순은 아래 기존 fail 경로로 보낸다.
+            historical=(self._source_payload is not None and pi_session==self._source_payload[0]
+                and sample<old[0] and source_us<old[1])
+            if historical or payload==self._source_payload:
+                return self.fail('ODOM_SAMPLE_ORDER',invalidate_sample=False)
             if sample<=old[0] or source_us<=old[1] or pi_us<=old[4]:return self.fail('ODOM_SAMPLE_ORDER')
             if max(source_us-old[1],pi_us-old[4])>self.config.maximum_sample_age_us:
                 # Unknown motion through a long sensor gap cannot be integrated
@@ -151,7 +175,8 @@ class VehicleOdometry:
                 self.errors['ODOM_CONTINUITY_GAP']=self.errors.get('ODOM_CONTINUITY_GAP',0)+1
                 if self.first_error is None:self.first_error='ODOM_CONTINUITY_GAP'
                 self.epoch=str(uuid4());self.pose=(0.,0.,0.);self.travel=0.;self.sequence=1
-                self.previous=current;self.samples.clear();self.latest=None;return None
+                self.absolute.invalidate()
+                self.previous=current;self._source_payload=payload;self.samples.clear();self.latest=None;return None
             modulus=1<<self.config.encoder_bits
             delta=lambda a,b:((a-b+modulus//2)%modulus)-modulus//2
             dl=delta(left,old[2])*self.config.metres_per_tick
@@ -168,7 +193,10 @@ class VehicleOdometry:
             yaw=math.remainder(yaw+turn,2*math.pi);velocity=distance/dt
             self.travel+=abs(distance)
             if abs(distance)>1e-9:steering=math.atan(self.config.wheelbase_m*turn/distance)
-        self.previous=current;self.pose=x,y,yaw;self.sequence+=1
+        self.previous=current;self._source_payload=payload;self.pose=x,y,yaw;self.sequence+=1
+        self.absolute.record(pi_session=pi_session,device_session=self.device,odom_epoch=self.epoch,
+            sequence=self.sequence,source_sample=sample,source_us=source_us,left=left,right=right,
+            pi_sample_us=pi_us,clock_error_us=error)
         # First valid sample establishes a frame origin, but cannot certify a
         # measured velocity. It is retained as an anchor, not published as 0.
         if self.sequence==1:return None

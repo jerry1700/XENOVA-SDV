@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "controller.h"
+#include "lifecycle.h"
 #include "workers.h"
 #if defined(CONFIG_XENOVA_DRIVE_LATTICE)
 #include "lattice_app.h"
@@ -23,6 +24,7 @@ static uint64_t assessed_revision[DRIVE_TASK_COUNT], assessed_connection[DRIVE_T
 static int64_t next_beat[DRIVE_TASK_COUNT], next_readiness[DRIVE_TASK_COUNT];
 #if defined(CONFIG_XENOVA_DRIVE_WARM) && defined(CONFIG_XENOVA_DRIVE_LATTICE)
 static struct drive_command_gate command_gate[DRIVE_TASK_COUNT];
+static struct drive_deadline_gate deadline_gate;
 #endif
 #if defined(CONFIG_XENOVA_DRIVE_WARM)
 struct app_lifecycle {
@@ -78,26 +80,13 @@ static void warm_report(enum drive_task task,const struct drive_result *selected
  const struct xd_received *in=task==DRIVE_TASK_AUTO?&inputs.perception:&inputs.input;
  struct drive_adapter *adapter=task==DRIVE_TASK_AUTO?&controller.automatic:&controller.manual;
  int64_t tick=k_uptime_get();
- const char *phase=chosen?"ACTIVATING":"WAITING",*state="NOT_READY",*reason="CONTROL_UNAPPLIED";
  const struct drive_completion *work=&completed[task];
- bool current=work->performed&&work->source.lifetime==status.lifetime&&work->context_revision==inputs.control_revision&&
-  work->source.connection_revision==inputs.connection_revision;
- if(selected->control_valid){
-  reason=drive_adapter_qualify(adapter,(struct xm_span){in->error?NULL:in->payload,in->error?0:in->length},
-    in->error?-1:tick-in->received_ms);
-  if(!chosen){
-   if(status.state==DRIVE_TASK_RUNNING||status.pending)reason="STATE_PREPARING";
-   if(!reason)state="QUALIFIED";
-  }else if(current){
-   phase="EXECUTING";reason=work->sample.reason;
-   uint64_t clock;int rc=xdiag_clock_us(&clock);
-   if(rc||tick-work->finished_ms>=300||(status.state==DRIVE_TASK_RUNNING&&clock>status.running_deadline_us))reason="CALCULATION_FAILED";
-   if(!reason)state="READY";
-  }else if(!reason)reason="STATE_PREPARING";
- }
- if(status.revoked){phase=status.state==DRIVE_TASK_RESIDUAL?"RESIDUAL":"STOPPING";state="NOT_READY";
-  reason=status.state==DRIVE_TASK_RESIDUAL?"RESOURCE_RETAINED":"APP_STOPPING";}
- uint32_t generation=selected->control_valid?selected->generation:0;
+ uint64_t clock=0;bool clock_valid=true;
+ if(chosen&&drive_warm_current(&status,work,inputs.control_revision,inputs.connection_revision))clock_valid=xdiag_clock_us(&clock)==0;
+ struct drive_warm_view view=drive_warm_classify(adapter,selected,&status,work,chosen,
+  (struct xm_span){in->error?NULL:in->payload,in->error?0:in->length},in->error?-1:tick-in->received_ms,
+  inputs.control_revision,inputs.connection_revision,tick,clock,clock_valid);
+ const char *phase=view.phase,*state=view.state,*reason=view.reason;uint32_t generation=view.generation;
  bool changed=generation!=a->generation||strcmp(a->last_phase,phase)||strcmp(a->last_state,state)||strcmp(a->last_reason,reason?reason:"");
  if(!changed&&tick<a->due)return;
  if(a->check==UINT64_MAX){a->failed=true;(void)xdiag_error("app-supervision",-EOVERFLOW);return;}
@@ -105,6 +94,7 @@ static void warm_report(enum drive_task task,const struct drive_result *selected
  int n=xm_app_lifecycle_json(payload,sizeof(payload),generation,++a->check,work->progress,phase,state,reason);
  xm_topic_vm_app_events(topic,sizeof(topic),inputs.vm_id,task==DRIVE_TASK_AUTO?AUTO_APP_ID:MANUAL_APP_ID);
  if(n>0)(void)xd_publish_supervision(topic,payload,a->check,tick,&inputs);
+ else (void)xdiag_error("app-supervision",n); /* 조합 거절(-EINVAL)이 소리 없이 100 ms 보고 공백이 되지 않게 */
  strcpy(a->last_phase,phase);strcpy(a->last_state,state);strcpy(a->last_reason,reason?reason:"");
  a->generation=generation;a->due=tick+100;
 }
@@ -319,8 +309,9 @@ int main(void)
     .connection_revision=work->source.connection_revision,.lifetime=work->source.lifetime,
     .generation=selected.generation,.mode=selected.mode};
    strcpy(command_context.app_instance,work->source.app_instance);
-   command_due=drive_command_attempt_due(&command_gate[task],&command_context,lifecycle[task].check,
-    work->sample.reason,work->sample.v_mps,work->sample.steer_rad);
+    command_due=(!automatic||drive_deadline_attempt_due(&deadline_gate,&command_context,work->sequence,work->sample.reason))&&
+     drive_command_attempt_due(&command_gate[task],&command_context,lifecycle[task].check,
+      work->sample.reason,work->sample.v_mps,work->sample.steer_rad);
 #endif
    if(selected.mode!=DRIVE_STOP&&command_due){
     if((rc=xd_command_input(work->sample.binary_input?"world.track":automatic?"perception.result":"drive.input")))break;

@@ -317,8 +317,27 @@ def test_link2_clock_keeps_vehicle_major1_and_nested_current_mission(probe):
     reply.vehicle.odom_pose.CopyFrom(schema.Pose(x=0.,y=0.,yaw=0.))
     assert decode(encode(link),schema.DriveLink)==link
     assert product(probe,encode(link),'link')['result']=='OK'
+    reply.pi_send_us=reply.pi_receive_us-1
+    with pytest.raises(ValueError,match='Pi clock order'):encode(link)
+    with pytest.raises(ValueError,match='Pi clock order'):decode(link.SerializeToString(),schema.DriveLink)
+    assert product(probe,link.SerializeToString(),'link')['result']=='TIME'
+    reply.pi_send_us=1002000
     reply.vehicle.major=2
     with pytest.raises(ValueError):encode(link)
+    assert product(probe,link.SerializeToString(),'link')['result']=='VERSION'
+
+
+@pytest.mark.parametrize('with_receipt',[False,True])
+def test_clock_receipt_does_not_bypass_declared_capability_check(probe,with_receipt):
+    link=schema.DriveLink(major=2)
+    link.probe.CopyFrom(schema.ClockProbe(vm=fixture.BOOT,execution=fixture.INSTANCE,
+        app_instance=fixture.MAP,sequence=2,guest_send_us=1000000,supported_state_features=1<<20))
+    if with_receipt:
+        link.probe.receipt.CopyFrom(schema.GuestClockReceipt(probe_sequence=1,
+            reply_sha256=bytes([1])*32,guest_receive_us=999999))
+    with pytest.raises(ValueError,match='unsupported declared state capabilities'):encode(link)
+    with pytest.raises(ValueError,match='unsupported declared state capabilities'):
+        decode(link.SerializeToString(),schema.DriveLink)
     assert product(probe,link.SerializeToString(),'link')['result']=='VERSION'
 
 
@@ -354,7 +373,7 @@ def test_scene_and_tof_standalone_shapes_do_not_imply_admission():
         gateway_instance=fixture.INSTANCE,pi_session=fixture.MAP,device_session=fixture.FRAME,
         sensor_id=0,source_sample=1,source_us=1000000,pi_sample_us=1001000,
         clock_error_us=1000,sensor_time_error_us=1000,calibration='0'*64,sensor_config_revision=1,
-        rows=8,cols=8,distance_mm_le=b'\xe8\x03'*64,status=bytes([1])*64,quality=bytes([1])*64,
+        rows=1,cols=1,distance_mm_le=b'\xe8\x03',status=bytes([1]),quality=bytes([1]),
         frame_status=3,source_crc32=0,clock_epoch=fixture.CLOCK,clock_seq=1,complete=True,
         sensor_instance=bytes([5])*16,sensor_generation=1)
     assert decode(encode(value),schema.TofObservation)==value

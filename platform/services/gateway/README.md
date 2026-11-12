@@ -37,6 +37,47 @@ native POSIX serial의 owner 경로는 기존 readiness 뒤 한 번 읽어 pyser
 줄인다. idle/HUP·부분 frame·첫 실패·read 완료 시각·STOP/종료 우선순위는 유지한다.
 직접 `poll()`의 공개 취소와 socket URL/custom backend는 기존 pyserial 경로를 사용한다.
 
+### 회피 Episode·주차 원 예산 선택
+
+새 회피/주차 연결은 [Episode·ControlFacts 계약](../../../docs/contracts/drive-world/episode-registry-and-control-facts.md)을 따른다.
+private operator 정책의 선택값 `episode_support: true`는 검증한 planner manifest를 사용하는
+설치의 명시 승인이다. 인증된 현재 앱의 ClockProbe feature16 선언과 함께 있어야
+EpisodeStatus·ControlFacts를 전달한다. feature 선언 자체는 설치 승인이나 주행 권한이 아니다.
+이 선택값이 없는 기존 설치와 미지원 peer에는 초기 NONE을 만들어 보내지 않는다.
+현재 AUTO에서 새 profile이 선택된 뒤에는 같은 서비스 안의 A/B·앱 교체·연결 상실·
+feature 선언 누락으로 legacy grace에 돌아가지 않는다. 현재 지원 증거가 없으면 새 준비와
+DRIVE를 거절하며, 서비스/profile을 명시 변경하는 경계 외에는 이 선택을 초기화하지 않는다.
+
+odometry 정책에는 선택값 `metres_per_tick_upper`를 공급할 수 있다. 이는 nominal
+`metres_per_tick` 이상인 보수적인 실제 이동 상한이며, nominal 값을 자동 승격하지 않는다.
+미지정이면 기존 odom/MANUAL/legacy 처리는 유지하되 새 회피·주차 거리 예산의 meter는
+무효다. scale/calibration·session·연속 표본이 바뀌면 새 meter epoch를 발급하고 이전
+원 anchor를 0거리로 복원하지 않는다. 시험의 `0.000001` 상한은 software bench 값이며
+실물 encoder 보정값으로 사용할 수 없다.
+
+serial owner는 각 수락 encoder 표본에서 wrap을 고려한 `max(|ΔL|, |ΔR|)`를 정수 tick으로
+누적한다. actor는 불변 current/history만 읽는다. 회피 등록은 원 clock·birth 표본·Scene·
+mission/grant/cancel·source 기하에 결박하며 RAM registry1/최근 exact reply1/terminal1을
+보관한다. BEGIN/ADVANCE/FINISH ACK 뒤에도 그 phase의 완전한 State가 수락되기 전에는
+DRIVE를 보내지 않는다. C 계산과 입력 수신은 계속해서 그 State를 만들 수 있다.
+Gateway 재기동은 UNKNOWN/disarm이며, 실제 새 mission만 초기 NONE을 열 수 있다.
+같은 phase 재계획·A/B·clock 재결합은 원40초/6m·phase10초 예산이나 실제 진전 시각을
+재시작하지 않는다. 현재 S19 주행 phase에는 일반 STOP 대기 phase가 없다.
+
+주차 예약은 실제 수락 State의 slot/goal/plan 해시와 원 request bytes에 결박한다.
+원120초 mission·90초 SEARCH, 최초 lock의30초 EXEC·SEARCH10m/EXEC5m를 별도로 유지한다.
+EXEC lock 뒤에는 이미 끝난 SEARCH 기한을 EXEC 출력에 다시 적용하지 않는다.
+최초 예약과 최대2회 보정의 원 reply bytes를 기존 mission4KiB 안에 보관하며, 한도가
+부족하면 HISTORY_FULL로 거절한다. 과거 원 reply 조회는 현재 owner의 새 grant ACK가 아니다.
+빈칸 선택·경로·차체 containment는 C 책임이며, Gateway의 PARKED 종결에는 현재
+source/grant/plan/phase에 결박된 실제 STOP/APPLIED와 현재 stationary window가 필요하다.
+
+ordinary StopFacts는 cusp READY나 출력 허가와 다르다. 원 최초 장치 APPLIED 시각을
+보존하면서 새 encoder window만 별도로 갱신한다. warm 연속성 증거는 실제 last-A와
+first-B APPLIED, 원 frame/device E, 중간 STOP을 함께 사용한다. 기존 grace나 수신 시각만으로
+연속 주행을 선언하지 않으며 증거 부족은 `stop_then_resume`로 남긴다. mutable progress·
+travel은 원 full State/HWM에 보관하고 immutable phase/goal 준비 stamp를 매 pose마다 바꾸지 않는다.
+
 이력은 `--history-policy <private-file>`의 `retry_ms`와 `retention_ms`를 명시 공급할 때
 정당하게 종결하고 보존 약속·참조를 해소한 기록만 새 내구 수락에서 정리한다.
 `GatewayClient.history()`는 읽기 전용이다. `new_request_id(host_boot_id)`는 최초 송신 전에
@@ -562,8 +603,16 @@ feedback3 profile exact fields는 `Feedback3Profile`의 등록 config/firmware S
 `steering_tolerance_rad`, `steering_settle_us`다. `stationary`는 Scene의
 `StationaryPolicy`와 같은 exact 단위·필드를 쓴다. 실제 firmware와 hash/capability를
 검산하고, 원 CLOCK_INSTALL ACK 전에는 DRIVE를 전달하지 않는다. STOP은 별도다.
-ToF source가 없는 구성은 유효하다. 이 adapter는 TOF_FRAGMENT3를 지원한다고 광고하지
-않으며 수신 fragment를 거절한다. 등록 ToF assembler는 독립 센서 연결부가 담당한다.
+ToF source가 없는 `tof_profiles: []` 구성은 유효하다. 장착 구성은 앞 중앙0·뒤 중앙1의
+단일존1×1 센서2개이며, 선택 source만 `TOF_SAMPLE3(0x0f17/145B)` 한 패킷으로 소비한다.
+신규 MCU cap0x0800·원 INSTALL ACK를 검사하며 구0x0f16/8×8 조각과 cap0x0200은 현재
+지원으로 인정하지 않는다. 구 고정 vector는 역사 자료다. 거리/status/quality는 각각1개,
+sample CRC domain은141B다. cap 부족·센서 오류·누락은 ToF만 폐기하고 clock/encoder/STOP을 막지 않는다.
+단일 RX queue8 뒤 기존 actor가 센서별 완전 관측 최신1만 보유한다. partial/재조립 timer는 없고
+원 capture 시각·CRC·generation/instance와 TTL을 보존한1×1 `TofObservation`을 기존 J port로 보낸다.
+ToF는 근거리 장애물 HIT-only이며 정상 거리·NO_TARGET·out-of-range를 FREE로 carve하지 않는다.
+모델·FOV·측정 오차·native 상태 매핑·baud/율과 물리 수락은 별도 확인한다. 새 thread/serial handle은 없다.
+[정확 계약과 시험 경계](../../../docs/contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)를 따른다.
 
 actor는 권한·입력·기한을 판정하고, serial owner 하나가 실제 출력/feedback을 소유한다.
 Scene과 operator의 내구 쓰기는 worker1/job1/result1 하나를 공유한다. operator/keyboard
@@ -612,3 +661,9 @@ report_seq/source_sample/time의 stationary 보고를 계속 생산해야 한다
 operator/journal과 원 ClockReply stamp/P4 확인은 실제 코드지만 lifecycle·Vehicle·장치
 관측은 명시 typed 시험 입력이다. 실물 READY·RF·serial feedback3·World planner·MANUAL
 주행의 통합 성공이나 성능 수치로 해석하지 않는다.
+
+## 운영 설정과 명시 출발
+
+승인 profile의 `operation_support`는 기본 false다. 새 profile의 주차 ON/OFF·명시 출발·
+SAFE_STOP 초기 조작·원 예산 보존은 [운영 계약](operation-contract.md)을 참고한다.
+기존 수동 키보드는 그대로이며 `xenova-drive manual keyboard --auto-enter`만 새 AUTO Enter를 선택한다.

@@ -32,12 +32,16 @@ def source(kind='STOP',calc=1,next_direction=1):
 @pytest.fixture
 def link():
     master,slave=os.openpty()
-    odom=VehicleOdometry(replace(config(),metres_per_tick=.000001,heading_error_rad=.000001),HOST)
+    # Explicit software bench upper; this is not a measured physical encoder scale.
+    odom=VehicleOdometry(replace(config(),metres_per_tick=.000001,metres_per_tick_upper=.000001,
+        heading_error_rad=.000001),HOST)
     policy=StationaryPolicy(30000,100000,200000,.000001,.05,.1,0.,0.)
     profile=Feedback3Profile('a'*64,'b'*64,100,100,100000,1000000,200000,100,100,policy,10000000,.02,20000)
     spec=importlib.util.spec_from_file_location('virtual_feedback3',Path(__file__).parents[1]/'examples/virtual_feedback3.py')
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
-    peer=module.VirtualFeedback3(master,'a'*64,'b'*64,drop_first_feedback=True).start()
+    # The peer declares measured steering, so the bench must supply an error bound.
+    peer=module.VirtualFeedback3(master,'a'*64,'b'*64,drop_first_feedback=True,
+        steering_error_mrad=1).start()
     sink=Feedback3SerialSink(os.ttyname(slave),timeout_ms=1000,odometry=odom,profile=profile)
     owner=OutputOwner(sink,command_timeout_s=.1)
     try:
@@ -59,12 +63,10 @@ def test_actual_clock_stop_hold_ready_and_immutable_phase(link):
     again=owner.write(StopFrame(7,1,1,witness=source(calc=2)),time.monotonic())
     assert again.metadata['command_sequence']==receipt.metadata['command_sequence']
     assert gate().valid_until_pi_us==end and gate().gate.gate_revision==revision
-    deadline=time.monotonic()+1
-    while time.monotonic()<deadline:
-        now=time.monotonic();stamp=int(now*1e6)
-        owner.write(DriveFrame(7,3,0,0,issued_pi_us=stamp,expires_pi_us=stamp+90000,witness=source('HOLD_STEER',3)),now)
-        if gate() is not None and gate().gate.state==4:break
-        time.sleep(.02)
+    now=time.monotonic();stamp=int(now*1e6)
+    owner.write(DriveFrame(7,3,0,0,issued_pi_us=stamp,expires_pi_us=stamp+90000,witness=source('HOLD_STEER',3)),now)
+    # Observe application and settling of this command before issuing another.
+    wait(lambda: (current := gate()) is not None and current.gate.state == 4)
     ready=gate();assert ready is not None and ready.gate.state==4
     assert ready.calculation_sequence==1 and ready.gate.stop_command_sequence==serial and ready.valid_until_pi_us==end
     assert peer.dropped and any(c[10]==3 for c in peer.commands)

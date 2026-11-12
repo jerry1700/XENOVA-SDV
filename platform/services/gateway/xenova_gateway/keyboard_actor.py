@@ -6,7 +6,7 @@ import re
 from uuid import uuid4
 
 from .authority_journal import canonical
-from .keyboard_contract import validate
+from .keyboard_contract import validate,AUTO_KINDS
 from .operator_contract import OperatorError
 
 
@@ -17,6 +17,8 @@ class KeyboardActor:
         self.outgoing=queue.Queue(maxsize=4);self.profile_loader=profile_loader
         self.scope=None;self.attach=None;self.tx=0;self.rx=0
         self.normal_cache=None;self.fence_cache=None;self.last_fence=None;self.predecessor=None
+        from .keyboard_auto import AutoKeyboardBoundary
+        self.auto=AutoKeyboardBoundary(self)
 
     def submit(self,packet,peer):
         validate(packet);result=queue.Queue(maxsize=1)
@@ -29,7 +31,7 @@ class KeyboardActor:
 
     def _response(self,request,kind,payload):
         self.tx+=1
-        return dict(version=1,kind=kind,host_boot_id=self.operator.runner.authority.host,
+        return dict(version=2 if kind in AUTO_KINDS else 1,kind=kind,host_boot_id=self.operator.runner.authority.host,
             gateway_instance_id=self.operator.instance,source_instance=request['source_instance'],
             channel_epoch=request['channel_epoch'],sequence=str(self.tx),request_id=request['request_id'],
             issued_pi_us=str(self.operator.now),expires_pi_us=str(self.operator.now+5_000_000),payload=payload)
@@ -62,12 +64,12 @@ class KeyboardActor:
 
     def _handle(self,call,peer,result):
         now=self.operator.now;kind=call['kind'];payload=call['payload'];r=self.registry;m=self.operator.runner.machine
-        initial=kind=='HELLO' and call['host_boot_id'] is None and call['gateway_instance_id'] is None
+        initial=kind in ('HELLO','HELLO_AUTO') and call['host_boot_id'] is None and call['gateway_instance_id'] is None
         if not initial and (call['host_boot_id']!=self.operator.runner.authority.host or call['gateway_instance_id']!=self.operator.instance):
             raise OperatorError('SOURCE_MISMATCH')
         if not initial and (call['issued_pi_us'] is None or not int(call['issued_pi_us'])<=now<int(call['expires_pi_us'])):
             raise OperatorError('INPUT_EXPIRED')
-        if kind=='HELLO':
+        if kind in ('HELLO','HELLO_AUTO'):
             if self.scope is not None:
                 if (peer,self.scope['source'],self.scope['channel'])!=(self.scope['peer'],call['source_instance'],call['channel_epoch']):
                     raise OperatorError('DRIVER_BUSY')
@@ -76,6 +78,7 @@ class KeyboardActor:
             profile=self._profile(payload['device_profile'])
             if (payload['device_identity_sha256']!=profile.device_identity_sha256
                     or payload['kernel_abi_sha256']!=profile.kernel_abi_sha256):raise OperatorError('UNSUPPORTED_DEVICE')
+            if kind=='HELLO_AUTO':return self.auto.hello(call,peer,profile)
             self.scope=dict(peer=peer,source=call['source_instance'],channel=call['channel_epoch'],profile=profile,
                 attached=False,generation=m.generation,last=call)
             self.rx=int(call['sequence']);return self._state(call,'HELLO_ACCEPTED',True,detached=True)
@@ -86,7 +89,11 @@ class KeyboardActor:
         if cache is not None and raw==cache[0]:return cache[1]
         if int(call['sequence'])<=self.rx:raise OperatorError('STALE_SAMPLE')
         self.rx=int(call['sequence']);scope['last']=call
+        if kind=='OBSERVE':return self.auto.observe(call)
+        if kind=='AUTO_ENTER':return self.auto.enter(call,peer)
         if kind=='ATTACH':
+            if scope.get('auto') and (payload['device_instance'],payload['link_epoch'])!=(scope['device'],scope['link']):
+                raise OperatorError('SOURCE_MISMATCH')
             if not scope['profile'].continuous_allowed:raise OperatorError('UNVERIFIED_RADIO')
             if (m.mode.value!='MANUAL' or self.operator.hold or payload['expected_generation']!=m.generation
                     or payload['expected_owner']!=m.active_vm):raise OperatorError('WRONG_MODE')
@@ -97,6 +104,7 @@ class KeyboardActor:
                 fence=self.operator.fence_revision,expires=min(now+5_000_000,int(call['expires_pi_us'])),
                 device=payload['device_instance'],link=payload['link_epoch'])
             return None
+        if kind=='FRAME' and self.auto.replacing_manual():return self._state(call,'AUTO_DEPARTING',False)
         if not scope['attached'] or r.kind!='HELD':raise OperatorError('SOURCE_MISMATCH')
         if kind=='FRAME':
             self._check_tuple(payload)
@@ -139,6 +147,7 @@ class KeyboardActor:
                 r._publish('HELD_SAMPLE' if r.keys else 'NEUTRAL')
                 if not r.keys:self.operator.direction_witness(m.active_vm,'manual')
             if self.predecessor is not None:self.predecessor=None
+            self.auto.observed(payload,manual=True)
             return self._state(call,'OK',True)
         if kind=='ARM':
             self._check_tuple(payload);event=int(payload['arm_event_seq'])
@@ -160,6 +169,7 @@ class KeyboardActor:
             r.fence_hwm=revision;r.fence_event_hwm=max(getattr(r,'fence_event_hwm',0),int(payload['key_event_seq']))
             mask=payload['reason_mask']
             if not mask:raise OperatorError('PROTOCOL_ERROR')
+            self.auto.invalidate()
             if mask&1 and int(payload['key_event_seq'])>getattr(r,'release_event_hwm',-1):
                 r._next('action');r.release_event_hwm=int(payload['key_event_seq'])
             r.fence(payload['reason'],release=mask==1);self.operator._stop_driver()
@@ -187,7 +197,7 @@ class KeyboardActor:
 
     def tick(self):
         scope=self.scope;r=self.registry;m=self.operator.runner.machine
-        if scope is not None and scope['attached']:
+        if scope is not None and scope['attached'] and not self.auto.replacing_manual():
             if r.kind!='HELD' or r.source!=scope['source']:
                 self._send_async(scope['peer'],self._state(scope['last'],'REVOKED',False,asynchronous=True,detached=True))
                 self.scope=None
@@ -204,7 +214,8 @@ class KeyboardActor:
             except queue.Empty:continue
             if call is None:
                 if self.scope is not None and self.scope['peer']==peer:
-                    self.registry.fence('LINK_LOST');self.operator._stop_driver()
+                    if self.scope['attached'] and not self.auto.replacing_manual():
+                        self.registry.fence('LINK_LOST');self.operator._stop_driver()
                     if self.attach is not None:
                         self.attach['cancelled']=True
                         self.attach['result'].put_nowait(self._state(self.attach['call'],'UNCONFIRMED',False,detached=True))
@@ -222,8 +233,10 @@ class KeyboardActor:
                     elif call['kind']!='FENCE':self.normal_cache=(canonical(call),response)
                 result.put_nowait(response)
         self._attach_tick()
+        self.auto.tick()
         if self.scope is not None and 'closing' in self.scope:
-            if self.operator.stationary():self.registry.neutral_candidate();self.scope=None
+            if not self.scope['attached']:self.scope=None
+            elif self.operator.stationary():self.registry.neutral_candidate();self.scope=None
             elif self.operator.now>=self.scope['closing']:
                 self.operator._stop('KEYBOARD_STOP_UNCONFIRMED');self.scope=None
         fence=self.last_fence

@@ -7,18 +7,150 @@ from copy import deepcopy
 from hashlib import sha256
 from uuid import UUID,uuid4
 import math
+import base64
 
 from xenova_drive_world import schema,encode,decode
 from xenova_mqtt.drive_binding import app_instance
 from .operator_contract import OperatorError
+from .absolute_meter import upper_distance
 
 
 class MissionAuthority:
     def __init__(self,runner):
         self.runner=runner;self.previous=None;self.distance=0.;self.distance_valid=False
         self.stop_reason=None;self.last_published=None;self.execution=None
+        self.execution_hwm={};self.terminal_pending=None
+        self.route_overlay=None;self.route_seed=None;self.route_blocked=False;self.route_journal=None
 
-    def current(self):return self.runner.authority.value.get('current_mission')
+    def _route_valid(self):
+        if self.route_overlay is None:return not self.route_blocked
+        from .authority_journal import canonical
+        r=self.runner;value=r.authority.value;record=self.route_overlay;operator=r.operator
+        durable=canonical(value.get('current_mission'))
+        allowed={self.route_seed}
+        if self.route_journal is not None and not self.route_journal['explicit']:
+            allowed.add(self.route_journal['after'])
+        binding=operator.operations.binding()
+        from .operation_owner import binding_record
+        valid=(not self.route_blocked and not r.authority.error and operator.unknown is None
+            and durable in allowed and value['generation']==record['generation']==r.machine.generation
+            and value['owner']==record['owner']==r.machine.active_vm and value['mode']=='AUTO'
+            and binding is not None and binding_record(binding)==record.get('operation_binding')
+            and record['admitted'] and int(r._clock()*1e6)<record['deadline'])
+        if not valid:self.route_blocked=True
+        return valid
+
+    def current(self):
+        durable=self.runner.authority.value.get('current_mission')
+        if self.route_overlay is None:return durable
+        if self._route_valid():return self.route_overlay
+        # 무효 RAM 등록을 과거 durable kind3 seed로 fallback하지 않는다.
+        stopped=deepcopy(self.route_overlay);stopped.update(admitted=False,phase='HOLD',result='FAILED')
+        return stopped
+
+    def augment(self,changes):
+        """다른 async 기록에도 현재 논리 등록을 고정한다. worker가 현재 RAM을 다시 읽지 않는다."""
+        changes=dict(changes)
+        if self.route_overlay is not None and 'current_mission' not in changes:
+            changes['current_mission']=deepcopy(self.current())
+        return changes
+
+    def journal_started(self,changes,*,explicit,operation):
+        from .authority_journal import canonical
+        before=self.current();after=changes.get('current_mission')
+        if self.route_overlay is None and not any(value is not None and value['kind']==3 for value in (before,after)):return
+        if self.route_journal is not None:raise OperatorError('BUSY_NOT_ACCEPTED')
+        self.route_journal=dict(explicit=explicit,after=canonical(after),before=canonical(self.runner.authority.value.get('current_mission')),
+            before_record=deepcopy(before),operation=operation)
+
+    def journal_completed(self,ok,unknown):
+        pending=self.route_journal;self.route_journal=None
+        if unknown:
+            self.route_blocked=True
+            return
+        if pending is None or not ok:return
+        from .authority_journal import canonical
+        actual=canonical(self.runner.authority.value.get('current_mission'))
+        if actual!=pending['after']:
+            self.route_blocked=True
+        elif pending['explicit']:
+            # 새 control/owner/mission은 실제 durable ACK가 맡는다. 이전 RAM 권한은 종료한다.
+            self.route_overlay=None;self.route_seed=None;self.route_blocked=False
+        else:self.route_seed=actual
+
+    def revoke_route(self):
+        """issuer 채택 뒤 다른 owner 채택이 실패해도 예전 grant로 rollback하지 않는다."""
+        if self.route_overlay is not None:self.route_blocked=True
+
+    def route_rebind_source(self):
+        """현재 출력 권한이 아닌 원 후보다. 같은 서비스의 실제 durable rebind issuer만 소비한다."""
+        from .authority_journal import canonical
+        from .operation_owner import binding_record
+        r=self.runner;o=r.operator;route=getattr(getattr(o,'routes',None),'route',None)
+        journal=self.route_journal
+        binding_job=journal is not None and journal['explicit'] and journal['operation']=='mission_binding'
+        record=(self.route_overlay if self.route_overlay is not None else journal['before_record'] if binding_job
+            else r.authority.value.get('current_mission'))
+        m=r.machine;value=r.authority.value
+        if (record is None or record['kind']!=3 or not record['admitted'] or route is None or route.failed
+                or route.registry is None or route.registry['snapshot'].state!=2 or route.registry['state'] is None
+                or r.authority.error or o.unknown is not None
+                or value['mode']!='AUTO' or m.mode.value!='AUTO' or value['generation']!=m.generation
+                or value['owner']!=m.active_vm or (record['generation'],record['owner'])==(m.generation,m.active_vm)
+                or m.generation<=record['generation']):return None
+        actual=canonical(value.get('current_mission'))
+        allowed={self.route_seed} if self.route_overlay is not None else {canonical(record)}
+        if binding_job:allowed.add(journal['after'])
+        if actual not in allowed:return None
+        binding=o.operations.binding();peer=o.operations.active_peer()
+        if (binding is None or binding_record(binding)!=record.get('operation_binding') or peer is None
+                or not route.supported(peer) or int(r._clock()*1e6)>=record['deadline'] or route.exhausted() is not None):return None
+        original=decode(route.registry['grant'],schema.MissionGrant)
+        if (original.mission_id!=UUID(record['id']).bytes or original.control_generation!=record['generation']
+                or original.grant_revision!=record['grant_revision'] or original.cancel_fence_revision!=record['cancel_fence']
+                or encode(original.route_binding)!=base64.b64decode(record['route_binding'],validate=True)):
+            return None
+        return deepcopy(record)
+
+    def commit_route_registration(self,registration):
+        """같은 권한의 UPDATE/FINISH 한 건만 RAM에서 발급한다. BEGIN/새 control은 async 전용이다."""
+        from .authority_journal import canonical
+        r=self.runner;o=r.operator;route=o.routes.route
+        if (route is None or o.job is not None or o.worker.busy or not o.worker._results.empty()
+                or o.unknown is not None or self.route_journal is not None):raise OperatorError('BUSY_NOT_ACCEPTED')
+        if route.registration()!=registration or route.registry is None or route.failed:
+            raise OperatorError('CONTEXT_CHANGED')
+        candidate=decode(registration.candidate_raw,schema.RouteCandidate)
+        if candidate.action not in (2,3):raise OperatorError('CONTEXT_CHANGED')
+        old=self.current();grant=self.grant()
+        if old is None or grant is None or old['kind']!=3 or not old['admitted']:
+            raise OperatorError('CONTEXT_CHANGED')
+        if encode(grant)!=route.registry['grant']:raise OperatorError('CONTEXT_CHANGED')
+        before=route.registry['snapshot'];after=decode(registration.snapshot_raw,schema.RouteSnapshot)
+        immutable=('route_id','purpose','goal_sha256','topology_sha256','global_plan_sha256','geometry_scope_sha256',
+            'started_pi_us','deadline_pi_us','meter_epoch','meter_baseline_total_ticks','max_travel_m',
+            'parking_attempt_id','parking_goal_sha256','predecessor_episode_sha256','budget_profile_sha256',
+            'max_laps','meter_gap_revision','metres_per_tick_upper')
+        if (before.state!=2 or after.core.revision!=before.core.revision+1
+                or any(getattr(before.core,k)!=getattr(after.core,k) for k in immutable)
+                or after.core.deadline_pi_us!=old['deadline'] or route.exhausted() is not None):
+            raise OperatorError('CONTEXT_CHANGED')
+        if after.core.phase_revision==before.core.phase_revision:
+            if (after.core.phase_started_pi_us,after.core.phase_expires_pi_us)!=(
+                    before.core.phase_started_pi_us,before.core.phase_expires_pi_us):raise OperatorError('CONTEXT_CHANGED')
+        elif (candidate.action!=2 or after.core.phase_revision!=before.core.phase_revision+1
+                or after.core.phase_started_pi_us<before.core.phase_started_pi_us
+                or after.core.phase_expires_pi_us>min(after.core.deadline_pi_us,
+                    after.core.phase_started_pi_us+route.policy.phase_cap(after.core.phase))):
+            raise OperatorError('CONTEXT_CHANGED')
+        record=self.route_record(None,registration,old['generation'],old['owner'])
+        if (set(record)!=set(old) or record['grant_revision']!=old['grant_revision']+1
+                or any(record[k]!=old[k] for k in old if k not in ('route_binding','grant_revision'))
+                or len(canonical(record))>4096):raise OperatorError('CONTEXT_CHANGED')
+        if self.route_overlay is None:self.route_seed=canonical(r.authority.value.get('current_mission'))
+        self.route_overlay=deepcopy(record)
+        if not self._route_valid():raise OperatorError('CONTEXT_CHANGED')
+        return encode(self.grant())
 
     def _context(self):
         r=self.runner;m=r.machine;provider=r.drive_link
@@ -48,7 +180,56 @@ class MissionAuthority:
             vehicle=trust.vehicle,reservations=[],goal=None,owner=self.runner.machine.active_vm,
             execution=row['execution_id'],app=app_instance(row,'autonomous'),generation=self.runner.machine.generation)
         self.previous=None;self.distance=0.;self.distance_valid=False;self.stop_reason=None
+        if kind==2 and getattr(self.runner,'episode_support',False):
+            record['search_meter']=self._meter_anchor();record['execution_meter']=None
         return record
+
+    def _meter_anchor(self):
+        operator=getattr(self.runner,'operator',None)
+        meter=None if operator is None else operator.episodes._meter()
+        if meter is None:return None
+        return dict(epoch=meter.meter_epoch,total_ticks=meter.total_ticks,metres_per_tick=meter.metres_per_tick,
+            gap_revision=meter.gap_revision,vehicle_sequence=meter.vehicle_sequence)
+
+    def route_record(self,call,registration,generation,owner):
+        """검산된 원 Candidate의 kind3 변경안만 만든다. 실제 grant 공개는 원 async ACK 뒤다."""
+        candidate=decode(registration.candidate_raw,schema.RouteCandidate)
+        snapshot=decode(registration.snapshot_raw,schema.RouteSnapshot)
+        binding=decode(registration.route_binding_raw,schema.RouteBinding)
+        if (binding.route_id!=snapshot.core.route_id or binding.revision!=snapshot.core.revision
+                or binding.core_sha256!=snapshot.acceptance.accepted_core_sha256):raise OperatorError('CONTEXT_CHANGED')
+        if candidate.action==1:
+            record=self.start(call,1,admitted=True)
+            record.update(kind=3,strategy=0,phase='FOLLOW',deadline=snapshot.core.deadline_pi_us,
+                search_deadline=0,execution_deadline=0)
+        else:
+            current=self.current()
+            if current is None or current['kind']!=3 or 'route_binding' not in current:raise OperatorError('CONTEXT_CHANGED')
+            old=decode(base64.b64decode(current['route_binding'],validate=True),schema.RouteBinding)
+            if old.route_id!=binding.route_id:raise OperatorError('CONTEXT_CHANGED')
+            record=deepcopy(current)
+        record['route_binding']=base64.b64encode(registration.route_binding_raw).decode('ascii')
+        from .operation_owner import binding_record
+        operation=self.runner.operator.operations.binding()
+        if operation is None:raise OperatorError('NOT_READY')
+        record['operation_binding']=binding_record(operation)
+        record=self.rebind(record,generation,owner)
+        validate_record(record)
+        return record
+
+    def _meter_distance(self,current):
+        anchor=current.get('execution_meter') if current['execution_deadline'] else current.get('search_meter')
+        meter=self._meter_anchor()
+        if (anchor is None or meter is None or any(meter[key]!=anchor[key] for key in
+                ('epoch','gap_revision','metres_per_tick')) or meter['total_ticks']<anchor['total_ticks']):return None
+        return upper_distance(meter['total_ticks']-anchor['total_ticks'],anchor['metres_per_tick'])
+
+    def used_distance(self,current=None):
+        current=self.current() if current is None else current
+        if current is not None and 'search_meter' in current:
+            return self._meter_distance(current)
+        return None if not self.distance_valid else self.distance+(0. if current is None else
+            current['execution_distance'] if current['execution_deadline'] else current['search_distance'])
 
     def fence(self,result='CANCELLED'):
         current=self.current()
@@ -58,16 +239,23 @@ class MissionAuthority:
         return record
 
     def grant(self,record=None):
+        if record is None and self.route_journal is not None and self.route_journal['explicit']:
+            # worker가 쓴 새 grant는 actor가 그 원 ACK를 소비하기 전에는 공개하지 않는다.
+            return None
+        if record is None and self.route_overlay is not None and not self._route_valid():return None
         record=self.current() if record is None else record
         if record is None:return None
+        if ('operation_binding' in record
+                and record['operation_binding']['service_epoch']!=UUID(self.runner.drive_link.instance).hex):return None
         r=self.runner;m=r.machine
+        # kind3의 원 E는 record/RouteCore가 소유하며 공용 주차 예산은 sentinel 0이다.
         grant=schema.MissionGrant(major=1,vehicle=record['vehicle'],pi_host_boot=UUID(r.authority.host).bytes,
             gateway_instance=UUID(r.drive_link.instance).bytes,owner_vm=UUID(record['owner']).bytes,
             owner_execution=UUID(record['execution']).bytes,app_instance=UUID(record['app']).bytes,
             control_generation=record['generation'],mission_id=UUID(record['id']).bytes,
             mission_revision=record['revision'],grant_revision=record['grant_revision'],kind=record['kind'],
             strategy=record['strategy'],operator_request_nonce=UUID(record['nonce']).bytes,issued_pi_us=record['issued'],
-            mission_deadline_pi_us=record['deadline'],cancel_fence_revision=record['cancel_fence'],
+            mission_deadline_pi_us=0 if record['kind']==3 else record['deadline'],cancel_fence_revision=record['cancel_fence'],
             scene_admission_id=bytes(16) if record['scene_id'] is None else UUID(record['scene_id']).bytes,
             scene_revision=record['scene_revision'],configuration=record['configuration'],calibration=record['calibration'],
             primitive=bytes.fromhex(record['primitive']),execution_deadline_pi_us=record['execution_deadline'],
@@ -76,6 +264,11 @@ class MissionAuthority:
             search_deadline_pi_us=record['search_deadline'],search_travel_m=record['search_distance'],
             max_search_travel_m=10. if record['kind']==2 else 0.)
         if record['goal'] is not None:grant.locked_goal_sha256=bytes.fromhex(record['goal'])
+        if 'operation_binding' in record:
+            from .operation_owner import binding_message
+            grant.operation_binding.CopyFrom(binding_message(record['operation_binding']))
+        if 'route_binding' in record:
+            grant.route_binding.CopyFrom(decode(base64.b64decode(record['route_binding'],validate=True),schema.RouteBinding))
         encode(grant);return grant
 
     def publish(self):
@@ -94,6 +287,12 @@ class MissionAuthority:
         return value
 
     def observe_vehicle(self,sample,metres_per_tick,now):
+        current=self.current()
+        if current is not None and current['kind']==2 and 'search_meter' in current:
+            distance=self._meter_distance(current);self.distance_valid=distance is not None
+            self.distance=0. if distance is None else distance
+            self.stop_reason=None if distance is not None else 'PARKING_METER_UNAVAILABLE'
+            return
         if sample is None or metres_per_tick is None:return
         if (sample.get('quality')!=3 or not 0<=now-sample['pi_sample_us']+sample['clock_error_us']<=200_000
                 or not math.isfinite(metres_per_tick) or metres_per_tick<=0):
@@ -117,9 +316,15 @@ class MissionAuthority:
         def reply(result,reason):return schema.MissionBudgetReply(major=1,request_nonce=body.request_nonce,
             request_sha256=envelope.request_sha256,result=result,reason=reason)
         if current is None:return reply(5,1),None
-        for row in current['reservations']:
+        operation=self.runner.authority.value.get('current_operation')
+        attempt=None if operation is None else operation.get('parking_attempt')
+        original=(attempt if attempt is not None and body.mission_id==UUID(attempt['id']).bytes
+            and body.mission_revision==attempt['revision'] else current)
+        for row in original['reservations']:
             if row['nonce']==body.request_nonce.hex():
-                return reply(2,0) if row['sha']==envelope.request_sha256.hex() else reply(5,8),None
+                if row['sha']!=envelope.request_sha256.hex():return reply(5,8),None
+                if 'reply' in row:return decode(base64.b64decode(row['reply'],validate=True),schema.MissionBudgetReply),None
+                return reply(2,0),None  # Old records did not retain an exact reply; never mint its old grant.
         m=self.runner.machine
         if (body.mission_id!=UUID(current['id']).bytes or body.mission_revision!=current['revision']
                 or current['kind']!=2 or not current['admitted'] or current['phase']=='HOLD'
@@ -138,34 +343,99 @@ class MissionAuthority:
         if not stationary:return reply(5,3),None
         if not self.distance_valid:return reply(5,1),None
         if now>=current['deadline']:return reply(5,7),None
+        if self.execution is None:return reply(5,1),None
+        state=decode(self.execution[0],schema.DriveState)
+        from xenova_drive_world import plan_sha256,selected_goal_sha256
+        if (not self.runner.drive_link._state_mission_matches(state,self.grant())
+                or not 0<=now-int(self.execution[1]*1e6)<=250000
+                or state.path_revision!=body.plan_revision or plan_sha256(state)!=body.plan_sha256
+                or selected_goal_sha256(state.mission)!=body.selected_goal_sha256
+                or state.mission.slot_id!=body.slot_id or state.mission.slot_revision!=body.slot_revision
+                or state.mission.goal_revision!=body.goal_revision):return reply(5,1),None
+        used=self.used_distance(current)
+        if used is None:return reply(5,1),None
         value=deepcopy(current)
         if body.action==1:
             if value['execution_deadline']:return reply(5,4),None
-            if now>=value['search_deadline'] or value['search_distance']+self.distance>=10:return reply(5,6),None
+            if state.mission.phase!=2:return reply(5,1),None
+            if now>=value['search_deadline'] or used>=10:return reply(5,6),None
             value.update(execution_deadline=min(current['deadline'],now+30_000_000),
-                goal=body.selected_goal_sha256.hex(),phase='EXECUTE',search_distance=value['search_distance']+self.distance)
+                goal=body.selected_goal_sha256.hex(),phase='EXECUTE',search_distance=used)
+            if 'search_meter' in value:value['execution_meter']=self._meter_anchor()
         elif body.action==2:
-            if self.execution is None:return reply(5,1),None
-            state=decode(self.execution[0],schema.DriveState)
-            if (state.mission.phase!=7 or state.path_revision==body.plan_revision
-                    or not 0<=now-int(self.execution[1]*1e6)<=250_000):return reply(5,1),None
+            if state.mission.phase!=7:return reply(5,1),None
             if not value['execution_deadline'] or value['goal']!=body.selected_goal_sha256.hex():return reply(5,1),None
             if now>=value['execution_deadline']:return reply(5,7),None
             if value['corrections']>=2:return reply(5,5),None
-            if value['execution_distance']+self.distance>=5:return reply(5,6),None
-            value['corrections']+=1;value['execution_distance']+=self.distance
+            if used>=5:return reply(5,6),None
+            value['corrections']+=1;value['execution_distance']=used
         else:return reply(5,1),None
         value['grant_revision']+=1
         value['reservations'].append(dict(nonce=body.request_nonce.hex(),sha=envelope.request_sha256.hex()))
         result=reply(1,0);result.grant.CopyFrom(self.grant(value))
+        value['reservations'][-1]['reply']=base64.b64encode(encode(result)).decode('ascii')
+        from .authority_journal import canonical
+        if len(canonical(value))>4096:return reply(5,10),None
         return result,value
 
-    def observe_execution(self,state,received):
+    def prepare_execution(self,state,received):
         current=self.current()
-        if current is None or not self.runner.drive_link._state_mission_matches(state,self.grant()):return False
-        if not current['admitted'] or state.source_generation!=self.runner.machine.generation:return False
-        self.execution=(state.SerializeToString(deterministic=True),received)
+        if current is None or not self.runner.drive_link._state_mission_matches(state,self.grant()):return None
+        if not current['admitted'] or state.source_generation!=self.runner.machine.generation:return None
+        peer=(state.source_vm,state.source_execution,state.source_app_instance)
+        hwm=self.execution_hwm.get(peer)
+        signature=(state.state_revision,state.calculation_sequence,state.vehicle_sequence)
+        if hwm is not None and any(new<old for new,old in zip(signature,hwm)):return None
+        if current['goal'] is not None:
+            from xenova_drive_world import selected_goal_sha256
+            if selected_goal_sha256(state.mission).hex()!=current['goal']:return None
+        terminal=None
+        if state.mission.phase==0 and state.mission.result==1:
+            facts=self.runner.control_facts();now=int(received*1e6)
+            if (current['goal'] is None or facts is None or not facts.HasField('stop') or facts.stop.state!=3
+                    or not state.HasField('direction_gate') or state.direction_gate.stop_command_sequence!=facts.stop.command_sequence
+                    or not now<facts.stop.valid_until_pi_us or facts.stop.control_generation!=state.source_generation
+                    or facts.stop.producer_role!=1 or facts.stop.source_vm!=UUID(peer[0]).bytes
+                    or facts.stop.source_execution!=UUID(peer[1]).bytes or facts.stop.source_app_instance!=UUID(peer[2]).bytes
+                    or facts.stop.mission_id!=UUID(current['id']).bytes or facts.stop.mission_revision!=current['revision']
+                    or facts.stop.grant_revision!=current['grant_revision']
+                    or facts.stop.plan_revision!=state.path_revision or facts.stop.phase_revision!=state.maneuver_revision
+                    or self.exhausted(now) is not None):return None
+            terminal=deepcopy(current);terminal.update(phase='HOLD',result='PARKED',admitted=False)
+            terminal['cancel_fence']+=1;terminal['grant_revision']+=1
+        return dict(execution=(state.SerializeToString(deterministic=True),received),peer=peer,
+            signature=signature,terminal=terminal)
+
+    def commit_execution(self,prepared):
+        self.execution=prepared['execution'];self.execution_hwm={prepared['peer']:prepared['signature']}
+        if prepared['terminal'] is not None:
+            self.terminal_pending=prepared['terminal'];self.runner.operator._stop('PARKED')
+
+    def observe_execution(self,state,received):
+        prepared=self.prepare_execution(state,received)
+        if prepared is None:return False
+        self.commit_execution(prepared)
         return True
+
+    def motion_allowed(self,command):
+        current=self.current()
+        if current is None or current['kind']!=2:return True
+        if self.execution is None:return False
+        state=decode(self.execution[0],schema.DriveState)
+        if (not self.runner.drive_link._state_mission_matches(state,self.grant())
+                or int(command['plan_revision'])!=state.path_revision
+                or int(command['phase_revision'])!=state.maneuver_revision):return False
+        if not command['v_mps']:return True
+        used=self.used_distance(current)
+        if used is None:return False
+        if not current['execution_deadline']:return state.mission.phase==1 and used<10
+        return state.mission.phase in (4,6) and used<5
+
+    def output_deadline(self):
+        current=self.current()
+        if current is not None and current['kind']==3:return current['deadline']
+        if current is None or current['kind']!=2:return None
+        return min(current['deadline'],current['execution_deadline'] or current['search_deadline'])
 
     def exhausted(self,now):
         current=self.current()
@@ -173,8 +443,9 @@ class MissionAuthority:
         if now>=current['deadline']:return 'MISSION_DEADLINE'
         if current['execution_deadline']:
             if now>=current['execution_deadline']:return 'EXECUTION_DEADLINE'
-            if current['execution_distance']+self.distance>=5:return 'EXECUTION_TRAVEL'
-        elif now>=current['search_deadline'] or current['search_distance']+self.distance>=10:return 'SEARCH_BUDGET'
+            used=self.used_distance(current)
+            if used is not None and used>=5:return 'EXECUTION_TRAVEL'
+        elif now>=current['search_deadline'] or self.used_distance(current) is not None and self.used_distance(current)>=10:return 'SEARCH_BUDGET'
         if self.stop_reason is not None:return self.stop_reason
         return None
 
@@ -185,10 +456,11 @@ def validate_record(value):
         'execution_deadline','corrections','execution_distance','search_distance','cancel_fence','phase','result','admitted',
         'scene_id','scene_revision','configuration','calibration','primitive','vehicle','reservations','goal','owner',
         'execution','app','generation'}
-    if type(value) is not dict or set(value)!=fields:raise ValueError('exact current Mission record')
+    optional={'search_meter','execution_meter','operation_binding','route_binding'}
+    if type(value) is not dict or not fields<=set(value)<=fields|optional:raise ValueError('exact current Mission record')
     for key in ('id','nonce','owner','execution','app'):UUID(value[key])
     if value['scene_id'] is not None:UUID(value['scene_id'])
-    if (value['kind'] not in (1,2) or type(value['admitted']) is not bool
+    if (value['kind'] not in (1,2,3) or type(value['admitted']) is not bool
             or value['phase'] not in ('HOLD','FOLLOW','SEARCH','EXECUTE','FINAL_VERIFY')
             or type(value['reservations']) is not list or len(value['reservations'])>3):raise ValueError('Mission state')
     for key in ('revision','grant_revision','issued','deadline','search_deadline','execution_deadline','corrections',
@@ -198,7 +470,31 @@ def validate_record(value):
     for key in ('execution_distance','search_distance'):
         if type(value[key]) not in (int,float) or not math.isfinite(value[key]) or value[key]<0:raise ValueError('Mission absolute travel')
     for row in value['reservations']:
-        if set(row)!={'nonce','sha'} or len(bytes.fromhex(row['nonce']))!=16 or len(bytes.fromhex(row['sha']))!=32:
+        if not {'nonce','sha'}<=set(row)<={'nonce','sha','reply'} or len(bytes.fromhex(row['nonce']))!=16 or len(bytes.fromhex(row['sha']))!=32:
             raise ValueError('Mission reservation result')
+        if 'reply' in row:
+            raw=base64.b64decode(row['reply'],validate=True)
+            if not 0<len(raw)<=1536:raise ValueError('bounded original reservation reply')
+            reply=decode(raw,schema.MissionBudgetReply)
+            if reply.request_nonce.hex()!=row['nonce'] or reply.request_sha256.hex()!=row['sha']:
+                raise ValueError('original reservation reply mismatch')
+    if 'operation_binding' in value:
+        from .operation_owner import binding_message
+        encode(binding_message(value['operation_binding']))
+    if ('route_binding' in value)!=(value['kind']==3):raise ValueError('kind3 route binding record')
+    if 'route_binding' in value:
+        raw=base64.b64decode(value['route_binding'],validate=True)
+        if not 0<len(raw)<=512 or 'operation_binding' not in value or value['strategy']!=0 or value['deadline']<=value['issued']:
+            raise ValueError('bounded route binding and original deadline')
+        decode(raw,schema.RouteBinding)
+    for name in ('search_meter','execution_meter'):
+        anchor=value.get(name)
+        if anchor is not None:
+            if set(anchor)!={'epoch','total_ticks','metres_per_tick','gap_revision','vehicle_sequence'}:
+                raise ValueError('exact mission meter anchor')
+            UUID(anchor['epoch'])
+            if (any(type(anchor[key]) is not int or not 0<=anchor[key]<2**63 for key in
+                    ('total_ticks','gap_revision','vehicle_sequence')) or not math.isfinite(anchor['metres_per_tick'])
+                    or anchor['metres_per_tick']<=0):raise ValueError('mission meter anchor')
     if value['goal'] is not None and len(bytes.fromhex(value['goal']))!=32:raise ValueError('Mission locked goal hash')
     if len(bytes.fromhex(value['primitive']))!=32:raise ValueError('Mission primitive hash')

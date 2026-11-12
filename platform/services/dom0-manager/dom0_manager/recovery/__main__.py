@@ -61,7 +61,8 @@ def main() -> int:
         from .rejoin import production
         rejoin=production(os.environ['XENOVA_RECOVERY_DRIVE_CONFIG'],manager.data)
     observer = PlatformObserver(manager, _xl(platform_settings), intent_refresh_s=settings.intent_refresh_s,
-        drive_bindings=rejoin.cache if rejoin else None,drive_vm_ids=rejoin.vm_ids if rejoin else ())
+        drive_bindings=rejoin.cache if rejoin else None,drive_vm_ids=rejoin.vm_ids if rejoin else (),
+        intent_action="recovery-intents")
     heartbeats, app_heartbeats = HeartbeatTable(), AppHeartbeatTable()
     client = build_client(settings)
     subscribe_liveness(client, heartbeats, app_heartbeats,rejoin=rejoin)

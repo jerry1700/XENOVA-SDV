@@ -35,6 +35,11 @@ class CreationReconcileTest(FollowupFixture):
 
     def setUp(self):
         super().setUp()
+        # 이 묶음은 명시 수습의 실패 경계를 고정한다. 기본 자동 후속과의 경합은 별도 제품 시험에서 확인한다.
+        if getattr(self,'manual_only',True):
+            import xenova_creation_auto
+            automatic=patch.object(xenova_creation_auto,'start',return_value=None)
+            automatic.start();self.addCleanup(automatic.stop)
         command=self.p.command
         def external(args,**kwargs):
             if args[0]=='losetup':return json.dumps({'loopdevices':[]})

@@ -289,6 +289,9 @@ class KeyState:
         self.early_keys = set()
         self.arm_waiting = False
         self.waiting_stop = False
+        self.auto_enabled = self.observer = False
+        self.auto_context = self.auto_edge = None
+        self.auto_neutral_samples = 0
 
     @property
     def mask(self):
@@ -304,6 +307,8 @@ class KeyState:
         self.blocked = True
         self.waiting_stop = True
         self.arm_event = None
+        self.auto_edge = None
+        self.auto_neutral_samples = 0
         self.neutral_samples = 0
         if mask & (REARM | DETACH | GLOBAL_STOP):
             self.require_rearm = True
@@ -317,6 +322,8 @@ class KeyState:
         self.require_rearm = self.blocked = True
         self.neutral_samples = 0
         self.arm_event = None
+        self.auto_edge = None
+        self.auto_neutral_samples = 0
 
     def process(self, event, observed_us):
         if (event.time_us > observed_us or observed_us-event.time_us > BACKLOG_US
@@ -356,6 +363,7 @@ class KeyState:
         mask = self.mask
         if mask & ~ENTER:
             self.neutral_samples = 0
+            self.auto_neutral_samples = 0
         if not down and KEY_BITS[event.code] & (W | S) and not was_early:
             self.fence(RELEASE, 'OK')
         if mask & MODIFIER:
@@ -373,7 +381,18 @@ class KeyState:
         if (down and KEY_BITS[event.code] == ENTER and not before & ~ENTER
                 and not mask & ~ENTER and self.neutral_samples >= 2 and not self.fence_mask
                 and not self.waiting_stop):
-            self.arm_event = self.key_event
+            if self.auto_enabled and (self.observer or self.armed):
+                # Freeze the readiness statement at the actual down edge. A
+                # later READY or key repeat cannot reuse this original event.
+                ready=self.auto_context
+                context=ready is not None and (ready['vehicle_phase']=='WAIT' or ready['mode']=='MANUAL'
+                    and ready['desired_mode']!='AUTO' and ready['manual_attach_available'])
+                current=context and self.auto_neutral_samples>=2 and ready['auto_ready'] and event.time_us<int(ready['valid_until_pi_us'])
+                self.auto_edge = (self.key_event, dict(ready) if current else None)
+                self.auto_neutral_samples=0
+                self.arm_event = None
+            else:
+                self.arm_event = self.key_event
 
     def snapshot(self, t1, t2):
         if (not 0 <= t1 <= t2 <= MAX_COUNTER or t2-t1 > WORK_US or t1 > MAX_COUNTER-LEASE_US):
@@ -384,6 +403,8 @@ class KeyState:
         return Frame(self.sample, self.key_event, t1, t2, self.mask, self.last_event)
 
     def frame_accepted(self, frame):
+        if not self.waiting_stop and frame.mask==0 and self.mask==0:
+            self.auto_neutral_samples=min(2,self.auto_neutral_samples+1)
         if not self.waiting_stop and not frame.mask & ~ENTER and not self.mask & ~ENTER:
             self.neutral_samples = min(2, self.neutral_samples+1)
 
@@ -413,7 +434,7 @@ class Pending:
 
 class KeyboardSession:
     """K 한 채널의 ordinary1/latest1/fence1. retry는 원 bytes/E만 재사용한다."""
-    def __init__(self, profile, view, clock=now_us):
+    def __init__(self, profile, view, clock=now_us, *, auto_enter=False):
         self.profile, self.clock = profile, clock
         self.view = {name: view[name] for name in ('host_boot_id', 'gateway_instance_id', 'generation', 'owner')}
         self.source, self.channel = str(uuid4()), str(uuid4())
@@ -430,9 +451,18 @@ class KeyboardSession:
         self.closing = self.done = False
         self.closing_until = None
         self.result = 'OK'
+        self.auto_enabled = auto_enter
+        self.observer = False
+        self.auto_trigger = self.auto_result = self.auto_notice = None
+        self.auto_progress = False
+        self.manual_attach = None
+        self.state.auto_enabled = auto_enter
+        self.initial_mode = view.get('mode','MANUAL')
         self.start_until = self.clock()+CONTROL_US
-        self._ordinary('HELLO', dict(device_profile=profile.alias,
-            device_identity_sha256=profile.device_identity_sha256, kernel_abi_sha256=profile.kernel_abi_sha256))
+        hello = dict(device_profile=profile.alias,
+            device_identity_sha256=profile.device_identity_sha256, kernel_abi_sha256=profile.kernel_abi_sha256)
+        if auto_enter:hello.update(device_instance=self.device,link_epoch=self.link)
+        self._ordinary('HELLO_AUTO' if auto_enter else 'HELLO',hello)
 
     def _packet(self, kind, payload, issued=None, expires=None, frame=None):
         issued = self.clock() if issued is None else issued
@@ -442,7 +472,7 @@ class KeyboardSession:
             raise KeyboardError('INPUT_EXPIRED')
         self.sequence = _increment(self.sequence)
         request = str(uuid4())
-        body = dict(version=1, kind=kind, host_boot_id=self.view['host_boot_id'],
+        body = dict(version=2 if kind in contract.AUTO_KINDS else 1, kind=kind, host_boot_id=self.view['host_boot_id'],
                     gateway_instance_id=self.view['gateway_instance_id'], source_instance=self.source,
                     channel_epoch=self.channel, sequence=str(self.sequence), request_id=request,
                     issued_pi_us=str(issued), expires_pi_us=str(expires), payload=payload)
@@ -473,7 +503,7 @@ class KeyboardSession:
 
     def offer(self, frame):
         # A frame describes actual raw keys, never a synthetic all-up bitmap.
-        if self.binding is not None and not self.closing:
+        if (self.binding is not None or self.observer) and not self.closing:
             self.latest = frame
 
     def _collect_fence(self):
@@ -483,6 +513,11 @@ class KeyboardSession:
         self.state.fence_mask, self.state.fence_reason = 0, 'OK'
         self.latest = None
         if self.binding is None:
+            if self.observer and mask & REARM:
+                # There is no MANUAL tuple to fence. Close the observer so a
+                # previously staged AUTO_ENTER cannot outlive input loss.
+                self.closing=True
+                self.closing_until=self.closing_until or self.clock()+CONTROL_US
             if mask & (DETACH | GLOBAL_STOP):
                 self.close_intent(reason, bool(mask & GLOBAL_STOP))
             else:
@@ -517,11 +552,21 @@ class KeyboardSession:
 
     def outgoing(self, now):
         self._collect_fence()
+        if self.manual_attach is not None and self.ordinary is None and not self.closing:
+            generation,owner=self.manual_attach
+            self.manual_attach=None;self.observer=self.state.observer=False
+            self.start_until=now+CONTROL_US
+            self.state.armed=False;self.state.blocked=self.state.require_rearm=True
+            self.state.arm_event=self.state.auto_edge=None;self.state.neutral_samples=0
+            self.state.auto_neutral_samples=0
+            self.state.early_keys|=self.state.pressed&{17,31}
+            self._ordinary('ATTACH',dict(expected_generation=generation,expected_owner=owner,
+                device_instance=self.device,link_epoch=self.link))
         if self.closing_until is not None and now >= self.closing_until:
             self.done = True
             self.result = 'UNCONFIRMED'
             return None
-        if self.binding is None and now >= self.start_until:
+        if self.binding is None and not self.observer and now >= self.start_until:
             self.done = True
             self.result = 'UNCONFIRMED'
             return None
@@ -540,23 +585,27 @@ class KeyboardSession:
         if self.closing:
             if self.binding is None:
                 self.done = True
+                if self.observer:return None
             elif self.ordinary is None and self.acknowledged is not None:
                 self._ordinary('DETACH', dict(driver_session=self.binding[0], input_epoch=self.binding[1],
                     final_fence_revision=str(self.fence_revision), reason='DETACHED'))
-        elif self.binding is not None and self.ordinary is None and self.latest is not None:
+        elif (self.binding is not None or self.observer) and self.ordinary is None and self.latest is not None:
             frame, self.latest = self.latest, None
             if not 0 <= frame.t1 <= frame.t2 <= now or frame.t2-frame.t1 > WORK_US:
                 raise KeyboardError('PROTOCOL_ERROR')
             if frame.t1+LEASE_US <= now:
                 self.close_intent('INPUT_EXPIRED')
                 return self.outgoing(now)
-            if self.state.early_keys and frame.mask & (W | S):
+            if not self.observer and self.state.early_keys and frame.mask & (W | S):
                 return None
-            payload = dict(**self._bound(), device_instance=self.device, link_epoch=self.link,
+            payload = dict(**({} if self.observer else self._bound()), device_instance=self.device, link_epoch=self.link,
                 source_sample_seq=str(frame.sample), key_event_seq=str(frame.key_event),
                 t1_pi_us=str(frame.t1), t2_pi_us=str(frame.t2), key_mask=frame.mask,
                 last_event_pi_us=None if frame.last_event is None else str(frame.last_event))
-            self._ordinary('FRAME', payload, issued=frame.t1, expires=frame.t1+LEASE_US, frame=frame)
+            if self.observer:
+                payload={name:payload[name] for name in contract.AUTO_FRAME}
+            self._ordinary('OBSERVE' if self.observer else 'FRAME', payload,
+                issued=frame.t1, expires=frame.t1+LEASE_US, frame=frame)
         if self.ordinary is not None and now < self.ordinary.expires:
             return self.ordinary if not self.sent_ordinary or now-self.sent_ordinary >= PERIOD_US else None
         return None
@@ -583,6 +632,87 @@ class KeyboardSession:
                 return True
         return False
 
+    def _observer(self):
+        """현재 중앙 AUTO 전환의 관측자로 남는다. 추진 SID를 새로 만들지 않는다."""
+        self.observer = self.state.observer = True
+        self.binding = None
+        self.state.armed = False
+
+    def _auto_after_frame(self, frame, now):
+        edge, self.state.auto_edge = self.state.auto_edge, None
+        if not self.auto_enabled or edge is None:return
+        event, context = edge
+        if (context is None or self.auto_trigger is not None or event != frame.key_event or frame.mask != ENTER
+                or self.state.mask not in (0, ENTER) or self.fence is not None or self.wait_stop
+                or self.pending_mask or self.state.fence_mask or frame.last_event is None
+                or not 0 <= now-frame.last_event <= BACKLOG_US or now >= frame.t1+LEASE_US):
+            self.auto_notice = 'AUTO_NOT_READY: 원 Enter를 소비했습니다. 준비 후 다시 누르세요.'
+            return
+        issued = frame.last_event//1000
+        payload = dict(device_instance=self.device,link_epoch=self.link,source_sample_seq=str(frame.sample),
+            key_event_seq=str(frame.key_event),t1_pi_us=str(frame.t1),t2_pi_us=str(frame.t2),key_mask=frame.mask,
+            last_event_pi_us=str(frame.last_event),enter_event_seq=str(frame.key_event),
+            operation_revision=context['operation_revision'],permission_revision=context['permission_revision'],
+            ready_revision=context['ready_revision'],generation=context['generation'],expected_owner=context['owner'],
+            operator_request_id=f'g1:{self.view["host_boot_id"]}:{issued}:{uuid4()}')
+        self._ordinary('AUTO_ENTER',payload,issued=frame.t1,expires=frame.t1+LEASE_US,frame=frame)
+        self.auto_trigger = self.ordinary
+        self.auto_progress = False
+
+    def _auto_receive(self, value, now):
+        kind=value['kind'];p=value['payload'];ordinary=self.ordinary
+        if not self.auto_enabled:raise KeyboardError('UNSUPPORTED_PROFILE')
+        if kind=='AUTO_READY':
+            if (p['device_instance'],p['link_epoch'])!=(self.device,self.link) or not p['supported']:
+                raise KeyboardError('SOURCE_MISMATCH')
+            prior=self.state.auto_context
+            self.state.auto_context=dict(p)
+            if prior is None or any(prior[k]!=p[k] for k in
+                    ('auto_ready','blocked_reason','vehicle_phase','ready_revision','parking_enabled','permission_revision')):
+                manual=p['manual_attach_available'] and not self.state.armed and not self.observer
+                departing=p['desired_mode']=='AUTO' and p['vehicle_phase'] in ('COUNTDOWN','APPLYING','ACTIVE')
+                self.auto_notice=('MANUAL_ARM: 모든 조작 키를 놓고 Enter를 새로 누르세요.' if manual else
+                    'AUTO_'+p['vehicle_phase'] if departing else
+                    'AUTO_READY: Enter를 새로 누르면 AUTO 출발을 요청합니다.' if p['auto_ready']
+                    else 'AUTO_'+p['vehicle_phase']+': '+str(p['blocked_reason'] or 'NOT_READY'))
+            original=self.auto_trigger
+            if (original is not None and p['active_request_id']==json_decode(original.raw)['payload']['operator_request_id']
+                    and p['desired_mode']=='AUTO' and p['vehicle_phase'] in ('COUNTDOWN','APPLYING','ACTIVE')):
+                self.auto_progress=True
+                self._observer()
+            elif self.auto_progress and p['vehicle_phase']=='WAIT':
+                self.auto_trigger=None;self.auto_progress=False
+            if self.observer and p['manual_attach_available']:
+                self.manual_attach=(p['generation'],p['owner'])
+            elif not p['manual_attach_available']:
+                self.manual_attach=None
+            if p['reply_to_kind'] is None:return
+            if (ordinary is None or p['reply_to_kind']!=ordinary.kind or p['reply_to_sequence']!=str(ordinary.sequence)
+                    or value['request_id']!=ordinary.request):raise KeyboardError('PROTOCOL_ERROR')
+            self.ordinary=None;self.sent_ordinary=0
+            if ordinary.kind=='HELLO_AUTO':
+                if p['manual_attach_available']:
+                    self.start_until=now+CONTROL_US
+                    self._ordinary('ATTACH',dict(expected_generation=p['generation'],expected_owner=p['owner'],
+                        device_instance=self.device,link_epoch=self.link))
+                else:self._observer()
+            elif ordinary.kind=='OBSERVE':
+                self.state.frame_accepted(ordinary.frame)
+                self._auto_after_frame(ordinary.frame,now)
+            else:raise KeyboardError('PROTOCOL_ERROR')
+        else:
+            from .keyboard_auto import trigger_sha256
+            original=self.auto_trigger
+            if original is None:return  # A retired result never creates a new request.
+            packet=json_decode(original.raw)
+            if (p['operator_request_id']!=packet['payload']['operator_request_id']
+                    or p['trigger_sha256']!=trigger_sha256(packet) or p['reply_to_sequence']!=str(original.sequence)
+                    or value['request_id']!=original.request):raise KeyboardError('SOURCE_MISMATCH')
+            if ordinary is original:self.ordinary=None;self.sent_ordinary=0
+            self.auto_result=dict(p)
+            self.auto_notice='AUTO_'+p['phase']+': '+str(p['result'])
+            if p['terminal']:self.auto_trigger=None
+
     def receive(self, raw, now):
         value = contract.decode(raw)
         if (value['host_boot_id'] != self.view['host_boot_id']
@@ -599,6 +729,9 @@ class KeyboardSession:
             raise KeyboardError('PROTOCOL_ERROR')
         self.received_sequence, self.last_reply = sequence, (sequence, raw)
         payload, kind = value['payload'], value['kind']
+        if kind in ('AUTO_READY','AUTO_RESULT'):
+            self._auto_receive(value,now)
+            return
         if kind in ('FENCE_ACK', 'STOP_READY'):
             original = self.fence if kind == 'FENCE_ACK' else self.acknowledged
             if original is None:
@@ -657,9 +790,12 @@ class KeyboardSession:
         self.sent_ordinary = 0
         if not payload['accepted']:
             self.state.arm_waiting = False
-            if ordinary.kind in ('HELLO', 'ATTACH'):
+            if ordinary.kind in ('HELLO', 'HELLO_AUTO', 'ATTACH'):
                 self.result = payload['reason']
                 self.done = True
+                return
+            if self.auto_enabled and ordinary.kind=='FRAME' and payload['reason']=='AUTO_DEPARTING':
+                self._observer()
                 return
             if payload['reason'] in ('STALE_SAMPLE', 'INPUT_EXPIRED', 'STOP_REQUIRED') and self._covered_by_fence(ordinary):
                 return  # This exact response retires only the fenced old request.
@@ -673,6 +809,8 @@ class KeyboardSession:
                 device_instance=self.device, link_epoch=self.link))
         elif ordinary.kind == 'DETACH':
             self.done = True
+        elif self.auto_enabled and self.observer and ordinary.kind=='FRAME':
+            return  # Exact old FRAME reply retires credit, never becomes an observer grant.
         elif self.binding is None or payload['driver_session'] != self.binding[0]:
             raise KeyboardError('SOURCE_MISMATCH')
         elif ordinary.kind == 'ARM':
@@ -683,6 +821,7 @@ class KeyboardSession:
             self.binding = (payload['driver_session'], payload['input_epoch'], int(payload['grant_revision']), payload['generation'])
             if self.fence is None and not self.wait_stop and not self.pending_mask:
                 self.state.arm_accepted()
+                if self.auto_enabled:self.auto_notice='MANUAL_ARMED: WASD 조종 가능. AUTO 준비 뒤 새 Enter는 AUTO 요청입니다.'
             self.latest = None
         elif ordinary.kind == 'FRAME':
             if payload['accepted_state_seq'] is None or not int(payload['accepted_state_seq']):
@@ -700,6 +839,8 @@ class KeyboardSession:
                     arm_event_seq=str(frame.key_event)), issued=frame.t1, expires=frame.t1+LEASE_US)
                 self.state.arm_waiting = True
                 self.latest = None
+            elif frame is not None:
+                self._auto_after_frame(frame,now)
 
 
 class OperatorStop:
@@ -817,13 +958,16 @@ def drain_device(device, state, clock=now_us):
     return state.snapshot(t1, t2), changed
 
 
-def run_keyboard(profile, view, *, endpoint=contract.ENDPOINT, operator_endpoint='/run/xenova-gateway/operator.sock', uid=0):
+def run_keyboard(profile, view, *, endpoint=contract.ENDPOINT, operator_endpoint='/run/xenova-gateway/operator.sock', uid=0,
+                 auto_enter=False):
     """실제 foreground K. 성공 종료도 물리 정지 수락이나 RF 실측을 뜻하지 않는다."""
     if not profile.continuous_allowed:
         raise KeyboardError(profile.reason)
     host = Path('/proc/sys/kernel/random/boot_id').read_text(encoding='ascii').strip()
-    if (view['host_boot_id'] != host or view['mode'] != 'MANUAL' or view['owner'] is None
-            or type(view['generation']) is not int or not 1 <= view['generation'] <= 0xffffffff):
+    mode_ok=(view['mode'] in ('SAFE_STOP','MANUAL','AUTO_READY','AUTO') if auto_enter
+        else view['mode']=='MANUAL' and view['owner'] is not None)
+    if (view['host_boot_id'] != host or not mode_ok or type(view['generation']) is not int
+            or not (0 if auto_enter else 1) <= view['generation'] <= 0xffffffff):
         raise KeyboardError('WRONG_MODE')
     trusted_endpoint(endpoint, uid)
     try:
@@ -842,7 +986,7 @@ def run_keyboard(profile, view, *, endpoint=contract.ENDPOINT, operator_endpoint
     detached_on_wire = False
     try:
         selector = selectors.DefaultSelector()
-        session = KeyboardSession(profile, view)
+        session = KeyboardSession(profile, view,auto_enter=auto_enter)
         session.state.resync(device.keys())
         next_sample = now_us()
         stream = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -901,6 +1045,9 @@ def run_keyboard(profile, view, *, endpoint=contract.ENDPOINT, operator_endpoint
                         session.receive(raw, now_us())
                 except BlockingIOError:
                     pass
+                if session.auto_notice is not None:
+                    print(session.auto_notice,flush=True)
+                    session.auto_notice=None
                 outgoing = session.outgoing(now_us())
                 if outgoing is not None and not session.done:
                     try:
@@ -969,6 +1116,7 @@ def main(argv=None):
     parser.add_argument('--profile-directory', type=Path, default=Path('/etc/xenova/keyboards'))
     parser.add_argument('--operator-socket', default='/run/xenova-gateway/operator.sock')
     parser.add_argument('--keyboard-socket', default=contract.ENDPOINT)
+    parser.add_argument('--auto-enter',action='store_true',help='승인된 새 profile에서 AUTO 준비 안내/새 Enter 출발을 사용합니다.')
     args = parser.parse_args(argv)
     if re.fullmatch('[a-z0-9][a-z0-9_-]{0,63}', args.device) is None:
         parser.error('등록된 device alias가 필요합니다.')
@@ -980,7 +1128,8 @@ def main(argv=None):
         result = OperatorClient(args.operator_socket, wait_ms=1000).call(dict(version=2, action='status'))
         if result.get('version') != 2 or result.get('ok') is not True:
             raise KeyboardError('WRONG_MODE')
-        return run_keyboard(profile, result['data'], endpoint=args.keyboard_socket, operator_endpoint=args.operator_socket)
+        return run_keyboard(profile, result['data'], endpoint=args.keyboard_socket, operator_endpoint=args.operator_socket,
+            auto_enter=args.auto_enter)
     except (OSError, ValueError, KeyboardError, RuntimeError) as error:
         print(error, file=sys.stderr)
         return 2

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { APP_MEMORY_REGIONS, buildAppMemorySeries } from '../domain/appMemory';
 import { buildMemoryPoolSeries } from '../domain/memoryPools';
 import {
   BACKEND_UNSUPPORTED,
@@ -7,9 +8,15 @@ import {
   interfaceFlagOf,
   ZEPHYR_CARRIER_METRIC,
 } from '../domain/networkMetrics';
-import { buildZephyrHeapSeries } from '../domain/vmMetrics';
+import { buildZephyrHeapSeries, cpuPercentOf } from '../domain/vmMetrics';
 import { VM_IDS } from './data';
-import { mockKernelHeapSamples, mockMemoryPoolSamples, mockZephyrNetworkSamples } from './memoryMetrics';
+import {
+  mockAppMemorySamples,
+  mockKernelHeapSamples,
+  mockMemoryPoolSamples,
+  mockZephyrCpuSamples,
+  mockZephyrNetworkSamples,
+} from './memoryMetrics';
 
 describe('Zephyr network mock samples', () => {
   it('counter_value 바이트 속도와 rx_bytes_per_s 를 제공하고, interface 상태는 지금 백엔드처럼 미지원으로 보인다', () => {
@@ -34,7 +41,9 @@ describe('Kernel heap mock samples', () => {
     const series = buildZephyrHeapSeries(samples);
 
     expect(series.points).toHaveLength(30);
-    expect(Date.parse(series.points[0]!.observedAt)).toBe(now - 290_000);
+    // 가장 최근 관측은 조회 시각보다 2초 전 (화면 시계보다 미래로 판정되지 않게)
+    expect(Date.parse(series.points[0]!.observedAt)).toBe(now - 2_000 - 290_000);
+    expect(Date.parse(series.points.at(-1)!.observedAt)).toBe(now - 2_000);
     expect(series.current?.totalBasis).toBe('accounted');
     expect(series.current?.highWaterBytes).toBeGreaterThanOrEqual(series.current!.usedBytes);
     // heap 표본은 Pool 계산에 섞이지 않는다
@@ -55,5 +64,56 @@ describe('Memory Pool mock samples', () => {
 
     expect(series.rx.usagePercent).toBeLessThan(10);
     expect(series.tx.usagePercent).toBeLessThan(10);
+  });
+});
+
+describe('App memory mock samples', () => {
+  it('passes the app memory validation for all eight regions with varied usage and one abnormal input', () => {
+    const now = 1_000_000_000;
+    const series = (vmId: string) =>
+      buildAppMemorySeries(
+        [
+          ...mockKernelHeapSamples(vmId, now),
+          ...mockMemoryPoolSamples(vmId, now),
+          ...mockAppMemorySamples(vmId, now),
+        ],
+        vmId,
+        now,
+      );
+    for (const vmId of [VM_IDS.autonomous, VM_IDS.manual]) {
+      const regions = series(vmId);
+      for (const { id } of APP_MEMORY_REGIONS) {
+        expect(regions[id].current.state, `${vmId} ${id}`).toBe('ok');
+        expect(regions[id].current.stale).toBe(false);
+      }
+    }
+    const a = series(VM_IDS.autonomous);
+    // 지도 풀 87.5% (주의 색), 경로 풀 공간 부족 1회
+    expect(a.drive_maps.current.usagePercent).toBe(87.5);
+    expect(a.drive_paths.current.capacity_failure_total).toBe(1n);
+    expect(a.manual_input.current.buffer?.input_status).toBe('accepted');
+    // VM B 조작 입력은 만료 상태 (이상 입력 신호)
+    const b = series(VM_IDS.manual);
+    expect(b.manual_input.current.buffer?.phase).toBe('stored');
+    expect(b.manual_input.current.buffer?.input_status).toBe('expired');
+    expect(b.manual_pending.current.buffer?.phase).toBe('empty');
+    expect(mockAppMemorySamples(VM_IDS.interaction, now)).toEqual([]);
+  });
+});
+
+describe('Zephyr CPU mock samples', () => {
+  it('최근 5분 cpu.system.percent 와 스레드별 cpu.thread.percent 를 제공하고, 메모리 계산에 섞이지 않는다', () => {
+    const now = 1_000_000;
+    const busy = mockZephyrCpuSamples(VM_IDS.autonomous, now);
+    const idle = mockZephyrCpuSamples(VM_IDS.manual, now);
+    expect(busy).toHaveLength(30);
+    expect(Date.parse(busy.at(-1)!.observed_at)).toBe(now - 2_000);
+    const values = busy.map(cpuPercentOf);
+    expect(values.every((value) => value != null && value >= 0 && value <= 100)).toBe(true);
+    expect(cpuPercentOf(busy.at(-1)!)!).toBeGreaterThan(cpuPercentOf(idle.at(-1)!)!);
+    const threads = busy[0]!.values.filter((value) => value.name === 'cpu.thread.percent');
+    expect(threads.map((value) => value.labels?.thread_name)).toContain('drive_worker');
+    expect(buildZephyrHeapSeries(busy).points).toHaveLength(0);
+    expect(buildMemoryPoolSeries(busy).rx.state).toBe('missing');
   });
 });

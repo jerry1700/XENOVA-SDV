@@ -53,6 +53,8 @@ export function ControlVmDetailPage() {
 
   const operation = vmOperations.operations[vmId];
   const operationPending = operation?.status === 'pending';
+  // Zephyr 템플릿은 1 vCPU · 16 MiB 고정 프로필 (ResourceAdjustmentPanel 의 fixedProfile 과 같은 판단)
+  const zephyr = vm.data?.guest_kind === 'zephyr';
 
   return (
     <div className={styles.controlDetailPage} style={{ '--vm-accent': accent } as CSSProperties}>
@@ -176,8 +178,13 @@ export function ControlVmDetailPage() {
             </div>
           </Card>
 
-          <ResourceAdjustmentPanel key={`tuning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
-          <VcpuPinningPanel key={`pinning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
+          {/* Zephyr는 고정 프로필이라 조정·핀닝 패널을 두지 않는다 (Linux VM만) */}
+          {!zephyr && (
+            <>
+              <ResourceAdjustmentPanel key={`tuning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
+              <VcpuPinningPanel key={`pinning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
+            </>
+          )}
 
           <section className={styles.dangerZone} aria-labelledby="danger-zone-title">
             <div>

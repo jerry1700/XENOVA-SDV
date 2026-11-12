@@ -1,10 +1,15 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "lattice.h"
+#include "parking.h"
+#include "route_exit.h"
 #include <math.h>
 #include <string.h>
 #include <float.h>
 
 #define PI 3.14159265358979323846f
+/* Initial parking tracker limits from the R45 host simulation. */
+#define LP_PARKING_TRACK_SPEED_MPS 0.16f
+#define LP_PARKING_TRACK_RESPONSE_M 0.10f
 _Static_assert(sizeof(struct lp_node)<=64,"signed gear/cusp labels preserve the design node bound");
 static float clamp(float v,float low,float high) { return fminf(high,fmaxf(low,v)); }
 static enum lp_result guard(const struct lp_budget *b,struct lp_metrics *m) {
@@ -19,10 +24,32 @@ static float distance(dw_pose a,dw_pose b) { return hypotf(a.x-b.x,a.y-b.y); }
 static dw_point boundary(const dw_world *w,unsigned i) {
  return i<w->left_boundary_count?w->left_boundary[i]:w->right_boundary[2*w->left_boundary_count-1-i];
 }
-static bool inside_road(const dw_world *w,float x,float y,struct lp_metrics *m) {
- bool inside=false;unsigned n=2*w->left_boundary_count;
+static void road_vertices(const dw_world *w,float tape,dw_point *out){
+ unsigned side=w->left_boundary_count,n=2*side;
+ for(unsigned i=0;i<n;i++)out[i]=boundary(w,i);
+ if(tape<=0)return;
+ /* Boundaries may be independently sampled. Offset along their own outward
+  * normals and keep the original near/far caps. The lane and grid remain
+  * independent tests for every footprint. */
+ float area=0;
+ for(unsigned i=0;i<n;i++){
+  dw_point a=out[i],b=out[(i+1)%n];
+  area+=(a.x-out[0].x)*(b.y-out[0].y)-(a.y-out[0].y)*(b.x-out[0].x);
+ }
+ if(fabsf(area)<1e-6f)return;
+ for(unsigned first=0;first<n;first+=side){
+  for(unsigned i=first+1;i+1<first+side;i++){
+   dw_point a=boundary(w,i-1),b=boundary(w,i+1);
+   float x=b.x-a.x,y=b.y-a.y,length=hypotf(x,y);
+   if(length>1e-6f){float scale=copysignf(tape,area)/length;
+    out[i].x+=scale*y;out[i].y-=scale*x;}
+  }
+ }
+}
+static bool inside_road(const dw_point *vertices,unsigned n,float x,float y,struct lp_metrics *m) {
+ bool inside=false;
  for(unsigned i=0,j=n-1;i<n;j=i++) {
-  dw_point a=boundary(w,i),b=boundary(w,j);m->road_checks++;
+  dw_point a=vertices[i],b=vertices[j];m->road_checks++;
   if(((a.y>y)!=(b.y>y))&&(x<(b.x-a.x)*(y-a.y)/(b.y-a.y)+a.x))inside=!inside;
  }
  return inside;
@@ -46,8 +73,20 @@ static bool blocked(const dw_world *w,size_t i,const struct lp_config *c) {
  return denied||!(flags&1)||(flags&4)||(!(flags&2)&&(double)age+c->live_age_us/1000>c->cell_age_ms)||w->occupancy.bytes[i]>=70;
 }
 void lp_state_import(struct lp_path *path,const dw_state *state){
+ memset(&path->space,0,sizeof(path->space));
  path->execution=(struct lp_execution){.present=true,.features=state->state_features,.mission=state->mission,
   .segments_count=state->segments_count,.has_direction_gate=state->has_direction_gate,.direction_gate=state->direction_gate};
+ path->has_episode=state->has_episode;if(state->has_episode)path->episode=state->episode;
+ path->has_route=state->has_route;if(state->has_route)path->route=state->route;
+ path->origin.retained=true;strcpy(path->origin.message_id,state->message_id);strcpy(path->origin.vm,state->source_vm);
+ strcpy(path->origin.execution,state->source_execution);strcpy(path->origin.app_instance,state->source_app_instance);
+ path->origin.generation=state->source_generation;path->origin.state_revision=state->state_revision;path->origin.mission=state->mission;
+ if(state->mission.kind==2&&state->mission.selected_slot_polygon_count==4){
+  path->space=(struct lp_space){.parking=state->mission.phase==5||state->mission.phase==6||state->mission.phase==7||
+    (state->mission.phase==0&&state->mission.result==1),
+   .slot_id=state->mission.slot_id,.slot_revision=state->mission.slot_revision};
+  memcpy(path->space.polygon,state->mission.selected_slot_polygon,sizeof(path->space.polygon));
+ }
  memcpy(path->execution.segments,state->segments,state->segments_count*sizeof(state->segments[0]));
  memset(&path->task,0,sizeof(path->task));memset(&path->basis,0,sizeof(path->basis));
  path->initial_tracker_index=state->tracker_index;path->initial_pi_us=0;
@@ -63,10 +102,30 @@ void lp_state_import(struct lp_path *path,const dw_state *state){
  }
 }
 bool lp_state_export(const struct lp_path *path,dw_state *state){
+ /* EXIT preparation is not legacy road Task33/NONE. Its geometry commitment
+  * has a separate API; registered route export is an integration boundary. */
  if(!path||!state||path->task.active!=path->basis.bound)return false;
+ bool route=path->has_route,route_mission=route&&path->execution.present&&path->execution.mission.kind==3;
+ bool exit=route_mission&&path->route.task_space_kind==DW_ROUTE_EXIT_SPACE;
+ if(path->space.exiting&&!exit)return false;
+ if(route){
+  if(dw_route_validate(&path->route,xenova_drive_RouteSnapshot_fields))return false;
+  if(!route_mission&&path->route.state!=3)return false;
+  if(route_mission){
+   const xenova_drive_RouteBinding *binding=&path->execution.mission.route_binding;
+   const xenova_drive_RouteCore *core=&path->route.core;
+   if(!path->execution.mission.has_route_binding||dw_route_mission_validate(&path->execution.mission)||
+      path->execution.mission.phase!=core->phase||memcmp(binding->route_id.bytes,core->route_id.bytes,16)||
+      binding->revision!=core->revision||binding->purpose!=core->purpose||
+      memcmp(binding->core_sha256.bytes,path->route.acceptance.accepted_core_sha256.bytes,32)||
+      memcmp(binding->global_plan_sha256.bytes,core->global_plan_sha256.bytes,32)||
+      memcmp(binding->goal_sha256.bytes,core->goal_sha256.bytes,32))return false;
+  }
+  if(exit&&path->has_episode&&(path->episode.core.state!=1||path->episode.core.phase!=5))return false;
+ }
  state->major=2;state->has_state_features=true;state->state_features=DW_STATE_FEATURES;state->has_mission=true;
- state->has_task_reference=path->task.active;
- if(path->task.active){
+ state->has_task_reference=path->task.active&&!exit;
+ if(state->has_task_reference){
   const struct tr_basis *basis=&path->basis;xenova_drive_TaskReferenceState *out=&state->task_reference;
   if(basis->count<2||basis->count>64||strcmp(basis->id,path->reference)||strcmp(basis->frame,path->frame)||
      strcmp(basis->odom,path->odom)||strcmp(basis->configuration,path->configuration))return false;
@@ -77,7 +136,12 @@ bool lp_state_export(const struct lp_path *path,dw_state *state){
   strcpy(out->mapper_instance,basis->mapper_instance);strcpy(out->clock_epoch,basis->clock_epoch);
   state->state_features|=DW_TASK_REFERENCE;
  }
+ state->has_episode=path->has_episode;
+ if(path->has_episode){state->episode=path->episode;state->state_features|=DW_EPISODE;}
+ state->has_route=route;
+ if(route){state->route=path->route;state->state_features|=DW_ROUTE_STATE;}
  if(path->execution.present){
+  if(path->execution.mission.has_operation_binding)state->state_features|=DW_OPERATION;
   if(path->execution.features!=state->state_features)return false;
   state->mission=path->execution.mission;
   state->segments_count=path->execution.segments_count;
@@ -95,17 +159,75 @@ bool lp_state_export(const struct lp_path *path,dw_state *state){
  }
  return true;
 }
-bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGrant *g){
- const struct lp_execution *e=&path->execution;const xenova_drive_MissionExecution *m=&e->mission;
- uint32_t expected=DW_STATE_FEATURES|(path->task.active?DW_TASK_REFERENCE:0);
- return e->present&&e->features==expected&&g&&g->admitted&&g->kind==1&&m->kind==1&&m->phase==10&&
+static bool route_binding_equal(const xenova_drive_RouteBinding *a,const xenova_drive_RouteBinding *b){
+ return a->revision==b->revision&&a->purpose==b->purpose&&!memcmp(a->route_id.bytes,b->route_id.bytes,16)&&
+  !memcmp(a->core_sha256.bytes,b->core_sha256.bytes,32)&&!memcmp(a->global_plan_sha256.bytes,b->global_plan_sha256.bytes,32)&&
+  !memcmp(a->goal_sha256.bytes,b->goal_sha256.bytes,32);
+}
+bool lp_execution_matches(const xenova_drive_MissionExecution *m,const xenova_drive_MissionGrant *g){
+ bool matches=m&&g&&g->admitted&&g->kind==m->kind&&m->has_operation_binding==g->has_operation_binding&&
+  (!m->has_operation_binding||dw_operation_binding_equal(&m->operation_binding,&g->operation_binding))&&
+  m->has_route_binding==g->has_route_binding&&(!m->has_route_binding||route_binding_equal(&m->route_binding,&g->route_binding))&&
+  ((g->kind==1&&m->phase==10)||(g->kind==3&&m->phase>=1&&m->phase<=6&&m->has_route_binding)||
+   (g->kind==2&&m->phase<=9&&m->mission_deadline_pi_us==g->mission_deadline_pi_us&&
+   m->execution_deadline_pi_us==g->execution_deadline_pi_us&&m->search_deadline_pi_us==g->search_deadline_pi_us&&
+   m->strategy==g->strategy&&m->correction_attempts_used==g->correction_attempts_used&&
+   m->execution_travel_m==g->execution_travel_m&&m->search_travel_m==g->search_travel_m))&&
   m->mission_revision==g->mission_revision&&m->grant_revision==g->grant_revision&&m->cancel_fence_revision==g->cancel_fence_revision&&
-  !memcmp(m->mission_id.bytes,g->mission_id.bytes,16)&&!memcmp(m->scene_admission_id.bytes,g->scene_admission_id.bytes,16)&&
+  !memcmp(m->mission_id.bytes,g->mission_id.bytes,16)&&!memcmp(m->operator_request_nonce.bytes,g->operator_request_nonce.bytes,16)&&
+  !memcmp(m->scene_admission_id.bytes,g->scene_admission_id.bytes,16)&&
   m->scene_admission_revision==g->scene_revision;
+ if(matches&&g->kind==2&&g->has_locked_goal_sha256){uint8_t hash[32];
+  matches=dw_selected_goal_hash(m,hash)&&!memcmp(hash,g->locked_goal_sha256.bytes,32);}
+ return matches;
+}
+bool lp_mission_matches(const struct lp_path *path,const xenova_drive_MissionGrant *g){
+ if(!path)return false;
+ const struct lp_execution *e=&path->execution;
+ bool exit=path->has_route&&e->mission.kind==3&&path->route.task_space_kind==DW_ROUTE_EXIT_SPACE;
+ if(e->mission.kind==3&&(!path->has_route||e->mission.phase!=path->route.core.phase))return false;
+ uint32_t expected=DW_STATE_FEATURES|(path->task.active&&!exit?DW_TASK_REFERENCE:0)|(path->has_episode?DW_EPISODE:0)|
+  (path->has_route?DW_ROUTE_STATE:0)|
+  (e->mission.has_operation_binding?DW_OPERATION:0);
+ return e->present&&e->features==expected&&lp_execution_matches(&e->mission,g);
+}
+bool lp_grant_revalidates(const struct lp_path *p,const xenova_drive_MissionGrant *g){
+ /* Both an owned current path and an exact imported copy are geometry only.
+  * Callers must validate and calculate a new candidate before publication. */
+ if(!p||!g||!g->admitted||!p->execution.present)return false;
+ const xenova_drive_MissionExecution *m=&p->execution.mission;
+ if(m->kind!=g->kind||(g->kind!=1&&g->kind!=2&&g->kind!=3)||m->mission_revision!=g->mission_revision||m->grant_revision>g->grant_revision||
+    m->cancel_fence_revision!=g->cancel_fence_revision||m->scene_admission_revision!=g->scene_revision||
+    memcmp(m->mission_id.bytes,g->mission_id.bytes,16)||memcmp(m->operator_request_nonce.bytes,g->operator_request_nonce.bytes,16)||
+    memcmp(m->scene_admission_id.bytes,g->scene_admission_id.bytes,16)||m->strategy!=g->strategy||
+    m->mission_deadline_pi_us!=g->mission_deadline_pi_us||m->execution_deadline_pi_us!=g->execution_deadline_pi_us||
+    m->search_deadline_pi_us!=g->search_deadline_pi_us||m->correction_attempts_used>g->correction_attempts_used||
+    m->execution_travel_m>g->execution_travel_m||m->search_travel_m>g->search_travel_m)return false;
+ if(g->kind==3&&(!p->has_route||!m->has_route_binding||!g->has_route_binding||!route_binding_equal(&m->route_binding,&g->route_binding)))return false;
+ if(g->kind==2&&g->has_locked_goal_sha256){uint8_t goal[32];
+  if(!dw_selected_goal_hash(m,goal)||memcmp(goal,g->locked_goal_sha256.bytes,32))return false;
+ }
+ return true;
+}
+void lp_bind_current_grant(struct lp_path *p,const xenova_drive_MissionGrant *g){
+ xenova_drive_MissionExecution *m=&p->execution.mission;
+ m->grant_revision=g->grant_revision;m->execution_travel_m=g->execution_travel_m;m->search_travel_m=g->search_travel_m;
+ m->correction_attempts_used=g->correction_attempts_used;
+ m->has_operation_binding=g->has_operation_binding;
+ if(g->has_operation_binding){m->operation_binding=g->operation_binding;p->execution.features|=DW_OPERATION;}
+ else{memset(&m->operation_binding,0,sizeof(m->operation_binding));p->execution.features&=~DW_OPERATION;}
+ m->has_route_binding=g->has_route_binding;if(g->has_route_binding)m->route_binding=g->route_binding;
+ else memset(&m->route_binding,0,sizeof(m->route_binding));
 }
 void lp_index_build(struct lp_collision_index *index,const dw_world *w,const struct lp_config *c) {
  memset(index,0,sizeof(*index));index->world=w;index->sequence=w->sequence;
  index->cell_age_ms=c->cell_age_ms;index->live_age_us=c->live_age_us;
+ index->lane_pair_simple=tr_lane_pair_simple(w);
+ if(w->left_boundary_count>=2&&w->left_boundary_count<=TR_BASIS_POINTS&&
+    w->left_boundary_count==w->right_boundary_count){
+  index->road_allowance=lp_lane_boundary_allowance_m(c);
+  if(index->road_allowance>0)road_vertices(w,index->road_allowance,index->road_with_allowance);
+ }
  for(unsigned y=0;y<w->height;y++)for(unsigned x=0;x<w->width;x++)
   {
    size_t at=(size_t)y*w->width+x;
@@ -114,8 +236,9 @@ void lp_index_build(struct lp_collision_index *index,const dw_world *w,const str
     index->shoulder[y]|=UINT64_C(1)<<x;
   }
 }
-static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,
- struct lp_metrics *m,const struct lp_budget *b,bool obstacle_evidence,bool *outside,const struct tr_intent *task) {
+static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,
+ struct lp_metrics *m,const struct lp_budget *b,bool obstacle_evidence,bool *outside,const struct tr_intent *task,
+ const struct lp_space *space,const struct tr_parking_geometry *parking) {
  if(outside)*outside=false;
  enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;
  if(!dw_pose_finite(pose)||!isfinite(extra)||extra<0)return LP_NUMERIC;
@@ -123,21 +246,36 @@ static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const
  m->footprints++;
  if(!obstacle_evidence&&task&&task->active){struct tr_view view;
   extra+=task->vehicle_pad;
-  if(!isfinite(extra)||!tr_open(w,task,&view)||!tr_contains(&view,pose,extra,c))return LP_COLLISION;
+  if(!isfinite(extra))return LP_COLLISION;
+  bool contained;
+  if(parking)contained=tr_prepared_parking_contains(parking,space->polygon,space->uncertainty,pose,extra,c);
+  else{
+   if(!tr_open_indexed(w,task,b->collision_index,&view))return LP_COLLISION;
+   contained=space&&space->exiting?dre_contains(&view,space,pose,extra,c):
+    space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):tr_contains(&view,pose,extra,c);
+  }
+  if(!contained)return LP_COLLISION;
  }
  float half=(c->front+c->rear)*.5f+c->margin+extra,width=c->half_width+c->margin+extra;
  float cs=cosf(pose.yaw),sn=sinf(pose.yaw),shift=(c->front-c->rear)*.5f;
  float center_x=pose.x+shift*cs,center_y=pose.y+shift*sn;
- if(!obstacle_evidence){
+ if(!obstacle_evidence&&!(space&&space->parking)){
+ dw_point road_buffer[2*TR_BASIS_POINTS];
+ unsigned vertices=2*w->left_boundary_count;
+ float tape=task&&task->active&&!(space&&space->exiting)?lp_lane_boundary_allowance_m(c):0;
+ const struct lp_collision_index *geometry=b->collision_index;
+ const dw_point *road=road_buffer;
+ if(tape>0&&geometry&&geometry->world==w&&geometry->sequence==w->sequence&&geometry->road_allowance==tape)
+  road=geometry->road_with_allowance;
+ else road_vertices(w,tape,road_buffer);
  for(unsigned i=0;i<4;i++) {
   float u=(i&1)?half:-half,v=(i&2)?width:-width;
-  if(!inside_road(w,center_x+cs*u-sn*v,center_y+sn*u+cs*v,m))return LP_COLLISION;
+  if(!inside_road(road,vertices,center_x+cs*u-sn*v,center_y+sn*u+cs*v,m))return LP_COLLISION;
  }
- unsigned vertices=2*w->left_boundary_count;
  for(unsigned k=0;k<vertices;k++) {
   m->road_checks++;
   if(!(k&31)){rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;}
-  if(road_edge_cuts_box(boundary(w,k),boundary(w,(k+1)%vertices),center_x,center_y,cs,sn,half,width))return LP_COLLISION;
+  if(road_edge_cuts_box(road[k],road[(k+1)%vertices],center_x,center_y,cs,sn,half,width))return LP_COLLISION;
  }
  }
  dw_pose local=dw_compose(dw_inverse(w->origin),pose);
@@ -184,13 +322,17 @@ static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const
  return LP_PATH_FOUND;
 }
 
+static enum lp_result footprint(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,
+ struct lp_metrics *m,const struct lp_budget *b,bool obstacle_evidence,bool *outside,const struct tr_intent *task,const struct lp_space *space){
+ return footprint_geometry(w,pose,extra,c,m,b,obstacle_evidence,outside,task,space,NULL);
+}
 enum lp_result lp_footprint(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,
  struct lp_metrics *m,const struct lp_budget *b) {
- return footprint(w,pose,extra,c,m,b,false,NULL,NULL);
+ return footprint(w,pose,extra,c,m,b,false,NULL,NULL,NULL);
 }
 
 static bool reference(const dw_world *w,const struct tr_intent *task,const dw_point **points,unsigned *count){
- if(task&&task->active){struct tr_view view;if(!tr_open(w,task,&view))return false;*points=view.points;*count=view.count;}
+ if(task&&task->active)return tr_centerline(w,task,points,count);
  else{*points=w->reference;*count=w->reference_count;}
  return *count>=2;
 }
@@ -356,11 +498,15 @@ static float heuristic(const struct lp_search *s,dw_pose p) {
   * set deliberately carry no optimality or completeness claim. */
  dw_pose local=dw_compose(dw_inverse(s->world->origin),p);
  int x=(int)floorf(local.x/s->world->resolution_m),y=(int)floorf(local.y/s->world->resolution_m);
- float value=distance(p,s->goal);
+ float value=FLT_MAX,heading=FLT_MAX;
+ for(unsigned k=0;k<s->goals.count;k++){
+  value=fminf(value,distance(p,s->goals.poses[k]));
+  heading=fminf(heading,fabsf(dw_angle(p.yaw-s->goals.poses[k].yaw)));
+ }
  if(!(s->world->required_features&DW_ROAD_PRIORITY)&&x>=0&&y>=0&&x<(int)s->world->width&&y<(int)s->world->height) {
   float obstacle=s->heuristic[y*s->world->width+x];if(obstacle<FLT_MAX)value=fmaxf(value,obstacle);
  }
- return s->config->heuristic_weight*value+s->config->heading_weight*fabsf(dw_angle(p.yaw-s->goal.yaw));
+ return s->config->heuristic_weight*value+s->config->heading_weight*heading;
 }
 static bool heuristic_blocked(const struct lp_search *s,int x,int y) {
  const dw_world *w=s->world;
@@ -391,10 +537,6 @@ static bool heuristic_shoulder(struct lp_search *s,int x,int y) {
 }
 static enum lp_result build_heuristic(struct lp_search *s) {
  const dw_world *w=s->world;unsigned n=w->width*w->height;
- dw_pose local=dw_compose(dw_inverse(w->origin),s->goal);
- if(!dw_pose_finite(local)||local.x<0||local.y<0||local.x>=w->width*w->resolution_m||local.y>=w->height*w->resolution_m)return LP_INPUT;
- int gx=(int)floorf(local.x/w->resolution_m),gy=(int)floorf(local.y/w->resolution_m);
- if(gx<0||gy<0||gx>=(int)w->width||gy>=(int)w->height)return LP_INPUT;
  s->building_heuristic=true;
  for(unsigned k=0;k<n;k++){
   if(!(k&63)){enum lp_result rc=guard(&s->budget,&s->metrics);if(rc!=LP_SEARCHING)return rc;}
@@ -403,7 +545,13 @@ static enum lp_result build_heuristic(struct lp_search *s) {
   s->nodes[k].qx=(int16_t)(k%w->width);s->nodes[k].qy=(int16_t)(k/w->width);
   s->nodes[k].deviated=(w->required_features&DW_ROAD_PRIORITY)&&heuristic_shoulder(s,s->nodes[k].qx,s->nodes[k].qy);
  }
- int goal=gy*(int)w->width+gx;s->nodes[goal].g=s->nodes[goal].f=s->nodes[goal].road_cost=0;push(s,goal);
+ for(unsigned k=0;k<s->goals.count;k++){
+  dw_pose local=dw_compose(dw_inverse(w->origin),s->goals.poses[k]);
+  if(!dw_pose_finite(local)||local.x<0||local.y<0||local.x>=w->width*w->resolution_m||local.y>=w->height*w->resolution_m)return LP_INPUT;
+  int gx=(int)floorf(local.x/w->resolution_m),gy=(int)floorf(local.y/w->resolution_m),goal=gy*(int)w->width+gx;
+  if(s->nodes[goal].heap>=0)continue;
+  s->nodes[goal].g=s->nodes[goal].f=s->nodes[goal].road_cost=0;push(s,goal);
+ }
  while(s->open) {
   enum lp_result rc=guard(&s->budget,&s->metrics);if(rc!=LP_SEARCHING)return rc;
   int at=pop(s);s->nodes[at].closed=1;s->heuristic_expanded++;
@@ -427,10 +575,23 @@ static enum lp_result build_heuristic(struct lp_search *s) {
  s->heuristic_open_high_water=s->metrics.open_high_water;s->metrics.open_high_water=0;
  memset(&s->nodes[0],0,sizeof(s->nodes[0]));return LP_SEARCHING;
 }
-static bool reached(const struct lp_search *s,const struct lp_node *n) {
+static bool space_terminal(const dw_world *w,const struct lp_space *space,const struct tr_intent *task,
+ dw_pose pose,float pad,const struct lp_config *c){
+ if(!space->parking)return true;
+ if(!space->exiting)return dp_goal_contains(space,pose,pad,c);
+ struct tr_view road;
+ return tr_open(w,task,&road)&&tr_contains(&road,pose,pad+space->uncertainty,c);
+}
+static bool reached(struct lp_search *s,const struct lp_node *n) {
+ if(s->signed_search){
+  if(n->gear!=s->goal_gear||fabsf(n->steer)>s->config->max_steer/(LP_STEERS/2))return false;
+  for(unsigned k=0;k<s->goals.count;k++)if(distance(n->pose,s->goals.poses[k])<=s->goals.distance&&
+      fabsf(dw_angle(n->pose.yaw-s->goals.poses[k].yaw))<=s->goals.heading&&
+      space_terminal(s->world,&s->space,&s->task,n->pose,s->config->tracking_guard+s->task.vehicle_pad,s->config)){
+       s->goal=s->goals.poses[k];s->selected_goal=k;return true;}
+  return false;
+ }
  if(fabsf(dw_angle(n->pose.yaw-s->goal.yaw))>s->config->goal_heading)return false;
- if(s->signed_search)return n->gear==s->goal_gear&&distance(n->pose,s->goal)<=s->config->goal_distance&&
-  fabsf(n->steer)<=s->config->max_steer/(LP_STEERS/2);
  if(n->parent<0&&distance(n->pose,s->goal)<=s->config->goal_distance)return true;
  /* Interior controls are spaced by two steering levels. Accept an actually
   * reached pose with the nearest road steering instead of appending a chord. */
@@ -464,7 +625,7 @@ static enum lp_result obstruction(const dw_world *w,const struct tr_intent *task
   for(float at=fmaxf(0,start.arc-arc);at<=end;at+=step) {
    if(samples++>=c->collision_limit)return LP_WORK_BUDGET;
    dw_pose pose={a.x+dx*at/len,a.y+dy*at/len,atan2f(dy,dx)};
-   rc=footprint(w,pose,c->tracking_guard+(task?task->vehicle_pad:0),c,metrics,&budget,true,NULL,NULL);
+   rc=footprint(w,pose,c->tracking_guard+(task?task->vehicle_pad:0),c,metrics,&budget,true,NULL,NULL,NULL);
    if(rc==LP_COLLISION){*blocked_out=true;return LP_PATH_FOUND;}
    if(rc!=LP_PATH_FOUND)return rc;
   }
@@ -486,9 +647,10 @@ static enum lp_result reference_obstruction(struct lp_search *s,struct lp_road_s
 static enum lp_result local_terminal(struct lp_search *s) {
  const struct lp_config *c=s->config;
  float dt=c->primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
- float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
- float padding=.5f*(c->primitive_speed*dt+radius*fabsf(c->primitive_speed/c->wheelbase*tanf(c->max_steer)*dt));
- enum lp_result rc=footprint(s->world,s->goal,c->tracking_guard+padding,c,&s->metrics,&s->budget,false,NULL,&s->task);
+ /* A candidate goal is a pose. Motion edges and path adoption check the
+  * actual swept travel separately. A hypothetical max-steer step here can
+  * reject a stationary goal that has a safe straight approach. */
+ enum lp_result rc=footprint(s->world,s->goal,c->tracking_guard,c,&s->metrics,&s->budget,false,NULL,&s->task,&s->space);
  if(rc!=LP_COLLISION)return rc;
  float clearance=hypotf(c->front+c->margin+c->tracking_guard+.5f*c->primitive_speed*dt,
                        c->half_width+c->margin+c->tracking_guard+.5f*c->primitive_speed*dt);
@@ -503,7 +665,7 @@ static enum lp_result local_terminal(struct lp_search *s) {
   if(distance(previous,candidate)<1e-5f)continue;
   previous=candidate;
   if(distance(s->start,candidate)<=c->goal_distance)break;
-  rc=footprint(s->world,candidate,c->tracking_guard+padding,c,&s->metrics,&s->budget,false,NULL,&s->task);
+  rc=footprint(s->world,candidate,c->tracking_guard,c,&s->metrics,&s->budget,false,NULL,&s->task,&s->space);
   if(rc==LP_PATH_FOUND){s->goal=candidate;return rc;}
   if(rc!=LP_COLLISION)return rc;
  }
@@ -513,7 +675,7 @@ static enum lp_result local_terminal(struct lp_search *s) {
 static enum lp_result start(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
  const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget,int preferred,bool local,
  const struct tr_intent *task,const struct tr_basis *basis,const struct lp_metrics *prefix,
- bool signed_mode,int initial_gear,int final_gear,unsigned max_cusps) {
+ bool signed_mode,int initial_gear,int final_gear,unsigned max_cusps,const struct lp_goal_set *goals,const struct lp_space *space) {
  if(!s||!w||!c||!a||!dw_pose_finite(pose)||!dw_pose_finite(goal)||!isfinite(steer)||
     !c->node_limit||c->node_limit>LP_NODES||!c->expansion_limit||!c->collision_limit||c->steering_levels!=LP_STEERS||
     strcmp(c->id,w->configuration)||strcmp(a->sha256,w->primitive)||strcmp(c->id,a->id)||
@@ -522,18 +684,21 @@ static enum lp_result start(struct lp_search *s,const dw_world *w,dw_pose pose,f
     fabsf(c->steer_rate-a->steer_rate)>1e-6f||fabsf(c->primitive_duration-a->duration)>1e-6f||
     fabsf(c->primitive_speed-a->speed)>1e-6f||fabsf(steer)>c->max_steer)return LP_INPUT;
  memset(s,0,sizeof(*s));s->world=w;s->config=c;s->assets=a;s->budget=budget;s->start=pose;s->goal=goal;
+ s->goals=(struct lp_goal_set){.count=1,.poses={goal},.distance=c->goal_distance,.heading=c->goal_heading,.final_gear=final_gear};
+ if(goals)s->goals=*goals;
+ if(space)s->space=*space;
  s->signed_search=signed_mode;s->initial_gear=initial_gear;s->goal_gear=final_gear;s->max_cusps=max_cusps;
+ if(!budget.collision_index){lp_index_build(&s->collision_index,w,c);s->budget.collision_index=&s->collision_index;}
  if(w->required_features&DW_LANE_MODEL){struct tr_view view;
-  if(!task||!basis||!tr_open(w,task,&view)||!tr_basis_compatible(basis,w))return s->result=LP_INPUT;
+  if(!task||!basis||!tr_open_indexed(w,task,s->budget.collision_index,&view)||!tr_basis_compatible(basis,w))return s->result=LP_INPUT;
   s->task=*task;s->basis=*basis;
  }
  if(prefix)s->metrics=*prefix;
- if(!budget.collision_index){lp_index_build(&s->collision_index,w,c);s->budget.collision_index=&s->collision_index;}
  s->initial_steer=steer;s->preferred_direction=preferred;s->result=LP_SEARCHING;
  for(unsigned k=0;k<LP_INDEX;k++)s->index[k]=-1;
- enum lp_result rc=footprint(w,pose,c->tracking_guard,c,&s->metrics,&s->budget,false,NULL,&s->task);
+ enum lp_result rc=footprint(w,pose,c->tracking_guard,c,&s->metrics,&s->budget,false,NULL,&s->task,&s->space);
  if(rc!=LP_PATH_FOUND){s->result=rc;return rc;}
- if(local){rc=local_terminal(s);if(rc!=LP_PATH_FOUND)return s->result=rc;}
+ if(local){rc=local_terminal(s);if(rc!=LP_PATH_FOUND)return s->result=rc;s->goals.poses[0]=s->goal;}
  if(!signed_mode){
   struct lp_road_state target;rc=lp_task_project(w,&s->task,s->goal,&target);
   if(rc!=LP_PATH_FOUND)return s->result=rc;
@@ -551,22 +716,209 @@ static enum lp_result start(struct lp_search *s,const dw_world *w,dw_pose pose,f
 }
 enum lp_result lp_start(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
  const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget,int preferred) {
- return start(s,w,pose,steer,goal,c,a,budget,preferred,false,NULL,NULL,NULL,false,1,1,0);
+ return start(s,w,pose,steer,goal,c,a,budget,preferred,false,NULL,NULL,NULL,false,1,1,0,NULL,NULL);
 }
 enum lp_result lp_start_local(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
  const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget,int preferred) {
- return start(s,w,pose,steer,goal,c,a,budget,preferred,true,NULL,NULL,NULL,false,1,1,0);
+ return start(s,w,pose,steer,goal,c,a,budget,preferred,true,NULL,NULL,NULL,false,1,1,0,NULL,NULL);
 }
 enum lp_result lp_start_task(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
  const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget,const struct tr_intent *task,
  const struct tr_basis *basis,const struct lp_metrics *prefix){
- return start(s,w,pose,steer,goal,c,a,budget,0,true,task,basis,prefix,false,1,1,0);
+ return start(s,w,pose,steer,goal,c,a,budget,0,true,task,basis,prefix,false,1,1,0,NULL,NULL);
+}
+
+static bool narrow_lane(const dw_world *w,const struct tr_intent *task,const struct lp_config *c,struct tr_view *view){
+ /* Use the arrival lane's width. Footprint still checks the full change corridor. */
+ struct tr_intent selected=*task;
+ selected.changing=false;selected.from_lane_id=selected.selected_lane_id;
+ if(lp_lane_boundary_allowance_m(c)<=0||!task->active||!tr_open(w,&selected,view))return false;
+ float half=FLT_MAX;
+ for(unsigned i=0;i<view->count;i++){
+  dw_point a=view->points[i],b=w->lane_model.divider[i];
+  half=fminf(half,hypotf(a.x-b.x,a.y-b.y));
+ }
+ return half<c->half_width+c->margin+c->tracking_guard+c->resolution;
+}
+
+struct lane_guide {
+ dw_point points[32];
+ float heading[32],length[32];
+ unsigned count;
+};
+
+/* Select the curvature guide when the arrival lane lies outside the observed bend. */
+static bool change_toward_outside(const struct tr_view *view){
+ const dw_point *points=view->points,*divider=view->world->lane_model.divider;
+ bool outside=false;
+ for(unsigned i=1;i+1<view->count;i++){
+  float ax=points[i].x-points[i-1].x,ay=points[i].y-points[i-1].y;
+  float bx=points[i+1].x-points[i].x,by=points[i+1].y-points[i].y;
+  float scale=hypotf(ax,ay)*hypotf(bx,by)*hypotf(ax+bx,ay+by);
+  float turn=2*(ax*by-ay*bx);
+  if(scale<=1e-9f||fabsf(turn)<=.15f*scale)continue;
+  float side=(ax+bx)*(points[i].y-divider[i].y)-(ay+by)*(points[i].x-divider[i].x);
+  if(turn*side>=0)return false;
+  outside=true;
+ }
+ return outside;
+}
+
+static bool make_lane_guide(const struct tr_view *view,const struct lp_config *c,struct lane_guide *g){
+ const dw_point *p=view->points;
+ float arc[32]={0},bend_inset[32]={0};
+ float reach=fmaxf(c->front,c->rear),scale=1.06f*reach*reach*.25f;
+ bool left=false,right=false;
+ for(unsigned i=1;i<view->count;i++)arc[i]=arc[i-1]+hypotf(p[i].x-p[i-1].x,p[i].y-p[i-1].y);
+ for(unsigned i=1;i+1<view->count;i++){
+  float ax=p[i].x-p[i-1].x,ay=p[i].y-p[i-1].y,bx=p[i+1].x-p[i].x,by=p[i+1].y-p[i].y;
+  float lengths=hypotf(ax,ay)*hypotf(bx,by)*hypotf(ax+bx,ay+by);
+  if(lengths<=1e-9f)return false;
+  float curvature=2*(ax*by-ay*bx)/lengths;
+  left|=curvature>.15f;right|=curvature<-.15f;
+  /* Balance the inside flank with the outside bumper corner at this station. */
+  bend_inset[i]=scale*curvature/(1+c->half_width*fabsf(curvature));
+ }
+ if(left&&right)return false;
+ float primitive_length=c->primitive_speed*c->primitive_duration;
+ float approach=c->front+primitive_length,departure=c->rear+2*primitive_length;
+ float blend=c->lookahead_min;
+ g->count=view->count;
+ float before=atan2f(p[1].y-p[0].y,p[1].x-p[0].x);
+ for(unsigned i=0;i<g->count;i++){
+  float next=i+1<g->count?atan2f(p[i+1].y-p[i].y,p[i+1].x-p[i].x):before;
+  float turn=.5f*dw_angle(next-before),heading=before+turn;
+  if(fabsf(turn)>.6f)return false;
+  /* The bumper enters first. Allow one primitive of approach and retain the
+   * inset through the rear overhang and steering recovery. Fade in arc length. */
+  float inset=0;
+  for(unsigned j=1;j+1<g->count;j++){
+   float ahead=arc[j]-arc[i];
+   float outside=fmaxf(ahead-approach,-ahead-departure);
+   float t=clamp(outside/blend,0,1);
+   float candidate=bend_inset[j]*(1-t)*(1-t)*(1+2*t);
+   if(fabsf(candidate)>fabsf(inset))inset=candidate;
+  }
+  float shift=inset/cosf(turn);
+  g->points[i]=(dw_point){p[i].x-shift*sinf(heading),p[i].y+shift*cosf(heading)};
+  if(i)g->length[i-1]=hypotf(g->points[i].x-g->points[i-1].x,g->points[i].y-g->points[i-1].y);
+  before=next;
+ }
+ before=atan2f(g->points[1].y-g->points[0].y,g->points[1].x-g->points[0].x);
+ for(unsigned i=0;i<g->count;i++){
+  float next=i+1<g->count?atan2f(g->points[i+1].y-g->points[i].y,g->points[i+1].x-g->points[i].x):before;
+  g->heading[i]=dw_angle(before+.5f*dw_angle(next-before));before=next;
+ }
+ return true;
+}
+
+static float guide_curvature(const struct lane_guide *g,dw_pose pose,float response){
+ float best=FLT_MAX,correction=0,fraction=0;unsigned nearest=0;
+ for(unsigned i=0;i+1<g->count;i++){
+  dw_point a=g->points[i],b=g->points[i+1];float len=g->length[i];
+  if(len<=1e-5f)continue;
+  float dx=b.x-a.x,dy=b.y-a.y,t=clamp(((pose.x-a.x)*dx+(pose.y-a.y)*dy)/(len*len),0,1);
+  float x=pose.x-a.x-t*dx,y=pose.y-a.y-t*dy,squared=x*x+y*y;
+  if(squared>=best)continue;
+  best=squared;float change=dw_angle(g->heading[i+1]-g->heading[i]),heading=g->heading[i]+t*change;
+  float lateral=-sinf(heading)*x+cosf(heading)*y,angle=dw_angle(pose.yaw-heading);
+  correction=-2*angle/response-lateral/(response*response);nearest=i;fraction=t;
+ }
+ /* Begin ramping before entering the bend to account for steering slew. */
+ float advance=fraction*g->length[nearest]+.010f;
+ while(nearest+2<g->count&&advance>g->length[nearest])advance-=g->length[nearest++];
+ float length=g->length[nearest];
+ return correction+(length>1e-5f?dw_angle(g->heading[nearest+1]-g->heading[nearest])/length:0);
+}
+
+enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_world *w,dw_pose start_pose,
+ float steer,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
+ const struct tr_basis *basis,struct lp_metrics *metrics){
+ struct tr_view view;
+ if(!narrow_lane(w,task,c,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
+    fabsf(steer)>c->max_steer)return LP_NOT_FOUND;
+ if(task->changing&&!change_toward_outside(&view))return LP_NOT_FOUND;
+ struct lane_guide guide;
+ if(!make_lane_guide(&view,c,&guide))return LP_NOT_FOUND;
+ struct lp_road_state first,last;
+ if(lp_task_project(w,task,start_pose,&first)!=LP_PATH_FOUND||lp_task_project(w,task,nominal,&last)!=LP_PATH_FOUND)return LP_NOT_FOUND;
+ float length=last.arc-first.arc;
+ if(length<=c->goal_distance)return LP_NOT_FOUND;
+ float step=fminf(c->tracking_guard*.6f,.0015f),dt=step/c->primitive_speed;
+ unsigned count=(unsigned)fminf(LP_PATH-1,floorf(length/step));
+ if(!budget.collision_index){lp_index_build(&s->collision_index,w,c);budget.collision_index=&s->collision_index;}
+ memset(path,0,sizeof(*path));
+ path->task=*task;path->basis=*basis;path->world_features=w->required_features;
+ path->revision=path->maneuver_revision=1;
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ dw_pose pose=start_pose;
+ path->points[0]=(xenova_drive_PathPoint){.pose=pose,.steering_rad=steer,.velocity_mps=c->primitive_speed};
+ path->count=1;
+ float radius=hypotf(fmaxf(c->front,c->rear),c->half_width);
+ /* A lateral transfer needs room to straighten after crossing the divider. */
+ float response=task->changing?fmaxf(c->lookahead_min,2*c->wheelbase):c->lookahead_min*(.24f/.35f);
+ for(unsigned i=0;i<count;i++){
+  float k=guide_curvature(&guide,pose,response);
+  float next=clamp(atanf(c->wheelbase*k),-c->max_steer,c->max_steer);
+  next=clamp(next,steer-c->steer_rate*dt,steer+c->steer_rate*dt);
+  dw_pose moved=pose;integrate(&moved,.5f*(next+steer),c->primitive_speed,dt,c->wheelbase);
+  float pad=c->tracking_guard+.5f*(step+radius*fabsf(dw_angle(moved.yaw-pose.yaw)));
+  enum lp_result rc=footprint(w,pose,pad,c,metrics,&budget,false,NULL,task,NULL);
+  if(rc==LP_PATH_FOUND)rc=footprint(w,moved,pad,c,metrics,&budget,false,NULL,task,NULL);
+  if(rc==LP_COLLISION)break;
+  if(rc!=LP_PATH_FOUND)return rc;
+  path->points[path->count++]=(xenova_drive_PathPoint){.pose=moved,.steering_rad=next,.velocity_mps=c->primitive_speed};
+  pose=moved;steer=next;
+ }
+ if((path->count-1)*step<c->goal_distance*2)return LP_NOT_FOUND;
+ path->goal=path->merge_goal=pose;
+ enum lp_result checked=lp_validate_path(path,w,c,metrics,&budget);
+ return checked==LP_COLLISION?LP_NOT_FOUND:checked;
 }
 enum lp_result lp_start_signed(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
  int initial,int final,unsigned cusps,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
  if((initial!=1&&initial!=-1)||(final!=1&&final!=-1)||cusps>2||!c||
     !isfinite(c->max_reverse_velocity)||c->max_reverse_velocity<=0)return LP_INPUT;
- return start(s,w,pose,steer,goal,c,a,budget,0,false,NULL,NULL,NULL,true,initial,final,cusps);
+ return start(s,w,pose,steer,goal,c,a,budget,0,false,NULL,NULL,NULL,true,initial,final,cusps,NULL,NULL);
+}
+enum lp_result lp_start_task_goal(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
+ const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget,const struct tr_intent *task,const struct tr_basis *basis){
+ return start(s,w,pose,steer,goal,c,a,budget,0,false,task,basis,NULL,false,1,1,0,NULL,NULL);
+}
+enum lp_result lp_start_parking(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,
+ const struct lp_goal_set *goals,int initial,unsigned cusps,const struct lp_space *space,
+ const struct tr_intent *task,const struct tr_basis *basis,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
+ if(!goals||!goals->count||goals->count>LP_GOALS||!space||!space->parking||space->exiting||!space->slot_id||!space->slot_revision||
+    !c||!isfinite(goals->distance)||goals->distance<=0||goals->distance>c->goal_distance||
+    !isfinite(goals->heading)||goals->heading<=0||goals->heading>c->goal_heading||
+    (initial!=1&&initial!=-1)||(goals->final_gear!=1&&goals->final_gear!=-1)||cusps>2)return LP_INPUT;
+ for(unsigned k=0;k<goals->count;k++)if(!dw_pose_finite(goals->poses[k]))return LP_INPUT;
+ return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,goals->final_gear,cusps,goals,space);
+}
+enum lp_result lp_start_exit(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,
+ const struct lp_goal_set *goals,int initial,unsigned cusps,const struct dre_input *source,
+ const struct tr_intent *task,const struct tr_basis *basis,const struct lp_config *c,const struct lp_assets *a,struct lp_budget budget){
+ struct lp_space space;struct tr_view road;
+ if(!source||source->records.world!=w||pose.x!=source->current_map_pose.x||pose.y!=source->current_map_pose.y||
+    pose.yaw!=source->current_map_pose.yaw||!task||!c||!goals||!goals->count||goals->count>LP_GOALS||
+    (initial!=1&&initial!=-1)||goals->final_gear!=1||cusps>2||
+    !isfinite(goals->distance)||goals->distance<=0||goals->distance>c->goal_distance||
+    !isfinite(goals->heading)||goals->heading<=0||goals->heading>c->goal_heading||
+    dre_prepare(source,c,&space)!=DRP_OK||task->changing||task->from_lane_id!=source->records.space->aisle_lane_id||
+    task->selected_lane_id!=task->from_lane_id||task->home_lane_id!=task->selected_lane_id||!tr_open(w,task,&road))return LP_INPUT;
+ float measured=source->vehicle->has_measured_steering_rad?source->vehicle->measured_steering_rad:
+  source->vehicle->has_estimated_steering_rad?source->vehicle->estimated_steering_rad:NAN;
+ if(!isfinite(measured)||measured!=steer||!source->vehicle->has_steering_error_rad||
+    !isfinite(source->vehicle->steering_error_rad)||source->vehicle->steering_error_rad<0||
+    fabsf(measured)+source->vehicle->steering_error_rad>c->max_steer)return LP_INPUT;
+ for(unsigned k=0;k<goals->count;k++){
+  struct lp_road_state projection;
+  if(!dw_pose_finite(goals->poses[k])||!tr_contains(&road,goals->poses[k],c->tracking_guard+space.uncertainty+task->vehicle_pad,c)||
+     lp_task_project(w,task,goals->poses[k],&projection)!=LP_PATH_FOUND||
+     fabsf(dw_angle(goals->poses[k].yaw-projection.pose.yaw))>goals->heading)return LP_INPUT;
+ }
+ return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,1,cusps,goals,&space);
 }
 /* All ordinary edges use the generated control set. A measured root steering
  * between levels is connected by the same continuous ramp integration; it is
@@ -589,7 +941,7 @@ static enum lp_result edge(struct lp_search *s,int parent,unsigned target,int ge
  float yaw_step=c->primitive_speed/c->wheelbase*tanf(c->max_steer)*dt;
  float padding=.5f*(c->primitive_speed*dt+radius*fabsf(yaw_step));
  bool previous_outside=false;
- enum lp_result first=footprint(s->world,pose,padding+c->tracking_guard,c,&s->metrics,&s->budget,false,&previous_outside,&s->task);
+ enum lp_result first=footprint(s->world,pose,padding+c->tracking_guard,c,&s->metrics,&s->budget,false,&previous_outside,&s->task,&s->space);
  if(first!=LP_PATH_FOUND)return first;
  float road_cost=old->road_cost;
  for(unsigned k=1;k<=steps;k++) {
@@ -600,7 +952,7 @@ static enum lp_result edge(struct lp_search *s,int parent,unsigned target,int ge
   /* Half the maximum translational+corner travel bounds the gap to an
    * adjacent sample. Both endpoint boxes cover that swept interval. */
   bool outside=false;
-  rc=footprint(s->world,pose,padding+c->tracking_guard,c,&s->metrics,&s->budget,false,&outside,&s->task);
+  rc=footprint(s->world,pose,padding+c->tracking_guard,c,&s->metrics,&s->budget,false,&outside,&s->task,&s->space);
   if(rc!=LP_PATH_FOUND)return rc;
   road_cost+=c->primitive_speed*dt*.5f*(previous_outside+outside);previous_outside=outside;
   if(points&&k%(steps/16)==0){if(*count>=LP_PATH)return LP_PATH_LIMIT;
@@ -614,7 +966,7 @@ static enum lp_result reconstruct_signed(struct lp_search *s,int last,struct lp_
  int chain[(LP_PATH-3)/16];unsigned count=0;int at=last;
  while(s->nodes[at].parent>=0){if(count>=sizeof(chain)/sizeof(*chain))return LP_PATH_LIMIT;chain[count++]=at;at=s->nodes[at].parent;}
  if(!count)return LP_STOP;
- memset(path,0,sizeof(*path));path->goal=path->merge_goal=s->goal;path->task=s->task;path->basis=s->basis;
+ memset(path,0,sizeof(*path));path->goal=path->merge_goal=s->goal;path->task=s->task;path->basis=s->basis;path->space=s->space;
  path->world_features=s->world->required_features;path->revision=path->maneuver_revision=1;path->count=1;
  path->points[0]=(xenova_drive_PathPoint){.pose=s->start,.steering_rad=s->initial_steer,.velocity_mps=0};
  path->execution.segments_count=1;
@@ -669,7 +1021,7 @@ static enum lp_result reconstruct(struct lp_search *s,int last,struct lp_path *p
  for(unsigned k=0;k<=steps;k++) {
   dw_pose pose={end.x+cosf(end.yaw)*ds*k,end.y+sinf(end.yaw)*ds*k,end.yaw};
   bool outside=false;
-  enum lp_result rc=footprint(s->world,pose,padding,s->config,&s->metrics,&s->budget,false,&outside,&s->task);
+  enum lp_result rc=footprint(s->world,pose,padding,s->config,&s->metrics,&s->budget,false,&outside,&s->task,&s->space);
   if(rc!=LP_PATH_FOUND)return rc;
   /* Decline a shoulder-cutting analytic tail; keep expanding real primitives.
    * This is a search decision, not a physical collision or a completed path. */
@@ -750,8 +1102,21 @@ static xenova_drive_GearSegment path_segment(const struct lp_path *path,unsigned
  return (xenova_drive_GearSegment){0,(uint32_t)path->count-1,1};
 }
 static bool same_pose(dw_pose a,dw_pose b){return a.x==b.x&&a.y==b.y&&a.yaw==b.yaw;}
+/* Legacy0/1 NONE snapshots retain the original forward tracker. Explicit signed
+ * geometry and every lane-profile task keep the segment/progress/gate contract. */
+static bool legacy_forward_path(const struct lp_path *path){
+ return path&&path->world_features<=1&&(!path->execution.segments_count||
+  (path->execution.present&&!path->execution.mission.kind&&path->execution.segments_count==1&&
+   path->execution.segments[0].signed_direction==1));
+}
+static bool legacy_stationary_path(const struct lp_path *path){
+ return legacy_forward_path(path)&&path->count==2&&same_pose(path->points[0].pose,path->points[1].pose)&&
+  path->points[0].steering_rad==path->points[1].steering_rad&&
+  !path->points[0].velocity_mps&&!path->points[1].velocity_mps;
+}
 static bool path_shape(const struct lp_path *path){
  if(!path||path->count<2||path->count>LP_PATH||path->execution.segments_count>3)return false;
+ if(legacy_stationary_path(path))return true;
  unsigned count=path_segments(path);
  for(unsigned part=0;part<count;part++){
   xenova_drive_GearSegment segment=path_segment(path,part);
@@ -776,12 +1141,31 @@ static bool path_shape(const struct lp_path *path){
  }
  return true;
 }
-enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
- struct lp_metrics *m,const struct lp_budget *b){
- if(!path_shape(p)||!c||!w)return LP_INPUT;
- if((w->required_features&DW_LANE_MODEL)&&(!p->task.active||!tr_basis_compatible(&p->basis,w)))return LP_INPUT;
- if(p->world_features!=w->required_features||strcmp(p->frame,w->frame_epoch)||strcmp(p->odom,w->odom_epoch)||
-    strcmp(p->configuration,w->configuration)||strcmp(p->reference,w->reference_id))return LP_INPUT;
+bool lp_prepare_tracking(const struct lp_path *path,struct lp_tracking_geometry *geometry){
+ if(!path_shape(path))return false;
+ if(legacy_forward_path(path))return true;
+ for(unsigned part=0;part<path_segments(path);part++){
+  xenova_drive_GearSegment segment=path_segment(path,part);
+  geometry->arc[segment.first_index]=0;
+  geometry->max_steer_slope[part]=0;
+  for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
+   float ds=distance(path->points[i-1].pose,path->points[i].pose);
+   if(ds<=0)return false;
+   geometry->arc[i]=geometry->arc[i-1]+ds;
+   float slope=fabsf(path->points[i].steering_rad-path->points[i-1].steering_rad)/ds;
+   geometry->max_steer_slope[part]=fmaxf(geometry->max_steer_slope[part],slope);
+  }
+ }
+ return true;
+}
+static bool path_matches_world(const struct lp_path *p,const dw_world *w){
+ return w&&path_shape(p)&&p->world_features==w->required_features&&
+  !strcmp(p->frame,w->frame_epoch)&&!strcmp(p->odom,w->odom_epoch)&&
+  !strcmp(p->configuration,w->configuration)&&!strcmp(p->reference,w->reference_id)&&
+  (!(w->required_features&DW_LANE_MODEL)||(p->task.active&&tr_basis_compatible(&p->basis,w)));
+}
+static enum lp_result path_geometry(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
+ struct lp_metrics *m,const struct lp_budget *b,float *pads){
  float radius=hypotf(fmaxf(c->front,c->rear),c->half_width);
  for(unsigned part=0;part<path_segments(p);part++){
   xenova_drive_GearSegment segment=path_segment(p,part);float vmax=segment.signed_direction>0?c->max_velocity:c->max_reverse_velocity;
@@ -797,7 +1181,7 @@ enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const 
     float first_ds=distance(p->points[k].pose,p->points[k+1].pose);
     float first_yaw=fabsf(dw_angle(p->points[k+1].pose.yaw-p->points[k].pose.yaw));pad=.5f*(first_ds+radius*first_yaw);
    }else{
-    if(ds<=0||ds>c->primitive_speed*c->primitive_duration/16*1.05f||
+    if((ds<=0&&!legacy_stationary_path(p))||ds>c->primitive_speed*c->primitive_duration/16*1.05f||
        dy>ds*tanf(c->max_steer)/c->wheelbase*1.1f+.0001f)return LP_INPUT;
     float interval=ds/c->primitive_speed;
     if(fabsf(point->steering_rad-p->points[previous].steering_rad)>c->steer_rate*interval+.0001f)return LP_INPUT;
@@ -805,36 +1189,81 @@ enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const 
     integrate(&predicted,.5f*(point->steering_rad+p->points[previous].steering_rad),segment.signed_direction*c->primitive_speed,interval,c->wheelbase);
     if(distance(predicted,point->pose)>.001f||fabsf(dw_angle(predicted.yaw-point->pose.yaw))>.001f)return LP_INPUT;
    }
-   enum lp_result rc=footprint(w,point->pose,pad+c->tracking_guard,c,m,b,false,NULL,&p->task);if(rc!=LP_PATH_FOUND)return rc;
+   if(pads){
+    if(!(k&31)){enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;}
+    pads[k]=pad+c->tracking_guard;
+   }else{
+    enum lp_result rc=footprint(w,point->pose,pad+c->tracking_guard,c,m,b,false,NULL,&p->task,&p->space);
+    if(rc!=LP_PATH_FOUND)return rc;
+   }
   }
  }
  return LP_PATH_FOUND;
+}
+enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
+ struct lp_metrics *m,const struct lp_budget *b){
+ return c&&path_matches_world(p,w)?path_geometry(p,w,c,m,b,NULL):LP_INPUT;
+}
+enum lp_result lp_clearance_lower(const struct lp_path *p,const dw_world *w,const struct lp_config *c,float maximum,
+ struct lp_metrics *m,const struct lp_budget *b,float *out){
+ if(!out||!c||!isfinite(maximum)||maximum<=0||!path_matches_world(p,w))return LP_INPUT;
+ float pads[LP_PATH];
+ enum lp_result rc=path_geometry(p,w,c,m,b,pads);if(rc!=LP_PATH_FOUND)return rc;
+ float low=0,high=maximum;
+ /* Inflated full-edge footprint validation proves a lower bound; it does not
+  * compare vehicle centers or assume the nearest obstacle cell's center. */
+ for(unsigned k=0;k<5;k++){
+  float mid=.5f*(low+high);struct lp_config expanded=*c;expanded.margin+=mid;
+  for(size_t i=0;i<p->count;i++){
+   rc=footprint(w,p->points[i].pose,pads[i],&expanded,m,b,false,NULL,&p->task,&p->space);
+   if(rc!=LP_PATH_FOUND)break;
+  }
+  if(rc==LP_PATH_FOUND)low=mid;
+  else if(rc==LP_COLLISION)high=mid;
+  else return rc;
+ }
+ *out=low;return LP_PATH_FOUND;
 }
 /* Signed current-state reaction/braking rollout. known is travelled length,
  * never signed displacement; the final clamped command gets a fresh rollout. */
 static enum lp_result project(const dw_world *w,dw_pose pose,float current_velocity,float current_steer,
  float velocity,float steer,float uncertainty,float steering_error,const struct lp_config *c,struct lp_metrics *m,
- const struct lp_budget *b,float *known,const struct tr_intent *task,dw_pose *stopped,float *stop_pad){
+ const struct lp_budget *b,float *known,const struct tr_intent *task,dw_pose *stopped,float *stop_pad,
+ const struct lp_space *space,const struct tr_parking_geometry *parking){
  if(current_velocity*velocity<0)return LP_INPUT;
  float maximum=fmaxf(c->max_velocity,c->max_reverse_velocity);
- float interval=fminf(.025f,c->resolution/(4*fmaxf(maximum,.01f)));
+ struct tr_view view;
+ bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||narrow_lane(w,task,c,&view));
+ float interval=fminf(tight?.01f:.025f,c->resolution/(4*fmaxf(maximum,.01f)));
  float time=0,v=current_velocity,delta=current_steer;*known=0;
  float horizon=c->reaction_s+fmaxf(fabsf(v),fabsf(velocity))/c->max_brake+.1f;
- float yaw_error=maximum/c->wheelbase*horizon*
-  fmaxf(tanf(fabsf(current_steer)+steering_error)-tanf(fabsf(current_steer)),
-        tanf(fabsf(steer)+steering_error)-tanf(fabsf(steer)));
+ float steer_error=fmaxf(tanf(fabsf(current_steer)+steering_error)-tanf(fabsf(current_steer)),
+                        tanf(fabsf(steer)+steering_error)-tanf(fabsf(steer)));
+ float yaw_error=maximum/c->wheelbase*horizon*steer_error;
  unsigned steps=(unsigned)ceilf(horizon/interval);if(steps>512)return LP_WORK_BUDGET;
- float radius=hypotf(fmaxf(c->front,c->rear),c->half_width),last_pad=0;
+ float radius=hypotf(fmaxf(c->front,c->rear),c->half_width),last_pad=0,previous_pad=0;
  for(unsigned k=0;k<=steps;k++){
-  float extra=.5f*(fmaxf(fabsf(v),fabsf(velocity))*interval+radius*maximum/c->wheelbase*fabsf(tanf(c->max_steer))*interval);
-  float envelope=(maximum*time+radius)*yaw_error;last_pad=extra+uncertainty+envelope;
-  enum lp_result rc=footprint(w,pose,last_pad,c,m,b,false,NULL,task);if(rc!=LP_PATH_FOUND)return rc;
-  delta+=clamp(steer-delta,-c->steer_rate*interval,c->steer_rate*interval);
+  float next_delta=delta+clamp(steer-delta,-c->steer_rate*interval,c->steer_rate*interval);
   int gear=v<0?-1:v>0?1:velocity<0?-1:1;
   float magnitude=fabsf(v),target=fabsf(velocity);
   if(time<c->reaction_s)magnitude+=clamp(target-magnitude,-c->max_brake*interval,c->max_accel*interval);
   else magnitude=fmaxf(0,magnitude-c->max_brake*interval);
-  v=gear*magnitude;integrate(&pose,delta,v,interval,c->wheelbase);*known+=fabsf(v)*interval;time+=interval;
+  float travelled=magnitude*interval,extra,envelope;
+  if(tight){
+   /* The low-speed sweep uses its own travel/yaw plus steering uncertainty,
+    * covering both endpoints of each integration interval. */
+   float yaw=travelled*fabsf(tanf(next_delta))/c->wheelbase;
+   float next_pad=.5f*(travelled+radius*yaw);
+   extra=fmaxf(previous_pad,next_pad);previous_pad=next_pad;
+   envelope=(*known+travelled+radius)*(*known+travelled)*steer_error/c->wheelbase;
+  }else{
+   extra=.5f*(fmaxf(fabsf(v),fabsf(velocity))*interval+radius*maximum/c->wheelbase*fabsf(tanf(c->max_steer))*interval);
+   envelope=(maximum*time+radius)*yaw_error;
+  }
+  last_pad=extra+uncertainty+envelope;
+  enum lp_result rc=footprint_geometry(w,pose,last_pad,c,m,b,false,NULL,task,space,parking);
+  if(rc!=LP_PATH_FOUND)return rc;
+  v=gear*magnitude;delta=next_delta;integrate(&pose,delta,v,interval,c->wheelbase);*known+=travelled;time+=interval;
  }
  if(stopped)*stopped=pose;
  if(stop_pad)*stop_pad=last_pad;
@@ -855,6 +1284,15 @@ void lp_tracker_begin(struct lp_tracker *tracker,uint64_t token){
 static float arc_to(const struct lp_path *path,xenova_drive_GearSegment segment,size_t end){
  float arc=0;for(size_t i=segment.first_index+1;i<=end;i++)arc+=distance(path->points[i-1].pose,path->points[i].pose);return arc;
 }
+static size_t first_edge(const struct lp_tracking_geometry *geometry,xenova_drive_GearSegment segment,float station){
+ size_t first=segment.first_index,last=segment.last_index;
+ if(geometry)while(first<last){
+  size_t middle=first+(last-first)/2;
+  if(geometry->arc[middle+1]<station)first=middle+1;
+  else last=middle;
+ }
+ return first;
+}
 bool lp_tracker_next_segment(struct lp_tracker *tracker,const struct lp_path *path,uint64_t now,uint64_t original_stop,
  const struct lp_direction_fact *fact){
  if(!tracker||!path||!fact||!tracker->initialized||tracker->segment+1>=path_segments(path)||!original_stop||
@@ -867,17 +1305,20 @@ bool lp_tracker_next_segment(struct lp_tracker *tracker,const struct lp_path *pa
  tracker->segment++;tracker->index=path_segment(path,tracker->segment).first_index;tracker->progress=0;
  tracker->gate_revision=fact->gate_revision;tracker->last_pi_us=0;tracker->last_velocity=0;return true;
 }
-static bool progress_project(struct lp_tracker *tracker,const struct lp_path *path,dw_pose pose,const dw_vehicle *vehicle,
- const struct lp_config *c,float dt,float *remaining,bool *terminal_in_window){
+static bool progress_project(struct lp_tracker *tracker,const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ dw_pose pose,const dw_vehicle *vehicle,
+ const struct lp_config *c,float dt,float *remaining,bool *terminal_in_window,bool *pose_in_window){
  if(!tracker->initialized){
   tracker->segment=path->execution.present?path->execution.mission.active_segment:0;
   if(tracker->segment>=path_segments(path))return false;
   xenova_drive_GearSegment segment=path_segment(path,tracker->segment);
   tracker->index=path->initial_tracker_index;
   if(tracker->index<segment.first_index||tracker->index>segment.last_index)return false;
-  tracker->progress=arc_to(path,segment,tracker->index);tracker->last_pi_us=path->initial_pi_us;
+  tracker->progress=geometry?geometry->arc[tracker->index]:arc_to(path,segment,tracker->index);
+  tracker->last_pi_us=path->initial_pi_us;
  }
- xenova_drive_GearSegment segment=path_segment(path,tracker->segment);float total=arc_to(path,segment,segment.last_index);
+ xenova_drive_GearSegment segment=path_segment(path,tracker->segment);
+ float total=geometry?geometry->arc[segment.last_index]:arc_to(path,segment,segment.last_index);
  float elapsed=dt;
  if(vehicle->pi_sample_us&&tracker->last_pi_us){
   if(vehicle->pi_sample_us<tracker->last_pi_us)return false;
@@ -889,18 +1330,22 @@ static bool progress_project(struct lp_tracker *tracker,const struct lp_path *pa
   c->primitive_speed*c->primitive_duration/16;
  float low=fmaxf(0,tracker->progress-error),high=fminf(total,tracker->progress+fmaxf(c->max_velocity,c->max_reverse_velocity)*elapsed+.5f*c->max_accel*elapsed*elapsed+error);
  if(!tracker->initialized&&!path->initial_pi_us){low=0;high=total;} /* explicit software/new-plan first correspondence */
- float best=FLT_MAX,best_s=0,arc=0;size_t best_index=0;bool found=false,ambiguous=false;
- for(size_t i=segment.first_index;i<segment.last_index;i++){
+ size_t first=first_edge(geometry,segment,low);
+ float best=FLT_MAX,best_s=0,arc=geometry?geometry->arc[first]:0;
+ size_t best_index=0;bool found=false,ambiguous=false;*pose_in_window=false;
+ for(size_t i=first;i<segment.last_index&&(!geometry||arc<=high);i++){
   dw_pose a=path->points[i].pose,z=path->points[i+1].pose;float dx=z.x-a.x,dy=z.y-a.y,length=hypotf(dx,dy);
   if(length<=0||!isfinite(length))return false;
   float begin=fmaxf(low,arc),end=fminf(high,arc+length);
   if(begin<=end){
-   float u=clamp(((pose.x-a.x)*dx+(pose.y-a.y)*dy)/(length*length),(begin-arc)/length,(end-arc)/length);
+   float raw_u=((pose.x-a.x)*dx+(pose.y-a.y)*dy)/(length*length);
+   float u=clamp(raw_u,(begin-arc)/length,(end-arc)/length);
    float heading=dw_angle(a.yaw+u*dw_angle(z.yaw-a.yaw));
    if(fabsf(dw_angle(pose.yaw-heading))+vehicle->heading_error_rad<=c->goal_heading+c->max_heading_error){
     float px=a.x+u*dx-pose.x,py=a.y+u*dy-pose.y,d2=px*px+py*py,station=arc+u*length;
     if(found&&fabsf(d2-best)<=vehicle->position_error_m*vehicle->position_error_m&&fabsf(station-best_s)>2*error)ambiguous=true;
-    if(d2<best){best=d2;best_s=station;best_index=i;found=true;}
+    if(d2<best){best=d2;best_s=station;best_index=i;found=true;
+     float observed=arc+clamp(raw_u,0,1)*length;*pose_in_window=observed>=low&&observed<=high;}
    }
   }
   arc+=length;
@@ -910,9 +1355,11 @@ static bool progress_project(struct lp_tracker *tracker,const struct lp_path *pa
  tracker->initialized=true;if(vehicle->pi_sample_us)tracker->last_pi_us=vehicle->pi_sample_us;
  *remaining=fmaxf(0,total-tracker->progress);*terminal_in_window=high+1e-4f>=total;return true;
 }
-static dw_pose carrot(const struct lp_path *path,xenova_drive_GearSegment segment,float station){
- float arc=0;
- for(size_t i=segment.first_index;i<segment.last_index;i++){
+static dw_pose carrot(const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ xenova_drive_GearSegment segment,float station){
+ size_t first=first_edge(geometry,segment,station);
+ float arc=geometry?geometry->arc[first]:0;
+ for(size_t i=first;i<segment.last_index;i++){
   dw_pose a=path->points[i].pose,z=path->points[i+1].pose;float length=distance(a,z);
   if(station<=arc+length){float u=clamp((station-arc)/length,0,1);
    return (dw_pose){a.x+u*(z.x-a.x),a.y+u*(z.y-a.y),dw_angle(a.yaw+u*dw_angle(z.yaw-a.yaw))};}
@@ -920,10 +1367,85 @@ static dw_pose carrot(const struct lp_path *path,xenova_drive_GearSegment segmen
  }
  return path->points[segment.last_index].pose;
 }
-enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,const dw_world *w,dw_pose pose,
- const dw_vehicle *vehicle,const struct lp_config *c,float dt,struct lp_command *out,struct lp_metrics *m,const struct lp_budget *b){
+static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const struct lp_path *path,const dw_world *w,dw_pose pose,
+ const dw_vehicle *vehicle,const struct lp_config *c,float dt,struct lp_command *out,
+ struct lp_metrics *m,const struct lp_budget *b) {
  memset(out,0,sizeof(*out));out->result=LP_INPUT;
- if(!path_shape(path)||!dw_pose_finite(pose)||!isfinite(dt)||dt<=0||dt>.1f||
+ if(!dw_pose_finite(pose)||!isfinite(dt)||dt<=0||dt>.1f||path->count<2||path->count>LP_PATH||
+    !isfinite(vehicle->velocity_mps)||vehicle->velocity_mps< -.01f||vehicle->velocity_mps>c->max_velocity+.01f||
+    !isfinite(vehicle->position_error_m)||vehicle->position_error_m<0||vehicle->position_error_m>c->max_position_error||
+    !isfinite(vehicle->heading_error_rad)||vehicle->heading_error_rad<0||vehicle->heading_error_rad>c->max_heading_error||
+    !vehicle->has_steering_error_rad||!isfinite(vehicle->steering_error_rad)||vehicle->steering_error_rad<0||
+    vehicle->steering_error_rad>c->max_steering_error||
+    vehicle->quality!=3||path->world_features!=w->required_features||strcmp(path->frame,w->frame_epoch)||strcmp(path->odom,w->odom_epoch)||
+    strcmp(path->configuration,w->configuration)||strcmp(path->reference,w->reference_id))return LP_INPUT;
+ /* 호환 추종도 새 지도를 수신했다는 이유로 오래된 최초 대응을 재사용하지 않는다. */
+ uint64_t previous_sample=tracker->last_pi_us?tracker->last_pi_us:path->initial_pi_us;
+ if(vehicle->pi_sample_us&&previous_sample&&(vehicle->pi_sample_us<previous_sample||
+    vehicle->pi_sample_us-previous_sample>c->pose_age_us))return LP_INPUT;
+ float actual_steer=vehicle->has_measured_steering_rad?vehicle->measured_steering_rad:
+                    vehicle->has_estimated_steering_rad?vehicle->estimated_steering_rad:NAN;
+ if(!isfinite(actual_steer)||fabsf(actual_steer)+vehicle->steering_error_rad>c->max_steer+.0001f)return LP_INPUT;
+ float uncertainty=vehicle->position_error_m+hypotf(c->front,c->half_width)*vehicle->heading_error_rad;
+ size_t nearest=0;float remaining=lp_path_remaining(path,pose,&nearest);
+ if(!isfinite(remaining)||distance(pose,path->points[nearest].pose)>c->tracking_error)return LP_INPUT;
+ tracker->index=nearest;
+ if(path->direction){
+  float peak=0;size_t peak_index=0;
+  for(size_t k=0;k<path->count;k++){float offset=fabsf(reference_offset(w,NULL,path->points[k].pose));if(offset>peak){peak=offset;peak_index=k;}}
+  out->maneuver_phase=path->phase==2||nearest>peak_index?2:1;
+ }
+ /* Planning, tracking and observation errors share the original total bound.
+  * Stopping at a local endpoint does not complete the persistent merge. */
+ dw_pose end=path->points[path->count-1].pose;
+ float heading_error=fabsf(dw_angle(end.yaw-path->goal.yaw))+fabsf(dw_angle(pose.yaw-end.yaw))+vehicle->heading_error_rad;
+ if(distance(pose,path->goal)<=c->goal_distance&&heading_error<=c->goal_heading) {
+  float known;enum lp_result stopped=project(w,pose,vehicle->velocity_mps,actual_steer,0,actual_steer,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL,NULL,NULL);
+  out->steer=actual_steer;out->emergency=true;out->result=stopped==LP_PATH_FOUND?LP_STOP:stopped;
+  if(stopped==LP_PATH_FOUND){tracker->last_pi_us=vehicle->pi_sample_us;tracker->completed++;}
+  return out->result;
+ }
+ float lookahead=clamp(fabsf(vehicle->velocity_mps)*c->lookahead_time,c->lookahead_min,c->lookahead_max);
+ size_t target=nearest;float along=0;
+ while(target+1<path->count&&along<lookahead){along+=distance(path->points[target].pose,path->points[target+1].pose);target++;}
+ dw_pose local=dw_compose(dw_inverse(pose),path->points[target].pose);
+ float d2=local.x*local.x+local.y*local.y;
+ if(d2<1e-8f||local.x<=0)return LP_INPUT;
+ out->target_x=local.x;out->target_y=local.y;out->geometric_distance=sqrtf(d2);
+ out->curvature=2*local.y/d2;
+ float desired=atanf(c->wheelbase*out->curvature);
+ float allowed=c->max_steer-vehicle->steering_error_rad;
+ float delta=clamp(desired,-allowed,allowed);
+ delta=actual_steer+clamp(delta-actual_steer,-c->steer_rate*dt,c->steer_rate*dt);
+ float speed=fminf(c->max_velocity,path->points[target].velocity_mps);
+ if(fabsf(out->curvature)>1e-6f)speed=fminf(speed,sqrtf(c->max_lateral_accel/fabsf(out->curvature)));
+ speed=fminf(speed,sqrtf(2*c->max_brake*fmaxf(0,remaining)));
+ /* Independent metric clearance: forward final-curvature probes, not a
+  * planner cost->metres conversion. Bound candidate speed by a braking model. */
+ float known=0;enum lp_result rc=project(w,pose,vehicle->velocity_mps,actual_steer,c->max_velocity,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL,NULL,NULL);
+ if(rc!=LP_PATH_FOUND&&rc!=LP_COLLISION)return out->result=rc;
+ out->known_distance=known;
+ if(rc==LP_COLLISION) {
+  float safe=fmaxf(0,known-c->margin-vehicle->position_error_m);
+  float limit=sqrtf(c->max_brake*c->max_brake*c->reaction_s*c->reaction_s+2*c->max_brake*safe)-c->max_brake*c->reaction_s;
+  speed=fminf(speed,limit);
+ }
+ float limited=vehicle->velocity_mps+clamp(speed-vehicle->velocity_mps,-c->max_brake*dt,c->max_accel*dt);
+ if(speed<vehicle->velocity_mps-c->max_brake*dt){limited=0;out->emergency=true;}
+ rc=project(w,pose,vehicle->velocity_mps,actual_steer,limited,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,NULL,NULL,NULL,NULL,NULL);
+ if(rc!=LP_PATH_FOUND){out->velocity=0;out->steer=actual_steer;out->emergency=true;return out->result=rc;}
+ out->velocity=limited;out->steer=delta;out->result=LP_PATH_FOUND;
+ tracker->last_velocity=limited;tracker->last_steer=delta;tracker->last_pi_us=vehicle->pi_sample_us;tracker->completed++;
+ return LP_PATH_FOUND;
+}
+
+static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ const dw_world *w,dw_pose pose,
+ const dw_vehicle *vehicle,const struct lp_config *c,float dt,struct lp_command *out,struct lp_metrics *m,
+ const struct lp_budget *b,struct lp_parking_cache *cache){
+ if(legacy_forward_path(path))return track_legacy_forward(tracker,path,w,pose,vehicle,c,dt,out,m,b);
+ memset(out,0,sizeof(*out));out->result=LP_INPUT;
+ if((!geometry&&!path_shape(path))||!dw_pose_finite(pose)||!isfinite(dt)||dt<=0||dt>.1f||
     !isfinite(vehicle->velocity_mps)||vehicle->velocity_mps< -c->max_reverse_velocity-.01f||vehicle->velocity_mps>c->max_velocity+.01f||
     !isfinite(vehicle->position_error_m)||vehicle->position_error_m<0||vehicle->position_error_m>c->max_position_error||
     !isfinite(vehicle->heading_error_rad)||vehicle->heading_error_rad<0||vehicle->heading_error_rad>c->max_heading_error||
@@ -931,51 +1453,125 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
     vehicle->steering_error_rad>c->max_steering_error||vehicle->quality!=3||path->world_features!=w->required_features||
     strcmp(path->frame,w->frame_epoch)||strcmp(path->odom,w->odom_epoch)||strcmp(path->configuration,w->configuration)||strcmp(path->reference,w->reference_id))return LP_INPUT;
  if((w->required_features&DW_LANE_MODEL)&&(!path->task.active||!tr_basis_compatible(&path->basis,w)))return LP_INPUT;
+ if(path->space.exiting&&(!path->execution.present||path->execution.mission.kind!=3||
+    !path->execution.mission.has_route_binding))return LP_INPUT;
  float steering=vehicle->has_measured_steering_rad?vehicle->measured_steering_rad:vehicle->has_estimated_steering_rad?vehicle->estimated_steering_rad:NAN;
  if(!isfinite(steering)||fabsf(steering)+vehicle->steering_error_rad>c->max_steer+.0001f)return LP_INPUT;
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
- float uncertainty=vehicle->position_error_m+radius*vehicle->heading_error_rad,remaining;bool terminal_in_window;
- if(!progress_project(tracker,path,pose,vehicle,c,dt,&remaining,&terminal_in_window))return LP_INPUT;
+ float uncertainty=vehicle->position_error_m+radius*vehicle->heading_error_rad,remaining;bool terminal_in_window,pose_in_window;
+ if(!progress_project(tracker,path,geometry,pose,vehicle,c,dt,&remaining,&terminal_in_window,&pose_in_window))return LP_INPUT;
  xenova_drive_GearSegment segment=path_segment(path,tracker->segment);int gear=segment.signed_direction;
  if(vehicle->velocity_mps*gear< -.01f)return LP_INPUT;
  out->segment_index=tracker->segment;out->cusp_index=tracker->segment;out->requested_direction=gear;
  struct tr_intent live_task=path->task;live_task.vehicle_pad=0;
  dw_pose goal=path->points[segment.last_index].pose;
  if(tracker->segment+1==path_segments(path))goal=path->goal;
+ float goal_distance=c->goal_distance,goal_heading=c->goal_heading;
+ if(path->execution.present&&path->execution.mission.kind==2&&path->execution.mission.has_goal_position_bound_m&&
+    tracker->segment+1==path_segments(path)&&path->space.parking){
+  goal_distance=fminf(goal_distance,path->execution.mission.goal_position_bound_m);
+  goal_heading=fminf(goal_heading,path->execution.mission.goal_heading_bound_rad);
+ }
  if(path->direction){
-  if(path->task.active)out->maneuver_phase=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==path->task.selected_lane_id?2:1;
+  if(path->has_episode&&path->episode.core.state==2)out->maneuver_phase=path->episode.core.phase==4?2:path->episode.core.phase<5?1:0;
+  else if(path->task.active)out->maneuver_phase=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==path->task.selected_lane_id?2:1;
   else out->maneuver_phase=path->phase;
  }
+ const struct tr_parking_geometry *parking=NULL;
+ if(cache&&path->space.parking&&!path->space.exiting){
+  struct tr_view aisle;
+  if(!cache->ready&&tr_open_indexed(w,&live_task,b->collision_index,&aisle)&&aisle.selected==aisle.from){
+   enum lp_result ready=guard(b,m);if(ready!=LP_SEARCHING)return out->result=ready;
+   tr_prepare_parking(&cache->geometry,&aisle,path->space.polygon);
+   cache->ready=true;
+  }
+  if(cache->ready)parking=&cache->geometry;
+ }
  float known=0;dw_pose stopped;float final_pad=0;
- enum lp_result stopped_result=project(w,pose,vehicle->velocity_mps,steering,0,steering,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,&stopped,&final_pad);
+ enum lp_result stopped_result=project(w,pose,vehicle->velocity_mps,steering,0,steering,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,&stopped,&final_pad,&path->space,parking);
  /* 종점에 가까운 입력도 같은 원 progress window를 통과해야 한다. 현재 pose만으로
   * 아직 도달할 수 없는 남은 arc를 지워 segment/cusp 완료를 만들지 않는다. */
- bool captured=terminal_in_window&&stopped_result==LP_PATH_FOUND&&distance(pose,goal)+vehicle->position_error_m<=c->goal_distance&&
-  distance(stopped,goal)+final_pad<=c->goal_distance&&fabsf(dw_angle(pose.yaw-goal.yaw))+vehicle->heading_error_rad<=c->goal_heading&&
-  fabsf(dw_angle(stopped.yaw-goal.yaw))+vehicle->heading_error_rad<=c->goal_heading;
+ bool has_next=tracker->segment+1<path_segments(path);
+ /* An intermediate parking stop is inside the checked maneuver space. The
+  * selected slot is the terminal only for the last entry segment. */
+ bool parking_cusp=has_next&&(path->space.parking||path->space.exiting);
+ bool captured=terminal_in_window&&stopped_result==LP_PATH_FOUND&&distance(pose,goal)+vehicle->position_error_m<=goal_distance&&
+  distance(stopped,goal)+final_pad<=goal_distance&&fabsf(dw_angle(pose.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
+  fabsf(dw_angle(stopped.yaw-goal.yaw))+vehicle->heading_error_rad<=goal_heading&&
+  (parking_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
+ /* Goal proximity is insufficient while the body still straddles the divider. */
+ if(captured&&live_task.changing)
+  captured=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==live_task.selected_lane_id&&
+   tr_unique_lane(w,stopped,final_pad+c->tracking_guard,c)==live_task.selected_lane_id;
+ /* Only the last selected parking segment has a region terminal. Its actual
+  * correspondence must be in the same movement window; a clipped projection
+  * cannot turn a teleport or an earlier cusp into completed progress. */
+ bool parking_entry=path->space.parking&&!path->space.exiting;
+ bool parking_final=parking_entry&&!has_next;
+ bool intended_gear=!path->execution.present||path->execution.mission.kind!=2||
+  (path->execution.mission.strategy==1&&gear==-1)||(path->execution.mission.strategy==2&&gear==1);
+ if(parking_final)captured=pose_in_window&&intended_gear&&stopped_result==LP_PATH_FOUND&&
+  dp_terminal_accept(&path->space,pose,uncertainty,path->goal,vehicle->heading_error_rad,c)&&
+  dp_terminal_accept(&path->space,stopped,final_pad,path->goal,vehicle->heading_error_rad,c);
  if(captured){
-  tracker->progress=arc_to(path,segment,segment.last_index);tracker->index=segment.last_index;
+  /* Region completion keeps the actual correspondence for State/warm import.
+   * Only point/cusp completion consumes the path endpoint. */
+  if(!parking_final){
+   tracker->progress=geometry?geometry->arc[segment.last_index]:arc_to(path,segment,segment.last_index);
+   tracker->index=segment.last_index;
+  }
   out->steer=steering;out->emergency=true;out->known_distance=known;out->result=LP_STOP;
-  if(tracker->segment+1<path_segments(path)){out->gate_required=true;out->requested_direction=path_segment(path,tracker->segment+1).signed_direction;}
+  if(has_next){out->gate_required=true;out->requested_direction=path_segment(path,tracker->segment+1).signed_direction;}
   tracker->completed++;return LP_STOP;
  }
  if(stopped_result!=LP_PATH_FOUND)return out->result=stopped_result;
  float lookahead=clamp(fabsf(vehicle->velocity_mps)*c->lookahead_time,c->lookahead_min,c->lookahead_max);
- dw_pose target=carrot(path,segment,tracker->progress+lookahead),local=dw_compose(dw_inverse(pose),target);
+ dw_pose target=carrot(path,geometry,segment,tracker->progress+lookahead),local=dw_compose(dw_inverse(pose),target);
  float chord2=local.x*local.x+local.y*local.y;
  if(chord2<1e-8f||gear*local.x<=0)return LP_INPUT;
  out->target_x=local.x;out->target_y=local.y;out->geometric_distance=sqrtf(chord2);out->curvature=2*local.y/chord2;
  float allowed=c->max_steer-vehicle->steering_error_rad,delta=clamp(atanf(c->wheelbase*out->curvature),-allowed,allowed);
+ struct tr_view narrow_view;
+ /* AUTO publishes an episode snapshot even when its state is NONE. */
+ bool ordinary_episode=!path->has_episode||path->episode.core.state==1;
+ bool avoidance_episode=path->has_episode&&path->episode.core.state==2;
+ bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode||live_task.changing)&&
+  !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,&narrow_view);
+ if(narrow||parking_entry){
+  dw_pose reference_pose=carrot(path,geometry,segment,tracker->progress);
+  dw_pose error=dw_compose(dw_inverse(reference_pose),pose);
+  float response=parking_entry?LP_PARKING_TRACK_RESPONSE_M:c->lookahead_min*(.24f/.35f);
+  float feed=tanf(path->points[tracker->index].steering_rad)/c->wheelbase;
+  out->curvature=feed-2*gear*dw_angle(error.yaw)/response-error.y/(response*response);
+  delta=clamp(atanf(c->wheelbase*out->curvature),-allowed,allowed);
+ }
  delta=steering+clamp(delta-steering,-c->steer_rate*dt,c->steer_rate*dt);
  float speed=gear>0?c->max_velocity:c->max_reverse_velocity;
+ if(narrow)speed=fminf(speed,c->narrow_lane_speed_mps);
+ if(parking_entry)speed=fminf(speed,LP_PARKING_TRACK_SPEED_MPS);
  if(fabsf(out->curvature)>1e-6f)speed=fminf(speed,sqrtf(c->max_lateral_accel/fabsf(out->curvature)));
- for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
+ if(geometry){
+  float slope=geometry->max_steer_slope[tracker->segment];
+  if(slope>1e-6f)speed=fminf(speed,c->steer_rate/slope);
+ }else for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
   float ds=distance(path->points[i-1].pose,path->points[i].pose),slope=fabsf(path->points[i].steering_rad-path->points[i-1].steering_rad)/ds;
   if(slope>1e-6f)speed=fminf(speed,c->steer_rate/slope);
  }
  float reaction=fabsf(vehicle->velocity_mps)*c->reaction_s+.5f*c->max_accel*c->reaction_s*c->reaction_s;
+ bool can_creep=parking_final&&remaining>vehicle->position_error_m&&speed>=c->min_control_speed;
  speed=fminf(speed,sqrtf(2*c->max_brake*fmaxf(0,remaining-reaction-vehicle->position_error_m)));
- enum lp_result rc=project(w,pose,vehicle->velocity_mps,steering,gear*speed,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL);
+ if(can_creep)speed=fmaxf(speed,c->min_control_speed);
+ if(path->space.parking&&speed<c->min_control_speed)return out->result=LP_INPUT;
+ enum lp_result rc=project(w,pose,vehicle->velocity_mps,steering,gear*speed,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space,parking);
+ if(rc!=LP_PATH_FOUND&&rc!=LP_COLLISION)return out->result=rc;
+ /* A failed fast sweep can still have a safe slower command. Each candidate
+  * covers reaction and braking, and the acceleration-limited command below
+  * is checked again before publishing. */
+ if((narrow||parking_final)&&rc==LP_COLLISION)for(unsigned i=1;i<=3;i++){
+  float candidate=speed*(1-.25f*i);
+  rc=project(w,pose,vehicle->velocity_mps,steering,gear*candidate,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space,parking);
+  if(rc!=LP_COLLISION){speed=candidate;break;}
+ }
  if(rc!=LP_PATH_FOUND&&rc!=LP_COLLISION)return out->result=rc;
  out->known_distance=known;
  if(rc==LP_COLLISION){
@@ -983,12 +1579,25 @@ enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,co
   float limit=sqrtf(c->max_brake*c->max_brake*c->reaction_s*c->reaction_s+2*c->max_brake*safe)-c->max_brake*c->reaction_s;
   speed=fminf(speed,limit);
  }
- float actual=fabsf(vehicle->velocity_mps),limited=actual+clamp(speed-actual,-c->max_brake*dt,c->max_accel*dt);
+ float actual=fabsf(vehicle->velocity_mps),limited=clamp(speed,fmaxf(0,actual-c->max_brake*dt),actual+c->max_accel*dt);
+ if(path->space.parking&&limited>0&&limited<c->min_control_speed)return out->result=LP_INPUT;
  if(speed<actual-c->max_brake*dt){limited=0;out->emergency=true;}
- rc=project(w,pose,vehicle->velocity_mps,steering,gear*limited,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL);
+ if(rc==LP_PATH_FOUND&&limited==speed){
+  rc=guard(b,m);if(rc==LP_SEARCHING)rc=LP_PATH_FOUND;
+ }
+ else rc=project(w,pose,vehicle->velocity_mps,steering,gear*limited,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space,parking);
  if(rc!=LP_PATH_FOUND){out->steer=steering;out->emergency=true;return out->result=rc;}
  out->velocity=gear*limited;out->steer=delta;out->result=LP_PATH_FOUND;
  tracker->last_velocity=out->velocity;tracker->last_steer=delta;tracker->completed++;return LP_PATH_FOUND;
+}
+enum lp_result lp_track(struct lp_tracker *tracker,const struct lp_path *path,const dw_world *w,dw_pose pose,
+ const dw_vehicle *vehicle,const struct lp_config *c,float dt,struct lp_command *out,struct lp_metrics *m,const struct lp_budget *b){
+ return track_path(tracker,path,NULL,w,pose,vehicle,c,dt,out,m,b,NULL);
+}
+enum lp_result lp_track_prepared(struct lp_tracker *tracker,const struct lp_path *path,const struct lp_tracking_geometry *geometry,
+ const dw_world *w,dw_pose pose,const dw_vehicle *vehicle,const struct lp_config *c,float dt,
+ struct lp_command *out,struct lp_metrics *m,const struct lp_budget *b,struct lp_parking_cache *cache){
+ return track_path(tracker,path,geometry,w,pose,vehicle,c,dt,out,m,b,cache);
 }
 const char *lp_reason(enum lp_result result) {
  static const char *const names[]={"SEARCHING","PATH_FOUND","NORMAL_STOP","SEARCH_NOT_FOUND","NODE_BUDGET",

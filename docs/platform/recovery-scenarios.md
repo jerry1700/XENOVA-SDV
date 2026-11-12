@@ -96,6 +96,12 @@
 | BO2 | 정체 원인 구분 | 진단·기록용 | CPU/thread·I/O·local health 제공. 원인 확정·Worker 행동 연결 전체는 미완료 |
 | BO3 | 출력 변화율 이상 | B3 보조 | Gateway가 명시적 설정으로 연속 제출 목표의 변화율을 제한. 실제 가속도·조향 응답 측정이나 STOP 지연 정책은 아님 |
 
+**warm B2·B4 소비 경계(2026-11-10):** 한 번의 `CALCULATION_FAILED`/`DEADLINE` 보고는 현재 결과·준비를 즉시 제한한다. Gateway는 기존 readiness 300ms 창 안에서 실제 계산 회복을 관찰하며, 마지막 실제 READY 작업과 최초 거절 중 이른 시각을 기준으로 기능 상실을 확인한다. 계산 READY/progress는 신선하지만 명령 전달만 비면 현재 연속 READY 구간의 최초 실제 work 시각과 마지막 유효 ForwardDrive의 원 수신 시각 중 늦은 시각부터 300ms에 기능 상실을 확인한다. 최초 출력 전·정상 계획 대기 후 회복에도 같은 고정 anchor를 사용한다. 반복 거절·연속 READY/감독 보고만으로 각 관찰 창을 늘리지 않는다. 그동안 마지막으로 출력한 원 명령의 수신 시각·세대·유효기간은 유지하고, 원 100ms 수명 종료 뒤 같은 세대의 STOP을 보낸다. 거절된 새 명령의 수신은 이전 출력 수명을 연장하지 않는다.
+
+정상 callback이 완료되고 현재 세대 작업이 계속 진전하는 경로 없음·충돌·탐색 예산·상태/좌표 재준비는 STOP과 AUTO 계획 대기로 처리한다. 별도 C planner owner의 건강은 외곽 callback progress만으로 판정하지 않는다. 진행 중 search/apply는 원 budget 기한, 실제 정상/no-path 완료는 기존 300ms 관측 snapshot으로 확인하고 반복 BUSY/slice가 원 기한을 늘리지 못하게 한다. 실제 owner 정체는 기존 `CALCULATION_FAILED`로 보고한다. STOPPING/RESIDUAL phase는 대기/입력 reason보다 우선한다. 현재 준비된 B가 있으면 확인된 AUTO 기능 상실을 승계하고, 없으면 정지 후 수동 준비·명시적 출발 경계를 따른다. A만 입력을 잃었고 B가 현재 준비돼 있으면 B 승계가 가능하며, 둘 다 AUTO 입력을 제공하지 못하면 정상 로컬 MANUAL을 사용한다. 이 판단은 VM 전체 `UNTRUSTED` 발행이나 VM 재시작을 뜻하지 않는다.
+
+일시 계산/입력 거절은 적용된 경로·상태 사본을 삭제하는 근거가 아니다. 명시적인 `STATE_REJECTED`·`STATE_FRAME_CHANGED`·`STATE_CONFIGURATION_CHANGED`·`STATE_REFERENCE_CHANGED`, 앱/실행 신원 변경 등 실제 무효 사유에서 적용 증거를 철회하며, 사본 유지 자체로 READY·출력 권한을 만들지 않는다. [코드 경로와 로컬 회귀 근거](../verification/drive-result-and-recovery-scope-20261110.md).
+
 ### 메모리 (C): 예방 → 징후 → 발생
 
 | ID | 시나리오 | 대응 | 현재 처리 |

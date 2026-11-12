@@ -35,6 +35,7 @@ class TypedPhysical(MockSink):
     def __init__(self,world):
         super().__init__();self.world=world;self.device=self;self.sequence=0;self.raw=None;self.sample=0
         self.pi=str(uuid4());self.session=str(uuid4());self.gateway=None
+        self.steering_available=True
         self.stationary_policy=StationaryPolicy(10000,30000,200000,.000001,.01,.01,0.,0.)
         self.odometry=SimpleNamespace(config=SimpleNamespace(metres_per_tick=.000001))
     def write(self,frame,at):
@@ -45,11 +46,12 @@ class TypedPhysical(MockSink):
     def measure(self):
         at=int(self.world.t*1e6);self.sample+=2;values=[]
         for n,stamp in ((self.sample-1,at-20000),(self.sample,at)):
-            values.append(schema.VehicleSample(major=1,vehicle='rc-test-1',host_boot=HOST,device_session=self.session,
+            value=schema.VehicleSample(major=1,vehicle='rc-test-1',host_boot=HOST,device_session=self.session,
                 odom_epoch=self.session,sequence=n,source_sample=n,source_us=stamp,pi_sample_us=stamp,clock_error_us=0,
                 left_ticks=0,right_ticks=0,odom_pose=schema.Pose(x=0,y=0,yaw=0),velocity_mps=0,
                 position_error_m=0,heading_error_rad=0,quality=3,calibration='encoder-lab-1',
-                gateway_instance=self.gateway,pi_session=self.pi))
+                gateway_instance=self.gateway,pi_session=self.pi)
+            self.actuator_observation(value);values.append(value)
         self.vehicle=values[-1]
         if not self.sequence:return
         f=self.frame
@@ -57,6 +59,13 @@ class TypedPhysical(MockSink):
         feedback=FEEDBACK3.pack(UUID(self.pi).bytes,UUID(self.session).bytes,self.sequence,f.generation,f.counter,2,2,
             self.sample,self.sample,at,4,0,0,1,bytes(16),0,0,0,0)
         self.raw=MatchedStop(command,feedback,tuple(encode(v) for v in values))
+    def actuator_observation(self,value):
+        """새 plant 표본의 선언된 centered servo 추정. 실물 측정·장치 APPLIED 증거는 아니다."""
+        value.ClearField('measured_steering_rad')
+        if self.steering_available:
+            value.estimated_steering_rad=0.;value.steering_error_rad=.001
+        else:
+            value.ClearField('estimated_steering_rad');value.ClearField('steering_error_rad')
     @property
     def matched_stop(self):return self.raw
     def device_view(self):
@@ -65,7 +74,7 @@ class TypedPhysical(MockSink):
 
 
 class OperatorWorld:
-    def __init__(self,path):
+    def __init__(self,path,*,operation_support=False):
         self.w=WarmWorld(path,mode='MANUAL');self.w.auth.update(manual_hold=True);self.w.arm()
         self.sink=TypedPhysical(self.w);self.client=Client();self.client.identity=SimpleNamespace(agent_instance_id=str(uuid4()))
         self.r=VerifiedGatewayRunner(self.client,self.sink,authority=self.w.auth,bindings=self.w.cache,vm_ids=(A,B),
@@ -74,20 +83,28 @@ class OperatorWorld:
         self.r.drive_link=DriveLinkProvider(self.r,self.io,trust(self.w),self.client.identity.agent_instance_id)
         self.sink.gateway=self.r.drive_link.instance
         self.r.manual_profile=ManualProfile(.1,.08,.3);self.r.guest_clock_policy=GuestClockPolicy(1000,100,1000000,20000,1000000)
+        self.r.operation_support=operation_support;self.r.episode_support=operation_support
         self.r.configure_operator();self.o=self.r.operator;self.w.m.manual_registry=self.o.sources
         self.w.m.durable_write_available=self.r._durable_available
         self.pump(lambda:self.o.ready)
     def view(self):
         # Bare protobuf numeric fields must remain native integers at this internal port.
         v=self.sink.vehicle
-        return dict(vehicle=v.vehicle,host_boot=v.host_boot,device_session=v.device_session,odom_epoch=v.odom_epoch,
+        value=dict(vehicle=v.vehicle,host_boot=v.host_boot,device_session=v.device_session,odom_epoch=v.odom_epoch,
             sequence=v.sequence,source_sample=v.source_sample,source_us=v.source_us,pi_sample_us=v.pi_sample_us,clock_error_us=0,
             left_ticks=0,right_ticks=0,odom_pose=dict(x=0,y=0,yaw=0),velocity_mps=0,position_error_m=0,heading_error_rad=0,quality=3,
             calibration=v.calibration,pi_session=v.pi_session)
+        for key in ('measured_steering_rad','estimated_steering_rad','steering_error_rad'):
+            if v.HasField(key):value[key]=getattr(v,key)
+        return value
     def tick(self):
         self.w.t+=.002;self.w.bind();self.sink.measure()
-        self.sink.device_view=lambda:dict(feedback_supported=True,ready=True,fault=None,pi_session=self.sink.pi,
-            device_session=self.sink.session,vehicle_sample=self.view(),accepted=None,applied=None,physical_stop=None)
+        def measured():
+            value=dict(feedback_supported=True,ready=True,fault=None,pi_session=self.sink.pi,
+                device_session=self.sink.session,vehicle_sample=self.view(),accepted=None,applied=None,physical_stop=None)
+            if hasattr(self,'meter_view'):value.update(self.meter_view())
+            return value
+        self.sink.device_view=measured
         self.o.tick()
     def pump(self,predicate):
         end=time.monotonic()+3
@@ -158,6 +175,28 @@ def test_busy_actual_fsync_does_not_delay_ram_stop_or_query(world,monkeypatch):
     w.pump(lambda:not pending.empty());assert pending.get_nowait()['ok']
 
 
+def test_idle_tick_does_not_scan_retired_stop_ledger(world, monkeypatch):
+    call = world.call('stop')
+    key = call['request_id']
+    assert world.send(call)['ok']
+    world.pump(lambda: world.o._known(key)['terminal'] and key not in world.o.pending)
+    recorded = world.w.auth.path.read_bytes()
+    reads = []
+    rows = world.o._rows
+
+    def observed_rows():
+        reads.append(True)
+        return rows()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(world.o, '_rows', observed_rows)
+        world.tick()
+    assert reads == []
+    assert world.w.auth.path.read_bytes() == recorded
+    assert world.send(call)['data']['original'] == world.o._known(key)['original']
+    assert not world.w.m.output_permitted
+
+
 def test_unconsumed_original_control_ack_cannot_apply_old_generation_readiness(world):
     """실제 저장은 끝났지만 actor callback 전인 창에서 old READY를 섞지 않는다."""
     w=world;m=w.w.m;original_generation=m.generation;done=[]
@@ -213,11 +252,14 @@ def test_parking_issuer_original_search_90s_survives_grant_and_owner_rebind(worl
     assert record['deadline']==issued+120_000_000
     assert record['search_deadline']==min(record['deadline'],issued+90_000_000)
     original=w.o.missions.grant(record)
+    assert original.kind==2 and original.mission_deadline_pi_us>original.issued_pi_us
+    assert decode(encode(original),schema.MissionGrant)==original
     assert original.mission_deadline_pi_us==record['deadline']
     assert original.search_deadline_pi_us==issued+90_000_000
     w.w.t+=.1;w.w.bind()
     rebound=w.o.missions.rebind(record,w.w.m.generation+1,B)
     grant=w.o.missions.grant(rebound)
+    assert grant.kind==2 and (grant.max_execution_travel_m,grant.max_search_travel_m)==(5.,10.)
     assert rebound['owner']==B and rebound['generation']==w.w.m.generation+1
     assert grant.owner_vm==UUID(B).bytes
     assert (rebound['issued'],grant.mission_deadline_pi_us,grant.search_deadline_pi_us)==(

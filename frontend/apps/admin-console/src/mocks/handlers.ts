@@ -26,7 +26,13 @@ import {
 } from '../api/types';
 import { mockBoardDown, setMockBoardDown } from './board';
 import { initialVms, MOCK_PASSWORD, MOCK_USER, TEMPLATES, VM_IDS } from './data';
-import { mockKernelHeapSamples, mockMemoryPoolSamples, mockZephyrNetworkSamples } from './memoryMetrics';
+import {
+  mockAppMemorySamples,
+  mockKernelHeapSamples,
+  mockMemoryPoolSamples,
+  mockZephyrCpuSamples,
+  mockZephyrNetworkSamples,
+} from './memoryMetrics';
 import { mockTelemetryHeartbeat } from './telemetryHeartbeat';
 import { getDisplays, RouteError, scenarioEvents, setRoute, startVm, stopVm, vmStateOf } from './scenario';
 
@@ -178,6 +184,41 @@ const boardUnreachable = () =>
     { code: 'VM_CONTROL_BAD_RESPONSE', message: 'VM 제어 서비스와의 연결 설정이 올바르지 않습니다.' },
     { status: 502 },
   );
+
+/**
+ * Zephyr 스레드 CPU 점유(계측 구간 1초, 단일 코어 기준). VM A(주 구동)는 주행 계산 부하가 있고 VM B(백업)는 대기.
+ * idle 은 남은 시간이라 대기 VM 에서 높게 나온다
+ */
+function mockZephyrThreads(vmId: string) {
+  const busy = vmId === VM_IDS.autonomous;
+  const rows: [string, string, number][] = busy
+    ? [
+        ['2', 'drive_worker', 21.4],
+        ['3', 'telemetry', 3.6],
+        ['4', 'net_rx', 2.4],
+        ['5', 'mqtt_client', 1.8],
+        ['6', 'sysworkq', 0.9],
+        ['1', 'main', 0.2],
+        ['7', 'logging', 0.1],
+        ['8', 'idle', 69.6],
+      ]
+    : [
+        ['2', 'drive_worker', 2.1],
+        ['3', 'telemetry', 3.1],
+        ['4', 'net_rx', 1.2],
+        ['5', 'mqtt_client', 1.4],
+        ['6', 'sysworkq', 0.4],
+        ['1', 'main', 0],
+        ['8', 'idle', 91.8],
+      ];
+  return rows.map(([thread_id, thread_name, cpu_percent]) => ({
+    thread_id,
+    thread_name,
+    name_truncated: false,
+    cpu_percent,
+    unavailable_reason: null,
+  }));
+}
 
 export const handlers = [
   // ---- 인증 ----
@@ -582,7 +623,9 @@ export const handlers = [
         items: [
           ...mockKernelHeapSamples(vmId),
           ...mockMemoryPoolSamples(vmId),
+          ...mockAppMemorySamples(vmId),
           ...mockZephyrNetworkSamples(vmId),
+          ...mockZephyrCpuSamples(vmId),
         ],
       } as unknown as JsonBodyType);
     }
@@ -694,17 +737,7 @@ export const handlers = [
       part_count: zephyr ? 1 : null,
       complete: zephyr,
       conflicting_pages: false,
-      items: zephyr
-        ? [
-            {
-              thread_id: '1',
-              thread_name: 'telemetry',
-              name_truncated: false,
-              cpu_percent: 1.2,
-              unavailable_reason: null,
-            },
-          ]
-        : [],
+      items: zephyr ? mockZephyrThreads(String(params.vmId)) : [],
     });
   }),
 

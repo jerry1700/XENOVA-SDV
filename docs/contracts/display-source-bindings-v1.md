@@ -16,6 +16,25 @@ python -m xenova_display.bindings examples/integration-candidate-bindings.json -
 
 점검기는 네트워크·VM에 접속하지 않으며 `registry_verified: false`를 출력한다. 실제 배치 전에는 UUID와 발행 app_id를 등록 정보 및 담당자와 대조해야 한다.
 
+## 플랫폼의 초기 선택과 명시 교체 — 2026-11-11
+
+일반 VM 등록은 화면 역할을 자동 변경하지 않는다. 동일 Debian 템플릿이 여러 개여도 기존
+interaction UUID를 유지한다. 실제 표시 제공물을 선택한 새 factory만 identity plan의 Debian·A/B를
+초기 binding으로 게시한다. 완료된 설치·재부팅은 운영자 선택을 초기값으로 복원하지 않는다.
+
+root 전용 `xenova-display-setup show`는 선택 UUID만 읽으며 등록/현재 실행을 확인했다고 하지 않는다.
+`select --vm-id NEW --expected-vm-id OLD`는 계획이고 `--execute`가 설정 게시·변경 소비자 재시작이다.
+현재 선택이 OLD 또는 이미 NEW인 재전달만 허용한다. 등록된 Debian의 실제 guest_display 제공물
+receipt가 필요하며, 새 VM을 생성/기동하거나 주행 A/B·Authority를 변경하지 않는다.
+잘못된 역할/후속 UI 설정은 게시 전에 거절한다. 일반 쓰기 오류는 자기 변경을 되돌리며,
+rollback 실패와 서비스 재시작 실패는 unconfirmed다. 후자는 게시된 binding을 보존하고 같은 조건의
+`--execute --restart`로 재확인한다. 전원 단절에 대한 다중 파일 원자성은 없으며 check는
+origin/binding 불일치를 성공으로 반환하지 않는다. CLI 소비자에게 원 journal을 요구하지 않는다.
+
+설정 공급·이번 HTTP 연결·MQTT/Agent/앱의 수신·현재 readiness는 다른 단계다.
+`check --live`의 connected는 feed/relay/guest-data/UI의 HTTP 왕복과 relay 무인증 401만 확인한다.
+정확한 설치·명령·실패/회복 절차는 [제공물 README](../../platform/services/display/router/deploy/guest-display/README.md#표시-담당-선택과-설치-확인)를 따른다.
+
 ## 수신과 표시
 
 | 확인 대상 | 동작 |

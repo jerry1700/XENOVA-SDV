@@ -1,0 +1,284 @@
+"""고정 전파 기준과 현재 정합 자격의 수명을 검산하는 software 반례다.
+
+영상 추출·깊이 입력은 명시 기하 fixture이고 정합·오차 전파는 실제 코어다.
+픽셀 인식·physical FREE·World 발행이나 실물 주행 수락으로 사용하지 않는다.
+"""
+
+from dataclasses import replace
+import math
+import unittest
+from unittest.mock import patch
+
+from xenova_vehicle.perception.calibration import CalibrationProfile
+from xenova_vehicle.perception.depth import DepthEvidence
+from xenova_vehicle.perception.geometry import PointBounds
+from xenova_vehicle.perception.pipeline import PerceptionPipeline
+from xenova_vehicle.perception.tape import TapeGraph
+from xenova_vehicle.mapping.registration import PoseBox, register, transform_point
+
+import test_alignment_flow as fixture_module
+
+
+class AlignmentAnchorTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = fixture_module.AlignmentFlowTests(methodName='runTest')
+        self.fixture.setUp()
+        fields = self.fixture.calibration.to_dict()
+        fields.update(kind='LIVE', vehicle_bundle_sha256='b' * 64)
+        self.fixture.calibration = CalibrationProfile.from_dict(fields)
+        self.limits = dict(localization_valid_for_us=250_000,
+            localization_position_drift_mps=0., localization_yaw_drift_rps=0.)
+
+    def pipeline(self, *, bias=0.):
+        profile = replace(self.fixture.profile, registration=replace(self.fixture.profile.registration,
+            shared_bias_m=bias, shared_bias_rad=bias / 10))
+        return PerceptionPipeline(self.fixture.calibration, profile)
+
+    def execute(self, pipeline, sequence, *, at_us=None, x=0., truth_x=0., yaw=0., truth_yaw=0., error=.00001,
+                tape=True, epoch='odom', clock='clock', limits=None, world_lines=fixture_module.CORNER_GT):
+        at = sequence * 100_000 if at_us is None else at_us
+        value = replace(self.fixture.observation(sequence), kind='LIVE')
+        value = replace(value, **{name: replace(getattr(value, name), stamp=replace(getattr(value, name).stamp,
+            clock_id=clock, captured_us=(at, at), available_us=at)) for name in ('rgb', 'depth')})
+        raw = self.fixture.pose(sequence, x, error=error, epoch=epoch, clock=clock)
+        raw = replace(raw, sample=replace(raw.sample, at_us=at, yaw=yaw, yaw_error_rad=.00001, origin='ODOMETRY'),
+            captured_us=(at, at), bracket_us=(at, at))
+        graph = (self.fixture.graph(world_lines, truth_x) if tape else
+            TapeGraph((), status='UNKNOWN', complete=False, calibration_qualified=True))
+        graph = replace(graph, strips=tuple(replace(strip, points_xy=tuple(
+            transform_point(point, (0., 0., -truth_yaw)) for point in strip.points_xy)) for strip in graph.strips))
+        corners = tuple(transform_point((px - truth_x, py), (0., 0., -truth_yaw))
+            for px in (1.24, 1.26) for py in (.79, .81))
+        hit = PointBounds((min(p[0] for p in corners), min(p[1] for p in corners), .05),
+            (max(p[0] for p in corners), max(p[1] for p in corners), .07), True)
+        depth = DepthEvidence(value.depth.stamp, self.fixture.calibration.sha256, 'LIVE',
+            (hit,), (), 1, 0, 0, 0, 0, 0, True, 'HIT_ONLY')
+        with patch('xenova_vehicle.perception.pipeline.extract_tape', return_value=graph), \
+                patch('xenova_vehicle.perception.depth.analyze_depth', return_value=depth):
+            return pipeline.process(value, pose=raw, now_us=at, **(self.limits if limits is None else limits))
+
+    def seed(self, pipeline, *, limits=None):
+        self.execute(pipeline, 1, limits=limits)
+        self.assertIsNone(pipeline._propagation_anchor)
+        matched = self.execute(pipeline, 2, limits=limits)
+        self.assertEqual(matched.registration.status, 'BOUNDED')
+        self.assertTrue(matched.summary['localization_qualified'])
+        self.assertIs(pipeline._propagation_anchor, pipeline._alignment)
+        return pipeline._propagation_anchor
+
+    def test_stationary_repetition_keeps_anchor_and_nonzero_bias_without_feedback_growth(self):
+        for bias in (0., .001):
+            with self.subTest(bias=bias):
+                pipeline = self.pipeline(bias=bias)
+                anchor = self.seed(pipeline)
+                fields = anchor.fields()
+                errors = []
+                for sequence in range(3, 43):
+                    result = self.execute(pipeline, sequence)
+                    self.assertEqual(result.registration.status, 'BOUNDED')
+                    self.assertTrue(result.summary['localization_qualified'])
+                    self.assertIs(pipeline._propagation_anchor, anchor)
+                    self.assertGreaterEqual(result.registration.position_error_m, bias)
+                    errors.append(result.registration.position_error_m)
+                self.assertEqual(max(errors), min(errors))
+                self.assertEqual(anchor.fields(), fields)
+                self.assertEqual(anchor.observed_j_interval, (200_000, 200_000))
+                self.assertEqual(pipeline._alignment.observed_j_interval, (4_200_000, 4_200_000))
+
+    def test_fixed_total_elapsed_drift_is_independent_of_frame_partition(self):
+        finals = []
+        limits = dict(self.limits, localization_position_drift_mps=.001, localization_yaw_drift_rps=.001)
+        for count in (15, 30, 60):
+            pipeline = self.pipeline()
+            anchor = self.seed(pipeline, limits=limits)
+            for index in range(1, count + 1):
+                at = 200_000 + 900_000 * index // count
+                result = self.execute(pipeline, index + 2, at_us=at, limits=limits)
+                self.assertEqual(result.registration.status, 'BOUNDED')
+                self.assertIs(pipeline._propagation_anchor, anchor)
+            finals.append((result.registration.position_error_m, result.registration.yaw_error_rad))
+        for final in finals[1:]:
+            self.assertAlmostEqual(final[0], finals[0][0], places=12)
+            self.assertAlmostEqual(final[1], finals[0][1], places=12)
+
+    def test_real_current_match_corrects_a_noisy_sample_without_replacing_anchor(self):
+        pipeline = self.pipeline()
+        anchor = self.seed(pipeline)
+        result = self.execute(pipeline, 3, x=.2, truth_x=.1, error=.16)
+        self.assertEqual(result.registration.status, 'BOUNDED')
+        self.assertAlmostEqual(result.summary['mapped_pose'][0], .1, delta=.03)
+        self.assertIs(pipeline._propagation_anchor, anchor)
+
+        current = pipeline._alignment
+        no_match = self.execute(pipeline, 4, at_us=350_000, x=.25, truth_x=.15, tape=False)
+        self.assertIsNone(no_match.registration)
+        self.assertTrue(no_match.summary['quarantined'])
+        self.assertFalse(no_match.summary['localization_qualified'])
+        self.assertIsNone(no_match.summary['mapped_pose'])
+        self.assertIs(pipeline._alignment, current)
+        recovered = self.execute(pipeline, 5, x=.15, truth_x=.15)
+        self.assertEqual(recovered.registration.status, 'BOUNDED')
+        self.assertAlmostEqual(recovered.summary['mapped_pose'][0], .15, delta=.003)
+        self.assertIs(pipeline._propagation_anchor, anchor)
+
+    def test_recent_complementary_lines_reduce_propagation_error_and_move_anchor(self):
+        self.fixture.profile=replace(self.fixture.profile,registration=replace(
+            self.fixture.profile.registration,cell_steps=(.005,.005,.002)))
+        pipeline = self.pipeline()
+        limits = dict(self.limits, localization_position_drift_mps=.031, localization_yaw_drift_rps=.006)
+        original = self.seed(pipeline,limits=limits)
+        self.execute(pipeline,3,at_us=950_000,x=.07,truth_x=.07,limits=limits,
+                     world_lines=fixture_module.CORNER_GT[1:])
+        matched=self.execute(pipeline,4,at_us=1_150_000,x=.11,truth_x=.11,limits=limits,
+                             world_lines=fixture_module.CORNER_GT[:1])
+        self.assertEqual(matched.summary['registration_method'],'MULTI_FRAME')
+        self.assertIs(pipeline._previous_propagation_anchor,original)
+        self.assertIs(pipeline._propagation_anchor,pipeline._alignment)
+        self.assertEqual(pipeline._propagation_anchor.observed_j_interval,(1_150_000,1_150_000))
+        self.assertTrue(matched.summary['localization_qualified'])
+
+    def test_joint_endpoint_match_cannot_shift_a_pose_supported_by_current_observation(self):
+        pipeline = self.pipeline()
+        anchor = self.seed(pipeline)
+        self.execute(pipeline,3,x=.02,truth_x=.02)
+        attempted = []
+
+        def fit(points, reference, prior, profile, **kwargs):
+            result = register(points,reference,prior,profile,**kwargs)
+            if len({point.capture_id for point in points}) == 1:
+                return result
+            attempted.append(points)
+            x,y,yaw = prior.center
+            return replace(result,status='BOUNDED',complete=True,representative=(x+.04,y,yaw),
+                position_error_m=0.,yaw_error_rad=0.,feasible=(PoseBox((x+.04,x+.04),(y,y),(yaw,yaw)),))
+
+        with patch('xenova_vehicle.perception.pipeline.register',side_effect=fit):
+            result = self.execute(pipeline,4,x=.04,truth_x=.04)
+        self.assertTrue(attempted)
+        self.assertEqual(result.registration.status,'BOUNDED')
+        self.assertNotEqual(result.summary['registration_method'],'MULTI_FRAME')
+        self.assertAlmostEqual(result.summary['mapped_pose'][0],.04,places=6)
+        self.assertIs(pipeline._propagation_anchor,anchor)
+
+    def test_unlocalized_frame_keeps_its_original_observation_off_the_reference(self):
+        limits = dict(self.limits,localization_position_drift_mps=.06)
+        pipeline = self.pipeline()
+        self.seed(pipeline,limits=limits)
+        reference = pipeline.reference
+        other_corner = tuple(tuple((x+3.,y) for x,y in line) for line in fixture_module.CORNER_GT)
+        result = self.execute(pipeline,3,at_us=1_200_000,x=3.,truth_x=3.,limits=limits,
+            world_lines=other_corner)
+        self.assertEqual(result.summary['localization_status'],'ODOMETRY_OUT_OF_BOUNDS')
+        self.assertIs(pipeline.reference,reference)
+        frame = pipeline._registration_history[-1]
+        self.assertEqual(frame.capture,result.summary['capture_id'])
+        self.assertEqual(frame.odometry.captured_us,(1_200_000,1_200_000))
+        self.assertTrue(frame.points)
+
+    def test_expiry_requires_a_fresh_match_for_qualification_and_profile_change_cannot_relabel_anchor(self):
+        pipeline = self.pipeline()
+        anchor = self.seed(pipeline)
+        current = pipeline._alignment
+        expired = self.execute(pipeline, 6, tape=False)
+        self.assertFalse(expired.summary['localization_qualified'])
+        self.assertFalse(expired.summary['quarantined'])
+        self.assertEqual(expired.summary['localization_status'], 'ODOMETRY_CONTINUED')
+        self.assertIs(pipeline._alignment, current)
+        self.assertIs(pipeline._propagation_anchor, anchor)
+        fresh = self.execute(pipeline, 7)
+        self.assertTrue(fresh.summary['localization_qualified'])
+        self.assertEqual(pipeline._alignment.observed_j_interval, (700_000, 700_000))
+        self.assertIs(pipeline._propagation_anchor, anchor)
+        current, reference = pipeline._alignment, pipeline.reference
+        changed = self.execute(pipeline, 8,
+            limits=dict(self.limits, localization_position_drift_mps=.001))
+        self.assertTrue(changed.summary['quarantined'])
+        self.assertFalse(changed.summary['localization_qualified'])
+        self.assertIs(pipeline.reference, reference)
+        self.assertIs(pipeline._alignment, current)
+        self.assertIs(pipeline._propagation_anchor, anchor)
+
+    def test_rotation_uses_current_raw_heading_and_keeps_large_coordinate_lever_error(self):
+        pipeline = self.pipeline()
+        anchor = self.seed(pipeline)
+        result = self.execute(pipeline, 3, yaw=.02, truth_yaw=.02)
+        self.assertEqual(result.registration.status, 'BOUNDED')
+        self.assertAlmostEqual(result.summary['mapped_pose'][2], .02, delta=.001)
+        self.assertIs(pipeline._propagation_anchor, anchor)
+        far = self.fixture.pose(4, 10., error=.00001)
+        far = replace(far, sample=replace(far.sample, origin='ODOMETRY', yaw_error_rad=.00001))
+        propagated = anchor.apply(far)
+        lever = 20. * math.sin(anchor.yaw_error_rad / 2)
+        self.assertGreaterEqual(propagated.sample.position_error_m,
+            anchor.position_error_m + far.sample.position_error_m + lever)
+        self.assertEqual(anchor.apply(far), propagated)
+
+    def test_discarded_widthless_path_does_not_hide_other_observed_registration_strips(self):
+        for reasons, usable in ((('NO_MEASURED_TAPE_WIDTH',), True),
+                                (('THINNING_CAP',), False),
+                                (('NO_MEASURED_TAPE_WIDTH','STRIP_COUNT_CAP'), False)):
+            with self.subTest(reasons=reasons):
+                pipeline=self.pipeline()
+                self.seed(pipeline)
+                alignment,reference=pipeline._alignment,pipeline.reference
+                graph=replace(self.fixture.graph(fixture_module.CORNER_GT,0.),
+                    status='UNKNOWN',complete=False,reasons=reasons)
+                with patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=graph):
+                    value=replace(self.fixture.observation(3),kind='LIVE')
+                    raw=self.fixture.pose(3)
+                    raw=replace(raw,sample=replace(raw.sample,origin='ODOMETRY',yaw_error_rad=.00001))
+                    result=pipeline.process(value,pose=raw,now_us=300_000,**self.limits)
+                self.assertEqual(result.tape.status,'UNKNOWN')
+                self.assertFalse(result.tape.complete)
+                if usable:
+                    self.assertEqual(result.registration.status,'BOUNDED')
+                    self.assertEqual(result.summary['registration_method'],'NORMAL')
+                    self.assertIsNot(pipeline._alignment,alignment)
+                    self.assertIsNot(pipeline.reference,reference)
+                else:
+                    self.assertIsNone(result.registration)
+                    self.assertIs(pipeline._alignment,alignment)
+                    self.assertIs(pipeline.reference,reference)
+
+    def test_incomplete_graph_cannot_establish_the_initial_map_alignment(self):
+        pipeline=self.pipeline()
+        graph=replace(self.fixture.graph(fixture_module.CORNER_GT,0.),status='UNKNOWN',
+            complete=False,reasons=('NO_MEASURED_TAPE_WIDTH',))
+        with patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=graph):
+            result=pipeline.process(replace(self.fixture.observation(1),kind='LIVE'),
+                pose=self.fixture.pose(1),now_us=100_000,**self.limits)
+        self.assertIsNone(result.registration)
+        self.assertIsNone(pipeline.reference)
+        self.assertIsNone(pipeline._alignment)
+
+    def test_new_odom_or_clock_context_cannot_inherit_previous_anchor(self):
+        for field in ('epoch', 'clock'):
+            with self.subTest(field=field):
+                pipeline = self.pipeline()
+                anchor = self.seed(pipeline)
+                changed = self.execute(pipeline, 3, **{field: 'new-' + field})
+                self.assertIsNone(pipeline._propagation_anchor)
+                self.assertIsNone(pipeline._alignment)
+                self.assertFalse(changed.summary['localization_qualified'])
+                self.assertEqual(anchor.observed_j_interval, (200_000, 200_000))
+
+    def test_legacy_anchor_cannot_gain_a_configured_drift_policy_from_new_frame(self):
+        pipeline = self.pipeline()
+        self.execute(pipeline, 1, limits={})
+        matched = self.execute(pipeline, 2, limits={})
+        self.assertEqual(matched.registration.status, 'BOUNDED')
+        anchor = pipeline._propagation_anchor
+        self.assertFalse(anchor.has_metadata)
+        current, reference = pipeline._alignment, pipeline.reference
+        result = self.execute(pipeline, 3,
+            limits=dict(self.limits, localization_position_drift_mps=.001))
+        self.assertTrue(result.summary['quarantined'])
+        self.assertFalse(result.summary['localization_qualified'])
+        self.assertIs(pipeline._alignment, current)
+        self.assertIs(pipeline.reference, reference)
+        self.assertIs(pipeline._propagation_anchor, anchor)
+        self.assertFalse(anchor.has_metadata)
+
+
+if __name__ == '__main__':
+    unittest.main()

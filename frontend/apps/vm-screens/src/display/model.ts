@@ -206,12 +206,20 @@ export class SnapshotOrder {
   private sequence = -1;
   private retired = new Set<string>();
   accept(p: Presentation): boolean {
+    return this.classify(p) === 'new';
+  }
+  /**
+   * 새 상태(new)면 기준을 옮긴다. 같은 세대·같은 sequence 재수신은 same(변화 없음),
+   * 더 작은 sequence·은퇴한 세대는 old(이전 세대)로 기준을 바꾸지 않는다.
+   */
+  classify(p: Presentation): 'new' | 'same' | 'old' {
     const { source_epoch: epoch, sequence } = p.state;
-    if (this.retired.has(epoch)) return false;
-    if (epoch === this.epoch && sequence <= this.sequence) return false;
+    if (this.retired.has(epoch)) return 'old';
+    if (epoch === this.epoch && sequence === this.sequence) return 'same';
+    if (epoch === this.epoch && sequence < this.sequence) return 'old';
     if (epoch !== this.epoch && this.epoch !== null) this.retired.add(this.epoch);
     this.epoch = epoch;
     this.sequence = sequence;
-    return true;
+    return 'new';
   }
 }

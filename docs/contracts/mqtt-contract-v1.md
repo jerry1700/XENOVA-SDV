@@ -66,6 +66,7 @@ Python 공통 클라이언트의 내부 `Message.received_monotonic`은 Paho 수
 - 노션 MQTT-06의 AppEventEnvelope는 이 봉투로 합친다: `event_id` → `message_id`, `source_vm_id` → `vm_id`, `source_app_id` → `app_id`, `event_type` → `type`.
 - 백엔드가 에이전트에 보내는 명령(MQTT-04)만 예외다. 공통 필드(`schema_version`, `message_id`, `vm_id`, `type`, `sent_at`)에 명령 전용 필드를 더한 CommandEnvelope를 쓰고, `boot_id`·`agent_instance_id`·`seq` 대신 `expected_boot_id`·`command_id`를 쓴다.
 - `boot_id`나 `agent_instance_id`가 바뀌면 받는 쪽은 그 발행자의 `seq` 기준을 새로 잡는다.
+  - 백엔드의 `agent.heartbeat` 저장은 VM 마다 마지막 보고 하나를 두고, 같은 `agent_instance_id` 면 `seq` 가 더 클 때만, 다른 `agent_instance_id` 면 `sent_at` 이 저장된 값보다 늦을 때만(어느 쪽이든 `sent_at` 이 없으면 받음) 새 보고로 받는다. `boot_id` 는 비교에 쓰지 않는다 — 에이전트는 프로세스마다 새 `agent_instance_id`(UUID)를 만들므로 재부팅도 instance 변경으로 잡힌다. 이전 instance 의 늦게 도착한 보고가 새 instance 를 덮지 않게 하기 위해서다.
 - Zephyr 앱 토픽은 `message_id`에 단조 증가 정수 문자열을 쓸 수 있다. Zephyr MQTT-03은 저장소의 36자 표본 키에 맞춰 메시지별 UUID를 사용한다.
 
 ## 3. VM 에이전트·자원 지표 토픽
@@ -189,7 +190,7 @@ v1 앱과 v2 Publisher는 같은 guest boot여도 서로 다른 instance와 sock
 | 판정 | 주체 | 근거 신호 |
 | --- | --- | --- |
 | 제어권 전환 (자율 ↔ 수동) | **dom0 게이트웨이** (관리 서버와 별도 프로세스) | 활성 앱의 `drive.command` 끊김 100 ms |
-| VM 재시작 | 복구 서비스 | Xen 도메인 상태 + Linux VM은 에이전트 `OFFLINE`, Zephyr VM은 `app.heartbeat`(6.1) 3초 끊김 |
+| VM 재시작 | 복구 서비스 | Xen 도메인 상태 + Linux VM은 `agent.heartbeat` 30초 무수신(백엔드 `OFFLINE` 기준과 같음), Zephyr VM은 `app.heartbeat`(6.1) 15초 무수신 (11.1, 기본값. `XENOVA_RECOVERY_HEARTBEAT_LOST`·`XENOVA_RECOVERY_APP_HEARTBEAT_LOST`) |
 | 최종 정지 | ESP32 | 게이트웨이 시리얼 프레임 끊김 300 ms (와치독) |
 
 - 게이트웨이는 VM을 재시작하지 않고, 복구 서비스는 제어권을 바꾸지 않는다.
@@ -244,6 +245,9 @@ verified payload의 필수 `expected_generation`은 현재 uint32 세대, 선택
 `message_id`는 요청 중복 방지에 사용한다. 과거 세대/게시 문맥·retained 요청·재전달 중복은
 새 승인으로 쓰지 않는다. 재연결 뒤에는 새 control 문맥을 확인한다. 출력 금지 상태의
 MANUAL/AUTO 재무장도 이 요청을 사용하며 legacy의 AUTO_READY 전용 규칙과 구별한다.
+SAFE_STOP 에서도 같은 요청을 받는다: Gateway 가 준비된 수동 VM 을 골라 MANUAL 로 재무장한다
+(`verified.on_resume`). 백엔드는 AUTO_READY·MANUAL·AUTO·SAFE_STOP 에서 요청을 보내고(그 밖의 모드는 409),
+적용할 수 없는 요청은 Gateway 가 이벤트 없이 무시한다 — 202 는 "보냈다"는 뜻이지 재무장 완료가 아니다.
 
 ```json
 {"type":"drive.resume.requested","causation_id":"<현재 control message_id>",
@@ -327,6 +331,14 @@ ESP32가 시리얼로 보낸 상태를 게이트웨이가 바꿔 발행한다. �
 | `obstacles` | array | `[{x, y, w}]` |
 | `stop` | bool | 정지 필요 |
 
+좌표·부호 (v1.8.1 명시. 인지 대역 `platform/apps/perception`, 자율 앱 `autonomous.c`, 시뮬레이터 폐루프 도구, 젯슨 인계(S15P31E110-315)가 이미 이 규칙을 쓴다. 필드·타입은 그대로):
+
+- 원점은 카메라 바로 아래 지면, x 전방·y 왼쪽(오른손 좌표), 단위 m·rad.
+- `lane_offset_m`: 차선 중심에 대한 차의 가로 위치, **+ = 차가 중심보다 왼쪽**.
+- `heading_err_rad`: 차 진행 방향에서 본 0.6 m 앞 차선 중심의 방향, **+ = 차선이 왼쪽으로 돈다** (`steer_rad` + 와 같은 쪽). 곡선의 굽음이 들어간다.
+- `obstacles[]`: `x` 는 장애물이 지면에 닿은 아랫변 가운데까지의 전방 거리, `y` 는 그 가로 위치(왼쪽 +), `w` 는 아랫변 폭. 가까운(x 작은) 순, 최대 8개. 받는 쪽(C `XM_PERCEPTION_MAX_OBSTACLES`)은 앞에서 8개만 쓴다.
+- 자세한 계산과 정지 영역은 [인지 대역 README](../../platform/apps/perception/README.md) "좌표계·단위".
+
 ### 5.5 게이트웨이 수용 규칙
 
 아래는 legacy 수용 규칙이다. verified는 §5.2의 토픽/현재 실행/준비/출력 허가를 함께 적용한다.
@@ -371,7 +383,7 @@ ESP32가 시리얼로 보낸 상태를 게이트웨이가 바꿔 발행한다. �
 
 - 앱 **프로세스**가 살아 있는지와 상태를 알린다. VM 생존은 `agent.heartbeat`(3장), 제어권 전환은 `drive.command` 끊김 100 ms(5장)로 판정하며 이 신호를 쓰지 않는다.
 - 계산 main이 실제 완료를 근거로 생성한다. 별도 통신 worker는 그 보고만 전달하며 관측 시각·완료 순번을 새로 만들지 않는다. 입력 부족은 verified에서 app.readiness로, 계산 실패는 heartbeat error와 준비 오류로 구분한다.
-- 받는 쪽은 3초 동안 못 받으면 그 앱을 끊김으로 표시한다.
+- **표시하는** 받는 쪽(백엔드 주행 상태, 관리 콘솔, 주행 화면)은 3초 동안 못 받으면 그 앱을 끊김으로 표시한다. 복구 서비스의 VM 재시작 판정은 이 표시 기준이 아니라 15초 무수신이다(5.1·11.1). 한 번 밀린 신호로 VM 을 재시작하지 않도록 더 보수적으로 둔다.
 - verified의 `active`는 게스트가 적용한 control에서 자신이 선택됐다는 보고이며 Gateway의 실제 출력 허가가 아니다. 준비·승격은 §6.2를 따른다.
 - Legacy의 에이전트가 없는 Zephyr 주행 VM에서는 이 신호가 앱 쪽 생존 정보다. 복구 서비스의 VM 재시작 판정(5.1)과 게이트웨이의 `AUTO_READY` 판정(5.2)은 Xen 도메인 상태와 이 신호를 쓴다 (시나리오 §8 D8).
 - Linux VM 에서 도는 앱도 같은 토픽·형식으로 보낸다(어떤 앱을 올릴지는 4장 앱 구성에 따른다). 주행과 무관한 앱의 평상시 상태는 `idle` 이다. 에이전트의 `agent.heartbeat`(3장)는 VM·에이전트 생존이고 앱 생존이 아니며, `metrics` 의 `processes[]` 는 CPU 상위 목록이라 앱 생존 근거로 쓰지 않는다.
@@ -430,7 +442,14 @@ mode를 발급하면 해당 새 세대 적용을 다시 확인한다. 상태 있
 | `progress_seq` | 정규 uint64 십진 string, 0..18446744073709551615 | 앱 instance의 실제 계산 완료 순번. 무업무 대기 중 증가하지 않음 |
 | `phase` | WAITING / ACTIVATING / EXECUTING / STOPPING / RESIDUAL | 무업무 대기 / 현재 문맥의 계산 대기 / 계산 실행·결과 관측 / 종료 중 / 정리 미확정 |
 | `readiness` | QUALIFIED / READY / NOT_READY | 사전 대기 자격 / 실제 계산을 확인한 활성화 준비 / 제한 상태 |
-| `reason` | QUALIFIED·READY는 null, NOT_READY는 제한 코드 | 6.2절 코드와 APP_STOPPING·RESOURCE_RETAINED |
+| `reason` | QUALIFIED·READY는 null, NOT_READY는 제한 코드 | 6.2절 코드, APP_STOPPING·RESOURCE_RETAINED, 아래 lattice 계산 코드 |
+
+lattice 계산 코드(공통 펌웨어의 경로 계획·추종 사유. C `xm_app_lifecycle_json`·Python `xenova_mqtt.lifecycle.LATTICE_REASONS` 가 같은 집합을 받는다):
+BUSY, MAP_UNAVAILABLE, WORLD_UNAVAILABLE, POSE_UNAVAILABLE, PATH_UNAVAILABLE, PATH_INVALIDATED,
+OBSERVATION_EXPIRED, CONTEXT_CHANGED, STEERING_UNAVAILABLE, CLOCK_ERROR, SEARCH_NOT_FOUND,
+NODE_BUDGET, WORK_BUDGET, DEADLINE, CANCELLED, NUMERIC_ERROR, COLLISION, PATH_LIMIT,
+STATE_REJECTED, RESOURCE_LIMIT, STATE_FRAME_CHANGED, STATE_CONFIGURATION_CHANGED, STATE_REFERENCE_CHANGED.
+이 코드는 `app.lifecycle` 에만 쓴다. 6.2 `app.readiness` 의 reason 집합은 그대로다.
 
 앞자리 0은 값 0 외에는 허용하지 않는다. 알 수 없는 필드·프로필·enum·이유·자료형은
 거절한다. QUALIFIED는 WAITING과 1 이상의 generation이 필요하다. READY는 EXECUTING과
@@ -499,8 +518,9 @@ Xen crash/absent, Engine 원 attempt·예산·force 승인 경계는 유지한�
 
 현재 backend의 keys-only 생산 경로와 구분하는 선택 계약이다. 공통 C decoder/어댑터와
 warm Gateway에 소비 경로가 있으며 Spring/UI의 실제 세션 생산·모드 독립 공급은 아직
-연결되지 않았다. 기존 `drive.input` type·토픽·QoS 0·retain false·1024 bytes 상한을
-재사용한다. 아래 필드를 모두 사용하고 추가 필드는 거절한다.
+연결되지 않았다. 기존 `drive.input` type·토픽·QoS 0·retain false를 재사용하고, payload는
+1024 bytes 이하다(공통 C 수신기가 이보다 큰 입력을 버린다. 정책 표의 `drive.input` 상한은
+주행 토픽이 아닌 일반 64 KB 그대로다). 아래 필드를 모두 사용하고 추가 필드는 거절한다.
 
 | 필드 | 타입·범위 | 의미 |
 |---|---|---|
@@ -587,17 +607,17 @@ VM 간 메시지 지연은 왕복 시간(RTT)으로 잰다. 일방향 지연이�
 
 | 계정 | publish 허용 |
 | --- | --- |
-| 각 VM 에이전트 | `xenova/v1/vms/{자기 vm_id}/heartbeat·inventory·metrics·command-result` |
-| 앱 VM | `xenova/v1/apps/{자기 app_id}/events` |
-| 젯슨 | `xenova/v1/apps/perception/events` |
-| 게이트웨이 | `xenova/v1/vehicle/control`, `xenova/v1/vehicle/status`, `xenova/v1/apps/vehicle/events` |
-| 공통 Zephyr 직접 MQTT | username=vm_id. `xenova/v1/vms/%u/apps/autonomous/events`와 `.../manual/events`로 앱 이벤트 발행. 토픽과 봉투 VM/app를 대조하고 현재 실행은 root 바인딩으로 확인 |
-| 백엔드 | `xenova/v1/apps/manual/input`, `xenova/v1/vms/{vm_id}/command`, `xenova/v1/console/resume`, `xenova/v1/sim/command` (12장) |
+| 각 VM (username = `vm_id`. Linux 에이전트와 공통 Zephyr 직접 MQTT 가 같은 계정 규칙) | v1 `xenova/v1/vms/{자기 vm_id}/heartbeat`·`inventory`·`metrics`·`command-result`, `xenova/v1/vms/{자기 vm_id}/apps/autonomous/events`·`.../apps/manual/events`(verified 앱 이벤트), `xenova/v1/vms/{자기 vm_id}/drive/link/out`(DriveLink, [drive-world](drive-world/README.md)), `xenova/v1/probes/#`, v2 `xenova/v2/vms/{자기 vm_id}/telemetry/inventory`·`heartbeat`·`metrics`·`events`·`snapshot`. Zephyr 앱 이벤트는 토픽과 봉투 VM/app 를 대조하고 현재 실행은 root 바인딩으로 확인 |
+| legacy 앱 계정 (`autonomous`·`manual`·`interaction`) | `xenova/v1/apps/{자기 app_id}/events`, `xenova/v1/probes/#`. `message-board` 계정은 정책에 남아 있으나 기본 생성하지 않는다(`default: false`) |
+| 젯슨 (`perception`) | `xenova/v1/apps/perception/events`, `xenova/v1/probes/#` |
+| 게이트웨이 (`gateway`) | `xenova/v1/vehicle/control`, `xenova/v1/vehicle/status`, `xenova/v1/vehicle/state.pb`([drive-world](drive-world/README.md)), `xenova/v1/apps/vehicle/events`, `xenova/v1/vms/+/drive/link/in`, `xenova/v1/probes/#` |
+| 백엔드 (`backend`) | `xenova/v1/apps/manual/input`, `xenova/v1/vms/+/command`, `xenova/v1/vms/+/inventory` (VM 삭제 때 retained 지우기, 3장), `xenova/v1/console/resume`, `xenova/v1/sim/command` (12장), `xenova/v1/probes/#` |
 | 시뮬레이터 (`simulator`, 시뮬레이터 구성만) | `xenova/v1/sim/pose`·`sim/world`·`sim/result`. 구독은 `xenova/v1/sim/command` 만. `vehicle.status` 는 게이트웨이 대역으로 `gateway` 계정을 따로 쓴다 (12장) |
-| 각 VM 측정 클라이언트·응답기 | `xenova/v1/probes/#` (자기 `vm_id`가 `source_vm_id`·`target_vm_id`와 맞는 것만) |
-| dom0 Recovery Worker (`dom0-server`) | `xenova/v1/recovery/events`·`xenova/v1/recovery/health/{vm_id}` (11장, ACL 은 `xenova/v1/recovery/#`). 구독(read)은 `xenova/v1/vms/+/heartbeat`, legacy `xenova/v1/apps/+/events`, verified `xenova/v1/vms/+/apps/+/events`(Zephyr `app.heartbeat`, 6.1). 개발 단계의 전체 읽기 허용에 포함되며 계정별 구독 제한(다음 개정)에서도 유지한다. 계정 `dom0-server`와 이 발행·구독 규칙은 `platform/deploy/mosquitto/etc/policy.json`에서 함께 관리하며 개발용 accounts·acl을 생성한다. Worker 는 필터별 구독 승인(SUBACK)에 더해 승인 뒤 실제 수신을 경로의 증거로 삼는다. Mosquitto 는 읽기 ACL 에 막힌 구독도 SUBACK 성공으로 답하고 전달만 거르므로(실보드 확인), 승인만으로는 경로를 믿지 않고 그 경로로 메시지를 받기 전에는 손실을 판정하지 않는다 |
+| VM 별 Telemetry (`telemetry-{vm_id}`) | `xenova/v1/vms/{자기 vm_id}/metrics`, v2 `xenova/v2/vms/{자기 vm_id}/telemetry/inventory`·`heartbeat`·`metrics`·`events`·`snapshot`. 읽기 없음 |
+| 읽기 전용 (`observer`, `telemetry-reference-subscriber`) | 없음. `observer` 는 `xenova/v1/#`, `telemetry-reference-subscriber` 는 `xenova/v2/vms/+/telemetry/+` 만 읽는다 |
+| dom0 Recovery Worker (`dom0-server`) | `xenova/v1/recovery/events`·`xenova/v1/recovery/health/{vm_id}` (11장, ACL 은 `xenova/v1/recovery/#`), `xenova/v1/probes/#`. 구독(read)은 `xenova/v1/vms/+/heartbeat`, legacy `xenova/v1/apps/+/events`, verified `xenova/v1/vms/+/apps/+/events`(Zephyr `app.heartbeat`, 6.1). 개발 단계의 전체 읽기 허용에 포함되며 계정별 구독 제한(다음 개정)에서도 유지한다. 계정 `dom0-server`와 이 발행·구독 규칙은 `platform/deploy/mosquitto/etc/policy.json`에서 함께 관리하며 개발용 accounts·acl을 생성한다. Worker 는 필터별 구독 승인(SUBACK)에 더해 승인 뒤 실제 수신을 경로의 증거로 삼는다. Mosquitto 는 읽기 ACL 에 막힌 구독도 SUBACK 성공으로 답하고 전달만 거르므로(실보드 확인), 승인만으로는 경로를 믿지 않고 그 경로로 메시지를 받기 전에는 손실을 판정하지 않는다 |
 
-브로커 계정·ACL 파일은 [브로커 구성](../../platform/deploy/mosquitto/README.md)(`platform/deploy/mosquitto/etc/acl`)에서 관리한다.
+브로커 계정·ACL 의 원본은 `platform/deploy/mosquitto/etc/policy.json` 이다([브로커 구성](../../platform/deploy/mosquitto/README.md)). 개발용 `etc/accounts`·`etc/acl` 은 이 정책에서 생성한 결과이고, Yocto 브로커(`xenova-mqtt-broker`)도 같은 `policy.json` 을 설치해 계정을 만든다. 위 표는 그 정책을 옮긴 것이며 다르면 정책이 기준이다. 모든 VM·서비스 계정의 `probes/#` 발행은 8장 지연 측정용이다.
 
 - 계정 이름 = 토픽 안의 id: 에이전트는 `vm_id`, legacy 앱은 `app_id`, 젯슨은 `perception`, 그 외 `gateway`·`backend`. 공통 정책에서 계정별 ACL을 생성해 자기 토픽만 허용한다. 전역 pattern으로 v2·읽기 전용 계정에 v1 쓰기를 부여하지 않는다. ESP32는 MQTT에 붙지 않으므로 계정이 없다 (v1.1).
 - `backend`의 읽기 ACL은 `xenova/v1/#`와 `xenova/v2/vms/+/telemetry/+`다. 백엔드가 실제로 구독하는 v2 토픽은 `metrics`와 `heartbeat`다(3장).
@@ -681,7 +701,7 @@ Worker 가 VM 마다 내는 현재 건강이다(주행 명세 3.3 의 게이트�
 
 - 발행자 `source_id`: 시뮬레이터 `simulator`, 백엔드 `dom0-server` (계정 `backend`, 수동 입력·재개 요청과 같음). 봉투·seq 규칙은 2장과 같다.
 - 좌표는 **트랙 고정 좌표**다 (5.4 `perception.result` 의 차량 기준 좌표와 다르다). x·y(m), `yaw` = +x 에서 반시계 rad.
-- 값은 모두 **모의 단위**(m, m/s)다. 화면은 트랙의 `real_m` ÷ 중심선 한 바퀴 길이(약 51)를 곱해 실제 서킷 단위(km, km/h)로 보인다.
+- 값은 모두 **모의 단위**(m, m/s)다. 기존 실제 서킷은 화면에서 `real_m` ÷ 중심선 한 바퀴 길이를 곱해 실제 서킷 단위(km, km/h)로 보인다. 아래 `track.layout`이 있는 Jetson 시험 코스는 이미 m 단위이므로 화면 배율은 1이다.
 
 **`sim.pose`**
 
@@ -714,8 +734,8 @@ Worker 가 VM 마다 내는 현재 건강이다(주행 명세 3.3 의 게이트�
 | --- | --- | --- |
 | `revision` | uint32 | 트랙·장애물·E-stop 이 바뀔 때마다 1 오른다. 시작 1. 시뮬레이터가 다시 시작하면 1 부터 다시 세므로, 받는 쪽은 revision 이 줄어도 새 실행으로 보고 받는다. 시뮬레이터는 정상 종료할 때 retained 를 지운다 |
 | `track` | object | 지금 트랙. 아래 표 |
-| `tracks` | array | 고를 수 있는 트랙 `[{id, name, real_m}]`. 10개: `spielberg`·`monza`·`silverstone`·`spa`·`melbourne`·`hungaroring`·`catalunya`·`mexico`·`bahrain`·`interlagos`. 시작은 `spielberg` |
-| `car` | object | `{length_m, width_m}` 판정에 쓰는 차 몸 크기. `0.42`·`0.20` |
+| `tracks` | array | 고를 수 있는 트랙 `[{id, name, real_m}]`. 기존 서킷 10개에 아래 Jetson 시험 코스 6개를 추가한다. 기본 시작은 계속 `spielberg` |
+| `car` | object | `{length_m, width_m}` 현재 코스의 판정에 쓰는 차 몸 크기. 기존 서킷은 `0.42`·`0.20`, Jetson 시험 코스는 `0.30`·`0.22` |
 | `time_scale` | float | 시뮬레이터 시간 배율 (1 = 실제 시간). 화면이 위치 사이를 이어 그릴 때 곱한다 |
 | `obstacles` | array | `[{id, kind, x, y, w}]` — 종류·가운데 위치(m)·폭(m). 최대 8개 |
 | `estop` | bool | 시연용 E-stop 이 걸려 있음 (`vehicle.status.flags.estop` 도 같이 true) |
@@ -726,14 +746,35 @@ Worker 가 VM 마다 내는 현재 건강이다(주행 명세 3.3 의 게이트�
 | --- | --- | --- |
 | `shape` | string | `centerline` |
 | `id`, `name` | string | 트랙 id·화면 이름 |
-| `real_m` | uint32 | 실제 서킷 한 바퀴 길이 (m). 화면 단위 변환에 쓴다 |
-| `lane_width_m`, `curb_m` | float | 차선 폭 `0.6`, 연석 폭 `0.06`. 연석 끝까지 아스팔트 |
-| `centerline` | array | `[[x, y], …]` 차선 중심선, 약 0.2 m 간격, 닫힌 고리 (진행 방향 순서). 트랙마다 413 ~ 681점 |
+| `real_m` | uint32 | 기존 서킷의 실제 한 바퀴 길이(m). Jetson 시험 코스에서는 모의 중심선 길이를 반올림한 표시용 근삿값이며 화면 배율 계산에 쓰지 않는다 |
+| `lane_width_m`, `curb_m` | float | 기존 서킷은 도로 폭 `0.6`, 연석 폭 `0.06`. Jetson 시험 코스는 같은 방향 두 차로의 **전체 도로 폭** `0.8`(각 `0.4`), 연석 `0` |
+| `centerline` | array | `[[x, y], …]`, 닫힌 고리의 진행 방향 순서. 기존 서킷은 차로 중심선, 약 0.2 m 간격·413 ~ 681점·소수 3자리. Jetson 시험 코스는 두 차로 사이의 분리선, 약 0.05 m 간격·소수 6자리의 공유 생성 좌표 |
 | `wall_left_m`, `wall_right_m` | array | 점마다 중심선에서 왼쪽·오른쪽 벽까지 거리 (m). 연석 밖 ~ 벽 = 잔디·흙. 출발 직선은 잔디 없이 바로 벽, 코너 근처는 보통의 두 배 |
 | `start_index` | uint32 | 출발선이 있는 `centerline` 점 |
+| `layout` | object, 선택 | Jetson 시험 코스의 지면·표시선·초기 배치와 잠정 차량·카메라 가정. 기존 서킷 10개에는 없다. 아래 표 |
 
-- 트랙 모양 출처: TUM racetrack-database (LGPL-3.0, © OpenStreetMap contributors) 중심선을 1/50 로 줄이고 반경 0.8 m 미만 코너만 다듬었다. 벽 거리는 시뮬레이터가 계산해 넣는다 — 받는 쪽은 그대로 쓴다. 관리 콘솔 mock 과 같은 계산이다.
-- `sim.world` 는 가장 긴 스파 기준 약 30 KB (1장 64 KB 이하).
+- 기존 10개는 `spielberg`·`monza`·`silverstone`·`spa`·`melbourne`·`hungaroring`·`catalunya`·`mexico`·`bahrain`·`interlagos`다. TUM racetrack-database (LGPL-3.0, © OpenStreetMap contributors) 중심선을 1/50로 줄이고 반경 0.8 m 미만 코너만 다듬었다. 기존 중심선·벽·payload 값과 기본 `spielberg`는 유지한다.
+- Jetson 코스는 `jetson-demo`·`jetson-r40`·`jetson-r45`·`jetson-r50`·`jetson-r55`·`jetson-r60`이다. 표시명의 반경은 안쪽 차로 중심 기준이며 기본 `jetson-demo`는 사진 근사값 0.4625 m다. 두 차로의 각 폭은 0.285 m이며 여섯 코스 모두 도로 외곽 3.15 m × 2.07 m를 사용한다.
+- `sim.world`는 기존 스파 기준 약 30 KB이며, 새 선택 필드를 포함해 **공통 봉투를 직렬화한 UTF-8 전체가 65,536 bytes 이하**여야 한다. backend는 `world`를 그대로 중계하므로 새 `layout` 때문에 별도 backend DTO를 추가하지 않는다. 선택 필드가 없으면 기존 코스 렌더와 모델을 사용한다.
+
+`track.layout` (좌표 m, x 오른쪽·y 위쪽, yaw는 +x에서 반시계 rad)
+
+| 필드 | 타입 | 의미 |
+| --- | --- | --- |
+| `bounds` | `[x0, y0, x1, y1]` | 화면·카메라의 world 범위. 여섯 코스 모두 `[0, 0, 3.35, 2.27]`, 도로 외곽에는 사방 0.10 m 여백을 둔다 |
+| `lane_count` | uint32 | `2`. 두 차로 모두 중심선 점의 시계 방향 순서를 따른다 |
+| `start_pose` | `[x, y, yaw]` | 여섯 코스 공통 후륜축 초기·다시 출발 pose `[2.39, 0.5275, pi]`. 출발선 중심 `[2.14, 0.385]`의 횡단선에 앞범퍼를 맞춘다 |
+| `paved_areas` | polygon array | `[[[x,y], ...], ...]`. 기본 도로에 추가하는 연결 마당과 주차칸 지면. 이 합집합은 모의 노면·수동 진입·배치 검사 영역이지 AUTO 이동 권한이나 주차 가능성 증명이 아니다 |
+| `paint_lines` | polyline array | `[[[x,y], ...], ...]`. 주차 표시선·연결선. 열린 점열은 자동으로 닫지 않는다. 각 주차칸은 첫 점을 끝에 반복해 네 변을 닫아 표시하며, 입구선은 도색이므로 통행면은 유지한다 |
+| `parking_slots` | object array | `[{id, outline:[[x,y], ...]}]`. 오른쪽 안마당에 y 방향으로 놓인 `P1`, `P2`. 각 칸은 폭 0.30 m·깊이 0.46 m의 사진 근사치이며 오른쪽 도로에 연결한다 |
+| `obstacle_seeds` | object array | `[{id, kind, x, y, w, h}]`. 여섯 코스 공통 `A` 중심 `[1.44, 0.5275]`, `B` 중심 `[1.05, 0.2425]`, `kind="cone"`, 폭·높이 각 0.18 m. 현재 장애물은 `world.obstacles`를 사용한다 |
+| `vehicle` | object | `{length_m:0.30, width_m:0.22, wheelbase_m:0.20, min_turn_radius_m:0.55}`. 앞뒤 axle overhang은 대칭 0.05 m로 둔 미실측 모델 |
+| `camera` | object | `{height_m:0.12, pitch_rad:pi/12, hfov_rad:69*pi/180, mount_x_m:0.20}`. 후륜축 기준 전방 mount, 양의 pitch는 아래 숙임. 카메라 출력 해상도는 기존 설정 유지 |
+| `assumptions` | string | 실측한 도로 외곽과 사진으로 추정한 반경·주차 치수, 잠정 차량·카메라 모델을 설명한다 |
+
+새 코스를 선택하면 해당 차량·카메라 profile과 초기 seed를 적용하고, 기존 서킷으로 돌아가면 원 profile로 복원한다. 초기 실행과 `track.select`는 seed를 배치하지만 장애물을 치운 뒤 `race.start`만 실행해 seed를 복구하지는 않는다. 이 확장은 같은 방향 두 차로와 주차장 표현·수동 진입을 위한 것이며, 장애물 회피 완주·자율주차·실제 MANUAL/AUTO 전환·A/B 교체 성공을 증명하지 않는다.
+
+초기 pose에서 후륜축부터 앞범퍼까지는 0.25 m이고 앞범퍼에서 첫 콘까지는 0.61 m다. 반경 R에 대해 긴 직선은 `2.295 - 2*R`, 짧은 직선은 `1.215 - 2*R` m다. 반경별로 주차칸의 x 좌표를 조정해 도로와 겹치지 않게 배치하고, 연결 마당이 오른쪽 차로와 이어지게 한다.
 
 **`sim.command`**
 
@@ -744,18 +785,19 @@ Worker 가 VM 마다 내는 현재 건강이다(주행 명세 3.3 의 게이트�
 | `obstacle.remove` | `obstacle_id` | 치우기 |
 | `estop` | `engaged` (bool) | E-stop 걸기·풀기 |
 | `push` | `dy_m` | 차를 진행 방향 기준 옆으로 옮긴다 (+ 왼쪽, \|dy_m\| ≤ 0.5). 자율주행이 차선으로 돌아오는지 보이는 시연용 |
-| `track.select` | `track_id` | 트랙 바꾸기. 장애물을 모두 치우고 차를 출발선에 세운다. 출발 신호도 처음부터 |
+| `track.select` | `track_id` | 트랙 바꾸기. 기존 장애물을 치우고 새 코스의 초기 seed가 있으면 적용한 뒤 출발선에 세운다. 출발 신호도 처음부터 |
 | `race.start` | — | 다시 출발. 차를 출발선에 세우고 출발 신호·랩 기록(지난·최고·부정 출발)을 처음부터 |
 
 - 모든 명령에 `request_id`(string)를 넣는다. 시뮬레이터는 명령마다 MQTT-18 `sim.command.result` 를 한 번 낸다. 적용되면 `sim.world`(revision +1)도 다시 낸다 — `push`·`race.start` 는 `sim.pose` 에만 보인다.
 - 모르는 `op`·범위 밖 값은 `ok: false`, `code: INVALID` 로 답한다 (9번째 장애물, \|dy_m\| > 0.5, 없는 `track_id`, 없는 `obstacle_id`).
-- **배치 검사** (`obstacle.add`·`obstacle.move`, 관리 콘솔 mock checkPlacement 와 같은 식·순서). 앞에서부터 처음 걸린 것으로 거부한다. 옮기기는 옛 자리를 빼고 본다.
+- **기존 서킷 10개의 배치 검사** (`obstacle.add`·`obstacle.move`, 관리 콘솔 mock checkPlacement와 같은 식·순서). 앞에서부터 처음 걸린 것으로 거부한다. 옮기기는 옛 자리를 빼고 본다.
   1. `OUT_OF_TRACK`: 장애물이 벽 밖으로 조금이라도 나감 (\|옆 거리\| > 벽 − 폭/2)
   2. `ON_CAR`: 차 몸(길이 0.42·폭 0.20)과 겹침
   3. `NO_GAP`: 장애물 앞뒤(차 길이 + 폭)를 3 cm 마다 보아, 가장 넓은 틈(벽~장애물~벽)이 0.26 m(차 폭 0.20 + 양쪽 0.03) 보다 좁음. `gap_m`·`need_m` 을 채운다
   4. `TOO_DENSE`: 틈은 있지만, 기준 회피 주행(mock 의 자율 규칙: 인지 4 m → 틈 고르기 → pure pursuit·속도 계획)을 장애물 묶음 4.8 m 앞에서 출발시켜 보면 서거나 닿음
   5. `TOO_CLOSE`: 출발 뒤(`race.phase` = `go`)이고 차 바로 앞(−0.3 ~ 4.8 m)이라, 지금 차 상태로 4 를 돌려 봐도 못 지나감
 - 4·5 의 기준 회피 주행은 화면 판정용이다. 지금 자율 앱은 장애물을 피하지 않고 앞에서 선다.
+- **`layout`이 있는 Jetson 시험 코스**는 장애물의 축정렬 전체 box(`w` × `w`)가 기본 도로와 `paved_areas`의 합집합에 포함되는지 검사해 `OUT_OF_TRACK`, 현재 0.30 m × 0.22 m 차체와 겹치면 `ON_CAR`로 거절한다. 네 corner만 안에 있는 것으로 포함을 판정하지 않는다. 기존 단일 서킷용 `NO_GAP`·`TOO_DENSE`·`TOO_CLOSE` 회피 trial은 이 코스에 적용하지 않는다. 배치 수락은 놓을 수 있는 모의 지면이라는 뜻이며 차량이 피하거나 주차할 수 있다는 결과가 아니다. 초기 seed도 이 검사나 회피 trial의 통과 증거로 취급하지 않는다.
 
 **`sim.command.result`** (MQTT-18)
 
@@ -818,6 +860,9 @@ Worker 가 VM 마다 내는 현재 건강이다(주행 명세 3.3 의 게이트�
 | v1.6 (보완) | 2026-11-02 | 12장 WS-06: `sim.command.result` 는 모든 콘솔 연결에 방송, 결과가 REST 202 보다 먼저 올 수 있음을 명시 (구현과 같음, S15P31E110-267). 토픽·payload 는 그대로 |
 | v1.7 | 2026-11-04 | 재개 카운트다운 운영자 취소 (S15P31E110-280): `console/resume` 에 `drive.resume.cancel_requested`(`causation_id`·`expected_generation`·`requested_by`) 추가, `drive.resume.cancelled` reason `operator_cancelled`(모드 유지, 자동 복귀 없음)(5.2 verified, 6장). 6장 표에 그동안 게이트웨이 README 에만 있던 `drive.resume.accepted`·`cancelled` 와 `console/resume` 재개 요청 행을 올림. 기존 토픽·payload·ACL 은 그대로 |
 | v1.8 | 2026-11-04 | 3.2절 데모 명령 규칙 추가 (S15P31E110-123): MQTT-04 payload 필드·범위(`stress` 의 `cpu_workers`·`memory_mib`·`duration_s`), 유효 기간 300초·시계 허용 30초(`CLOCK_UNTRUSTED`), 같은 `command_id`·같은 요청은 재실행 없이 마지막 결과 재전송, 다른 요청은 `IDEMPOTENCY_CONFLICT`, 기록을 남기지 못하면 실행하지 않음(`STATE_UNAVAILABLE`), MQTT-05 상태 흐름과 오류 코드, `agent_exit` 의 종결 결과는 `ACCEPTED` 하나이고 PUBACK 확인 뒤 종료(PUBACK 전 재시작은 이어서 진행), MQTT-05 중복은 백엔드가 `(vm_id, command_id)` 집계 키로 처리(같은 결과 재전달은 무시, `RUNNING` → 종결은 전이, 종결 뒤 다른 종결은 계약 위반). 데모 설정이 꺼진 에이전트는 `DEMO_DISABLED`. 10장 미확정에서 명령 만료 허용 범위 제외 |
+| v1.8.1 | 2026-11-06 | 5.4 `perception.result` 의 좌표·부호(원점·축·`lane_offset_m`·`heading_err_rad` 부호·장애물 기준점·순서·최대 8개)를 구현이 이미 따르는 규칙대로 명시 (S15P31E110-156 후속, -249). 6.3 `app.lifecycle` reason 에 C·Python 이 이미 받는 lattice 계산 코드 23개를 적음. 7.1 의 "기존 1024 bytes 상한" 을 실제(공통 C 수신기 1024 bytes, 정책 표는 64 KB)대로 고침. 필드·타입·토픽은 그대로 |
+| v1.8.2 | 2026-11-06 | 구현에 맞춤: 5.1·6.1 `app.heartbeat` 끊김 기준을 주체별로 구분(표시 3초, 복구 서비스 재시작 15초·Linux 30초), 2장 백엔드 heartbeat 순서 판정(같은 instance 는 `seq`, 다른 instance 는 `sent_at`), 9장 ACL 표를 `policy.json` 기준으로 보완(v2 Telemetry, `drive/link/*`, `vehicle/state.pb`, 계정별 `probes/#`, `telemetry-{vm_id}`·읽기 전용 계정). 토픽·payload 변경 없음 |
+| v1.8.3 | 2026-11-06 | 5.2 verified 재개 요청을 SAFE_STOP 에서도 받는다(Gateway 가 수동 VM 으로 재무장), 백엔드 허용 모드 AUTO_READY·MANUAL·AUTO·SAFE_STOP 명시. 9장 `backend` 쓰기에 `xenova/v1/vms/+/inventory`(VM 삭제 때 retained inventory 지우기, 3장) 추가 — 사용자 결정. 토픽·payload 는 그대로 |
 
 공식 전송 경계 참고: [MQTT 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html)의
 QoS 교환은 메시지 전달을 위한 것이며 앱/장치 적용 확인을 대신하지 않는다.
