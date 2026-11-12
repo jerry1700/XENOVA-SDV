@@ -1937,16 +1937,41 @@ button.chip:hover:not(.chipOn) {
   color: var(--x-recovering);
 }
 /* ---- S15P31E110-438 VM 상세 프로세스·스레드 표: Memory 탭 막대 행 모양 (공용 .table 과 별개) ---- */
+/* 표 위 상태 줄: 한 줄 높이 고정 (경고가 늘어도 표 영역이 밀리지 않게, 넘치면 잘리고 개수는 맨 앞) */
 .detailTableStatus {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--x-space-1) var(--x-space-3);
+  flex-wrap: nowrap;
+  gap: var(--x-space-3);
+  height: var(--x-space-4);
   margin: 0 0 var(--x-space-2);
+  overflow: hidden;
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
+  line-height: var(--x-space-4);
+  white-space: nowrap;
+}
+.detailTableStatus > span {
+  flex: none;
 }
 .detailTableStatus [data-warn] {
   color: var(--x-recovering);
+}
+/* 표 영역: 행 높이를 변수로 고정하고, 접힌 상태 최소 높이 = (표 머리 + VISIBLE_ROWS) 행.
+   --table-rows 는 컴포넌트가 VISIBLE_ROWS + 1 로 넘긴다. 불러오는 중·오류·보고 없음 문구는 이 안 위쪽에 */
+.detailTableFrame {
+  --table-row-h: calc(var(--x-space-2) * 2 + var(--x-space-5));
+  min-height: calc(var(--table-rows) * (var(--table-row-h) + 1px));
+}
+.detailTableFrame > p {
+  margin: 0;
+  padding: var(--x-space-2) 0;
+}
+.detailTableFrame .detailTable tr {
+  height: var(--table-row-h);
+}
+.detailTableFrame .detailTable th,
+.detailTableFrame .detailTable td {
+  line-height: var(--x-space-5);
 }
 /* [이름] [ID·PID] [CPU %] [짧은 CPU 막대] ([메모리 RSS]) — 고정 열 폭(table-layout: fixed)이라 값 길이에 따라 열이 흔들리지 않는다.
    열을 왼쪽에 모아 한 줄이 한 덩어리로 읽히게, 남는 폭은 오른쪽 */
@@ -4486,6 +4511,15 @@ button.chip:hover:not(.chipOn) {
   height: 100%;
   border-radius: inherit;
   background: var(--vm-accent);
+}
+.memUsageDetail {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .memUsageNotice {
   grid-column: 1 / -1;

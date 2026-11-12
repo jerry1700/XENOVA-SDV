@@ -64,11 +64,12 @@ function memoryTelemetry(
       status: 'ok',
       source_rc: 0,
     },
+    // 관리 RAM 요약은 host_provisioned(세 ID 모두 있음) 또는 unbound(모두 없음) 문맥만 믿는다 (domain/managedRam identity)
     context: {
-      binding: 'mock',
+      binding: 'host_provisioned',
       host_boot_id: 'mock-host-boot',
       execution_id: `mock-exec-${vmId}`,
-      receipt_id: null,
+      receipt_id: `mock-receipt-${vmId}`,
     },
   };
 }
@@ -85,6 +86,25 @@ function poolValues(region: 'net_rx_data' | 'net_tx_data', usedBytes: number): M
 const HEAP_INTERVAL_MS = 10_000;
 const HEAP_SAMPLES = 30;
 const HEAP_ACCOUNTED = 48 * 1024;
+
+/**
+ * Zephyr 관리 RAM (memory.firmware.* · memory.page_allocator.free_bytes). 검증 규칙 image ≤ mapped, mapped + free ≤ total 을 지킨다.
+ * 구성: 정적 데이터 200 KiB, 펌웨어 이미지(mapped − image) 약 1.9 MiB, 할당 페이지(committed − mapped) 약 0.5 MiB (VM A 는 조금씩 증가)
+ */
+const RAM_TOTAL = 4 * 1024 * 1024;
+const RAM_STATIC = 200 * 1024;
+const RAM_MAPPED = RAM_STATIC + 1946 * 1024;
+
+function ramValues(busy: boolean, index: number): MetricValue[] {
+  const allocated = 512 * 1024 + (busy ? index * 4 * 1024 : (index % 3) * 4 * 1024);
+  const free = RAM_TOTAL - RAM_MAPPED - allocated;
+  return [
+    metric('memory.firmware.ram_region_bytes', RAM_TOTAL, 'bytes', {}),
+    metric('memory.firmware.mapped_bytes', RAM_MAPPED, 'bytes', {}),
+    metric('memory.firmware.static_data_bytes', RAM_STATIC, 'bytes', {}),
+    metric('memory.page_allocator.free_bytes', free, 'bytes', {}),
+  ];
+}
 
 /**
  * Zephyr 커널 heap 표본(최근 5분, 10초 간격). 실제 Publisher 처럼 memory 계열만 담은 별도 표본이다.
@@ -113,6 +133,7 @@ export function mockKernelHeapSamples(vmId: string, now = Date.now()): MetricSam
         metric('memory.kernel_heap.free_bytes', HEAP_ACCOUNTED - used, 'bytes'),
         metric('memory.kernel_heap.high_water_bytes', highWater, 'bytes'),
         metric('memory.kernel_heap.accounted_bytes', HEAP_ACCOUNTED, 'bytes'),
+        ...ramValues(busy, index),
       ],
     };
   });

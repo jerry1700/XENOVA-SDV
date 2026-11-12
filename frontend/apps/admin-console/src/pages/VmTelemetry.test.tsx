@@ -723,6 +723,97 @@ describe('VM telemetry dashboard', () => {
     expect(ops.getByText('자원 회수 대기')).toHaveAttribute('title', 'RESOURCE_RETAINED');
   });
 
+  // 접힌 표 영역은 상태와 관계없이 같은 틀(표 머리 + VISIBLE_ROWS 행 = 11행 최소 높이) 안에 그린다
+  const frameOf = (inside: Element) => inside.closest('[data-state]')!;
+  const expectFrame = (frame: Element, state: string) => {
+    expect(frame).toHaveAttribute('data-state', state);
+    expect((frame as HTMLElement).style.getPropertyValue('--table-rows')).toBe('11');
+  };
+
+  it.each([
+    ['loading', () => new Promise<Response>(() => {}), '스레드 정보를 불러오는 중…'],
+    ['error', async () => Response.json({}, { status: 500 }), '스레드 정보를 불러오지 못했습니다.'],
+    [
+      'empty',
+      async () => Response.json({ vm_id: VM_IDS.autonomous, received_at: null, items: [] }),
+      '스레드 보고 없음',
+    ],
+  ] as const)('keeps the thread table area height while %s', async (state, reply, message) => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) =>
+      url.endsWith(`/vms/${VM_IDS.autonomous}/threads`) ? reply() : original(url),
+    );
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const text = await screen.findByText(message);
+    expectFrame(frameOf(text), state);
+    // 상태 줄 자리는 비어 있어도 표 영역 위에 그대로 있다
+    expect(frameOf(text).previousElementSibling?.tagName).toBe('P');
+  });
+
+  it.each([
+    ['few rows', 3, 'ok'],
+    ['ten or more rows', 12, 'ok'],
+    ['no rows', 0, 'empty'],
+  ] as const)('keeps the same thread table frame with %s', async (_label, count, state) => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) =>
+      url.endsWith(`/vms/${VM_IDS.autonomous}/threads`)
+        ? Response.json({
+            vm_id: VM_IDS.autonomous,
+            window_ms: 1000,
+            received_at: received,
+            stale: false,
+            threads_status: 'ok',
+            parts_received: 1,
+            part_count: 1,
+            complete: true,
+            conflicting_pages: false,
+            items: Array.from({ length: count }, (_, i) => ({
+              thread_id: String(i + 1),
+              thread_name: `worker_${i + 1}`,
+              name_truncated: false,
+              cpu_percent: i,
+              unavailable_reason: null,
+            })),
+          })
+        : original(url),
+    );
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const status = await screen.findByText(`CPU 높은 순 · ${count}개`);
+    const frame = status.parentElement!.nextElementSibling!;
+    expectFrame(frame, state);
+    expect(frame.querySelector('table')).not.toBeNull();
+    // 상태 줄(개수·경고)은 표 영역 밖 위쪽
+    expect(frame.contains(status)).toBe(false);
+    expect(within(frame as HTMLElement).getAllByRole('row')).toHaveLength(
+      // 표 머리 + 보이는 행 (행이 없으면 "표시할 스레드 없음" 한 줄)
+      count === 0 ? 2 : Math.min(count, 10) + 1,
+    );
+  });
+
+  it.each([
+    ['loading', () => new Promise<Response>(() => {}), '불러오는 중…'],
+    ['error', async () => Response.json({}, { status: 500 }), '프로세스 정보를 불러오지 못했습니다.'],
+  ] as const)('keeps the Linux process table area height while %s', async (state, reply, message) => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) =>
+      url.endsWith(`/vms/${VM_IDS.interaction}/processes`) ? reply() : original(url),
+    );
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const text = await screen.findByText(message);
+    expectFrame(frameOf(text), state);
+  });
+
+  it('keeps the same Linux process table frame with few rows', async () => {
+    fixture();
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const status = await screen.findByText('CPU 높은 순 · 1개');
+    expectFrame(status.parentElement!.nextElementSibling!, 'ok');
+  });
+
   it('sorts threads by CPU, shows ten rows first and expands the rest', async () => {
     const fetch = fixture();
     const original = fetch.getMockImplementation()!;

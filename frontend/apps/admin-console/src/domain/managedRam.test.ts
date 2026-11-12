@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { MetricSample } from '../api/types';
-import { buildManagedRamSeries, managedRamSummary, type ManagedRamIdentity } from './managedRam';
+import {
+  buildManagedRamSeries,
+  formatManagedRamPart,
+  managedRamParts,
+  managedRamSummary,
+  type ManagedRamIdentity,
+  type ManagedRamSummary,
+} from './managedRam';
 import { memoryFixture, ramOracle, wireFixture } from './memoryContractFixtures';
 
 const NOW = Date.parse('2026-11-04T10:00:00Z');
@@ -278,5 +285,52 @@ describe('managed RAM observation lease', () => {
     expect(
       buildManagedRamSeries([report, next], report.vm_id, NOW + 1000, identity(report)).current.percent,
     ).toBe('50.000');
+  });
+});
+
+describe('managed RAM used parts (정적 데이터 · 펌웨어 이미지 · 할당 페이지)', () => {
+  const ok = (total: number, mapped: number, image: number, free: number): ManagedRamSummary => ({
+    status: 'ok',
+    reason: null,
+    totalBytes: String(total),
+    committedBytes: String(total - free),
+    freeBytes: String(free),
+    mappedBytes: String(mapped),
+    imageBytes: String(image),
+    percent: '0.000',
+    sourceStatus: {},
+  });
+
+  it('adds mapped·image bytes to the verified summary and splits it without overlap (parts + free = total)', () => {
+    const summary = managedRamSummary(memoryFixture('ram-committed'));
+    expect(summary).toMatchObject({ status: 'ok', mappedBytes: '4096', imageBytes: '2048' });
+    const parts = managedRamParts(summary)!;
+    const sum = parts.reduce((total, part) => total + part.bytes, 0n) + BigInt(summary.freeBytes!);
+    expect(sum).toBe(BigInt(summary.totalBytes!));
+    // 할당 페이지(committed − mapped)가 0 이라 빠진다
+    expect(parts.map((part) => part.key)).toEqual(['static', 'image']);
+  });
+
+  it('orders parts by size, largest first', () => {
+    const MiB = 1024 * 1024;
+    const parts = managedRamParts(ok(4 * MiB, 2_200_000, 200_000, 1_500_000))!;
+    expect(parts.map((part) => [part.key, Number(part.bytes)])).toEqual([
+      ['image', 2_000_000],
+      ['pages', 4 * MiB - 1_500_000 - 2_200_000],
+      ['static', 200_000],
+    ]);
+  });
+
+  it('shows nothing for unverified, failed or missing values', () => {
+    expect(managedRamParts(managedRamSummary(memoryFixture('ram-mapped-over-total')))).toBeNull();
+    expect(managedRamParts({ ...ok(100, 40, 10, 50), mappedBytes: null })).toBeNull();
+    expect(managedRamParts({ ...ok(100, 40, 50, 50) })).toBeNull();
+  });
+
+  it('formats each part in KiB below 1 MiB and MiB from 1 MiB', () => {
+    expect(formatManagedRamPart(2048n)).toBe('2.0 KiB');
+    expect(formatManagedRamPart(204_800n)).toBe('200.0 KiB');
+    expect(formatManagedRamPart(1_992_294n)).toBe('1.9 MiB');
+    expect(formatManagedRamPart(524_288n)).toBe('512.0 KiB');
   });
 });

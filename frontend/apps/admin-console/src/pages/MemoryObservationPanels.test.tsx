@@ -27,6 +27,9 @@ describe('RAM summary and grouped buffer panels', () => {
     expect(card.getByText('여유')).toBeInTheDocument();
     expect(section.querySelector('[title]')).toBeNull();
     expect(card.queryByText('관측 만료 · 최근 관측값')).not.toBeInTheDocument();
+    // 사용 중 구성 한 줄: 큰 순서, 0 바이트(할당 페이지) 생략, 여유 제외
+    const parts = '정적 데이터 2.0 KiB · 펌웨어 이미지 2.0 KiB';
+    expect(card.getByText(parts)).toBeInTheDocument();
     const timers = vi.getTimerCount();
     act(() => {
       vi.advanceTimersByTime(6001);
@@ -36,10 +39,14 @@ describe('RAM summary and grouped buffer panels', () => {
     expect(card.getByRole('progressbar')).toHaveAttribute('aria-valuetext', '최근 관측 25.0% · 관측 만료');
     expect(card.getByText('25.0%')).toBeInTheDocument();
     expect(card.getByText('관측 당시 여유')).toBeInTheDocument();
+    // 관측 만료 때는 최근 관측값 기준으로 그대로
+    expect(card.getByText(parts)).toBeInTheDocument();
     expect(card.queryByRole('img')).not.toBeInTheDocument();
     act(() => vi.advanceTimersByTime(60_000));
     expect(card.queryByText('25.0%')).not.toBeInTheDocument();
     expect(card.getByText('관리 RAM 관측 만료')).toBeInTheDocument();
+    // 쓸 수 있는 관측값이 없으면 구성 줄도 없다
+    expect(card.queryByText(/정적 데이터|펌웨어 이미지|할당 페이지/)).not.toBeInTheDocument();
     page.unmount();
     expect(vi.getTimerCount()).toBe(timers - 1);
   });
