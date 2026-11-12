@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import {
   CAR,
   carLamps,
@@ -36,6 +36,7 @@ export function ParkedView({
   callouts,
   connected,
   time,
+  audioControl,
   departing = false,
 }: {
   /** 예상 주행 가능 시간 (초, 잔량 센서가 없어 완충 기준 시간 − 주행 시간으로 추정). 모르면 null */
@@ -43,6 +44,7 @@ export function ParkedView({
   callouts: ParkedCallout[];
   connected: boolean;
   time: string;
+  audioControl?: ReactNode;
   /** 차가 막 출발함: 바퀴가 구르고 차가 앞으로 나간다 */
   departing?: boolean;
 }) {
@@ -84,16 +86,7 @@ export function ParkedView({
 
       <footer className={styles.parkedCards}>
         <article className={styles.parkedCard} aria-label="인포테인먼트">
-          <span className={styles.albumArt} aria-hidden="true">
-            ♪
-          </span>
-          <div>
-            <small>VM3 · 인포테인먼트</small>
-            <b>재생 정보 수신 대기</b>
-          </div>
-          <span className={styles.mediaControls} aria-hidden="true">
-            ⏮ ▶ ⏭
-          </span>
+          {audioControl}
         </article>
         <article className={styles.parkedCard} aria-label="경로">
           <span className={styles.routeIcon} aria-hidden="true">
