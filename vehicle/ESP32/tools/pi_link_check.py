@@ -10,6 +10,11 @@ PC 에서 게이트웨이 코드를 돌리는 것이므로 실제 Pi 의 USB 와
   3. DRIVE: Pi 가 1초 동안 20 ms 마다 DRIVE 를 보내고 모두 APPLIED 를 받는다. 보내기를 멈추면 장치가 스스로
      출력을 끊어 속도가 0 이 되고, 이어서 보낸 STOP 으로 다시 정지를 확인한다.
      실보드에서는 --drive 를 줄 때만 한다. 바퀴가 0.2 m/s 로 1초 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다.
+  4. HOLD_STEER: 장치가 정지 조향(capability 0x0400)을 알리면, Pi 가 방향을 바꾸는 자리의 STOP 뒤에 0.5초 동안
+     HOLD_STEER 를 보내고 APPLIED 를 받는다. 바퀴는 돌지 않고 조향이 왼쪽 0.1 rad 로 움직인다. 3 과 같은 때에만 한다.
+     Pi 는 HOLD_STEER 를 내보낼 때마다 정지 확인 창을 다시 검사하고, 통과하지 못한 순간의 것은 내보내지 않는다.
+     그런 것이 하나라도 있으면 실패다. Pi 가 방향 전환을 허락하는 단계(gate state 4)까지 가는지는 판정하지 않고 값만
+     보여 준다. 조향 측정이 없는 장치에서는 그 단계에 이르지 않는다.
 
 펌웨어가 알리는 capability 에 Pi 필수 bit 가 모자라면 Pi 가 HELLO_ACK 를 받지 않는 것을 먼저 확인하고,
 중계가 모자란 bit 를 채워 넣은 채로 1 만 본다. 그것은 부분 호환성 시험이다.
@@ -25,7 +30,7 @@ import socket
 import sys
 import threading
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fb3 import (ACK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, HELLO, HELLO3,
                  HELLO_ACK, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, Peer, Splitter, add_device_arguments,
@@ -41,6 +46,9 @@ DRIVE_MPS = .2              # --drive 로 보내는 DRIVE 의 속도
 DRIVE_S = 1.0               # DRIVE 를 이어 보내는 시간
 DRIVE_PERIOD_S = .02
 DRIVE_LIFE_US = 90000       # DRIVE 하나의 기한
+STATIONARY_STEER = 0x0400   # HELLO_ACK capabilities 가운데 HOLD_STEER 를 받는다는 bit
+HOLD_S = .5                 # HOLD_STEER 를 이어 보내는 시간
+HOLD_RAD = .1               # 그 HOLD_STEER 의 조향. 왼쪽이 +
 # Pi odometry 에 주는 차체 값. 조립 안내서에서 잰 치수 언저리이고 보정한 값이 아니다
 METRES_PER_TICK = .000164
 MAXIMUM_SPEED_MPS = 1.
@@ -238,6 +246,43 @@ def confirm_stop(sink, stop_frame, counter, witness):
     return time.monotonic() - sent if stop_confirmed(sink) else None
 
 
+def cusp_witness(gateway_instance):
+    """방향을 바꾸는 자리의 STOP 에 붙는 문맥. Pi 는 이런 STOP 뒤에만, 같은 문맥의 HOLD_STEER 를 내보낸다"""
+    command = dict(next_direction=-1, calculation_sequence='1', plan_revision='1', phase_revision='1', segment_index=0,
+                   cusp_index=0, mission_id=str(uuid4()), mission_revision='1', grant_revision='1',
+                   driver_session=str(UUID(int=0)), driver_action_seq='0', driver_state_seq='0')
+    return dict(gateway_instance=gateway_instance, vm_id='esp32-link-check', app_id='autonomous', generation=1,
+                direction_intent_admitted=True, command=command)
+
+
+def gate_state(sink, witness):
+    """Pi 가 지금 내놓는 방향 전환 gate 의 state. 4 가 방향 전환을 허락하는 값이다. 내놓지 않으면 None"""
+    machine = type('Machine', (), {'generation': witness['generation']})()
+    gate = sink.direction_witness(witness['vm_id'], witness['app_id'], machine, int(sink.clock() * 1e6))
+    return None if gate is None else gate.gate.state
+
+
+def keep_holding(sink, drive_frame, counter, witness, seconds):
+    """seconds 동안 HOLD_STEER 를 이어 보낸다. witness 의 command_kind 를 보고 Pi 가 HOLD_STEER 로 내보낸다.
+    Pi 가 내보내지 않은 것은 건너뛰고 계속한다.
+    (낸 횟수, 그 가운데 Pi 가 내보낸 수, 내보내지 않은 까닭들, 그동안 본 방향 전환 gate state 들)"""
+    from xenova_gateway.sink import SinkError
+    tried, sent, declined, states = 0, 0, [], set()
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        now = int(sink.clock() * 1e6)
+        try:
+            sink.write(drive_frame(1, (counter + tried) & 255, 0., HOLD_RAD, now, now + DRIVE_LIFE_US, witness),
+                       time.monotonic())
+            sent += 1
+        except SinkError as error:
+            declined.append(str(error))
+        tried += 1
+        poll_until(sink, DRIVE_PERIOD_S, lambda: False)
+        states.add(gate_state(sink, witness))
+    return tried, sent, declined, states
+
+
 def keep_driving(sink, drive_frame, counter, witness, seconds):
     """seconds 동안 DRIVE 를 이어 보낸다. (보낸 수, Pi 가 보내기를 거절한 까닭 또는 None, 그동안 Pi 가 본 가장 큰 속도)"""
     from xenova_gateway.sink import SinkError
@@ -274,7 +319,8 @@ def main():
     parser.add_argument('--seconds', type=float, default=3.0,
                         help='첫 lease 를 받은 뒤 계속 주고받는 시간 (기본 3, 최소 2)')
     parser.add_argument('--drive', action='store_true',
-                        help='실보드에 DRIVE 까지 보낸다. 바퀴가 돈다. 바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
+                        help='실보드에 DRIVE·HOLD_STEER 까지 보낸다. 바퀴가 돌고 조향이 움직인다. '
+                             '바퀴를 띄우고 모터 전원을 넣었을 때만 준다')
     args = parser.parse_args()
     if args.seconds < 2 * LEASE_US / 1e6:
         parser.error('--seconds 는 lease 길이의 두 배(2초) 이상이어야 중간에 끊긴 것이 드러난다')
@@ -400,6 +446,34 @@ def main():
                     check(took is not None, 'DRIVE 뒤의 STOP 으로 Pi 가 다시 정지를 확인함'
                           + (f' ({took:.2f}초)' if took is not None else ''))
                     clean('DRIVE 를 주고받는 동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음')
+
+                    if capabilities & STATIONARY_STEER:
+                        print(f'HOLD_STEER: Pi 가 방향을 바꾸는 자리의 STOP 뒤에 {HOLD_S}초 동안 HOLD_STEER 를 이어 보냄')
+                        counter = 2 + sent
+                        cusp = cusp_witness(witness['gateway_instance'])
+                        took = confirm_stop(sink, StopFrame, counter, cusp)
+                        check(took is not None, 'Pi 가 그 STOP 으로 정지를 확인함' + (f' ({took:.2f}초)' if took is not None else ''))
+                        before = sink.snapshot.get('vehicle_sample')
+                        steer = dict(cusp, command=dict(cusp['command'], command_kind='HOLD_STEER'))
+                        tried, held, declined, states = keep_holding(sink, DriveFrame, counter + 1, steer, HOLD_S)
+                        check(held >= HOLD_S / DRIVE_PERIOD_S * 6 // 10, f'Pi 가 HOLD_STEER {held}개를 내보냄')
+                        check(not declined, f'Pi 가 내보내지 않은 HOLD_STEER 가 없음 ({len(declined)}개'
+                              + (': ' + ', '.join(sorted(set(declined))) if declined else '') + ')')
+                        told = len(applied_commands(relay, 3))
+                        check(told >= held * 9 // 10 > 0, f'장치가 그 가운데 {told}개를 APPLIED 로 알림')
+                        row = sink.hold_row
+                        check(row is not None and row.get('applied'), 'Pi 가 HOLD_STEER 의 APPLIED 보고를 받아들임')
+                        after = sink.snapshot.get('vehicle_sample')
+                        check(before is not None and after is not None
+                              and (before['left_ticks'], before['right_ticks']) == (after['left_ticks'], after['right_ticks']),
+                              'HOLD_STEER 동안 Pi 가 본 엔코더 누계가 그대로임')
+                        seen = ', '.join(str(state) for state in sorted(states, key=lambda state: (state is None, state)))
+                        print(f'      그동안 Pi 의 방향 전환 gate state: {seen} (4 가 방향 전환 허락. 조향 측정이 없으면 '
+                              '이르지 않는다. None 은 정지 확인 창이 통과하지 못한 때)')
+                        took = confirm_stop(sink, StopFrame, counter + 1 + tried, witness)
+                        check(took is not None, 'HOLD_STEER 뒤의 STOP 으로 Pi 가 다시 정지를 확인함'
+                              + (f' ({took:.2f}초)' if took is not None else ''))
+                        clean('HOLD_STEER 를 주고받는 동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음')
             print('      ' + transcript(relay))
         finally:
             sink.close()

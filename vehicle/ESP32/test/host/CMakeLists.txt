@@ -64,6 +64,9 @@ if(WIN32)
   target_link_libraries(sim_link PRIVATE winmm)
 endif()
 add_test(NAME esp32_link_bench COMMAND ${Python3_EXECUTABLE} ${TOOLS}/link_bench.py --sim $<TARGET_FILE:sim_link>)
+add_test(NAME esp32_steer_check COMMAND ${Python3_EXECUTABLE} ${TOOLS}/steer_check.py --sim $<TARGET_FILE:sim_link> --hold 0.1)
+add_test(NAME esp32_steer_check_stationary
+         COMMAND ${Python3_EXECUTABLE} ${TOOLS}/steer_check.py --sim $<TARGET_FILE:sim_link> --hold 0.1 --stationary)
 
 # 점검 도구가 답이 끊기거나 검증한 것이 없을 때 통과로 끝나지 않는지 가짜 장치로 본다
 add_test(NAME esp32_tools COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_tools.py)
