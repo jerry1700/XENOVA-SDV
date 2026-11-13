@@ -1259,6 +1259,52 @@ class Execution:
                              **({'rollback_error':rollback_error} if rollback_error else {})}) from storage_error
         return settled
 
+    def _complete_replayed_stop(self, record, previous, intent, run, observation, deadline):
+        """늦은 정상 종료를 같은 의도와 작업에 귀속한다. 물리 명령은 보내지 않는다."""
+        if self.p.process_isolation or (run or {}).get('process_scope'):
+            from xenova_guest_process import cleanup
+            try:
+                cleanup(self.p, record, run, deadline, observe_only=True)
+            except (PlatformError, OSError, ValueError) as error:
+                raise ExecutionError('RECONCILE_REQUIRED', 'domain absent but owned process cleanup is unconfirmed; no signal sent',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                             'cause_type':type(error).__name__}) from error
+
+        self.checkpoint('stop-reconcile-before-guard', previous)
+        path = self._path(self.data, 'control-requests', previous['operation_id'])
+        with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
+            if (self.p.boot_id_reader() != self.host
+                    or self.lifecycle(record) != ('REGISTERED', previous['lifecycle_generation'])
+                    or self.intent(record) != intent or self.run_record(record) != run or self.read(path) != previous
+                    or intent.get('desired_state') != 'stopped' or intent.get('intent_revision') != previous['intent_revision']
+                    or intent.get('accepted_host_boot_id') != self.host
+                    or intent.get('lifecycle_generation') != previous['lifecycle_generation']
+                    or observation['intent_revision'] != previous['intent_revision']):
+                refuse('TARGET_CHANGED', 'stop reconciliation context changed before completion')
+            settled = {**previous, 'events':list(previous['events']), 'error':None,
+                       'result':{'accepted':True, 'observation':observation, 'intent_revision':previous['intent_revision']}}
+            if previous['error'] is not None:
+                settled['reconciliation'] = {'outcome':'late_stop_confirmed', 'metadata_only':True,
+                                              'original_error':previous['error']}
+            try:
+                if run and run.get('phase') != 'stopped':
+                    self.end_run(record)
+                self.save_request(settled, 'completed')
+            except OSError as error:
+                # A failed parent sync may leave a visible rename. Restore the
+                # uncertain record so a read cannot mistake it for confirmed completion.
+                try:
+                    if self.read(path) == settled:
+                        self.write(path, previous)
+                except (PlatformError, OSError, ValueError):
+                    raise ExecutionError('RECONCILE_REQUIRED', 'stop completion and journal restore are unconfirmed',
+                        details={'operation_id':previous['operation_id'], 'replayed':True,
+                                 'completion':'uncertain', 'stage':'completion'}) from error
+                raise ExecutionError('RECONCILE_REQUIRED', 'stop completion could not be durably reconciled',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                             'completion':'uncertain', 'stage':'completion'}) from error
+        return settled['result']
+
     def _reconcile_expired_control_launch(self, record, previous, intent, run, observed, deadline):
         """만료된 원 실행의 부재와 정확한 scope 종료를 확인한다."""
         from xenova_guest_process import cleanup, scope_name
@@ -1516,6 +1562,10 @@ class Execution:
             if not confirmed:
                 refuse("RECONCILE_REQUIRED", "physical control result is uncertain; command not repeated",
                        details={"operation_id":previous["operation_id"], "replayed":True})
+            if action == 'stop':
+                result = self._complete_replayed_stop(record, previous, intent, run, observation, readonly_end)
+                return {'operation_id':previous['operation_id'], 'replayed':True,
+                        'original_result':result, 'diagnostic_warnings':diagnostics}
             if action in ('start', 'reboot') and not bound_reboot:
                 self.p.cpu().require(record, readonly_end, expected=previous.get('cpu_policy', {'configured':False}),
                                      present=True, expected_identity=observation)
@@ -1525,7 +1575,7 @@ class Execution:
                     self.write(self._path(self.runtime, 'executions', record['uuid']), run)
                     row = {k:observation[k] for k in ('domid', 'xen_state', 'xen_state_flags')}
                     observation = self.publish_observation(record, row, observation['xen_unique_id'], readonly_end)
-            if action in ("stop", "destroy"):
+            if action == "destroy":
                 if self.p.process_isolation:
                     from xenova_guest_process import cleanup
                     try:

@@ -90,7 +90,7 @@ def kill_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Response:
     response_class=Response,
     responses={
         200: {"model": ControlOperation, "description": "Idempotency-Key 가 있을 때: 원 작업 완료(재전달 포함)"},
-        202: {"model": ControlOperation, "description": "Idempotency-Key 가 있을 때: 정지 의도를 내구 수락했고 실행이 남음. 같은 키로 재전달·조회"},
+        202: {"model": ControlOperation, "description": "Idempotency-Key 가 있을 때: 정지 의도를 내구 수락했고 원 기한 안에 실행이 남음. 같은 키로 재전달·조회"},
         204: {"description": "키 없음: 정지 완료. 키 유무와 무관하게 등록이 없으면 정지 목표 달성(작업 기록 없음)"},
         400: _ERR,
         409: _ERR,

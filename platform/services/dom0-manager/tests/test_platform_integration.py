@@ -523,6 +523,43 @@ def test_shutdown_timeout_reports_confirmation_and_original_id(client, board, ke
     assert len(shutdowns(board)) == 1
 
 
+@pytest.mark.parametrize("key", [None, "late-stop"])
+def test_late_shutdown_is_settled_by_replaying_the_original_stop(client, board, key):
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    board.platform.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+    board.xen.hang_shutdown = True
+    path = f"/api/v1/vms/{UBUNTU}/stop"
+    headers = {"Idempotency-Key": key} if key else {}
+    failed = client.post(path, headers=headers)
+    assert failed.status_code == 503, failed.text
+    operation_id = failed.json()["context"]["operation_id"]
+    journal = board.data / "control-requests" / f"{operation_id}.json"
+    before = json.loads(journal.read_text())
+    intent = board.data / "control" / f"{UBUNTU}.json"
+    original_intent = intent.read_bytes()
+    if key:
+        present = client.post(path, headers=headers)
+        assert present.status_code == 503 and present.json()["context"]["status"] == "uncertain"
+    board.xen.rows.clear()  # Xen fixture: the already-issued shutdown takes effect after its deadline.
+    read = client.get(f"/api/v1/vms/{UBUNTU}/operations/{operation_id}", params={"action": "stop"})
+    assert read.json()["status"] == "uncertain"
+    assert json.loads(journal.read_text()) == before
+    recovered = client.post(path, headers=headers)
+    assert recovered.status_code == (200 if key else 204), recovered.text
+    if key:
+        assert (recovered.json()["operation_id"], recovered.json()["status"]) == (operation_id, "completed")
+        assert lookup(client, UBUNTU, key).json()["status"] == "completed"
+    after = json.loads(journal.read_text())
+    assert after["phase"] == "completed"
+    assert after["reconciliation"]["original_error"] == before["error"]
+    assert all(after[field] == before[field] for field in (
+        "operation_id", "idempotency_key", "request_hash", "intent_revision", "deadline_monotonic_ms",
+    ))
+    assert intent.read_bytes() == original_intent and len(shutdowns(board)) == 1
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "destroy"]]
+
+
 def test_real_keyed_stop_replay_lookup_and_conflict(client, board):
     first = keyed_stop(client, UBUNTU, "stop-ubuntu-1", **{"X-Request-Budget-Ms": "20000"})  # 실제 Manager 가 budget_ms 를 받는다
     assert first.status_code == 200, first.text
@@ -542,6 +579,85 @@ def test_real_keyed_stop_replay_lookup_and_conflict(client, board):
     conflict = keyed_stop(client, DEBIAN, "stop-ubuntu-1")  # 같은 키를 다른 VM 에
     assert conflict.status_code == 409 and conflict.json()["platform_code"] == "IDEMPOTENCY_CONFLICT"
     assert lookup(client, UBUNTU, "never-sent").status_code == 404
+
+
+def test_lost_stop_response_can_be_recovered_after_retirement(client, board):
+    stopped = keyed_stop(client, UBUNTU, "stop-before-archive")
+    assert stopped.status_code == 200, stopped.text
+    assert client.delete(f"/api/v1/vms/{UBUNTU}").status_code == 204
+    operation_id = lookup(client, UBUNTU, "stop-before-archive").json()["operation_id"]
+    count = len(board.xen.calls)
+    replayed = keyed_stop(client, UBUNTU, "stop-before-archive")
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["operation_id"] == operation_id
+    assert replayed.json()["status"] == "completed"
+    assert len(board.xen.calls) == count and len(shutdowns(board)) == 1
+
+
+def test_completed_stop_replay_requires_verified_storage(client, board):
+    stopped = keyed_stop(client, UBUNTU, "completed-before-storage-error")
+    assert stopped.status_code == 200, stopped.text
+    with patch.object(vm, "storage_check", side_effect=OSError("test storage unavailable")):
+        replay = keyed_stop(client, UBUNTU, "completed-before-storage-error")
+    assert replay.status_code == 503, replay.text
+    assert replay.json()["context"]["status"] == "uncertain"
+    assert replay.json()["context"]["operation_id"] == stopped.json()["operation_id"]
+    assert len(shutdowns(board)) == 1
+
+
+@pytest.mark.parametrize("lock_still_held", [False, True])
+def test_expired_pending_stop_does_not_return_202_again(client, board, lock_still_held):
+    from contextlib import nullcontext
+    from xenova_runtime import operation_lock
+
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    with operation_lock(board.run):
+        pending = keyed_stop(client, UBUNTU, "expires-before-dispatch")
+    assert pending.status_code == 202, pending.text
+    now[0] += 91.
+    with operation_lock(board.run) if lock_still_held else nullcontext():
+        response = keyed_stop(client, UBUNTU, "expires-before-dispatch")
+    assert response.status_code == 504, response.text
+    body = response.json()
+    assert body["platform_code"] == "DEADLINE_EXCEEDED"
+    assert body["operation"]["execution_deadline_expired"] is True
+    assert body["context"]["operation_id"] == pending.json()["operation_id"]
+    assert lookup(client, UBUNTU, "expires-before-dispatch").json()["execution_deadline_expired"] is True
+    assert shutdowns(board) == []
+
+
+def test_keyed_stop_can_be_found_during_an_in_flight_http_response(client, board):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    entered, release = Event(), Event()
+
+    def hold_command(argv, *args, **kwargs):
+        if argv[:2] == ["xl", "shutdown"]:
+            entered.set()
+            assert release.wait(5)
+        return board.xen(argv, *args, **kwargs)
+
+    board.platform.command = hold_command
+    key = "response-still-in-flight"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        original = pool.submit(keyed_stop, client, UBUNTU, key)
+        try:
+            assert entered.wait(5)
+            with pytest.raises(TimeoutError):
+                original.result(timeout=.01)
+            pending = lookup(client, UBUNTU, key)
+            assert pending.status_code == 200, pending.text
+            body = pending.json()
+            assert (body["phase"], body["status"]) == ("executing", "pending")
+        finally:
+            release.set()
+        assert original.result(timeout=5).status_code == 200
+    recovered = keyed_stop(client, UBUNTU, key)
+    assert (recovered.status_code, recovered.json()["status"]) == (200, "completed")
+    assert recovered.json()["operation_id"] == body["operation_id"]
+    assert len(shutdowns(board)) == 1
 
 
 def test_real_keyed_stop_is_accepted_while_a_long_operation_holds_the_execution_lock(client, board):

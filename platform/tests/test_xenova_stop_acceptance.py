@@ -323,6 +323,55 @@ class StopAcceptanceTest(unittest.TestCase):
             self.f.ok(self.f.call('stop',key='cleanup-uncertain-stop'))
         self.assertEqual(len(self.f.physical('shutdown')),count)
 
+    def test_late_stop_does_not_complete_if_new_intent_wins_before_final_write(self):
+        self.f.start()
+        self.xen.hang_shutdown=True
+        first=self.f.call('stop',key='old-late-stop')
+        self.f.fails(first,'RECONCILE_REQUIRED')
+        self.xen.rows.clear()
+        path=self.p.data/'control-requests'/(first['operation_id']+'.json')
+        before=path.read_bytes()
+        other=self.m.fork()
+        newer=[]
+
+        def supersede(phase, _):
+            if phase=='stop-reconcile-before-guard':
+                newer.append(other.call('stop',{'vm_id':self.f.vm_id},idempotency_key='newer-stop'))
+
+        self.p.execution_checkpoint=supersede
+        replay=self.f.call('stop',key='old-late-stop')
+        self.f.fails(replay,'TARGET_CHANGED')
+        self.assertEqual(replay['error']['details']['completion'],'superseded')
+        self.f.fails(newer[0],'OPERATION_IN_PROGRESS')
+        self.assertEqual(self.p.execution().intent(self.r)['accepted_operation_id'],newer[0]['operation_id'])
+        self.assertEqual(path.read_bytes(),before)
+        self.assertEqual(len(self.f.physical('shutdown')),1)
+
+    def test_late_stop_keeps_original_uncertain_when_completion_sync_fails(self):
+        self.f.start()
+        self.xen.hang_shutdown=True
+        first=self.f.call('stop',key='late-stop-sync')
+        self.f.fails(first,'RECONCILE_REQUIRED')
+        self.xen.rows.clear()
+        path=self.p.data/'control-requests'/(first['operation_id']+'.json')
+        before=path.read_bytes()
+        write=execution.Execution.write
+
+        def fail_after_publish(owner, target, value):
+            write(owner,target,value)
+            if target==path and value['phase']=='completed':
+                raise OSError('injected directory sync failure after completion rename')
+
+        with patch.object(execution.Execution,'write',fail_after_publish):
+            replay=self.f.call('stop',key='late-stop-sync')
+        self.f.fails(replay,'RECONCILE_REQUIRED')
+        self.assertEqual(replay['error']['details']['completion'],'uncertain')
+        self.assertEqual(path.read_bytes(),before)
+        final=self.f.call('stop',key='late-stop-sync')
+        self.f.ok(final)
+        self.assertEqual(final['operation_id'],first['operation_id'])
+        self.assertEqual(len(self.f.physical('shutdown')),1)
+
     def test_outer_wait_timeout_does_not_cancel_or_duplicate_original_operation(self):
         self.f.start();spec=self.f.spec()
         entered,release=threading.Event(),threading.Event()

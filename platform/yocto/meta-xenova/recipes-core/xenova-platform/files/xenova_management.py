@@ -1061,7 +1061,7 @@ class Manager:
         return data
 
     def _accept_stop(self, spec, key, deadline, context):
-        """긴 실행 잠금 없이 짧게 의도를 수락한다. 정상 완료 응답을 만들지는 않는다."""
+        """긴 실행 잠금 없이 원 완료를 확인하거나 정지 의도를 수락한다."""
         execution = self.p.execution()
         receipt = {}
         prevalidation=execution._prevalidate_requests(deadline)
@@ -1069,9 +1069,27 @@ class Manager:
         try:
             with short_lock(self.p.runtime, 'admission', deadline=admission_end,
                             clock=self.p.clock, sleep=self.p.sleep), span('manager.stop_admission'):
+                request = {'vm_id':spec['vm_id'],'action':'stop','force':bool(spec.get('force',False))}
+                previous = next((q for q in execution._requests_prevalidated(prevalidation,deadline=admission_end)
+                                 if key is not None and q['idempotency_key']==key),None)
+                if previous:
+                    if previous['request']!=request or previous['vm_id']!=spec['vm_id']:
+                        fail('IDEMPOTENCY_CONFLICT','control key has a different request')
+                    if previous['phase']!='prepared':
+                        context.update(operation_id=previous['operation_id'],replayed=True,stop_intent=previous,stop_key=key)
+                    if (previous['phase']=='completed' and previous['error'] is None
+                            and isinstance(previous['result'],dict) and previous['result'].get('accepted') is True):
+                        try:vm.storage_check(self.data)
+                        except (OSError,PlatformError,ValueError):
+                            fail('STORAGE_UNAVAILABLE','original stop storage could not be verified',
+                                 details={'completion':'uncertain','stage':'completion'})
+                        context['completed_stop_replay']=previous
+                        return previous
                 records = self.p.records(validate_assets=False)
                 tomb = self._state(spec['vm_id'], records)
                 if tomb['lifecycle'] != 'REGISTERED':
+                    if previous:
+                        fail('TARGET_CHANGED','original stop target is no longer registered')
                     fail('VM_PURGED' if tomb['lifecycle']=='PURGED' else 'INVALID_SPEC','VM is not registered')
                 record = tomb['record']
                 guard_asset(self.p, record['uuid'])
@@ -1079,9 +1097,7 @@ class Manager:
                     fail('TARGET_CHANGED', 'stop acceptance host changed')
                 if any(q['vm_id']==record['uuid'] and creation.holds(self,q) for q in self._operations()):
                     fail('OPERATION_IN_PROGRESS','asset operation owns stop target',retryable=True)
-                request = {'vm_id':record['uuid'],'action':'stop','force':bool(spec.get('force',False))}
                 intent = execution.intent(record)
-                previous = next((q for q in execution._requests_prevalidated(prevalidation,deadline=admission_end) if key is not None and q['idempotency_key']==key),None)
                 if key is None and intent and intent['desired_state']=='stopped':
                     candidate=execution.read(execution._path(execution.data,'control-requests',intent['accepted_operation_id']))
                     if candidate and candidate['request']==request and candidate['phase'] in ('prepared','accepted','executing','uncertain'):
@@ -1089,8 +1105,6 @@ class Manager:
                 if previous:
                     context.update(operation_id=previous['operation_id'],replayed=True)
                     context['stop_key']=previous['idempotency_key']
-                    if previous['request']!=request:
-                        fail('IDEMPOTENCY_CONFLICT','control key has a different request')
                     if (previous['phase']!='prepared' or
                             (intent and intent['accepted_operation_id']==previous['operation_id'])):
                         context['stop_intent']=previous
@@ -1953,6 +1967,10 @@ class Manager:
             if tomb['lifecycle']!='REGISTERED':
                 fail('VM_PURGED' if tomb['lifecycle']=='PURGED' else 'INVALID_SPEC','VM is not registered')
             record=tomb['record']
+            if context.get('completed_stop_replay'):
+                op=context['completed_stop_replay']
+                return self._control_view(tomb, {'original_result':op['result'],'replayed':True},
+                                          min(deadline,entered+15))
             if action in ('autostart-set', 'board-shutdown-set', 'config'):
                 self._writable()
             with tool_output():
@@ -2266,6 +2284,9 @@ class Manager:
             response.update(ok=True,data=result)
         except ManagementError as exc:
             response['error']=exc.error
+            if (action=='stop' and context.get('stop_intent') and exc.error['code']=='VM_NOT_FOUND'):
+                response['error']={'code':'TARGET_CHANGED','message':'original stop target is no longer registered',
+                                   'retryable':False,'details':{}}
         except ExecutionError as exc:
             response['error'] = exc.error
             context['observation_error_handled'] = getattr(exc, 'observation_error_handled', False)
@@ -2295,27 +2316,45 @@ class Manager:
             response['error']={'code':'CLEANUP_INCOMPLETE' if cleanup else 'RECOVERY_REQUIRED' if context['operation_id'] else 'ARTIFACT_INVALID',
                                'message':type(exc).__name__+': management operation could not be completed',
                                'retryable':cleanup,'details':{'operation_id':context['operation_id']} if cleanup else {}}
+        if not response['ok'] and context.get('completed_stop_replay'):
+            # 현재 등록을 읽지 못해도 먼저 확인한 과거 완료는 그대로 돌려준다.
+            op=context['completed_stop_replay']
+            response.update(ok=True,error=None,data={'vm':None,'current_observation':None,'original_result':op['result'],
+                'diagnostic_warnings':[{'code':'DIAGNOSTIC_UNAVAILABLE','sink':'current-observation',
+                                        'cause_type':response['error']['code']}]})
         if (not response['ok'] and context.get('stop_intent')
                 and context['stop_intent']['phase']!='prepared'):
             op=context['stop_intent']
             try:
-                latest=self.p.execution().read(self.p.execution()._path(self.data,'control-requests',op['operation_id']))
-                current=self.p.execution().read(self.data/'control'/(op['vm_id']+'.json'))
+                execution=self.p.execution()
+                latest=execution.read(execution._path(self.data,'control-requests',op['operation_id']))
+                current=execution.read(self.data/'control'/(op['vm_id']+'.json'))
                 superseded=bool(current and current.get('accepted_operation_id')!=op['operation_id'])
+                same_host=execution.host==op['host_boot_id']
             except (OSError,PlatformError,ValueError):
-                latest=current=None;superseded=False
+                latest=current=None;superseded=same_host=False
             phase=latest['phase'] if latest else None
-            pending=current is not None and not superseded and phase in ('accepted','executing')
-            completion='pending' if pending else phase if phase in ('completed','failed') else 'uncertain'
             recorded_deadline=op.get('deadline_monotonic_ms')
-            expired=self.p.clock()*1000>=recorded_deadline if type(recorded_deadline) is int else None
-            response['error']['details'].update(accepted=True,completion='superseded' if superseded else completion,
+            expired=self.p.clock()*1000>=recorded_deadline if same_host and type(recorded_deadline) is int else None
+            pending=(same_host and current is not None and current.get('desired_state')=='stopped' and not superseded
+                     and current.get('intent_revision')==op['intent_revision']
+                     and current.get('lifecycle_generation')==op['lifecycle_generation']
+                     and response['error']['code'] not in ('TARGET_CHANGED','VM_PURGED','INVALID_SPEC')
+                     and (phase=='accepted' or (phase=='executing' and expired is not True)))
+            details=response['error']['details']
+            completion=('uncertain' if details.get('completion')=='uncertain' else
+                        'pending' if pending else phase if phase in ('completed','failed') else 'uncertain')
+            if (completion=='pending' and phase=='accepted' and expired is True
+                    and response['error']['code']=='OPERATION_IN_PROGRESS'):
+                response['error'].update(code='DEADLINE_EXCEEDED',message='original stop execution deadline expired',
+                                         retryable=False)
+            details.update(accepted=True,completion='superseded' if superseded else completion,
                 operation_id=op['operation_id'],intent_revision=op['intent_revision'],phase=phase,
                 host_boot_id=op['host_boot_id'],lifecycle_generation=op['lifecycle_generation'],
                 deadline_monotonic_ms=recorded_deadline,
                 execution_deadline_expired=expired,
-                next_action=('inspect_original_operation_and_explicitly_request_stop_if_still_present' if pending and expired is not False else
-                             'replay_original_stop_after_execution_lock_is_available' if pending else
+                next_action=('inspect_original_operation_and_explicitly_request_stop_if_still_present' if completion=='pending' and expired is True else
+                             'replay_original_stop_after_execution_lock_is_available' if completion=='pending' and expired is False else
                              'inspect_original_operation_and_current_intent'))
         if not response['ok'] and context.get('control_completed'):
             response['error']['details'].update(accepted=True,completion='completed',stage='completion',

@@ -543,6 +543,8 @@ def control_operation_from_envelope(envelope: dict[str, Any], *, vm_id: UUID, ac
         next_action = next_action if next_action in _STOP_NEXT_ACTIONS else None
     if action == "stop" and completion == "completed":
         status = ControlStatus.completed
+    elif action == "stop" and completion == "superseded" and code == "TARGET_CHANGED":
+        status = ControlStatus.superseded
     elif phase == "uncertain" or completion == "uncertain" or code == "RECONCILE_REQUIRED":
         status = ControlStatus.uncertain  # completion=pending 이어도 자동 재시도 가능한 접수로 바꾸지 않는다
     elif completion == "superseded":
@@ -828,7 +830,8 @@ class PlatformDriver(Driver):
         if not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "VM_NOT_FOUND":
             return None
         operation = control_operation_from_envelope(envelope, vm_id=vm_id, action="stop", key=key)
-        if envelope.get("ok") or operation.status == ControlStatus.pending:
+        if envelope.get("ok") or (operation.status == ControlStatus.pending
+                                  and operation.execution_deadline_expired is not True):
             return operation
         raise_for_envelope(envelope, context=f"stop {vm_id}", operation=operation, action="stop")
         return None  # raise_for_envelope 는 ok 가 아니면 반드시 예외를 낸다

@@ -354,16 +354,18 @@ API 문서 경로(`/docs`·`/redoc`·`/openapi.json`)는 **기본으로 열지 �
 | 응답 | `status` | 의미·호출자가 할 일 |
 |---|---|---|
 | `200` | `completed` | 원 작업 완료. 같은 키 재전달이어도 같은 `operation_id` 이고 물리 동작을 반복하지 않는다 |
-| `202` | `pending` | 정지 의도를 내구 수락했고 실행이 남음. 같은 키·같은 요청으로 다시 보내면 원 작업을 이어 간다(자동 실행 daemon 은 없다). `execution_deadline_expired: true` 면 원 기한이 지나 재전달해도 새 물리 동작을 하지 않으니, 원 작업과 현재 VM 을 확인한 뒤 새 키로 명시적인 stop 을 보낸다 |
+| `202` | `pending` | 정지 의도를 내구 수락했고 실행이 남음. 같은 키·같은 요청으로 다시 보내면 원 기한 안에서 이행할 수 있다. 조회에서 `execution_deadline_expired: true`가 확인되면 원 요청의 물리 실행 권한은 만료됐다 |
 | `204` | — | 등록이 없어 정지 목표 달성(작업 기록 없음) |
 | `409 InvalidState` + `operation.status=superseded` | `superseded` | 이후 사용자 의도(새 start 등)가 수락돼 이 요청이 대체됨. 원 결과로 현재 VM 상태를 덮지 않는다 |
 | `503` + `operation.status=uncertain` | `uncertain` | 플랫폼이 결과를 확정하지 못함(`RECONCILE_REQUIRED`·`phase=uncertain`). **자동 재시도·새 키·force 로 우회하지 않는다.** 조사 대상 |
-| `5xx` + `operation.status=failed` | `failed` | 수락 뒤 실행 실패. 수락된 의도(`stopped`)는 되돌리지 않는다. 정지 대기 만료는 `504` |
-| 오류 + `operation.status=rejected` | `rejected` | 수락 전 거절(예: 수락 잠금 혼잡 `503 retryable`). 의도는 바뀌지 않았다 |
+| `504 DriverTimeout` + `execution_deadline_expired: true` | 원 접수 기록 유지 | 실행 전에 원 기한을 넘김. 이행을 다시 시작하지 않으며 원 ID와 기한을 보존한다 |
+| `5xx` + `operation.status=failed` | `failed` | 수락 뒤 실행 실패 확정. 수락된 의도(`stopped`)는 되돌리지 않는다 |
+| 오류 + `operation.status=rejected` | `rejected` | 수락 전 거절이 확인됨. 수락 잠금 혼잡으로 원 키까지 확인하지 못했다면 `unknown`으로 반환한다 |
 | 오류 + `operation.status=unknown` | `unknown` | 수락 저장을 확인하지 못함. 미수락으로 추측하지 않고 같은 키로 조회(4.8)한다 |
 
 - 같은 키를 다른 VM·다른 요청(force 등)에 쓰면 충돌(`409`, `platform_code=IDEMPOTENCY_CONFLICT`)이다. 키는 VM 마다 독립인 이름표가 아니라 플랫폼 제어 기록 전체에서 비교된다.
-- 응답을 잃으면(시간 초과·연결 끊김) **같은 키로 조회(4.8)** 하거나 같은 키로 다시 보낸다. 새 키로 반복하지 않는다. 읽기 시간 초과는 하위 작업 취소가 아니다.
+- 응답을 잃으면(시간 초과·연결 끊김) **같은 키로 조회(4.8)** 하거나 같은 키로 다시 보낸다. 이후 보관됐어도 확인된 과거 완료의 원 ID는 회수할 수 있다. 이 응답은 현재 VM 상태와 별개다.
+- 종료 명령 뒤 결과가 `uncertain`이면 조회는 원 기록을 그대로 반환한다. 명시적으로 같은 키로 다시 제출하면 기존 host·수명 세대·정지 의도에서 Xen 부재와 소유 프로세스 종료를 확인해 원 작업을 마감할 수 있다. 같은 실행이 남거나 새 의도가 들어오면 기존 종료 명령을 반복하지 않는다. 원 기한과 최초 오류는 보존한다.
 - mock·xen 드라이버는 작업 기록이 없어 동기 정지 뒤 `200 completed`(`operation_id: null`)로 답하고 조회는 `501` 이다.
 
 작업 상태 객체 (`ControlOperation`)
