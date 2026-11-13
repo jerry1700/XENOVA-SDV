@@ -289,6 +289,18 @@ def test_short_unblocked_lane_goal_does_not_require_bypass_settling_length(libra
     finally: library.engine_free(handle)
 
 
+@pytest.mark.parametrize(('x', 'expected'), [(4.90, 5.60), (5.40, 5.80), (5.75, 5.9999)])
+def test_live_lane_goal_relaxes_end_clearance_only_for_short_remaining_arc(library, x, expected):
+    ports(library)
+    product = Product(library, modern_world())
+    try:
+        goal = (C.c_float*3)()
+        assert library.probe_task_goal(product.handle, 1, x, 1.2, 2.0, goal) == FOUND
+        assert goal[0] == pytest.approx(expected, abs=1e-5)
+    finally:
+        product.close()
+
+
 @pytest.mark.parametrize('state', ['free', 'occupied', 'unknown'])
 def test_short_interpolated_lane_uses_full_swept_grid(library, state):
     world = modern_world()

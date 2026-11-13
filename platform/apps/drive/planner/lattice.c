@@ -455,8 +455,10 @@ enum lp_result lp_task_goal(const dw_world *w,const struct tr_intent *task,dw_po
  const dw_point *points;unsigned count;
  if(!w||!out||!reference(w,task,&points,&count)||!dw_pose_finite(pose)||!isfinite(horizon)||horizon<=0||!isfinite(end_clearance)||end_clearance<0)return LP_INPUT;
  struct lp_road_state road;enum lp_result rc=lp_task_project(w,task,pose,&road);if(rc!=LP_PATH_FOUND)return rc;
- /* Keep the target axle just inside the lane slice. Only the actual grid needs the body reserve. */
- float lane_end_reserve=tr_live_follow(w,task)?1e-4f:end_clearance;
+ /* Preserve the terminal clearance on a long slice. On a short live slice,
+  * give it up only as needed to leave one clearance length for forward motion. */
+ float lane_end_reserve=end_clearance;
+ if(tr_live_follow(w,task))lane_end_reserve=fminf(end_clearance,fmaxf(1e-4f,road.length-road.arc-end_clearance));
  if(road.length<=lane_end_reserve)return LP_INPUT;
  float goal=fminf(road.length-lane_end_reserve,road.arc+horizon),total=0;
  float width=w->width*w->resolution_m,height=w->height*w->resolution_m;
