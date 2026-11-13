@@ -46,6 +46,9 @@ Pi는 World의 차로 경계를 받아 계획과 충돌 검사에 쓴다. Jetson
 양쪽 경계가 관측됐을 때는 관측한 위치가 유지된다. Pi의 `front`·`rear`·`half_width`·
 `wheelbase`는 같은 차체에서 생성한 설정을 읽는다.
 
+흰선 폭과 추가 돌출 허용치는 차체 경계 검사에 사용한다. 좁은 차로 추종은 도착 차로의
+폭과 차체 여유로 선택한다. `narrow_lane_speed_mps`는 선택적으로 지정하는 추종 속도 상한이다.
+
 `margin`은 선택한 시험 profile에서 고정하는 차체 여유다. `tracking_guard`는 실제 추종 오차에
 대해 별도로 조절하는 절대 거리(m)다. 둘 다 `course-clearance-narrow-test.json`에서
 정하고 아래 절차로 새 개발 번들을 생성한다. 각 빌드에서는 기본 여유를 고정한다.

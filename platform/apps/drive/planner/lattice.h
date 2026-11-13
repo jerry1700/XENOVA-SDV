@@ -26,7 +26,7 @@ struct lp_config {
  primitive_speed,primitive_duration,pose_age_us,live_age_us,cell_age_ms,
  deviation_cost,curvature_cost,switch_cost,plan_horizon,heuristic_weight,heading_weight,tracking_guard,goal_straight_m;
  float max_reverse_velocity;
- /* Zero tape allowance leaves the standard lane follower selected. */
+ /* Tape controls boundary geometry. Zero narrow-lane speed disables its speed cap. */
  float lane_tape_half_width_m,lane_tape_overhang_m,narrow_lane_speed_mps;
  float avoid_travel_m,avoid_progress_m,avoid_pass_margin_m,avoid_heading_rad,avoid_steering_rad;
  float parking_goal_distance,parking_goal_heading,parking_seed_inward_m,parking_yaw_seed_rad,min_control_speed;

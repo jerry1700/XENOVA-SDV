@@ -867,6 +867,10 @@ static float guide_curvature(const struct lane_guide *g,dw_pose pose,float respo
  return correction+(length>1e-5f?dw_angle(g->heading[nearest+1]-g->heading[nearest])/length:0);
 }
 
+static float lane_response(const struct lp_config *c){
+ return c->lookahead_min*(.24f/.35f);
+}
+
 enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_world *w,dw_pose start_pose,
  float steer,float speed,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
  const struct tr_basis *basis,struct lp_metrics *metrics){
@@ -898,7 +902,7 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  path->count=1;
  float radius=hypotf(fmaxf(c->front,c->rear),c->half_width);
  /* A lateral transfer needs room to straighten after crossing the divider. */
- float response=task->changing?fmaxf(c->lookahead_min,2*c->wheelbase):c->lookahead_min*(.24f/.35f);
+ float response=task->changing?fmaxf(c->lookahead_min,2*c->wheelbase):lane_response(c);
  for(unsigned i=0;i<count;i++){
   float k=guide_curvature(&guide,pose,response);
   float next=clamp(atanf(c->wheelbase*k),-c->max_steer,c->max_steer);
@@ -1274,8 +1278,7 @@ static enum lp_result project(const dw_world *w,dw_pose pose,float current_veloc
  if(current_velocity*velocity<0)return LP_INPUT;
  float maximum=fmaxf(c->max_velocity,c->max_reverse_velocity);
  struct tr_view view;
- bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||
-  (lp_lane_boundary_allowance_m(c)>0&&narrow_lane(w,task,c,&view)));
+ bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||narrow_lane(w,task,c,&view));
  float interval=fminf(tight?.01f:.025f,c->resolution/(4*fmaxf(maximum,.01f)));
  float time=0,v=current_velocity,delta=current_steer;*known=0;
  float horizon=c->reaction_s+fmaxf(fabsf(v),fabsf(velocity))/c->max_brake+.1f;
@@ -1578,19 +1581,18 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
  bool ordinary_episode=!path->has_episode||path->episode.core.state==1;
  bool avoidance_episode=path->has_episode&&path->episode.core.state==2;
  bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode||live_task.changing)&&
-  !path->space.parking&&!path->space.exiting&&!path->has_route&&lp_lane_boundary_allowance_m(c)>0&&
-  narrow_lane(w,&live_task,c,&narrow_view);
+  !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,&narrow_view);
  if(narrow||parking_entry){
   dw_pose reference_pose=carrot(path,geometry,segment,tracker->progress);
   dw_pose error=dw_compose(dw_inverse(reference_pose),pose);
-  float response=parking_entry?LP_PARKING_TRACK_RESPONSE_M:c->lookahead_min*(.24f/.35f);
+  float response=parking_entry?LP_PARKING_TRACK_RESPONSE_M:lane_response(c);
   float feed=tanf(path->points[tracker->index].steering_rad)/c->wheelbase;
   out->curvature=feed-2*gear*dw_angle(error.yaw)/response-error.y/(response*response);
   delta=clamp(atanf(c->wheelbase*out->curvature),-allowed,allowed);
  }
  delta=steering+clamp(delta-steering,-c->steer_rate*dt,c->steer_rate*dt);
  float speed=gear>0?c->max_velocity:c->max_reverse_velocity;
- if(narrow)speed=fminf(speed,c->narrow_lane_speed_mps);
+ if(narrow&&c->narrow_lane_speed_mps>0)speed=fminf(speed,c->narrow_lane_speed_mps);
  if(parking_entry)speed=fminf(speed,LP_PARKING_TRACK_SPEED_MPS);
  if(fabsf(out->curvature)>1e-6f)speed=fminf(speed,sqrtf(c->max_lateral_accel/fabsf(out->curvature)));
  if(geometry){
