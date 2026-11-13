@@ -4861,6 +4861,40 @@ button.chip:hover:not(.chipOn) {
 .scenarioIntro p {
   margin: 0;
 }
+.scenarioAction {
+  display: grid;
+  flex: 0 0 270px;
+  gap: var(--x-space-2);
+}
+.scenarioAction > label {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+}
+.scenarioAction > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--x-space-2);
+}
+.scenarioAction input {
+  width: 100%;
+  min-width: 0;
+  padding: var(--x-space-2) var(--x-space-3);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-1);
+  color: var(--x-text);
+  font: inherit;
+}
+.scenarioAction input:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 2px;
+}
+.scenarioAction small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
 .scenarioIntro h2 {
   margin-top: var(--x-space-1);
   font-size: var(--x-text-xl);
@@ -4936,6 +4970,62 @@ button.chip:hover:not(.chipOn) {
 .drivingVm h3,
 .drivingVm p {
   margin: 0;
+}
+.inputVm {
+  display: grid;
+  gap: var(--x-space-2);
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-md);
+  background: var(--x-surface-sunken);
+}
+.inputVm[data-active='true'] {
+  border-color: var(--x-primary);
+  box-shadow: 0 0 0 1px var(--x-primary);
+}
+.inputVm[data-fault='true'] {
+  border-color: var(--x-fault);
+  background: color-mix(in srgb, var(--x-fault) 7%, var(--x-surface-1));
+}
+.inputVm > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.inputVm > div:first-child b {
+  color: var(--x-primary);
+}
+.inputVm h3,
+.inputVm p,
+.inputVm dl,
+.inputVm dd {
+  margin: 0;
+}
+.inputVm p {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.inputVm dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-2);
+  padding-top: var(--x-space-2);
+  border-top: 1px solid var(--x-border);
+}
+.inputVm dl div {
+  display: grid;
+  gap: 2px;
+}
+.inputVm dt {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.inputVm dd {
+  overflow: hidden;
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  text-overflow: ellipsis;
 }
 .drivingVm p {
   color: var(--x-text-muted);
@@ -5030,5 +5120,8 @@ button.chip:hover:not(.chipOn) {
   .scenarioIntro {
     align-items: stretch;
     flex-direction: column;
+  }
+  .scenarioAction {
+    flex-basis: auto;
   }
 }

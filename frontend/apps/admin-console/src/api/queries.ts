@@ -203,6 +203,17 @@ export function useStartActiveDriveAutoDelay() {
   });
 }
 
+export function useStartAutoInputUnavailable(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AutoInputUnavailableRequest) =>
+      request<AutoInputUnavailableCommand>(
+        `/api/v1/vms/${encodeURIComponent(vmId)}/faults/auto-input-unavailable`,
+        { method: 'POST', body },
+      ),
+  });
+}
+
+
 export function useStartAgentExit(vmId: string) {
   return useMutation({
     mutationFn: () =>

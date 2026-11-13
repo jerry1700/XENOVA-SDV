@@ -6,6 +6,8 @@ import { ApiError } from '../api/client';
 import { DemoPage, failureText } from './DemoPage';
 
 const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const inputFault = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const inputStatus = vi.hoisted(() => ({ data: undefined as unknown }));
 const autoDelay = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const driveState = vi.hoisted(() => ({ activeId: 'vm-a', mode: 'AUTO' as string, age: 100 }));
 /** 명령 상태 조회 결과 (기본: 응답 전) */
@@ -34,7 +36,8 @@ vi.mock('../api/queries', () => ({
   }),
   useStartVmCrash: () => vmCrash,
   useStartActiveDriveAutoDelay: () => autoDelay,
-  useCommandStatus: () => commandStatus,
+  useStartAutoInputUnavailable: () => inputFault,
+  useCommandStatus: (vmId: string) => (vmId === 'vm-a' && inputStatus.data ? inputStatus : commandStatus),
   useEvents: () => ({ data: { items: [] } }),
 }));
 vi.mock('../layout/DriveContext', () => ({
@@ -187,5 +190,82 @@ describe('장애 시연 2', () => {
     fireEvent.click(screen.getByRole('button', { name: /시연 2/ }));
     expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
     expect(screen.getByText('자동주행 중에만 연산 지연 시연을 시작할 수 있습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('장애 시연 3', () => {
+  beforeEach(() => {
+    inputFault.mutate.mockReset();
+    commandStatus.data = undefined;
+    driveState.activeId = 'vm-a';
+    driveState.mode = 'AUTO';
+    driveState.activeApp = 'autonomous';
+    driveState.age = 100;
+    driveState.inputReason = null;
+  });
+
+  function selectScenario() {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 3/ }));
+  }
+
+  it('지속 시간을 조절하고 확인 후 현재 활성 VM에만 명령을 보낸다', () => {
+    selectScenario();
+    const duration = screen.getByRole('spinbutton', { name: '장애 지속 시간' });
+    fireEvent.change(duration, { target: { value: '50' } });
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    expect(screen.getByText(/한 대의 AUTO 계산 입력만 50초/)).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '50초 장애 발생' }));
+    expect(inputFault.mutate).toHaveBeenCalledWith(
+      { duration_s: 50 },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  it('허용 범위를 벗어난 지속 시간과 AUTO가 아닌 상태를 차단한다', () => {
+    selectScenario();
+    fireEvent.change(screen.getByRole('spinbutton', { name: '장애 지속 시간' }), {
+      target: { value: '121' },
+    });
+    expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
+    expect(screen.getByText('장애 지속 시간은 1초부터 120초까지 입력해 주세요.')).toBeInTheDocument();
+  });
+
+  it('INPUT_UNAVAILABLE와 AUTO를 유지한 VM 승계를 표시한다', () => {
+    inputFault.mutate.mockImplementation(
+      (_: unknown, options?: { onSuccess?: (value: Record<string, unknown>) => void }) =>
+        options?.onSuccess?.({
+          command_id: 'input-command',
+          submitted_at: new Date().toISOString(),
+          duration_s: 50,
+        }),
+    );
+    const { rerender } = render(
+      <ToastProvider>
+        <MemoryRouter>
+          <DemoPage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+    const again = () =>
+      rerender(
+        <ToastProvider>
+          <MemoryRouter>
+            <DemoPage />
+          </MemoryRouter>
+        </ToastProvider>,
+      );
+    fireEvent.click(screen.getByRole('button', { name: /시연 3/ }));
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '50초 장애 발생' }));
+    driveState.inputReason = 'INPUT_UNAVAILABLE';
+    commandStatus.data = { status: 'RUNNING', error: null };
+    again();
+    expect(screen.getAllByText('INPUT_UNAVAILABLE').length).toBeGreaterThan(0);
+
+    driveState.activeId = 'vm-b';
+    driveState.inputReason = null;
+    again();
+    expect(screen.getByText('AUTO 유지 · 승계 완료')).toBeInTheDocument();
   });
 });

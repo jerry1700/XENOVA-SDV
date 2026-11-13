@@ -209,6 +209,15 @@ export interface AutoDelayCommand extends SubmittedCommand {
   duration_s: number;
 }
 
+/** 활성 Zephyr VM의 AUTO 계산 입력만 일정 시간 사용할 수 없게 만드는 시연 명령 */
+export interface AutoInputUnavailableRequest {
+  duration_s: number;
+}
+
+export interface AutoInputUnavailableCommand extends SubmittedCommand {
+  duration_s: number;
+}
+
 /** POST /api/v1/vms/{id}/faults/agent-exit — Linux Agent 종료 데모 명령 */
 export type AgentExitCommand = SubmittedCommand;
 

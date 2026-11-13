@@ -593,6 +593,32 @@ export const handlers = [
     );
   }),
 
+  http.post('*/api/v1/vms/:vmId/faults/auto-input-unavailable', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr' || vm.state !== 'running')
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 Zephyr VM이 아닙니다.');
+    const body = (await request.json()) as Partial<AutoInputUnavailableRequest>;
+    if (!Number.isInteger(body.duration_s) || body.duration_s! < 1 || body.duration_s! > 120)
+      return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        duration_s: body.duration_s,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
   http.post('*/api/v1/vms/:vmId/faults/agent-exit', async ({ request, params }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
