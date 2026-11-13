@@ -24,6 +24,8 @@ PROBE3=struct.Struct('<16s16sQQ');CLOCK3=struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3=struct.Struct('<16s16s16sQQQqqQQ');CLOCK_ACK3=struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
+# 근거리 제동(ToF)을 하는 장치는 표본 quality 의 두 bit 로 막힌 방향을 알리고, 막힌 방향의 DRIVE 를 reason 21 로 거절한다.
+PROXIMITY_CAPABILITY=0x1000;PROXIMITY_FRONT=0x08;PROXIMITY_REAR=0x10;PROXIMITY_BLOCKED=21
 CLOCK_PROBE_INTERVAL_US=200000
 CLOCK_INSTALL_RETRY_US=50000
 HELLO_RETRY_US=50000
@@ -68,14 +70,24 @@ class Feedback3SerialSink(FeedbackSerialSink):
         self._matched_stop_snapshot=None;self._direction_snapshot=None;self.phase_key=None;self.phase_end=0
         self._vehicle_wire_cache=OrderedDict()
         self.hold_row=None;self.hold_start=None
+        self.proximity=None;self.proximity_rejected=0
         self.tof_inbox=TofInbox();self._tof_selection=None;self._tof_context_snapshot=None
         super().__init__(*args,**kwargs)
         self.protocol_version=3;self.odometry.clock_profile3=True
+
+    @property
+    def proximity_view(self):
+        """odometry 가 받아들인 가장 새 표본이 알린 막힌 방향. 근거리 제동을 알리지 않은 장치는 None 이다."""
+        blocked=getattr(self,'proximity',None)
+        return dict(proximity_front_blocked=None if blocked is None else bool(blocked&PROXIMITY_FRONT),
+            proximity_rear_blocked=None if blocked is None else bool(blocked&PROXIMITY_REAR),
+            proximity_rejected=getattr(self,'proximity_rejected',0))
 
     def _view(self):
         value=super()._view()
         value.update(profile='feedback-3',clock_epoch=self.clock_epoch,clock_lease_revision=self.clock_sequence,
             clock_ready=self.ready and self._sensor_available() and self._lease(int(self.clock()*1e6)) is not None if hasattr(self,'clock') else False)
+        value.update(self.proximity_view)
         if hasattr(self,'odometry'):
             value['absolute_meter']=self.odometry.absolute.snapshot
             self._matched_stop_snapshot=self._make_matched_stop()
@@ -287,7 +299,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
             raise FeedbackError('feedback3 deadline echo')
         if row['kind']!=2 and at>=row['expires']:raise FeedbackError('feedback3 original command expired')
         if not flags&1 and velocity or not flags&2 and steering:raise FeedbackError('feedback3 unsupported measurement')
-        if status in (3,4):self._fail('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
+        # 가까운 물체 때문에 이 DRIVE 만 받지 않은 것이다. 장치 고장이 아니고 적용을 기다릴 명령도 아니다.
+        blocked=status==3 and reason==PROXIMITY_BLOCKED and row['kind']==1 and bool(self.capabilities&PROXIMITY_CAPABILITY)
+        if blocked:self.pending.pop(seq,None);self.proximity_rejected+=1
+        elif status in (3,4):self._fail('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
         self.report_hwm=report_seq;row['accepted']=status in (1,2);row['applied']=status==2
         row['feedback']=payload
         evidence=dict(accepted=row['accepted'],applied=row['applied'],physical_stop=bool(stationary) if flags&4 and status==2 and row['kind']==2 else None,
@@ -295,6 +310,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
             observed_monotonic=now,command_generation=generation,command_counter=counter,command_sequence=seq,
             command_kind='STOP' if row['kind']==2 else 'HOLD_STEER' if row['kind']==3 else 'DRIVE',sample_seq=sample,
             observation_source='device_report',pi_session=self.pi_session,device_session=self.device_session,status=STATUS[status])
+        if blocked:evidence['rejection']='PROXIMITY_BLOCKED'
         measured=next((value for value in reversed(self.odometry.samples)
             if value['source_sample']==sample and value['source_us']==stamp),None)
         evidence['applied_pi_lower_us']=None if measured is None else measured['pi_sample_us']-measured['clock_error_us']
@@ -314,7 +330,12 @@ class Feedback3SerialSink(FeedbackSerialSink):
         lo,hi=stamp+lower,min(stamp+upper,now)
         if not 0<=lo<=hi<=now or now-lo>self.odometry.config.maximum_sample_age_us:
             raise FeedbackError('sensor3 observation window')
+        blocked=None
+        if self.capabilities&PROXIMITY_CAPABILITY:
+            blocked=quality&(PROXIMITY_FRONT|PROXIMITY_REAR);quality&=~blocked
         self.odometry.observe_mapped(self.pi_session,self.device_session,stamp,sample,left,right,quality,steer,error,lo,hi)
+        # odometry 가 받아들인 표본만 막힘 상태를 바꾼다. 순번이 뒤로 간 표본도 odometry 가 거절한다.
+        if blocked is not None:self.proximity=blocked
 
     @property
     def matched_stop(self):

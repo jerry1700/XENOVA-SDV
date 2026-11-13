@@ -612,6 +612,9 @@ sample CRC domain은141B다. cap 부족·센서 오류·누락은 ToF만 폐기�
 원 capture 시각·CRC·generation/instance와 TTL을 보존한1×1 `TofObservation`을 기존 J port로 보낸다.
 ToF는 근거리 장애물 HIT-only이며 정상 거리·NO_TARGET·out-of-range를 FREE로 carve하지 않는다.
 모델·FOV·측정 오차·native 상태 매핑·baud/율과 물리 수락은 별도 확인한다. 새 thread/serial handle은 없다.
+근거리 제동을 하는 MCU(cap0x1000)는 표본 quality의 앞 막힘8/뒤 막힘16과 DRIVE의 REJECTED/reason21로 알린다.
+Gateway는 두 bit를 odometry에 넘기지 않고 view의 `proximity_front_blocked`/`proximity_rear_blocked`로 내며,
+그 거절을 `DEVICE_REJECTED`·`DEVICE_APPLY_TIMEOUT`으로 묶지 않는다. 막힌 방향의 DRIVE를 미리 막지는 않는다.
 [정확 계약과 시험 경계](../../../docs/contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)를 따른다.
 
 actor는 권한·입력·기한을 판정하고, serial owner 하나가 실제 출력/feedback을 소유한다.

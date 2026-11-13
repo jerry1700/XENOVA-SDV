@@ -549,11 +549,13 @@ class ResidentMapperProcessor:
                 localization_valid_for_us=config.localization.registration_valid_for_us,
                 localization_position_drift_mps=config.localization.position_drift_mps,
                 localization_yaw_drift_rps=config.localization.yaw_drift_rps)
+            parking_clearance = (() if self._mapping_draft is None else
+                                 self._mapping.catalogs.parking_clearance_targets(self.clock()))
             result=candidate.process(observation,now_us=self.clock(),pose=inputs.pose,
                 checkpoint=checkpoint,completed_clock=self.clock,
                 motion_qualified=config.motion_qualified and config.localization_configured,
                 needed_region_factory=needed,cycle_bound_us=config.stopping.cycle_bound_us,
-                completion_bound_us=config.stopping.completion_bound_us,
+                completion_bound_us=config.stopping.completion_bound_us,parking_clearance=parking_clearance,
                 **({} if self._mapping_draft is None else dict(evidence_observer=self._mapping_draft.observer,
                     roi_reframe=self._mapping_draft.roi_reframe)),**localization)
             if self._mapping_draft is not None:

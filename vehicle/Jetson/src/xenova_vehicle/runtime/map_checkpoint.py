@@ -728,7 +728,7 @@ class MapCheckpointCollector:
         else:
             capture=sha256(canonical(frame.observation.rgb.stamp.key)).hexdigest()
             self._rgb_refs={capture:self._rgb_refs[capture]}
-        active=result.temporal_rgb_sources
+        active=result.temporal_rgb_sources | result.parking_rgb_sources
         self._temporal_rgb={key:identity for key,identity in self._temporal_rgb.items() if key in active}
         key=frame.observation.rgb.stamp.key
         if key in active and key not in self._temporal_rgb:
@@ -743,13 +743,16 @@ class MapCheckpointCollector:
 
     def temporal_lane_root(self,candidate):
         """누적 차로를 채택할 때만 현재와 이전 RGB의 provenance를 결합한다."""
+        return self.temporal_rgb_root(candidate.road.source_key,candidate.sources)
+
+    def temporal_rgb_root(self,current,sources):
+        """Keep the original camera records and their pose ancestry for a multi-frame fit."""
         from ..storage.records import aggregate_rgb_provenance
-        if (not candidate.sources.issubset(self._temporal_rgb)
-                or self._next+(len(candidate.sources)+1)//3>self.grant.end_exclusive):
+        if (current not in sources or not 2 <= len(sources) <= 12 or not sources.issubset(self._temporal_rgb)
+                or self._next+(len(sources)+1)//3>self.grant.end_exclusive):
             return None
-        current=candidate.road.source_key
         record=self._records[self._temporal_rgb[current]]
-        originals=tuple(self._records[self._temporal_rgb[key]] for key in sorted(candidate.sources-{current}))
+        originals=tuple(self._records[self._temporal_rgb[key]] for key in sorted(sources-{current}))
         for record in aggregate_rgb_provenance(record,originals,self._allocate):
             self._records[record.provenance_id]=record
         return record.provenance_id

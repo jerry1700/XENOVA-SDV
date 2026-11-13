@@ -96,7 +96,7 @@ class DevelopmentMappingCandidate:
 
 
 def build_development_world(pipeline,model,basis,snapshot,inputs,*,context,calibration,
-                            source_bytes,sequence,now_us,current_sensors=None,pc_owner_token=None):
+                            source_bytes,sequence,now_us,current_sensors=None,pc_owner_token=None,parking=None):
     """원 SYNTHETIC 계산/센서·카탈로그로 ordinary World 후보만 만든다.
 
     Store/actor/clock/ID를 소유하지 않는다. source는 원 admitted snapshot과 같아야 하며
@@ -192,6 +192,12 @@ def build_development_world(pipeline,model,basis,snapshot,inputs,*,context,calib
         timestamp_error_us=max((capture[1]-capture[0]+1)//2, (interval[1]-interval[0]+1)//2)))
     origin = WorldSource.from_calibration('SYNTHETIC', view['frame_id'], context.frame_epoch,
         view['clock_id'], calibration, capture, now, wire_clock_epoch=source['clock_epoch'])
+    if parking is not None:
+        from ..runtime.parking_bridge import ParkingPublication
+        if (type(parking) is not ParkingPublication or parking.input_kind != 'SYNTHETIC'
+                or parking.context != context or parking.source_clock != view['clock_id']):
+            raise ValueError('development parking belongs to another map source')
+        value = parking.apply_to_template(value)
     return build_world(view, value, source=origin, preferred_road=preferred)
 
 

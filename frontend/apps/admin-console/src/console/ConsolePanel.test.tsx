@@ -150,7 +150,18 @@ describe('web console with an offline WebSocket server', () => {
     expect(frames.input).toHaveLength(1);
   });
 
-  it.each([4401, 4404, 4409, 1011])('shows rejection %s and leaves manual retry available', async (code) => {
+  it('a login rejection (4401) renews once, then shows the error and leaves manual retry available', async () => {
+    const frames = mockConsole({ reject: 4401 });
+    render(<ConsolePanel vm={vm} />);
+    fireEvent.click(screen.getByRole('button', { name: '연결' }));
+    await waitFor(() => expect(screen.getByText('연결 오류', { exact: true })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '연결' })).toBeEnabled();
+    expect(terminals.instances[0]!.options.disableStdin).toBe(true);
+    expect(frames.opened).toBe(2); // the original attempt plus one renewal, never a loop
+    expect(frames.input).toHaveLength(0);
+  });
+
+  it.each([4404, 4409, 1011])('shows rejection %s and leaves manual retry available', async (code) => {
     const frames = mockConsole({ reject: code });
     render(<ConsolePanel vm={vm} />);
     fireEvent.click(screen.getByRole('button', { name: '연결' }));

@@ -18,7 +18,8 @@ from .lane_tracking import mapped_lane_ahead, track_lane
 from .registration_history import HISTORY_FRAMES, RegistrationObservation, combined_constraints
 from .yaw_bias import YawBias
 from .temporal_road import MappedRoad, TemporalRoadMap
-from .parking_entrance import entrance_summary
+from .parking_entrance import EntranceSpan, entrance_spans, entrance_summary
+from .parking import parking_clearance_cells
 from .depth import DepthConfig
 from ..mapping.local_map import EvidenceGrid, GridSpec, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
@@ -129,6 +130,9 @@ class PerceptionResult:
     temporal_rgb_sources: frozenset = frozenset()
     mapped_odometry: PoseEstimate | None = None
     yaw_bias: dict | None = None
+    parking_entrances: tuple[EntranceSpan, ...] = ()
+    parking_tape_history: tuple = ()
+    parking_rgb_sources: frozenset = frozenset()
 
 
 @dataclass(frozen=True)
@@ -372,7 +376,8 @@ class PerceptionPipeline:
     def process(self, observation, *, now_us=None, pose=None, checkpoint=None, completed_clock=None,
                 motion_qualified=False,needed_mask=None,cycle_bound_us=None,completion_bound_us=None,diagnostics=None,
                 needed_region_factory=None,evidence_observer=None,localization_valid_for_us=None,
-                localization_position_drift_mps=None,localization_yaw_drift_rps=None,roi_reframe=None):
+                localization_position_drift_mps=None,localization_yaw_drift_rps=None,roi_reframe=None,
+                parking_clearance=()):
         """원 관측을 처리한다. 선택 clock은 입력과 같은 domain의 실제 완료시각이다.
 
         checkpoint는 계산 owner의 취소/진전 callback이다. 부분 상태를 변경하므로
@@ -827,10 +832,12 @@ class PerceptionPipeline:
                     scheduler=FreeScheduler(grid.spec,context_key=schedule_context)
                     self._free_scheduler=scheduler
                 else:scheduler=self._free_scheduler
+                parking_cells = {cell for bay in parking_clearance for cell in parking_clearance_cells(bay, grid.spec)} if can_free else ()
                 plan=scheduler.plan(context_key=schedule_context,needed_mask=needed,support=grid.support,permission=grid.permission,
                     state=grid.state,observed_us=grid.observed_us,time_known=grid.time_known,now_us=now_us,
                     capture_lower_us=None if capture_interval is None else capture_interval[0],max_cells=self.profile.max_free_cells,
-                    max_ray_tests=remaining,cycle_bound_us=cycle_bound_us,completion_bound_us=completion_bound_us,free_ttl_us=self.profile.free_ttl_us)
+                    max_ray_tests=remaining,cycle_bound_us=cycle_bound_us,completion_bound_us=completion_bound_us,
+                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells)
                 selected=plan.cells
                 if not plan.needed_count:can_free=False
                 if scheduling_status not in ('NEEDED_REGION_OUTSIDE_GRID','NEEDED_REGION_EXPIRED','NEEDED_POSE_CHANGED'):scheduling_status=plan.status
@@ -922,6 +929,7 @@ class PerceptionPipeline:
         self._current_lane, lane_status = track_lane(
             self._current_lane, self._last_road, self._last_tape, lane_pose, lane_scope, self.profile.road)
         mapped_road = None
+        approach_fit = None
         if (self._alignment is None and not self._restore_pending and rgb_new and geometry_qualified
                 and rgb_age is not None and rgb_age <= self.profile.max_observation_age_us):
             self._temporal_road.collect_startup(self._last_tape,observation.rgb.stamp,raw_pose)
@@ -933,7 +941,9 @@ class PerceptionPipeline:
             self._temporal_road.place_startup(self._propagation_anchor or self._alignment,
                 stamp=observation.rgb.stamp)
             temporal = self._temporal_road.observe(self._last_tape,geometry_pose,self.profile.road,self.profile.tape,
-                stamp=observation.rgb.stamp,capture_pose=raw_pose,qualified=lane_pose is not None)
+                stamp=observation.rgb.stamp,capture_pose=raw_pose,qualified=lane_pose is not None,
+                registration=self.profile.registration)
+            approach_fit = self._temporal_road.approach_fit
             # 현재 영상이 여러 도로를 가리키거나 탐색을 끝내지 못했다면 후보를 승격하지 않는다.
             if (self._last_road is None or (self._last_road.status == 'UNKNOWN'
                     and len(self._last_road.hypotheses) <= 1 and set(self._last_road.reasons) <= {
@@ -976,6 +986,10 @@ class PerceptionPipeline:
             scheduling_status if not final_free else 'QUALIFIED_CELL_ATTEMPTS')
         step('SNAPSHOT_COMPLETED')
         ended=perf_counter_ns()
+        parking_entrances = entrance_spans(self._temporal_road.parking_branches)
+        parking_history = (self._temporal_road.parking_tape_history(observation.rgb.stamp.key)
+                           if lane_pose is not None and any(math.dist(lane_pose.prior.center[:2],end) <= self.profile.tape.x_max_m
+                               for span in parking_entrances for end in span.endpoints) else ())
         summary=dict(schema_version=1,kind=observation.kind,calibration_id=self.calibration.sha256,
             capture_id=capture,tape_capture_id=self._last_capture,rgb_source_key=observation.rgb.stamp.key,
             depth_source_key=None if observation.depth is None else observation.depth.stamp.key,
@@ -992,7 +1006,15 @@ class PerceptionPipeline:
             current_lane=(dict(status=lane_status) if self._current_lane is None
                           else self._current_lane.summary(lane_status, lane_section)),
             temporal_road_revision=self._temporal_road.revision,
-            parking_entrances=entrance_summary(self._temporal_road.parking_branches),
+            parking_entrances=entrance_summary(self._temporal_road.parking_branches, parking_entrances),
+            parking_approach_fit=(None if approach_fit is None else dict(
+                longitudinal_bound_m=approach_fit.longitudinal_bound_m,
+                lateral_bound_m=approach_fit.lateral_bound_m,
+                heading_bound_rad=approach_fit.road.hypotheses[0].yaw_error_rad,
+                entrance_relative_bounds_m=approach_fit.entrance_relative_bounds_m,
+                local_heading_bounds_rad=approach_fit.local_heading_bounds_rad,
+                map_position_bound_m=approach_fit.map_position_bound_m,
+                sources=len(approach_fit.sources))),
             road_semantic_scored=0 if self._last_road is None else self._last_road.semantic_scored,
             neural_layer=None if self._last_neural is None else self._last_neural.descriptor(),
             neural_matches_current_rgb=self._last_neural is not None and self._last_neural.rgb_source_key==self._last_rgb_key,
@@ -1028,7 +1050,8 @@ class PerceptionPipeline:
         if diagnostics is not None: summary['diagnostic_timings']=diagnostics.snapshot()
         return PerceptionResult(summary,self._last_tape,self._last_road,evidence,registration,snapshot,
                                 self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys,
-                                pose,None if yaw_bias is None else yaw_bias.summary())
+                                pose,None if yaw_bias is None else yaw_bias.summary(),parking_entrances,parking_history,
+                                self._temporal_road.parking_source_keys)
 
 
 def render_diagnostics(result, calibration):
