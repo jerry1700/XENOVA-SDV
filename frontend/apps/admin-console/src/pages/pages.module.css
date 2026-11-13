@@ -4701,3 +4701,235 @@ button.chip:hover:not(.chipOn) {
   font-size: var(--x-text-xs);
   white-space: normal;
 }
+
+/* Simulator 장애 시연 */
+.scenarioTabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--x-space-2);
+  margin: 0 0 var(--x-space-4);
+  border-bottom: 1px solid var(--x-border);
+}
+.scenarioTabs button {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  min-height: 68px;
+  padding: var(--x-space-3) var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-bottom: 0;
+  border-radius: var(--x-radius-md) var(--x-radius-md) 0 0;
+  background: var(--x-surface-sunken);
+  color: var(--x-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.scenarioTabs button[aria-pressed='true'] {
+  z-index: 1;
+  margin-bottom: -1px;
+  background: var(--x-surface-1);
+  color: var(--x-text);
+  box-shadow: inset 0 3px 0 var(--x-primary);
+}
+.scenarioTabs button span,
+.scenarioTabs button small {
+  font-size: var(--x-text-xs);
+}
+.scenarioTabs button strong {
+  font-size: var(--x-text-sm);
+}
+.scenarioTabs button small {
+  position: absolute;
+  top: var(--x-space-2);
+  right: var(--x-space-2);
+}
+.scenarioStack {
+  display: grid;
+  gap: var(--x-space-4);
+}
+.scenarioIntro {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--x-space-5);
+  padding: var(--x-space-5);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-lg);
+  background: linear-gradient(120deg, var(--x-surface-1), var(--x-surface-sunken));
+}
+.scenarioIntro h2,
+.scenarioIntro p {
+  margin: 0;
+}
+.scenarioIntro h2 {
+  margin-top: var(--x-space-1);
+  font-size: var(--x-text-xl);
+}
+.scenarioIntro p {
+  margin-top: var(--x-space-2);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-sm);
+}
+.scenarioNumber {
+  color: var(--x-primary);
+  font-size: var(--x-text-xs);
+  font-weight: 800;
+  text-transform: uppercase;
+}
+.scenarioWarning {
+  margin: calc(var(--x-space-2) * -1) 0 0;
+  padding: var(--x-space-3) var(--x-space-4);
+  border: 1px solid var(--x-fault);
+  border-radius: var(--x-radius-md);
+  color: var(--x-fault);
+  font-size: var(--x-text-sm);
+}
+.scenarioSummary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-3);
+}
+.summaryItem {
+  display: grid;
+  align-content: center;
+  gap: var(--x-space-2);
+  min-height: 96px;
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-md);
+  background: var(--x-surface-1);
+}
+.summaryItem > span:first-child {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.summaryItem small {
+  color: var(--x-text-muted);
+}
+.drivingVmGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--x-space-3);
+}
+.drivingVm {
+  display: grid;
+  gap: var(--x-space-2);
+  padding: var(--x-space-4);
+  border: 1px solid var(--x-border);
+  border-left: 4px solid var(--vm-accent);
+  border-radius: var(--x-radius-md);
+  background: var(--x-surface-sunken);
+}
+.drivingVm[data-active='true'] {
+  background: color-mix(in srgb, var(--vm-accent) 8%, var(--x-surface-1));
+  box-shadow: 0 0 0 1px var(--vm-accent);
+}
+.drivingVm > div {
+  display: flex;
+  justify-content: space-between;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.drivingVm > div b {
+  color: var(--vm-accent);
+}
+.drivingVm h3,
+.drivingVm p {
+  margin: 0;
+}
+.drivingVm p {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.runMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--x-space-3);
+  padding-bottom: var(--x-space-4);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.runMeta span:first-child {
+  margin-right: auto;
+  color: var(--x-text);
+}
+.scenarioProgress {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.scenarioProgress li {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: var(--x-space-3);
+  min-height: 64px;
+  color: var(--x-text-muted);
+}
+.scenarioProgress i {
+  display: grid;
+  place-items: center;
+  align-self: start;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--x-border);
+  border-radius: 50%;
+  background: var(--x-surface-sunken);
+  font-style: normal;
+  font-weight: 800;
+}
+.scenarioProgress li:not(:last-child) i::after {
+  width: 1px;
+  height: 38px;
+  margin-top: 64px;
+  background: var(--x-border);
+  content: '';
+}
+.scenarioProgress li[data-state='done'] i {
+  border-color: var(--x-online);
+  background: var(--x-online);
+  color: white;
+}
+.scenarioProgress li[data-state='failed'] i {
+  border-color: var(--x-fault);
+  background: var(--x-fault);
+  color: white;
+}
+.scenarioProgress li > div {
+  display: grid;
+  align-content: start;
+  gap: var(--x-space-1);
+}
+.scenarioProgress strong {
+  color: var(--x-text);
+  font-size: var(--x-text-sm);
+}
+.scenarioProgress span {
+  font-size: var(--x-text-xs);
+}
+.scenarioEmpty {
+  display: grid;
+  justify-items: start;
+  gap: var(--x-space-2);
+  min-height: 96px;
+  align-content: center;
+  color: var(--x-text-muted);
+}
+.scenarioEmpty p {
+  margin: 0;
+}
+@media (max-width: 760px) {
+  .scenarioTabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .scenarioSummary,
+  .drivingVmGrid {
+    grid-template-columns: 1fr;
+  }
+  .scenarioIntro {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
