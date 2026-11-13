@@ -43,7 +43,7 @@ Content-Type: application/json
 {"memory_mib":8,"duration_s":30}
 ```
 
-- Linux 전용이며 `memory_mib`는 1..512, MQTT action은 `stress`다.
+- Linux 전용이며 `memory_mib`는 1 이상, **그 VM 메모리의 70%(소수점 버림)와 512 중 작은 값 이하**다. 512는 에이전트 자체 상한(`MAX_MEMORY_MIB`)과 같아 어떤 VM에서도 넘지 않는다. 넘으면 에이전트에 보내지 않고 `422 VALIDATION_ERROR`("이 VM에는 최대 N MiB까지…"). 예: 256 MiB VM → 179, 512 MiB VM → 358, 832·1024 MiB VM → 512. MQTT action은 `stress`다.
 - Zephyr VM은 `400 UNSUPPORTED_GUEST_KIND`이며 `/faults/auto-delay`를 사용한다.
 
 ## 4. Zephyr AUTO 연산 지연
