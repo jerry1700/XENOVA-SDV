@@ -1,6 +1,7 @@
 """유한 world/state 계약의 형식·기하 검증. 권위·시계·센서 수락을 발급하지 않는다."""
 import math
 from functools import lru_cache
+from struct import iter_unpack
 from uuid import UUID
 from google.protobuf.message import DecodeError
 from . import world_pb2 as schema
@@ -58,7 +59,7 @@ def _bytes_bound(field):
     return {'occupancy':(4096,False),'cell_flags':(4096,False),'age_le32':(16384,False),
         'point_state':(32,False),'crossing':(31,False),'divider_state':(32,False),
         'distance_mm_le':(2,True),'status':(1,True),'quality':(1,True),
-        'drivable_permission':(512,False)}.get(name,(MAX_BYTES,False))
+        'drivable_permission':(512,False),'boundary_cell_free4_le':(512,False)}.get(name,(MAX_BYTES,False))
 
 def _repeated(field):
     # 6.x deprecates label access; 3.20 remains the fixed generator/test reader.
@@ -343,6 +344,15 @@ def _validate_one(message):
         if any(v>100 and v!=255 for v in message.occupancy) or any(v&~allowed for v in message.cell_flags):raise ValueError('cell encoding')
         if message.required_features&ROAD_PRIORITY and not any(v&CELL_ROAD for v in message.cell_flags):raise ValueError('missing preferred road')
         new=message.required_features in (11,15,27,31)
+        if message.HasField('boundary_cell_free4_le'):
+            records=message.boundary_cell_free4_le
+            if not new or not records or len(records)%4 or len(records)>512:
+                raise ValueError('boundary cell refinement records')
+            previous=-1
+            for cell,mask in iter_unpack('<HH',records):
+                if not previous<cell<n or not 0<mask<65535 or not 70<=message.occupancy[cell]<=100:
+                    raise ValueError('boundary cell refinement record')
+                previous=cell
         if not new and any(flags&2 for flags in message.cell_flags):
             raise ValueError('legacy world supports live-only cells')
         if new and message.minor!=2:raise ValueError('world minor2 required')

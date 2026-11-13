@@ -3,6 +3,7 @@ import ctypes as C
 import importlib.util
 import json
 import math
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -78,6 +79,40 @@ def obstacle(world,x0,x1,y0,y1,*,unknown=False):
     for y in range(y0,y1):
         for x in range(x0,x1):values[y*world.width+x]=255 if unknown else 100
     world.occupancy=bytes(values)
+
+@pytest.mark.parametrize('indexed',[0,1])
+def test_boundary_cell_checks_only_observed_free_subcells(library,indexed):
+    from test_world import modern_world
+    library.probe_boundary_cell.argtypes=[C.c_void_p,C.c_float,C.c_int,C.POINTER(C.c_uint64)]
+    library.probe_boundary_cell.restype=C.c_int
+    world=modern_world()
+    obstacle(world,20,21,17,18)
+    cell=17*world.width+20
+
+    def check(y,expected):
+        product=Product(library,world)
+        try:
+            subcells=C.c_uint64()
+            result=library.probe_boundary_cell(product.handle,y,indexed,C.byref(subcells))
+            assert result==expected
+            return subcells.value
+        finally:
+            product.close()
+
+    assert check(1.60,10)==0
+    world.boundary_cell_free4_le=struct.pack('<HH',cell,0x00ff)
+    assert check(1.60,FOUND)>0
+    assert check(1.65,10)>0
+    ages=bytearray(world.age_le32)
+    struct.pack_into('<I',ages,4*cell,201)
+    world.age_le32=bytes(ages)
+    assert check(1.60,10)==0
+    struct.pack_into('<I',ages,4*cell,0)
+    world.age_le32=bytes(ages)
+    permission=bytearray(world.drivable_permission)
+    permission[cell//8]&=~(1<<(cell%8))
+    world.drivable_permission=bytes(permission)
+    assert check(1.60,10)==0
 
 def independent_footprint(world,point,half_width=None):
     x,y,yaw=point[:3];c=math.cos(yaw);s=math.sin(yaw)

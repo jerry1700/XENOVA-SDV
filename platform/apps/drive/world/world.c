@@ -151,11 +151,23 @@ static enum dw_result world_extra(const dw_world *w,size_t count){
     w->has_parking_set!=!!(w->required_features&DW_PARKING_MODEL)||w->has_drivable_permission!=current||
     w->parking_slots_count>8||(!(w->required_features&DW_PARKING_MODEL)&&w->parking_slots_count))return DW_ARRAY;
  if(!current){
+  if(w->has_boundary_cell_free4_le)return DW_VERSION;
   for(size_t i=0;i<count;i++)if(w->cell_flags.bytes[i]&2)return DW_VERSION;
   return w->has_scene?DW_VERSION:DW_OK;
  }
  if(w->drivable_permission.size!=(count+7)/8||
     ((count%8)&&(w->drivable_permission.bytes[count/8]>>(count%8))))return DW_ARRAY;
+ if(w->has_boundary_cell_free4_le){
+  const xenova_drive_WorldSnapshot_boundary_cell_free4_le_t *cells=&w->boundary_cell_free4_le;
+  if(!cells->size||cells->size>DW_BOUNDARY_FREE4_BYTES||cells->size%4)return DW_ARRAY;
+  unsigned previous=0;
+  for(unsigned i=0;i<cells->size;i+=4){
+   unsigned cell=dw_grid_le16(cells->bytes+i),mask=dw_grid_le16(cells->bytes+i+2);
+   if(cell>=count||(i&&cell<=previous)||!mask||mask==UINT16_MAX||
+      w->occupancy.bytes[cell]<70||w->occupancy.bytes[cell]>100)return DW_ARRAY;
+   previous=cell;
+  }
+ }
  enum dw_result rc=lane_validate(&w->lane_model);if(rc)return rc;
  const xenova_drive_MapLocalization *loc=&w->localization;
  if(!positive63(loc->registration_revision)||!positive63(loc->observed_mapper_us)||

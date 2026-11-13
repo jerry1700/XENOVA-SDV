@@ -61,6 +61,9 @@ message WorldSnapshot {
   optional SceneAdmissionRef scene = 40;
   optional ParkingSetMeta parking_set = 41;
   optional WorldRouteView route_view = 42;
+  // Sorted 4-byte records: uint16 cell index, uint16 observed-free 4x4 mask, little endian.
+  // A zero bit is blocked (occupied or unobserved). Only live occupied boundary cells qualify.
+  optional bytes boundary_cell_free4_le = 43;
 }
 message VehicleSample {
   required uint32 major = 1;

@@ -128,6 +128,14 @@ uint32_t probe_round(void *pointer,void *behavior,int action,uint32_t id){
  return dp_round_next(&b->round);
 }
 int probe_decoded(void *pointer) { return ((struct probe *)pointer)->decoded; }
+int probe_boundary_cell(void *pointer,float y,int indexed,uint64_t *subcells){
+ struct probe *p=pointer;uint64_t now;
+ if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_metrics metrics={0};
+ const struct lp_budget budget={now+100000,clock_us,NULL,NULL,indexed?&p->collision_index:NULL};
+ enum lp_result rc=lp_footprint(&p->snapshot.world,(dw_pose){2,y,0},0,&p->config,&metrics,&budget);
+ *subcells=metrics.subcells;return rc;
+}
 int probe_plan(void *pointer,float x,float y,float yaw,float steer,float gx,float gy,float gyaw,
  unsigned nodes,unsigned collisions,uint64_t cancel_after,unsigned budget_ms,float width) {
  struct probe *p=pointer;if(p->decoded)return LP_INPUT;

@@ -278,6 +278,17 @@ wire_bytes = candidate.payload
 
 내부 UNKNOWN0/FREE1/OCCUPIED2는 wire255/0/100으로 명시 변환한다. age는 원 uint32 ms를
 little-endian row-major로 보존한다. whole-cell permission bit와 선호 도로 중심 bit는 독립이다.
+
+`WorldSnapshot.boundary_cell_free4_le`는 minor 2 지도에 추가할 수 있는 선택 항목이다.
+최대 128개의 레코드를 셀 번호 순서로 보낸다. 레코드는 row-major 셀 번호 uint16과
+관측으로 전체가 비어 있음을 확인한 4×4 하위 셀 비트마스크 uint16을 각각 little-endian으로
+저장한다. 비트 0은 격자 로컬 좌표에서 x와 y가 가장 작은 하위 셀이다. 번호는 x부터 증가한다.
+점유 셀만 대상으로 하며, 마스크는 최소 한 칸을 막힌 상태로 보존한다. 비트가 0인 곳은 점유와
+미관측을 모두 포함한다. 발행자는 지도와 같은 좌표계, 시각 및 오차 한계로 자유 공간을 보수적으로
+확인해야 한다. 원 셀이 만료됐거나 통행 권한이 없거나 retained 상태라면 이 항목으로 통과를 허용하지
+않는다. 항목이나 레코드가 없으면 셀 전체를 검사한다. 이전 소비자는 이 항목을 무시하고 기존
+점유 셀 전체를 검사한다. 주행 프로파일의 5cm 격자와 32KiB 메시지 상한은 유지된다.
+
 frame-local 이름과 원 clock label을 wire epoch에 명시 결박하는 책임은 caller에 남는다.
 `simulation:<UUID>` 같은 원 label을 잘라 쓰거나 J 시각으로 재발급하지 않는다. legacy0/1은
 비영점 capture 구간을 표현하지 못하므로 거절하며,11/15는 localization의 timestamp 반폭을 검사한다.

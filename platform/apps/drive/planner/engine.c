@@ -861,6 +861,7 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
  const struct lp_metrics *m=&e->search.metrics;struct lp_metrics *total=&e->planned;
  total->expanded+=m->expanded;total->primitives+=m->primitives;total->footprints+=m->footprints;
  total->cells+=m->cells;total->road_checks+=m->road_checks;total->cancel_checks+=m->cancel_checks;total->clock_checks+=m->clock_checks;
+ total->subcells+=m->subcells;
  if(m->nodes_high_water>total->nodes_high_water)total->nodes_high_water=m->nodes_high_water;
  if(m->open_high_water>total->open_high_water)total->open_high_water=m->open_high_water;
  if(m->index_probes_max>total->index_probes_max)total->index_probes_max=m->index_probes_max;
@@ -993,7 +994,7 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
    enum dw_result final_scene=dw_scene_generation(&e->maps,e->paths[ph.slot].scene_generation,now,NULL);
    if(final_scene)rc=final_scene==DW_BUSY?DE_BUSY:DE_CHANGED;
   }
-  if(live){e->tracking.cells+=measured.cells;e->tracking.footprints+=measured.footprints;}
+  if(live){e->tracking.cells+=measured.cells;e->tracking.footprints+=measured.footprints;e->tracking.subcells+=measured.subcells;}
   if(!rc&&witness){witness->reference_revision=map->world.reference_revision;witness->observation_sequence=map->world.observation_seq;
    witness->valid_until_pi_us=command->valid_until_pi_us;strcpy(witness->map_epoch,map->world.map_epoch);}
  }
@@ -1763,6 +1764,7 @@ void de_parking_boundary_ready(struct drive_engine *e){if(e&&atomic_exchange(&e-
  e->parking.boundary_ready=true;if(e->requested<UINT32_MAX)atomic_fetch_add(&e->requested,1);}}
 static void metric_add(struct lp_metrics *to,const struct lp_metrics *from){
  to->expanded+=from->expanded;to->primitives+=from->primitives;to->footprints+=from->footprints;to->cells+=from->cells;
+ to->subcells+=from->subcells;
  to->road_checks+=from->road_checks;to->cancel_checks+=from->cancel_checks;to->clock_checks+=from->clock_checks;
  if(to->nodes_high_water<from->nodes_high_water)to->nodes_high_water=from->nodes_high_water;
  if(to->open_high_water<from->open_high_water)to->open_high_water=from->open_high_water;

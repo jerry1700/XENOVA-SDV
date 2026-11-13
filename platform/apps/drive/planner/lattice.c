@@ -65,12 +65,31 @@ static bool road_edge_cuts_box(dw_point a,dw_point b,float x,float y,float cs,fl
  }
  return lo<=hi;
 }
-static bool blocked(const dw_world *w,size_t i,const struct lp_config *c) {
+static bool cell_unavailable(const dw_world *w,size_t i,const struct lp_config *c) {
  unsigned flags=w->cell_flags.bytes[i];const uint8_t *p=w->age_le32.bytes+4*i;
  uint32_t age=(uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;
  bool denied=(w->required_features&DW_LANE_MODEL)&&
   (!w->has_drivable_permission||i/8>=w->drivable_permission.size||!(w->drivable_permission.bytes[i/8]&(1u<<(i%8))));
- return denied||!(flags&1)||(flags&4)||(!(flags&2)&&(double)age+c->live_age_us/1000>c->cell_age_ms)||w->occupancy.bytes[i]>=70;
+ return denied||!(flags&1)||(flags&4)||(!(flags&2)&&(double)age+c->live_age_us/1000>c->cell_age_ms);
+}
+static bool blocked(const dw_world *w,size_t i,const struct lp_config *c) {
+ return cell_unavailable(w,i,c)||w->occupancy.bytes[i]>=70;
+}
+static bool refinable(const dw_world *w,size_t i,const struct lp_config *c){
+ return w->occupancy.bytes[i]>=70&&w->occupancy.bytes[i]<=100&&
+  !(w->cell_flags.bytes[i]&2)&&!cell_unavailable(w,i,c);
+}
+static uint16_t refined_free(const dw_world *w,size_t cell){
+ const xenova_drive_WorldSnapshot_boundary_cell_free4_le_t *records=&w->boundary_cell_free4_le;
+ unsigned lo=0,hi=records->size/4;
+ while(lo<hi){
+  unsigned mid=lo+(hi-lo)/2;
+  const uint8_t *record=records->bytes+mid*4;
+  unsigned id=dw_grid_le16(record);
+  if(id==cell)return dw_grid_le16(record+2);
+  if(id<cell)lo=mid+1;else hi=mid;
+ }
+ return 0;
 }
 void lp_state_import(struct lp_path *path,const dw_state *state){
  memset(&path->space,0,sizeof(path->space));
@@ -235,6 +254,29 @@ void lp_index_build(struct lp_collision_index *index,const dw_world *w,const str
    if((w->required_features&DW_ROAD_PRIORITY)&&!(w->cell_flags.bytes[at]&DW_CELL_ROAD))
     index->shoulder[y]|=UINT64_C(1)<<x;
   }
+ if(w->has_boundary_cell_free4_le)
+  for(unsigned i=0;i<w->boundary_cell_free4_le.size;i+=4){
+   unsigned cell=dw_grid_le16(w->boundary_cell_free4_le.bytes+i);
+   if(cell<(size_t)w->width*w->height&&refinable(w,cell,c))index->refined[cell/w->width]|=UINT64_C(1)<<(cell%w->width);
+  }
+}
+/* The caller has already proved an overlap with the parent cell. Check only
+ * subcells that lack observed free evidence, using all four separating axes. */
+static enum lp_result refined_overlap(uint16_t free,float dx,float dy,float cell,float cs,float sn,
+ float half,float width,float ex,float ey,const struct lp_config *c,struct lp_metrics *m,const struct lp_budget *b){
+ unsigned occupied=(uint16_t)~free;
+ float size=cell*.5f,subhalf=size*.5f;
+ float pad=subhalf*(fabsf(cs)+fabsf(sn));
+ while(occupied){
+  unsigned i=__builtin_ctz(occupied);occupied&=occupied-1;
+  if(++m->cells>c->collision_limit)return LP_WORK_BUDGET;
+  m->subcells++;
+  if(!(m->cells&31)){enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;}
+  float x=dx+((i%4)-1.5f)*size,y=dy+((i/4)-1.5f)*size;
+  if(fabsf(x)<=ex+subhalf&&fabsf(y)<=ey+subhalf&&
+     fabsf(x*cs+y*sn)<=half+pad&&fabsf(-x*sn+y*cs)<=width+pad)return LP_COLLISION;
+ }
+ return LP_PATH_FOUND;
 }
 static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,
  struct lp_metrics *m,const struct lp_budget *b,bool obstacle_evidence,bool *outside,const struct tr_intent *task,
@@ -314,8 +356,19 @@ static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float ex
    * body axes complete the test, including obstacle cells at body corners. */
   if(fabsf(dx*cs+dy*sn)<=half+cell*(fabsf(cs)+fabsf(sn))&&
      fabsf(-dx*sn+dy*cs)<=width+cell*(fabsf(cs)+fabsf(sn))) {
-   if(hard&(UINT64_C(1)<<x))return LP_COLLISION;
-   *outside=true;candidates&=hard;
+   uint64_t bit=UINT64_C(1)<<x;
+   if(hard&bit){
+    size_t at=(size_t)y*w->width+x;
+    bool refine=indexed?(index->refined[y]&bit)!=0:w->has_boundary_cell_free4_le&&refinable(w,at,c);
+    uint16_t free=refine?refined_free(w,at):0;
+    if(!free)return LP_COLLISION;
+    rc=refined_overlap(free,dx,dy,cell,cs,sn,half,width,ex,ey,c,m,b);
+    if(rc!=LP_PATH_FOUND)return rc;
+   }
+   if(outside&&!*outside&&(!(hard&bit)||((w->required_features&DW_ROAD_PRIORITY)&&
+      !(w->cell_flags.bytes[(size_t)y*w->width+x]&DW_CELL_ROAD)))){
+    *outside=true;candidates&=hard;
+   }
   }
   }
  }

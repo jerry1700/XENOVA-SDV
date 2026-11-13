@@ -145,6 +145,20 @@ def modern_world():
 
 
 
+def test_boundary_cell_wire_validates_cell_index_mask_and_order(probe):
+    world=modern_world()
+    world.occupancy=bytes((100,100))+world.occupancy[2:]
+    world.boundary_cell_free4_le=struct.pack('<HHHH',0,0x0001,1,0x8000)
+    wire=encode(world)
+    assert decode(wire)==world and product(probe,wire)['result']=='OK'
+    for invalid in (b'',b'x',struct.pack('<HH',0,0),struct.pack('<HH',0,65535),
+                    struct.pack('<HH',2,1),struct.pack('<HH',world.width*world.height,1),
+                    struct.pack('<HHHH',0,1,0,2),struct.pack('<HHHH',1,1,0,2)):
+        world.boundary_cell_free4_le=invalid
+        with pytest.raises(ValueError,match='boundary cell'):encode(world)
+        assert product(probe,world.SerializeToString())['result']=='ARRAY'
+
+
 def parking_world(*,width=64,height=32):
     """고정 fixture다. 두 lane/slot 후보를 수락 권위로 승격하지 않는다."""
     value=fixture.world(width=width,height=height)
