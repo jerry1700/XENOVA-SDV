@@ -13,11 +13,11 @@ import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.agent.application.AgentInventoryCleaner;
 import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
+import com.xenova.backend.template.application.FixedTemplateCatalog;
 import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.template.domain.VmTemplate;
-import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.CreateVmCommand;
 import com.xenova.backend.vm.domain.CpuLayout;
@@ -77,8 +77,7 @@ class VmServiceTest {
 
     @BeforeEach
     void setUp() {
-        TemplateCatalog templateCatalog = new TemplateCatalog(new TemplateCatalogProperties(
-                List.of(new VmTemplate("alpine", "1.2.0", "Alpine 1.2.0", 128, GuestKind.LINUX))));
+        TemplateCatalog templateCatalog = FixedTemplateCatalog.of(new VmTemplate("alpine", "1.2.0", "Alpine 1.2.0", 128, GuestKind.LINUX));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         // Disabled cache: every read goes to the port, as these cases were written for.
         VmRuntimeCache runtimeCache = new VmRuntimeCache(

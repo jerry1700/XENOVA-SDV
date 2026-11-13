@@ -127,22 +127,27 @@ Spring이 자기 레코드와 dom0-manager 응답을 조합해 구성합니다. 
 | 필드 | 의미 |
 |---|---|
 | `template_id` | 플랫폼 공개 카탈로그 ID (예: `debian-13-arm64`) |
-| `version` | 템플릿 버전. VM 생성 요청에서는 이 값을 `template_version`으로 보냄 |
-| `display_name` | 드롭다운 표시 이름 (예: `Debian 12`) |
+| `version` | 보드에 공개된 이 템플릿의 최신 버전. VM 생성 요청에서는 이 값을 `template_version`으로 보냄 |
+| `display_name` | 드롭다운 표시 이름 (예: `Debian 13`) |
 | `min_memory_mib` | 이 템플릿의 최소 메모리 |
-| `guest_kind` | 이 템플릿으로 만든 VM의 종류 `linux` / `zephyr` |
+| `guest_kind` | 이 템플릿으로 만든 VM의 종류 `linux` / `zephyr` (보드 카탈로그 값) |
 
 ```json
 [
-  { "template_id": "ubuntu-24.04-arm64", "version": "1.0.0", "display_name": "Ubuntu 24.04", "min_memory_mib": 512, "guest_kind": "linux" },
-  { "template_id": "debian-13-arm64", "version": "1.0.0", "display_name": "Debian 13", "min_memory_mib": 256, "guest_kind": "linux" },
-  { "template_id": "zephyr-xenvm-starter-arm64", "version": "1.0.0", "display_name": "Zephyr Starter 1.0.0", "min_memory_mib": 16, "guest_kind": "zephyr" }
+  { "template_id": "ubuntu-24.04-arm64", "version": "1.0.5", "display_name": "Ubuntu 24.04", "min_memory_mib": 512, "guest_kind": "linux" },
+  { "template_id": "debian-13-arm64", "version": "1.0.8", "display_name": "Debian 13", "min_memory_mib": 256, "guest_kind": "linux" },
+  { "template_id": "zephyr-drive-lattice-lab-arm64", "version": "1.0.8", "display_name": "Zephyr Drive Lattice Lab", "min_memory_mib": 16, "guest_kind": "zephyr" }
 ]
 ```
 
 플랫폼 기본 Ubuntu·Debian·Zephyr 공개 카탈로그의 ID와 버전을 그대로 사용합니다. dom0-manager는 템플릿 값을 변환하지 않습니다. OS 검증에서는 카탈로그 ID를 게스트의 `os-release` ID(`ubuntu`, `debian`)와 별도로 대응시킵니다.
 
-1차 데이터는 Spring 설정 파일(`application.yml`의 `xenova.template-catalog.templates`)에 고정하며, Ubuntu·Debian·Zephyr마다 플랫폼이 공개한 버전 하나를 사용합니다. 최소 메모리 값은 실측에 따라 조정할 수 있습니다.
+**버전은 보드에서 읽습니다.** Spring은 dom0-manager `GET /api/v1/templates`(보드 `/srv/xenova/catalog`의 모든 공개 버전)를 조회해 `xenova.template-catalog.refresh-interval`(기본 30초) 동안 캐시합니다. 그래서 이미지를 보드에 올리기만 하면 위저드에 반영되고, 백엔드 커밋은 필요 없습니다.
+
+- **목록(`GET /api/v1/templates`)**: `template_id`마다 가장 높은 버전 하나만 보입니다. 버전은 점으로 나눈 숫자로 비교합니다(`1.0.10` > `1.0.9`).
+- **검증(생성·시작·자원 변경)**: 보드에 남아 있는 모든 버전을 허용합니다. 옛 버전으로 만든 VM도 그 버전이 보드에 남아 있으면 계속 쓸 수 있습니다.
+- **표시 이름·최소 메모리**: 보드 카탈로그에 없으므로 `application.yml`의 `xenova.template-catalog.templates`에 `template-id`별로 둡니다. 여기에 없는 템플릿은 보드에 있어도 보이지 않고, 여기에 있어도 보드에 없으면 보이지 않습니다. 목록 순서가 위저드 표시 순서입니다.
+- **보드 장애**: 조회에 실패하면 마지막으로 읽은 목록을 계속 씁니다. 한 번도 읽지 못했으면 dom0-manager 오류(`503 VM_CONTROL_UNAVAILABLE` 등)를 그대로 돌려줍니다.
 
 ---
 
@@ -595,7 +600,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `POST` | `/api/v1/vms/{vm_id}/start` | `200` VM | dom0 단건 조회 후 도메인이 없을 때만 create 재호출. 이미 `running`이면 그대로 반환. `crashed`·`paused`·`stopping`이면 `409 INVALID_VM_STATE`로 거부(정지 후 다시 시작). 플랫폼 CLI와 같은 동작이며 자동 복구는 하지 않음 |
 | `POST` | `/api/v1/vms/{vm_id}/stop` | `200` VM (`state: stopped`) | dom0 단건 조회로 정지 전 상태를 읽은 뒤 **runtime 유무와 관계없이** dom0 stop을 호출. 플랫폼이 `desired_state: stopped` 의도를 기록해야 Recovery Worker가 사용자가 끈 VM을 다시 켜지 않는다(1.2절). 이미 꺼져 있었으면 `vm.state.changed` 이벤트만 남기지 않음. dom0는 `204`지만 Spring은 레코드로 VM 객체를 만들어 반환 |
 | `DELETE` | `/api/v1/vms/{vm_id}` | `204` | dom0 retire 성공 뒤 Spring 레코드를 `RETIRED`로 보존하고 v1 목록·단건 조회에서는 숨김 |
-| `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 설정 파일 고정 데이터 (2.3절) |
+| `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 보드 카탈로그(템플릿별 최신) + 설정 표시 정보 (2.3절). 보드 미조회 시 `503` |
 
 같은 `/api/v1/vms` 아래의 그 밖의 공개 엔드포인트(위 VM 관리와 별도. 형식의 기준은 각 계약·[백엔드 README](../../backend/README.md)):
 
@@ -731,7 +736,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 |---|---|---|
 | `401` | `UNAUTHORIZED` / `INVALID_TOKEN` / `TOKEN_REVOKED` | 토큰 없음 / 잘못됐거나 만료 / 로그아웃으로 폐기 |
 | `422` | `VALIDATION_ERROR` | 입력값 규칙 위반 — dom0-manager를 호출하지 않고 거절 |
-| `404` | `TEMPLATE_NOT_FOUND` | 템플릿 목록에 없는 `template_id`·`template_version` |
+| `404` | `TEMPLATE_NOT_FOUND` | 보드에 공개되지 않았거나 표시 정보가 없는 `template_id`·`template_version` |
 | `404` | `VM_NOT_FOUND` | Spring 레코드에 없는 `vm_id` |
 | `409` | `VM_NAME_CONFLICT` | 같은 이름의 VM이 다른 명세로 이미 있음 |
 | `409` | `INVALID_VM_STATE` | 시작 요청인데 도메인이 `crashed`·`paused`·`stopping` 상태로 남아 있음 |
