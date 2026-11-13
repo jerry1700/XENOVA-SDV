@@ -1008,12 +1008,12 @@ static enum lp_result roll_lane_guide(struct lp_path *path,const struct lane_gui
 
 enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_world *w,dw_pose start_pose,
  float steer,float speed,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
- const struct tr_basis *basis,struct lp_metrics *metrics,struct lp_tracking_geometry *geometry,bool curve_blocker,bool compact){
+ const struct tr_basis *basis,struct lp_metrics *metrics,struct lp_tracking_geometry *geometry,bool curve_blocker,float inset_scale){
  struct tr_view view;
  if(!narrow_lane(w,task,c,budget.collision_index,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
     fabsf(steer)>c->max_steer||!isfinite(speed))return LP_NOT_FOUND;
  struct lane_guide guide;
- if(!make_lane_guide(&view,c,&guide,compact?0:1))return LP_NOT_FOUND;
+ if(!make_lane_guide(&view,c,&guide,inset_scale))return LP_NOT_FOUND;
  struct lp_road_state first,last;
  if(lp_task_project(w,task,start_pose,&first)!=LP_PATH_FOUND||lp_task_project(w,task,nominal,&last)!=LP_PATH_FOUND)return LP_NOT_FOUND;
  bool blend=task->changing&&curve_blocker;

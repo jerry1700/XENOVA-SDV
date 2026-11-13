@@ -125,11 +125,11 @@ float lp_lookahead_distance(const struct lp_config *,float speed);
 float lp_stopping_distance(const struct lp_config *,float speed);
 /* Try a forward lane-guided path whose body fits the observed road. The caller
  * retains the existing path admission and may run the lattice on NOT_FOUND.
- * curve_blocker selects a continuous merge on a bend. compact omits the
- * bend inset for a straight merge with limited space between blockers. */
+ * curve_blocker selects a continuous merge on a bend. inset_scale in [0,1]
+ * controls the bend inset for straight merges between observed blockers. */
 enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,float,dw_pose,
  const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *,
- struct lp_tracking_geometry *,bool curve_blocker,bool compact);
+ struct lp_tracking_geometry *,bool curve_blocker,float inset_scale);
 /* Build once per immutable map/configuration; 64 rows, no global cache. */
 void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp_config *);
 /* Maximum expansions per slice; collision and cancellation checks are also
