@@ -1019,11 +1019,14 @@ enum lp_result lp_start_exit(struct lp_search *s,const dw_world *w,dw_pose pose,
  }
  return start(s,w,pose,steer,goals->poses[0],c,a,budget,0,false,task,basis,NULL,true,initial,1,cusps,goals,&space);
 }
+/* All outgoing edges share their initial footprint on this search snapshot.
+ * Reconstruction still checks its own edge samples. */
+struct lp_edge_start {bool checked,outside;enum lp_result result;};
 /* All ordinary edges use the generated control set. A measured root steering
  * between levels is connected by the same continuous ramp integration; it is
  * never snapped to a nominal initial curvature. */
 static enum lp_result edge(struct lp_search *s,int parent,unsigned target,int gear,struct lp_node *next,
- xenova_drive_PathPoint *points,size_t *count) {
+ xenova_drive_PathPoint *points,size_t *count,struct lp_edge_start *departure) {
  const struct lp_node *old=&s->nodes[parent];const struct lp_config *c=s->config;
  const struct lp_primitive_point *samples=s->assets->motion[old->steering][target];
  float initial=c->max_steer*((int)old->steering-LP_STEERS/2)/(LP_STEERS/2);
@@ -1039,9 +1042,14 @@ static enum lp_result edge(struct lp_search *s,int parent,unsigned target,int ge
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
  float yaw_step=c->primitive_speed/c->wheelbase*tanf(c->max_steer)*dt;
  float padding=.5f*(c->primitive_speed*dt+radius*fabsf(yaw_step));
- bool previous_outside=false;
- enum lp_result first=footprint(s->world,pose,padding+c->tracking_guard,c,&s->metrics,&s->budget,false,&previous_outside,&s->task,&s->space);
- if(first!=LP_PATH_FOUND)return first;
+ struct lp_edge_start fresh={0};
+ if(!departure)departure=&fresh;
+ if(!departure->checked){
+  departure->result=footprint(s->world,pose,padding+c->tracking_guard,c,&s->metrics,&s->budget,false,&departure->outside,&s->task,&s->space);
+  departure->checked=true;
+ }
+ if(departure->result!=LP_PATH_FOUND)return departure->result;
+ bool previous_outside=departure->outside;
  float road_cost=old->road_cost;
  for(unsigned k=1;k<=steps;k++) {
   enum lp_result rc=guard(&s->budget,&s->metrics);if(rc!=LP_SEARCHING)return rc;
@@ -1083,7 +1091,7 @@ static enum lp_result reconstruct_signed(struct lp_search *s,int last,struct lp_
    gear=next->gear;
   }
   struct lp_node ignored={0};
-  enum lp_result rc=edge(s,next->parent,next->edge,next->gear,&ignored,path->points,&path->count);
+  enum lp_result rc=edge(s,next->parent,next->edge,next->gear,&ignored,path->points,&path->count,NULL);
   if(rc!=LP_PATH_FOUND)return rc;
  }
  path->points[path->count-1].velocity_mps=0;
@@ -1105,7 +1113,7 @@ static enum lp_result reconstruct(struct lp_search *s,int last,struct lp_path *p
  path->points[0]=(xenova_drive_PathPoint){.pose=s->start,.steering_rad=s->initial_steer,.velocity_mps=s->config->primitive_speed};
  for(unsigned k=n;k>0;k--) {
   int node=chain[k-1];struct lp_node ignored={0};
-  enum lp_result rc=edge(s,s->nodes[node].parent,s->nodes[node].edge,s->nodes[node].gear,&ignored,path->points,&path->count);
+  enum lp_result rc=edge(s,s->nodes[node].parent,s->nodes[node].edge,s->nodes[node].gear,&ignored,path->points,&path->count,NULL);
   if(rc!=LP_PATH_FOUND)return rc;
  }
  dw_pose end=s->nodes[last].pose,local=dw_compose(dw_inverse(end),s->goal);
@@ -1143,11 +1151,11 @@ static enum lp_result reconstruct(struct lp_search *s,int last,struct lp_path *p
  path->phase=path->direction?1:0;path->revision=path->maneuver_revision=1;
  return LP_PATH_FOUND;
 }
-static enum lp_result expand_edge(struct lp_search *s,int current,unsigned target,int gear){
+static enum lp_result expand_edge(struct lp_search *s,int current,unsigned target,int gear,struct lp_edge_start *departure){
  struct lp_node *node=&s->nodes[current];
  if(gear!=node->gear&&(node->parent<0||node->cusps>=s->max_cusps))return LP_SEARCHING;
  struct lp_node next={.parent=current,.heap=-1,.edge=(uint8_t)target};s->metrics.primitives++;
- enum lp_result rc=edge(s,current,target,gear,&next,NULL,NULL);
+ enum lp_result rc=edge(s,current,target,gear,&next,NULL,NULL,departure);
  if(rc==LP_COLLISION)return LP_SEARCHING;
  if(rc!=LP_PATH_FOUND)return rc;
  quantize(s,&next);float offset=reference_offset(s->world,&s->task,next.pose);
@@ -1187,10 +1195,11 @@ enum lp_result lp_advance(struct lp_search *s,unsigned expansions,struct lp_path
    path->count=0;
   }
   int original_gear=node->gear;
+  struct lp_edge_start departure={0};
   for(unsigned target=0;target<LP_STEERS;target++){
    if(current!=0&&(target&1))continue;
-   rc=expand_edge(s,current,target,original_gear);if(rc!=LP_SEARCHING)return s->result=rc;
-   if(s->signed_search){rc=expand_edge(s,current,target,-original_gear);if(rc!=LP_SEARCHING)return s->result=rc;}
+   rc=expand_edge(s,current,target,original_gear,&departure);if(rc!=LP_SEARCHING)return s->result=rc;
+   if(s->signed_search){rc=expand_edge(s,current,target,-original_gear,&departure);if(rc!=LP_SEARCHING)return s->result=rc;}
   }
  }
  return LP_SEARCHING;
