@@ -1,4 +1,5 @@
 import { useId } from 'react';
+import { MAX_STEER_DEG } from './driveExtras';
 import styles from './driver.module.css';
 
 /** 바퀴 중심 (viewBox 120×220, 앞이 위) */
@@ -24,7 +25,8 @@ function Wheel({ x, y, angle = 0, testId }: { x: number; y: number; angle?: numb
  */
 export function CarTop({ steerDeg }: { steerDeg: number | null }) {
   const id = useId().replace(/[^a-zA-Z0-9_-]/g, '');
-  const wheel = -(steerDeg ?? 0);
+  // 최대 조향각 밖의 값이 와도 바퀴가 뒤집혀 그려지지 않게 자른다
+  const wheel = -Math.max(-MAX_STEER_DEG, Math.min(MAX_STEER_DEG, steerDeg ?? 0));
   return (
     <svg
       className={styles.car}

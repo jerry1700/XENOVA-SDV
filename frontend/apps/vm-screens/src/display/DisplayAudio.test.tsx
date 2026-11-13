@@ -122,4 +122,43 @@ describe('DisplayAudio (운전자 화면 음악 카드)', () => {
     expect(screen.getByTestId('music-state')).toHaveTextContent('음원 파일 확인 필요');
     expect(screen.getByRole('button', { name: '음악 재생' })).toBeDisabled();
   });
+
+  it('재생을 기다리는 동안 버튼을 잠그고, pause 가 끊은 play(AbortError)는 차단으로 보지 않는다', async () => {
+    render(<Player />);
+    const audio = AudioFake.latest!;
+    let reject!: (error: unknown) => void;
+    // 브라우저처럼 play() 직후 paused=false, 응답(promise)은 나중에
+    audio.play.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, fail) => {
+          audio.paused = false;
+          reject = fail;
+        }),
+    );
+    const button = screen.getByRole('button', { name: '음악 재생' });
+    act(() => button.click());
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('aria-busy', 'true');
+    // 잠긴 동안 다시 눌러도 play·pause 를 부르지 않는다
+    act(() => button.click());
+    expect(audio.play).toHaveBeenCalledOnce();
+    expect(audio.pause).not.toHaveBeenCalled();
+
+    // 다른 이유(화면 정리 등)로 pause 되어 play 가 AbortError 로 끝나면: 일시정지 그대로
+    await act(async () => {
+      audio.pause();
+      reject(new DOMException('The play() request was interrupted by a call to pause().', 'AbortError'));
+    });
+    expect(screen.getByTestId('music-state')).toHaveTextContent('일시정지');
+    expect(screen.getByTestId('music-state')).not.toHaveTextContent('재생 버튼을 눌러 시작');
+    expect(button).toBeEnabled();
+  });
+
+  it('자동재생 차단(NotAllowedError)은 지금처럼 "재생 버튼을 눌러 시작"', async () => {
+    AudioFake.rejectPlay = true;
+    render(<Player />);
+    await act(async () => screen.getByRole('button', { name: '음악 재생' }).click());
+    expect(screen.getByTestId('music-state')).toHaveTextContent('재생 버튼을 눌러 시작');
+    expect(screen.getByRole('button', { name: '음악 재생' })).toBeEnabled();
+  });
 });

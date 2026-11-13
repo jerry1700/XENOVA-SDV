@@ -25,7 +25,7 @@ export function distText(t: Telemetry, m: number, digits = 1): string {
   return isCircuit(track) ? `${realM(circuitOf(track), m).toFixed(digits)} m` : `${m.toFixed(2)} m`;
 }
 export const rad = (r: number) => `${r >= 0 ? '+' : ''}${r.toFixed(2)} rad`;
-export const seconds = (ms: number) => `${Math.max(0, Math.floor(ms / 1000))}초`;
+export const seconds = (ms: number) => `${Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0}초`;
 
 /** 시뮬레이터 화면의 차 색 = 지금 차량을 제어하는 앱 색, 제어 앱이 없으면(SAFE_STOP) 정지 색 */
 export function carColor(t: { activeApp: 'autonomous' | 'manual' | null }): string {

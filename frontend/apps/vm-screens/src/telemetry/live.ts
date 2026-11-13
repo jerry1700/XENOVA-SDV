@@ -240,7 +240,9 @@ function text(event: EventDto): string {
 export function applyEvent(t: Telemetry, event: EventDto, now: number, wallNow = Date.now()): Telemetry {
   const id = hash(event.event_id);
   if (t.events.some((e) => e.id === id)) return t;
-  const ageMs = Math.max(0, wallNow - Date.parse(event.occurred_at));
+  // occurred_at 이 깨졌으면(NaN) 받은 시각으로 둔다 ('NaN초 전' 방지)
+  const occurred = Date.parse(event.occurred_at);
+  const ageMs = Number.isFinite(occurred) ? Math.max(0, wallNow - occurred) : 0;
   const level: TimelineEvent['level'] =
     event.type === 'drive.resume.accepted' ? 'ok' : event.severity === 'INFO' ? 'info' : 'warning';
   const entry: TimelineEvent = { id, at: now - ageMs, type: event.type, level, text: text(event) };

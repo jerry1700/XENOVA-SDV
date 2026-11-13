@@ -15,7 +15,24 @@ export interface VehicleStatus {
   steer_rad: number | null;
   flags: { estop: boolean; watchdog: boolean; obstacle: boolean } | null;
   source: Source;
+  /** 숫자로 왔지만 물리 범위(VEHICLE_RANGE)를 벗어나 null 로 둔 값 — 화면은 '범위 밖'으로 보인다 */
+  outOfRange: { v_mps: boolean; batt_v: boolean };
 }
+
+/**
+ * 화면이 믿는 물리 범위 (RC 차 기준). 이 밖의 값은 센서·변환 오류로 보고 표시하지 않는다.
+ * 플랫폼 수집기가 범위를 정하면 그 값과 맞춘다.
+ *  - 속도 |v_mps| ≤ 10 m/s
+ *  - 팩 전압 batt_v 9 ~ 13.5 V (3S LiPo)
+ *  - 주행 프로필 최대 속도 0 < max_v_mps ≤ 5 m/s
+ * 조향은 null 로 두지 않고 ±MAX_STEER_RAD 로 자른다 (steeringOf).
+ */
+export const VEHICLE_RANGE = {
+  maxAbsSpeedMps: 10,
+  minBattV: 9,
+  maxBattV: 13.5,
+  maxProfileSpeedMps: 5,
+} as const;
 
 export interface DriveAppReport {
   heartbeat: { state: 'active' | 'standby' | 'error'; uptime_s: number } | null;
@@ -38,6 +55,7 @@ export interface DriveApps {
 const object = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const within = (v: number, min: number, max: number) => v >= min && v <= max;
 const SOURCES = ['fresh', 'stale', 'disconnected', 'unknown'];
 
 function source(v: unknown): Source | null {
@@ -51,9 +69,13 @@ export function vehicleOf(p: Presentation | null): VehicleStatus | null {
   const src = source(v.source);
   if (!src) return null;
   const f = v.flags;
+  const { maxAbsSpeedMps, minBattV, maxBattV } = VEHICLE_RANGE;
+  // 숫자가 아니거나 Infinity 면 미수신, 숫자지만 범위 밖이면 범위 밖 (둘 다 값은 null)
+  const speedOk = finite(v.v_mps) && within(v.v_mps, -maxAbsSpeedMps, maxAbsSpeedMps);
+  const battOk = finite(v.batt_v) && within(v.batt_v, minBattV, maxBattV);
   return {
-    v_mps: finite(v.v_mps) ? v.v_mps : null,
-    batt_v: finite(v.batt_v) ? v.batt_v : null,
+    v_mps: speedOk ? (v.v_mps as number) : null,
+    batt_v: battOk ? (v.batt_v as number) : null,
     steer_rad: finite(v.steer_rad) ? v.steer_rad : null,
     flags:
       object(f) &&
@@ -63,6 +85,10 @@ export function vehicleOf(p: Presentation | null): VehicleStatus | null {
         ? { estop: f.estop, watchdog: f.watchdog, obstacle: f.obstacle }
         : null,
     source: src,
+    outOfRange: {
+      v_mps: !speedOk && typeof v.v_mps === 'number' && !Number.isNaN(v.v_mps),
+      batt_v: !battOk && typeof v.batt_v === 'number' && !Number.isNaN(v.batt_v),
+    },
   };
 }
 
@@ -175,10 +201,15 @@ export function activeCommand(p: Presentation | null, connected: boolean) {
   return { command: app.command, perception: app.perception };
 }
 
-/** 주행 프로필 한도 (state.drive_limits, 제안). 펌웨어 프로필 max_velocity */
+/** 주행 프로필 한도 (state.drive_limits, 제안). 펌웨어 프로필 max_velocity. 0 이하·범위 밖이면 null */
 export function maxSpeedOf(p: Presentation | null): number | null {
   const v = (p?.state as Record<string, unknown> | undefined)?.drive_limits;
-  return object(v) && finite(v.max_v_mps) && v.max_v_mps > 0 ? v.max_v_mps : null;
+  return object(v) &&
+    finite(v.max_v_mps) &&
+    v.max_v_mps > 0 &&
+    v.max_v_mps <= VEHICLE_RANGE.maxProfileSpeedMps
+    ? v.max_v_mps
+    : null;
 }
 
 /** 트립 (state.trip, 제안): 거리·주행 시간 */
@@ -279,27 +310,43 @@ export function driverMode(summary: { mode: string; preparing: unknown }): {
   }
 }
 
-/** 계기판 최대 눈금: 최대 속도 × 2, 최대 속도를 모르면 1.0 m/s */
+/** 계기판 최대 눈금: 최대 속도 × 2, 최대 속도를 모르거나 범위 밖이면 1.0 m/s */
 export const DEFAULT_GAUGE_MAX_MPS = 1;
 export const gaugeMaxOf = (maxSpeed: number | null) =>
-  maxSpeed !== null && maxSpeed > 0 ? maxSpeed * 2 : DEFAULT_GAUGE_MAX_MPS;
+  maxSpeed !== null && maxSpeed > 0 && maxSpeed <= VEHICLE_RANGE.maxProfileSpeedMps
+    ? maxSpeed * 2
+    : DEFAULT_GAUGE_MAX_MPS;
+
+/** 소수 둘째 자리 표시. 반올림해 0 이 되는 음수는 "-0.00" 대신 "0.00" */
+export function fixed2(v: number): string {
+  const text = v.toFixed(2);
+  return Number(text) === 0 ? (0).toFixed(2) : text;
+}
 
 /**
  * 조향 최대각 (rad). 주행 프로필 platform/apps/drive/profiles/lattice-lab-1.json max_steer 0.55 (약 31.5°).
  * steer_rad 는 + 가 왼쪽 (MQTT 계약 수동 입력 변환: left = steer_rad +)
  */
 export const MAX_STEER_RAD = 0.55;
+/** 조향 최대각 (정수 도, 32°) */
+export const MAX_STEER_DEG = Math.round((MAX_STEER_RAD * 180) / Math.PI);
+/** 측정 잡음으로 최대각을 살짝 넘는 값은 경고하지 않는다 (약 0.6°) */
+const STEER_TOLERANCE_RAD = 0.01;
 
-/** 조향각 표시: 정수 도, 좌/우 (1° 미만은 방향 없음), 최대각 대비 비율 -1(오른쪽 끝) ~ 1(왼쪽 끝) */
+/**
+ * 조향각 표시: 정수 도, 좌/우 (1° 미만은 방향 없음), 최대각 대비 비율 -1(오른쪽 끝) ~ 1(왼쪽 끝).
+ * 최대각을 넘는 값은 ±MAX_STEER_DEG 로 자르고 clipped 로 알린다 (바퀴가 뒤집혀 그려지지 않게)
+ */
 export function steeringOf(
   rad: number | null,
-): { deg: number; side: '좌' | '우' | null; ratio: number } | null {
+): { deg: number; side: '좌' | '우' | null; ratio: number; clipped: boolean } | null {
   if (rad === null || !Number.isFinite(rad)) return null;
-  const deg = Math.round((Math.abs(rad) * 180) / Math.PI);
+  const deg = Math.min(MAX_STEER_DEG, Math.round((Math.abs(rad) * 180) / Math.PI));
   return {
     deg,
     side: deg < 1 ? null : rad > 0 ? '좌' : '우',
     ratio: Math.max(-1, Math.min(1, rad / MAX_STEER_RAD)),
+    clipped: Math.abs(rad) > MAX_STEER_RAD + STEER_TOLERANCE_RAD,
   };
 }
 
