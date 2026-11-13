@@ -304,7 +304,7 @@ export function SimulatorStressLab() {
               <span className={styles.stressOsBadge} data-kind={item.guest_kind}>
                 {item.guest_kind}
               </span>
-              <strong>{item.name}</strong>
+              <strong title={item.name}>{item.name}</strong>
               <small>
                 {osLabel(item)} · {item.vcpus} vCPU · {item.memory_mib} MiB
               </small>

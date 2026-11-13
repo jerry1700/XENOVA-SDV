@@ -43,7 +43,9 @@ export function ConsoleLayout() {
               <span className={styles.avatar} aria-hidden="true">
                 {name.slice(0, 1).toUpperCase()}
               </span>
-              {name}
+              <span className={styles.userName} title={name}>
+                {name}
+              </span>
             </span>
             <Button
               variant="secondary"

@@ -65,6 +65,7 @@ function MemoryDashboard({
       </header>
 
       {pending && <div className={styles.statePanel}>VM 정보를 불러오는 중입니다…</div>}
+      {!pending && items?.length === 0 && <div className={styles.statePanel}>등록된 VM이 없습니다.</div>}
       <LiveDataAlert />
 
       <div className={styles.memoryVmGrid}>
@@ -333,6 +334,7 @@ function CpuDashboard({
       </header>
 
       {pending && <div className={styles.statePanel}>VM 정보를 불러오는 중입니다…</div>}
+      {!pending && items?.length === 0 && <div className={styles.statePanel}>등록된 VM이 없습니다.</div>}
       <LiveDataAlert />
 
       <div className={styles.cpuGrid}>
@@ -369,7 +371,7 @@ function CpuVmChart({ role, vm }: { role: Role | null; vm: Vm }) {
         <span className={styles.cpuCardTitle}>
           <i aria-hidden="true" />
           <span>
-            <strong>{vm.name}</strong>
+            <strong title={vm.name}>{vm.name}</strong>
             <small>{role?.title ?? '역할 미지정'}</small>
           </span>
         </span>

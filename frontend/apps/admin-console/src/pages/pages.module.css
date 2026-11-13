@@ -1,7 +1,10 @@
 .center {
   min-height: 100vh;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
+  /* 로그인·회원가입 카드가 좁은 화면 가장자리에 붙지 않게 */
+  padding: var(--x-space-4);
 }
 .detail {
   display: grid;
@@ -145,9 +148,15 @@
   border-color: var(--x-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--x-primary) 12%, transparent);
 }
+.stressVmGrid button {
+  min-width: 0;
+}
 .stressVmGrid button > strong {
   margin-top: 4px;
   font-size: var(--x-text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .stressVmGrid button > small {
   overflow: hidden;
@@ -814,7 +823,16 @@ button.chip:hover:not(.chipOn) {
   display: flex;
   flex-direction: column;
   gap: var(--x-space-1);
+  min-width: 0;
   border-top-width: 3px;
+}
+/* 콘솔 VM 선택: 긴 이름은 말줄임 (전체 이름은 title) */
+.pickName {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .consoleStates {
   display: inline-flex;
@@ -1101,6 +1119,8 @@ button.chip:hover:not(.chipOn) {
   color: var(--x-fault);
 }
 .statePanel {
+  /* 오류 문구(공백 없는 긴 message 포함)도 패널 안에서 줄바꿈 */
+  overflow-wrap: anywhere;
   padding: var(--x-space-4);
   border: 1px dashed var(--x-border);
   border-radius: var(--x-radius);
@@ -1180,7 +1200,15 @@ button.chip:hover:not(.chipOn) {
   justify-content: space-between;
   gap: var(--x-space-3);
 }
+.vmCardTop > div {
+  min-width: 0;
+}
+.vmCardTop > span {
+  flex: none;
+}
 .vmCardTop h3 {
+  /* 공백 없는 긴 이름도 카드 안에서 줄바꿈해 오른쪽 ACTIVE 배지를 밀어내지 않는다 */
+  overflow-wrap: anywhere;
   margin: 6px 0 2px;
   font-size: 36px;
   letter-spacing: -0.04em;
@@ -2086,11 +2114,43 @@ button.chip:hover:not(.chipOn) {
   font-family: var(--x-font-mono);
   font-variant-numeric: tabular-nums;
 }
+.detailEventRow:not([data-head]) {
+  cursor: pointer;
+}
+/* 내용 칸은 버튼(키보드로 펼치기). 모양은 글자 그대로 */
 .detailEventText {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.detailEventText:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.detailEventLine {
   overflow: hidden;
   min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 펼친 행: 전체 내용을 줄바꿈하고 title 설명을 아래 작은 회색 글로 */
+.detailEventRow[data-open] .detailEventLine {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.detailEventMore {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  overflow-wrap: anywhere;
 }
 /* 이벤트 화면: 시각 | 상태 | 대상 | 내용, 시각은 밀리초까지 (S15P31E110-462) */
 .detailEventRow[data-target] {
@@ -2179,6 +2239,8 @@ button.chip:hover:not(.chipOn) {
 .eventChip {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
+  min-width: 0;
   height: var(--x-space-6);
   padding: 0 var(--x-space-2);
   border: 0;
@@ -2189,6 +2251,13 @@ button.chip:hover:not(.chipOn) {
   font-size: var(--x-text-xs);
   white-space: nowrap;
   cursor: pointer;
+}
+/* 칩 글자: 긴 VM 이름은 말줄임 (전체 이름은 title) */
+.eventChipLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .eventChip > i {
   top: 0;
@@ -2336,6 +2405,7 @@ button.chip:hover:not(.chipOn) {
   display: flex;
   align-items: center;
   gap: var(--x-space-2);
+  min-width: 0;
 }
 .cpuCardTitle > i {
   width: 10px;
@@ -2347,11 +2417,18 @@ button.chip:hover:not(.chipOn) {
 .cpuCardTitle > span {
   display: grid;
   gap: 2px;
+  min-width: 0;
 }
 .cpuCardTitle strong {
   font-size: var(--x-text-lg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .cpuCardTitle small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
   font-weight: 500;
@@ -2639,7 +2716,8 @@ button.chip:hover:not(.chipOn) {
 }
 .vmOperationNotice {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  /* 가운데 열이 긴 문구에 늘어나 화면 밖으로 밀리지 않게 minmax(0, 1fr) */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--x-space-2);
   padding: 10px 12px;
@@ -2656,9 +2734,13 @@ button.chip:hover:not(.chipOn) {
   animation: vmOperationSpin 0.8s linear infinite;
 }
 .vmOperationNotice > strong {
+  min-width: 0;
   color: var(--x-text);
+  overflow-wrap: anywhere;
 }
 .vmOperationNotice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--x-text-muted);
   font-family: var(--x-font-mono);
 }
@@ -2667,7 +2749,7 @@ button.chip:hover:not(.chipOn) {
   background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
 }
 .vmOperationNotice[data-tone='fault'] {
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   border-color: color-mix(in srgb, var(--x-fault) 44%, var(--x-border));
   background: color-mix(in srgb, var(--x-fault) 7%, var(--x-surface-2));
 }
@@ -2722,6 +2804,8 @@ button.chip:hover:not(.chipOn) {
 }
 .deleteConfirm strong {
   display: block;
+  /* 공백 없는 긴 VM 이름도 모달 안에서 줄바꿈해 끝까지 보이게 (Modal 은 overflow: hidden) */
+  overflow-wrap: anywhere;
   color: var(--x-text);
   font-size: var(--x-text-md);
   line-height: 1.45;
@@ -3249,7 +3333,8 @@ button.chip:hover:not(.chipOn) {
 }
 .pendingCreationSummary {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  /* 생성 중인 긴 VM 이름들이 가운데 열을 늘려 밀어내지 않게 */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--x-space-3);
   padding: var(--x-space-3) var(--x-space-4);
@@ -3260,6 +3345,10 @@ button.chip:hover:not(.chipOn) {
 .pendingCreationSummary > div {
   display: grid;
   gap: 3px;
+  min-width: 0;
+}
+.pendingCreationSummary span {
+  overflow-wrap: anywhere;
 }
 .pendingCreationSummary strong,
 .pendingCreationSummary span {
@@ -3303,7 +3392,12 @@ button.chip:hover:not(.chipOn) {
   font-weight: 900;
   box-shadow: 0 0 0 7px color-mix(in srgb, var(--x-ok) 8%, transparent);
 }
+.createSuccess > div {
+  max-width: 100%;
+  min-width: 0;
+}
 .createSuccess strong {
+  overflow-wrap: anywhere;
   color: var(--x-text);
   font-size: var(--x-text-xl);
   letter-spacing: -0.025em;
@@ -3338,6 +3432,7 @@ button.chip:hover:not(.chipOn) {
   font-size: var(--x-text-xs);
 }
 .createSuccessMeta dd {
+  overflow-wrap: anywhere;
   margin: 0;
   color: var(--x-text);
   font-size: var(--x-text-sm);

@@ -75,12 +75,13 @@ export function EventsPage() {
       type="button"
       aria-pressed={current === value}
       className={styles.eventChip}
+      title={label}
       onClick={() => set(current === value ? null : value)}
     >
       {dot && (
         <i data-tone={dot.tone} style={dot.color ? ({ '--dot': dot.color } as CSSProperties) : undefined} />
       )}
-      {label}
+      <span className={styles.eventChipLabel}>{label}</span>
     </button>
   );
 

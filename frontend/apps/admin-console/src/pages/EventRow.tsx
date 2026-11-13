@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import type { VmEvent } from '../api/types';
 import { eventLine, SEVERITY_LABEL } from './eventLine';
 import styles from './pages.module.css';
@@ -8,6 +8,8 @@ import styles from './pages.module.css';
  * 상태는 경고·오류만 작은 색 글자 (정보는 비움, 열 폭은 유지). 종류·보조 글(사유·세대 등)·원문 코드는
  * 줄에서 빼고 title 툴팁에, 정보를 포함한 심각도와 종류는 상태 칸의 aria-label 에 남긴다.
  * 열은 grid 로 모든 행·열 제목 줄에서 같은 세로선, 글자는 기준선(baseline) 정렬.
+ * 내용은 기본 한 줄(말줄임). 행을 누르면(키보드는 내용 버튼 Enter·Space) 그 자리에서 펼쳐 전체 내용과
+ * title 에만 있던 설명을 보이고, 다시 누르면 접는다 — 툴팁을 볼 수 없는 터치 기기용.
  */
 export function EventRow({
   event,
@@ -23,8 +25,16 @@ export function EventRow({
   const line = eventLine(event);
   const withTarget = target !== undefined;
   const severity = SEVERITY_LABEL[event.severity] ?? event.severity;
+  const [open, setOpen] = useState(false);
+  const toggle = () => setOpen((value) => !value);
   return (
-    <div className={styles.detailEventRow} data-target={withTarget || undefined} title={line.full}>
+    <div
+      className={styles.detailEventRow}
+      data-target={withTarget || undefined}
+      data-open={open || undefined}
+      title={line.full}
+      onClick={toggle}
+    >
       <time dateTime={event.occurred_at} title={new Date(event.occurred_at).toLocaleString('ko-KR')}>
         {time}
       </time>
@@ -37,7 +47,19 @@ export function EventRow({
         {event.severity === 'INFO' ? '' : severity}
       </span>
       {withTarget && <span className={styles.eventTarget}>{target}</span>}
-      <span className={styles.detailEventText}>{line.text}</span>
+      <button
+        type="button"
+        className={styles.detailEventText}
+        aria-expanded={open}
+        onClick={(click) => {
+          // 행 onClick 과 두 번 바뀌지 않게
+          click.stopPropagation();
+          toggle();
+        }}
+      >
+        <span className={styles.detailEventLine}>{line.text}</span>
+        {open && line.full !== line.text && <small className={styles.detailEventMore}>{line.full}</small>}
+      </button>
     </div>
   );
 }

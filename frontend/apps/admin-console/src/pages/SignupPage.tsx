@@ -34,7 +34,7 @@ export function SignupPage() {
 
   return (
     <div className={styles.center}>
-      <Card title="Xenova 회원가입" style={{ width: 380 }}>
+      <Card title="Xenova 회원가입" style={{ width: 'min(380px, 100%)' }}>
         <form className={styles.form} onSubmit={submit}>
           <label>
             아이디
