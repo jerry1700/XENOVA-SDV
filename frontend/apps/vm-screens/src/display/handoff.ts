@@ -27,6 +27,12 @@ const NOTICE: Record<HandoffNotice['mode'], Omit<HandoffNotice, 'key' | 'mode'>>
 const isNoticeMode = (mode: string): mode is HandoffNotice['mode'] => mode in NOTICE;
 
 /**
+ * 같은 모드 안내를 다시 띄우기까지 최소 간격. AUTO/MANUAL 이 번갈아 오면 1초마다 전면 안내·알림음이
+ * 반복되지 않게 한다. 안전 정지는 간격 없이 항상 안내한다
+ */
+export const MIN_REPEAT_MS = 3000;
+
+/**
  * 모드가 바뀐 순간 한 번 안내한다. 'unknown'(연결 끊김·신선하지 않음)은 전환으로 세지 않는다 —
  * 끊겼다 돌아와 같은 모드면 안내하지 않고, 끊긴 사이에 바뀌었으면 돌아온 순간 안내한다.
  * 첫 관측(이전 모드 없음)은 안내하지 않는다.
@@ -34,6 +40,8 @@ const isNoticeMode = (mode: string): mode is HandoffNotice['mode'] => mode in NO
 export function useHandoffNotice(mode: string): HandoffNotice | null {
   const last = useRef<string | null>(null);
   const seq = useRef(0);
+  // 모드별 마지막 안내 시각
+  const shownAt = useRef<Partial<Record<HandoffNotice['mode'], number>>>({});
   const [notice, setNotice] = useState<HandoffNotice | null>(null);
 
   useEffect(() => {
@@ -41,6 +49,14 @@ export function useHandoffNotice(mode: string): HandoffNotice | null {
     const previous = last.current;
     last.current = mode;
     if (previous === null || previous === mode || !isNoticeMode(mode)) return;
+    const now = Date.now();
+    const before = shownAt.current[mode];
+    if (mode !== 'SAFE_STOP' && before !== undefined && now - before < MIN_REPEAT_MS) {
+      // 방금 안내한 모드로 되돌아왔다: 다시 안내하지 않고, 떠 있는 다른 모드 안내는 거둔다 (지금 모드와 다르므로)
+      setNotice((current) => (current && current.mode !== mode ? null : current));
+      return;
+    }
+    shownAt.current[mode] = now;
     const key = ++seq.current;
     setNotice({ key, mode, ...NOTICE[mode] });
     playChime(NOTICE[mode].tone);

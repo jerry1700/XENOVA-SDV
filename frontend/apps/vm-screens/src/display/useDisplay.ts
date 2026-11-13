@@ -20,11 +20,18 @@ export const POLL_MS = 1000;
 export const REQUEST_TIMEOUT_MS = 2500;
 /** 같은 sequence 가 이 시간을 넘게 이어지면 수집기 멈춤으로 보고 값을 미확인으로 둔다 */
 export const STALL_MS = 3000;
+/**
+ * 요청이 이 횟수만큼 연달아 실패해야 '연결 끊김'으로 본다. 그 전에는 마지막 값을 그대로 둔다
+ * (한 번 늦은 응답·5xx 로 화면 전체가 "—" 가 되지 않게). 최악은 시간 초과 2번 ≈ 7초
+ */
+export const FAILURE_LIMIT = 2;
 
 export interface DisplayConnection {
   presentation: Presentation | null;
   /** 신선한 값을 쓸 수 있는가 (끊김·갱신 멈춤이면 false) */
   connected: boolean;
+  /** 첫 응답을 기다리는 중 (아직 실패가 FAILURE_LIMIT 에 닿지 않음). 옛 호출부와 맞추려고 선택 필드 */
+  connecting?: boolean;
   /** 실패·멈춤 종류 (정상이면 null). 옛 호출부(MobilePage)와 맞추려고 선택 필드 */
   problem?: DisplayProblem | null;
   /** problem 의 고정 한국어 문구 (없으면 null) */
@@ -53,6 +60,7 @@ const failed =
   (previous: DisplayConnection): DisplayConnection => ({
     ...previous,
     connected: false,
+    connecting: false,
     problem,
     error: DISPLAY_PROBLEM_TEXT[problem],
   });
@@ -62,6 +70,7 @@ export function useDisplay(): DisplayConnection {
   const [state, setState] = useState<DisplayConnection>({
     presentation: null,
     connected: false,
+    connecting: true,
     problem: null,
     error: null,
   });
@@ -72,10 +81,29 @@ export function useDisplay(): DisplayConnection {
     const order = new SnapshotOrder();
     // 마지막으로 sequence 가 바뀐 시각 (같은 sequence 가 STALL_MS 넘게 이어지면 갱신 멈춤)
     let changedAt = 0;
+    // 연달아 실패한 횟수 (응답을 제대로 받으면 0)
+    let failures = 0;
+    // 마지막으로 기록한 실패 종류: 같은 종류가 이어지면 1초마다 로그를 쌓지 않는다
+    let logged: DisplayProblem | null = null;
+    const fail = (problem: DisplayProblem, error?: unknown) => {
+      if (problem !== logged) {
+        logged = problem;
+        console.debug('[display] 표시 데이터 요청 실패', problem, error);
+      }
+      failures += 1;
+      if (failures >= FAILURE_LIMIT) setState(failed(problem));
+    };
+    const ok = (next: (previous: DisplayConnection) => DisplayConnection) => {
+      failures = 0;
+      logged = null;
+      setState(next);
+    };
     async function poll() {
       controller = new AbortController();
       const timeout = setTimeout(() => controller?.abort(), REQUEST_TIMEOUT_MS);
       try {
+        // 절대 경로를 그대로 쓴다: dom0 kiosk 빌드는 base '/' 라 BASE_URL 기준과 같고, /screens/ 공개 빌드에서
+        // BASE_URL 기준(/screens/api/…)으로 바꾸면 nginx 가 API 대신 정적 서버로 보낸다 (deploy/nginx /screens/ → vm-screens)
         const response = await fetch('/api/v1/display/presentation', {
           credentials: 'same-origin',
           cache: 'no-store',
@@ -86,21 +114,24 @@ export function useDisplay(): DisplayConnection {
         const kind = order.classify(presentation);
         if (kind === 'old') throw new DisplayRequestError('old');
         const now = Date.now();
+        if (stopped) return;
         if (kind === 'new') {
           changedAt = now;
-          if (!stopped) setState({ presentation, connected: true, problem: null, error: null });
+          ok(() => ({ presentation, connected: true, connecting: false, problem: null, error: null }));
         } else if (now - changedAt > STALL_MS) {
-          if (!stopped) setState(failed('stalled'));
-        } else if (!stopped) {
+          // 응답은 오지만 수집기 값이 멈췄다: 시간으로 이미 판정했으므로 바로 알린다
+          failures = 0;
+          if (logged !== 'stalled') {
+            logged = 'stalled';
+            console.debug('[display] 표시 데이터 갱신 멈춤');
+          }
+          setState(failed('stalled'));
+        } else {
           // 변화 없음: 값은 그대로 두고 연결만 정상으로 본다
-          setState((previous) => ({ ...previous, connected: true, problem: null, error: null }));
+          ok((previous) => ({ ...previous, connected: true, connecting: false, problem: null, error: null }));
         }
       } catch (error) {
-        if (!stopped) {
-          const problem = problemOf(error);
-          console.debug('[display] 표시 데이터 요청 실패', problem, error);
-          setState(failed(problem));
-        }
+        if (!stopped) fail(problemOf(error), error);
       } finally {
         clearTimeout(timeout);
         if (!stopped) timer = setTimeout(() => void poll(), POLL_MS);

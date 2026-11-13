@@ -73,8 +73,8 @@ function driving(o: Overrides = {}): Presentation {
 
 function displayOf(p: Presentation | null, connected: boolean, problem: DisplayProblem = 'network') {
   return connected
-    ? { presentation: p, connected, problem: null, error: null }
-    : { presentation: p, connected, problem, error: DISPLAY_PROBLEM_TEXT[problem] };
+    ? { presentation: p, connected, connecting: false, problem: null, error: null }
+    : { presentation: p, connected, connecting: false, problem, error: DISPLAY_PROBLEM_TEXT[problem] };
 }
 
 function show(p: Presentation | null, connected = true, problem?: DisplayProblem) {
@@ -188,10 +188,13 @@ describe('속도 패널', () => {
     next(manual, rerender);
     const tones = screen.getAllByTestId('trend-run').map((g) => g.getAttribute('data-tone'));
     expect(tones).toEqual(['auto', 'manual']);
-    // 표시 연결이 끊기면 비운다
+    // 표시 연결이 끊긴 동안은 그리지 않는다
     next(driving({ at: 73 }), rerender, false);
     expect(screen.getByTestId('speed-trend')).toHaveAttribute('data-points', '0');
     expect(screen.getByTestId('speed-average')).toHaveTextContent('평균 —');
+    // 짧게 끊겼다 돌아오면 앞 기록을 이어서 그린다 (71·72초 + 74초)
+    next(driving({ v_mps: 0.2, at: 74 }), rerender);
+    expect(screen.getByTestId('speed-trend')).toHaveAttribute('data-points', '4');
   });
 });
 
@@ -311,6 +314,29 @@ describe('가운데 차량 패널', () => {
     expect(screen.getByTestId('steer-value')).toHaveTextContent('0°');
   });
 
+  it('범위 밖 값: 거대한 숫자·Infinity 대신 "—"·범위 밖, 조향은 최대각에서 자르고 경고색', () => {
+    const { rerender } = show(driving({ v_mps: 1e9, batt_v: 1e9, max: 1e308, steer_rad: 3.14 }));
+    expect(screen.getByTestId('speed-value')).toHaveTextContent(/^—$/);
+    expect(screen.getByTestId('speed-gauge')).toHaveTextContent('범위 밖');
+    expect(screen.getByTestId('speed-max')).toHaveTextContent('MAX —');
+    expect(screen.getByTestId('speed-scale-end')).toHaveTextContent(/^1$/);
+    expect(screen.getByTestId('battery-value')).toHaveTextContent('—');
+    expect(screen.getByTestId('battery-sub')).toHaveTextContent('범위 밖');
+    expect(screen.getByTestId('steer-value')).toHaveTextContent('32° 좌');
+    expect(screen.getByTestId('steer-sub')).toHaveTextContent('±32° 초과');
+    expect(screen.getByRole('group', { name: '조향 각도' })).toHaveAttribute('data-tone', 'warning');
+    expect(screen.getByTestId('wheel-front-left')).toHaveAttribute('data-angle', '-32.0');
+    expect(screen.getByTestId('combined')).not.toHaveTextContent(/Infinity|NaN|e\+|000000/);
+    next(driving({ steer_rad: -1e9 }), rerender);
+    expect(screen.getByTestId('steer-value')).toHaveTextContent('32° 우');
+    expect(screen.getByTestId('wheel-front-right')).toHaveAttribute('data-angle', '32.0');
+  });
+
+  it('반올림하면 0 인 음수 속도는 "-0.00" 대신 "0.00"', () => {
+    show(driving({ v_mps: -0.003 }));
+    expect(screen.getByTestId('speed-value')).toHaveTextContent(/^0\.00$/);
+  });
+
   it('위쪽 알약 칸에 현재 시각', () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(2026, 10, 11, 9, 5));
@@ -383,6 +409,21 @@ describe('운전자 화면 공통', () => {
     expect(screen.getByTestId('combined')).not.toHaveTextContent(/signal|abort|fetch/i);
   });
 
+  it('첫 응답 전에는 "연결 중" (빨간 끊김 알림 없음)', () => {
+    vi.mocked(useDisplay).mockReturnValue({
+      presentation: null,
+      connected: false,
+      connecting: true,
+      problem: null,
+      error: null,
+    });
+    render(<CombinedPage />);
+    expect(screen.getByTestId('link')).toHaveTextContent('연결 중');
+    expect(screen.getByTestId('link')).toHaveAttribute('data-connected', 'connecting');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByTestId('speed-value')).toHaveTextContent('—');
+  });
+
   it('갱신 멈춤이면 연결 줄에 갱신 멈춤, 값은 미확인', () => {
     show(driving(), false, 'stalled');
     expect(screen.getByTestId('link')).toHaveTextContent('갱신 멈춤');
@@ -396,6 +437,14 @@ describe('운전자 화면 공통', () => {
     expect(screen.getByTestId('drive-mode')).toHaveTextContent('미확인');
     expect(screen.getByTestId('battery-value')).toHaveTextContent('—');
     expect(screen.getByTestId('steer-sub')).toHaveTextContent('수신 대기');
+  });
+
+  it('세로 안내 문구를 두되 표시 여부는 CSS(@media portrait)가 정한다 (값 패널은 그대로)', () => {
+    show(driving());
+    const hint = screen.getByTestId('rotate-hint');
+    expect(hint).toHaveTextContent('가로로 돌려 주세요');
+    expect(hint).toHaveAttribute('role', 'note');
+    expect(screen.getByRole('region', { name: '속도' })).toBeInTheDocument();
   });
 
   it('시각·주소와 상관없이 항상 어두운 Xenova 테마', () => {
@@ -452,6 +501,35 @@ describe('모드 전환 안내 (운전자용 전면 오버레이)', () => {
     expect(screen.getByTestId('handoff-title').textContent).toBe('자율 주행 복귀');
     act(() => vi.advanceTimersByTime(2100));
     expect(screen.queryByTestId('handoff')).toBeNull();
+  });
+
+  it('자율·수동이 1초마다 번갈아 와도 같은 안내는 3초 안에 다시 띄우지 않는다 (안전 정지는 항상)', () => {
+    vi.useFakeTimers();
+    const { rerender } = show(driving());
+    next(modeOf(driving(), 'MANUAL'), rerender);
+    expect(playChime).toHaveBeenCalledTimes(1);
+    act(() => vi.advanceTimersByTime(1000));
+    next(driving(), rerender); // AUTO: 처음이라 안내
+    expect(screen.getByTestId('handoff-title').textContent).toBe('자율 주행 복귀');
+    expect(playChime).toHaveBeenCalledTimes(2);
+    act(() => vi.advanceTimersByTime(1000));
+    next(modeOf(driving(), 'MANUAL'), rerender); // 2초 전에 안내한 수동: 다시 띄우지 않고 자율 안내는 거둔다
+    expect(playChime).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId('handoff')).toBeNull();
+    act(() => vi.advanceTimersByTime(1000));
+    next(driving(), rerender); // 2초 전에 안내한 자율
+    expect(playChime).toHaveBeenCalledTimes(2);
+    act(() => vi.advanceTimersByTime(1100));
+    next(modeOf(driving(), 'MANUAL'), rerender); // 수동 안내 뒤 3초가 지났다
+    expect(screen.getByTestId('handoff-title').textContent).toBe('수동 전환');
+    expect(playChime).toHaveBeenCalledTimes(3);
+    next(modeOf(driving(), 'SAFE_STOP'), rerender);
+    act(() => vi.advanceTimersByTime(500));
+    next(modeOf(driving(), 'MANUAL'), rerender);
+    next(modeOf(driving(), 'SAFE_STOP'), rerender); // 안전 정지는 간격 없이 다시 안내
+    expect(screen.getByTestId('handoff-title').textContent).toBe('안전 정지');
+    expect(playChime).toHaveBeenLastCalledWith('danger');
+    expect(vi.mocked(playChime).mock.calls.filter(([tone]) => tone === 'danger')).toHaveLength(2);
   });
 
   it('자율이 선택만 되고 출력 허가 전이면 복귀 안내를 미루고, 구동이 허가된 순간 안내한다', () => {

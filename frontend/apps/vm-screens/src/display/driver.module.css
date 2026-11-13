@@ -281,6 +281,11 @@
   color: var(--x-fault);
 }
 
+/* 첫 응답 전: 오류가 아니므로 흐린 색 */
+.link[data-connected='connecting'] svg {
+  color: var(--x-text-muted);
+}
+
 .alert {
   /* 카드를 밀어내지 않는 한 줄 (넘치면 말줄임, 전체 문구는 툴팁) */
   flex: none;
@@ -349,19 +354,25 @@
 }
 
 .sideInfo strong {
+  max-width: 100%;
+  overflow: hidden;
   font-size: var(--fs-sm);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sideInfo small {
+  max-width: 100%;
+  overflow: hidden;
   color: var(--x-text-muted);
   font-size: var(--fs-xs);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -592,6 +603,15 @@
   pointer-events: none;
 }
 
+/* 값은 범위 안으로 걸러 오지만, 그래도 길면 게이지 밖으로 넘치지 않고 말줄임 */
+.gaugeReadout strong,
+.gaugeReadout span {
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gaugeReadout strong {
   font-size: max(var(--fs-xl), calc(var(--gw) * 0.19));
   font-weight: 600;
@@ -792,5 +812,45 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+/* ── 세로 안내: 좁은 휴대폰을 세로로 들었을 때만 3열 배치 위를 덮는다 (전환 안내 .handoff 보다 아래) ── */
+.rotate {
+  display: none;
+}
+
+@media (orientation: portrait) and (max-width: 600px) {
+  .rotate {
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px;
+    background: color-mix(in srgb, var(--x-bg) 94%, transparent);
+    color: var(--x-text-muted);
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: center;
+  }
+
+  .rotate svg {
+    width: 48px;
+    height: 48px;
+    fill: none;
+    stroke: var(--x-text);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.6;
+  }
+
+  .rotate strong {
+    color: var(--x-text);
+    font-size: 20px;
+    font-weight: 600;
   }
 }
