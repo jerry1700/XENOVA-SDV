@@ -5,9 +5,12 @@ import { request, setSession } from './client';
 import type {
   CreateVmRequest,
   AgentExitCommand,
+  AppExitCommand,
+  AppExitRequest,
   AutoDelayCommand,
   AutoDelayRequest,
   CommandStatusResponse,
+  DomainKillResponse,
   Display,
   DisplayListResponse,
   EventListResponse,
@@ -194,6 +197,27 @@ export function useStartAgentExit(vmId: string) {
       request<AgentExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/agent-exit`, {
         method: 'POST',
       }),
+  });
+}
+
+export function useStartAppExit(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AppExitRequest) =>
+      request<AppExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/app-exit`, {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartDomainKill(vmId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<DomainKillResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/domain-kill`, {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }
 

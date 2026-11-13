@@ -36,7 +36,9 @@ import {
 } from './memoryMetrics';
 import { mockTelemetryHeartbeat } from './telemetryHeartbeat';
 import {
+  exitApp,
   getDisplays,
+  killDomain,
   resetScenario,
   RouteError,
   scenarioEvents,
@@ -547,6 +549,46 @@ export const handlers = [
         submitted_at: now.toISOString(),
         expires_at: new Date(now.getTime() + 30_000).toISOString(),
       },
+      { status: 202 },
+    );
+  }),
+
+  // 장애 주입 (계약안 .../faults/app-exit · domain-kill — 백엔드 구현 전, 시연 제어 화면용)
+  http.post('*/api/v1/vms/:vmId/faults/app-exit', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr')
+      return error(400, 'UNSUPPORTED_GUEST_KIND', 'app_exit는 Zephyr VM에서만 지원합니다.');
+    const body = (await request.json().catch(() => ({}))) as { app_id?: unknown };
+    if (body.app_id !== 'autonomous') return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    if (vm.state !== 'running' || !exitApp(vm.vm_id))
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 주행 앱이 아닙니다.');
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.post('*/api/v1/vms/:vmId/faults/domain-kill', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.state !== 'running' || !killDomain(vm.vm_id))
+      return error(409, 'INVALID_VM_STATE', 'VM이 실행 중이 아닙니다.');
+    return HttpResponse.json(
+      { operation_id: crypto.randomUUID(), vm_id: vm.vm_id, submitted_at: new Date().toISOString() },
       { status: 202 },
     );
   }),

@@ -1,58 +1,30 @@
-import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { Link, useNavigate } from 'react-router';
-import {
-  driveKeyOf,
-  mockDemo,
-  cancelResume,
-  pressKey,
-  requestResume,
-  useManualInput,
-  type DriveKey,
-  type DriveMode,
-  type InputResult,
-} from '../api/drive';
-import { useVms } from '../api/queries';
-import {
-  appHealth,
-  appHealthLabel,
-  osLabel,
-  plain,
-  ROLE_ORDER,
-  ROLES,
-  signed,
-  vmOf,
-  type AppId,
-} from '../domain/roles';
+import { Button, Card, Modal, StatusBadge } from '@xenova/ui';
+import { useState } from 'react';
+import { Link } from 'react-router';
+import { ApiError } from '../api/client';
+import { useCommandStatus, useStartAppExit, useStartDomainKill, useVms } from '../api/queries';
+import type { Vm } from '../api/types';
+import { MODE_HEALTH, MODE_LABEL, ROLES, vmOf } from '../domain/roles';
+import { STATE_LABEL } from '../format';
 import { useDrive } from '../layout/DriveContext';
-import { SimTrackControl } from './SimTrackControl';
 import styles from './pages.module.css';
 
 /**
- * W-07 시연 제어 (화면 정의서 W-07, UI-08·DS-01) — 공병우 -128·-130, 격리 시연 API 는 정송하 -135.
- * 위: 격리 시연 — 세 VM 을 나란히 두고 각자 [강제 종료]. 다른 둘이 계속 도는 것을 같은 줄에서 본다.
- * 아래: 수동주행 입력 + 자율주행 재개(POST /api/v1/drive/resume, 3·2·1).
- * 화면 배치 카드(REST-23·24, -129)는 2026-11-12 제거 — HDMI 가 합친 한 화면(/display/combined)으로 바뀌어 모니터별 배치가 무의미하고,
- * 보드엔 그 WebSocket 에 붙는 라우터가 없어 항상 "모니터 꺼짐" 이었다 (계약 display-route-v1 "기존 Spring 화면 배치" 절).
- * 강제 종료 API(-135)는 아직 없다 → mock 에서만 동작.
+ * 시뮬레이션 제어 — VM1(주 구동 VM) 장애 주입 두 가지만 둔다 (2026-11-13 정리: 격리 시연 카드·트랙 조작·수동주행 입력·재개 제거).
+ * - 자율주행 앱 종료: POST /vms/{id}/faults/app-exit — VM 은 그대로, 앱만 명령·생존 신호를 멈춘다
+ *   → 게이트웨이가 수동주행으로 넘기고(MANUAL), 생존 신호 15초 무수신이면 복구 서비스가 VM 을 다시 띄운다.
+ * - VM1 강제 종료: POST /vms/{id}/faults/domain-kill — 도메인을 즉시 없앤다(의도는 running 그대로)
+ *   → 복구 서비스가 DOMAIN_ABSENT(60초 유예) 뒤 다시 띄운다. 정지(stop)와 달리 운영자가 끈 것으로 남지 않는다.
+ * 두 API 는 계약안 단계 — 백엔드에 없으면 그 사실을 그대로 알린다.
  */
 export function DemoPage() {
-  const { drive } = useDrive();
   return (
     <div className={styles.page}>
       <section className={styles.pageHead}>
         <div>
-          <div className={styles.eyebrow}>시연 제어</div>
-          <h1>격리 시연</h1>
+          <div className={styles.eyebrow}>시뮬레이션 제어</div>
+          <h1>장애 주입</h1>
         </div>
-        <span className={styles.grow} />
-        {mockDemo ? (
-          <Button variant="ghost" onClick={mockDemo.togglePerception}>
-            {drive?.perception?.valid === false ? '인지 복구' : '인지 끊김 (D5)'}
-          </Button>
-        ) : (
-          <span className={styles.draft}>강제 종료 API(-135) 미구현 — mock 모드에서만 동작</span>
-        )}
       </section>
       <nav className={styles.simulatorTabs} aria-label="Simulator 하위 메뉴">
         <Link to="/simulator" aria-current="page">
@@ -60,306 +32,212 @@ export function DemoPage() {
         </Link>
         <Link to="/simulator/stress">부하 테스트</Link>
       </nav>
-      <div className={styles.cols3}>
-        {ROLE_ORDER.map((app) => (
-          <IsolationCard key={app} app={app} />
-        ))}
-      </div>
-      {/* 시뮬레이터 구성일 때만 (실차 구성에는 없다) */}
-      <SimTrackControl />
-      {/* 화면 배치 카드가 빠져 한 장만 남았으므로 한 줄 전체를 쓴다 */}
-      <Card title="수동주행 입력">
-        <ManualInput />
-        <Resume />
-      </Card>
+      <FaultCard />
     </div>
   );
 }
 
-// ---- 격리 시연 (UI-08, -135 미구현) ----
+type Fault = 'app' | 'vm';
 
-const KILL_EFFECT: Record<AppId, string> = {
-  autonomous: '명령이 끊겨 게이트웨이가 수동주행으로 넘긴다 (MANUAL, gen +1). 복구되면 AUTO_READY.',
-  manual: '수동주행이 제어 중이면 SAFE_STOP, 아니면 예비만 사라진다.',
-  interaction: '주행과 무관 — 차는 그대로 달린다 (격리).',
+const FAULT: Record<Fault, { button: string; title: string; effect: string }> = {
+  app: {
+    button: '자율주행 앱 종료',
+    title: 'VM1 자율주행 앱 종료',
+    effect:
+      'VM 은 켜진 채 자율주행 앱만 멈춘다. 명령이 끊겨 수동주행으로 넘어가고, 생존 신호가 15초 끊기면 복구 서비스가 VM 을 다시 띄운다.',
+  },
+  vm: {
+    button: 'VM1 강제 종료',
+    title: 'VM1 강제 종료',
+    effect:
+      '전원을 뽑듯 VM 을 즉시 없앤다. 명령이 끊겨 수동주행으로 넘어가고, 약 60초 뒤 복구 서비스가 VM 을 다시 띄운다.',
+  },
 };
 
-function IsolationCard({ app }: { app: AppId }) {
-  const navigate = useNavigate();
-  const { drive } = useDrive();
+/** 404·405 는 백엔드에 아직 이 API 가 없다는 뜻 — 일반 실패와 구분해 알린다 */
+export function failureText(error: unknown): string {
+  if (
+    error instanceof ApiError &&
+    (error.status === 404 || error.status === 405) &&
+    error.code !== 'VM_NOT_FOUND'
+  )
+    return '백엔드에 이 장애 주입 API가 아직 없습니다.';
+  return error instanceof Error ? error.message : '요청이 실패했습니다.';
+}
+
+function FaultCard() {
   const vms = useVms();
-  const toast = useToast();
-  const [confirm, setConfirm] = useState(false);
-  const role = ROLES[app];
-  const vm = vmOf(app, vms.data?.items, drive);
-  const state = drive?.apps[app];
-  const health = appHealth(role, vm, state);
-  const down = vm?.state !== 'running' || health === 'recovering' || health === 'fault';
-  const active = !!vm && drive?.control?.active_vm_id === vm.vm_id && drive.control.received_ago_ms < 3000;
+  const { drive } = useDrive();
+  const [confirm, setConfirm] = useState<Fault | null>(null);
+  const vm = vmOf('autonomous', vms.data?.items, drive);
+  const app = drive?.apps.autonomous;
+  const mode = drive?.control?.mode ?? null;
+  const running = vm?.state === 'running';
   return (
-    <Card>
-      <div className={styles.appCard} style={{ borderTop: `3px solid ${role.color}` }}>
-        <div className={styles.row}>
-          <b style={{ color: role.color, fontSize: 'var(--x-text-lg)' }}>{role.title}</b>
-          <span className={styles.grow} />
-          <StatusBadge health={health} label={appHealthLabel(vm, state)} size="sm" />
-        </div>
-        <div className={styles.eyebrow}>
-          {vm ? `${vm.name} · ${osLabel(vm)}` : app}
-          {active ? ' · 제어 중' : ''}
-        </div>
-        <div className={styles.rows}>
-          <div>
-            <span>{role.driving ? '명령' : '생존 신호'}</span>
-            <span className={styles.mono}>
-              {role.driving
-                ? state?.command_fresh
-                  ? `${state.command_hz} Hz`
-                  : '없음'
-                : state?.heartbeat_ago_ms != null
-                  ? `${(state.heartbeat_ago_ms / 1000).toFixed(1)}초 전`
-                  : '없음'}
-            </span>
+    <Card title={vm ? `VM1 · ${vm.name}` : 'VM1'}>
+      <div className={styles.appCard} style={{ borderTop: `3px solid ${ROLES.autonomous.color}` }}>
+        {!vm ? (
+          <p className={styles.dim}>
+            {vms.isLoading
+              ? 'VM 목록을 불러오는 중…'
+              : '주 구동 역할의 VM 을 찾지 못했습니다. VM 역할을 확인하세요.'}
+          </p>
+        ) : (
+          <div className={styles.rows}>
+            <div>
+              <span>VM 상태</span>
+              <span>{STATE_LABEL[vm.state] ?? vm.state}</span>
+            </div>
+            <div>
+              <span>자율주행 명령</span>
+              <span className={styles.mono}>{app?.command_fresh ? `${app.command_hz} Hz` : '없음'}</span>
+            </div>
+            <div>
+              <span>자율주행 앱 생존 신호</span>
+              <span className={styles.mono}>
+                {app?.heartbeat_ago_ms != null ? `${(app.heartbeat_ago_ms / 1000).toFixed(1)}초 전` : '없음'}
+              </span>
+            </div>
+            <div>
+              <span>주행 모드</span>
+              <span>
+                {mode ? (
+                  <StatusBadge health={MODE_HEALTH[mode]} label={MODE_LABEL[mode]} size="sm" />
+                ) : (
+                  '미확인'
+                )}
+              </span>
+            </div>
           </div>
-        </div>
-        <p className={styles.dim}>강제 종료 시: {KILL_EFFECT[app]}</p>
+        )}
         <div className={styles.row}>
-          <Button
-            variant="danger"
-            style={{ flex: 1 }}
-            disabled={!mockDemo || down}
-            title={down ? '이미 꺼져 있거나 복구 중' : undefined}
-            onClick={() => setConfirm(true)}
-          >
-            강제 종료
-          </Button>
-          <Button variant="secondary" disabled={!vm} onClick={() => navigate('/simulator/stress')}>
-            부하 테스트
-          </Button>
-        </div>
-      </div>
-      <Modal
-        open={confirm}
-        title="강제 종료"
-        onClose={() => setConfirm(false)}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setConfirm(false)}>
-              취소
-            </Button>
+          {(['app', 'vm'] as const).map((fault) => (
             <Button
+              key={fault}
               variant="danger"
-              onClick={() => {
-                mockDemo?.forceKill(app);
-                setConfirm(false);
-                toast.show(`${role.title} 강제 종료 — 복구 서비스가 다시 시작한다`, 'fault', 3000);
-              }}
+              style={{ flex: 1 }}
+              disabled={!running}
+              title={vm && !running ? 'VM1 이 실행 중일 때만 쓸 수 있습니다' : undefined}
+              onClick={() => setConfirm(fault)}
             >
-              강제 종료
+              {FAULT[fault].button}
             </Button>
-          </>
-        }
-      >
-        <p>
-          <b style={{ color: role.color }}>{role.title}</b> 도메인을 강제 종료한다. 디스크는 지우지 않고 복구
-          서비스가 다시 시작한다.
-        </p>
-        <p className={styles.dim}>{KILL_EFFECT[app]}</p>
-      </Modal>
+          ))}
+        </div>
+        {vm && <AppExitAction vm={vm} open={confirm === 'app'} onClose={() => setConfirm(null)} />}
+        {vm && <DomainKillAction vm={vm} open={confirm === 'vm'} onClose={() => setConfirm(null)} />}
+      </div>
     </Card>
   );
 }
 
-// ---- 수동주행 입력 (MQTT 계약 §7) ----
-
-const RESULT_LABEL: Record<InputResult, string> = {
-  SENT: '보냄',
-  RELEASED: '놓음',
-  NOT_MANUAL: 'MANUAL 이 아니라 버려짐',
-  NOT_CONNECTED: '백엔드가 브로커에 연결되지 않음',
-};
-
-/**
- * 눌린 키 집합이 바뀔 때만 보낸다. 누르고 있는 동안의 반복(20 Hz)은 백엔드가 한다 (MQTT 계약 §7).
- * MANUAL 이 아니면 입력을 받지 않는다 — 백엔드도 같은 이유로 버린다. 손을 떼거나 창을 벗어나면 정지(200 ms).
- */
-function ManualInput() {
-  const { drive } = useDrive();
-  const mode = drive?.control?.mode ?? null;
-  const { socket, result, sendKeys } = useManualInput();
-  const [held, setHeld] = useState<DriveKey[]>([]);
-  const heldRef = useRef<DriveKey[]>([]);
-  const enabled = mode === 'MANUAL' && socket === 'open';
-  const manual = drive?.apps.manual?.last_command;
-
-  const press = useCallback(
-    (key: DriveKey, down: boolean) => {
-      const next = pressKey(heldRef.current, key, down);
-      if (next === heldRef.current) return;
-      heldRef.current = next;
-      setHeld(next);
-      sendKeys(next);
-    },
-    [sendKeys],
-  );
-
-  const releaseAll = useCallback(() => {
-    if (heldRef.current.length === 0) return;
-    heldRef.current = [];
-    setHeld([]);
-    sendKeys([]);
-  }, [sendKeys]);
-
-  useEffect(() => {
-    if (!enabled) {
-      releaseAll();
-      return;
-    }
-    const onKey = (down: boolean) => (event: KeyboardEvent) => {
-      const key = driveKeyOf(event.key);
-      if (!key) return;
-      // 누를 때만 거른다: 폼 요소 안의 입력과 Ctrl·Meta·Alt 조합(Ctrl+S 등)은 주행 입력이 아니다.
-      // 뗄 때는 거르지 않는다 — 키를 누른 채 포커스가 select 로 넘어가면 keyup 이 버려져 백엔드가 20Hz 로 계속 보낸다
-      if (down) {
-        if (event.ctrlKey || event.metaKey || event.altKey) return;
-        if ((event.target as HTMLElement | null)?.closest?.('input, textarea, select')) return;
-        event.preventDefault(); // 화살표·스페이스로 페이지가 스크롤되지 않게
+function ConfirmModal({
+  fault,
+  vm,
+  open,
+  onClose,
+  onConfirm,
+}: {
+  fault: Fault;
+  vm: Vm;
+  open: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Modal
+      open={open}
+      title={FAULT[fault].title}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose}>
+            취소
+          </Button>
+          <Button
+            variant="danger"
+            onClick={() => {
+              onConfirm();
+              onClose();
+            }}
+          >
+            {FAULT[fault].button}
+          </Button>
+        </>
       }
-      press(key, down);
-    };
-    const down = onKey(true);
-    const up = onKey(false);
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
-    window.addEventListener('blur', releaseAll); // 창을 떠나면 keyup 을 못 받는다
-    return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
-      window.removeEventListener('blur', releaseAll);
-    };
-  }, [enabled, press, releaseAll]);
-
-  const pad = (key: DriveKey, text: string, extra = '') => (
-    <button
-      type="button"
-      className={[styles.key, held.includes(key) ? styles.keyOn : '', extra].join(' ')}
-      disabled={!enabled}
-      aria-pressed={held.includes(key)}
-      onPointerDown={() => press(key, true)}
-      onPointerUp={() => press(key, false)}
-      onPointerLeave={() => press(key, false)}
-      onPointerCancel={() => press(key, false)}
     >
-      {text}
-    </button>
+      <p>
+        <b>{vm.name}</b> — {FAULT[fault].effect}
+      </p>
+    </Modal>
   );
+}
 
+function AppExitAction({ vm, open, onClose }: { vm: Vm; open: boolean; onClose: () => void }) {
+  const start = useStartAppExit(vm.vm_id);
+  const [commandId, setCommandId] = useState<string | null>(null);
+  const status = useCommandStatus(vm.vm_id, commandId);
+  const result = status.data;
+  let text: string | null = null;
+  let fault = false;
+  if (start.isPending) text = '자율주행 앱 종료 명령을 보내는 중…';
+  else if (start.isError) {
+    text = `자율주행 앱 종료 실패 — ${failureText(start.error)}`;
+    fault = true;
+  } else if (result?.status === 'REJECTED' || result?.status === 'FAILED') {
+    // 거부를 성공처럼 보이지 않게: 사유만 보인다 (DEMO_DISABLED 등)
+    text = `VM 이 명령을 거부했습니다 — ${result.message ?? result.status}`;
+    fault = true;
+  } else if (result) text = `자율주행 앱 종료 명령 ${result.status} — 위 명령·생존 신호가 끊기는지 보세요.`;
+  else if (commandId) text = '명령을 보냈습니다. VM 의 응답을 기다리는 중…';
   return (
     <>
-      <p className={enabled ? styles.dim : styles.draft}>
-        {socket !== 'open'
-          ? '입력 소켓 연결 중…'
-          : enabled
-            ? '화살표·WASD 로 운전, 스페이스는 브레이크. 손을 떼면 0.2초 뒤 정지한다.'
-            : `MANUAL 일 때만 입력 전달 — 지금 ${mode ?? '모드 없음'} 이라 입력 무시`}
-      </p>
-      <div className={styles.pad} style={{ '--accent': ROLES.manual.color } as CSSProperties}>
-        <span />
-        {pad('up', '▲')}
-        <span />
-        {pad('left', '◀')}
-        {pad('brake', '■')}
-        {pad('right', '▶')}
-        <span />
-        {pad('down', '▼')}
-        <span />
-      </div>
-      <div className={styles.rows}>
-        <div>
-          <span>눌린 키</span>
-          <span>
-            {held.length ? held.join(' + ') : '없음'}
-            {result && ` · ${RESULT_LABEL[result]}`}
-          </span>
-        </div>
-        <div>
-          <span>수동주행 명령</span>
-          <span>{manual ? `${plain(manual.v_mps)} m/s · ${signed(manual.steer_rad)} rad` : '—'}</span>
-        </div>
-      </div>
+      <ConfirmModal
+        fault="app"
+        vm={vm}
+        open={open}
+        onClose={onClose}
+        onConfirm={() => {
+          if (start.isPending) return;
+          setCommandId(null);
+          start.mutate(
+            { app_id: 'autonomous' },
+            { onSuccess: (command) => setCommandId(command.command_id) },
+          );
+        }}
+      />
+      {text && (
+        <p className={styles.dim} data-tone={fault ? 'fault' : 'ok'} role="status">
+          {text}
+        </p>
+      )}
     </>
   );
 }
 
-/**
- * [자율주행 재개]·[수동주행 시작]·[출력 다시 허용] — 누르면 POST /api/v1/drive/resume (백엔드와 같은 허용 모드, 계약 mqtt 5.2 v1.8.3).
- * - AUTO_READY: 게이트웨이가 받아들이면 3·2·1 카운트다운 뒤 AUTO (계약 v1.2 §6, 화면 위 알림).
- *   카운트다운 중에는 [취소]로 멈출 수 있다 (DELETE, 계약 v1.7) — 모드는 그대로다.
- * - MANUAL·AUTO: 출력 금지(disarmed)된 모드를 재무장. 화면은 출력 허가 여부를 모르므로 늘 누를 수 있고,
- *   이미 출력 중이면 게이트웨이가 조용히 무시한다.
- * - SAFE_STOP: 게이트웨이가 준비된 수동 VM 을 골라 MANUAL 로 재무장한다.
- */
-const RESUMABLE: readonly DriveMode[] = ['AUTO_READY', 'MANUAL', 'AUTO', 'SAFE_STOP'];
-
-/** 운영자용 문구 — 계약 용어(재무장)는 쓰지 않는다. 같은 요청이지만 모드마다 게이트웨이가 하는 일이 다르다 */
-function resumeLabel(mode: DriveMode | null | undefined) {
-  if (mode === 'SAFE_STOP') return '▶ 수동주행 시작';
-  if (mode === 'MANUAL' || mode === 'AUTO') return '▶ 출력 다시 허용';
-  return '▶ 자율주행 재개';
-}
-
-function Resume() {
-  const { drive } = useDrive();
-  const toast = useToast();
-  const [sending, setSending] = useState(false);
-  const mode = drive?.control?.mode;
-  const ready = mode != null && RESUMABLE.includes(mode);
-  const counting = drive?.resume ?? null;
-  const cancelledByOperator = drive?.resume_cancel?.reason === 'operator_cancelled';
-  const send = async (job: () => Promise<void> = requestResume) => {
-    setSending(true);
-    try {
-      await job();
-    } catch (error) {
-      toast.show(error instanceof Error ? error.message : String(error), 'fault', 5000);
-    } finally {
-      setSending(false);
-    }
-  };
+function DomainKillAction({ vm, open, onClose }: { vm: Vm; open: boolean; onClose: () => void }) {
+  const kill = useStartDomainKill(vm.vm_id);
+  let text: string | null = null;
+  if (kill.isPending) text = 'VM1 강제 종료 요청을 보내는 중…';
+  else if (kill.isError) text = `VM1 강제 종료 실패 — ${failureText(kill.error)}`;
+  else if (kill.isSuccess)
+    text = 'VM1 을 강제 종료했습니다. 복구 서비스가 약 60초 뒤 다시 띄웁니다 — 위 VM 상태를 보세요.';
   return (
-    <div style={{ marginTop: 'var(--x-space-4)' }}>
-      <Button
-        style={{ width: '100%' }}
-        disabled={!ready || !!counting || sending}
-        onClick={() => void send()}
-      >
-        {counting
-          ? `▶ ${Math.max(1, Math.ceil(counting.remaining_ms / 1000))}초 뒤 자율주행`
-          : resumeLabel(mode)}
-      </Button>
-      {counting && (
-        <Button
-          variant="danger"
-          style={{ width: '100%', marginTop: 'var(--x-space-2)' }}
-          disabled={sending}
-          onClick={() => void send(cancelResume)}
-        >
-          취소 — 수동주행 유지
-        </Button>
+    <>
+      <ConfirmModal
+        fault="vm"
+        vm={vm}
+        open={open}
+        onClose={onClose}
+        onConfirm={() => {
+          if (!kill.isPending) kill.mutate();
+        }}
+      />
+      {text && (
+        <p className={styles.dim} data-tone={kill.isError ? 'fault' : 'ok'} role="status">
+          {text}
+        </p>
       )}
-      <p className={styles.dim}>
-        {counting
-          ? '카운트다운 중 — [취소]하면 수동주행을 유지한다. 그 사이 자율주행이 다시 끊겨도 취소된다.'
-          : mode === 'SAFE_STOP'
-            ? '안전 정지 중 — 누르면 게이트웨이가 준비된 수동주행 VM 으로 수동주행을 시작한다 (준비된 VM 이 없으면 무시). 202 는 보냈다는 뜻이고, 적용은 모드가 바뀌는 것으로 확인한다.'
-            : mode === 'MANUAL' || mode === 'AUTO'
-              ? '차량 출력이 막힌 상태라면 다시 허용한다. 이미 출력 중이면 게이트웨이가 무시한다. 202 는 보냈다는 뜻이고, 적용은 모드가 바뀌는 것으로 확인한다.'
-              : ready
-                ? cancelledByOperator
-                  ? '재개를 취소했다. 수동주행 유지 중 — 누르면 다시 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
-                  : '자율주행이 준비됐다(AUTO_READY). 누르면 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
-                : '주행 상태를 받으면 [자율주행 재개]·[수동주행 시작]·[출력 다시 허용]을 누를 수 있다.'}
-      </p>
-    </div>
+    </>
   );
 }
