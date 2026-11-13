@@ -24,9 +24,15 @@ const createMutation = vi.hoisted(() => ({
   reset: vi.fn(),
 }));
 
+const templatesQuery = vi.hoisted(() => ({
+  data: undefined as unknown,
+  error: null as unknown,
+  isPending: false,
+}));
+
 vi.mock('../api/queries', () => ({
   useCreateVm: () => createMutation,
-  useTemplates: () => ({ data: [LINUX_TEMPLATE], error: null, isPending: false }),
+  useTemplates: () => templatesQuery,
 }));
 
 beforeAll(() => {
@@ -45,6 +51,9 @@ beforeEach(() => {
   createMutation.error = null;
   createMutation.isPending = false;
   createMutation.mutateAsync.mockReset();
+  templatesQuery.data = [LINUX_TEMPLATE];
+  templatesQuery.error = null;
+  templatesQuery.isPending = false;
 });
 
 afterEach(() => {
@@ -162,5 +171,34 @@ describe('VM 생성 중 기록 정리', () => {
       within(notice).getByText(/같은 이름·사양으로 다시 생성하면 이어서 복구됩니다/),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '같은 사양으로 다시 생성' })).toBeEnabled();
+  });
+});
+
+describe('템플릿 목록 안내', () => {
+  it('보드에 닿지 못해 템플릿을 못 읽으면 보드 연결 문제라고 안내한다', () => {
+    templatesQuery.data = undefined;
+    templatesQuery.error = new ApiError(503, {
+      code: 'VM_CONTROL_UNAVAILABLE',
+      message: 'VM 제어 서비스에 연결할 수 없습니다.',
+    });
+    renderCreatePage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent('보드에 연결할 수 없어 템플릿을 불러오지 못했습니다');
+  });
+
+  it('그 밖의 오류는 일반 실패 문구를 보여 준다', () => {
+    templatesQuery.data = undefined;
+    templatesQuery.error = new ApiError(500, { code: 'INTERNAL_ERROR' });
+    renderCreatePage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent('템플릿을 불러오지 못했습니다.');
+    expect(screen.queryByText(/보드에 연결할 수 없어/)).not.toBeInTheDocument();
+  });
+
+  it('보드에 공개된 템플릿이 없으면 빈 목록 안내를 보여 준다', () => {
+    templatesQuery.data = [];
+    renderCreatePage();
+
+    expect(screen.getByText(/보드에 공개된 템플릿이 없습니다/)).toBeInTheDocument();
   });
 });
