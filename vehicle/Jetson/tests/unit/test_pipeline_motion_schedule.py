@@ -11,10 +11,11 @@ import unittest
 from unittest.mock import patch
 
 from xenova_vehicle.mapping.free_schedule import FreeScheduler,stopping_region
-from xenova_vehicle.mapping.local_map import FREE,GridSpec
+from xenova_vehicle.mapping.local_map import FREE,OCCUPIED,GridSpec
 from xenova_vehicle.mapping.odometry import PoseEstimate,PoseSample
 from xenova_vehicle.perception.depth import DepthEvidence
 from xenova_vehicle.perception.free_space import TargetClass
+from xenova_vehicle.perception.geometry import PointBounds
 from xenova_vehicle.perception.inputs import FrameStamp,ImageFrame,PerceptionInput
 from xenova_vehicle.perception.motion import widen_motion_rays
 from xenova_vehicle.perception.pipeline import PerceptionPipeline,PipelineProfile
@@ -48,10 +49,10 @@ class PipelineMotionScheduleTests(unittest.TestCase):
             0.,0.,0.,.00001,.00001,'SYNTHETIC_ODOMETRY')
         return PoseEstimate(sample,(at,at+40_000),(at-10_000,at+50_000))
 
-    def process(self,core,observation,**kwargs):
+    def process(self,core,observation,*,hits=(),**kwargs):
         def depth(_array,_camera,_plane,*,stamp,**_):
             rays=tuple(replace(ray,source_key=stamp.key) for ray in depth_fixture.witness_rays())
-            return DepthEvidence(stamp,self.calibration.sha256,'SYNTHETIC',(),rays,9,9,0,0,0,0,True,'FLOOR')
+            return DepthEvidence(stamp,self.calibration.sha256,'SYNTHETIC',hits,rays,9,9,0,0,0,0,True,'FLOOR')
         with patch('xenova_vehicle.perception.depth.analyze_depth',side_effect=depth), \
                 patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=self.graph), \
                 patch('xenova_vehicle.perception.pipeline.infer_road',return_value=self.road):
@@ -70,6 +71,7 @@ class PipelineMotionScheduleTests(unittest.TestCase):
         self.assertEqual(value.summary['free_cells_applied'],1)
         self.assertEqual(value.map_snapshot['arrays']['state'][0,1],FREE)
         self.assertEqual(int(core.grid.observed_us[0,1]),100_000)
+
         self.assertEqual(int(value.map_snapshot['arrays']['age_ms'][0,1]),60)
         self.assertIs(value.depth.stamp,original.depth.stamp)
         self.assertEqual(value.depth.patches,depth_fixture.witness_rays())
@@ -83,6 +85,34 @@ class PipelineMotionScheduleTests(unittest.TestCase):
         self.assertEqual(second.summary['free_certificates'][0]['cell'],[0,0])
         self.assertEqual(int(core.grid.observed_us[0,0]),200_000)
         self.assertEqual(int(core.grid.observed_us[0,1]),100_000)
+
+    def test_boundary_proof_clears_only_witnessed_subcells_of_current_hit(self):
+        core=PerceptionPipeline(self.calibration,replace(self.profile,grid=GridSpec(2,1,.05,(-.025,-.025)),
+            max_free_ray_tests=4096),targets=self.targets)
+        original=self.observation()
+        hit=PointBounds((-.024,-.024,.1),(-.021,-.021,.11),True)
+        value=self.process(core,original,hits=(hit,),now_us=150_000,completed_clock=lambda:160_000,
+            pose=self.pose(),motion_qualified=True,needed_mask=self.needed,
+            cycle_bound_us=10_000,completion_bound_us=20_000)
+        arrays=value.map_snapshot['arrays']
+        self.assertEqual(arrays['state'][0,0],OCCUPIED)
+        self.assertEqual(arrays['state'][0,1],FREE)
+        self.assertEqual(int(arrays['boundary_free4'][0,0]),0xfffe)
+        self.assertNotIn('boundary_free4',core.grid.snapshot(600_001,clock_id='sim-clock')['arrays'])
+        latest=self.observation(2).depth.stamp
+        core.grid.add_hits(((-.024,-.024,-.021,-.021),),latest,view_id='right',origin_xy=(0.,0.))
+        self.assertNotIn('boundary_free4',core.grid.snapshot(250_000,clock_id='sim-clock')['arrays'])
+
+    def test_boundary_budget_does_not_cancel_completed_whole_cell_renewal(self):
+        core=PerceptionPipeline(self.calibration,replace(self.profile,grid=GridSpec(2,1,.05,(-.025,-.025)),
+            max_free_ray_tests=4096),targets=self.targets)
+        clocks=iter((150_000,160_000,170_001))
+        hit=PointBounds((-.024,-.024,.1),(-.021,-.021,.11),True)
+        value=self.process(core,self.observation(),hits=(hit,),now_us=150_000,completed_clock=lambda:next(clocks,170_001),
+            pose=self.pose(),motion_qualified=True,needed_mask=self.needed,
+            cycle_bound_us=10_000,completion_bound_us=20_000)
+        self.assertEqual(value.map_snapshot['arrays']['state'][0,1],FREE)
+        self.assertNotIn('boundary_free4',value.map_snapshot['arrays'])
 
     def test_missing_motion_full_pose_needed_or_timing_never_uses_cell_padding_as_free(self):
         base=dict(now_us=150_000,completed_clock=lambda:160_000,pose=self.pose(),motion_qualified=True,

@@ -133,14 +133,25 @@ def _project(draft, refs, reader, hazard, pi_upper, published_j_us, np):
           and snapshot.get('live_authority') is False and snapshot.get('world_valid') is False,
           'actual current candidate snapshot required')
     arrays = snapshot['arrays']; expected = dict(state='u1', age_ms='<u4', support='?', permission='?', conflict='?', unordered_hit='?')
-    _need(type(arrays) is dict and set(arrays) == set(expected), 'exact bounded candidate snapshot arrays required')
+    _need(type(arrays) is dict, 'exact bounded candidate snapshot arrays required')
+    if 'boundary_free4' in arrays:
+        expected['boundary_free4'] = '<u2'
+    _need(set(arrays) == set(expected), 'exact bounded candidate snapshot arrays required')
     for name, dtype in expected.items():
         value = arrays[name]
         _need(type(value) is np.ndarray and value.shape == shape and value.dtype == np.dtype(dtype),
               'candidate array shape/dtype differs: ' + name)
     _need(not np.any(arrays['state'] > 2), 'invalid candidate state')
-    copies = {name: value.copy() for name, value in arrays.items()}
+    copies = {name: value.copy() for name, value in arrays.items() if name != 'boundary_free4'}
     local_hazard, global_hazard = hazard
+    if 'boundary_free4' in arrays:
+        current = grid.snapshot(published_j_us, clock_id=grid.clock_id)['arrays']
+        if 'boundary_free4' in current:
+            masks = current['boundary_free4'].copy()
+            masks[local_hazard] = 0
+            copies['boundary_free4'] = masks
+            refined = masks != 0
+            copies['age_ms'][refined] = current['age_ms'][refined]
     blocked = ((grid.state == OCCUPIED) | grid.conflict | grid.unordered_hit | local_hazard)
     live = ((copies['state'] == FREE) & (grid.state == FREE) & copies['support'] & copies['permission']
             & grid.time_known & (grid.observed_us <= published_j_us))
@@ -156,6 +167,8 @@ def _project(draft, refs, reader, hazard, pi_upper, published_j_us, np):
         tx, x = divmod(gx, 64); ty, y = divmod(gy, 64); key = tx, ty
         bits = global_hazard.get(key)
         if bits is not None and bits[(y * 64 + x) // 8] & (1 << ((y * 64 + x) % 8)):
+            if 'boundary_free4' in copies:
+                copies['boundary_free4'][row, col] = 0
             if copies['state'][row, col] == FREE:
                 copies['state'][row, col] = UNKNOWN
             continue

@@ -124,6 +124,7 @@ class EvidenceGrid:
         self.hit_origin = np.zeros((*shape,2),dtype=np.float64)
         self.unordered_hit = np.zeros(shape,dtype=np.bool_)
         self.hit_available_us = np.zeros(shape,dtype=np.uint64)
+        self.boundary_free4 = np.zeros(shape, dtype=np.uint16)
         self.hit_view = {}
         self.rolling_window = None
         self.revision = 0
@@ -168,6 +169,7 @@ class EvidenceGrid:
             raise ValueError('hit view identity/origin missing')
         touched = self._hit_mask(boxes_xy)
         count = int(np.count_nonzero(touched))
+        self.boundary_free4[touched] = 0
         self.conflict[touched] |= self.state[touched] == FREE
         self.state[touched] = OCCUPIED
         if observed is None:
@@ -264,6 +266,7 @@ class EvidenceGrid:
                     self.conflict[row,col] = True
                     continue
             self.state[row,col] = FREE
+            self.boundary_free4[row, col] = 0
             self.observed_us[row,col] = observed
             self.time_known[row,col] = True
             self.conflict[row,col] = False
@@ -278,6 +281,20 @@ class EvidenceGrid:
                 observer(GridMutation('FREE',stamp,self.state.shape,mask,mask,
                     None if self.rolling_window is None else self.rolling_window.offset_xy))
         return applied
+
+    def add_boundary_free4(self, masks, stamp):
+        """Attach completed subcell proofs to a HIT from the same capture."""
+        observed = self._time(stamp)
+        if observed is None:
+            return
+        for (col, row), mask in masks.items():
+            if not (0 <= col < self.spec.width and 0 <= row < self.spec.height and 0 < mask < 0xffff):
+                raise ValueError('boundary proof requires a grid cell and a partial free mask')
+            if (self.state[row, col] == OCCUPIED and self.time_known[row, col]
+                    and not self.unordered_hit[row, col] and self.observed_us[row, col] == observed
+                    and self.hit_available_us[row, col] == stamp.available_us
+                    and self.support[row, col] and self.permission[row, col]):
+                self.boundary_free4[row, col] = mask
 
     def snapshot(self, now_us, *, clock_id):
         import numpy as np
@@ -296,6 +313,10 @@ class EvidenceGrid:
         state[(state==FREE)&~(self.support&self.permission)] = UNKNOWN
         arrays = dict(state=state,age_ms=age,support=self.support.copy(),permission=self.permission.copy(),
                       conflict=self.conflict.copy(),unordered_hit=self.unordered_hit.copy())
+        refined = ((self.boundary_free4 != 0) & (state == OCCUPIED) & (elapsed <= self.free_ttl_us)
+                   & self.support & self.permission & ~self.unordered_hit)
+        if np.any(refined):
+            arrays['boundary_free4'] = np.where(refined, self.boundary_free4, np.uint16(0))
         for value in arrays.values():
             value.setflags(write=False)
         return dict(frame_id=self.frame_id,calibration_id=self.calibration_id,clock_id=self.clock_id,

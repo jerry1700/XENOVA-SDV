@@ -23,7 +23,7 @@ from .temporal_road import MappedRoad, TemporalRoadMap
 from .parking_entrance import EntranceSpan, entrance_spans, entrance_summary
 from .parking import parking_clearance_cells
 from .depth import DepthConfig
-from ..mapping.local_map import EvidenceGrid, GridSpec, SourceGate
+from ..mapping.local_map import EvidenceGrid, GridSpec, OCCUPIED, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
     RegistrationProfile,transform_point,segment_distance,wrap_yaw)
 from ..mapping.odometry import PoseEstimate
@@ -32,6 +32,8 @@ from ..mapping.free_schedule import FreeScheduler,StoppingRegion
 
 
 _MIN_REGISTRATION_STRIP_M = .08
+_BOUNDARY_PARENTS_PER_FRAME = 2
+_BOUNDARY_RAY_TESTS_PER_FRAME = 2048
 
 
 def _digest(value):
@@ -238,6 +240,63 @@ class PerceptionPipeline:
             return point
         p=pose.sample
         return transform_point((point[0]-p.x,point[1]-p.y),(0.,0.,-p.yaw))
+
+    def _free_bounds(self, bounds, pose, grid_pad=0.):
+        x0,y0,x1,y1 = bounds
+        corners = [self._base(v,pose) for v in ((x0,y0),(x0,y1),(x1,y0),(x1,y1))]
+        error = grid_pad
+        if pose is not None:
+            sample = pose.sample
+            error += sample.position_error_m + 2*max(math.hypot(*v) for v in corners)*math.sin(min(math.pi,sample.yaw_error_rad)/2)
+        return (min(v[0] for v in corners)-error, min(v[1] for v in corners)-error,
+                max(v[0] for v in corners)+error, max(v[1] for v in corners)+error)
+
+    def _boundary_candidates(self, grid, stamp, needed):
+        import numpy as np
+        if stamp.captured_us is None or grid.spec.resolution_m != .05:
+            return ()
+        eligible = ((grid.state == OCCUPIED) & grid.support & grid.permission & grid.time_known
+                    & ~grid.unordered_hit & (grid.observed_us == stamp.captured_us[0])
+                    & (grid.hit_available_us == stamp.available_us))
+        indices = np.flatnonzero(eligible).tolist()
+        if len(indices) > _BOUNDARY_PARENTS_PER_FRAME:
+            offset = stamp.sequence * _BOUNDARY_PARENTS_PER_FRAME % len(indices)
+            indices = indices[offset:] + indices[:offset]
+            if needed is not None:
+                required = needed.ravel()
+                indices.sort(key=lambda index: not required[index])
+        width = grid.spec.width
+        return tuple((index % width, index // width) for index in indices[:_BOUNDARY_PARENTS_PER_FRAME])
+
+    def _certify_boundary_cells(self, grid, cells, pose, certify, remaining, has_time):
+        import numpy as np
+        resolution = grid.spec.resolution_m
+        wire_delta = float(np.float32(resolution)) - resolution
+        ox, oy = grid.spec.origin_xy
+        dx, dy = float(np.float32(ox)) - ox, float(np.float32(oy)) - oy
+        wire_pad = math.hypot(max(abs(dx), abs(dx + grid.spec.width * wire_delta)),
+                              max(abs(dy), abs(dy + grid.spec.height * wire_delta)))
+        subcell = resolution / 4
+        budget = min(remaining, _BOUNDARY_RAY_TESTS_PER_FRAME)
+        left = budget
+        masks = {}
+        for col, row in cells:
+            x0, y0, _, _ = grid.spec.bounds(col, row)
+            mask = 0
+            for bit in range(16):
+                if left <= 0 or not has_time():
+                    break
+                x, y = x0 + bit % 4 * subcell, y0 + bit // 4 * subcell
+                bounds = self._free_bounds((x, y, x + subcell, y + subcell), pose, wire_pad)
+                certificate, used = certify(bounds, left, work_allowed=has_time)
+                left -= used
+                if certificate.free:
+                    mask |= 1 << bit
+            if 0 < mask < 0xffff:
+                masks[col, row] = mask
+            if left <= 0:
+                break
+        return masks, budget - left
 
     def _xy_bounds(self, box, pose):
         if pose is None:
@@ -867,30 +926,29 @@ class PerceptionPipeline:
                 legacy_positions.append(self._free_cursor)
             selected=tuple(attempted)
         if can_free:
+            def certify(bounds, budget, *, work_allowed=None):
+                certificate=certify_cell(bounds,free_patches,self.targets,self.calibration,
+                    permission_polygon=self.profile.permission_polygon,max_tiles=self.profile.max_free_tiles,
+                    max_ray_tests=budget,hazards=evidence.hit_boxes,work_allowed=work_allowed)
+                work=certificate.work
+                consumed=work.get('ray_tests',work.get('tests',0)) if type(work) is dict else int(work)
+                if not 0<=consumed<=budget:
+                    raise ValueError('certificate work exceeds its original shared budget')
+                return certificate, consumed
+
             for col,row in selected:
                 if remaining<=0:break
                 step(None)
                 attempted_cells.append((col,row))
-                x0,y0,x1,y1=grid.spec.bounds(col,row)
-                corners=[self._base(v,pose) for v in ((x0,y0),(x0,y1),(x1,y0),(x1,y1))]
-                error=0. if pose is None else pose.sample.position_error_m+2*max(math.hypot(*v) for v in corners)*math.sin(min(math.pi,pose.sample.yaw_error_rad)/2)
-                bounds=(min(v[0] for v in corners)-error,min(v[1] for v in corners)-error,
-                        max(v[0] for v in corners)+error,max(v[1] for v in corners)+error)
-                certificate=certify_cell(bounds,free_patches,self.targets,self.calibration,
-                    permission_polygon=self.profile.permission_polygon,max_tiles=self.profile.max_free_tiles,
-                    max_ray_tests=remaining,hazards=evidence.hit_boxes)
-                work=certificate.work
-                consumed=work.get('ray_tests',work.get('tests',0)) if type(work) is dict else int(work)
-                if not 0<=consumed<=remaining:
-                    raise ValueError('certificate work exceeds its original shared budget')
+                bounds=self._free_bounds(grid.spec.bounds(col,row),pose)
+                certificate,consumed=certify(bounds,remaining)
                 remaining-=consumed
-                certificates.append(dict(cell=[col,row],status=certificate.status,complete=certificate.complete,reason=certificate.reason,work=work))
+                certificates.append(dict(cell=[col,row],status=certificate.status,complete=certificate.complete,reason=certificate.reason,work=certificate.work))
                 if certificate.free:
                     certified_cells.append((col,row));certified_details[(col,row)]=(certificate,bounds)
         if plan is not None:scheduler.note_attempts(plan,tuple(attempted_cells))
         elif legacy_positions is not None:
             self._free_cursor=legacy_positions[len(attempted_cells)-1] if attempted_cells else legacy_cursor_before
-        free_done=perf_counter_ns()
         step('FREE_COMPLETED')
         if completed_clock is not None:
             completed_us=completed_clock()
@@ -916,6 +974,27 @@ class PerceptionPipeline:
                     MapEvidenceUpdate(grid,delta,observation,evidence,raw_pose,pose,free_patches,certificate,bounds,self.targets))
                 applied_free+=grid.add_free((cell,),observation.depth.stamp,view_id=observation.depth.stamp.stream_id,
                     origin_xy=origin,certificate_complete=True,observer=free_observer)
+        # 남은 예산으로만 하위 셀을 확인해 5cm FREE 갱신이 이 작업을 기다리지 않게 한다.
+        if final_free and remaining and not evidence.omitted_hit_count:
+            stamp = observation.depth.stamp
+            candidates = self._boundary_candidates(grid, stamp, needed)
+            if candidates:
+                deadline = stamp.captured_us[0] + min(self.profile.max_observation_age_us, self.profile.free_ttl_us)
+                if completion_bound_us is not None:
+                    deadline = min(deadline, processing_began_us + completion_bound_us)
+
+                def has_time():
+                    at = now_us if completed_clock is None else completed_clock()
+                    if type(at) is not int or not now_us <= at < 2**64:
+                        raise ValueError('subcell completion must use the original clock domain')
+                    return (at <= deadline and (region is None or region.valid_at(at))
+                            and (not operational_localization or alignment_current(at)))
+
+                masks, used = self._certify_boundary_cells(grid, candidates, pose, certify, remaining, has_time)
+                remaining -= used
+                if masks and has_time():
+                    grid.add_boundary_free4(masks, stamp)
+        free_done=perf_counter_ns()
         lane_scope = None if raw_pose is None else (self.grid.frame_id, raw_pose.sample.context)
         rgb_age = observation.rgb.stamp.age_us(now_us, observation.rgb.stamp.clock_id)
         lane_pose = (pose if rgb_new and geometry_qualified and rgb_age is not None

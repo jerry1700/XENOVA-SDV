@@ -227,6 +227,19 @@ def build_world(snapshot, template, *, source, preferred_road=None, static_retai
                   age_le32=age.astype('<u4', copy=False).tobytes(order='C'))
     if result.required_features in (11, 15):
         fields['drivable_permission'] = np.packbits((support & permission).reshape(-1), bitorder='little').tobytes()
+    boundary = arrays.get('boundary_free4')
+    if 'boundary_cell_free4_le' in result.DESCRIPTOR.fields_by_name:
+        if result.HasField('boundary_cell_free4_le'):
+            raise WorldBuildError('template carries an unmanaged boundary subcell proof')
+        if boundary is not None and result.minor == 2 and result.required_features in (11, 15):
+            import struct
+            boundary = _layer(boundary, shape, 'u2', 'boundary_free4')
+            valid = ((state == 2) & support & permission & ~retained & ~old
+                     & (age != 0xffffffff) & (boundary != 0) & (boundary != 0xffff))
+            flat = boundary.reshape(-1)
+            records = b''.join(struct.pack('<HH', index, flat[index]) for index in np.flatnonzero(valid)[:128])
+            if records:
+                fields['boundary_cell_free4_le'] = records
     for name, value in fields.items():
         if result.HasField(name) and getattr(result, name) != value:
             raise WorldBuildError('template carries different managed grid field: ' + name)
