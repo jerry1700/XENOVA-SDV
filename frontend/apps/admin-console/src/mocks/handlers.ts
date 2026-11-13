@@ -35,7 +35,16 @@ import {
   mockZephyrNetworkSamples,
 } from './memoryMetrics';
 import { mockTelemetryHeartbeat } from './telemetryHeartbeat';
-import { getDisplays, RouteError, scenarioEvents, setRoute, startVm, stopVm, vmStateOf } from './scenario';
+import {
+  getDisplays,
+  resetScenario,
+  RouteError,
+  scenarioEvents,
+  setRoute,
+  startVm,
+  stopVm,
+  vmStateOf,
+} from './scenario';
 
 const REFRESH_COOKIE = 'xenova_refresh';
 const TOKEN_TTL_S = 900;
@@ -56,6 +65,7 @@ const demoCommands = new Map<string, { vmId: string; createdAt: number; agentExi
 /** 시험용: 처음 상태로 */
 export function resetMockState(): void {
   setMockBoardDown(false);
+  resetScenario();
   vms = initialVms();
   pinningByVm = initialPinning();
   tokenSeq = 0;
@@ -85,13 +95,21 @@ function resourcesOf(vm: Vm): VmResources {
     (item) => item.template_id === vm.template_id && item.version === vm.template_version,
   );
   const fixed = vm.guest_kind === 'zephyr';
+  const exclusivePcpus = [
+    ...new Set(
+      vms
+        .filter((item) => item.guest_kind === 'zephyr')
+        .flatMap((item) => (pinningByVm.get(item.vm_id) ?? defaultPinning(item)).flatMap((row) => row.pcpus)),
+    ),
+  ].sort((left, right) => left - right);
   return {
     vm_id: vm.vm_id,
     vcpus: vm.vcpus,
     memory_mib: vm.memory_mib,
     pcpu_count: 4,
     vcpu_pinning: vcpuPinning,
-    exclusive_pcpus: vm.guest_kind === 'zephyr' ? [...new Set(vcpuPinning.flatMap((row) => row.pcpus))] : [],
+    shared_pcpus: [0, 3],
+    exclusive_pcpus: exclusivePcpus,
     pcpus: [
       { pcpu: 0, load_percent: 24.8 },
       { pcpu: 1, load_percent: 36.2 },
@@ -312,8 +330,24 @@ export const handlers = [
     if (!body.mappings || !validMappings(vm, body.mappings)) {
       return error(400, 'INVALID_ARGUMENT', '각 vCPU에는 하나 이상의 유효한 pCPU를 선택해야 합니다.');
     }
-    if (vm.guest_kind === 'zephyr' && body.mappings.some((row) => row.pcpus.length !== 1)) {
-      return error(400, 'RESOURCE_UNSUPPORTED', 'Zephyr 전용 VM은 하나의 전용 pCPU에만 배치할 수 있습니다.');
+    if (vms.some((item) => live(item).state !== 'stopped')) {
+      return error(409, 'INVALID_VM_STATE', 'CPU 핀닝은 모든 VM이 정지된 상태에서만 변경할 수 있습니다.');
+    }
+    const masks = new Set(body.mappings.map((row) => [...row.pcpus].sort((a, b) => a - b).join(',')));
+    if (masks.size !== 1) {
+      return error(400, 'RESOURCE_UNSUPPORTED', '한 VM의 모든 vCPU에는 같은 pCPU 집합을 지정해야 합니다.');
+    }
+    const requested = new Set(body.mappings[0]?.pcpus ?? []);
+    const current = new Set((pinningByVm.get(vm.vm_id) ?? defaultPinning(vm)).flatMap((row) => row.pcpus));
+    const unavailable = resourcesOf(vm).exclusive_pcpus.filter((pcpu) => !current.has(pcpu));
+    if (
+      vm.guest_kind === 'zephyr' &&
+      [...requested].some((pcpu) => unavailable.includes(pcpu) || [0, 3].includes(pcpu))
+    ) {
+      return error(409, 'CPU_PLACEMENT_CONFLICT', '선택한 pCPU는 다른 VM 또는 dom0가 사용 중입니다.');
+    }
+    if (vm.guest_kind === 'linux' && [...requested].some((pcpu) => ![0, 3].includes(pcpu))) {
+      return error(400, 'RESOURCE_UNSUPPORTED', '공유 VM은 공유 pCPU 집합 안에서만 배치할 수 있습니다.');
     }
     pinningByVm.set(
       vm.vm_id,
