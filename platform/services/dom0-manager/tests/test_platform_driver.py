@@ -358,7 +358,9 @@ def test_platform_invalid_spec_is_400(client, manager):
     manager.fail_create = {"code": "INVALID_SPEC", "message": "invalid VM name"}
     rejected = client.post("/api/v1/vms", json=create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0"))
     assert rejected.status_code == 400, rejected.text
-    assert rejected.json()["code"] == "InvalidArgument" and "invalid VM name" in rejected.json()["message"]
+    assert rejected.json()["code"] == "InvalidArgument"
+    assert rejected.json()["platform_code"] == "INVALID_SPEC"
+    assert rejected.json()["context"]["next_action"] == "fix_request"
 
 
 def test_instance_paths_use_platform_internal_name(manager):

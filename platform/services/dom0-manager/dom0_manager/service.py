@@ -26,9 +26,9 @@ from uuid import UUID
 from . import budget as request_budget
 from .config import Settings
 from .drivers.base import CreateSpec, Domain, Driver, Provisioner, StatsSample
-from .errors import InsufficientResources, InvalidArgument, InvalidState, OperationNotFound, VMExists, VMNotFound
+from .errors import Dom0ManagerError, InsufficientResources, InvalidArgument, InvalidState, OperationNotFound, VMExists, VMNotFound, VMSpecConflict
 from .models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate,
-                     UpdateCpuPolicyRequest, UpdateResourcesRequest, VmState)
+                     UpdateCpuPolicyRequest, UpdateResourcesRequest, VmOperationAction, VmOperationResult, VmOperationStage, VmState)
 
 
 DOM0_UUID = UUID(int=0)  # xl list -v 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
@@ -38,6 +38,25 @@ def reject_dom0(vm_id: UUID) -> None:
     """Domain-0 은 관리 대상이 아니다. dom0 가 멈추면 제어 계층과 모든 게스트가 함께 멈추므로 어떤 경로로도 통과시키지 않는다."""
     if vm_id == DOM0_UUID:
         raise InvalidArgument("Domain-0 (nil UUID) is not a managed VM")
+
+
+@contextmanager
+def _failure_context(action: VmOperationAction, stage: VmOperationStage, *, before_submission: bool):
+    """실제로 제출하지 않은 서비스 단계와 하위 수락을 확인하지 못한 경우를 구분한다."""
+    try:
+        yield
+    except Dom0ManagerError as exc:
+        if exc.context is None:
+            rejected = before_submission or isinstance(exc, VMSpecConflict)
+            exc.context = VmOperationResult(
+                action=action, stage=stage,
+                accepted=False if rejected else None,
+                status=ControlStatus.rejected if rejected else ControlStatus.unknown,
+                next_action="fix_request" if isinstance(exc, (InvalidArgument, VMSpecConflict)) else "check_current_vm",
+            )
+            if exc.detail is not None:
+                exc.public_message = f"platform {action} failed ({exc.code})"
+        raise
 
 
 class VmService:
@@ -93,8 +112,9 @@ class VmService:
     # ---- 명령 ----
 
     def create(self, request: CreateVmRequest) -> Domain:
-        reject_dom0(request.vm_id)
-        with self._vm_lock(request.vm_id):
+        with _failure_context("create", "preflight", before_submission=True):
+            reject_dom0(request.vm_id)
+        with _failure_context("create", "preflight", before_submission=True), self._vm_lock(request.vm_id):
             if self._driver.has_domain(request.vm_id):
                 self._provisioner.check_existing_spec(request)
                 raise VMExists(f"domain {request.vm_id} already exists")
@@ -105,38 +125,45 @@ class VmService:
                 if request.memory_mib > host.free_memory_mib:
                     raise InsufficientResources("memory_mib", request.memory_mib, host.free_memory_mib)
                 request_budget.ensure(f"registering vm {request.vm_id}")
-                instance = self._provisioner.ensure_instance(
-                    request.vm_id,
-                    request.template_id,
-                    request.template_version,
-                    name=request.name,
-                    vcpus=request.vcpus,
-                    memory_mib=request.memory_mib,
-                )
+                with _failure_context("create", "registration", before_submission=False):
+                    instance = self._provisioner.ensure_instance(
+                        request.vm_id,
+                        request.template_id,
+                        request.template_version,
+                        name=request.name,
+                        vcpus=request.vcpus,
+                        memory_mib=request.memory_mib,
+                    )
                 spec = CreateSpec(
                     vm_id=request.vm_id,
                     vcpus=request.vcpus,
                     memory_mib=request.memory_mib,
                     instance=instance,
                 )
-                request_budget.ensure(f"starting vm {request.vm_id}")
-                return self._driver.create(spec)
+                with _failure_context("start", "preflight", before_submission=True):
+                    request_budget.ensure(f"starting vm {request.vm_id}")
+                with _failure_context("start", "acceptance", before_submission=False):
+                    return self._driver.create(spec)
 
     def stop(self, vm_id: UUID) -> None:
-        reject_dom0(vm_id)
-        with self._vm_lock(vm_id):
+        with _failure_context("stop", "preflight", before_submission=True):
+            reject_dom0(vm_id)
+        with _failure_context("stop", "preflight", before_submission=True), self._vm_lock(vm_id):
             request_budget.ensure(f"stopping vm {vm_id}")
-            self._driver.shutdown(vm_id, grace_s=self._settings.shutdown_grace_s)
+            with _failure_context("stop", "acceptance", before_submission=False):
+                self._driver.shutdown(vm_id, grace_s=self._settings.shutdown_grace_s)
 
     def request_stop(self, vm_id: UUID, key: str) -> ControlOperation | None:
         """키 있는 정지. 완료 또는 접수(pending) 상태를 돌려주고, 등록이 없으면 None.
 
         작업 기록이 없는 드라이버(mock·xen)는 기존 동기 정지를 하고 완료로 답한다(operation_id 없음, 조회 불가).
         """
-        reject_dom0(vm_id)
-        if self._driver.tracks_control_operations:
-            request_budget.ensure(f"stopping vm {vm_id}")
-            return self._driver.request_stop(vm_id, key=key)
+        with _failure_context("stop", "preflight", before_submission=True):
+            reject_dom0(vm_id)
+            if self._driver.tracks_control_operations:
+                request_budget.ensure(f"stopping vm {vm_id}")
+                with _failure_context("stop", "acceptance", before_submission=False):
+                    return self._driver.request_stop(vm_id, key=key)
         self.stop(vm_id)
         return ControlOperation(vm_id=vm_id, action="stop", request_key=key, status=ControlStatus.completed, accepted=True)
 
@@ -215,12 +242,18 @@ class VmService:
 
     def delete(self, vm_id: UUID) -> None:
         """계약 v1.1: 실행 중이면 409, 등록이 없으면 404, 정지된 VM 은 숨김 보관(retire). 강제 종료는 하지 않는다."""
-        reject_dom0(vm_id)
-        with self._vm_lock(vm_id):
+        with _failure_context("retire", "preflight", before_submission=True):
+            reject_dom0(vm_id)
+        with _failure_context("retire", "preflight", before_submission=True), self._vm_lock(vm_id):
             if not self._provisioner.guards_retirement:
                 if self._driver.has_domain(vm_id):
                     raise InvalidState(f"domain {vm_id} is running; stop it before delete")
                 if not self._provisioner.instance_exists(vm_id):
                     raise VMNotFound(f"instance {vm_id} not registered")
             request_budget.ensure(f"retiring vm {vm_id}")
-            self._provisioner.delete_instance(vm_id)
+            with _failure_context("retire", "acceptance", before_submission=False):
+                self._provisioner.delete_instance(vm_id)
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
+        reject_dom0(vm_id)
+        return self._driver.vm_operation(vm_id, action=action, operation_id=operation_id)

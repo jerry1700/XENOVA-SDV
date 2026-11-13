@@ -150,6 +150,28 @@ class ControlOperation(BaseModel):
     warnings: list[str] = Field(default_factory=list, description="진단 경고 코드(DIAGNOSTIC_UNAVAILABLE 등). 결과를 바꾸지 않는다")
 
 
+VmOperationAction = Literal["create", "start", "stop", "retire"]
+VmOperationStage = Literal[
+    "preflight", "acceptance", "asset_preparation", "registration", "network_apply",
+    "start_prepare", "start_submit", "start_confirmation", "shutdown_submit", "shutdown_confirmation",
+    "archive_move", "archive_commit", "completion",
+]
+
+
+class VmOperationResult(BaseModel):
+    """실패 응답과 원 작업 조회에 쓰는 제한된 관측값."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: VmOperationAction
+    stage: VmOperationStage | None = None
+    accepted: bool | None = None
+    status: ControlStatus
+    operation_id: UUID | None = None
+    next_action: Literal["fix_request", "check_current_vm", "lookup_original", "reconcile_original"] | None = None
+    platform_code: str | None = None
+
+
 class Error(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -163,6 +185,7 @@ class Error(BaseModel):
     )
     retryable: bool | None = Field(default=None, description="플랫폼이 준 원본 재시도 가능 여부. 코드만으로 재시도 정책을 만들지 않는다")
     operation: ControlOperation | None = Field(default=None, description="제어 요청이 받아들여진 뒤의 오류에만 있다. 원 작업 문맥")
+    context: VmOperationResult | None = Field(default=None, description="생성·시작·정지·보관 실패에서 확인한 작업 문맥")
 
 
 class HealthStatus(str, Enum):

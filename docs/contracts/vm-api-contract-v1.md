@@ -1,6 +1,6 @@
 # VM 관리 API 계약 v1
 
-**최종 갱신** 2026-11-02
+**최종 갱신** 2026-11-13
 **대상 시스템** Raspberry Pi 4 + Xen 멀티 OS 관리 플랫폼
 **구성 계층** 프론트 ↔ Spring (공개 API) ↔ dom0-manager (FastAPI) ↔ Xen `xl`
 
@@ -670,9 +670,7 @@ retire는 복구 가능성을 위해 디스크를 보존하고, 실제 공간 �
 |---|---|---|
 | `400` | `InvalidArgument` | 형식 또는 범위 오류 |
 | `404` | `VMNotFound` | `GET` 대상 도메인 부재 |
-| `404` | `OperationNotFound` | 요청 키로 원 제어 작업을 찾지 못함 (4.8). 검색 부재이며 미수락의 증거가 아님 |
-
-플랫폼이 제어 요청을 수락(완료 포함)했다고 하면서 유효한 원 작업 ID 를 주지 않으면 `503 PlatformUnavailable` 이다. 조회(4.8)한 원 기록은 정확히 "이 VM·이 키의 graceful stop·reboot" 이어야 한다: 작업 ID 가 유효하고 봉투의 값과 같음, 기록과 요청의 `vm_id` 가 조회 VM, 요청이 `stop`·`reboot`(force 없음), `idempotency_key` 가 조회 키, 단계가 알려진 값. 하나라도 어긋나면 하위 버전 불일치·기록 손상으로 보고 `503` 이다. 추적할 수 없거나 다른 작업인 기록을 `200`·`202` 로 꾸미지 않는다.
+| `404` | `OperationNotFound` | 요청 키(4.8) 또는 원 작업 ID(8.1.1)로 기록을 찾지 못함. 검색 부재이며 미수락의 증거가 아님 |
 | `409` | `VMExists` | `vm_id` 충돌(같은 VM 이 이미 있음). 자원 변경(4.12)에서는 같은 `Idempotency-Key` 가 다른 요청의 원 작업 |
 | `409` | `VMSpecConflict` | 같은 UUID의 기존 등록 또는 원 생성 작업과 명세가 충돌 |
 | `409` | `VMNameConflict` | 플랫폼 `VM_NAME_CONFLICT`: 생성 중 내부 실행 이름·UUID 예약·MAC 등이 다른 VM 과 겹침. 같은 VM 이 아니므로 생성 성공으로 바꾸지 않는다 (2026-11-06) |
@@ -683,6 +681,8 @@ retire는 복구 가능성을 위해 디스크를 보존하고, 실제 공간 �
 | `504` | `DriverTimeout` | `xl`·플랫폼 호출 시한 초과 (VM 목록·단건 조회 5초, 정지 90초 대기 포함) |
 | `500` | `DriverError` | 그 밖의 실행 실패, 모르는 상태 문자 |
 | `409` | `InvalidState` | 실행 중인 VM을 `DELETE` (4.4절). 먼저 정지해야 한다 |
+
+플랫폼이 수락 또는 완료를 알렸어도 유효한 제어 작업 ID가 빠지면 `503 PlatformUnavailable`로 응답한다. 키 조회(4.8)에서는 원장의 작업 ID와 응답의 ID, VM·키·단계, 정상 정지 또는 재부팅 명세를 대조한다. 불일치는 `503`이다.
 
 오류 본문:
 
@@ -699,11 +699,12 @@ retire는 복구 가능성을 위해 디스크를 보존하고, 실제 공간 �
 |---|---|
 | `code` | 위 표의 명명 |
 | `message` | 사람이 읽는 설명 |
-| `detail` | 선택. Xen 원문 등 상세. **Spring 로그 전용**이며 프론트에 노출하지 않음 |
+| `detail` | 선택. **Spring 로그 전용**이며 프론트에 노출하지 않음. 생성·정지·보관에서 하위 실행 원문과 내부 경로는 dom0-manager 진단에 남기고 이 필드에서 제외한다 |
 | `resource` | 선택. `InsufficientResources`일 때만 `{name, requested, available}` |
 | `platform_code` | 선택. 플랫폼 Manager가 준 원본 오류 코드(`HOST_QUIESCING` 등). 플랫폼 오류에만 있고 xl·검증·인증 오류에는 없다. 모르는 플랫폼 코드는 `500 DriverError`로 내되 이 값은 보존한다. **코드로 분기할 때는 `detail` 문자열이 아니라 이 값을 쓴다** |
 | `retryable` | 선택. 플랫폼이 준 원본 재시도 가능 여부. 코드의 고정 속성이 아니며 이것만으로 재시도 정책을 만들지 않는다(같은 작업이 아직 실행 중일 수 있으면 원 작업을 먼저 조회) |
 | `operation` | 선택. 키 있는 제어 요청(4.3.1)의 오류에만 있는 원 작업 문맥(작업 상태 객체) |
+| `context` | 선택. 생성·정지·보관에서 확인한 하위 작업 단계, 수락·결과 상태, 원 작업 ID, 다음 확인 절차(8.1.1) |
 
 **플랫폼 오류 코드 → dom0-manager 응답** (플랫폼 복구 기반, `docs/build-guides/xenova-recovery-foundation.md` "오류와 관측")
 
@@ -726,6 +727,37 @@ retire는 복구 가능성을 위해 디스크를 보존하고, 실제 공간 �
 FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환하므로 `400 InvalidArgument`로 정규화합니다. 예외 핸들러 교체만으로는 부족하며, **생성 스키마에서 422 응답 정의와 `HTTPValidationError` 모델까지 제거**해야 OpenAPI 차이 검사가 통과합니다.
 
 생성의 `VMExists`는 같은 VM의 실행 도메인이 이미 있음을 뜻합니다. `VMSpecConflict`는 같은 UUID의 명세 충돌, `VMNameConflict`는 다른 VM과의 식별 충돌입니다. 자원 변경(4.12)의 `VMExists`는 같은 키가 다른 요청의 원 작업이라는 뜻입니다. 표시 이름 중복은 Spring이 판정합니다.
+
+#### 8.1.1 생성·정지·보관의 원 작업 문맥
+
+아래는 정상 종료 요청을 보냈으나 Xen 도메인 제거가 확인되지 않은 예다.
+
+```json
+{
+  "code": "PlatformUnavailable",
+  "message": "platform stop failed (RECONCILE_REQUIRED)",
+  "platform_code": "RECONCILE_REQUIRED",
+  "retryable": false,
+  "context": {
+    "action": "stop",
+    "stage": "shutdown_confirmation",
+    "accepted": true,
+    "status": "uncertain",
+    "operation_id": "e89d21fd-cc29-4dc4-9a63-951875bdc0d7",
+    "next_action": "lookup_original"
+  }
+}
+```
+
+- `action`은 하위 작업이다. HTTP 생성 안에서 `create`는 자산 준비·등록, `start`는 등록 이후 Xen 시작을 뜻한다. HTTP 삭제는 `retire`다.
+- `stage`는 확인된 처리 단계다. 기록을 저장하는 도중 실패할 수도 있으므로 해당 단계의 완료나 부작용의 유무는 이 필드 하나로 판정하지 않는다. 확인할 수 없으면 `null`이다.
+- `accepted: true`는 하위 작업의 수락을 확인했다는 뜻이다. `false`는 이번 제출이 수락 전에 거절됐음을 확인한 경우다. 앞선 호출에서 응답을 잃었다면 이번 제출의 거절과 별개로 원 작업을 조회한다. 원장 저장 또는 원 키 확인이 불확실하면 `null`이다. 원 작업 ID가 할당됐어도 저장을 확인하기 전에는 수락을 단정하지 않는다.
+- `status`는 `rejected`(접수 전 거절), `unknown`(접수 여부 미확인), `pending`(접수·진행), `completed`(원 작업 완료), `failed`(원 작업 실패 확정), `uncertain`(수락 후 결과 미확정), `superseded`(이후 의도로 대체)를 구분한다. `completed`는 게스트 OS·앱의 준비를 의미하지 않는다.
+- `next_action`은 `fix_request`(명세/키 점검), `check_current_vm`(현재 등록·실행 확인), `lookup_original`(원 결과 확인), `reconcile_original`(원 자산 작업 조회 후 명시적 수습 판단) 중 하나다. `retryable`은 여전히 하위 원값이며, 새 키·강제 종료·자동 재실행을 결정하는 근거로 단독 사용하지 않는다.
+
+`GET /api/v1/vms/{vm_id}/operations/{operation_id}?action={action}`에 실패 응답의 VM·`context.operation_id`·`context.action`을 전달한다. 기존 서비스 토큰과 요청 예산을 적용한다. 기본 한도는 5초다. 응답은 같은 상태 구조에 원장에 보존된 `platform_code`를 더한다. 읽기 시점의 원 작업 결과이며, 현재 VM 상태나 새로운 사용자 의도는 별도로 확인한다. 다른 VM·동작 또는 찾을 수 없는 ID는 `404 OperationNotFound`이며, 앞선 제출이 없었다는 근거가 아니다.
+
+정지의 ID를 받지 못했다면 최초 `Idempotency-Key`로 기존 4.8 조회를 사용한다. 두 조회 모두 명령을 실행하거나 원 기한을 바꾸지 않는다. 요청 본문, 경로, 원장 원문, 자격은 ID 조회로 제공하지 않는다. 이 계약은 dom0-manager HTTP까지 적용한다.
 
 ### 8.2 Spring
 
@@ -891,3 +923,4 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.19 | 2026-11-06 | 구현에 맞춤: `role` 값을 `primary_drive`·`backup_drive`·`interaction` 으로(2.2·5·9장, Spring `VmRole`), 복구 이벤트 심각도 `WARN` → `WARNING`(5장), 재보충 `gap` 은 서버 로그 경고일 뿐 이벤트 로그에 남기지 않음(4.7), Spring VM 관리 엔드포인트 수 7 → 8 과 `/api/v1/vms` 아래 그 밖의 공개 엔드포인트 표(5장), 입력 오류 400 예외(로그 조회·등록 통지, 8.2), Spring 명령 응답 대기 100초 → 15분(10장) |
 | v1.20 | 2026-11-06 | 사용자 결정 반영: VM 목록·단건 조회 한도 5초를 하위 `list`·`get` 에 `timeout_ms` 로 명시(4.1·4.9, 초과 `504`), 플랫폼 `VM_NAME_CONFLICT` 를 `VMExists` 에서 분리해 `409 VMNameConflict`(8.1)로 내고 Spring 은 `409 VM_NAME_CONFLICT`(생성·시작에서도 성공 아님, 8.2), API 문서 경로(`/docs`·`/redoc`·`/openapi.json`) 기본 비활성·켜도 토큰 검사(4장) |
 | v1.21 | 2026-11-12 | USB 휴대폰 화면 중계 상태 조회 `GET /api/v1/display/phone-link` 와 연결번호 발급 `POST /api/v1/display/phone-link/pairing-code`(4.13). 번호는 발급 응답에만 담고 저장·로그·자동 재시도 금지, `Cache-Control: no-store` |
+| v1.22 | 2026-11-13 | dom0-manager의 생성·정지·보관 오류에 선택 `context` 추가. 기존 원장으로 작업 ID 조회 제공(8.1.1) |

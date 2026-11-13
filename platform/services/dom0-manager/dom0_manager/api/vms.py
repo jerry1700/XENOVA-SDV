@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, Header, Query, Response
 from fastapi.responses import JSONResponse
 
 from ..errors import InvalidArgument
-from ..models import ControlOperation, ControlStatus, CreateVmRequest, Error, ResourceUpdate, UpdateResourcesRequest, Vm
+from ..models import (ControlOperation, ControlStatus, CreateVmRequest, Error, ResourceUpdate, UpdateResourcesRequest,
+                      Vm, VmOperationAction, VmOperationResult)
 from ..service import VmService
 from . import get_service
 
@@ -169,6 +170,22 @@ def update_vm_resources(
     service: VmService = Depends(get_service),
 ) -> ResourceUpdate:
     return service.update_resources(vm_id, request, _request_key(idempotency_key, "Idempotency-Key"))
+
+
+@router.get(
+    "/vms/{vm_id}/operations/{operation_id}",
+    operation_id="getVmOperation",
+    summary="작업 ID로 원 생성·시작·정지·보관 결과 조회",
+    response_model=VmOperationResult,
+    responses={400: _ERR, 404: _ERR, **_COMMAND_ERRS},
+)
+def get_vm_operation(
+    vm_id: UUID,
+    operation_id: UUID,
+    action: VmOperationAction = Query(description="실패 응답의 context.action"),
+    service: VmService = Depends(get_service),
+) -> VmOperationResult:
+    return service.vm_operation(vm_id, action=action, operation_id=operation_id)
 
 
 @router.get(

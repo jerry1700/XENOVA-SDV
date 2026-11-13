@@ -571,6 +571,50 @@ paths:
           $ref: '#/components/responses/PlatformUnavailable'
         '504':
           $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/operations/{operation_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+      - name: operation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [VMs]
+      operationId: getVmOperation
+      summary: 작업 ID로 원 생성·시작·정지·보관 결과 조회
+      description: 원장의 기록을 제한적으로 조회한다. 작업을 실행하지 않는다. 404는 조회 시점의 검색 부재다.
+      x-driver-timeout-seconds: 5
+      parameters:
+        - name: action
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [create, start, stop, retire]
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: 원 작업 관측
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmOperationResult'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperationNotFound'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
   /api/v1/stats:
     get:
       tags: [Stats]
@@ -1413,6 +1457,39 @@ components:
             - $ref: '#/components/schemas/ControlOperation'
             - type: 'null'
           description: 키 있는 제어 요청의 오류에만 있다. 원 작업 문맥(status=failed·uncertain·superseded·unknown·rejected)
+        context:
+          oneOf:
+            - $ref: '#/components/schemas/VmOperationResult'
+            - type: 'null'
+          description: 생성·시작·정지·보관 실패에서 확인한 작업 문맥. 원 오류 코드는 Error.platform_code에 있다
+    VmOperationResult:
+      type: object
+      additionalProperties: false
+      required: [action, status]
+      properties:
+        action:
+          type: string
+          enum: [create, start, stop, retire]
+        stage:
+          type: [string, 'null']
+          enum: [preflight, acceptance, asset_preparation, registration, network_apply, start_prepare, start_submit, start_confirmation, shutdown_submit, shutdown_confirmation, archive_move, archive_commit, completion, null]
+          description: 실패 처리 위치 또는 마지막 작업 단계. 단계만으로 부작용의 유무를 확정하지 않는다
+        accepted:
+          type: [boolean, 'null']
+          description: 하위 작업 수락 여부. 확인하지 못했으면 null
+        status:
+          $ref: '#/components/schemas/ControlStatus'
+        operation_id:
+          type: [string, 'null']
+          format: uuid
+          description: 원 작업 ID. ID가 있어도 수락 여부는 accepted로 확인한다
+        next_action:
+          type: [string, 'null']
+          enum: [fix_request, check_current_vm, lookup_original, reconcile_original, null]
+          description: 다음 확인·조사 범위. 새 명령을 실행할 수 있는 권한을 부여하지 않는다
+        platform_code:
+          type: [string, 'null']
+          description: 조회에서 원 기록에 보존된 오류 코드. 실패 응답은 바깥쪽 Error.platform_code 사용
     ControlStatus:
       type: string
       description: >-
@@ -1875,7 +1952,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     OperationNotFound:
-      description: 요청 키로 원 제어 작업을 찾지 못함. 조회 시점의 검색 부재이며 미수락·미실행의 증거가 아니다
+      description: 요청 키 또는 작업 ID로 원 기록을 찾지 못함. 조회 시점의 검색 부재이며 미수락·미실행의 증거가 아니다
       content:
         application/json:
           schema:

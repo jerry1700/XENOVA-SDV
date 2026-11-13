@@ -25,7 +25,7 @@ from uuid import UUID
 
 from ..errors import NotSupportedByPlatform, VMNotFound
 from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, StatsSource, UnavailableReason,
-                      UpdateCpuPolicyRequest, Vm, VmState, VmStats)
+                      UpdateCpuPolicyRequest, Vm, VmOperationAction, VmOperationResult, VmState, VmStats)
 
 
 @dataclass(frozen=True)
@@ -165,6 +165,10 @@ class Driver(ABC):
     def control_operation(self, vm_id: UUID, *, key: str) -> ControlOperation:
         """요청 키로 원 제어 작업 조회. 작업 기록이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track control operations")
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
+        """원 작업 ID의 제한된 조회. 작업 기록이 없는 드라이버는 501."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not track VM operations")
 
     def reboot(self, vm_id: UUID) -> None:  # S15P31E110-208
         """실행 중인 도메인을 같은 디스크로 다시 시작한다(게스트 정상 재부팅, 새 실행). 제공하지 않는 드라이버는 501.

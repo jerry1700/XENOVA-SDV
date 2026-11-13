@@ -174,6 +174,10 @@ def test_delete_preserves_assets_in_use(client, board):
     with patch.object(board.manager, "usage_check", side_effect=failure):
         response = client.delete(f"/api/v1/vms/{DEBIAN}")
     assert (response.status_code, response.json()["platform_code"]) == (409, "ASSET_IN_USE")
+    assert response.json()["context"] == {
+        "action": "retire", "stage": "preflight", "accepted": False, "status": "rejected",
+        "operation_id": None, "next_action": "check_current_vm",
+    }
     assert (board.data / "instances" / "debian-dev" / "root.raw").is_file()
     assert not list((board.data / "operations").glob("*.json"))
 
@@ -200,6 +204,24 @@ def test_delete_resumes_original_retire_after_interruption(client, board, legacy
             failure = client.delete(path)
             assert failure.status_code == 503 and failure.json()["platform_code"] == "RECOVERY_REQUIRED"
     original, = operation_ids
+    lookup_path = f"{path}/operations/{original}"
+    original_file = board.data / "operations" / f"{original}.json"
+    original_bytes = original_file.read_bytes()
+    calls = list(board.xen.calls)
+    read = client.get(lookup_path, params={"action": "retire"})
+    stage = "network_apply" if phase == "dhcp-pending" else "archive_commit"
+    assert read.json() == {
+        "action": "retire", "stage": stage, "accepted": True, "status": "uncertain",
+        "operation_id": original, "next_action": "reconcile_original", "platform_code": "RECOVERY_REQUIRED",
+    }
+    assert read.status_code == 200
+    if not legacy_key:
+        assert failure.json()["context"] == {k: v for k, v in read.json().items() if k != "platform_code"}
+        assert "detail" not in failure.json()
+    assert client.get(lookup_path, params={"action": "create"}).status_code == 404
+    assert client.get(f"/api/v1/vms/{UBUNTU}/operations/{original}", params={"action": "retire"}).status_code == 404
+    assert client.get(lookup_path, params={"action": "purge"}).status_code == 400
+    assert original_file.read_bytes() == original_bytes and board.xen.calls == calls
     assert not source.exists()
     with patch.object(board.manager, "_prepare_dhcp", wraps=board.manager._prepare_dhcp) as dhcp:
         assert client.delete(path).status_code == 204
@@ -208,6 +230,7 @@ def test_delete_resumes_original_retire_after_interruption(client, board, legacy
     op = json.loads(operation_path.read_text())
     assert (op["operation_id"], op["status"], op["phase"]) == (original, "SUCCEEDED", "complete")
     assert (board.data / op["target"] / "root.raw").stat().st_ino == disk_inode
+    assert client.get(lookup_path, params={"action": "retire"}).json()["status"] == "completed"
 
 
 @pytest.mark.parametrize("parent", ["instances", "tombstones", "operations"])
@@ -401,10 +424,51 @@ def test_create_conflict_uses_original_unregistered_request(client, board):
     conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
     assert conflict.status_code == 409
     assert (conflict.json()["code"], conflict.json()["platform_code"]) == ("VMSpecConflict", "IDEMPOTENCY_CONFLICT")
+    assert conflict.json()["context"]["operation_id"] is None
+    assert conflict.json()["context"]["accepted"] is False
     assert list((board.data / "operations").glob("*.json")) == [original]
     assert original.read_bytes() == before
     assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
     assert client.post("/api/v1/vms", json=body).status_code == 201
+
+
+def test_registration_save_failure_does_not_report_acceptance(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "record-save-error", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    write = board.manager._write
+
+    def fail_operation_save(path, value):
+        if path.parent == board.data / "operations":
+            raise OSError("fixture/private/path")
+        return write(path, value)
+
+    with patch.object(board.manager, "_write", side_effect=fail_operation_save):
+        response = client.post("/api/v1/vms", json=body)
+    assert response.status_code == 503
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == ("create", "acceptance", None, "unknown")
+    assert context["next_action"] == "lookup_original" and context["operation_id"]
+    assert "fixture/private/path" not in response.text and "detail" not in response.json()
+    missing = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "create"})
+    assert missing.status_code == 404 and missing.json()["code"] == "OperationNotFound"
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+
+
+def test_xen_start_failure_is_separate_from_successful_registration(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "start-error", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    board.xen.fail_create = True
+    response = client.post("/api/v1/vms", json=body)
+    assert response.status_code == 503, response.text
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == ("start", "start_submit", True, "uncertain")
+    original, = (board.data / "operations").glob("*.json")
+    registered = client.get(f"/api/v1/vms/{NEW_VM}/operations/{original.stem}", params={"action": "create"})
+    assert registered.json()["status"] == "completed"
+    started = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "start"})
+    assert started.json()["status"] == "uncertain"
+    assert started.json()["platform_code"] == response.json()["platform_code"] == "RECONCILE_REQUIRED"
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
 
 
 # ---- 정지 요청 추적 (S15P31E110-305): 실제 Manager.fork·budget_ms·control-operation ----
@@ -420,6 +484,43 @@ def lookup(client, vm_id, key):
 
 def shutdowns(board):
     return [call for call in board.xen.calls if call[:2] == ["xl", "shutdown"]]
+
+
+def test_stop_admission_failure_after_durable_intent_is_not_a_rejection(client, board):
+    from xenova_execution import Execution
+
+    with patch.object(Execution, "set_admission", side_effect=OSError("fixture/private/admission")):
+        response = keyed_stop(client, UBUNTU, "stop-admission-error")
+    assert response.status_code == 503, response.text
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == (
+        "stop", "acceptance", True, "uncertain",
+    )
+    assert context["operation_id"] and shutdowns(board) == []
+    assert "fixture/private/admission" not in response.text
+    original = lookup(client, UBUNTU, "stop-admission-error").json()
+    assert (original["operation_id"], original["phase"]) == (context["operation_id"], "accepted")
+
+
+@pytest.mark.parametrize("key", [None, "stop-timeout"])
+def test_shutdown_timeout_reports_confirmation_and_original_id(client, board, key):
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    board.platform.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+    board.xen.hang_shutdown = True
+    response = client.post(f"/api/v1/vms/{UBUNTU}/stop", headers={"Idempotency-Key": key} if key else {})
+    assert response.status_code == 503, response.text
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == (
+        "stop", "shutdown_confirmation", True, "uncertain",
+    )
+    operation_id = context["operation_id"]
+    assert context["next_action"] == "lookup_original" and operation_id
+    read = client.get(f"/api/v1/vms/{UBUNTU}/operations/{operation_id}", params={"action": "stop"})
+    assert read.json()["status"] == "uncertain" and read.json()["operation_id"] == operation_id
+    if key:
+        assert lookup(client, UBUNTU, key).json()["operation_id"] == operation_id
+    assert len(shutdowns(board)) == 1
 
 
 def test_real_keyed_stop_replay_lookup_and_conflict(client, board):

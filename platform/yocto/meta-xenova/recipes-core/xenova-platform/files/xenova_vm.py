@@ -696,6 +696,8 @@ class Platform:
             state = started_state(record, existing[0])
             if _accept:
                 _accept()
+            if _result is not None:
+                _result['stage'] = 'start_confirmation'
             observation = execution.observe(record, deadline)
             state = started_state(record, observation)
             self.cpu().require(record, deadline, expected=cpu_context, present=True,
@@ -714,6 +716,8 @@ class Platform:
         execution.settle_expired_launch(record, deadline)
         execution.require_launch_available(record)
         owner = _accept() if _accept else _owner
+        if _result is not None:
+            _result['stage'] = 'start_prepare'
         execution.gate()
         ensure_runtime(self.runtime)
         captured = {}
@@ -731,6 +735,7 @@ class Platform:
             submitted = True
             if _result is not None:
                 _result['physical_submitted'] = True
+                _result['stage'] = 'start_submit'
             return self.command(argv, timeout=left)
 
         try:
@@ -767,6 +772,8 @@ class Platform:
                 except (PlatformError, OSError, ValueError):
                     pass
             raise
+        if _result is not None:
+            _result['stage'] = 'start_confirmation'
         created = self.matching(record, self.domains(deadline=deadline))
         if not created:
             raise PlatformError(f"{record['id']}: xl create returned without a live domain")
@@ -958,12 +965,15 @@ class Platform:
             try:
                 if _result is not None:
                     _result['physical_submitted'] = True
+                    _result['stage'] = 'shutdown_submit'
                 self.control(record, 'destroy' if strategy == 'forced' else 'shutdown', row, deadline=deadline)
             except (PlatformError, OSError, ValueError, KeyError, TypeError) as exc:
                 if isinstance(exc, DomainIdentityError):
                     identity_error = exc
                 result['instances'][key].update(result='failed', error=str(exc))
             else:
+                if _result is not None:
+                    _result['stage'] = 'shutdown_confirmation'
                 result['instances'][key]['stage'] = 'request-accepted'
                 result['forced' if strategy == 'forced' else 'graceful_shutdown_requested'].append(key)
                 pending.append((record, row, strategy))

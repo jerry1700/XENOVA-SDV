@@ -61,7 +61,7 @@ from ..errors import (
     VMSpecConflict,
 )
 from ..models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, UpdateCpuPolicyRequest,
-                      VmResources, VmState)
+                      VmOperationAction, VmOperationResult, VmOperationStage, VmResources, VmState)
 from .base import CreateSpec, Domain, Driver, HostInfo, InstancePaths, Provisioner, StatsSample
 from .xentop import Xentop, collect_stats
 from .xl import Xl
@@ -322,7 +322,10 @@ _REFUSAL_MESSAGES: tuple[tuple[str, type[Dom0ManagerError]], ...] = (
 )
 
 
-def raise_for_envelope(envelope: dict[str, Any], *, context: str, operation: ControlOperation | None = None) -> dict[str, Any]:
+def raise_for_envelope(
+    envelope: dict[str, Any], *, context: str, operation: ControlOperation | None = None,
+    action: VmOperationAction | None = None, hide_detail: bool = False,
+) -> dict[str, Any]:
     """ok 면 data 를 돌려주고, 아니면 계약 예외로 바꾼다. 원 retryable 을 보존하고, 제어 요청이면 원 작업 문맥(operation)을 붙인다.
 
     operation 이 superseded 면 409(이후 사용자 의도가 이겼다), uncertain 이면 최소 503(조사 전 재시도 금지)으로 낸다.
@@ -337,10 +340,6 @@ def raise_for_envelope(envelope: dict[str, Any], *, context: str, operation: Con
     extra: dict[str, Any] = {"platform_code": code, "retryable": retryable}
     if operation is not None:
         extra["operation"] = operation.model_dump(mode="json")
-    if code == "INSUFFICIENT_STORAGE":
-        raise _insufficient_storage(message, detail, **extra)
-    if code == "IP_POOL_EXHAUSTED":  # 플랫폼이 전역 잠금 안에서 고른 Linux 내부 IP 가 바닥남
-        raise InsufficientResources("ipv4", 1, 0, platform_code=code, retryable=retryable)
     cls: type[Dom0ManagerError]
     refusal = next((c for marker, c in _REFUSAL_MESSAGES if message.startswith(marker)), None) if code == "ARTIFACT_INVALID" else None
     if refusal is not None:
@@ -353,7 +352,18 @@ def raise_for_envelope(envelope: dict[str, Any], *, context: str, operation: Con
         cls = InvalidState
     elif operation is not None and operation.status == ControlStatus.uncertain and cls.status_code < 503:
         cls = PlatformUnavailable
-    raise cls(f"{context}: {message}", detail=detail, **extra)
+    if code == "INSUFFICIENT_STORAGE":
+        exc = _insufficient_storage(message, detail, **extra)
+    elif code == "IP_POOL_EXHAUSTED":  # 플랫폼이 고른 Linux 내부 IP 가 바닥남
+        exc = InsufficientResources("ipv4", 1, 0, platform_code=code, retryable=retryable)
+    else:
+        exc = cls(f"{context}: {message}", detail=detail, **extra)
+    if action is not None:
+        exc.context = _failure_result(action, envelope, operation)
+    if action is not None or hide_detail:
+        public_code = code if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) else exc.code
+        exc.public_message = f"platform {action or 'operation lookup'} failed ({public_code})"
+    raise exc
 
 
 def _insufficient_storage(message: str, detail: str, **extra: Any) -> Dom0ManagerError:
@@ -388,6 +398,87 @@ def _str(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+_ASSET_STAGES: dict[str, VmOperationStage] = {
+    "recorded": "acceptance", "preparing": "asset_preparation", "published": "registration",
+    "dhcp-pending": "network_apply", "moving": "archive_move", "moved": "archive_commit",
+    "complete": "completion",
+}
+_CONTROL_STAGES: dict[str, VmOperationStage] = {
+    "preflight": "preflight", "acceptance": "acceptance", "network_apply": "network_apply",
+    "start_prepare": "start_prepare", "start_submit": "start_submit", "start_confirmation": "start_confirmation",
+    "shutdown_submit": "shutdown_submit", "shutdown_confirmation": "shutdown_confirmation",
+    "completion": "completion",
+}
+_FIX_REQUEST = frozenset({
+    "INVALID_SPEC", "TEMPLATE_NOT_FOUND", "TEMPLATE_VERSION_NOT_FOUND", "RESOURCE_UNSUPPORTED",
+    "IDEMPOTENCY_CONFLICT", "VM_NAME_CONFLICT", "IP_CONFLICT",
+})
+_REJECTED_CODES = _FIX_REQUEST | {"VM_NOT_STOPPED"}
+_STOP_NEXT_ACTIONS = frozenset({
+    "inspect_original_operation_and_explicitly_request_stop_if_still_present",
+    "replay_original_stop_after_execution_lock_is_available",
+    "inspect_original_operation_and_current_intent",
+    "observe_current_intent_before_any_new_request",
+})
+
+
+def _asset_stage(action: VmOperationAction, phase: Any) -> VmOperationStage | None:
+    if phase == "dhcp-applied":
+        return "registration" if action == "create" else "archive_commit"
+    return _ASSET_STAGES.get(_str(phase) or "")
+
+
+def _result(
+    action: VmOperationAction, stage: VmOperationStage | None, accepted: bool | None, status: ControlStatus,
+    operation_id: UUID | None, code: str | None,
+) -> VmOperationResult:
+    if status == ControlStatus.rejected and code in _FIX_REQUEST:
+        next_action = "fix_request"
+    elif operation_id is not None and status == ControlStatus.uncertain and action in ("create", "retire"):
+        next_action = "reconcile_original"
+    elif operation_id is not None and status in (ControlStatus.unknown, ControlStatus.pending, ControlStatus.uncertain):
+        next_action = "lookup_original"
+    else:
+        next_action = "check_current_vm"
+    return VmOperationResult(action=action, stage=stage, accepted=accepted, status=status, operation_id=operation_id,
+                             next_action=next_action, platform_code=code)
+
+
+def _failure_result(
+    action: VmOperationAction, envelope: dict[str, Any], operation: ControlOperation | None = None,
+) -> VmOperationResult:
+    error = envelope.get("error") or {}
+    details = error.get("details")
+    details = details if isinstance(details, dict) else {}
+    code = _str(error.get("code"))
+    asset = details.get("operation_context")
+    if action in ("create", "retire") and isinstance(asset, dict):
+        accepted = _bool(asset.get("accepted"))
+        status = _ASSET_COMPLETION.get(_str(asset.get("completion")) or "", ControlStatus.uncertain)
+        if accepted is not True:
+            status = ControlStatus.unknown
+        return _result(action, _asset_stage(action, asset.get("phase")), accepted, status, _uuid(asset.get("operation_id")), code)
+    stage = _CONTROL_STAGES.get(_str(details.get("stage")) or "")
+    operation_id = _uuid(details.get("operation_id"))
+    if details.get("acceptance") in ("unconfirmed", "not-checked"):
+        stage = stage or "acceptance"
+    elif operation is not None and operation.accepted is True:
+        return _result(action, stage, True, operation.status, operation.operation_id, code)
+    elif details.get("accepted") is True and operation_id is not None:
+        state = _str(details.get("completion"))
+        status = _PHASE_STATUS.get(state or "", (ControlStatus.uncertain, True))[0]
+        if state in ("superseded", "pending"):
+            status = ControlStatus(state)
+        return _result(action, stage, True, status, operation_id, code)
+    elif details.get("accepted") is False or details.get("submitted") is False or code in _REJECTED_CODES:
+        # 충돌 봉투의 최상위 ID는 다른 명세/키의 원 작업일 수 있다.
+        return _result(action, stage or "preflight", False, ControlStatus.rejected, None, code)
+    result = _result(action, stage, None, ControlStatus.unknown, operation_id, code)
+    if operation is not None and operation.request_key is not None:
+        result.next_action = "lookup_original"
+    return result
+
+
 def _warning_codes(warnings: Any) -> list[str]:
     if not isinstance(warnings, list):
         return []
@@ -402,6 +493,7 @@ _PHASE_STATUS: dict[str, tuple[ControlStatus, bool | None]] = {
     "failed": (ControlStatus.failed, True),
     "uncertain": (ControlStatus.uncertain, True),
 }
+_ASSET_COMPLETION = {"failed": ControlStatus.failed, "uncertain": ControlStatus.uncertain}
 
 
 def _accepted_without_operation(code: str | None) -> PlatformUnavailable:
@@ -435,14 +527,23 @@ def control_operation_from_envelope(envelope: dict[str, Any], *, vm_id: UUID, ac
     details = error.get("details") if isinstance(error.get("details"), dict) else {}
     code = _str(error.get("code"))
     if details.get("accepted") is not True:
-        # 수락 전 거절. 수락 저장을 확인하지 못했을 때(unconfirmed)만 수락 여부가 불명이다
-        unconfirmed = details.get("acceptance") == "unconfirmed"
+        # stop 키의 원 수락을 검사할 수 없으면 이번 호출에서 쓰지 않았더라도 원 요청은 미확인이다.
+        unconfirmed = details.get("acceptance") == "unconfirmed" or (
+            action == "stop" and _failure_result("stop", envelope).accepted is None
+        )
+        operation_id = _uuid(details.get("operation_id")) if action == "stop" else _uuid(envelope.get("operation_id"))
         return ControlOperation(
-            **base, operation_id=_uuid(envelope.get("operation_id")), status=ControlStatus.unknown if unconfirmed else ControlStatus.rejected,
+            **base, operation_id=operation_id, status=ControlStatus.unknown if unconfirmed else ControlStatus.rejected,
             accepted=None if unconfirmed else False, error_code=code, warnings=_warning_codes(details.get("diagnostic_warnings")),
         )
     phase, completion = _str(details.get("phase")), details.get("completion")
-    if phase == "uncertain" or code == "RECONCILE_REQUIRED":
+    next_action = _str(details.get("next_action"))
+    if action == "stop":
+        phase = phase if phase in _PHASE_STATUS else None
+        next_action = next_action if next_action in _STOP_NEXT_ACTIONS else None
+    if action == "stop" and completion == "completed":
+        status = ControlStatus.completed
+    elif phase == "uncertain" or completion == "uncertain" or code == "RECONCILE_REQUIRED":
         status = ControlStatus.uncertain  # completion=pending 이어도 자동 재시도 가능한 접수로 바꾸지 않는다
     elif completion == "superseded":
         status = ControlStatus.superseded
@@ -454,12 +555,21 @@ def control_operation_from_envelope(envelope: dict[str, Any], *, vm_id: UUID, ac
         status = ControlStatus.uncertain
     operation_id = _uuid(details.get("operation_id") or envelope.get("operation_id"))
     if operation_id is None:
-        raise _accepted_without_operation(code)
+        exc = _accepted_without_operation(code)
+        if action == "stop":
+            exc.retryable = _bool(error.get("retryable"))
+            exc.context = VmOperationResult(
+                action="stop", status=ControlStatus.unknown, next_action="lookup_original",
+            )
+        raise exc
+    host_boot_id = _str(details.get("host_boot_id"))
+    if action == "stop" and _uuid(host_boot_id) is None:
+        host_boot_id = None
     return ControlOperation(
         **base, operation_id=operation_id, status=status, accepted=True,
-        phase=phase, intent_revision=_int(details.get("intent_revision")), host_boot_id=_str(details.get("host_boot_id")),
+        phase=phase, intent_revision=_int(details.get("intent_revision")), host_boot_id=host_boot_id,
         lifecycle_generation=_int(details.get("lifecycle_generation")), deadline_monotonic_ms=_int(details.get("deadline_monotonic_ms")),
-        execution_deadline_expired=_bool(details.get("execution_deadline_expired")), next_action=_str(details.get("next_action")),
+        execution_deadline_expired=_bool(details.get("execution_deadline_expired")), next_action=next_action,
         error_code=code, warnings=_warning_codes(details.get("diagnostic_warnings")),
     )
 
@@ -663,11 +773,17 @@ class PlatformDriver(Driver):
 
     def create(self, spec: CreateSpec) -> Domain:
         """registry 에 등록된 VM 을 시작한다. 등록은 Provisioner.ensure_instance 가 먼저 한다."""
-        data = raise_for_envelope(call_with_budget(self.manager, "start", {"vm_id": str(spec.vm_id)}), context=f"start {spec.vm_id}")
+        envelope = call_with_budget(self.manager, "start", {"vm_id": str(spec.vm_id)})
+        data = raise_for_envelope(envelope, context=f"start {spec.vm_id}", action="start")
         domain = view_to_domain(data.get("vm") or {})
         if domain is None:
-            # start 가 돌아왔는데 도메인이 안 보이면 플랫폼이 거부한 것(예: unknown 상태). 그대로 실패로 올린다
-            raise DriverError(f"start {spec.vm_id}: platform returned without a live domain")
+            exc = DriverError(f"start {spec.vm_id}: platform returned without a live domain")
+            operation_id = _uuid(envelope.get("operation_id"))
+            original = data.get("original_result") or {}
+            completed = operation_id is not None and original.get("accepted") is True
+            exc.context = _result("start", "completion", True if completed else None,
+                                  ControlStatus.completed if completed else ControlStatus.unknown, operation_id, None)
+            raise exc
         return domain
 
     def shutdown(self, vm_id: UUID, *, grace_s: float) -> None:
@@ -690,7 +806,7 @@ class PlatformDriver(Driver):
         envelope = call_with_budget(self.manager, "stop", {"vm_id": str(vm_id), "force": force})
         if not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "VM_NOT_FOUND":
             return  # 멱등: 등록 자체가 없어도 목표 상태(도메인 부재)는 달성
-        raise_for_envelope(envelope, context=f"stop {vm_id}")
+        raise_for_envelope(envelope, context=f"stop {vm_id}", action=None if force else "stop")
 
     def reboot(self, vm_id: UUID) -> None:
         """같은 디스크로 새 실행(새 execution_id)을 시작한다. 하위가 graceful 재부팅 뒤 새 실행을 관측할 때까지 기다린다.
@@ -714,7 +830,7 @@ class PlatformDriver(Driver):
         operation = control_operation_from_envelope(envelope, vm_id=vm_id, action="stop", key=key)
         if envelope.get("ok") or operation.status == ControlStatus.pending:
             return operation
-        raise_for_envelope(envelope, context=f"stop {vm_id}", operation=operation)
+        raise_for_envelope(envelope, context=f"stop {vm_id}", operation=operation, action="stop")
         return None  # raise_for_envelope 는 ok 가 아니면 반드시 예외를 낸다
 
     def request_reboot(self, vm_id: UUID, *, key: str) -> ControlOperation:
@@ -752,6 +868,65 @@ class PlatformDriver(Driver):
         observation = data.get("deadline_observation") if isinstance(data.get("deadline_observation"), dict) else {}
         return control_operation_from_record(record, observation, vm_id=vm_id, key=key,
                                              envelope_operation_id=envelope.get("operation_id"))
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
+        """원장의 원 결과만 조회한다. 현재 실행·사용자 의도를 다시 판정하거나 작업을 재개하지 않는다."""
+        asset = action in ("create", "retire")
+        read = "operation" if asset else "control-operation"
+        envelope = call_with_budget(self._request_manager(), read, {
+            "vm_id": str(vm_id), "operation_id": str(operation_id), "timeout_ms": _LOOKUP_TIMEOUT_MS,
+        })
+        missing = OperationNotFound("no matching original VM operation at lookup time")
+        if not envelope.get("ok"):
+            code = (envelope.get("error") or {}).get("code")
+            if code == "VM_NOT_FOUND":
+                raise missing
+            if code == "INVALID_SPEC":
+                raise NotSupportedByPlatform("platform manager does not support VM operation lookup", platform_code=code)
+            raise_for_envelope(envelope, context=read, hide_detail=True)
+        data = envelope.get("data")
+        if not isinstance(data, dict):
+            raise PlatformUnavailable("platform returned no original VM operation data")
+        record = data.get("operation")
+        if (not isinstance(record, dict) or _uuid(record.get("operation_id")) != operation_id
+                or _uuid(envelope.get("operation_id")) != operation_id):
+            raise PlatformUnavailable("platform returned an invalid original VM operation record")
+        if _uuid(record.get("vm_id")) != vm_id:
+            raise missing
+        phase = _str(record.get("phase"))
+        if asset:
+            if record.get("action") != action:
+                raise missing
+            stage = _asset_stage(action, phase)
+            status = {
+                "SUCCEEDED": ControlStatus.completed, "FAILED": ControlStatus.failed,
+                "RUNNING": ControlStatus.pending, "RECONCILING": ControlStatus.pending,
+                "RECOVERY_REQUIRED": ControlStatus.uncertain,
+            }.get(_str(data.get("effective_status")) or "")
+            accepted = True
+        else:
+            request = record.get("request")
+            if not isinstance(request, dict):
+                raise PlatformUnavailable("platform returned an invalid original control request")
+            if (request.get("action") != action or _uuid(request.get("vm_id")) != vm_id
+                    or request.get("force") is not False or record.get("source") != "user"):
+                raise missing
+            status, accepted = _PHASE_STATUS.get(phase or "", (None, None))
+            stage = "completion" if status == ControlStatus.completed else "acceptance" if status == ControlStatus.unknown else None
+        if status is None:
+            raise PlatformUnavailable("platform returned an invalid original VM operation status")
+        error = record.get("error")
+        if error is not None and not isinstance(error, dict):
+            raise PlatformUnavailable("platform returned an invalid original VM operation error")
+        error = error or {}
+        if not asset:
+            details = error.get("details")
+            if isinstance(details, dict):
+                stage = _CONTROL_STAGES.get(_str(details.get("stage")) or "", stage)
+        code = _str(error.get("code"))
+        if code and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code):
+            raise PlatformUnavailable("platform returned an invalid original VM operation error code")
+        return _result(action, stage, accepted, status, operation_id, code)
 
     # ---- CPU 배치 (S15P31E110-353) ----
 
@@ -963,29 +1138,52 @@ class PlatformProvisioner(Provisioner):
         envelope = call_with_budget(self.manager, "create", spec, execute=True, idempotency_key=f"create-{vm_id}")
         error = envelope.get("error") or {}
         if not envelope.get("ok") and error.get("code") == "IDEMPOTENCY_CONFLICT":
-            raise VMSpecConflict(
+            exc = VMSpecConflict(
                 f"vm {vm_id} conflicts with the original creation request", platform_code="IDEMPOTENCY_CONFLICT",
                 retryable=error.get("retryable") if isinstance(error.get("retryable"), bool) else None,
             )
-        data = raise_for_envelope(envelope, context=f"create {name}")
+            exc.context = _failure_result("create", envelope)
+            raise exc
+        data = raise_for_envelope(envelope, context=f"create {vm_id}", action="create")
+        if data.get("effective_status") in ("RUNNING", "RECONCILING", "RECOVERY_REQUIRED"):
+            record = data.get("operation")
+            record = record if isinstance(record, dict) else {}
+            operation_id = _uuid(envelope.get("operation_id"))
+            bound = (operation_id is not None and _uuid(record.get("operation_id")) == operation_id
+                     and _uuid(record.get("vm_id")) == vm_id and record.get("action") == "create")
+            status = (ControlStatus.uncertain if data["effective_status"] == "RECOVERY_REQUIRED"
+                      else ControlStatus.pending) if bound else ControlStatus.unknown
+            exc = PlatformUnavailable("original VM registration is incomplete", platform_code="OPERATION_IN_PROGRESS",
+                                      retryable=bound and status == ControlStatus.pending)
+            exc.context = _result("create", _asset_stage("create", record.get("phase")), True if bound else None,
+                                  status, operation_id if bound else None, exc.platform_code)
+            raise exc
         view = (data.get("vm") or data.get("current") or data.get("original_result") or {}) if isinstance(data, dict) else {}
         if not (view.get("configuration") or {}).get("id"):
             view = self._registration(vm_id) or {}
         if str(view.get("vm_id")) != str(vm_id):
-            raise DriverError(
-                "platform registered a different vm_id than requested; Spring-issued vm_id must be honoured",
-                detail=f"requested={vm_id} registered={view.get('vm_id')}",
-            )
+            raise PlatformUnavailable("platform VM registration could not be confirmed")
         return self._paths(view)
 
     def delete_instance(self, vm_id: UUID) -> None:
         # Manager가 같은 lease에서 현재 세대와 원 작업을 골라 검증한다.
         envelope = call_with_budget(self.manager, "retire", {"vm_id": str(vm_id)}, execute=True)
-        data = raise_for_envelope(envelope, context=f"retire {vm_id}")
-        if not isinstance(data, dict) or data.get("lifecycle") != "RETIRED" or data.get("vm_id") != str(vm_id):
-            raise PlatformUnavailable(
+        data = raise_for_envelope(envelope, context=f"retire {vm_id}", action="retire")
+        if not isinstance(data, dict):
+            raise PlatformUnavailable(f"retire {vm_id}: completion was not confirmed", platform_code="RECONCILE_REQUIRED")
+        if data.get("lifecycle") != "RETIRED" or data.get("vm_id") != str(vm_id):
+            exc = PlatformUnavailable(
                 f"retire {vm_id}: completion was not confirmed", platform_code="RECONCILE_REQUIRED",
             )
+            record = data.get("operation")
+            record = record if isinstance(record, dict) else {}
+            operation_id = _uuid(envelope.get("operation_id"))
+            bound = (operation_id is not None and _uuid(record.get("operation_id")) == operation_id
+                     and _uuid(record.get("vm_id")) == vm_id and record.get("action") == "retire")
+            if bound and data.get("effective_status") == "RUNNING":
+                exc.context = _result("retire", _asset_stage("retire", record.get("phase")),
+                                      True, ControlStatus.pending, operation_id, exc.platform_code)
+            raise exc
 
     # ---- 자원 변경 (S15P31E110-368) ----
 

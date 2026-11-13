@@ -1112,6 +1112,8 @@ class Execution:
         else:
             sync_directory(self.data/"control")
         self.save_request(op, "accepted")
+        if receipt is not None:
+            receipt["accepted"] = True
         self.checkpoint("intent-admission-pending", op)
         self.set_admission(record, op["desired_state"] == "running",
                            "user-stop" if op["desired_state"] == "stopped" else "user-reboot" if request["action"] == "reboot" else "user-start",
@@ -1543,9 +1545,11 @@ class Execution:
             return {"operation_id":previous["operation_id"], "replayed":True, "original_result":previous["result"], "diagnostic_warnings":diagnostics}
         accepted = None
         receipt = {}
+        confirmed = {'stage':'preflight'}
 
         def admit():
             nonlocal accepted
+            confirmed['stage'] = 'acceptance'
             accepted = self.accept(record, request, key, previous=previous, receipt=receipt, deadline=end)
             if action in ('start', 'reboot'):
                 # Actual layout is checked by the launch primitive immediately before
@@ -1554,13 +1558,13 @@ class Execution:
             self.save_request(accepted, "executing")
             event("xen-action-requested", record, accepted["operation_id"], {"action":action})
             if action == "start" and vm.has_network(record):
+                confirmed['stage'] = 'network_apply'
                 self.p.prepare_dhcp(records, deadline=end)
             return {"kind":"user", "operation_id":accepted["operation_id"]}
 
         try:
             if self.p.clock() >= end:
                 refuse('DEADLINE_EXCEEDED', 'original control execution deadline expired')
-            confirmed = {}
             if action == "start":
                 self.p.check_xen(deadline=end)
                 records = self.p.records(validate_assets=False)
@@ -1581,6 +1585,7 @@ class Execution:
             result = {"accepted":True, "physical_result":physical, "observation":observation,
                       "intent_revision":accepted["intent_revision"], "app_readiness":"unknown"}
             accepted["result"] = result
+            confirmed['stage'] = 'completion'
             try:
                 self.save_request(accepted, "completed")
             except OSError as error:
@@ -1590,9 +1595,18 @@ class Execution:
         except (PlatformError, OSError, ValueError) as error:
             if accepted is None:
                 prepared = receipt.get("operation")
+                if action in ('start','stop') and receipt.get('accepted') and isinstance(error, ExecutionError):
+                    error.error['details'].update(operation_id=prepared['operation_id'], accepted=True,
+                                                  completion='uncertain', stage='acceptance')
                 if prepared and isinstance(error, OSError):
+                    if action in ('start','stop') and receipt.get('accepted'):
+                        refuse("STORAGE_UNAVAILABLE", "accepted intent could not finish admission",
+                               details={"operation_id":prepared["operation_id"], "accepted":True,
+                                        "completion":"uncertain", "stage":"acceptance"})
                     refuse("STORAGE_UNAVAILABLE", "intent acceptance was not durably confirmed; no Xen action issued",
-                           details={"operation_id":prepared["operation_id"], "acceptance":"unconfirmed"})
+                           details={"operation_id":prepared["operation_id"], "acceptance":"unconfirmed", "stage":"acceptance"})
+                if action in ('start','stop') and previous is None and not prepared and isinstance(error, ExecutionError):
+                    error.error['details'].update(accepted=False, stage=confirmed['stage'])
                 event("control-rejected", record, details={"error":getattr(error, "error", {}).get("code", "PREFLIGHT_REFUSED")})
                 raise
             code = error.error["code"] if isinstance(error, ExecutionError) else "XEN_EXECUTION_FAILED"
@@ -1607,6 +1621,8 @@ class Execution:
             # ownership even when no physical result was returned; replay cannot issue
             # another command merely because result is null.
             uncertain = bool(confirmed.get('physical_submitted') or owned_launch or accepted.get('result'))
+            if action in ('start','stop'):
+                accepted['error']['details'].update(stage=confirmed['stage'], completion='uncertain' if uncertain else 'failed')
             if uncertain and code in ('XEN_EXECUTION_FAILED', 'DEADLINE_EXCEEDED'):
                 accepted['error']['code'] = 'RECONCILE_REQUIRED'
                 accepted['error']['details'].setdefault('cause', {'code':code, 'message':str(error),
@@ -1616,7 +1632,8 @@ class Execution:
             except OSError as journal_error:
                 refuse("RECONCILE_REQUIRED", "accepted control journal could not be finalized",
                        details={"operation_id":accepted["operation_id"], "accepted":True,
-                                "intent_revision":accepted["intent_revision"]})
+                                "intent_revision":accepted["intent_revision"], "stage":confirmed['stage'],
+                                "completion":"uncertain"})
             raise ExecutionError(**accepted["error"]) from error
 
     def event(self, event, record=None, operation_id=None, details=None):

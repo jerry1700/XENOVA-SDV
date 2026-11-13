@@ -171,13 +171,16 @@ def test_accepted_stop_errors_carry_the_original_operation(client, manager, resp
     assert body["code"] == code and body["platform_code"] == response_env["error"]["code"]
     assert body["retryable"] == response_env["error"]["retryable"]
     assert (body["operation"]["status"], body["operation"]["accepted"], body["operation"]["operation_id"]) == (op_status, True, OP)
+    assert (body["context"]["status"], body["context"]["accepted"], body["context"]["operation_id"]) == (op_status, True, OP)
 
 
 def test_not_accepted_stop_is_rejected_or_unknown(client, manager):
     manager.responses["stop"] = failure("OPERATION_IN_PROGRESS", retryable=True, lock="admission", acceptance="not-checked")
     body = stop(client).json()
     assert body["code"] == "PlatformUnavailable" and body["retryable"] is True
-    assert (body["operation"]["status"], body["operation"]["accepted"], body["operation"]["operation_id"]) == ("rejected", False, None)
+    assert (body["operation"]["status"], body["operation"]["accepted"], body["operation"]["operation_id"]) == ("unknown", None, None)
+    assert (body["context"]["status"], body["context"]["accepted"]) == ("unknown", None)
+    assert body["context"]["next_action"] == "lookup_original"
     manager.responses["stop"] = failure("STORAGE_UNAVAILABLE", acceptance="unconfirmed")
     body = stop(client).json()
     assert (body["operation"]["status"], body["operation"]["accepted"]) == ("unknown", None)  # 수락 저장 미확인: 미수락으로 추측하지 않는다

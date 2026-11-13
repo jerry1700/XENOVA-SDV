@@ -473,7 +473,7 @@ class Manager:
         elif action in ('list','intents'):
             allowed = {'lifecycle'} | ({'vm_id'} if action=='intents' else set())
         elif action == 'operation':
-            allowed = {'operation_id', 'idempotency_key', 'timeout_ms'}
+            allowed = {'operation_id', 'idempotency_key', 'vm_id', 'timeout_ms'}
         else:
             allowed = {'vm_id'} | ({'force'} if action in ('stop', 'reboot', 'destroy')
                                   else {'value'} if action.endswith('-set') else set())
@@ -500,6 +500,7 @@ class Manager:
             if (name == 'operation_id' and (not isinstance(value, str) or not vm.UUID.fullmatch(value))
                     or name == 'idempotency_key' and not self._text_token(value)):
                 fail('INVALID_SPEC', 'invalid operation selector')
+            if 'vm_id' in spec:spec={**spec,'vm_id':normalize_uuid(spec['vm_id'])}
         elif action != 'templates':
             spec = {**spec, 'vm_id': normalize_uuid(spec.get('vm_id'))}
             if action in ('snapshot', 'probe'):
@@ -1102,6 +1103,10 @@ class Manager:
                 context.update(operation_id=op['operation_id'],stop_intent=op,stop_key=op['idempotency_key'])
                 return op
         except ExecutionError as error:
+            if receipt.get('accepted'):
+                error.error['details'].update(operation_id=receipt['operation']['operation_id'],
+                                              accepted=True,completion='uncertain',stage='acceptance')
+                raise
             if (error.error['code']=='DEADLINE_EXCEEDED' and
                     error.error['details'].get('lock')=='admission' and self.p.clock()<deadline):
                 fail('OPERATION_IN_PROGRESS','stop admission lock is busy; acceptance has not been checked',
@@ -1109,6 +1114,9 @@ class Manager:
             raise
         except OSError as error:
             op=receipt.get('operation')
+            if receipt.get('accepted'):
+                fail('STORAGE_UNAVAILABLE','accepted stop intent could not finish admission',
+                     details={'operation_id':op['operation_id'],'accepted':True,'completion':'uncertain','stage':'acceptance'})
             fail('STORAGE_UNAVAILABLE','stop intent acceptance was not durably confirmed',
                  details={'operation_id':op['operation_id'] if op else None,'acceptance':'unconfirmed'})
 
@@ -1654,6 +1662,7 @@ class Manager:
                 fail('IDEMPOTENCY_CONFLICT','same key has a different action or request')
             if implicit_retire and previous['expected_generation'] != retire_generation:
                 fail('TARGET_CHANGED', 'retire key belongs to a different lifecycle generation')
+            context.update(asset_operation=previous, asset_accepted=True)
             context['replayed']=True
             tomb = (self._tombs() if tombstones is None else tombstones).get(previous['vm_id'])
             if action=='create' and previous['status']!='SUCCEEDED':
@@ -1729,6 +1738,7 @@ class Manager:
                 return self._create(previous,context)
             if context.get('asset_lease'):context['asset_lease'].bind(previous)
             return self._transition(previous,records,context=context)
+        context['asset_new']=True
         if action=='create':
             # 이 공통 잠금 구간에서는 아직 원장을 쓰거나 callback/준비에 진입하지 않았다.
             # 반환 확인도 한 번 수행해 주소/용량 판정에 전달한다. 슬롯 대기·private 준비 뒤에는
@@ -1818,7 +1828,9 @@ class Manager:
             op['snapshot']=tomb
         context['operation_id']=opid
         context['write_operation'] = True
+        context['asset_operation']=op
         self._save_op(op)
+        context['asset_accepted']=True
         if context.get('asset_lease'):context['asset_lease'].bind(op)
         if action=='create' and op['template']['guest_kind']=='linux':
             with creation.work(self,op,context):pass
@@ -1950,6 +1962,8 @@ class Manager:
                     context['operation_id'] = control_result['operation_id']
                     context['replayed'] = control_result['replayed']
                     context['diagnostic_warnings'] = control_result.get('diagnostic_warnings', [])
+                    if action in ('start','stop'):
+                        context['control_completed']=control_result['operation_id']
                 elif action=='config':
                     vm.validate_record(record,self.data/'instances'/record['id'])
                     vm.ensure_runtime(self.p.runtime)
@@ -2076,6 +2090,8 @@ class Manager:
                             if self.p.clock()>=deadline:fail('DEADLINE_EXCEEDED','operation search budget expired')
                             found=[item for item in rows if item.get(selector)==selected]
                             if len(found)>1:fail('RECONCILE_REQUIRED','operation selector is ambiguous')
+                            if found and 'vm_id' in spec and found[0]['vm_id']!=spec['vm_id']:
+                                return []
                             return found
                         first=search()
                         view=self._operation_view(first[0],deadline) if first and action=='operation' else None
@@ -2222,6 +2238,7 @@ class Manager:
                         result=self._dispatch_locked(action,spec,execute,idempotency_key,context,deadline,cpu_deadline,entered)
                     break
                 except NeedLinuxSlot:
+                    context.pop('asset_new',None)
                     context['write_operation']=False
                     if 'linux_slot' in context:
                         fail('RECOVERY_REQUIRED','preparation slot did not bind the original request')
@@ -2278,25 +2295,31 @@ class Manager:
             response['error']={'code':'CLEANUP_INCOMPLETE' if cleanup else 'RECOVERY_REQUIRED' if context['operation_id'] else 'ARTIFACT_INVALID',
                                'message':type(exc).__name__+': management operation could not be completed',
                                'retryable':cleanup,'details':{'operation_id':context['operation_id']} if cleanup else {}}
-        if not response['ok'] and context.get('stop_intent'):
+        if (not response['ok'] and context.get('stop_intent')
+                and context['stop_intent']['phase']!='prepared'):
             op=context['stop_intent']
             try:
-                latest=self.p.execution().read(self.p.execution()._path(self.data,'control-requests',op['operation_id'])) or op
+                latest=self.p.execution().read(self.p.execution()._path(self.data,'control-requests',op['operation_id']))
                 current=self.p.execution().read(self.data/'control'/(op['vm_id']+'.json'))
                 superseded=bool(current and current.get('accepted_operation_id')!=op['operation_id'])
             except (OSError,PlatformError,ValueError):
-                latest=op;superseded=False
-            pending=not superseded and latest['phase'] not in ('completed','failed')
+                latest=current=None;superseded=False
+            phase=latest['phase'] if latest else None
+            pending=current is not None and not superseded and phase in ('accepted','executing')
+            completion='pending' if pending else phase if phase in ('completed','failed') else 'uncertain'
             recorded_deadline=op.get('deadline_monotonic_ms')
             expired=self.p.clock()*1000>=recorded_deadline if type(recorded_deadline) is int else None
-            response['error']['details'].update(accepted=True,completion='superseded' if superseded else 'pending' if pending else latest['phase'],
-                operation_id=op['operation_id'],intent_revision=op['intent_revision'],phase=latest['phase'],
+            response['error']['details'].update(accepted=True,completion='superseded' if superseded else completion,
+                operation_id=op['operation_id'],intent_revision=op['intent_revision'],phase=phase,
                 host_boot_id=op['host_boot_id'],lifecycle_generation=op['lifecycle_generation'],
                 deadline_monotonic_ms=recorded_deadline,
                 execution_deadline_expired=expired,
                 next_action=('inspect_original_operation_and_explicitly_request_stop_if_still_present' if pending and expired is not False else
                              'replay_original_stop_after_execution_lock_is_available' if pending else
                              'inspect_original_operation_and_current_intent'))
+        if not response['ok'] and context.get('control_completed'):
+            response['error']['details'].update(accepted=True,completion='completed',stage='completion',
+                                                operation_id=context['control_completed'])
         if (action == 'probe' and not response['ok'] and not context.get('observation_error_handled')
                 and isinstance(spec, dict) and isinstance(spec.get('vm_id'), str) and vm.UUID.fullmatch(spec['vm_id'])):
             try:
@@ -2348,9 +2371,23 @@ class Manager:
                             from xenova_creation_auto import failed as automatic_cleanup_failed
                             automatic_cleanup_failed(self,op)
                         self._save_op(op)
+                        context['asset_accepted']=True
             except (OSError,PlatformError,ValueError):
                 if action=='create':
                     response['error']['message'] += '; operation failure was not confirmed durable; inspect the original operation'
+        if not response['ok'] and execute and action in ('create','retire'):
+            # 이 응답의 관측값이다. 원 실패 기록과 자동 수습 상태는 별도로 보존한다.
+            op=context.get('asset_operation')
+            if op is not None:
+                details=response['error']['details']
+                accepted=context.get('asset_accepted')
+                response['error']={**response['error'],'details':{**details,'operation_context':{
+                    'operation_id':op['operation_id'], 'accepted':accepted, 'phase':op['phase'],
+                    'completion':('failed' if details.get('original_create_succeeded') is False and 'reconciliation' in details else
+                                  'uncertain' if accepted else 'unknown'),
+                }}}
+            elif context.get('asset_new'):
+                response['error']={**response['error'],'details':{**response['error']['details'],'accepted':False}}
         return response
 
 
