@@ -7,6 +7,8 @@ import { DemoPage, failureText } from './DemoPage';
 
 const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const driveState = vi.hoisted(() => ({ activeId: 'vm-a', mode: 'AUTO' as string, age: 100 }));
+/** 명령 상태 조회 결과 (기본: 응답 전) */
+const commandStatus = vi.hoisted(() => ({ data: undefined as unknown }));
 
 vi.mock('../api/queries', () => ({
   useVms: () => ({
@@ -30,7 +32,7 @@ vi.mock('../api/queries', () => ({
     },
   }),
   useStartVmCrash: () => vmCrash,
-  useCommandStatus: () => ({ data: undefined }),
+  useCommandStatus: () => commandStatus,
   useEvents: () => ({ data: { items: [] } }),
 }));
 vi.mock('../layout/DriveContext', () => ({
@@ -58,7 +60,8 @@ function show() {
 
 describe('장애 시연 1', () => {
   beforeEach(() => {
-    vmCrash.mutate.mockClear();
+    vmCrash.mutate.mockReset();
+    commandStatus.data = undefined;
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
     driveState.age = 100;
@@ -90,6 +93,48 @@ describe('장애 시연 1', () => {
     expect(vmCrash.mutate).not.toHaveBeenCalled();
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '장애 발생' }));
     expect(vmCrash.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it('장애 명령 단계는 응답 전·접수·거절 사유를 한글로 보인다 (명령 상태 응답에 message 없음)', () => {
+    vmCrash.mutate.mockImplementation((_: unknown, options?: { onSuccess?: (value: unknown) => void }) =>
+      options?.onSuccess?.({ command_id: 'cmd-1', submitted_at: new Date().toISOString() }),
+    );
+    const { rerender } = render(
+      <ToastProvider>
+        <MemoryRouter>
+          <DemoPage />
+        </MemoryRouter>
+      </ToastProvider>,
+    );
+    const again = () =>
+      rerender(
+        <ToastProvider>
+          <MemoryRouter>
+            <DemoPage />
+          </MemoryRouter>
+        </ToastProvider>,
+      );
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '장애 발생' }));
+    expect(screen.getByText('VM 응답 대기 중')).toBeInTheDocument();
+
+    commandStatus.data = { vm_id: 'vm-a', command_id: 'cmd-1', status: 'ACCEPTED', error: null };
+    again();
+    expect(screen.getByText('접수')).toBeInTheDocument();
+
+    commandStatus.data = {
+      vm_id: 'vm-a',
+      command_id: 'cmd-1',
+      status: 'REJECTED',
+      error: { code: 'DEMO_DISABLED', message: 'demo commands are disabled on this agent' },
+    };
+    again();
+    expect(screen.getByText('이 VM에서는 시연용 명령이 꺼져 있습니다.')).toBeInTheDocument();
+    expect(screen.queryByText(/DEMO_DISABLED|REJECTED|demo commands/)).toBeNull();
+
+    commandStatus.data = { vm_id: 'vm-a', command_id: 'cmd-1', status: 'FAILED', error: 'broken' };
+    again();
+    expect(screen.getByText('명령을 처리하지 못했습니다.')).toBeInTheDocument();
   });
 
   it('활성 VM을 확인할 수 없으면 시작할 수 없다', () => {

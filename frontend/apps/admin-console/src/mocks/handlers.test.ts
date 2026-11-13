@@ -4,6 +4,7 @@ import { getSession, refreshSession, request, requestWithStatus, setSession } fr
 import {
   VM_CPU_PERCENT_METRIC,
   type AgentExitCommand,
+  type CommandStatusResponse,
   type MetricHistoryResponse,
   type TokenResponse,
   type StressCommand,
@@ -248,5 +249,46 @@ describe('MSW mock API', () => {
         body: { workers: 1, duration_s: 30 },
       }),
     ).rejects.toMatchObject({ status: 400, code: 'UNSUPPORTED_GUEST_KIND' });
+  });
+
+  it('부하 명령 상태는 백엔드 형식: 성공, 끝나기 전 두 번째 부하는 BUSY 거절, CPU 4워커는 실패, 없는 명령은 404', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await login();
+      await request(`/api/v1/vms/${VM_IDS.interaction}/start`, { method: 'POST' });
+      const stress = (body: object, kind = 'cpu') =>
+        request<StressCommand>(`/api/v1/vms/${VM_IDS.interaction}/stress/${kind}`, { method: 'POST', body });
+      const status = (id: string) =>
+        request<CommandStatusResponse>(`/api/v1/vms/${VM_IDS.interaction}/commands/${id}`);
+
+      const first = await stress({ workers: 1, duration_s: 30 });
+      const busy = await stress({ memory_mib: 128, duration_s: 30 }, 'memory');
+      expect(await status(busy.command_id)).toMatchObject({
+        status: 'REJECTED',
+        error: { code: 'BUSY' },
+        command_id: busy.command_id,
+        vm_id: VM_IDS.interaction,
+      });
+      const running = await status(first.command_id);
+      expect(running).toMatchObject({ status: 'ACCEPTED', error: null, finished_at: null });
+      expect(running).not.toHaveProperty('message');
+      expect(running).not.toHaveProperty('updated_at');
+
+      vi.setSystemTime(Date.now() + 3000);
+      expect(await status(first.command_id)).toMatchObject({ status: 'SUCCEEDED', error: null });
+      const failing = await stress({ workers: 4, duration_s: 30 });
+      vi.setSystemTime(Date.now() + 3000);
+      expect(await status(failing.command_id)).toMatchObject({
+        status: 'FAILED',
+        error: { code: 'PROCESS_EXITED' },
+      });
+
+      await expect(status('00000000-0000-4000-8000-000000000000')).rejects.toMatchObject({
+        status: 404,
+        code: 'COMMAND_NOT_FOUND',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

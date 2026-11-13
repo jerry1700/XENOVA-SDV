@@ -11,6 +11,7 @@ import {
   VM_CPU_PERCENT_METRIC,
   type CpuStressRequest,
   type AutoDelayRequest,
+  type CommandState,
   type CreateVmRequest,
   type LoginRequest,
   type MemoryStressRequest,
@@ -62,7 +63,26 @@ let refreshGranted = false;
 let mockUsername = MOCK_USER.username;
 let mockNickname = MOCK_USER.nickname;
 let mockPassword = MOCK_PASSWORD;
-const demoCommands = new Map<string, { vmId: string; createdAt: number; agentExit?: boolean }>();
+/**
+ * mock 명령. outcome 으로 Agent 결과를 흉내 낸다 (백엔드 AgentCommandStatusResponse 형식):
+ *  - busy: 같은 VM 에 끝나지 않은 부하 명령이 있으면 Agent 가 BUSY 로 거절 (Agent 는 부하를 한 번에 하나만)
+ *  - failed: CPU 워커 4개 부하는 부하 프로세스가 일찍 끝나 실패로 둔다 (시험용)
+ */
+interface DemoCommand {
+  vmId: string;
+  createdAt: number;
+  agentExit?: boolean;
+  stress?: boolean;
+  outcome?: 'busy' | 'failed';
+}
+const demoCommands = new Map<string, DemoCommand>();
+const STRESS_DONE_MS = 2200;
+const STRESS_RUNNING_MS = 600;
+/** 같은 VM 에 아직 끝나지 않은(거절·실패 아닌) 부하 명령이 있는가 */
+const stressRunning = (vmId: string) =>
+  [...demoCommands.values()].some(
+    (c) => c.vmId === vmId && c.stress && !c.outcome && Date.now() - c.createdAt <= STRESS_DONE_MS,
+  );
 
 /** 시험용: 처음 상태로 */
 export function resetMockState(): void {
@@ -490,7 +510,12 @@ export const handlers = [
       submitted_at: now.toISOString(),
       expires_at: new Date(now.getTime() + 30_000).toISOString(),
     };
-    demoCommands.set(command.command_id, { vmId: vm.vm_id, createdAt: Date.now() });
+    demoCommands.set(command.command_id, {
+      vmId: vm.vm_id,
+      createdAt: Date.now(),
+      stress: true,
+      outcome: stressRunning(vm.vm_id) ? 'busy' : kind === 'cpu' && amount === 4 ? 'failed' : undefined,
+    });
     return HttpResponse.json(command as unknown as JsonBodyType, { status: 202 });
   }),
 
@@ -624,22 +649,38 @@ export const handlers = [
     if (!item || item.vmId !== params.vmId)
       return error(404, 'COMMAND_NOT_FOUND', '명령을 찾을 수 없습니다.');
     const elapsed = Date.now() - item.createdAt;
-    return HttpResponse.json({
-      command_id: params.commandId,
-      vm_id: params.vmId,
-      status: item.agentExit
-        ? 'ACCEPTED'
-        : elapsed > 2200
-          ? 'SUCCEEDED'
-          : elapsed > 600
+    const status: CommandState = item.agentExit
+      ? 'ACCEPTED'
+      : item.outcome === 'busy'
+        ? 'REJECTED'
+        : elapsed > STRESS_DONE_MS
+          ? item.outcome === 'failed'
+            ? 'FAILED'
+            : 'SUCCEEDED'
+          : elapsed > STRESS_RUNNING_MS
             ? 'RUNNING'
-            : 'ACCEPTED',
-      message: item.agentExit
-        ? 'Agent가 종료 명령을 수락했습니다.'
-        : elapsed > 2200
-          ? '명령 실행이 완료되었습니다.'
-          : 'VM에서 명령을 실행하고 있습니다.',
-      updated_at: new Date().toISOString(),
+            : 'ACCEPTED';
+    const at = (ms: number) => new Date(item.createdAt + ms).toISOString();
+    const done = status === 'SUCCEEDED' || status === 'FAILED' || status === 'REJECTED';
+    return HttpResponse.json({
+      vm_id: params.vmId,
+      command_id: params.commandId,
+      operation_id: null,
+      status,
+      submitted_at: at(0),
+      started_at: status === 'REJECTED' || status === 'ACCEPTED' ? null : at(STRESS_RUNNING_MS),
+      finished_at: done ? at(item.outcome === 'busy' ? 50 : STRESS_DONE_MS) : null,
+      duration_ms: done ? (item.outcome === 'busy' ? 0 : STRESS_DONE_MS - STRESS_RUNNING_MS) : null,
+      result: status === 'SUCCEEDED' ? {} : null,
+      error:
+        status === 'REJECTED'
+          ? { code: 'BUSY', message: 'stress command is running' }
+          : status === 'FAILED'
+            ? { code: 'PROCESS_EXITED', message: 'stress worker exited early' }
+            : null,
+      received_at: new Date().toISOString(),
+      contract_violation: false,
+      violation_detail: null,
     });
   }),
 

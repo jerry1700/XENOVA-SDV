@@ -1,5 +1,5 @@
 import { ApiError } from './client';
-import type { CommandState, KnownErrorCode } from './types';
+import type { AgentErrorCode, CommandState, KnownErrorCode } from './types';
 
 /**
  * 화면에 보일 오류 문구 한 곳 (프론트 QA 1-F12·3-A6).
@@ -29,6 +29,11 @@ export const ERROR_TEXT = {
   VM_CONTROL_BAD_RESPONSE: '보드 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.',
   RESOURCE_UNSUPPORTED: '이 VM에서는 자원을 바꿀 수 없습니다.',
   INTERNAL_SERVER_ERROR: '서버에서 오류가 났습니다. 잠시 후 다시 시도해 주세요.',
+  AGENT_UNAVAILABLE:
+    'VM Agent가 연결되어 있지 않아 명령을 보낼 수 없습니다. VM 실행과 Agent 상태를 확인해 주세요.',
+  MQTT_UNAVAILABLE:
+    '메시지 브로커에 연결되어 있지 않아 명령을 보내지 못했습니다. 잠시 후 다시 시도해 주세요.',
+  COMMAND_NOT_FOUND: '명령을 찾을 수 없습니다. 이미 정리되었거나 다른 VM의 명령일 수 있습니다.',
 } as const satisfies Record<KnownErrorCode, string>;
 
 const DEFAULT_TEXT = '요청을 처리하지 못했습니다.';
@@ -43,6 +48,37 @@ export function errorText(error: unknown, fallback: string = DEFAULT_TEXT): stri
     if (error.status === 0) return NETWORK_TEXT;
   }
   return fallback;
+}
+
+/**
+ * VM Agent 가 명령을 거절·실패한 사유 (명령 상태 응답 error.code). HTTP 오류가 아니라 errorText 와 따로 둔다.
+ * 문구에 코드 이름·괄호를 붙이지 않는다. AgentErrorCode 가 늘면 typecheck 가 빠진 문구를 잡는다.
+ */
+export const AGENT_ERROR_TEXT = {
+  BUSY: '이미 실행 중인 부하가 있습니다. 끝난 뒤 다시 시도해 주세요.',
+  INVALID_PARAMETERS: 'Agent가 요청 값을 받아들이지 않았습니다. 입력값을 확인해 주세요.',
+  INVALID_COMMAND: 'Agent가 명령 형식을 받아들이지 않았습니다.',
+  AGENT_EXITING: 'Agent가 종료 중이라 명령을 실행하지 않았습니다.',
+  RESOURCE_UNAVAILABLE: 'VM에 남은 메모리가 부족해 실행하지 않았습니다. 부하 크기를 줄여 주세요.',
+  STATE_UNAVAILABLE: 'Agent가 명령 기록을 확인하지 못해 실행하지 않았습니다.',
+  UNSUPPORTED_ACTION: '이 VM의 Agent가 지원하지 않는 명령입니다.',
+  DEMO_DISABLED: '이 VM에서는 시연용 명령이 꺼져 있습니다.',
+  EXPIRED: '명령 유효 시간이 지나 실행하지 않았습니다. 다시 보내 주세요.',
+  CLOCK_UNTRUSTED: '서버와 VM의 시각 차이가 커서 명령을 실행하지 않았습니다.',
+  BOOT_MISMATCH: 'VM이 다시 시작되어 이전 명령을 실행하지 않았습니다.',
+  IDEMPOTENCY_CONFLICT: '같은 명령 번호로 다른 요청이 있어 거절되었습니다. 다시 보내 주세요.',
+} as const satisfies Record<AgentErrorCode, string>;
+
+const AGENT_DEFAULT_TEXT = '명령을 처리하지 못했습니다.';
+
+const isAgentCode = (code: string): code is AgentErrorCode => Object.hasOwn(AGENT_ERROR_TEXT, code);
+
+/** Agent 거절·실패 코드의 한글 문구. 코드가 없거나 모르는 코드면 fallback 또는 기본 문구 */
+export function agentErrorText(
+  code: string | null | undefined,
+  fallback: string = AGENT_DEFAULT_TEXT,
+): string {
+  return code && isAgentCode(code) ? AGENT_ERROR_TEXT[code] : fallback;
 }
 
 const COMMAND_STATE_TEXT: Record<CommandState, string> = {

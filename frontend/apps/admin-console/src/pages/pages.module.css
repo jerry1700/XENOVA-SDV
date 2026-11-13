@@ -4095,6 +4095,10 @@ button.chip:hover:not(.chipOn) {
   background: color-mix(in srgb, var(--x-fault) 10%, transparent);
   color: var(--x-fault);
 }
+.pinningFeedback[data-tone='pending'] {
+  background: color-mix(in srgb, var(--x-primary) 10%, transparent);
+  color: var(--x-primary);
+}
 .resourceTuningSection {
   min-width: 0;
   padding: var(--x-space-4);
