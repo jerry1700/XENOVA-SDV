@@ -3,6 +3,7 @@ package com.xenova.backend.vm.infrastructure;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.xenova.backend.common.error.ApiException;
+import com.xenova.backend.template.domain.BoardTemplate;
 import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.CpuLayout;
 import com.xenova.backend.vm.domain.CpuPolicyUpdate;
@@ -107,6 +108,16 @@ public class Dom0ManagerClient implements VmControlPort {
                 .retrieve()
                 .onStatus(status -> status.isError(), this::handleError)
                 .body(VmRegistrationInventory[].class));
+        return response == null ? List.of() : Arrays.asList(response);
+    }
+
+    /** Every template version published in the board catalog, unfiltered (dom0-manager GET /api/v1/templates). */
+    public List<BoardTemplate> listTemplates() {
+        BoardTemplate[] response = executeQuery(() -> queryClient.get()
+                .uri("/api/v1/templates")
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(BoardTemplate[].class));
         return response == null ? List.of() : Arrays.asList(response);
     }
 

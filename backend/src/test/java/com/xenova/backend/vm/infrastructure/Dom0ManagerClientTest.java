@@ -118,6 +118,37 @@ class Dom0ManagerClientTest {
     }
 
     @Test
+    void listTemplatesReadsEveryPublishedVersionAndIgnoresExtraFields() {
+        server.createContext(
+                "/api/v1/templates",
+                exchange -> respond(exchange, 200, """
+                        [{
+                          "template_id":"debian-13-arm64",
+                          "template_version":"1.0.7",
+                          "guest_kind":"linux",
+                          "default_resources":{"vcpus":1,"memory_mib":512},
+                          "resource_limits":{"vcpus":[1,4],"memory_mib":[128,8192]},
+                          "capabilities":{"graceful_shutdown":true}
+                        },{
+                          "template_id":"zephyr-drive-lattice-lab-arm64",
+                          "template_version":"1.0.8",
+                          "guest_kind":"zephyr",
+                          "default_resources":{"vcpus":1,"memory_mib":16},
+                          "resource_limits":{"vcpus":[1,1],"memory_mib":[16,16]},
+                          "capabilities":{"graceful_shutdown":false}
+                        }]
+                        """));
+
+        var templates = client.listTemplates();
+
+        assertThat(templates).containsExactly(
+                new com.xenova.backend.template.domain.BoardTemplate(
+                        "debian-13-arm64", "1.0.7", com.xenova.backend.template.domain.GuestKind.LINUX),
+                new com.xenova.backend.template.domain.BoardTemplate(
+                        "zephyr-drive-lattice-lab-arm64", "1.0.8", com.xenova.backend.template.domain.GuestKind.ZEPHYR));
+    }
+
+    @Test
     void runtimeLogsForwardOnlyQueryAndServerServiceToken() {
         AtomicReference<String> query = new AtomicReference<>();
 
