@@ -36,8 +36,6 @@ xenova:
     access-token-ttl: 15m
     refresh-token-ttl: 7d
     refresh-cookie-secure: false
-    max-login-attempts: 5
-    login-attempt-window: 5m
   # Versions come from the board; integration tests get them from TestBoardTemplates.
   template-catalog:
     templates:
