@@ -278,9 +278,10 @@ static enum lp_result refined_overlap(uint16_t free,float dx,float dy,float cell
  }
  return LP_PATH_FOUND;
 }
+enum lp_guide_block {LP_GUIDE_CLEAR,LP_GUIDE_LANE,LP_GUIDE_OCCUPIED};
 static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,
  struct lp_metrics *m,const struct lp_budget *b,bool obstacle_evidence,bool *outside,const struct tr_intent *task,
- const struct lp_space *space,const struct tr_parking_geometry *parking,bool *occupied) {
+ const struct lp_space *space,const struct tr_parking_geometry *parking,enum lp_guide_block *block) {
  if(outside)*outside=false;
  enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;
  if(!dw_pose_finite(pose)||!isfinite(extra)||extra<0)return LP_NUMERIC;
@@ -297,7 +298,7 @@ static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float ex
     space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):
     tr_live_follow(w,task)?tr_contains_live(&view,pose,extra,c):tr_contains(&view,pose,extra,c);
   }
-  if(!contained)return LP_COLLISION;
+  if(!contained){if(block)*block=LP_GUIDE_LANE;return LP_COLLISION;}
  }
  float half=(c->front+c->rear)*.5f+c->margin+extra,width=c->half_width+c->margin+extra;
  float cs=cosf(pose.yaw),sn=sinf(pose.yaw),shift=(c->front-c->rear)*.5f;
@@ -363,11 +364,11 @@ static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float ex
     bool refine=indexed?(index->refined[y]&bit)!=0:w->has_boundary_cell_free4_le&&refinable(w,at,c);
     uint16_t free=refine?refined_free(w,at):0;
     if(!free){
-     if(occupied)*occupied=w->occupancy.bytes[at]>=70&&!cell_unavailable(w,at,c);
+     if(block&&w->occupancy.bytes[at]>=70&&!cell_unavailable(w,at,c))*block=LP_GUIDE_OCCUPIED;
      return LP_COLLISION;
     }
     rc=refined_overlap(free,dx,dy,cell,cs,sn,half,width,ex,ey,c,m,b);
-    if(rc==LP_COLLISION&&occupied)*occupied=true;
+    if(rc==LP_COLLISION&&block)*block=LP_GUIDE_OCCUPIED;
     if(rc!=LP_PATH_FOUND)return rc;
    }
    if(outside&&!*outside&&(!(hard&bit)||((w->required_features&DW_ROAD_PRIORITY)&&
@@ -455,8 +456,10 @@ enum lp_result lp_task_goal(const dw_world *w,const struct tr_intent *task,dw_po
  const dw_point *points;unsigned count;
  if(!w||!out||!reference(w,task,&points,&count)||!dw_pose_finite(pose)||!isfinite(horizon)||horizon<=0||!isfinite(end_clearance)||end_clearance<0)return LP_INPUT;
  struct lp_road_state road;enum lp_result rc=lp_task_project(w,task,pose,&road);if(rc!=LP_PATH_FOUND)return rc;
- /* Keep the target axle just inside the lane slice. Only the actual grid needs the body reserve. */
- float lane_end_reserve=tr_live_follow(w,task)?1e-4f:end_clearance;
+ /* Preserve the terminal clearance on a long slice. On a short live slice,
+  * give it up only as needed to leave one clearance length for forward motion. */
+ float lane_end_reserve=end_clearance;
+ if(tr_live_follow(w,task))lane_end_reserve=fminf(end_clearance,fmaxf(1e-4f,road.length-road.arc-end_clearance));
  if(road.length<=lane_end_reserve)return LP_INPUT;
  float goal=fminf(road.length-lane_end_reserve,road.arc+horizon),total=0;
  float width=w->width*w->resolution_m,height=w->height*w->resolution_m;
@@ -982,7 +985,7 @@ static float guide_step(const struct lane_guide *guide,const struct lp_config *c
 
 static enum lp_result roll_lane_guide(struct lp_path *path,const struct lane_guide *guide,const dw_world *w,
  const struct lp_config *c,const struct lp_budget *budget,struct lp_metrics *metrics,
- float response,float step,unsigned count,float minimum,bool *occupied){
+ float response,float step,unsigned count,float minimum,enum lp_guide_block *block){
  dw_pose pose=path->points[0].pose;
  float steer=path->points[0].steering_rad;
  float radius=hypotf(fmaxf(c->front,c->rear),c->half_width);
@@ -991,8 +994,8 @@ static enum lp_result roll_lane_guide(struct lp_path *path,const struct lane_gui
   dw_pose moved=pose;
   float next=guide_step(guide,c,response,c->primitive_speed,step,&moved,steer);
   float pad=c->tracking_guard+.5f*(step+radius*fabsf(dw_angle(moved.yaw-pose.yaw)));
-  enum lp_result rc=footprint_geometry(w,pose,pad,c,metrics,budget,false,NULL,&path->task,NULL,NULL,occupied);
-  if(rc==LP_PATH_FOUND)rc=footprint_geometry(w,moved,pad,c,metrics,budget,false,NULL,&path->task,NULL,NULL,occupied);
+  enum lp_result rc=footprint_geometry(w,pose,pad,c,metrics,budget,false,NULL,&path->task,NULL,NULL,block);
+  if(rc==LP_PATH_FOUND)rc=footprint_geometry(w,moved,pad,c,metrics,budget,false,NULL,&path->task,NULL,NULL,block);
   if(rc==LP_COLLISION)break;
   if(rc!=LP_PATH_FOUND)return rc;
   path->points[path->count++]=(xenova_drive_PathPoint){.pose=moved,.steering_rad=next,.velocity_mps=c->primitive_speed};
@@ -1005,27 +1008,27 @@ static enum lp_result roll_lane_guide(struct lp_path *path,const struct lane_gui
 
 enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_world *w,dw_pose start_pose,
  float steer,float speed,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
- const struct tr_basis *basis,struct lp_metrics *metrics,struct lp_tracking_geometry *geometry,bool curve_blocker){
+ const struct tr_basis *basis,struct lp_metrics *metrics,struct lp_tracking_geometry *geometry,struct lp_lane_guide_options options){
  struct tr_view view;
  if(!narrow_lane(w,task,c,budget.collision_index,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
     fabsf(steer)>c->max_steer||!isfinite(speed))return LP_NOT_FOUND;
  struct lane_guide guide;
- if(!make_lane_guide(&view,c,&guide,1))return LP_NOT_FOUND;
+ if(!make_lane_guide(&view,c,&guide,options.inset_scale))return LP_NOT_FOUND;
  struct lp_road_state first,last;
  if(lp_task_project(w,task,start_pose,&first)!=LP_PATH_FOUND||lp_task_project(w,task,nominal,&last)!=LP_PATH_FOUND)return LP_NOT_FOUND;
- bool blend=task->changing&&curve_blocker;
+ bool blend=task->changing&&options.curve_blocker;
  if(blend){
   struct tr_view corridor;
   if(!tr_open_indexed(w,task,budget.collision_index,&corridor)||!blend_lane_change(&guide,&corridor,&first,c))return LP_NOT_FOUND;
  }
  float length=last.arc-first.arc;
  float cruise=c->narrow_lane_speed_mps>0?c->narrow_lane_speed_mps:c->max_velocity;
- speed=fmaxf(speed,cruise);
+ float planning_speed=fmaxf(speed,cruise);
  /* The tracker can steer toward a nearer path endpoint. Size the minimum
   * prefix from cruise time and stopping distance, leaving the lookahead
   * floor for selecting a target on the available path. */
- float minimum=fmaxf(c->primitive_speed*c->primitive_duration,
-  nominal_lookahead(c,speed)+lp_stopping_distance(c,speed));
+ float primitive_length=c->primitive_speed*c->primitive_duration;
+ float minimum=fmaxf(primitive_length,nominal_lookahead(c,planning_speed)+lp_stopping_distance(c,planning_speed));
  if(length<minimum)return LP_NOT_FOUND;
  float step=fminf(c->tracking_guard*.6f,.0015f);
  unsigned count=(unsigned)fminf(LP_PATH-1,floorf(length/step));
@@ -1038,17 +1041,45 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  path->points[0]=(xenova_drive_PathPoint){.pose=start_pose,.steering_rad=steer,.velocity_mps=c->primitive_speed};
  /* The shorter response follows an explicit merge. Ordinary lane changes
   * still need room to settle while steering toward the destination lane. */
- float response=blend?(c->lookahead_min/.35f)*.17f:
-  task->changing?fmaxf(c->lookahead_min,2*c->wheelbase):lane_response(c);
- bool occupied=false;
+ float merge_response=fmaxf(c->lookahead_min,2*c->wheelbase);
+ /* A straight merge with less than one body length before the next blocker
+  * needs to align sooner. The response scale is tuned for R45. */
+ if(options.compact_merge)merge_response*=.75f;
+ float response=blend?(c->lookahead_min/.35f)*.17f:task->changing?merge_response:lane_response(c);
+ enum lp_guide_block block=LP_GUIDE_CLEAR;
  bool retry_inset=!task->changing&&!w->has_route_view;
  enum lp_result rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,response,step,count,minimum,
-  retry_inset?&occupied:NULL);
+  retry_inset||blend||options.short_handoff?&block:NULL);
  /* An observed obstacle can cut a live lane-keeping guide short. Try one
   * deeper inset with the same swept checks. Scale tuned on the R45 stop replay. */
  const float blocked_bend_inset_scale=1.30f;
- if(rc==LP_NOT_FOUND&&occupied&&make_lane_guide(&view,c,&guide,blocked_bend_inset_scale)){
-  rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,response,step,count,minimum,NULL);
+ if(rc==LP_NOT_FOUND&&retry_inset&&block==LP_GUIDE_OCCUPIED&&make_lane_guide(&view,c,&guide,blocked_bend_inset_scale)){
+  if(options.short_handoff)block=LP_GUIDE_CLEAR;
+  rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,response,step,count,minimum,options.short_handoff?&block:NULL);
+ }
+ /* A settled footprint can still point away from the next bend after a
+  * merge. Recover with the bend response when the lane guide runs out. */
+ if(rc==LP_NOT_FOUND&&retry_inset&&block==LP_GUIDE_LANE&&path->count>1&&
+    fabsf(dw_angle(start_pose.yaw-first.pose.yaw))>c->avoid_heading_rad){
+  float bend_response=(c->lookahead_min/.35f)*.17f;
+  rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,bend_response,step,count,minimum,NULL);
+ }
+ /* On a straight approach, a bend merge can hit the lane boundary during
+  * its initial correction. Retry with a gentler turn toward the destination. */
+ if(rc==LP_NOT_FOUND&&blend&&block==LP_GUIDE_LANE&&path->count>1&&
+    (path->count-1)*step<=primitive_length&&
+    fabsf(first.curvature)*c->wheelbase<=c->goal_heading&&
+    fabsf(dw_angle(start_pose.yaw-first.pose.yaw))<=c->goal_heading&&
+    fabsf(steer)<=c->avoid_steering_rad&&make_lane_guide(&view,c,&guide,1)){
+  float gentler_response=merge_response+.5f*fmaxf(0,c->front-c->rear);
+  rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,gentler_response,step,count,minimum,NULL);
+ }
+ /* During a handoff, an obstacle can leave a safe stopping prefix shorter
+  * than a cruise path. Preserve that prefix so the phase can be registered. */
+ if(rc==LP_NOT_FOUND&&options.short_handoff&&block==LP_GUIDE_OCCUPIED&&
+    (path->count-1)*step>=fmaxf(primitive_length,lp_stopping_distance(c,fmaxf(0,speed))+c->tracking_guard)){
+  path->goal=path->merge_goal=path->points[path->count-1].pose;
+  rc=LP_PATH_FOUND;
  }
  if(rc!=LP_PATH_FOUND)return rc;
  enum lp_result checked=lp_validate_path_prepared(path,w,c,metrics,&budget,geometry);

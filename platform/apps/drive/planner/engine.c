@@ -345,6 +345,29 @@ static bool correspondence_current(const struct lp_path *p,const struct lp_track
  uint64_t anchor=progress->initialized?progress->last_pi_us:p->initial_pi_us;
  return !anchor||(v->pi_sample_us>=anchor&&v->pi_sample_us-anchor<=(uint64_t)c->pose_age_us);
 }
+/* Measure the free station interval between two observed blockers on the
+ * same lap. Overlapping or unobserved bounds cannot prove a usable gap. */
+static float merge_blocker_gap(const struct drive_engine *e,const dw_world *w,struct tr_intent task,dw_pose pose){
+ if(e->episode.phase!=DB_CHANGE_OUT||e->episode.policy!=DB_KEEP_TARGET)return INFINITY;
+ task.changing=false;task.from_lane_id=task.selected_lane_id;
+ const struct db_blocker *first=&e->episode.blocker;
+ struct db_blocker next;
+ if(!db_blocker_observe(w,&task,pose,e->config->plan_horizon,e->config,&next)||!next.present||next.unknown)return INFINITY;
+ next.station_lower=first->station_lower;next.station_upper=first->station_upper;
+ if(!db_blocker_locate(&e->episode.basis,&next,w->localization.geometry_position_bound_m))return INFINITY;
+ float gap=next.station_lower-first->station_upper;
+ return gap>0?gap:INFINITY;
+}
+static float merge_inset_scale(const struct lp_config *c,float gap){
+ float body_length=c->front+c->rear;
+ float no_inset_gap=body_length+c->wheelbase;
+ float reduced_inset_gap=2*body_length;
+ if(gap<=no_inset_gap)return 0.0f;
+ if(gap>reduced_inset_gap)return 1.0f;
+ /* Retain up to a quarter of the bend inset. This scale is tuned for R45
+  * and needs validation on other course radii. */
+ return 0.25f*(gap-no_inset_gap)/(reduced_inset_gap-no_inset_gap);
+}
 static bool changing_on_bend(const struct drive_engine *e,const dw_world *world,struct tr_intent task){
  if(!task.changing||!e->episode.active||!e->episode.blocker.present)return false;
  const struct db_blocker *blocker=&e->episode.blocker;
@@ -677,8 +700,16 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
   if((e->episode.active||(!task.changing&&!e->maneuver_active))&&e->has_grant&&e->grant.kind==1){
    struct de_path_slot *slot=&e->paths[e->planning_path.slot];
    bool bend=changing_on_bend(e,&map->world,task);
+   float gap=task.changing&&!bend?merge_blocker_gap(e,&map->world,task,pose):INFINITY;
+   struct lp_lane_guide_options options={
+    .curve_blocker=bend,.inset_scale=merge_inset_scale(e->config,gap),
+    .compact_merge=gap<=e->config->front+e->config->rear,
+    .short_handoff=!task.changing&&e->episode.policy==DB_KEEP_TARGET&&
+     (e->episode_handoff==DE_EPISODE_PASS_PLANNING||
+      (e->episode_handoff==DE_EPISODE_PLANNING&&e->episode.phase==DB_FINISHED)),
+   };
    e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,vehicle.velocity_mps,goal,
-    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry,bend);
+    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry,options);
    slot->tracking_prepared=slot->lane_guide=e->search_reason==LP_PATH_FOUND;
    /* Retry the guide on the next map while the current merge can still
     * advance and stop safely. Reserve the lattice for a needed replacement. */
@@ -1386,7 +1417,7 @@ static bool behavior_phase(struct drive_engine *e,enum db_phase phase,dw_pose go
  return true;
 }
 static bool lane_settled(struct drive_engine *e,const dw_world *w,const struct tr_intent *task,dw_pose pose,const dw_vehicle *v,
- uint32_t lane,bool contained,uint64_t now){
+ uint32_t lane,bool contained,uint64_t now,uint64_t settle_us){
  struct tr_intent only=*task;only.changing=false;only.from_lane_id=only.selected_lane_id=lane;
  struct lp_road_state road;float steer=v->has_measured_steering_rad?v->measured_steering_rad:v->estimated_steering_rad;
  bool fit=contained&&
@@ -1395,7 +1426,25 @@ static bool lane_settled(struct drive_engine *e,const dw_world *w,const struct t
   fabsf(steer-atanf(e->config->wheelbase*road.curvature))+v->steering_error_rad<=e->behavior_limits.steering_rad;
  if(!fit){e->episode.settle_since_pi_us=0;return false;}
  if(!e->episode.settle_since_pi_us)e->episode.settle_since_pi_us=v->pi_sample_us;
- return v->pi_sample_us>=e->episode.settle_since_pi_us&&v->pi_sample_us-e->episode.settle_since_pi_us>=e->behavior_limits.settle_us&&now>=v->pi_sample_us;
+ return v->pi_sample_us>=e->episode.settle_since_pi_us&&v->pi_sample_us-e->episode.settle_since_pi_us>=settle_us&&now>=v->pi_sample_us;
+}
+/* The station intervals can still overlap when a second obstacle closes the
+ * lane ahead. End KEEP_TARGET early enough to plan the next crossing; the
+ * episode receipt, swept path and stopping checks still apply. */
+static bool behavior_next_blocker(const struct drive_engine *e,const dw_world *w,const struct tr_intent *task,
+ dw_pose pose,const dw_vehicle *v,float lo,float hi){
+ const struct db_blocker *first=&e->episode.blocker;
+ if(e->episode.policy!=DB_KEEP_TARGET||lo<=first->station_lower||hi<=first->station_upper)return false;
+ float speed=fmaxf(0,v->velocity_mps);
+ float lookahead=lp_lookahead_distance(e->config,speed)+lp_stopping_distance(e->config,speed);
+ struct tr_intent ahead=*task;ahead.changing=false;
+ ahead.from_lane_id=ahead.selected_lane_id=e->episode.target_lane_id;
+ struct db_blocker next;
+ if(!db_blocker_observe(w,&ahead,pose,lookahead+e->config->front,e->config,&next)||!next.present||next.unknown)return false;
+ /* Lift the new blocker onto the same lap as the old one. */
+ next.station_lower=first->station_lower;next.station_upper=first->station_upper;
+ return db_blocker_locate(&e->episode.basis,&next,w->localization.geometry_position_bound_m)&&
+        next.station_lower>first->station_upper&&next.station_lower>hi&&next.station_lower-hi<=e->config->front;
 }
 static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,dw_pose pose,const dw_vehicle *v,
  uint64_t now,float clearance,struct tr_intent *task,dw_pose *goal){
@@ -1406,7 +1455,8 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
  }
  /* The registered phase milestone and the swept local terminal have separate lifetimes. */
  const float phase_clearance=e->config->front+e->config->margin;
- if(e->episode.active&&e->episode.terminal&&e->episode.phase==DB_FINISHED){
+ if(e->episode.active&&e->episode.terminal&&e->episode.phase==DB_FINISHED&&
+    e->episode_state.core.phase==DB_FINISHED&&e->episode_status.commit_state==2){
   struct db_blocker next;if(!db_blocker_observe(w,task,pose,e->config->plan_horizon,e->config,&next))return DE_PATH;
   if(next.present&&!next.unknown)e->episode.active=false;
  }
@@ -1431,7 +1481,14 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
   uint32_t arrival=e->episode.phase==DB_CHANGE_OUT?e->episode.target_lane_id:
                    e->episode.phase==DB_REJOIN?e->episode.home_lane_id:0;
   bool contained=arrival&&tr_unique_lane(w,pose,task->vehicle_pad+e->config->tracking_guard,e->config,e->budget.collision_index)==arrival;
-  if(e->episode.phase==DB_CHANGE_OUT&&lane_settled(e,w,task,pose,v,e->episode.target_lane_id,contained,now)){
+  uint64_t settle_us=e->behavior_limits.settle_us;
+  if(e->episode.phase==DB_CHANGE_OUT&&contained){
+   struct tr_intent arrival_task=*task;arrival_task.selected_lane_id=arrival;
+   /* A short interval leaves little room to move straight before the next
+    * crossing. Keep the body and alignment checks, with a shorter dwell. */
+   if(merge_blocker_gap(e,w,arrival_task,pose)<=e->config->front+e->config->rear)settle_us=(settle_us+1)/2;
+  }
+  if(e->episode.phase==DB_CHANGE_OUT&&lane_settled(e,w,task,pose,v,e->episode.target_lane_id,contained,now,settle_us)){
    task->changing=false;task->from_lane_id=task->selected_lane_id=e->episode.target_lane_id;
    dw_pose phase_goal;
    if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND)return DE_PATH;
@@ -1441,7 +1498,10 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    float radius=hypotf(e->config->front,e->config->half_width),lo,hi,pad=v->position_error_m+radius*v->heading_error_rad;
    if(!db_station_bounds_near(&e->episode.basis,e->episode.basis.count,pose,pad,e->config,
       e->episode.progress_lower,false,&lo,&hi))return DE_STATE;
-   if(lo>e->episode.blocker.station_upper+e->behavior_limits.pass_margin_m){
+   /* Finish only after the PASS plan has been registered and committed. */
+   if(e->episode_state.core.phase==DB_PASS&&e->episode_status.commit_state==2&&
+      (lo>e->episode.blocker.station_upper+e->behavior_limits.pass_margin_m||
+       behavior_next_blocker(e,w,task,pose,v,lo,hi))){
     if(e->episode.policy==DB_KEEP_TARGET){
      if(!behavior_phase(e,DB_FINISHED,e->episode.phase_goal,now))return DE_STATE;
      e->episode.terminal=true;
@@ -1454,7 +1514,7 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
     }
     e->episode_handoff=DE_EPISODE_PLANNING;
    }
-  }else if(e->episode.phase==DB_REJOIN&&lane_settled(e,w,task,pose,v,e->episode.home_lane_id,contained,now)){
+  }else if(e->episode.phase==DB_REJOIN&&lane_settled(e,w,task,pose,v,e->episode.home_lane_id,contained,now,settle_us)){
    if(!behavior_phase(e,DB_FINISHED,e->episode.phase_goal,now))return DE_STATE;
    task->changing=false;task->from_lane_id=task->selected_lane_id=e->episode.home_lane_id;
    e->episode.terminal=true;e->episode_handoff=DE_EPISODE_PLANNING;
@@ -1480,7 +1540,11 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    struct tr_view view;if(!tr_open_indexed(w,task,e->budget.collision_index,&view)||e->episode_counter==UINT64_MAX)return DE_STATE;
    uint8_t id[16];memcpy(id,e->behavior_incarnation,16);uint64_t n=++e->episode_counter;
    for(unsigned k=0;k<8;k++)id[15-k]^=(uint8_t)(n>>(k*8));
-   uint32_t target=view.selected->adjacent_lane_id;task->from_lane_id=task->selected_lane_id;task->selected_lane_id=target;task->changing=true;
+   uint32_t target=view.selected->adjacent_lane_id;
+   /* A new episode departs from the live lane even if an older path kept
+    * the home lane of the previous avoidance. */
+   task->home_lane_id=task->from_lane_id=task->selected_lane_id;
+   task->selected_lane_id=target;task->changing=true;
    dw_pose phase_goal;
    if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND||
       !db_episode_begin(&e->episode,id,task->home_lane_id,target,&e->basis,&blocker,phase_goal,now,&e->facts,&e->behavior_limits)||
