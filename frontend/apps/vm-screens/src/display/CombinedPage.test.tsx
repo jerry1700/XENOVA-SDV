@@ -454,6 +454,21 @@ describe('모드 전환 안내 (운전자용 전면 오버레이)', () => {
     expect(screen.queryByTestId('handoff')).toBeNull();
   });
 
+  it('자율이 선택만 되고 출력 허가 전이면 복귀 안내를 미루고, 구동이 허가된 순간 안내한다', () => {
+    vi.useFakeTimers();
+    const { rerender } = show(modeOf(driving(), 'MANUAL'));
+    const pending = driving();
+    pending.state.drive.active_vm_id = null;
+    Object.assign(pending.state.drive.authority!, { phase: 'PENDING', output_permitted: false });
+    next(pending, rerender);
+    expect(screen.queryByTestId('handoff')).toBeNull(); // "손을 떼도 됩니다" 는 아직 거짓이다
+    expect(playChime).not.toHaveBeenCalled();
+
+    next(driving(), rerender); // APPLIED + 출력 허가
+    expect(screen.getByTestId('handoff-title').textContent).toBe('자율 주행 복귀');
+    expect(playChime).toHaveBeenLastCalledWith('auto');
+  });
+
   it('연결이 끊겼다 같은 모드로 돌아오면 안내하지 않고, 끊긴 사이 바뀌었으면 돌아온 순간 안내한다', () => {
     vi.useFakeTimers();
     const { rerender } = show(driving());

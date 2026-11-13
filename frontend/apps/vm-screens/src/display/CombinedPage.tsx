@@ -147,7 +147,8 @@ export function CombinedPage() {
   const { presentation: p, connected, problem, error } = useDisplay();
   const summary = driveSummary(p, connected);
   const mode = driverMode(summary);
-  const handoff = useHandoffNotice(summary.mode);
+  // 자율이 선택만 되고 아직 구동 전이면 "손을 떼도 됩니다" 는 거짓이다. 출력이 허가된 순간에 안내한다
+  const handoff = useHandoffNotice(summary.mode === 'AUTO' && summary.preparing ? 'unknown' : summary.mode);
   const vehicle = connected ? vehicleOf(p) : null;
   const live = vehicle?.source.status === 'fresh' ? vehicle : null;
   const speed = live?.v_mps ?? null;
