@@ -178,7 +178,7 @@ def platform_root(root):
     mapping['usr/lib/xenova/update_guest_ssh.py'] = ROOT / 'platform/scripts/update-xenova-guest-ssh.py'
     for name in ('prepare_instance.py', 'prepare_rootfs.py', 'guest_identity.py'):
         mapping['usr/lib/xenova/' + name] = ROOT / 'platform/guests/common' / name
-    for path in [*FILES.glob('*.service'), *FILES.glob('*.mount')]:
+    for path in [*FILES.glob('*.service'), *FILES.glob('*.mount'), *FILES.glob('*.timer')]:
         mapping['usr/lib/systemd/system/' + path.name] = path
     mapping.update(assemble.deployment_payloads.source_files('usr/lib/python3.14/site-packages'))
     for relative, source in mapping.items():
@@ -210,6 +210,10 @@ def platform_root(root):
     wants.mkdir(exist_ok=True)
     for name in ('xenova-dom0-manager.service', 'xenova-recovery-worker.service', 'xenova-host-admission.service', 'xenova-first-boot.service', 'srv-xenova.mount', 'xenova-vms.service', 'xenova-vm-shutdown.service'):
         (wants / name).symlink_to('/usr/lib/systemd/system/' + name)
+    timers = root/'etc/systemd/system/timers.target.wants'
+    timers.mkdir(parents=True, exist_ok=True)
+    for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+        (timers/name).symlink_to('/usr/lib/systemd/system/' + name)
     collector = assemble.deployment_payloads.COLLECTOR
     (wants/collector).symlink_to('/usr/lib/systemd/system/' + collector)
     early = root/'etc/systemd/system/sysinit.target.wants'

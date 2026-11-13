@@ -12,7 +12,7 @@ BRINGUP = ROOT / 'platform/yocto/meta-xenova/recipes-core/xenova-bringup/files'
 def fixture(root, *, cycle=False):
     units = root / 'usr/lib/systemd/system'
     units.mkdir(parents=True)
-    for path in [*FILES.glob('*.service'), *FILES.glob('*.mount'), *BRINGUP.glob('*.service')]:
+    for path in [*FILES.glob('*.service'), *FILES.glob('*.mount'), *FILES.glob('*.timer'), *BRINGUP.glob('*.service')]:
         content = path.read_text().replace('@BINDIR@', '/usr/bin').replace('@SBINDIR@', '/usr/sbin')
         if cycle and path.name == 'xenova-data-prepare.service':
             content = content.replace('[Unit]\n', '[Unit]\nAfter=xenova-vms.service\n', 1)
@@ -21,7 +21,7 @@ def fixture(root, *, cycle=False):
         (units / name).write_text('[Unit]\nDefaultDependencies=no\n')
     for name in ['xenstored.service', 'xenconsoled.service', 'xen-init-dom0.service', 'xen-qemu-dom0-disk-backend.service', 'systemd-udev-settle.service', 'systemd-udev-trigger.service', 'systemd-remount-fs.service']:
         (units / name).write_text('[Unit]\nDefaultDependencies=no\n[Service]\nType=oneshot\nExecStart=/bin/true\nRemainAfterExit=yes\n')
-    for path in ('bin/true', 'bin/kill', 'usr/sbin/xenova-first-boot', 'usr/sbin/xenova-vm', 'usr/sbin/xenova-bridge-up', 'usr/bin/dnsmasq'):
+    for path in ('bin/true', 'bin/kill', 'usr/sbin/xenova-first-boot', 'usr/sbin/xenova-vm', 'usr/sbin/xenova-bridge-up', 'usr/sbin/xenova-telemetry-support', 'usr/bin/dnsmasq'):
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('#!/bin/sh\nexit 0\n')
@@ -37,7 +37,7 @@ def verify(root, *, cycle=False):
         raise RuntimeError('systemd-analyze required for the unit dependency check')
     units = fixture(root, cycle=cycle)
     result = subprocess.run(['systemd-analyze', 'verify', '--man=no', '--generators=no', '--root=' + str(root),
-                             str(units / 'xenova-vms.service'), str(units / 'xenova-host-admission.service'), str(units / 'srv-xenova.mount')],
+                             str(units / 'xenova-vms.service'), str(units / 'xenova-host-admission.service'), str(units / 'srv-xenova.mount'), str(units / 'xenova-telemetry-clock.timer'), str(units / 'xenova-telemetry-evidence.timer')],
                             text=True, capture_output=True, check=False)
     return result
 

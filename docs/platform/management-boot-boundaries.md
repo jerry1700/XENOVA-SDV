@@ -159,6 +159,18 @@ unit의 `After/Before`는 순서를 지정하고 `Requires/Wants`는 함께 시�
 CPU 정책이 활성화되면 모든 수동/자동 start·reboot·recover_once가 현재 host 준비와
 실제 배치를 다시 검사하므로, 준비 서비스의 active 표시만으로 시작을 허가하지 않는다.
 
+선택적 UTC 기준 제공과 콘솔 증거 수집은 각각
+`xenova-telemetry-clock.service`·`xenova-telemetry-evidence.service`가 수행한다.
+두 unit은 데이터 마운트 외에 `Requisite=xenova-first-boot.service`와
+`After=xenova-first-boot.service`를 함께 사용한다. 최초 등록이 진행 중이면 그
+작업 뒤에 실행되고, 등록이 실패했거나 활성 상태가 아니면 수집 명령을 실행하지 않는다.
+first-boot는 성공 후 활성 상태를 유지하는 oneshot이다. 이 의존성은 first-boot를
+수집기에서 새로 시작하거나 중단된 등록을 대신 복구하지 않는다.
+타이머의 `OnBootSec=10`은 실행 시도 시각이며 등록 성공의 근거가 아니다.
+VM autostart는 이 두 수집기의 완료를 기다리지 않는다.
+`storage_check()`의 실제 설치·마운트 검증도 그대로 적용된다.
+
+
 CPU 준비 서비스에는 VM으로 중지 전파를 일으키는 PartOf/BindsTo나 ExecStop이 없다.
 재시작이 실행 중 VM을 종료하거나 affinity를 초기화하지 않는다. 네트워크가 필요 없는
 게스트와 진단을 외부 네트워크 준비 뒤로 일괄 직렬화하지 않는다.

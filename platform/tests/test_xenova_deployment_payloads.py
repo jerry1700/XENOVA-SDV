@@ -105,6 +105,40 @@ class DeploymentPayloadTest(unittest.TestCase):
                 finally:
                     target.write_bytes(before)
 
+    def test_gate_rejects_missing_or_stale_telemetry_units(self):
+        platform_root(self.root)
+        for name in ('xenova-telemetry-clock', 'xenova-telemetry-evidence'):
+            for suffix in ('.service', '.timer'):
+                with self.subTest(name=name, suffix=suffix):
+                    target = self.root/'usr/lib/systemd/system'/(name+suffix)
+                    before = target.read_bytes()
+                    target.unlink()
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'source/installed contract mismatch'):
+                            assemble.platform_root_ok(self.root)
+                    finally:
+                        target.write_bytes(before)
+            target = self.root/'usr/lib/systemd/system'/(name+'.service')
+            before = target.read_text()
+            target.write_text(before.replace('Requisite=xenova-first-boot.service', ''))
+            try:
+                with self.assertRaisesRegex(ValueError, 'source/installed contract mismatch'):
+                    assemble.platform_root_ok(self.root)
+            finally:
+                target.write_text(before)
+
+    def test_gate_requires_both_telemetry_timers_enabled(self):
+        platform_root(self.root)
+        for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+            with self.subTest(name=name):
+                link = self.root/'etc/systemd/system/timers.target.wants'/name
+                link.unlink()
+                try:
+                    with self.assertRaisesRegex(ValueError, 'required telemetry timer not enabled'):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    link.symlink_to('/usr/lib/systemd/system/'+name)
+
     def test_gate_rejects_each_missing_runtime_log_installation(self):
         platform_root(self.root)
         collector = payloads.COLLECTOR
