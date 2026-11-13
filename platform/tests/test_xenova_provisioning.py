@@ -482,23 +482,29 @@ class ProvisioningHooksTest(unittest.TestCase):
         view=manager.call('provisioning',{'vm_id':B});self.assertTrue(view['ok'],view)
         self.assertEqual(view['data']['profile']['apps']['autonomous']['model'],'stateful')
 
-    def test_zephyr_original_create_resumes_complete_private_firmware_after_hash_failure_without_recopy(self):
+    def test_zephyr_hash_failure_replays_original_error_without_recopy_or_reissuing_credentials(self):
         import test_xenova_recovery_foundation as foundation
+        import xenova_creation_auto as cleanup
         import xenova_management as management
         import xenova_zephyr as zephyr
         f=foundation.FoundationTest('runTest');f.setUp();self.addCleanup(f.doCleanups)
         request=self.zephyr_template(f);manager=management.Manager(f.p,defaults_path=f.m.defaults_path)
-        with patch.object(zephyr,'copy_revision',wraps=zephyr.copy_revision) as copies:
+        with patch.object(cleanup,'start',return_value=None), \
+                patch.object(zephyr,'copy_revision',wraps=zephyr.copy_revision) as copies:
             with patch.object(broker.subprocess,'run',side_effect=OSError(errno.EIO,'fixture interrupted hasher')):
                 failed=manager.call('create',request,execute=True)
-            self.assertFalse(failed['ok']);self.assertEqual(copies.call_count,1)
-            original=manager._operations()[0]
-            if original['vm_id']!=B:original=next(o for o in manager._operations() if o['vm_id']==B)
-            before=json.loads((next((f.p.data/'mqtt').glob('.pending-*'))/'credentials.json').read_text())['accounts'][B]
-            completed=manager.fork().call('create',request,execute=True)
-            self.assertTrue(completed['ok'],completed);self.assertEqual(copies.call_count,1)
-            self.assertEqual(completed['operation_id'],original['operation_id'])
-            self.assertTrue(json.loads(provision.credential_file(f.p.data,B,'drive').read_text())['password']==before)
+            self.assertFalse(failed['ok'])
+            original=next(op for op in manager._operations() if op['vm_id']==B)
+            self.assertEqual(original['automatic_cleanup']['state'],'pending')
+            private_credentials=next((f.p.data/'mqtt').glob('.pending-*'))/'credentials.json'
+            before=private_credentials.read_bytes()
+            replay=manager.fork().call('create',request,execute=True)
+            self.assertFalse(replay['ok'])
+            self.assertTrue(replay['replayed'])
+            self.assertEqual(replay['error']['code'],failed['error']['code'])
+            self.assertEqual(replay['operation_id'],original['operation_id'])
+            self.assertEqual(copies.call_count,1)
+            self.assertTrue(private_credentials.read_bytes()==before)
 
     def test_zephyr_supply_timeout_retains_published_broker_account_after_firmware_cleanup(self):
         from test_xenova_broker_accounts import fixture_hash

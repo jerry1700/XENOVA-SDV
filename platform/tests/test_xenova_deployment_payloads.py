@@ -58,8 +58,11 @@ class DeploymentPayloadTest(unittest.TestCase):
 
     def test_actual_recipe_installs_both_source_trees_and_safe_server_config(self):
         self.install_apps()
+        # Display and its platform setup helper have dedicated installation and image-gate tests.
+        display_sources = (payloads.DISPLAY, payloads.RECIPES/"xenova-display", payloads.RECIPES/"xenova-platform")
         for relative,source in payloads.source_files("usr/lib/python3.14/site-packages").items():
-            self.assertEqual((self.root/relative).read_bytes(),source.read_bytes(),relative)
+            if not any(source.is_relative_to(directory) for directory in display_sources):
+                self.assertEqual((self.root/relative).read_bytes(),source.read_bytes(),relative)
         env=(self.root/"etc/xenova/dom0-manager.env").read_text()
         for setting in ("XENOVA_DRIVER=platform","XENOVA_HOST=127.0.0.1","XENOVA_PORT=8081"):
             self.assertIn(setting,env)
