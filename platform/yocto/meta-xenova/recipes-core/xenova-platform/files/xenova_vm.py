@@ -711,6 +711,7 @@ class Platform:
                 path = item.get('pdev_path')
                 if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
                     raise PlatformError(f'{disk} is already attached to domain {d["domid"]}')
+        execution.settle_expired_launch(record, deadline)
         execution.require_launch_available(record)
         owner = _accept() if _accept else _owner
         execution.gate()
@@ -719,52 +720,53 @@ class Platform:
         self.cpu().require(record, deadline, expected=cpu_context, capture=captured)
         launch = execution.prepare_launch(record, owner, deadline=deadline, expected_cpu=cpu_context,
                                           cpu_evidence=captured.get('evidence'))
-        config = self.runtime / (record['id'] + '.cfg')
-        atomic_write(config, text)
-        # 준비/쓰기 뒤 새 도메인·디스크 점유를 다시 확인한다. 이 검사는
-        # CPU 근거 재사용과 별개이며 외부 xl을 전역 잠금으로 막는다는 뜻이 아니다.
-        latest = self.domains(deadline=deadline)
-        if self.matching(record, latest):
-            raise DomainIdentityError('domain appeared before explicit launch')
-        for domain in latest:
-            for item in domain.get('config', {}).get('disks', []):
-                path = item.get('pdev_path')
-                if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
-                    raise PlatformError(f'{disk} became attached before launch')
-        try:
-            execution.guard_launch(record, launch, deadline)
-        except PlatformError:
-            # 아직 helper/명령을 만들지 않은 이 경계만 안전한 미제출 종결 근거다.
-            # 확인·저장 실패면 원 거절과 미확정 실행을 유지하며 성공으로 바꾸지 않는다.
-            try:
-                execution.abort_unsubmitted_launch(record, launch, deadline)
-            except (PlatformError, OSError, ValueError):
-                pass
-            raise
-        command_deadline=min(deadline,self.clock()+45)
-        remaining = command_deadline-self.clock()
-        if remaining <= 0:
-            from xenova_execution import refuse
-            refuse('DEADLINE_EXCEEDED', 'guest operation deadline exceeded')
-        def submit(argv):
-            left=command_deadline-self.clock()
-            if left<=0:
+        submitted = False
+
+        def submit(argv, command_deadline):
+            nonlocal submitted
+            left = command_deadline-self.clock()
+            if left <= 0:
                 from xenova_execution import refuse
-                refuse('DEADLINE_EXCEEDED','create submission deadline expired')
-            # create의 기존 45초 상한을 유지한다. 조회용 timed_command의 15초와 구별한다.
-            return self.command(argv,timeout=left)
-        with span('external.command', command_kind='xl.create', timeout_seconds=remaining):
+                refuse('DEADLINE_EXCEEDED', 'create submission deadline expired')
+            submitted = True
             if _result is not None:
                 _result['physical_submitted'] = True
-            if self.process_isolation:
-                from xenova_guest_process import command
-                argv=command(self,record,deadline,launch=launch)
-                submit(argv)
-            else:
-                from xenova_execution import short_lock
-                with short_lock(self.runtime,'admission'):
-                    execution.guard_launch(record,launch,deadline)
-                    submit(['xl','create',str(config)])
+            return self.command(argv, timeout=left)
+
+        try:
+            config = self.runtime / (record['id'] + '.cfg')
+            atomic_write(config, text)
+            # 준비/쓰기 뒤 새 도메인·디스크 점유를 다시 확인한다.
+            latest = self.domains(deadline=deadline)
+            if self.matching(record, latest):
+                raise DomainIdentityError('domain appeared before explicit launch')
+            for domain in latest:
+                for item in domain.get('config', {}).get('disks', []):
+                    path = item.get('pdev_path')
+                    if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
+                        raise PlatformError(f'{disk} became attached before launch')
+            execution.guard_launch(record, launch, deadline)
+            # Recovery already has a bounded attempt deadline. Cutting
+            # xl off earlier can leave Xen paused before device setup finishes.
+            recovery_launch = owner and owner.get('kind') == 'recovery'
+            command_deadline = deadline if recovery_launch else min(deadline, self.clock()+45)
+            with span('external.command', command_kind='xl.create',
+                      timeout_seconds=max(0, command_deadline-self.clock())):
+                if self.process_isolation:
+                    from xenova_guest_process import command
+                    submit(command(self, record, deadline, launch=launch), command_deadline)
+                else:
+                    from xenova_execution import short_lock
+                    with short_lock(self.runtime, 'admission'):
+                        execution.guard_launch(record, launch, deadline)
+                        submit(['xl', 'create', str(config)], command_deadline)
+        except (PlatformError, OSError, ValueError):
+            if not submitted:
+                try:
+                    execution.abort_unsubmitted_launch(record, launch, deadline)
+                except (PlatformError, OSError, ValueError):
+                    pass
+            raise
         created = self.matching(record, self.domains(deadline=deadline))
         if not created:
             raise PlatformError(f"{record['id']}: xl create returned without a live domain")

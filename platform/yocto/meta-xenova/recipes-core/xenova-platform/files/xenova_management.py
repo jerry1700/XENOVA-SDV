@@ -5,7 +5,7 @@
 """
 from argparse import Namespace
 from _thread import allocate_lock
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 import os
@@ -1172,12 +1172,12 @@ class Manager:
                          self._register_created(op,tomb['record'],context,pending.dhcp_applied))
         return pending
 
-    def _save_tomb(self, tomb, op, lifecycle, generation, **extra):
+    def _save_tomb(self, tomb, op, lifecycle, generation, *, admission_held=False, **extra):
         updated = {**tomb, **extra, 'lifecycle':lifecycle,'generation':generation,'last_operation_id':op['operation_id'],
                    'history':tomb['history'] + [{'operation_id':op['operation_id'],'action':op['action'],
                                                'generation':generation,'lifecycle':lifecycle}]}
         # 실행 잠금 -> admission 순서. stop의 lifecycle 확인과 전환 게시를 직렬화한다.
-        with short_lock(self.p.runtime, 'admission'):
+        with (nullcontext() if admission_held else short_lock(self.p.runtime, 'admission')):
             self._write(self.data / 'tombstones' / (tomb['vm_id']+'.json'), updated)
         return updated
 
@@ -1470,12 +1470,14 @@ class Manager:
         target = self.data / op['target'] if action!='purge' else None
         if action == 'purge':
             return self._purge(op, tomb, records=records, context=context)
+        moving = source.exists() or source.is_symlink()
+        revision = None
         if action == 'restore':
-            directory = source if source.exists() or source.is_symlink() else target
+            directory = source if moving else target
             self._record_at(record, directory)
             self._restore_ip(record, records)
             self._reserve_space(0, records, restored=(record, directory))
-        if source.exists() or source.is_symlink():
+        if moving:
             if target.exists() or target.is_symlink():
                 fail('RECOVERY_REQUIRED', 'both lifecycle source and destination exist')
             self._record_at(record, source)
@@ -1500,17 +1502,20 @@ class Manager:
             self._writable()
             revision = filesystem_check if action=='restore' and vm.guest_kind(record)=='linux' else None
             self._save_op(op, 'moving')
-            with short_lock(self.p.runtime,'admission'):
-                if context.get('asset_lease'):context['asset_lease'].guard()
-                self._writable()
+        # 이동 후 잠금을 다시 잡다가 막히면 등록 경로와 tombstone이 서로 다른 상태로 남는다.
+        with short_lock(self.p.runtime, 'admission'):
+            if context.get('asset_lease'):
+                context['asset_lease'].guard()
+            self._writable()
+            if moving:
                 self._record_at(record,source)
                 if revision is not None and self._filesystem_revision(source/'root.raw')!=revision:
                     fail('TARGET_CHANGED','restore root changed before publication')
                 publish(source, target, allow_hidden=action=='retire')
-        self._record_at(record, target)
-        self._save_op(op, 'moved')
-        tomb = self._save_tomb(tomb, op, desired, expected+1,
-                              archive=op['target'] if action=='retire' else None)
+            self._record_at(record, target)
+            self._save_op(op, 'moved')
+            tomb = self._save_tomb(tomb, op, desired, expected+1, admission_held=True,
+                                   archive=op['target'] if action=='retire' else None)
         self._apply_dhcp(op,context)
         return self._finish(op, tomb)
 
@@ -2145,7 +2150,8 @@ class Manager:
             if action in ('get','list','intents','registrations','recovery-intents','probe','execution-context','templates','operation','control-operation','recovery-operation'):
                 self.p.response_deadline=min(self.p.response_deadline,deadline)
                 if action in ('get','list','probe','execution-context'):
-                    with observation_slot(self.p.runtime,deadline=deadline,clock=self.p.clock) as fd:
+                    with observation_slot(self.p.runtime, deadline=deadline, clock=self.p.clock,
+                                          whole_registry=action=='list') as fd:
                         previous_fds=_output.fds
                         _output.fds=(*previous_fds,fd)
                         try:result=self._query(action,spec,context,deadline)

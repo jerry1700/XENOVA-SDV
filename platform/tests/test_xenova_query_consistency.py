@@ -1,5 +1,5 @@
 """공개 CLI→Manager→실제 metadata/관측 reader를 확인한다. Xen/작은 OS 자산만 대역이다."""
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import io
 from argparse import Namespace
 import json
@@ -18,7 +18,7 @@ import xenova_management_cli as cli
 import xenova_catalog as catalog
 from test_xenova_zephyr import bundle
 from test_xenova_lifecycle import application_bundle
-from xenova_runtime import operation_lock
+from xenova_runtime import OBSERVATION_SLOTS, observation_slot, operation_lock
 from xenova_execution import Execution
 
 
@@ -167,6 +167,25 @@ class QueryConsistencyTest(unittest.TestCase):
             self.assertEqual(call.call_args.args[0],'list');samples.append(result['data'])
             self.assertIn('NAME |',out) if options==['--short'] else self.assertEqual(json.loads(out),result)
         self.assertEqual(samples[0],samples[1]);self.assertEqual(samples[0],samples[2])
+
+    def test_exact_json_queries_skip_parser_and_keep_success_and_busy_envelopes(self):
+        with patch.object(cli, 'uuid4', return_value=foundation.HOST_B):
+            for action in ('list', 'status'):
+                with self.subTest(action=action):
+                    expected = self.invoke(['--json', action])
+                    self.assertEqual(expected[0], 0)
+                    with patch.object(cli, '_parser', side_effect=AssertionError('unexpected parser creation')):
+                        self.assertEqual(self.invoke([action, '--json']), expected)
+
+                    with ExitStack() as slots:
+                        for _ in range(OBSERVATION_SLOTS):
+                            slots.enter_context(observation_slot(
+                                self.p.runtime, deadline=self.p.clock() + 1, clock=self.p.clock))
+                        expected = self.invoke(['--json', action])
+                        self.assertEqual(expected[0], 3)
+                        self.assertEqual(expected[1]['error']['code'], 'OPERATION_IN_PROGRESS')
+                        with patch.object(cli, '_parser', side_effect=AssertionError('unexpected parser creation')):
+                            self.assertEqual(self.invoke([action, '--json']), expected)
 
     def test_explicit_options_apply_or_refuse_before_effect_and_names_do_not_override(self):
         for action in ('get','list','intents','probe','execution-context'):

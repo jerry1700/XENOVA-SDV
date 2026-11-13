@@ -208,7 +208,8 @@ class DeploymentPayloadTest(unittest.TestCase):
         config.write_bytes((payloads.API/"deploy"/config.name).read_bytes())
         self.assertNotIn("network-online.target",worker.read_text())
         self.assertIn("network.target",worker.read_text())
-        self.assertIn("ReadWritePaths=/srv/xenova /run/xenova /var/lib/xen",worker.read_text())
+        self.assertIn("ReadWritePaths=/srv/xenova /run/xenova /var/lib/xen /run/xen /var/log/xen",
+                      worker.read_text().splitlines())
         for source in (payloads.RECIPES/"xenova-platform/files").glob("*.service"):
             (self.root/"usr/lib/systemd/system"/source.name).write_bytes(source.read_bytes())
         # The target fstab mounts this tmpfs above the new journal bind.
