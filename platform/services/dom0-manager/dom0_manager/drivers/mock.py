@@ -178,6 +178,12 @@ class MockDriver(Driver):
             if self._domains.pop(vm_id, None) is not None:
                 self.events.append(("destroy", vm_id, {}))
 
+    def kill(self, vm_id: UUID) -> None:
+        with self._lock:
+            if self._domains.pop(vm_id, None) is None:
+                raise VMNotFound(f"domain {vm_id} is not running")
+            self.events.append(("kill", vm_id, {}))
+
     def host_info(self) -> HostInfo:
         with self._lock:
             return HostInfo(

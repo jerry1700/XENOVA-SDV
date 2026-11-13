@@ -69,6 +69,19 @@ def delete_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Respons
 
 
 @router.post(
+    "/vms/{vm_id}/kill",
+    operation_id="killVm",
+    summary="장애 주입: 도메인 즉시 소멸 (등록·의도 유지 → 복구 워커가 다시 띄움)",
+    status_code=204,
+    response_class=Response,
+    responses={400: _ERR, 404: _ERR, 409: _ERR, **_COMMAND_ERRS},
+)
+def kill_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Response:
+    service.kill(vm_id)
+    return Response(status_code=204)
+
+
+@router.post(
     "/vms/{vm_id}/stop",
     operation_id="stopVm",
     summary="정상 종료 (디스크 보존)",
