@@ -17,14 +17,16 @@ static void published_path_during_pass_planning(void){
  path->has_episode=true;path->episode.core.state=2;path->episode.core.phase=DB_CHANGE_OUT;
  path->episode.core.target_lane_id=2;
  path->task=(struct tr_intent){true,false,2,2,1,0};
- engine.episode_transition=engine.episode_pass_planning=true;
+ engine.episode_handoff=DE_EPISODE_PASS_PLANNING;
  assert(!episode_transition_blocks_path(&engine,path));
  engine.path_invalidated=true;
  assert(episode_transition_blocks_path(&engine,path));
  engine.path_invalidated=false;
  path->task.changing=true;
  assert(episode_transition_blocks_path(&engine,path));
- path->task.changing=false;engine.episode_pass_planning=false;
+ path->task.changing=false;engine.episode_handoff=DE_EPISODE_REQUEST_READY;
+ assert(episode_transition_blocks_path(&engine,path));
+ engine.episode_handoff=DE_EPISODE_AWAITING_RECEIPT;
  assert(episode_transition_blocks_path(&engine,path));
 }
 

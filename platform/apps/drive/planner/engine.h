@@ -9,6 +9,9 @@
 #define DE_PATH_SLOTS 3
 enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
  DE_EXPIRED,DE_CHANGED,DE_STATE,DE_LIMIT,DE_CANCELLED,DE_CLOCK,DE_FRAME,DE_CONFIGURATION,DE_REFERENCE };
+/* Path registration progresses independently of the driving episode phase. */
+enum de_episode_handoff { DE_EPISODE_IDLE,DE_EPISODE_PLANNING,DE_EPISODE_PASS_PLANNING,
+ DE_EPISODE_REQUEST_READY,DE_EPISODE_AWAITING_RECEIPT };
 /* Tracker, supervisor, state exporter and one planner preparation probe. */
 #define DE_READERS 4
 struct de_path_slot {struct lp_path path;struct lp_tracking_geometry tracking_geometry;
@@ -63,8 +66,8 @@ struct drive_engine {
  atomic_int search_reason,last_state_result,last_world_result;struct lp_budget budget;
  unsigned search_outcomes[LP_CLOCK+1];enum lp_result first_search_failure;
  /* One planner owner mutates behavior; tracker reads immutable path snapshots. */
- atomic_bool behavior_enabled,local_owner,episode_transition,episode_pass_planning,behavior_failed,facts_current;
- bool episode_request_ready,episode_receipt_pending;
+ atomic_bool behavior_enabled,local_owner,behavior_failed,facts_current;
+ _Atomic enum de_episode_handoff episode_handoff;
  struct db_limits behavior_limits;struct dp_limits parking_limits;struct db_facts facts;
  struct db_episode episode,restore_episode;struct dp_state parking;
  struct lp_config parking_work_config;

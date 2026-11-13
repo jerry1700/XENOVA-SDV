@@ -154,8 +154,7 @@ enum de_result de_mission(struct drive_engine *e,const xenova_drive_MissionGrant
  if(new_intent&&e->behavior_enabled){
   atomic_store(&e->parking_stop_generation,0);
   memset(&e->episode,0,sizeof(e->episode));memset(&e->episode_state,0,sizeof(e->episode_state));
-  memset(&e->parking,0,sizeof(e->parking));e->episode_transition=e->episode_request_ready=e->episode_receipt_pending=false;
-  e->episode_pass_planning=false;
+  memset(&e->parking,0,sizeof(e->parking));e->episode_handoff=DE_EPISODE_IDLE;
   e->phase_state_message_id[0]=0;
   e->behavior_failed=false;e->parking_boundary_pending=false;
  }
@@ -388,7 +387,7 @@ static enum lp_result planning_correspondence(struct drive_engine *e,struct de_p
  if(!e->behavior_enabled||!e->planning||e->planning_path.slot>=DE_PATH_SLOTS||
     path!=&e->paths[e->planning_path.slot].path||!e->paths[e->planning_path.slot].writing||
     path->has_episode||path->origin.retained||!path->task.active||path->space.parking||
-    !episode->active||!e->episode_transition||e->behavior_failed||!e->has_grant||!lp_mission_matches(path,&e->grant)||
+    !episode->active||e->episode_handoff==DE_EPISODE_IDLE||e->behavior_failed||!e->has_grant||!lp_mission_matches(path,&e->grant)||
     now>=episode->deadline_pi_us||now>=episode->phase_deadline_pi_us||now<episode->phase_entered_pi_us||
     !e->facts_current||!facts->valid||!facts->meter_valid||now>=facts->expires_pi_us||
     memcmp(facts->meter_epoch,episode->meter_epoch,16)||facts->meter_revision!=episode->meter_revision||
@@ -434,7 +433,7 @@ static enum de_result initial_correspondence_context(struct drive_engine *e,cons
  uint64_t now,const struct lp_budget *budget){
  const xenova_drive_EpisodeCore *core=&candidate->episode.core;
  if(!e->behavior_enabled||!candidate->has_episode||dw_episode_snapshot_validate(&candidate->episode)||core->state!=2||!e->has_grant||
-    !lp_mission_matches(candidate,&e->grant)||e->episode_transition||e->behavior_failed)return DE_STATE;
+    !lp_mission_matches(candidate,&e->grant)||e->episode_handoff!=DE_EPISODE_IDLE||e->behavior_failed)return DE_STATE;
  uint64_t guest=0;
  if(!budget->clock||budget->clock(budget->context,&guest))return DE_CLOCK;
  if(guest>=budget->deadline_us)return DE_EXPIRED;
@@ -568,7 +567,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
     }
     (void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return adopted?adopted:DE_BUSY;
    }
-   bool same_intent=(!e->behavior_enabled||old->has_episode)&&!e->episode_transition&&same_mission&&tr_same_intent(&old->task,&task)&&
+   bool same_intent=(!e->behavior_enabled||old->has_episode)&&e->episode_handoff==DE_EPISODE_IDLE&&same_mission&&tr_same_intent(&old->task,&task)&&
                     ((old->direction!=0)==e->maneuver_active)&&
                     old->merge_passed_reference_revision==e->merge_passed_reference_revision;
    float remaining=lp_path_remaining(old,pose,NULL);
@@ -727,11 +726,12 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
   }
   e->plan_finalized=true;e->plan_valid=valid;
  }
- if(e->episode_request_ready||e->episode_receipt_pending){
+ enum de_episode_handoff handoff=e->episode_handoff;
+ if(handoff==DE_EPISODE_REQUEST_READY||handoff==DE_EPISODE_AWAITING_RECEIPT){
   uint64_t guest=0;bool expired=e->budget.clock&&(e->budget.clock(e->budget.context,&guest)||guest>=e->budget.deadline_us);
-  expired|=e->episode_receipt_pending&&e->episode_request.valid_until_pi_us&&now>=e->episode_request.valid_until_pi_us;
+  expired|=handoff==DE_EPISODE_AWAITING_RECEIPT&&e->episode_request.valid_until_pi_us&&now>=e->episode_request.valid_until_pi_us;
   if(!expired)return DE_BUSY;
-  e->episode_request_ready=e->episode_receipt_pending=false;e->plan_valid=false;e->behavior_failed=true;db_episode_hold(&e->episode,DB_TIME);
+  e->plan_valid=false;e->behavior_failed=true;e->episode_handoff=DE_EPISODE_IDLE;db_episode_hold(&e->episode,DB_TIME);
  }
  bool valid=e->plan_valid&&!e->stopping&&e->search_reason==LP_PATH_FOUND;
  if(valid){
@@ -828,10 +828,11 @@ static bool completed_episode_progress(const struct lp_path *path,uint32_t gener
  out->valid=true;(void)hi;return true;
 }
 static bool episode_transition_blocks_path(const struct drive_engine *e,const struct lp_path *path){
- if(!e->episode_transition)return false;
+ enum de_episode_handoff handoff=e->episode_handoff;
+ if(handoff==DE_EPISODE_IDLE)return false;
  /* Before registration, a settled vehicle may still follow the published
   * target-lane path. The caller checks the current map and stopping sweep. */
- return !e->episode_pass_planning||e->path_invalidated||path->execution.mission.kind!=1||
+ return handoff!=DE_EPISODE_PASS_PLANNING||e->path_invalidated||path->execution.mission.kind!=1||
   !path->has_episode||path->episode.core.state!=2||path->episode.core.phase!=DB_CHANGE_OUT||
   !path->task.active||path->task.changing||path->task.selected_lane_id!=path->episode.core.target_lane_id;
 }
@@ -1099,8 +1100,7 @@ enum de_result de_restart(struct drive_engine *e){
  e->has_grant=false;memset(&e->grant,0,sizeof(e->grant));
  if(e->behavior_enabled){
   memset(&e->episode,0,sizeof(e->episode));memset(&e->episode_state,0,sizeof(e->episode_state));memset(&e->parking,0,sizeof(e->parking));
-  e->episode_request_ready=e->episode_receipt_pending=e->episode_transition=false;e->local_owner=false;
-  e->episode_pass_planning=false;
+  e->episode_handoff=DE_EPISODE_IDLE;e->local_owner=false;
   e->behavior_failed=e->facts_current=e->parking_boundary_pending=false;e->phase_state_message_id[0]=0;
  }
  memset(&e->task,0,sizeof(e->task));memset(&e->basis,0,sizeof(e->basis));
@@ -1168,7 +1168,7 @@ enum de_result de_episode_status(struct drive_engine *e,const xenova_drive_Episo
  return DE_OK;
 }
 bool de_episode_request(struct drive_engine *e,xenova_drive_EpisodeRequest *out){
- if(!e||!out||!e->episode_request_ready||e->episode_receipt_pending)return false;
+ if(!e||!out||e->episode_handoff!=DE_EPISODE_REQUEST_READY)return false;
  *out=e->episode_request;return true;
 }
 bool de_registration_state(struct drive_engine *e,dw_state *out){
@@ -1189,15 +1189,14 @@ bool de_registration_state(struct drive_engine *e,dw_state *out){
  if(owned){(void)de_path_release(e,ph);(void)dw_release(&e->maps,mh);}return true;
 }
 void de_episode_submitted(struct drive_engine *e,const xenova_drive_EpisodeRequest *request){
- if(!e||!request||!e->episode_request_ready)return;
- e->episode_request=*request;e->episode_request_ready=false;e->episode_receipt_pending=true;
+ if(!e||!request||e->episode_handoff!=DE_EPISODE_REQUEST_READY)return;
+ e->episode_request=*request;e->episode_handoff=DE_EPISODE_AWAITING_RECEIPT;
 }
 enum de_result de_episode_receipt(struct drive_engine *e,const xenova_drive_EpisodeReceipt *receipt){
- if(!e||!receipt||dw_episode_receipt_validate(receipt)||!e->episode_receipt_pending)return DE_STATE;
+ if(!e||!receipt||dw_episode_receipt_validate(receipt)||e->episode_handoff!=DE_EPISODE_AWAITING_RECEIPT)return DE_STATE;
  uint8_t hash[32],core[32];
  if(!dw_episode_request_hash(&e->episode_request,hash)||receipt->request_sequence!=e->episode_request.request_sequence||
     memcmp(receipt->request_nonce.bytes,e->episode_request.request_nonce.bytes,16)||memcmp(hash,receipt->request_sha256.bytes,32))return DE_STATE;
- e->episode_receipt_pending=false;
  /* The Pi fixes original guest intervals to their conservative Pi lower bound.
   * Candidate clock estimates are not approval. Everything else stays exact. */
  xenova_drive_EpisodeCore approved=e->episode_candidate.core;bool bounded=true;
@@ -1215,7 +1214,8 @@ enum de_result de_episode_receipt(struct drive_engine *e,const xenova_drive_Epis
  }
  if(!bounded||receipt->result!=1||!receipt->has_snapshot||!dw_episode_core_hash(&approved,core)||
     memcmp(core,receipt->snapshot.acceptance.accepted_core_sha256.bytes,32)){
-  db_episode_hold(&e->episode,DB_CONTEXT);e->behavior_failed=true;e->plan_valid=false;e->path_invalidated=true;return DE_STATE;
+  db_episode_hold(&e->episode,DB_CONTEXT);e->behavior_failed=true;e->plan_valid=false;e->path_invalidated=true;
+  e->episode_handoff=DE_EPISODE_IDLE;return DE_STATE;
  }
  e->episode_state=receipt->snapshot;
  /* Only the exact accepted request reserves the next fullState ID. Preparing
@@ -1227,7 +1227,7 @@ enum de_result de_episode_receipt(struct drive_engine *e,const xenova_drive_Epis
  e->episode.meter_used_ticks=receipt->snapshot.progress.used_travel_ticks;
  e->episode.last_progress_pi_us=receipt->snapshot.progress.last_progress_pi_us;
  if(e->planning&&e->plan_finalized){struct lp_path *p=&e->paths[e->planning_path.slot].path;p->has_episode=true;p->episode=e->episode_state;}
- e->episode_transition=false;return DE_OK;
+ e->episode_handoff=DE_EPISODE_IDLE;return DE_OK;
 }
 static bool same_stop(const struct drive_engine *e,const struct lp_path *p,uint64_t now){
  const xenova_drive_StopFacts *s=&e->control_facts.stop;const xenova_drive_MissionGrant *g=&e->grant;
@@ -1285,12 +1285,11 @@ static bool behavior_restore(struct drive_engine *e,const struct lp_path *p,bool
   if(e->grant.has_locked_goal_sha256)memcpy(parking->selected_goal_sha256,e->grant.locked_goal_sha256.bytes,32);
   parking->terminal=m->phase==DP_HOLD;parking->result=m->result==1?DP_FEASIBLE:DP_PENDING;
  }
- e->episode_transition=e->episode_pass_planning=false;e->behavior_failed=false;return true;
+ e->episode_handoff=DE_EPISODE_IDLE;e->behavior_failed=false;return true;
 }
 static bool behavior_phase(struct drive_engine *e,enum db_phase phase,dw_pose goal,uint64_t now){
  bool changed=e->episode.phase!=phase;
  if(!db_episode_phase(&e->episode,phase,goal,now,&e->behavior_limits))return false;
- if(changed)e->episode_pass_planning=false;
  if(changed&&(!e->budget.clock||e->budget.clock(e->budget.context,&e->phase_began_guest_us))){e->behavior_failed=true;return false;}
  return true;
 }
@@ -1345,8 +1344,7 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    dw_pose phase_goal;
    if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND)return DE_PATH;
    if(!behavior_phase(e,DB_PASS,phase_goal,now))return DE_STATE;
-   e->episode_pass_planning=true;
-   e->episode_transition=true;
+   e->episode_handoff=DE_EPISODE_PASS_PLANNING;
   }else if(e->episode.phase==DB_PASS){
    float radius=hypotf(e->config->front,e->config->half_width),lo,hi,pad=v->position_error_m+radius*v->heading_error_rad;
    if(!db_station_bounds(&e->episode.basis,pose,pad,e->config,&lo,&hi))return DE_STATE;
@@ -1361,11 +1359,12 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
      if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND)return DE_PATH;
      if(!behavior_phase(e,DB_REJOIN,phase_goal,now))return DE_STATE;
     }
-    e->episode_transition=true;
+    e->episode_handoff=DE_EPISODE_PLANNING;
    }
   }else if(e->episode.phase==DB_REJOIN&&lane_settled(e,w,task,pose,v,e->episode.home_lane_id,contained,now)){
    if(!behavior_phase(e,DB_FINISHED,e->episode.phase_goal,now))return DE_STATE;
-   task->changing=false;task->from_lane_id=task->selected_lane_id=e->episode.home_lane_id;e->episode.terminal=true;e->episode_transition=true;
+   task->changing=false;task->from_lane_id=task->selected_lane_id=e->episode.home_lane_id;
+   e->episode.terminal=true;e->episode_handoff=DE_EPISODE_PLANNING;
   }
   /* Once the body is in the arrival lane, follow that lane while settling.
    * The episode phase still advances only after the existing dwell proof. */
@@ -1405,7 +1404,7 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    e->episode.last_vehicle_sequence=v->sequence;
    if(e->budget.clock)e->budget.clock(e->budget.context,&e->episode_began_guest_us);
    e->phase_began_guest_us=e->episode_began_guest_us;
-   e->episode_transition=true;
+   e->episode_handoff=DE_EPISODE_PLANNING;
   }
  }
  return lp_task_goal(w,task,pose,e->config->plan_horizon,clearance,goal)==LP_PATH_FOUND?DE_OK:DE_PATH;
@@ -1442,7 +1441,7 @@ static enum de_result behavior_candidate(struct drive_engine *e,struct lp_path *
  if(!e->episode_state.core.state)return DE_STATE;
  path->has_episode=true;path->episode=e->episode_state;
  if(path->execution.present)path->execution.features|=DW_EPISODE;
- if(!e->episode.active||(!e->episode_transition&&e->episode.phase==DB_FINISHED)){
+ if(!e->episode.active||(e->episode_handoff==DE_EPISODE_IDLE&&e->episode.phase==DB_FINISHED)){
   if(e->episode_state.core.state==1&&!e->episode_state.core.phase&&e->episode_status.commit_state<2&&(path->direction||path->task.changing))return DE_STATE;
   return DE_OK;
  }
@@ -1495,8 +1494,7 @@ static enum de_result behavior_candidate(struct drive_engine *e,struct lp_path *
  r->expected_registry_revision=e->episode_state.acceptance.registry_revision;
  memcpy(r->expected_episode_id.bytes,e->episode_state.core.episode_id.bytes,16);r->expected_episode_revision=e->episode_state.core.revision;
  r->plan_revision=path->revision;r->phase_revision=path->maneuver_revision;r->calculation_sequence=e->last_actual_calculation;
- r->vehicle_sequence=e->facts.vehicle_sequence;e->episode_pass_planning=false;
- e->episode_request_ready=true;e->episode_transition=true;
+ r->vehicle_sequence=e->facts.vehicle_sequence;e->episode_handoff=DE_EPISODE_REQUEST_READY;
  (void)now;return DE_BUSY;
 }
 static void parking_metadata(struct drive_engine *e,struct lp_path *p,const xenova_drive_MissionGrant *g){
