@@ -214,6 +214,18 @@ public class Dom0ManagerClient implements VmControlPort {
     }
 
     @Override
+    public void kill(String vmId) {
+        executeCommand(() -> {
+            commandClient.post()
+                    .uri("/api/v1/vms/{vmId}/kill", vmId)
+                    .retrieve()
+                    .onStatus(status -> status.isError(), this::handleError)
+                    .toBodilessEntity();
+            return null;
+        });
+    }
+
+    @Override
     public void destroy(String vmId) {
         executeCommand(() -> {
             commandClient.delete()

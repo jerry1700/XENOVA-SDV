@@ -77,6 +77,21 @@ POST /api/v1/vms/{vmId}/faults/agent-exit
 - Agent는 `ACCEPTED` 결과의 MQTT PUBACK을 확인한 뒤 종료한다. 이후 heartbeat 손실은 플랫폼
   Recovery Worker의 자동복구 판정 대상이다.
 
+## 5-1. VM 강제 종료 (장애 주입)
+
+```http
+POST /api/v1/vms/{vmId}/faults/domain-kill
+```
+
+- 요청 본문은 없다. 게스트 종류와 관계없이 쓴다 (에이전트 명령이 아니라 dom0 동작이다).
+- 백엔드는 dom0-manager `POST /api/v1/vms/{vm_id}/kill` 을 부른다. dom0-manager 는 `xl destroy` 로 도메인만 없애고
+  등록·디스크·의도(desired=running)는 바꾸지 않는다. 그래서 정지(`/stop`, 의도를 stopped 로 기록)와 달리 복구 워커가
+  `DOMAIN_ABSENT`(60초 유예) 로 판정해 다시 띄운다.
+- 실행 중이 아니면 `409 INVALID_VM_STATE`, 등록이 없으면 `404 VM_NOT_FOUND`.
+- 성공하면 `202` 와 `{operation_id, vm_id, submitted_at}` 를 준다. 명령 상태 조회(7장)의 대상이 아니다 — 결과는 VM 상태
+  (`vm.state.changed`)와 복구 이벤트(`recovery.*`)로 본다. 요청 자체는 `demo.command.sent`(`command=force_kill`)로 기록한다.
+- 사용자 정지가 아니므로 `user_stop` 상태 변경으로 기록하지 않는다.
+
 ## 6. 제출 응답
 
 CPU·메모리 응답은 다음 형식이다. `amount`는 CPU에서는 workers, 메모리에서는 MiB다.

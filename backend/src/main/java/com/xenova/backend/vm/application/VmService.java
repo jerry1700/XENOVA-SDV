@@ -541,6 +541,21 @@ public class VmService {
         return Vm.of(record, runtime);
     }
 
+    /**
+     * 장애 주입 강제 종료. dom0-manager kill 로 도메인만 없애고 등록·의도(running)는 남겨 복구 워커가 다시 띄우게 한다.
+     * 사용자 정지가 아니므로 stateTracker.changedByUser 로 기록하지 않는다 — 꺼짐은 다음 상태 동기화가 장애로 감지한다.
+     */
+    public DomainKill kill(String vmId) {
+        VmRecord record = findRecord(vmId);
+        VmState state = vmControlPort.find(vmId).map(VmRuntime::state).orElse(VmState.STOPPED);
+        if (state != VmState.RUNNING) {
+            throw new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", "실행 중인 VM만 강제 종료할 수 있습니다.");
+        }
+        vmControlPort.kill(vmId);
+        eventRecorder.faultInjected(vmId, record.getName(), "force_kill");
+        return new DomainKill(UUID.randomUUID().toString(), vmId, clock.instant());
+    }
+
     private VmRecord findRecord(String vmId) {
         return vmRecordRepository.findById(vmId)
                 .filter(VmRecord::isRegistered)
