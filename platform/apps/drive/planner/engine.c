@@ -345,6 +345,19 @@ static bool correspondence_current(const struct lp_path *p,const struct lp_track
  uint64_t anchor=progress->initialized?progress->last_pi_us:p->initial_pi_us;
  return !anchor||(v->pi_sample_us>=anchor&&v->pi_sample_us-anchor<=(uint64_t)c->pose_age_us);
 }
+/* Another observed blocker can leave too little road to settle if the
+ * normal bend inset keeps the first merge close to the divider. */
+static bool compact_merge(const struct drive_engine *e,const dw_world *w,struct tr_intent task,dw_pose pose){
+ if(!task.changing||e->episode.phase!=DB_CHANGE_OUT||e->episode.policy!=DB_KEEP_TARGET)return false;
+ task.changing=false;task.from_lane_id=task.selected_lane_id;
+ const struct db_blocker *first=&e->episode.blocker;
+ struct db_blocker next;
+ if(!db_blocker_observe(w,&task,pose,e->config->plan_horizon,e->config,&next)||!next.present||next.unknown)return false;
+ next.station_lower=first->station_lower;next.station_upper=first->station_upper;
+ float space=e->config->front+e->config->rear+e->config->wheelbase;
+ return db_blocker_locate(&e->episode.basis,&next,w->localization.geometry_position_bound_m)&&
+        next.station_lower>first->station_upper&&next.station_lower-first->station_upper<=space;
+}
 static bool changing_on_bend(const struct drive_engine *e,const dw_world *world,struct tr_intent task){
  if(!task.changing||!e->episode.active||!e->episode.blocker.present)return false;
  const struct db_blocker *blocker=&e->episode.blocker;
@@ -678,7 +691,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
    struct de_path_slot *slot=&e->paths[e->planning_path.slot];
    bool bend=changing_on_bend(e,&map->world,task);
    e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,vehicle.velocity_mps,goal,
-    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry,bend);
+    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry,bend,!bend&&compact_merge(e,&map->world,task,pose));
    slot->tracking_prepared=slot->lane_guide=e->search_reason==LP_PATH_FOUND;
    /* Retry the guide on the next map while the current merge can still
     * advance and stop safely. Reserve the lattice for a needed replacement. */
