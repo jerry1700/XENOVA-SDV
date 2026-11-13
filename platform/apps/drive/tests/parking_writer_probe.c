@@ -47,12 +47,13 @@ enum dw_result __wrap_dw_current_pose(const dw_world *world,struct dw_odometry *
  (void)now;(void)age;assert(world==&snapshot.world&&odom==&engine.odometry);
  *pose=feedback.odom_pose;if(vehicle)*vehicle=feedback;return DW_OK;
 }
-enum lp_result __wrap_lp_validate_path(const struct lp_path *path,const dw_world *world,
- const struct lp_config *config,struct lp_metrics *metrics,const struct lp_budget *budget){
- (void)config;(void)metrics;
+enum lp_result __wrap_lp_validate_path_prepared(const struct lp_path *path,const dw_world *world,
+ const struct lp_config *config,struct lp_metrics *metrics,const struct lp_budget *budget,struct lp_tracking_geometry *geometry){
+ (void)metrics;
  assert(path->count>=2&&world==&snapshot.world);
  checked_deadline=budget->deadline_us;
  if(guest>=checked_deadline)return LP_DEADLINE;
+ if(!lp_prepare_tracking(path,config,geometry))return LP_INPUT;
  if(contend)assert(take(&engine));
  return LP_PATH_FOUND;
 }

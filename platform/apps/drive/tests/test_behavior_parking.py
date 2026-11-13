@@ -98,7 +98,7 @@ def parking_writer(library, tmp_path_factory):
         'cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=undefined',
         *[f'-I{directory}' for directory in (HOME/'planner', world, world/'generated', world/'nanopb')],
         *[f'-Wl,--wrap={symbol}' for symbol in (
-            'dw_acquire', 'dw_source_valid', 'dw_release', 'dw_current_pose', 'lp_validate_path',
+            'dw_acquire', 'dw_source_valid', 'dw_release', 'dw_current_pose', 'lp_validate_path_prepared',
         )],
         str(HOME/'tests/parking_writer_probe.c'), library._name, '-lm', '-o', str(executable),
     ], check=True, capture_output=True, text=True)

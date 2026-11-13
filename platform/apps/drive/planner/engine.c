@@ -50,6 +50,14 @@ static bool prepare_tracking(struct drive_engine *e,struct de_reference h){
  if(!slot->tracking_prepared)slot->tracking_prepared=lp_prepare_tracking(&slot->path,e->config,&slot->tracking_geometry);
  return slot->tracking_prepared;
 }
+static enum lp_result validate_slot(struct de_path_slot *slot,const dw_world *world,const struct lp_config *config,
+ struct lp_metrics *metrics,const struct lp_budget *budget){
+ if(slot->tracking_prepared)
+  return lp_recheck_path(&slot->path,&slot->tracking_geometry,world,config,metrics,budget);
+ enum lp_result result=lp_validate_path_prepared(&slot->path,world,config,metrics,budget,&slot->tracking_geometry);
+ slot->tracking_prepared=result==LP_PATH_FOUND;
+ return result;
+}
 /* Only the reserving writer can abandon an unpublished slot. Once it clears
  * writing, it must stop accessing the slot so the next reservation can use it. */
 static void discard_path(struct drive_engine *e,struct de_reference h){
@@ -369,11 +377,13 @@ static bool initial_correspondence_pending(const struct drive_engine *e,const st
 /* A newly searched local path has no receipt yet. A slow bounded search may
  * outlive its start Vehicle; establish its first correspondence on current
  * inputs before creating a registration request, never on a published path. */
-static enum lp_result planning_correspondence(struct drive_engine *e,struct lp_path *path,const dw_world *world,
+static enum lp_result planning_correspondence(struct drive_engine *e,struct de_path_slot *slot,const dw_world *world,
  dw_pose pose,const dw_vehicle *vehicle,uint64_t now,struct lp_tracker *probe,struct lp_command *command,
  struct lp_metrics *metrics,const struct lp_budget *budget){
+ struct lp_path *path=&slot->path;
+ const struct lp_tracking_geometry *geometry=&slot->tracking_geometry;
  bool stale=initial_correspondence_stale(path,vehicle,e->config);
- if(!stale)return lp_track(probe,path,world,pose,vehicle,e->config,.02f,command,metrics,budget);
+ if(!stale)return lp_track_prepared(probe,path,geometry,world,pose,vehicle,e->config,.02f,command,metrics,budget,NULL);
  const struct db_episode *episode=&e->episode;const struct db_facts *facts=&e->facts;
  if(!e->behavior_enabled||!e->planning||e->planning_path.slot>=DE_PATH_SLOTS||
     path!=&e->paths[e->planning_path.slot].path||!e->paths[e->planning_path.slot].writing||
@@ -395,12 +405,12 @@ static enum lp_result planning_correspondence(struct drive_engine *e,struct lp_p
     fabsf(dw_angle(pose.yaw-e->search.start.yaw))>e->config->max_heading_error+vehicle->heading_error_rad)return LP_INPUT;
  uint64_t original=path->initial_pi_us;size_t original_index=path->initial_tracker_index;
  path->initial_pi_us=0;path->initial_tracker_index=0;
- enum lp_result rc=lp_track(probe,path,world,pose,vehicle,e->config,.02f,command,metrics,budget);
+ enum lp_result rc=lp_track_prepared(probe,path,geometry,world,pose,vehicle,e->config,.02f,command,metrics,budget,NULL);
  bool checked=(rc==LP_PATH_FOUND||rc==LP_STOP)&&!probe->index&&!probe->segment&&!probe->gate_revision&&probe->progress<=enclosure;
  if(!checked){path->initial_pi_us=original;path->initial_tracker_index=original_index;return rc==LP_PATH_FOUND||rc==LP_STOP?LP_INPUT:rc;}
  path->initial_pi_us=vehicle->pi_sample_us;path->initial_tracker_index=probe->index;
  memset(probe,0,sizeof(*probe));
- return lp_track(probe,path,world,pose,vehicle,e->config,.02f,command,metrics,budget);
+ return lp_track_prepared(probe,path,geometry,world,pose,vehicle,e->config,.02f,command,metrics,budget,NULL);
 }
 /* Recognize the private metadata-only candidate produced below. Imported copies
  * and ordinary grant rebinds keep their existing restore path. */
@@ -435,8 +445,9 @@ static enum de_result initial_correspondence_context(struct drive_engine *e,cons
     memcmp(candidate->episode.acceptance.accepted_core_sha256.bytes,e->episode_status.accepted_core_sha256.bytes,32))return DE_STATE;
  return DE_OK;
 }
-static enum de_result initial_correspondence_validate(struct drive_engine *e,struct lp_path *candidate,uint32_t original_generation,
+static enum de_result initial_correspondence_validate(struct drive_engine *e,struct de_path_slot *slot,uint32_t original_generation,
  const dw_world *world,dw_pose pose,const dw_vehicle *vehicle,uint64_t now,const struct lp_budget *budget){
+ struct lp_path *candidate=&slot->path;
  enum de_result context=initial_correspondence_context(e,candidate,now,budget);if(context)return context;
  const xenova_drive_EpisodeCore *core=&candidate->episode.core;
  if(memcmp(core->meter_epoch.bytes,e->facts.meter_epoch,16)||e->facts.meter_revision!=e->episode.meter_revision||
@@ -453,14 +464,14 @@ static enum de_result initial_correspondence_validate(struct drive_engine *e,str
  float radius=hypotf(fmaxf(e->config->front,e->config->rear)+e->config->margin,e->config->half_width+e->config->margin);
  candidate->task.vehicle_pad=vehicle->position_error_m+radius*vehicle->heading_error_rad;
  struct lp_metrics measured={0};struct lp_tracker probe={0};struct lp_command command;
- enum lp_result valid=lp_validate_path(candidate,world,e->config,&measured,budget);
+ enum lp_result valid=validate_slot(slot,world,e->config,&measured,budget);
  if(valid!=LP_PATH_FOUND)return DE_PATH;
  if(seed){
   /* Only a new unpublished candidate uses the explicit first-correspondence
    * search. The original path, registered Core/E/meter and first StateID stay. */
   candidate->initial_pi_us=0;candidate->initial_tracker_index=0;
  }
- valid=lp_track(&probe,candidate,world,pose,vehicle,e->config,.02f,&command,&measured,budget);
+ valid=lp_track_prepared(&probe,candidate,&slot->tracking_geometry,world,pose,vehicle,e->config,.02f,&command,&measured,budget,NULL);
  if(valid!=LP_PATH_FOUND&&valid!=LP_STOP)return DE_PATH;
  if(seed){
   double bound=travel+e->config->max_position_error+vehicle->position_error_m+
@@ -469,7 +480,7 @@ static enum de_result initial_correspondence_validate(struct drive_engine *e,str
      hypotf(pose.x-candidate->points[0].pose.x,pose.y-candidate->points[0].pose.y)>bound)return DE_STATE;
   candidate->initial_tracker_index=probe.index;candidate->initial_pi_us=vehicle->pi_sample_us;
   memset(&probe,0,sizeof(probe));
-  valid=lp_track(&probe,candidate,world,pose,vehicle,e->config,.02f,&command,&measured,budget);
+  valid=lp_track_prepared(&probe,candidate,&slot->tracking_geometry,world,pose,vehicle,e->config,.02f,&command,&measured,budget,NULL);
   if(valid!=LP_PATH_FOUND&&valid!=LP_STOP)return DE_PATH;
  }
  return DE_OK;
@@ -548,8 +559,10 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
     if(!adopted){
      *candidate=*old;lp_bind_current_grant(candidate,&e->grant);
      struct lp_tracker probe={0};struct lp_command actual;
-     enum lp_result validated=lp_validate_path(candidate,&map->world,e->config,&checked,&budget);
-     if(validated==LP_PATH_FOUND)validated=lp_track(&probe,candidate,&map->world,pose,&vehicle,e->config,.02f,&actual,&checked,&budget);
+     struct de_path_slot *slot=&e->paths[next.slot];
+     enum lp_result validated=validate_slot(slot,&map->world,e->config,&checked,&budget);
+     if(validated==LP_PATH_FOUND)validated=lp_track_prepared(&probe,candidate,&slot->tracking_geometry,
+      &map->world,pose,&vehicle,e->config,.02f,&actual,&checked,&budget,NULL);
      e->paths[next.slot].scene_generation=scene_generation;e->apply_path=next;e->apply_valid=validated==LP_PATH_FOUND||validated==LP_STOP;
      e->apply_pending=true;e->apply_grant=e->grant;e->apply_has_grant=true;
      e->apply_map_generation=h.generation;e->apply_budget=budget;
@@ -576,7 +589,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
      struct de_reference next;struct lp_path *candidate;enum de_result adopted=reserve(e,&next,&candidate);
      if(!adopted){
       *candidate=*old;e->paths[next.slot].scene_generation=previous_scene;
-      adopted=initial_correspondence_validate(e,candidate,previous.generation,&map->world,pose,&vehicle,now,&budget);
+      adopted=initial_correspondence_validate(e,&e->paths[next.slot],previous.generation,&map->world,pose,&vehicle,now,&budget);
       if(!adopted&&dw_source_valid(&e->maps,h))adopted=DE_CHANGED;
       if(!adopted&&dw_scene_generation(&e->maps,previous_scene,now,NULL))adopted=DE_CHANGED;
       /* Retain the reserved slot across publish contention using the existing
@@ -613,9 +626,12 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
   e->search_reason=lp_start_task_goal(&e->search,&map->world,pose,steering,goal,e->config,e->assets,budget,&task,&e->basis);
  else if(task.active){
   e->search_reason=LP_NOT_FOUND;
-  if((e->episode.active||(!task.changing&&!e->maneuver_active))&&e->has_grant&&e->grant.kind==1)
+  if((e->episode.active||(!task.changing&&!e->maneuver_active))&&e->has_grant&&e->grant.kind==1){
+   struct de_path_slot *slot=&e->paths[e->planning_path.slot];
    e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,vehicle.velocity_mps,goal,
-    e->config,budget,&task,&e->basis,&prefix);
+    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry);
+   slot->tracking_prepared=e->search_reason==LP_PATH_FOUND;
+  }
   if(e->search_reason==LP_NOT_FOUND)
    e->search_reason=lp_start_task(&e->search,&map->world,pose,steering,goal,e->config,e->assets,budget,&task,&e->basis,&prefix);
   else{e->search.metrics=prefix;e->search.used=0;}
@@ -650,10 +666,7 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
   bool valid=e->search_reason==LP_PATH_FOUND&&!e->stopping;
   path->initial_pi_us=e->planning_vehicle_pi_us;path->initial_tracker_index=0;
   if(valid&&(path->world_features&DW_LANE_MODEL)&&e->planning_has_grant){
-   if(!e->has_grant)valid=false;
-  }
-  if(valid&&(path->world_features&DW_LANE_MODEL)&&e->planning_has_grant){
-   if(!grant_same(&e->grant,&e->planning_grant))valid=false;
+   if(!e->has_grant||!grant_same(&e->grant,&e->planning_grant))valid=false;
    else{mission_metadata(path,&e->planning_grant);if(e->planning_grant.kind==2)parking_metadata(e,path,&e->planning_grant);}
   }
   if(valid){
@@ -663,17 +676,20 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
    if(acquired)valid=false;
    else{
     struct lp_budget current_budget=e->budget;current_budget.collision_index=&e->map_indices[current.slot];
+    struct de_path_slot *slot=&e->paths[e->planning_path.slot];
     if(current.generation!=e->planning_map.generation||(e->episode.active&&e->search.used)){
-     struct lp_metrics checked={0};enum lp_result result=lp_validate_path(path,&snapshot->world,e->config,&checked,&current_budget);
+     struct lp_metrics checked={0};
+     enum lp_result result=validate_slot(slot,&snapshot->world,e->config,&checked,&current_budget);
      if(result!=LP_PATH_FOUND){e->search_reason=result;valid=false;}
     }
     enum de_result input=DE_OK;
+    if(valid&&!prepare_tracking(e,e->planning_path)){e->search_reason=LP_INPUT;valid=false;}
     if(valid){
      dw_pose pose;dw_vehicle vehicle;input=inputs(e,snapshot,now,&pose,&vehicle,NULL);
      struct lp_tracker probe={0};struct lp_command command;struct lp_metrics measured={0};
      if(input)valid=false;
      else{
-      enum lp_result result=planning_correspondence(e,path,&snapshot->world,pose,&vehicle,now,&probe,&command,&measured,&current_budget);
+      enum lp_result result=planning_correspondence(e,slot,&snapshot->world,pose,&vehicle,now,&probe,&command,&measured,&current_budget);
       if(result!=LP_PATH_FOUND&&result!=LP_STOP){e->search_reason=result;valid=false;}
      }
     }
@@ -739,7 +755,8 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
   else{
    dw_pose pose;dw_vehicle vehicle;enum de_result current=inputs(e,map,now,&pose,&vehicle,NULL);
    struct lp_budget current_budget=e->budget;current_budget.collision_index=&e->map_indices[fresh.slot];
-   if(!current)current=initial_correspondence_validate(e,path,e->planning_path.generation,&map->world,pose,&vehicle,now,&current_budget);
+   if(!current)current=initial_correspondence_validate(e,&e->paths[e->planning_path.slot],e->planning_path.generation,
+    &map->world,pose,&vehicle,now,&current_budget);
    if(!current){
     enum dw_result source=dw_source_valid(&e->maps,fresh);
     if(source)current=source==DW_BUSY?DE_BUSY:DE_CHANGED;
@@ -1008,9 +1025,11 @@ enum de_result de_apply(struct drive_engine *e,const dw_state *state,uint64_t no
   strcpy(path->frame,state->frame_epoch);strcpy(path->odom,state->odom_epoch);
   strcpy(path->configuration,state->configuration);strcpy(path->reference,state->reference_id);
   struct lp_metrics metrics={0};struct lp_tracker probe={0};struct lp_command calculated;
+  struct de_path_slot *slot=&e->paths[ph.slot];
   enum lp_result valid=rc||(scene_generation&&!lp_mission_matches(path,&e->grant))?LP_INPUT:
-   lp_validate_path(path,&map->world,e->config,&metrics,&budget);
-  if(valid==LP_PATH_FOUND)valid=lp_track(&probe,path,&map->world,pose,&vehicle,e->config,.02f,&calculated,&metrics,&budget);
+   validate_slot(slot,&map->world,e->config,&metrics,&budget);
+  if(valid==LP_PATH_FOUND)valid=lp_track_prepared(&probe,path,&slot->tracking_geometry,&map->world,pose,&vehicle,e->config,
+   .02f,&calculated,&metrics,&budget,NULL);
   e->last_state_result=valid;
   bool usable=valid==LP_PATH_FOUND||valid==LP_STOP;
   e->apply_path=ph;e->apply_valid=usable;e->apply_pending=true;
@@ -1038,14 +1057,15 @@ enum de_result de_apply_finish(struct drive_engine *e,uint64_t now){
    struct lp_budget current_budget=e->apply_budget;current_budget.collision_index=&e->map_indices[mh.slot];
    if(mh.generation!=e->apply_map_generation){
     struct lp_metrics measured={0};
-    if(lp_validate_path(&e->paths[e->apply_path.slot].path,&map->world,e->config,&measured,&current_budget)!=LP_PATH_FOUND)e->apply_valid=false;
+    enum lp_result checked=validate_slot(&e->paths[e->apply_path.slot],&map->world,e->config,&measured,&current_budget);
+    if(checked!=LP_PATH_FOUND)e->apply_valid=false;
    }
    if(dw_snapshot_time(map,now,(uint64_t)e->config->live_age_us,NULL))e->apply_valid=false;
    if(e->apply_valid&&first_adoption){
     struct lp_path *candidate=&e->paths[e->apply_path.slot].path;dw_pose pose;dw_vehicle vehicle;
     enum de_result valid=initial_correspondence_pending(e,candidate)?initial_correspondence_unrun(e,candidate,original_generation):DE_STATE;
     if(!valid)valid=inputs(e,map,now,&pose,&vehicle,NULL);
-    if(!valid)valid=initial_correspondence_validate(e,candidate,original_generation,&map->world,pose,&vehicle,now,&current_budget);
+    if(!valid)valid=initial_correspondence_validate(e,&e->paths[e->apply_path.slot],original_generation,&map->world,pose,&vehicle,now,&current_budget);
     if(valid==DE_BUSY){(void)dw_release(&e->maps,mh);return DE_BUSY;}
     if(valid||dw_source_valid(&e->maps,mh))e->apply_valid=false;
    }
@@ -1537,7 +1557,7 @@ static enum de_result parking_publish_pending(struct drive_engine *e,uint64_t no
   if(!world){
    struct lp_metrics metrics={0};struct lp_budget b=parking->publish_budget;
    b.collision_index=&e->map_indices[mh.slot];
-   enum lp_result checked=lp_validate_path(p,&map->world,e->config,&metrics,&b);
+   enum lp_result checked=validate_slot(&e->paths[h.slot],&map->world,e->config,&metrics,&b);
    if(checked!=LP_PATH_FOUND)
     rc=checked==LP_DEADLINE?DE_EXPIRED:checked==LP_CANCELLED?DE_CANCELLED:DE_STATE;
    if(!rc&&!parking->publish_source_generation){

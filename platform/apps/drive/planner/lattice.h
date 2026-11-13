@@ -122,7 +122,8 @@ float lp_terminal_clearance(const struct lp_config *);
 /* Try a forward lane-guided path whose body fits the observed road. The caller
  * retains the existing path admission and may run the lattice on NOT_FOUND. */
 enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,float,dw_pose,
- const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *);
+ const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *,
+ struct lp_tracking_geometry *);
 /* Build once per immutable map/configuration; 64 rows, no global cache. */
 void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp_config *);
 /* Maximum expansions per slice; collision and cancellation checks are also
@@ -130,6 +131,8 @@ void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp
 enum lp_result lp_advance(struct lp_search *,unsigned,struct lp_path *);
 enum lp_result lp_footprint(const dw_world *,dw_pose,float,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
 enum lp_result lp_validate_path(const struct lp_path *,const dw_world *,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
+enum lp_result lp_validate_path_prepared(const struct lp_path *,const dw_world *,const struct lp_config *,
+ struct lp_metrics *,const struct lp_budget *,struct lp_tracking_geometry *);
 /* Recheck a published path against a new map using its slot's validated geometry. */
 enum lp_result lp_recheck_path(const struct lp_path *,const struct lp_tracking_geometry *,const dw_world *,
  const struct lp_config *,struct lp_metrics *,const struct lp_budget *);

@@ -880,7 +880,7 @@ static float lane_response(const struct lp_config *c){
 
 enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_world *w,dw_pose start_pose,
  float steer,float speed,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
- const struct tr_basis *basis,struct lp_metrics *metrics){
+ const struct tr_basis *basis,struct lp_metrics *metrics,struct lp_tracking_geometry *geometry){
  struct tr_view view;
  if(!narrow_lane(w,task,c,budget.collision_index,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
     fabsf(steer)>c->max_steer||!isfinite(speed))return LP_NOT_FOUND;
@@ -925,7 +925,7 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  }
  if((path->count-1)*step<minimum)return LP_NOT_FOUND;
  path->goal=path->merge_goal=pose;
- enum lp_result checked=lp_validate_path(path,w,c,metrics,&budget);
+ enum lp_result checked=lp_validate_path_prepared(path,w,c,metrics,&budget,geometry);
  return checked==LP_COLLISION?LP_NOT_FOUND:checked;
 }
 enum lp_result lp_start_signed(struct lp_search *s,const dw_world *w,dw_pose pose,float steer,dw_pose goal,
@@ -1196,21 +1196,23 @@ static bool path_shape(const struct lp_path *path){
 static enum lp_result path_geometry(const struct lp_path *,const dw_world *,const struct lp_config *,
  struct lp_metrics *,const struct lp_budget *,float *);
 
-bool lp_prepare_tracking(const struct lp_path *path,const struct lp_config *c,struct lp_tracking_geometry *geometry){
- if(!path_shape(path)||path_geometry(path,NULL,c,NULL,NULL,geometry->sweep_pad)!=LP_PATH_FOUND)return false;
- if(legacy_forward_path(path))return true;
+static void prepare_tracking_arcs(const struct lp_path *path,struct lp_tracking_geometry *geometry){
+ if(legacy_forward_path(path))return;
  for(unsigned part=0;part<path_segments(path);part++){
   xenova_drive_GearSegment segment=path_segment(path,part);
   geometry->arc[segment.first_index]=0;
   geometry->max_steer_slope[part]=0;
   for(size_t i=segment.first_index+1;i<=segment.last_index;i++){
    float ds=distance(path->points[i-1].pose,path->points[i].pose);
-   if(ds<=0)return false;
    geometry->arc[i]=geometry->arc[i-1]+ds;
    float slope=fabsf(path->points[i].steering_rad-path->points[i-1].steering_rad)/ds;
    geometry->max_steer_slope[part]=fmaxf(geometry->max_steer_slope[part],slope);
   }
  }
+}
+bool lp_prepare_tracking(const struct lp_path *path,const struct lp_config *c,struct lp_tracking_geometry *geometry){
+ if(!path_shape(path)||path_geometry(path,NULL,c,NULL,NULL,geometry->sweep_pad)!=LP_PATH_FOUND)return false;
+ prepare_tracking_arcs(path,geometry);
  return true;
 }
 static bool path_matches_world(const struct lp_path *p,const dw_world *w){
@@ -1244,12 +1246,13 @@ static enum lp_result path_geometry(const struct lp_path *p,const dw_world *w,co
     integrate(&predicted,.5f*(point->steering_rad+p->points[previous].steering_rad),segment.signed_direction*c->primitive_speed,interval,c->wheelbase);
     if(distance(predicted,point->pose)>.001f||fabsf(dw_angle(predicted.yaw-point->pose.yaw))>.001f)return LP_INPUT;
    }
-   if(pads){
-    if(b&&!(k&31)){enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;}
-    pads[k]=pad+c->tracking_guard;
-   }else{
-    enum lp_result rc=footprint(w,point->pose,pad+c->tracking_guard,c,m,b,false,NULL,&p->task,&p->space);
+   pad+=c->tracking_guard;
+   if(pads)pads[k]=pad;
+   if(w){
+    enum lp_result rc=footprint(w,point->pose,pad,c,m,b,false,NULL,&p->task,&p->space);
     if(rc!=LP_PATH_FOUND)return rc;
+   }else if(b&&!(k&31)){
+    enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;
    }
   }
  }
@@ -1257,7 +1260,19 @@ static enum lp_result path_geometry(const struct lp_path *p,const dw_world *w,co
 }
 enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
  struct lp_metrics *m,const struct lp_budget *b){
- return c&&path_shape(p)&&path_matches_world(p,w)?path_geometry(p,w,c,m,b,NULL):LP_INPUT;
+ return lp_validate_path_prepared(p,w,c,m,b,NULL);
+}
+enum lp_result lp_validate_path_prepared(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
+ struct lp_metrics *m,const struct lp_budget *b,struct lp_tracking_geometry *geometry){
+ if(!c||!path_shape(p)||!path_matches_world(p,w))return LP_INPUT;
+ enum lp_result rc=path_geometry(p,w,c,m,b,geometry?geometry->sweep_pad:NULL);
+ if(rc==LP_PATH_FOUND&&geometry){
+  rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;
+  prepare_tracking_arcs(p,geometry);
+  rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;
+  rc=LP_PATH_FOUND;
+ }
+ return rc;
 }
 enum lp_result lp_recheck_path(const struct lp_path *p,const struct lp_tracking_geometry *geometry,const dw_world *w,
  const struct lp_config *c,struct lp_metrics *m,const struct lp_budget *b){
@@ -1272,7 +1287,7 @@ enum lp_result lp_clearance_lower(const struct lp_path *p,const dw_world *w,cons
  struct lp_metrics *m,const struct lp_budget *b,float *out){
  if(!out||!c||!isfinite(maximum)||maximum<=0||!path_shape(p)||!path_matches_world(p,w))return LP_INPUT;
  float pads[LP_PATH];
- enum lp_result rc=path_geometry(p,w,c,m,b,pads);if(rc!=LP_PATH_FOUND)return rc;
+ enum lp_result rc=path_geometry(p,NULL,c,m,b,pads);if(rc!=LP_PATH_FOUND)return rc;
  float low=0,high=maximum;
  /* Inflated full-edge footprint validation proves a lower bound; it does not
   * compare vehicle centers or assume the nearest obstacle cell's center. */
