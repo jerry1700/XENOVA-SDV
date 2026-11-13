@@ -15,10 +15,8 @@ import { ControlVmDetailPage } from './pages/ControlVmDetailPage';
 import { DashboardPage, LegacyDashboardPage } from './pages/DashboardPage';
 import { DemoPage } from './pages/DemoPage';
 import { EventsPage } from './pages/EventsPage';
-import { LoginPage } from './pages/LoginPage';
 import { PhoneLinkPage } from './pages/PhoneLinkPage';
 import { ResourcesPage } from './pages/ResourcesPage';
-import { SignupPage } from './pages/SignupPage';
 import { ShowcasePage } from './pages/ShowcasePage';
 import { SimulatorStressLab } from './pages/SimulatorStressLab';
 import { VmCreatePage } from './pages/VmCreatePage';
@@ -41,11 +39,12 @@ const queryClient = new QueryClient({
 
 const router = createBrowserRouter([
   {
-    // 레이아웃 밖(로그인·레이아웃 자체)의 오류 — 기본 "Unexpected Application Error!" 대신 (QA 2-1)
+    // 레이아웃 밖(레이아웃 자체)의 오류 — 기본 "Unexpected Application Error!" 대신 (QA 2-1)
     errorElement: <RouteError />,
     children: [
-      { path: '/login', element: <LoginPage /> },
-      { path: '/signup', element: <SignupPage /> },
+      // 계정 없는 콘솔: 예전 로그인·회원가입 주소는 첫 화면으로 보낸다
+      { path: '/login', element: <Navigate to="/dashboard/overview" replace /> },
+      { path: '/signup', element: <Navigate to="/dashboard/overview" replace /> },
       {
         element: (
           <RequireAuth>
@@ -95,7 +94,7 @@ const router = createBrowserRouter([
           },
         ],
       },
-      // 디자인 확인은 로그인 없이도 볼 수 있게
+      // 디자인 확인은 서버 연결 없이도 볼 수 있게
       { path: '/components-public', element: <ShowcasePage /> },
       { path: '*', element: <Navigate to="/dashboard/overview" replace /> },
     ],

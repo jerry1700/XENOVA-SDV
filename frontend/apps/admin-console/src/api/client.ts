@@ -98,16 +98,34 @@ if (sessionChannel) {
 
 let refreshing: Promise<boolean> | null = null;
 
+// ---- 공용 계정 자동 로그인 ------------------------------------------------------------------
+// 콘솔은 사용자 계정 없이 누구나 쓴다. 백엔드는 여전히 토큰을 요구하므로, 화면 없이 공용 계정으로 로그인해
+// 토큰을 받는다. refresh 가 실패하면(쿠키 없음·만료·재사용 폐기) 로그인 화면 대신 다시 공용 계정으로 로그인한다.
+// 값은 빌드 환경변수로 바꿀 수 있다. 누구나 쓰는 계정이라 비밀이 아니다(번들에 들어간다).
+export const SHARED_ACCOUNT = {
+  username: import.meta.env.VITE_SHARED_USERNAME || 'xenova',
+  password: import.meta.env.VITE_SHARED_PASSWORD || 'xenova-console',
+} as const;
+
+async function sharedLogin(): Promise<TokenResponse | null> {
+  const response = await send('/api/v1/auth/login', {
+    method: 'POST',
+    body: { username: SHARED_ACCOUNT.username, password: SHARED_ACCOUNT.password },
+    auth: false,
+  });
+  return response.ok ? parse<TokenResponse>(response) : null;
+}
+
 async function refreshOnce(seqAtStart: number): Promise<boolean> {
   // 락을 기다리는 동안 다른 탭이 재발급해 토큰을 나눴다 — 같은 쿠키로 또 보내면 재사용 판정이 난다
   if (sharedSeq !== seqAtStart && session) return true;
   try {
     const response = await send('/api/v1/auth/refresh', { method: 'POST', auth: false });
-    if (!response.ok) {
+    const next = response.ok ? await parse<TokenResponse>(response) : await sharedLogin();
+    if (!next) {
       setSession(null);
       return false;
     }
-    const next = await parse<TokenResponse>(response);
     setSession(next);
     sessionChannel?.postMessage({ type: 'refreshed', session: next } satisfies SessionMessage);
     return true;

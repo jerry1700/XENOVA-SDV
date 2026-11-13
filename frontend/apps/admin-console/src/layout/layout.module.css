@@ -22,38 +22,6 @@
   letter-spacing: 0.08em;
   color: var(--x-text-muted);
 }
-.user {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  max-width: min(40vw, 260px);
-  gap: var(--x-space-2);
-  padding: 4px 10px;
-  border-radius: var(--x-radius-sm);
-  background: var(--x-surface-2);
-  font-family: var(--x-font-mono);
-  font-size: var(--x-text-sm);
-}
-/* 닉네임이 길면 말줄임 (전체는 title) */
-.userName {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.avatar {
-  flex: none;
-}
-.avatar {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--x-primary);
-  color: var(--x-primary-text);
-  font-weight: 800;
-}
 .dashboardSection {
   display: grid;
   gap: var(--x-space-4);
@@ -177,8 +145,7 @@
 }
 
 @media (max-width: 1080px) {
-  .brandText,
-  .user {
+  .brandText {
     display: none;
   }
 }

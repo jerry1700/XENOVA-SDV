@@ -12,19 +12,6 @@ export interface LoginRequest {
   password: string;
 }
 
-export interface SignupRequest {
-  username: string;
-  nickname: string;
-  password: string;
-}
-
-export interface SignupResponse {
-  user_id: string;
-  username: string;
-  nickname: string;
-  created_at: string;
-}
-
 /** 로그인·재발급 응답. refresh 토큰은 HttpOnly 쿠키(xenova_refresh)라 본문에 없다 */
 export interface TokenResponse {
   access_token: string;

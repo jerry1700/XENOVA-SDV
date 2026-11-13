@@ -3,7 +3,7 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   place-items: center;
-  /* 로그인·회원가입 카드가 좁은 화면 가장자리에 붙지 않게 */
+  /* 가운데 카드가 좁은 화면 가장자리에 붙지 않게 */
   padding: var(--x-space-4);
 }
 .detail {

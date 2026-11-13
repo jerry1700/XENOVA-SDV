@@ -1,7 +1,7 @@
 /** TanStack Query 훅. 경로·응답은 VM 관리 API 계약 §5, 인증은 노션 API 명세 */
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { useState } from 'react';
-import { ApiError, request, requestWithStatus, setSession } from './client';
+import { ApiError, request, requestWithStatus } from './client';
 import type {
   CreateVmRequest,
   AgentExitCommand,
@@ -14,20 +14,16 @@ import type {
   Display,
   DisplayListResponse,
   EventListResponse,
-  LoginRequest,
   MetricHistoryResponse,
   PhoneLinkStatus,
   PhonePairingCode,
   ProcessesResponse,
   RouteRequest,
-  SignupRequest,
-  SignupResponse,
   StressCommand,
   StressRequest,
   TelemetryHeartbeatResponse,
   Template,
   ThreadsResponse,
-  TokenResponse,
   UpdateVcpuPinningRequest,
   UpdateVmResourcesRequest,
   Vm,
@@ -438,32 +434,5 @@ export function useCreateVm() {
       return { vm: data, created: status !== 200 };
     },
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
-  });
-}
-
-export function useLogin() {
-  return useMutation({
-    mutationFn: (body: LoginRequest) =>
-      request<TokenResponse>('/api/v1/auth/login', { method: 'POST', body, auth: false }),
-    onSuccess: setSession,
-  });
-}
-
-export function useSignup() {
-  return useMutation({
-    mutationFn: (body: SignupRequest) =>
-      request<SignupResponse>('/api/v1/auth/signup', { method: 'POST', body, auth: false }),
-  });
-}
-
-export function useLogout() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
-    onSettled: () => {
-      setSession(null);
-      clearVmList();
-      client.clear();
-    },
   });
 }
