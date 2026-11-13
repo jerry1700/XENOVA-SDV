@@ -286,6 +286,54 @@ describe('console transport', () => {
     transport.dispose();
   });
 
+  describe('replayed console output', () => {
+    async function connected() {
+      const { transport } = setup();
+      await transport.connect();
+      const ws = FakeSocket.instances[0]!;
+      ws.onopen?.();
+      ws.ready();
+      return { transport, ws };
+    }
+
+    it('drops terminal answers to replayed queries right after connecting', async () => {
+      const { transport, ws } = await connected();
+      // xterm answering ESC[6n / DA found in the replayed boot output.
+      for (const report of [
+        '\x1b[24;1R',
+        '\x1b[24;174R',
+        '\x1b[?1;2c',
+        '\x1b[>0;276;0c',
+        '\x1b[0n',
+        '\x1b[24;1R\x1b[24;174R',
+      ]) {
+        expect(transport.send(report)).toBe(true);
+      }
+      expect(ws.sent).toHaveLength(1); // auth only
+      transport.dispose();
+    });
+
+    it('still sends what a person types during the settle window', async () => {
+      const { transport, ws } = await connected();
+      transport.send('\r');
+      transport.send('root');
+      transport.send('\x1b[A'); // arrow key
+      transport.send('24;1R'); // plain text that only looks like a report
+      expect(ws.sent.slice(1)).toEqual(
+        ['\r', 'root', '\x1b[A', '24;1R'].map((t) => new TextEncoder().encode(t)),
+      );
+      transport.dispose();
+    });
+
+    it('answers live terminal queries after the replay has settled', async () => {
+      const { transport, ws } = await connected();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(transport.send('\x1b[24;174R')).toBe(true);
+      expect(ws.sent[1]).toEqual(new TextEncoder().encode('\x1b[24;174R'));
+      transport.dispose();
+    });
+  });
+
   describe('login expiry (4401)', () => {
     const soon = (ms: number) => new Date(Date.now() + ms).toISOString();
 
