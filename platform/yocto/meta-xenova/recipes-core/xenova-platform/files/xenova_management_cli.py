@@ -105,6 +105,8 @@ def _validate(args):
         raise ManagementError('INVALID_SPEC','budget_ms is outside the supported call range')
     if action in ('control-operation','operation') and sum(k in args for k in ('operation_id','idempotency_key'))!=1:
         raise ManagementError('INVALID_SPEC','exactly one operation ID or original key is required')
+    if action == 'retire' and 'idempotency_key' not in args:
+        raise ManagementError('INVALID_SPEC', 'retire requires --idempotency-key')
     if action=='destroy' and not args.get('force'):
         raise ManagementError('INVALID_SPEC','destroy requires --force')
     if action in ('autostart-set','board-shutdown-set'):

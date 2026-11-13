@@ -24,8 +24,8 @@ from typing import ClassVar
 from uuid import UUID
 
 from ..errors import NotSupportedByPlatform, VMNotFound
-from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, ResourceUpdate, StatsSource, UnavailableReason,
-                      UpdateCpuPolicyRequest, Vm, VmState, VmStats)
+from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, StatsSource, UnavailableReason,
+                      UpdateCpuPolicyRequest, Vm, VmLifecycle, VmOperationAction, VmOperationResult, VmState, VmStats)
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,8 @@ class InstancePaths:
     kernel: Path | None = None
     ramdisk: Path | None = None
     disk: Path | None = None
+    # 확인한 원 등록 작업. 기록이 없는 드라이버나 구형 등록에서는 None.
+    registration_operation_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,8 @@ class CreateSpec:
     vcpus: int
     memory_mib: int
     instance: InstancePaths
+    request_key: str | None = None
+    create_spec_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,8 +144,11 @@ class Driver(ABC):
     def has_domain(self, vm_id: UUID) -> bool:
         return any(d.vm_id == vm_id for d in self.list_domains())
 
+    def has_domain_for_create(self, vm_id: UUID) -> bool:
+        return self.has_domain(vm_id)
+
     @abstractmethod
-    def create(self, spec: CreateSpec) -> Domain:
+    def create(self, spec: CreateSpec) -> Domain | ControlOperation:
         """도메인을 만들어 실행 상태로 둔다. 이미 있으면 VMExists."""
 
     @abstractmethod
@@ -165,6 +172,18 @@ class Driver(ABC):
     def control_operation(self, vm_id: UUID, *, key: str) -> ControlOperation:
         """요청 키로 원 제어 작업 조회. 작업 기록이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track control operations")
+
+    def replay_start(self, vm_id: UUID, *, key: str, create_spec_sha256: str) -> ControlOperation | None:
+        """같은 원 시작을 회수한다. 원 기록이 없을 때만 None을 반환한다."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not track start operations")
+
+    def vm_lifecycle(self, vm_id: UUID) -> VmLifecycle:
+        raise NotSupportedByPlatform(f"{self.name} driver does not expose VM lifecycle")
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction,
+                     operation_id: UUID | None = None, key: str | None = None) -> VmOperationResult:
+        """원 작업 ID 또는 보관 키로 제한된 조회. 작업 기록이 없는 드라이버는 501."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not track VM operations")
 
     def reboot(self, vm_id: UUID) -> None:  # S15P31E110-208
         """실행 중인 도메인을 같은 디스크로 다시 시작한다(게스트 정상 재부팅, 새 실행). 제공하지 않는 드라이버는 501.
@@ -201,6 +220,8 @@ class Driver(ABC):
 class Provisioner(ABC):
     """템플릿 → 인스턴스(디스크·커널·initrd) 준비. 실제 구현은 플랫폼 관리 계층(xenova_management)과 연결한다."""
 
+    guards_retirement: ClassVar[bool] = False
+
     @abstractmethod
     def ensure_instance(
         self, vm_id: UUID, template_id: str, template_version: str, *, name: str, vcpus: int, memory_mib: int
@@ -210,9 +231,15 @@ class Provisioner(ABC):
     @abstractmethod
     def instance_exists(self, vm_id: UUID) -> bool: ...
 
+    def check_existing_spec(self, request: CreateVmRequest) -> None:
+        """비교 가능한 등록 명세가 있으면 실행 중인 VM의 생성 재전달을 검증한다."""
+
     @abstractmethod
     def delete_instance(self, vm_id: UUID) -> None:
-        """디스크를 포함한 인스턴스 삭제. 없으면 아무것도 하지 않는다(계약 4.4)."""
+        """등록된 인스턴스를 보관한다. guards_retirement 구현은 대상 검증과 원 작업 회수도 맡는다."""
+
+    def delete_instance_at_generation(self, vm_id: UUID, *, key: str, generation: int) -> None:
+        raise NotSupportedByPlatform("provisioner does not support generation-guarded retirement")
 
     def update_resources(self, vm_id: UUID, *, vcpus: int, memory_mib: int, key: str) -> ResourceUpdate:  # S15P31E110-368
         """정지한 Linux VM 의 등록 설정에서 vCPU·메모리를 바꾼다(계약 4.12). 다음 시작부터 적용되고 게스트를 시작하지 않는다.

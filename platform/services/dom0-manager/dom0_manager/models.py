@@ -103,6 +103,7 @@ class ErrorCode(str, Enum):
     InvalidArgument = "InvalidArgument"
     VMNotFound = "VMNotFound"
     VMExists = "VMExists"  # 409 같은 vm_id 의 VM 이 이미 있음(생성 재전달) 또는 같은 키가 다른 요청의 원 작업
+    VMSpecConflict = "VMSpecConflict"
     VMNameConflict = "VMNameConflict"  # 409 플랫폼 VM_NAME_CONFLICT: 다른 VM 과 내부 이름·UUID 예약·MAC 이 겹침. 생성 성공이 아니다
     InsufficientResources = "InsufficientResources"
     InvalidState = "InvalidState"  # 현재 생명주기에서 수행할 수 없음 (실행 중 VM 의 DELETE, 플랫폼 VM_NOT_STOPPED 등)
@@ -133,7 +134,7 @@ class ControlOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vm_id: UUID
-    action: str = Field(description="stop 또는 reboot")
+    action: str = Field(description="start, stop 또는 reboot")
     request_key: str | None = Field(default=None, description="최초 제출 전에 호출자가 정한 Idempotency-Key")
     operation_id: UUID | None = Field(default=None, description="하위 원 제어 작업. 수락 전 거절·작업 기록 없는 드라이버면 null")
     status: ControlStatus
@@ -149,6 +150,50 @@ class ControlOperation(BaseModel):
     warnings: list[str] = Field(default_factory=list, description="진단 경고 코드(DIAGNOSTIC_UNAVAILABLE 등). 결과를 바꾸지 않는다")
 
 
+VmOperationAction = Literal["create", "start", "stop", "retire"]
+
+
+class VmLifecycle(BaseModel):
+    """등록 수명 조회. 현재 Xen 실행 상태와 독립적이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm_id: UUID
+    lifecycle: Literal["REGISTERED", "RETIRED", "PURGING", "PURGED"]
+    generation: int = Field(ge=0)
+
+
+VmOperationStage = Literal[
+    "preflight", "acceptance", "asset_preparation", "registration", "network_apply",
+    "start_prepare", "start_submit", "start_confirmation", "shutdown_submit", "shutdown_confirmation",
+    "archive_move", "archive_commit", "completion",
+]
+
+
+class VmOperationResult(BaseModel):
+    """실패 응답과 원 작업 조회에 쓰는 제한된 관측값."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: VmOperationAction
+    stage: VmOperationStage | None = None
+    accepted: bool | None = None
+    status: ControlStatus
+    operation_id: UUID | None = None
+    next_action: Literal["fix_request", "check_current_vm", "lookup_original", "reconcile_original"] | None = None
+    platform_code: str | None = None
+    start_submitted: Literal[False] | None = Field(
+        default=None, description="이 HTTP 호출에서 시작 미제출이 확인되면 false. 그 외에는 생략",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unobserved_start(self, handler):
+        result = handler(self)
+        if self.start_submitted is None:
+            result.pop("start_submitted", None)
+        return result
+
+
 class Error(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -162,6 +207,7 @@ class Error(BaseModel):
     )
     retryable: bool | None = Field(default=None, description="플랫폼이 준 원본 재시도 가능 여부. 코드만으로 재시도 정책을 만들지 않는다")
     operation: ControlOperation | None = Field(default=None, description="제어 요청이 받아들여진 뒤의 오류에만 있다. 원 작업 문맥")
+    context: VmOperationResult | None = Field(default=None, description="생성·시작·정지·보관 실패에서 확인한 작업 문맥")
 
 
 class HealthStatus(str, Enum):

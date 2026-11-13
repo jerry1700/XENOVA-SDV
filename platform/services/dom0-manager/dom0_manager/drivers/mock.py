@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from ..errors import DriverTimeout, InsufficientResources, InvalidArgument, InvalidState, VMExists, VMNotFound
-from ..models import ResourceUpdate, VmResources, VmState
+from ..errors import DriverTimeout, InsufficientResources, InvalidArgument, InvalidState, VMExists, VMNotFound, VMSpecConflict
+from ..models import CreateVmRequest, ResourceUpdate, VmResources, VmState
 from .base import CreateSpec, Domain, DomainStats, Driver, HostInfo, InstancePaths, Provisioner, StatsSample
 
 SAMPLE_VMS: dict[str, tuple[UUID, int, int]] = {
@@ -65,10 +65,23 @@ class MockProvisioner(Provisioner):
     def ensure_instance(
         self, vm_id: UUID, template_id: str, template_version: str, *, name: str, vcpus: int, memory_mib: int
     ) -> InstancePaths:
+        requested = _MockInstance(template_id, template_version, vcpus, memory_mib)
         with self._lock:
-            self._instances.setdefault(vm_id, _MockInstance(template_id, template_version, vcpus, memory_mib))
+            self._require_matching_spec(vm_id, requested)
+            self._instances.setdefault(vm_id, requested)
         root = Path("/mock/instances") / str(vm_id)
         return InstancePaths(vm_id=vm_id, root=root, kernel=root / "Image", ramdisk=root / "initrd", disk=root / "root.raw")
+
+    def check_existing_spec(self, request: CreateVmRequest) -> None:
+        with self._lock:
+            self._require_matching_spec(request.vm_id, _MockInstance(
+                request.template_id, request.template_version, request.vcpus, request.memory_mib,
+            ))
+
+    def _require_matching_spec(self, vm_id: UUID, requested: _MockInstance) -> None:
+        existing = self._instances.get(vm_id)
+        if existing is not None and existing != requested:
+            raise VMSpecConflict(f"vm {vm_id} is registered with a different spec")
 
     def instance_exists(self, vm_id: UUID) -> bool:
         return vm_id in self._instances

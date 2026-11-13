@@ -87,7 +87,7 @@ def test_error_body_fields_match(client):
     contract = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))["components"]["schemas"]["Error"]
     actual = client.app.openapi()["components"]["schemas"]["Error"]
     assert set(actual["properties"]) == set(contract["properties"]) == {
-        "code", "message", "detail", "resource", "platform_code", "retryable", "operation"}
+        "code", "message", "detail", "resource", "platform_code", "retryable", "operation", "context"}
     assert set(actual["required"]) == set(contract["required"]) == {"code", "message"}
     assert contract["properties"]["platform_code"]["type"] == ["string", "null"]
     live = actual["properties"]["platform_code"]
@@ -101,6 +101,20 @@ def test_control_operation_schema_matches(client):
     assert actual["ControlStatus"]["enum"] == contract["ControlStatus"]["enum"]
     assert set(actual["ControlOperation"]["properties"]) == set(contract["ControlOperation"]["properties"])
     assert set(actual["ControlOperation"]["required"]) == set(contract["ControlOperation"]["required"])
+
+
+def test_vm_operation_result_schema_matches(client):
+    contract = yaml.safe_load(CONTRACT.read_text(encoding="utf-8"))["components"]["schemas"]["VmOperationResult"]
+    actual = client.app.openapi()["components"]["schemas"]["VmOperationResult"]
+    assert set(actual["properties"]) == set(contract["properties"])
+    assert set(actual["required"]) == set(contract["required"])
+    assert actual["additionalProperties"] is False and contract["additionalProperties"] is False
+    for name in ("action", "stage", "next_action"):
+        field = actual["properties"][name]
+        values = set(field.get("enum", []))
+        for member in field.get("anyOf", []):
+            values.update(member.get("enum", [None] if member.get("type") == "null" else []))
+        assert values == set(contract["properties"][name]["enum"])
 
 
 def test_cpu_layout_schemas_match(client):
