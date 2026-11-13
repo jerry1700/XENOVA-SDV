@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xenova.backend.sim.application.SimCommandService;
 import com.xenova.backend.sim.application.SimStateTracker;
+import com.xenova.backend.testsupport.MqttTestClients;
 import io.moquette.broker.Server;
 import io.moquette.broker.config.MemoryConfig;
 import java.io.IOException;
@@ -85,14 +86,13 @@ class SimRelayIntegrationTest {
 
     @BeforeEach
     void connectFakeSimulator() throws Exception {
-        fake = new MqttClient("tcp://127.0.0.1:" + MQTT_PORT, "fake-simulator", new MemoryPersistence());
+        fake = new MqttClient("tcp://127.0.0.1:" + MQTT_PORT, MqttTestClients.uniqueId("fake-simulator"), new MemoryPersistence());
         fake.connect();
     }
 
     @AfterEach
-    void disconnectFakeSimulator() throws Exception {
-        fake.disconnect();
-        fake.close();
+    void disconnectFakeSimulator() {
+        MqttTestClients.closeQuietly(fake);
     }
 
     @AfterAll
