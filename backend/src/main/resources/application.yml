@@ -57,8 +57,6 @@ xenova:
     access-token-ttl: ${ACCESS_TOKEN_TTL:15m}
     refresh-token-ttl: ${REFRESH_TOKEN_TTL:7d}
     refresh-cookie-secure: ${AUTH_COOKIE_SECURE:false}
-    max-login-attempts: ${MAX_LOGIN_ATTEMPTS:5}
-    login-attempt-window: ${LOGIN_ATTEMPT_WINDOW:5m}
   # 템플릿 버전은 여기서 정하지 않는다. 보드 카탈로그(dom0-manager GET /api/v1/templates)에서 읽고,
   # 위저드에는 template-id별 최신 버전만 보인다. 여기에는 보드 카탈로그에 없는 표시 이름·최소 메모리만 둔다.
   # - 보드에 있어도 여기에 없는 template-id는 위저드에 보이지 않는다. 여기에 있어도 보드에 없으면 보이지 않는다.
