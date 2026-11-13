@@ -136,6 +136,8 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 개발용 `mapper-profile.json`에 기록한다. 이 프로필은 R45 재생 결과를 바탕으로 `pipeline.registration.max_position_error_m`에 `0.065`m를 적용한다. 같은 개발 시험에 기존 mapper 프로필을 재사용할 때도 세 값을 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
 
+R45 실측 코스 설정은 폭 21cm·길이 38cm·축간거리 18cm·카메라 높이 14cm를 사용한다. 같은 설정에서 Jetson의 차체 보정과 Pi C 주행 프로필을 생성한다. 앞뒤 차체 돌출이 대칭이라고 가정한 개발 프로필에서 후륜축부터 앞단은 28cm, 뒤단은 10cm다.
+
 `pipeline.registration`의 오차 한도는 차량 위치·방향 판정에 쓰인다. `pipeline.road_geometry_limits`의 `max_position_error_m`·`max_yaw_error_rad`는 지도 차로 형상과 주차 접근 차로를 채택할 때 쓰인다. 항목을 생략한 기존 프로필은 이전과 같은 값을 사용하고 체크포인트 식별자도 유지한다.
 
 `pipeline.visual_registration`에서 단일 영상 보정의 이동·회전 허용치와 누적 지도 정합을 시도하는 조건을 조정할 수 있다. 기본값은 각각 1cm·0.01rad, 재방문 검사 시점은 위치 또는 방향 오차 상한의 65%다. 누적 지도 정합은 최대 1,024개 셀까지 사용하며, 모든 정합 후보는 `pipeline.registration`의 프레임당 셀·거리 비교 예산을 공유한다.

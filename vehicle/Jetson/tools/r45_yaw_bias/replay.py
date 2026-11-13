@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 import math
+from pathlib import Path
 import socket
 from uuid import UUID
 
@@ -30,9 +31,8 @@ from xenova_vehicle.transport.sensor_samples import SensorContext, SensorSamples
 DRIVE_STEP_US = 20_000
 CAMERA_EVERY_STEPS = 10
 CAPTURE_START_US = 97 * 250_000
-CAMERA_HEIGHT_M = .14
-BODY_LENGTH_M = .38
-BODY_WIDTH_M = .21
+MEASURED_GEOMETRY = (Path(__file__).resolve().parents[4]
+                     / 'platform/apps/simulator/tools/jetson-course-measured.json')
 
 
 class EncoderReplay:
@@ -45,6 +45,7 @@ class EncoderReplay:
         self.sent, self.accepted, self.probes = 0, 0, 0
         odometry = dict(profile['odometry'])
         odometry['maximum_speed_mps'] = wheel_speed_limit_mps
+        odometry['wheelbase_m'] = calibration.body.wheelbase
         self.odom = VehicleOdometry(OdometryConfig(
             vehicle='rc-sim-01', calibration=bundle, **odometry,
             **{name: encoder[name] for name in ('metres_per_tick', 'metres_per_tick_upper',
@@ -237,22 +238,23 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
         raise ValueError('mapper and calibration disagree')
     eeprom = dict(json.loads(rgb_eeprom.read_bytes())['cameraData'])[0]
     geometry = full_sensor_rgb_geometry((eeprom['intrinsicMatrix'],eeprom['width'],eeprom['height']))
+    measured = json.loads(MEASURED_GEOMETRY.read_bytes())
     fields = calibration.to_dict()
-    height_delta = CAMERA_HEIGHT_M - calibration.rgb.translation[2]
+    height_delta = measured['camera_height_m'] - calibration.rgb.translation[2]
     for sensor in ('rgb','right'):
         translation = list(fields[sensor]['translation'])
         translation[2] += height_delta
         fields[sensor]['translation'] = translation
-    body = fields['body']
-    length_delta = BODY_LENGTH_M - body['length']
-    body.update(length=BODY_LENGTH_M,width=BODY_WIDTH_M,
-        front=body['front']+length_delta/2,rear=body['rear']+length_delta/2)
+    length, width, wheelbase = (measured[k] for k in ('vehicle_length_m','vehicle_width_m','wheelbase_m'))
+    fields['body'].update(length=length,width=width,wheelbase=wheelbase,
+        front=(length+wheelbase)/2,rear=(length-wheelbase)/2)
     fields['rgb'].update(k=geometry['k'],roi=geometry['roi'])
     calibration = CalibrationProfile.from_dict(fields)
     scene_fields = Scene(scene_path.read_bytes()).fields
     layout = scene_fields['track']['layout']
-    layout['camera']['height_m'] = CAMERA_HEIGHT_M
-    layout['vehicle'].update(length_m=BODY_LENGTH_M,width_m=BODY_WIDTH_M)
+    layout['camera']['height_m'] = measured['camera_height_m']
+    layout['vehicle'].update(length_m=length,width_m=width,wheelbase_m=wheelbase,
+        min_turn_radius_m=wheelbase/math.tan(math.radians(measured['max_steer_deg'])))
     scene = Scene(canonical(scene_fields))
     camera = SyntheticCamera(calibration)
     # Use the existing operational localization gate on development-generated samples.

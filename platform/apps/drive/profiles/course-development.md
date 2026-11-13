@@ -21,12 +21,12 @@ RPi 주행 앱 입력이다. `kind=test`이며 실차 측정·장치 승인·주
 코스 생성기는 `platform/apps/simulator/tools/jetson-course-geometry.json`에서 한 차로의
 폭, 차체 길이·폭, 축간거리, 카메라 높이를 m 단위로 읽는다. 차로 폭을 바꾸면 양쪽 차로를 포함한
 도로 폭과 분리선·주차장 연결·콘 좌표를 함께 계산한다. 차체 길이로 뒤 차축 기준
-출발점을 다시 계산한다. 축간거리 20cm와 앞뒤 돌출 대칭 조건에서는 길이 38cm가 뒤 차축에서
-앞 29cm·뒤 9cm와 일치한다.
+출발점을 다시 계산한다. 축간거리 18cm와 앞뒤 돌출 대칭 조건에서는 길이 38cm가 뒤 차축에서
+앞 28cm·뒤 10cm와 일치한다.
 
 차체 폭 21cm·길이 38cm, 카메라 높이 14cm, 좌우 최대 조향각 ±40°, 흰 테이프 폭
 12mm는 `jetson-course-measured.json`에 기록했다. 합성 자전거 모델은 그 각도와
-축간거리 20cm에서 뒤 차축 최소 회전반경 약 23.8cm를 계산한다. 실차의 좌우
+축간거리 18cm에서 뒤 차축 최소 회전반경 약 21.5cm를 계산한다. 실차의 좌우
 조향 보정에는 각 명령에서 실제 뒤 차축 회전반경을 쓴다. 테이프 폭은 코스의
 물리 치수이며, 차체 겹침 허용량은 Pi 차로 검사에서 별도로 다룬다.
 기존 코스 파일을 기준으로 만든 Scene은 원 SHA에 결합되므로, 측정값 시험은 별도 출력으로 만든다.
@@ -144,7 +144,8 @@ python3 -B platform/scripts/package-xenova-drive-template.py \
 선택 primitive TU를 검사한다. 포장에는 실제 ARM `BUILD_RECEIPT.json`과 payload가
 필요하다. development template은 `xenova-zephyr-drive-development-1.0.0` /
 `zephyr-drive-development-arm64`이며 새 release version을 명시해야 한다.
-`--development-bundle`을 생략하면 기존 저장소 입력이 선택된다.
+R45 실측 치수의 18cm 축간거리를 적용하려면 위 절차에서 생성한 번들을
+`--development-bundle`로 지정한다. 이 옵션을 생략하면 기본 개발 입력이 선택된다.
 
 이 선택은 기본 LAB release `1.0.8`, factory/seed/VM 설정을 자동 변경하지 않는다.
 실제 포장 결과의 manifest/firmware SHA로 A/B asset·seed·release 선택을 갱신하고
