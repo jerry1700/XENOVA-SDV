@@ -4,6 +4,7 @@ import { publisherObservation } from '../domain/telemetryPublisher';
 import { VM_IDS } from '../mocks/data';
 import { mockTelemetryHeartbeat } from '../mocks/telemetryHeartbeat';
 import {
+  agoWhole,
   collectorBadgeLabel,
   collectorTooltip,
   heartbeatCount,
@@ -64,5 +65,22 @@ describe('수집 상태 툴팁', () => {
     expect(heartbeatCount(2 ** 53)).toBe('표시 범위 초과');
     expect(heartbeatCount(null)).toBe('—');
     expect(heartbeatCount(undefined)).toBe('—');
+  });
+});
+
+describe('VM 상세 수집기 경과 시간', () => {
+  it('1초 미만은 "방금", 그 이상은 소수점 없이 정수 초·분으로 쓴다', () => {
+    expect(agoWhole(0)).toBe('방금');
+    expect(agoWhole(600)).toBe('방금');
+    expect(agoWhole(1_000)).toBe('1초 전');
+    expect(agoWhole(10_400)).toBe('10초 전');
+    expect(agoWhole(112_000)).toBe('1분 전');
+  });
+
+  it('마지막 수집 성공도 같은 형식으로 바꿀 수 있고, 기본값(Network 탭 툴팁)은 그대로다', () => {
+    const report = { ...mockTelemetryHeartbeat(VM_IDS.autonomous, NOW), last_collection_success_age_ms: 400 };
+    const received = Date.parse(report.received_at!);
+    expect(lastCollectionSuccess(report, received, agoWhole)).toBe('방금');
+    expect(lastCollectionSuccess(report, received)).toBe('0.4초 전');
   });
 });

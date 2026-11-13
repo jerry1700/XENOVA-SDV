@@ -466,7 +466,7 @@ export function VmCreatePage() {
   );
 }
 
-/** 백엔드는 dom0-manager 응답을 command-timeout(15m)까지 기다린 뒤 504 VM_CONTROL_TIMEOUT으로 끝낸다 */
+/** 백엔드는 dom0-manager 응답을 command-timeout(20m)까지 기다린 뒤 504 VM_CONTROL_TIMEOUT으로 끝낸다 */
 function isCreationTimeout(error: ApiError): boolean {
   return error.code === 'VM_CONTROL_TIMEOUT' || error.status === 504;
 }

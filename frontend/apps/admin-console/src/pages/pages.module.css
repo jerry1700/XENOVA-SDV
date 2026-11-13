@@ -434,11 +434,6 @@
   border-radius: 4px;
   display: inline-block;
 }
-.linkList {
-  margin: 0;
-  padding-left: var(--x-space-5);
-  line-height: 2;
-}
 .pad {
   display: grid;
   grid-template-columns: repeat(3, 64px);
@@ -654,18 +649,6 @@ button.chip:hover:not(.chipOn) {
   display: block;
   height: 100%;
   background: var(--accent, var(--x-primary));
-}
-.eventRow {
-  display: grid;
-  grid-template-columns: 110px 90px 110px 130px 1fr;
-  gap: var(--x-space-3);
-  align-items: start;
-  padding: var(--x-space-3);
-  border-bottom: 1px solid var(--x-border);
-  font-size: var(--x-text-sm);
-}
-.eventRow:hover {
-  background: var(--x-surface-2);
 }
 .sev {
   display: inline-block;
@@ -1158,15 +1141,35 @@ button.chip:hover:not(.chipOn) {
   background: var(--vm-accent);
   content: '';
 }
-.vmCard[href]:hover,
-.vmCard[href]:focus-visible {
+.vmCard[data-linked] {
+  cursor: pointer;
+}
+.vmCard[data-linked]:hover,
+.vmCard[data-linked]:has(.vmCardTitleLink:focus-visible) {
   border-color: color-mix(in srgb, var(--vm-accent) 62%, var(--x-border));
   box-shadow: 0 18px 38px rgb(2 7 14 / 34%);
   transform: translateY(-3px);
 }
-.vmCard[href]:focus-visible {
+/* 키보드 초점은 제목 링크가 받고, 테두리는 카드 전체에 그린다 (예전 카드 링크와 같은 모양) */
+.vmCard[data-linked]:has(.vmCardTitleLink:focus-visible) {
   outline: 2px solid var(--x-primary);
   outline-offset: 3px;
+}
+.vmCardTitleLink {
+  color: inherit;
+  text-decoration: none;
+}
+.vmCardTitleLink:focus-visible {
+  outline: none;
+}
+.vmCardEventLink {
+  color: inherit;
+  text-decoration: none;
+}
+.vmCardEventLink:hover,
+.vmCardEventLink:focus-visible {
+  color: var(--x-text);
+  text-decoration: underline;
 }
 .vmCardMissing {
   opacity: 0.72;
@@ -1373,12 +1376,29 @@ button.chip:hover:not(.chipOn) {
   height: auto;
   border-top: 4px solid var(--vm-accent);
 }
+/*
+ * 카드 머리(@xenova/ui Card: header > h3 제목 · div 오른쪽 영역). 공용 Card는 그대로 두고 여기서만:
+ * 제목 쪽이 줄어들며 부제가 말줄임 되고, 오른쪽(권한 배지·마지막 갱신)은 줄지 않아 "N초 전"이 한 줄로 남는다.
+ */
+.memoryVmCard > header > h3 {
+  min-width: 0;
+}
+.memoryVmCard > header > div {
+  flex: none;
+}
 .memoryVmTitle {
   display: grid;
   gap: 3px;
+  min-width: 0;
 }
 .memoryVmTitle strong {
   font-size: var(--x-text-lg);
+}
+.memoryVmTitle strong,
+.memoryVmTitle small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .memoryVmTitle small,
 .memoryCardActions small {
@@ -1386,16 +1406,13 @@ button.chip:hover:not(.chipOn) {
   font-size: var(--x-text-xs);
   font-weight: 500;
 }
+.memoryCardActions small {
+  white-space: nowrap;
+}
 .memoryCardActions {
   display: grid;
   justify-items: end;
   gap: 4px;
-}
-.publisherStatus {
-  margin-bottom: var(--x-space-3);
-}
-.publisherStatus strong {
-  font-weight: 600;
 }
 .memoryNotice {
   margin-bottom: var(--x-space-3);
@@ -1683,141 +1700,603 @@ button.chip:hover:not(.chipOn) {
 /* ---- S15P31E110-299 관측 중심 VM 상세 ---- */
 .vmDetailPage {
   display: grid;
-  gap: var(--x-space-4);
+  /* 간격은 VM Control 상세(controlDetailPage)와 같게, 폭 제한은 유지 */
+  gap: var(--x-space-5);
   max-width: 1500px;
   margin: 0 auto;
 }
-.vmDetailHero {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--x-space-5);
-  padding: var(--x-space-5);
-  overflow: hidden;
-  border: 1px solid var(--x-border);
-  border-radius: 16px;
-  background: var(--x-surface);
-}
-.vmDetailHero::before {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 4px;
-  background: var(--vm-accent);
-  content: '';
-}
-.vmDetailHero h1 {
-  margin: 6px 0 0;
-  font-size: clamp(34px, 4vw, 52px);
-  letter-spacing: -0.04em;
-}
-.vmDetailHero p {
-  margin: 4px 0 0;
-  color: var(--x-text-muted);
-}
-.vmDetailBadges {
+/* 머리말은 VM Control 상세 클래스를 그대로 쓰고, 제목 옆 제어권 배지 줄만 따로 둔다 */
+.detailTitleRow {
+  /* 제목 크기는 VM Control 상세(controlDetailHero h1)와 같은 값. 배지 보정에도 쓴다 */
+  --detail-title-size: clamp(34px, 4vw, 52px);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
-  gap: var(--x-space-2);
+  gap: var(--x-space-1) var(--x-space-3);
+  max-width: 100%;
+  /* h1 의 위아래 여백을 줄로 옮겨, 줄 높이 = 제목 글자 높이 */
+  margin: var(--x-space-2) 0 var(--x-space-1);
+}
+.detailTitleRow h1 {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--detail-title-size);
+  line-height: 1;
+}
+/* 배지 가운데를 제목 소문자(x-height) 가운데에 맞추는 보정.
+   line-height 1 줄에서 x-height 가운데는 줄 가운데보다 제목 크기의 약 0.17배 아래 (헤드리스 Chrome 실측, 34·52px 모두 1px 이내) */
+.detailTitleRow > [data-authority] {
+  position: relative;
+  top: calc(var(--detail-title-size) * 0.17);
 }
 .vmDetailGrid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--x-space-4);
 }
-.resourceFacts {
+/* VM 상세 정보 목록: 라벨 고정 폭 열 + 값 왼쪽 정렬, 행 사이 얇은 구분선.
+   값은 일반 글꼴, 기술 값(ID·템플릿·버전·시각·숫자)만 data-mono 로 고정폭 */
+.detailFacts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--x-space-2);
-  margin-bottom: var(--x-space-4);
 }
-.resourceFacts > div {
+.detailFacts > div {
   display: grid;
-  gap: 4px;
+  grid-template-columns: calc(var(--x-space-6) * 4) minmax(0, 1fr);
+  gap: var(--x-space-3);
+  align-items: baseline;
+  padding: var(--x-space-2) 0;
+  border-bottom: 1px solid var(--x-border);
+  font-size: var(--x-text-sm);
+}
+.detailFacts > div:last-child {
+  border-bottom: 0;
+}
+.detailFacts > div > span:first-child {
+  color: var(--x-text-muted);
+}
+.detailFacts > div > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.detailFacts [data-mono] {
+  font-family: var(--x-font-mono);
+}
+/* VM 상세 타일 (운영 상태·구성 공통): 옅은 배경 + 작은 회색 라벨(위) + 큰 값(아래).
+   한글 문구는 일반 글꼴, 숫자·ID·버전만 data-mono 로 고정폭 */
+.detailTiles {
+  display: grid;
+  grid-template-columns: repeat(var(--tile-cols, 2), minmax(0, 1fr));
+  gap: var(--x-space-2);
+}
+.detailTiles[data-cols='3'] {
+  --tile-cols: 3;
+}
+.detailTiles > div {
+  display: grid;
+  align-content: start;
+  gap: var(--x-space-1);
   min-width: 0;
   padding: var(--x-space-3);
   border-radius: var(--x-radius-sm);
   background: var(--x-surface-2);
 }
-.resourceFacts span {
+/* 글꼴(고정폭·일반)에 따라 줄 높이가 달라지지 않게 라벨·값 줄 높이를 간격 토큰으로 고정 → 모든 타일 같은 높이 */
+.detailTiles > div > span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  line-height: var(--x-space-4);
+}
+.detailTiles > div > span small {
+  font-size: var(--x-text-xs);
+}
+.detailTiles > div > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  /* 라벨(xs)보다 크고 카드 제목(md)보다 작게. 두 카드 타일 공통 */
+  font-size: var(--x-text-sm);
+  font-weight: 700;
+  line-height: var(--x-space-5);
+}
+.detailTiles .statusDot {
+  display: flex;
+}
+.detailTiles > div > strong[data-mono] {
+  font-family: var(--x-font-mono);
+}
+/* 단위(MiB)가 줄 높이를 키우지 않게 */
+.detailTiles > div > strong small {
+  line-height: 0;
+  margin-left: var(--x-space-1);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+/* 타일 아래 정보 목록은 타일과 간격을 둔다 */
+.detailTiles + .detailFacts {
+  margin-top: var(--x-space-3);
+}
+/* 상태 색 점 + 문구: 점만 색이 바뀐다 */
+.statusDot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--x-space-2);
+}
+.statusDot > i {
+  width: var(--x-space-2);
+  height: var(--x-space-2);
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--x-text-muted);
+}
+.statusDot[data-tone='ok'] > i {
+  background: var(--x-ok);
+}
+.statusDot[data-tone='warning'] > i {
+  background: var(--x-recovering);
+}
+.statusDot[data-tone='fault'] > i {
+  background: var(--x-fault);
+}
+/* 수집기·Agent 한 줄 요약 */
+.collectorLine {
+  display: grid;
+  gap: var(--x-space-1);
+  margin-top: var(--x-space-3);
+  padding-top: var(--x-space-3);
+  border-top: 1px solid var(--x-border);
+  font-size: var(--x-text-sm);
+}
+.collectorLine + .collectorLine {
+  margin-top: 0;
+  padding-top: var(--x-space-2);
+  border-top: 0;
+}
+.collectorTitle {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+}
+.collectorLine > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--x-space-1) var(--x-space-3);
+}
+.collectorLine > small {
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
 }
-.resourceFacts strong {
+/* 앱 상태 대체 표시의 출처 줄 (heartbeat 기준 · 단계 미수신) */
+.detailTiles > div > strong .detailTileNote {
+  display: block;
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+  line-height: var(--x-space-4);
+}
+/* ---- S15P31E110-438 VM 상세 CPU·메모리 추이 (Network 탭 RxTxChart 를 선 하나로) ---- */
+.detailCharts {
+  /* 선 색은 Network 탭(NetworkDashboard 의 --rx-accent)과 같게 */
+  --rx-accent: var(--x-primary);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-3);
+}
+.detailCharts > section {
+  min-width: 0;
+  margin-top: 0;
+}
+/* 카드 안 빈 공간을 그래프가 쓰게 Network 탭보다 높게 */
+.detailCharts .memoryChart {
+  min-height: calc(var(--x-space-6) * 7);
+}
+.detailCharts .memoryChart svg,
+.detailCharts .memoryChartEmpty {
+  height: calc(var(--x-space-6) * 6);
+  min-height: 0;
+}
+/* 머리 한 줄: 이름 + 현재 값(큰 숫자 + 작은 단위) + 보조 문구 */
+.memoryChartBlock > header[data-summary] {
+  justify-content: flex-start;
+  align-items: baseline;
+  min-width: 0;
+}
+/* 좁은 화면에서도 머리 한 줄 유지 (세 그래프 높이 동일): 이름은 줄바꿈 없이, 보조 문구만 말줄임 */
+.memoryChartBlock > header[data-summary] > strong {
+  flex: none;
+  white-space: nowrap;
+}
+.detailChartSummary {
+  display: flex;
+  flex: 1 1 auto;
   overflow: hidden;
-  font-family: var(--x-font-mono);
+  min-width: 0;
+  align-items: baseline;
+  gap: var(--x-space-1);
+}
+.detailChartSummary > b {
   font-size: var(--x-text-lg);
+  font-weight: 800;
+}
+.detailChartSummary > b[data-mono] {
+  font-family: var(--x-font-mono);
+}
+.detailChartSummary > small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.detailChartSummary > .detailChartNote {
+  overflow: hidden;
+  min-width: 0;
+  margin-left: var(--x-space-2);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.resourceFacts small {
+.detailChartNote[data-warn] {
+  color: var(--x-recovering);
+}
+/* ---- S15P31E110-438 VM 상세 프로세스·스레드 표: Memory 탭 막대 행 모양 (공용 .table 과 별개) ---- */
+/* 표 위 상태 줄: 한 줄 높이 고정 (경고가 늘어도 표 영역이 밀리지 않게, 넘치면 잘리고 개수는 맨 앞) */
+.detailTableStatus {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--x-space-3);
+  height: var(--x-space-4);
+  margin: 0 0 var(--x-space-2);
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  line-height: var(--x-space-4);
+  white-space: nowrap;
+}
+.detailTableStatus > span {
+  flex: none;
+}
+.detailTableStatus [data-warn] {
+  color: var(--x-recovering);
+}
+/* 표 영역: 행 높이를 변수로 고정하고, 접힌 상태 최소 높이 = (표 머리 + VISIBLE_ROWS) 행.
+   --table-rows 는 컴포넌트가 VISIBLE_ROWS + 1 로 넘긴다. 불러오는 중·오류·보고 없음 문구는 이 안 위쪽에 */
+.detailTableFrame {
+  --table-row-h: calc(var(--x-space-2) * 2 + var(--x-space-5));
+  min-height: calc(var(--table-rows) * (var(--table-row-h) + 1px));
+}
+.detailTableFrame > p {
+  margin: 0;
+  padding: var(--x-space-2) 0;
+}
+.detailTableFrame .detailTable tr {
+  height: var(--table-row-h);
+}
+.detailTableFrame .detailTable th,
+.detailTableFrame .detailTable td {
+  line-height: var(--x-space-5);
+}
+/* [이름] [ID·PID] [CPU %] [짧은 CPU 막대] ([메모리 RSS]) — 고정 열 폭(table-layout: fixed)이라 값 길이에 따라 열이 흔들리지 않는다.
+   열을 왼쪽에 모아 한 줄이 한 덩어리로 읽히게, 남는 폭은 오른쪽 */
+.detailTable {
+  width: auto;
+  max-width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--x-text-sm);
+}
+/* 열 사이 간격은 모두 --x-space-4 (각 칸 오른쪽 여백). CPU % 와 막대는 한 덩어리라 그 사이만 --x-space-2.
+   열 폭은 그 여백을 포함한다 */
+.detailNameCol {
+  width: calc(var(--x-space-6) * 7);
+}
+/* PID 최대 7자리(작은 고정폭)가 들어가는 폭 */
+.detailIdCol {
+  width: calc(var(--x-space-6) * 2 + var(--x-space-2));
+}
+.detailValueCol {
+  width: calc(var(--x-space-6) * 2);
+}
+.detailBarCol {
+  width: calc(var(--x-space-6) * 6 + var(--x-space-4));
+}
+.detailRssCol {
+  width: calc(var(--x-space-6) * 3);
+}
+.detailTable th,
+.detailTable td {
+  padding: var(--x-space-2) var(--x-space-4) var(--x-space-2) 0;
+  border-bottom: 1px solid var(--x-border);
+  text-align: left;
+  white-space: nowrap;
+}
+.detailTable [data-cpu] {
+  padding-right: var(--x-space-2);
+}
+.detailTable th:last-child,
+.detailTable td:last-child {
+  padding-right: 0;
+}
+.detailTable th {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 600;
+}
+/* 이름이 길면 말줄임 (전체 이름은 title) */
+.detailTable td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* ID·PID: 제목과 값 모두 가운데, 값은 작은 회색 고정폭 */
+.detailTable [data-id] {
+  text-align: center;
+}
+.detailTable td[data-id] {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+}
+/* CPU %·메모리: 제목과 값의 시작점(왼쪽)을 맞춘다. 자릿수 폭 고정 */
+.detailTable [data-num] {
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.detailTable td[data-num] {
+  font-family: var(--x-font-mono);
+}
+/* 숫자 바로 뒤 막대: 왼쪽 여백 없이 붙인다 */
+.detailTable .detailBarCell {
+  vertical-align: middle;
+}
+.detailBarCell > span {
+  display: block;
+  width: calc(var(--x-space-6) * 6);
+}
+.detailTableMore {
+  margin-top: var(--x-space-2);
+  padding: var(--x-space-1) var(--x-space-2);
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: transparent;
+  color: var(--x-text-muted);
+  font: inherit;
+  font-size: var(--x-text-xs);
+  cursor: pointer;
+}
+.detailTableMore:hover,
+.detailTableMore:focus-visible {
+  color: var(--x-text);
+}
+/* VM 상세 이벤트: 한 줄 [시각] [심각도 점 + 종류] [내용], 고정 열이라 모든 행의 시작점이 같다 */
+.detailEvents {
+  display: grid;
+  font-size: var(--x-text-sm);
+}
+.detailEventRow {
+  display: grid;
+  /* 시각 | 상태(경고·오류 글자) | 내용 (종류·보조 글은 title 툴팁) */
+  grid-template-columns: calc(var(--x-space-6) * 2 + var(--x-space-3)) var(--x-space-6) minmax(0, 1fr);
+  gap: var(--x-space-3);
+  align-items: baseline;
+  padding: var(--x-space-2) 0;
+  border-bottom: 1px solid var(--x-border);
+}
+.detailEventRow:last-of-type {
+  border-bottom: 0;
+}
+.detailEventRow > time {
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.detailEventText {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 이벤트 화면: 시각 | 상태 | 대상 | 내용, 시각은 밀리초까지 (S15P31E110-462) */
+.detailEventRow[data-target] {
+  grid-template-columns:
+    calc(var(--x-space-6) * 3 + var(--x-space-3)) var(--x-space-6) calc(var(--x-space-6) * 4)
+    minmax(0, 1fr);
+}
+/* 열 제목 줄: 작은 회색, 행과 같은 grid */
+.detailEventRow[data-head] {
+  padding-top: 0;
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
 }
-.detailEvents {
-  display: grid;
+/* 상태: 경고·오류만 작은 색 글자, 정보는 빈 칸 */
+.eventSeverity {
+  font-size: var(--x-text-xs);
+  font-weight: 600;
+  white-space: nowrap;
 }
-.detailEvents > div {
-  display: grid;
-  grid-template-columns: 90px 82px minmax(0, 1fr);
-  gap: var(--x-space-3);
-  align-items: start;
-  padding: var(--x-space-3) 0;
+.eventSeverity[data-tone='warning'] {
+  color: var(--x-recovering);
+}
+.eventSeverity[data-tone='error'] {
+  color: var(--x-fault);
+}
+/* 좁은 폭: 내용 열이 0 으로 줄어 안 보이지 않게 내용을 다음 줄 전체 폭으로 (말줄임, 전체는 title) */
+@media (max-width: 720px) {
+  .detailEventRow[data-target] {
+    grid-template-columns:
+      calc(var(--x-space-6) * 3 + var(--x-space-3)) var(--x-space-6)
+      minmax(0, 1fr);
+    row-gap: var(--x-space-1);
+  }
+  .detailEventRow[data-target] > .detailEventText,
+  .detailEventRow[data-target] > span:last-child {
+    grid-column: 1 / -1;
+  }
+}
+.eventTarget {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.eventTarget > i,
+.eventChip > i {
+  position: relative;
+  top: calc(var(--x-space-1) / -2);
+  display: inline-block;
+  width: var(--x-space-2);
+  height: var(--x-space-2);
+  margin-right: var(--x-space-2);
+  border-radius: 50%;
+  /* VM 역할색은 --dot 으로 받는다 (없으면 회색) */
+  background: var(--dot, var(--x-text-muted));
+  vertical-align: middle;
+}
+.eventDay {
+  margin: 0;
+  padding: var(--x-space-3) 0 var(--x-space-1);
   border-bottom: 1px solid var(--x-border);
-}
-.detailEvents > div:last-child {
-  border-bottom: 0;
-}
-.detailEvents > div > div {
-  display: grid;
-  gap: 3px;
-}
-.detailEvents small {
   color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-variant-numeric: tabular-nums;
 }
-.controlHandoff {
-  display: flex;
+.eventDay:first-child {
+  padding-top: 0;
+}
+/* 필터 세 줄: 라벨 열 너비·칩 높이·간격 통일, 일반 글꼴 */
+.eventFilters {
+  display: grid;
+  grid-template-columns: calc(var(--x-space-6) * 2) minmax(0, 1fr);
+  gap: var(--x-space-1) var(--x-space-3);
   align-items: center;
-  justify-content: space-between;
-  gap: var(--x-space-4);
-  padding: var(--x-space-4) var(--x-space-5);
-  border: 1px solid var(--x-border);
-  border-radius: var(--x-radius);
-  background: color-mix(in srgb, var(--x-surface) 72%, var(--x-bg));
 }
-.controlHandoff > div {
-  display: grid;
-  gap: 3px;
-}
-.controlHandoff span {
+.eventFilters > span {
   color: var(--x-text-muted);
-  font-size: var(--x-text-sm);
+  font-size: var(--x-text-xs);
 }
-.controlHandoff a {
-  flex: 0 0 auto;
-  font-weight: 700;
-  text-decoration: none;
+.eventFilters > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--x-space-1);
 }
-@media (max-width: 800px) {
-  .vmDetailHero,
-  .controlHandoff {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .vmDetailBadges {
-    justify-content: flex-start;
-  }
-  .vmDetailGrid,
-  .resourceFacts {
+/* 선택 안 된 칩은 글자만(흐리게), 선택된 칩만 옅은 채움 박스 */
+.eventChip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--x-space-6);
+  padding: 0 var(--x-space-2);
+  border: 0;
+  border-radius: var(--x-radius-sm);
+  background: transparent;
+  color: var(--x-text-muted);
+  font: inherit;
+  font-size: var(--x-text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.eventChip > i {
+  top: 0;
+}
+.eventChip:hover {
+  color: var(--x-text);
+}
+.eventChip:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 1px;
+}
+.eventChip[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--x-primary) 16%, transparent);
+  color: var(--x-text);
+}
+.eventChip > i[data-tone='info'] {
+  background: var(--x-primary);
+}
+.eventChip > i[data-tone='warning'] {
+  background: var(--x-recovering);
+}
+.eventChip > i[data-tone='error'] {
+  background: var(--x-fault);
+}
+/* 요약 타일: VM 상세 타일처럼 작은 회색 라벨, 중간 크기 값, 작은 단위·보조 줄 */
+.eventTiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-2);
+}
+.eventTiles > div {
+  display: grid;
+  align-content: start;
+  gap: var(--x-space-1);
+  min-width: 0;
+  padding: var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+}
+.eventTiles > div > span,
+.eventTiles > div > small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.eventTiles > div > strong {
+  font-size: var(--x-text-lg);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.eventTiles > div > strong small {
+  margin-left: var(--x-space-1);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+@media (max-width: 720px) {
+  .eventTiles {
     grid-template-columns: 1fr;
   }
-  .detailEvents > div {
-    grid-template-columns: 76px 74px minmax(0, 1fr);
-    gap: var(--x-space-2);
+}
+@media (max-width: 800px) {
+  .vmDetailGrid,
+  .detailCharts {
+    grid-template-columns: 1fr;
+  }
+  /* 좁은 화면: [시각] [점 + 종류] 아래 줄에 내용 */
+  .detailEventRow {
+    grid-template-columns: calc(var(--x-space-6) * 2 + var(--x-space-3)) minmax(0, 1fr);
+    gap: var(--x-space-1) var(--x-space-2);
+  }
+  .detailEventText {
+    grid-column: 1 / -1;
+  }
+}
+/* 좁은 화면: 라벨 위·값 아래, 구성 타일 3칸은 2칸 (예약 IPv4 는 다음 줄 전체) */
+@media (max-width: 520px) {
+  .detailFacts > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--x-space-1);
+  }
+  .detailTiles[data-cols='3'] {
+    --tile-cols: 2;
+  }
+  .detailTiles[data-cols='3'] > div:last-child {
+    grid-column: 1 / -1;
+  }
+  .detailCharts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* 좁은 화면: 막대를 숨기고 숫자만, 이름 열이 남는 폭 */
+  .detailTable {
+    width: 100%;
+  }
+  .detailNameCol {
+    width: auto;
+  }
+  .detailBarCol {
+    width: 0;
+  }
+  .detailTable .detailBarCell {
+    display: none;
+  }
+  /* 막대가 없으니 CPU % 뒤도 다른 열과 같은 간격 */
+  .detailTable [data-cpu] {
+    padding-right: var(--x-space-4);
+  }
+  .detailRssCol {
+    width: calc(var(--x-space-6) * 2 + var(--x-space-3));
   }
 }
 
@@ -2042,6 +2521,10 @@ button.chip:hover:not(.chipOn) {
 }
 .controlSummaryItem[data-tone='ok'] strong {
   color: var(--x-ok);
+}
+.controlSummaryItem small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
 }
 .controlGrid {
   display: grid;
@@ -3338,8 +3821,21 @@ button.chip:hover:not(.chipOn) {
   font-weight: 800;
   letter-spacing: 0.04em;
 }
-.pinningTable thead th[data-exclusive='true'] {
+.pinningTable thead th[data-core-state='current'] {
   box-shadow: inset 0 3px 0 var(--vm-accent);
+}
+.pinningTable thead th[data-core-state='shared'] {
+  box-shadow: inset 0 3px 0 var(--x-primary);
+}
+.pinningTable thead th[data-core-state='free'] {
+  box-shadow: inset 0 3px 0 var(--x-ok);
+}
+.pinningTable thead th[data-core-state='unavailable'] {
+  background: color-mix(in srgb, var(--x-fault) 5%, var(--x-surface-3));
+}
+.pinningTable thead th[data-core-state='unavailable'] > em {
+  background: color-mix(in srgb, var(--x-fault) 10%, transparent);
+  color: var(--x-fault);
 }
 .pinningTable tbody th {
   padding: 20px;
@@ -3402,6 +3898,12 @@ button.chip:hover:not(.chipOn) {
 .pinningCell:disabled {
   cursor: not-allowed;
   opacity: 0.72;
+}
+.pinningCell[data-unavailable='true'] {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--x-fault) 5%, var(--x-surface));
+  color: var(--x-text-muted);
+  opacity: 0.55;
 }
 .pinningCell > span {
   font-size: 21px;
@@ -4028,6 +4530,15 @@ button.chip:hover:not(.chipOn) {
   height: 100%;
   border-radius: inherit;
   background: var(--vm-accent);
+}
+.memUsageDetail {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .memUsageNotice {
   grid-column: 1 / -1;

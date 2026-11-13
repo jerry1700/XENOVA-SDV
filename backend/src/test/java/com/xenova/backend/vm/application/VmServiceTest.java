@@ -15,10 +15,13 @@ import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
 import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
+import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.CreateVmCommand;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.VmControlOperation;
@@ -26,6 +29,9 @@ import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResources;
+import com.xenova.backend.vm.domain.VmResourceView;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
@@ -87,7 +93,7 @@ class VmServiceTest {
         when(vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
                 .thenReturn(List.of(running, stopped));
         when(vmControlPort.list()).thenReturn(List.of(
-                new VmRuntime("vm-1", VmState.RUNNING, 1, 256),
+                new VmRuntime("vm-1", VmState.RUNNING, 2, 512),
                 new VmRuntime("unknown-domain", VmState.RUNNING, 1, 128)));
 
         List<Vm> vms = service.list();
@@ -95,8 +101,37 @@ class VmServiceTest {
         assertThat(vms).extracting(Vm::vmId).containsExactly("vm-1", "vm-2");
         assertThat(vms.get(0).state()).isEqualTo(VmState.RUNNING);
         assertThat(vms.get(0).name()).isEqualTo("alpine-1");
+        assertThat(vms.get(0).templateId()).isEqualTo("alpine");
+        assertThat(vms.get(0).vcpus()).isEqualTo(2);
+        assertThat(vms.get(0).memoryMib()).isEqualTo(512);
         assertThat(vms.get(1).state()).isEqualTo(VmState.STOPPED);
         assertThat(vms.get(1).templateId()).isEqualTo("alpine");
+        assertThat(vms.get(1).vcpus()).isEqualTo(1);
+        assertThat(vms.get(1).memoryMib()).isEqualTo(256);
+        verify(vmRecordRepository).findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED);
+    }
+
+    @Test
+    void listOrdersByRoleThenDriveGuestsThenCreationWhateverFilledTheTable() {
+        // Creation order as a registry sync can leave it: the Linux VM was discovered a few ms first.
+        VmRecord interaction = new VmRecord("vm-d", new CreateVmCommand("debian", "alpine", "1.2.0", 1, 256),
+                GuestKind.LINUX, NOW);
+        VmRecord noRoleDrive = new VmRecord("vm-z", new CreateVmCommand("zephyr-c", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(1));
+        VmRecord backup = new VmRecord("vm-b", new CreateVmCommand("zephyr-b", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(2));
+        VmRecord primary = new VmRecord("vm-a", new CreateVmCommand("zephyr-a", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(3));
+        VmRecord unassignedLinux = new VmRecord("vm-l", new CreateVmCommand("web-test", "alpine", "1.2.0", 1, 256),
+                GuestKind.LINUX, NOW.plusMillis(4));
+        backup.changeRole(VmRole.BACKUP_DRIVE);
+        primary.changeRole(VmRole.PRIMARY_DRIVE);
+        interaction.changeRole(VmRole.INTERACTION);
+        when(vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
+                .thenReturn(List.of(interaction, noRoleDrive, backup, primary, unassignedLinux));
+        when(vmControlPort.list()).thenReturn(List.of());
+
+        assertThat(service.list()).extracting(Vm::vmId).containsExactly("vm-a", "vm-b", "vm-d", "vm-z", "vm-l");
     }
 
     @Test
@@ -321,6 +356,121 @@ class VmServiceTest {
     }
 
     @Test
+    void linuxResourcesAreUpdatedOnThePlatformAndSavedForTheNextStart() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        VmResourceUpdate update = new VmResourceUpdate(
+                "vm-1", "operation-1", new VmResources(1, 256), new VmResources(2, 512), true);
+        when(vmControlPort.updateResources("vm-1", 2, 512, "resize-1")).thenReturn(update);
+
+        assertThat(service.updateResources("vm-1", 2, 512, "resize-1")).isEqualTo(update);
+
+        assertThat(record.getVcpus()).isEqualTo(2);
+        assertThat(record.getMemoryMib()).isEqualTo(512);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).beginOperation("vm-1");
+        verify(stateTracker).endOperation("vm-1");
+    }
+
+    @Test
+    void zephyrResourcesAreRejectedBeforeCallingThePlatform() {
+        VmRecord record = new VmRecord(
+                "vm-z", new CreateVmCommand("zephyr", "alpine", "1.2.0", 1, 256), GuestKind.ZEPHYR, NOW);
+        when(vmRecordRepository.findById("vm-z")).thenReturn(Optional.of(record));
+
+        assertThatThrownBy(() -> service.updateResources("vm-z", 2, 512, "resize-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getCode()).isEqualTo("RESOURCE_UPDATE_UNSUPPORTED");
+                });
+        verify(vmControlPort, never()).updateResources(anyString(), any(Integer.class), any(Integer.class), anyString());
+    }
+
+    @Test
+    void resourceUpdateRejectsMemoryBelowTheTemplateMinimum() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+
+        assertThatThrownBy(() -> service.updateResources("vm-1", 1, 127, "resize-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception ->
+                        assertThat(exception.getCode()).isEqualTo("VALIDATION_ERROR"));
+        verify(vmControlPort, never()).updateResources(anyString(), any(Integer.class), any(Integer.class), anyString());
+    }
+
+    @Test
+    void resourcesExposeThePlatformHardAffinity() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.cpuLayout()).thenReturn(cpuLayout());
+
+        VmResourceView result = service.resources("vm-1");
+
+        assertThat(result.pcpuCount()).isEqualTo(4);
+        assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(0, 3)));
+        assertThat(result.sharedPcpus()).containsExactly(0, 3);
+        assertThat(result.exclusivePcpus()).containsExactly(1);
+        assertThat(result.pcpus()).allSatisfy(pcpu -> assertThat(pcpu.loadPercent()).isNull());
+    }
+
+    @Test
+    void pinningUpdateRebuildsTheFullPolicyAndPreservesOtherVmPlacements() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        when(vmControlPort.cpuLayout()).thenReturn(cpuLayout());
+        CpuPolicyUpdate update = new CpuPolicyUpdate(
+                new CpuPolicyUpdate.CpuPolicy(
+                        "2.0", "operation-1", 3, "Pool-0", List.of(0, 3), List.of(
+                        new CpuPolicyUpdate.CpuPlacement("vm-1", "shared", List.of(3)),
+                        new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)))),
+                true);
+        when(vmControlPort.updateCpuPolicy(any(), eq("pin-1"))).thenReturn(update);
+
+        VmResourceView result = service.updateVcpuPinning(
+                "vm-1", List.of(new CpuLayout.VcpuAffinity(0, List.of(3))), "pin-1");
+
+        ArgumentCaptor<CpuPolicyUpdate.Request> request = ArgumentCaptor.forClass(CpuPolicyUpdate.Request.class);
+        verify(vmControlPort).updateCpuPolicy(request.capture(), eq("pin-1"));
+        assertThat(request.getValue().expectedPolicyRevision()).isEqualTo(2);
+        assertThat(request.getValue().sharedPcpus()).containsExactly(0, 3);
+        assertThat(request.getValue().placements()).containsExactly(
+                new CpuPolicyUpdate.CpuPlacement("vm-1", "shared", List.of(3)),
+                new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)));
+        assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(3)));
+        assertThat(result.exclusivePcpus()).containsExactly(1);
+    }
+
+    @Test
+    void differentMasksPerVcpuAreRejectedBeforeCallingThePlatform() {
+        VmRecord record = new VmRecord(
+                "vm-2", new CreateVmCommand("linux-2", "alpine", "1.2.0", 2, 256), GuestKind.LINUX, NOW);
+        when(vmRecordRepository.findById("vm-2")).thenReturn(Optional.of(record));
+
+        assertThatThrownBy(() -> service.updateVcpuPinning("vm-2", List.of(
+                new CpuLayout.VcpuAffinity(0, List.of(0)),
+                new CpuLayout.VcpuAffinity(1, List.of(3))), "pin-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getCode()).isEqualTo("RESOURCE_UNSUPPORTED");
+                });
+        verify(vmControlPort, never()).cpuLayout();
+        verify(vmControlPort, never()).updateCpuPolicy(any(), anyString());
+    }
+
+    @Test
+    void exclusivePinningRejectsCoresReservedByDom0OrAnotherVmBeforeCallingThePlatform() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        when(vmControlPort.cpuLayout()).thenReturn(exclusiveCpuLayout());
+
+        assertThatThrownBy(() -> service.updateVcpuPinning(
+                "vm-1", List.of(new CpuLayout.VcpuAffinity(0, List.of(0, 1))), "pin-conflict"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("CPU_PLACEMENT_CONFLICT");
+                    assertThat(exception.getMessage()).contains("0", "1");
+                });
+        verify(vmControlPort, never()).updateCpuPolicy(any(), anyString());
+    }
+
+    @Test
     void destroyRetiresDomainAndKeepsTheRecordForRestore() {
         VmRecord record = record("vm-1", "alpine-1");
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
@@ -344,6 +494,22 @@ class VmServiceTest {
 
         assertThatThrownBy(() -> service.destroy("vm-1")).isInstanceOf(ApiException.class);
         verify(inventoryCleaner, never()).vmDeleted(anyString());
+    }
+
+    @Test
+    void destroyOfAVmTheBoardNoLongerRegistersRetiresTheRow() {
+        VmRecord record = record("vm-1", "web-test");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        org.mockito.Mockito.doThrow(new ApiException(HttpStatus.NOT_FOUND, "VM_NOT_FOUND", "instance vm-1 not registered"))
+                .when(vmControlPort).destroy("vm-1");
+
+        service.destroy("vm-1");
+
+        assertThat(record.getLifecycle()).isEqualTo(VmLifecycle.RETIRED);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).forget("vm-1");
+        verify(eventRecorder).vmDeleted("vm-1", "web-test", "platform");
+        verify(inventoryCleaner).vmDeleted("vm-1");
     }
 
     @Test
@@ -384,6 +550,36 @@ class VmServiceTest {
 
     private static VmRecord record(String vmId, String name) {
         return new VmRecord(vmId, new CreateVmCommand(name, "alpine", "1.2.0", 1, 256), NOW);
+    }
+
+    private static CpuLayout cpuLayout() {
+        return new CpuLayout(
+                true,
+                2,
+                "2.0",
+                new CpuLayout.CpuHost(List.of(0, 1, 2, 3), 3, List.of(0, 3), true),
+                List.of(new CpuLayout.CpuReservation("vm-z", List.of(1))),
+                List.of(
+                        new CpuLayout.VmCpuLayout(
+                                "vm-1", 1, "shared", List.of(new CpuLayout.VcpuAffinity(0, List.of(0, 3)))),
+                        new CpuLayout.VmCpuLayout(
+                                "vm-z", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(1))))));
+    }
+
+    private static CpuLayout exclusiveCpuLayout() {
+        return new CpuLayout(
+                true,
+                2,
+                "2.0",
+                new CpuLayout.CpuHost(List.of(0, 1, 2, 3), 3, List.of(0, 3), true),
+                List.of(
+                        new CpuLayout.CpuReservation("vm-1", List.of(2)),
+                        new CpuLayout.CpuReservation("vm-z", List.of(1))),
+                List.of(
+                        new CpuLayout.VmCpuLayout(
+                                "vm-1", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(2)))),
+                        new CpuLayout.VmCpuLayout(
+                                "vm-z", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(1))))));
     }
 
     private static VmControlOperation operation(String vmId, String requestKey, String status) {

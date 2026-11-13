@@ -1,6 +1,6 @@
 /** Memory·Network 탭 공통 블록: 텍스트 수치 격자, RX/TX 2선 그래프, 누적·속도 타일 */
 import styles from './pages.module.css';
-import { useState, type MouseEvent } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import {
   chartPoints,
   latestValue,
@@ -100,6 +100,7 @@ export function RxTxChart({
   formatMax,
   formatValue,
   rxOnly = false,
+  summary,
 }: {
   title: string;
   unit: string;
@@ -112,6 +113,8 @@ export function RxTxChart({
   /** 범례·툴팁 값 표시. 없으면 "{정수} {unit}" */
   formatValue?: (value: number) => string;
   rxOnly?: boolean;
+  /** 범례 대신 제목 옆에 둘 현재 값 (VM 상세처럼 선 하나에 이름 + 현재 값만 보일 때) */
+  summary?: ReactNode;
 }) {
   const [hover, setHover] = useState<number | null>(null);
   const values = points
@@ -133,20 +136,23 @@ export function RxTxChart({
 
   return (
     <section className={styles.memoryChartBlock}>
-      <header>
+      <header data-summary={summary ? '' : undefined}>
         <strong>{title}</strong>
-        <span className={styles.memoryLegend} data-values="">
-          <span data-tone="rx">
-            <i />
-            RX <b>{format(latestValue(points, 'rx'))}</b>
-          </span>
-          {!rxOnly && (
-            <span data-tone="tx">
+        {summary}
+        {!summary && (
+          <span className={styles.memoryLegend} data-values="">
+            <span data-tone="rx">
               <i />
-              TX <b>{format(latestValue(points, 'tx'))}</b>
+              RX <b>{format(latestValue(points, 'rx'))}</b>
             </span>
-          )}
-        </span>
+            {!rxOnly && (
+              <span data-tone="tx">
+                <i />
+                TX <b>{format(latestValue(points, 'tx'))}</b>
+              </span>
+            )}
+          </span>
+        )}
       </header>
       <div className={styles.memoryChart}>
         {rxPoints || txPoints ? (

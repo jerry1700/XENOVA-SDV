@@ -69,7 +69,7 @@ xenova:
         min-memory-mib: 512
         guest-kind: linux
       - template-id: debian-13-arm64
-        version: "1.0.6"
+        version: "1.0.8"
         display-name: Debian 13
         min-memory-mib: 256
         guest-kind: linux
@@ -117,17 +117,23 @@ xenova:
     service-token: ${DOM0_MANAGER_SERVICE_TOKEN:}
     connect-timeout: ${DOM0_MANAGER_CONNECT_TIMEOUT:2s}
     query-timeout: ${DOM0_MANAGER_QUERY_TIMEOUT:6s}
-    # Keep long-running VM commands connected for up to 15 minutes.
-    command-timeout: ${DOM0_MANAGER_COMMAND_TIMEOUT:15m}
+    # Keep long-running VM commands connected for up to 20 minutes.
+    command-timeout: ${DOM0_MANAGER_COMMAND_TIMEOUT:20m}
     retry-backoff: ${DOM0_MANAGER_RETRY_BACKOFF:500ms}
   vm:
-    # GET /api/v1/vms answers from the last dom0-manager list; one background loop refreshes it (S15P31E110-344).
+    # GET /api/v1/vms refreshes this snapshot on demand; point reads may reuse it between synchronizations.
     runtime-cache:
       enabled: ${VM_RUNTIME_CACHE_ENABLED:true}
-      # pause after each refresh: a state change shows up after about one dom0-manager list plus this
+      # Retained for configuration compatibility; there is no background runtime refresh loop.
       refresh-delay: ${VM_RUNTIME_REFRESH_DELAY:1s}
       # safety net only: past this age (loop stopped or failing) reads go to dom0-manager again
       stale-limit: ${VM_RUNTIME_STALE_LIMIT:10s}
+    # Board registry -> VM table on POST /api/v1/vms/synchronizations only (no periodic loop).
+    registration-sync:
+      # consecutive reads a VM must be absent from the board before its row is retired
+      missing-threshold: ${VM_REGISTRATION_SYNC_MISSING_THRESHOLD:2}
+      # never retire a row younger than this: create registers on the board only at its end (dom0 command timeout)
+      creation-grace: ${VM_REGISTRATION_SYNC_CREATION_GRACE:20m}
   vm-registration:
     # Platform registration sender authentication; separate from user JWT and dom0-manager credentials.
     service-token: ${VM_REGISTRATION_SERVICE_TOKEN:}
