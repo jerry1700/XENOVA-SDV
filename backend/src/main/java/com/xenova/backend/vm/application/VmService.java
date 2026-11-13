@@ -8,6 +8,8 @@ import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.vm.domain.CreateVmCommand;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.VmControlOperation;
@@ -15,6 +17,7 @@ import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
 import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResourceView;
 import com.xenova.backend.vm.domain.VmResources;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.vm.domain.VmRuntime;
@@ -22,6 +25,7 @@ import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -239,6 +243,202 @@ public class VmService {
             runtimeCache.remove(vmId);
             return result;
         });
+    }
+
+    public VmResourceView resources(String vmId) {
+        VmRecord record = findRecord(vmId);
+        CpuLayout layout = requireConfiguredCpuLayout(vmControlPort.cpuLayout());
+        CpuLayout.VmCpuLayout vmLayout = findVmLayout(layout, vmId);
+        return resourceView(record, layout, requireUniformAffinity(vmLayout), exclusivePcpus(layout));
+    }
+
+    public VmResourceView updateVcpuPinning(
+            String vmId, List<CpuLayout.VcpuAffinity> mappings, String requestKey) {
+        String validatedKey = validateRequestKey(requestKey);
+        VmRecord record = findRecord(vmId);
+        List<Integer> requestedMask = validatePinningMappings(record, mappings);
+        CpuLayout layout = requireConfiguredCpuLayout(vmControlPort.cpuLayout());
+        CpuLayout.VmCpuLayout target = findVmLayout(layout, vmId);
+        if (target.allocation() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "VM의 CPU 배치 정책이 없습니다.");
+        }
+        if (layout.host() == null || layout.host().onlinePcpus() == null
+                || !layout.host().onlinePcpus().containsAll(requestedMask)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "RESOURCE_UNSUPPORTED", "온라인 상태인 pCPU만 선택할 수 있습니다.");
+        }
+        List<Integer> shared = layout.host().desiredDom0Pcpus();
+        if (shared == null || shared.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "공유 CPU 정책이 설정되지 않았습니다.");
+        }
+        if ("shared".equals(target.allocation()) && !shared.containsAll(requestedMask)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "RESOURCE_UNSUPPORTED", "공유 VM은 공유 pCPU 집합 안에서만 배치할 수 있습니다.");
+        }
+        if ("exclusive".equals(target.allocation())) {
+            Set<Integer> unavailable = new java.util.HashSet<>(shared);
+            if (layout.reservations() != null) {
+                layout.reservations().stream()
+                        .filter(reservation -> !vmId.equals(reservation.vmId()))
+                        .filter(reservation -> reservation.pcpus() != null)
+                        .forEach(reservation -> unavailable.addAll(reservation.pcpus()));
+            }
+            List<Integer> conflicts = requestedMask.stream().filter(unavailable::contains).toList();
+            if (!conflicts.isEmpty()) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "CPU_PLACEMENT_CONFLICT",
+                        "선택한 pCPU " + conflicts + "는 dom0 공유 영역이거나 다른 VM이 전용으로 사용 중입니다.");
+            }
+        }
+
+        List<CpuPolicyUpdate.CpuPlacement> placements = new ArrayList<>();
+        for (CpuLayout.VmCpuLayout item : layout.vms()) {
+            if (item.allocation() == null) {
+                continue;
+            }
+            List<Integer> mask = item.vmId().equals(vmId) ? requestedMask : uniformMask(item);
+            placements.add(new CpuPolicyUpdate.CpuPlacement(item.vmId(), item.allocation(), mask));
+        }
+        placements.sort(Comparator.comparing(CpuPolicyUpdate.CpuPlacement::vmId));
+        CpuPolicyUpdate update = vmControlPort.updateCpuPolicy(
+                new CpuPolicyUpdate.Request(layout.policyRevision(), sortedUnique(shared), placements), validatedKey);
+        validateCpuPolicyResponse(update, vmId, target.allocation(), requestedMask, layout.policyRevision());
+
+        List<CpuLayout.VcpuAffinity> applied = new ArrayList<>();
+        for (int vcpu = 0; vcpu < record.getVcpus(); vcpu++) {
+            applied.add(new CpuLayout.VcpuAffinity(vcpu, requestedMask));
+        }
+        List<Integer> exclusive = update.policy().placements().stream()
+                .filter(placement -> "exclusive".equals(placement.mode()))
+                .flatMap(placement -> placement.pcpus().stream())
+                .distinct().sorted().toList();
+        return resourceView(record, layout, applied, exclusive);
+    }
+
+    private CpuLayout requireConfiguredCpuLayout(CpuLayout layout) {
+        if (layout == null || !layout.configured() || layout.policyRevision() == null
+                || layout.host() == null || layout.host().desiredDom0Pcpus() == null || layout.vms() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "CPU 배치 정책이 설정되지 않았습니다.");
+        }
+        return layout;
+    }
+
+    private CpuLayout.VmCpuLayout findVmLayout(CpuLayout layout, String vmId) {
+        return layout.vms().stream()
+                .filter(item -> vmId.equals(item.vmId()))
+                .findFirst()
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.BAD_GATEWAY, "VM_CONTROL_BAD_RESPONSE", "VM의 CPU 배치 정보를 찾을 수 없습니다."));
+    }
+
+    private List<Integer> validatePinningMappings(VmRecord record, List<CpuLayout.VcpuAffinity> mappings) {
+        if (mappings == null || mappings.size() != record.getVcpus()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "모든 vCPU의 매핑을 하나씩 보내야 합니다.");
+        }
+        List<CpuLayout.VcpuAffinity> sorted = mappings.stream()
+                .sorted(Comparator.comparingInt(CpuLayout.VcpuAffinity::vcpu)).toList();
+        List<Integer> common = null;
+        for (int index = 0; index < sorted.size(); index++) {
+            CpuLayout.VcpuAffinity mapping = sorted.get(index);
+            if (mapping.vcpu() != index || mapping.pcpus() == null || mapping.pcpus().isEmpty()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "vCPU 번호와 pCPU 매핑이 올바르지 않습니다.");
+            }
+            List<Integer> mask = sortedUnique(mapping.pcpus());
+            if (mask.size() != mapping.pcpus().size() || mask.stream().anyMatch(cpu -> cpu < 0 || cpu > 3)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "pCPU는 중복 없이 0~3 범위로 지정해야 합니다.");
+            }
+            if (common == null) {
+                common = mask;
+            } else if (!common.equals(mask)) {
+                throw new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "RESOURCE_UNSUPPORTED",
+                        "현재 플랫폼은 한 VM의 모든 vCPU에 동일한 pCPU 집합만 적용할 수 있습니다.");
+            }
+        }
+        return common;
+    }
+
+    private List<CpuLayout.VcpuAffinity> requireUniformAffinity(CpuLayout.VmCpuLayout layout) {
+        if (layout.desiredHardAffinity() == null || layout.desiredHardAffinity().size() != layout.vcpus()) {
+            throw malformedCpuLayout();
+        }
+        List<CpuLayout.VcpuAffinity> sorted = layout.desiredHardAffinity().stream()
+                .sorted(Comparator.comparingInt(CpuLayout.VcpuAffinity::vcpu)).toList();
+        List<Integer> mask = null;
+        for (int index = 0; index < sorted.size(); index++) {
+            CpuLayout.VcpuAffinity item = sorted.get(index);
+            List<Integer> current = item.pcpus() == null ? List.of() : sortedUnique(item.pcpus());
+            if (item.vcpu() != index || current.isEmpty() || (mask != null && !mask.equals(current))) {
+                throw malformedCpuLayout();
+            }
+            mask = current;
+        }
+        List<Integer> finalMask = mask;
+        return sorted.stream().map(item -> new CpuLayout.VcpuAffinity(item.vcpu(), finalMask)).toList();
+    }
+
+    private List<Integer> uniformMask(CpuLayout.VmCpuLayout layout) {
+        List<CpuLayout.VcpuAffinity> affinities = requireUniformAffinity(layout);
+        return affinities.getFirst().pcpus();
+    }
+
+    private ApiException malformedCpuLayout() {
+        return new ApiException(
+                HttpStatus.BAD_GATEWAY, "VM_CONTROL_BAD_RESPONSE", "플랫폼의 CPU 배치 정보가 올바르지 않습니다.");
+    }
+
+    private List<Integer> exclusivePcpus(CpuLayout layout) {
+        if (layout.reservations() == null) {
+            return List.of();
+        }
+        return layout.reservations().stream().flatMap(item -> item.pcpus().stream()).distinct().sorted().toList();
+    }
+
+    private VmResourceView resourceView(
+            VmRecord record,
+            CpuLayout layout,
+            List<CpuLayout.VcpuAffinity> pinning,
+            List<Integer> exclusive) {
+        VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
+        boolean fixed = record.getGuestKind() == GuestKind.ZEPHYR;
+        int pcpuCount = layout.host().maxCpuId() + 1;
+        List<VmResourceView.PcpuStatus> statuses = new ArrayList<>();
+        for (int pcpu = 0; pcpu < pcpuCount; pcpu++) {
+            statuses.add(new VmResourceView.PcpuStatus(pcpu, null));
+        }
+        return new VmResourceView(
+                record.getVmId(), record.getVcpus(), record.getMemoryMib(), pcpuCount, pinning,
+                List.copyOf(layout.host().desiredDom0Pcpus()), exclusive, statuses,
+                new VmResourceView.ResourceLimits(
+                        fixed ? record.getVcpus() : 1,
+                        fixed ? record.getVcpus() : 4,
+                        fixed ? record.getMemoryMib() : template.minMemoryMib(),
+                        fixed ? record.getMemoryMib() : 1024,
+                        fixed ? 1 : 128),
+                clock.instant());
+    }
+
+    private static List<Integer> sortedUnique(List<Integer> values) {
+        return values.stream().distinct().sorted().toList();
+    }
+
+    private void validateCpuPolicyResponse(
+            CpuPolicyUpdate update,
+            String vmId,
+            String mode,
+            List<Integer> mask,
+            int previousRevision) {
+        if (update == null || update.policy() == null || !update.hostPreparationRequired()
+                || update.policy().policyRevision() != previousRevision + 1
+                || update.policy().placements() == null) {
+            throw malformedCpuLayout();
+        }
+        CpuPolicyUpdate.CpuPlacement target = update.policy().placements().stream()
+                .filter(item -> vmId.equals(item.vmId())).findFirst().orElse(null);
+        if (target == null || !mode.equals(target.mode()) || !mask.equals(sortedUnique(target.pcpus()))) {
+            throw malformedCpuLayout();
+        }
     }
 
     private static void validateResourceUpdateResponse(

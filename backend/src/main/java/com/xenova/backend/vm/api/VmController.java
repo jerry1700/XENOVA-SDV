@@ -10,6 +10,8 @@ import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResourceView;
+import com.xenova.backend.vm.domain.CpuLayout;
 import jakarta.validation.Valid;
 import java.net.URI;
 import java.time.Clock;
@@ -104,6 +106,24 @@ public class VmController {
             @RequestHeader(value = "Idempotency-Key", required = false) String requestKey,
             @Valid @RequestBody UpdateVmResourcesRequest request) {
         return vmService.updateResources(vmId, request.vcpus(), request.memoryMib(), requestKey);
+    }
+
+    @GetMapping("/{vmId}/resources")
+    public VmResourceView resources(@PathVariable String vmId) {
+        return vmService.resources(vmId);
+    }
+
+    @PutMapping("/{vmId}/resources/vcpu-pinning")
+    public VmResourceView updateVcpuPinning(
+            @PathVariable String vmId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String requestKey,
+            @Valid @RequestBody UpdateVcpuPinningRequest request) {
+        return vmService.updateVcpuPinning(
+                vmId,
+                request.mappings().stream()
+                        .map(mapping -> new CpuLayout.VcpuAffinity(mapping.vcpu(), mapping.pcpus()))
+                        .toList(),
+                requestKey);
     }
 
     @DeleteMapping("/{vmId}")

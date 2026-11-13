@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.vm.domain.VmControlPort;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmRegistrationInventory;
@@ -178,6 +180,26 @@ public class Dom0ManagerClient implements VmControlPort {
                 .retrieve()
                 .onStatus(status -> status.isError(), this::handleError)
                 .body(VmResourceUpdate.class)));
+    }
+
+    @Override
+    public CpuLayout cpuLayout() {
+        return requireBody(executeQuery(() -> queryClient.get()
+                .uri("/api/v1/cpu-layout")
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(CpuLayout.class)));
+    }
+
+    @Override
+    public CpuPolicyUpdate updateCpuPolicy(CpuPolicyUpdate.Request request, String requestKey) {
+        return requireBody(executeCommand(() -> commandClient.put()
+                .uri("/api/v1/cpu-policy")
+                .header("Idempotency-Key", requestKey)
+                .body(request)
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(CpuPolicyUpdate.class)));
     }
 
     @Override
