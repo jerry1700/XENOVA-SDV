@@ -231,12 +231,30 @@ export interface DomainKillResponse {
 
 export type CommandState = 'PENDING' | 'ACCEPTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REJECTED';
 
+/**
+ * Agent 가 보낸 실패·거절 사유 (백엔드 AgentCommandStatusResponse.error, JsonNode 그대로).
+ * 형식이 보장되지 않으므로 값은 commandErrorCode 로 꺼낸다
+ */
+export interface CommandError {
+  code?: unknown;
+  message?: unknown;
+}
+
+/** GET /api/v1/vms/{vmId}/commands/{commandId} — 백엔드 AgentCommandStatusResponse (snake_case) */
 export interface CommandStatusResponse {
-  command_id: string;
   vm_id: string;
+  command_id: string;
+  operation_id?: string | null;
   status: CommandState;
-  message?: string | null;
-  updated_at: string;
+  submitted_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  result?: unknown;
+  error?: CommandError | null;
+  received_at?: string | null;
+  contract_violation?: boolean;
+  violation_detail?: string | null;
 }
 
 /** §2.3 */
@@ -279,7 +297,25 @@ export type KnownErrorCode =
   | 'VM_CONTROL_TIMEOUT'
   | 'VM_CONTROL_BAD_RESPONSE'
   | 'RESOURCE_UNSUPPORTED'
-  | 'INTERNAL_SERVER_ERROR';
+  | 'INTERNAL_SERVER_ERROR'
+  | 'AGENT_UNAVAILABLE'
+  | 'MQTT_UNAVAILABLE'
+  | 'COMMAND_NOT_FOUND';
+
+/** VM Agent 가 명령을 거절·실패할 때 명령 상태 error.code 로 보내는 코드 (platform vm-agent commands.py) */
+export type AgentErrorCode =
+  | 'BUSY'
+  | 'INVALID_PARAMETERS'
+  | 'INVALID_COMMAND'
+  | 'AGENT_EXITING'
+  | 'RESOURCE_UNAVAILABLE'
+  | 'STATE_UNAVAILABLE'
+  | 'UNSUPPORTED_ACTION'
+  | 'DEMO_DISABLED'
+  | 'EXPIRED'
+  | 'CLOCK_UNTRUSTED'
+  | 'BOOT_MISMATCH'
+  | 'IDEMPOTENCY_CONFLICT';
 
 // ---- 이벤트 (노션 API 명세 REST-18 "이벤트 조회", 백엔드 EventResponse) -------------------
 

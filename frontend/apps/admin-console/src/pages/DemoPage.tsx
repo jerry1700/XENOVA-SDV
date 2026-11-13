@@ -2,7 +2,9 @@ import { Button, Card, Modal, StatusBadge } from '@xenova/ui';
 import { useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router';
 import { ApiError } from '../api/client';
+import { commandErrorCode } from '../api/commandStatus';
 import type { DriveMode } from '../api/drive';
+import { agentErrorText, commandStateText } from '../api/errorText';
 import { useCommandStatus, useEvents, useStartVmCrash, useVms } from '../api/queries';
 import type { Vm } from '../api/types';
 import { MODE_HEALTH, MODE_LABEL, ROLES } from '../domain/roles';
@@ -212,7 +214,13 @@ function VmCrashScenario() {
                 done={commandAccepted}
                 failed={commandFailed}
                 title="장애 명령 수락"
-                detail={command.data?.message ?? 'VM 응답 대기 중'}
+                detail={
+                  command.data
+                    ? command.data.status === 'FAILED' || command.data.status === 'REJECTED'
+                      ? agentErrorText(commandErrorCode(command.data))
+                      : commandStateText(command.data.status)
+                    : 'VM 응답 대기 중'
+                }
               />
               <ProgressStep
                 done={sawFailure}

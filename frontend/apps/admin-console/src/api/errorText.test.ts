@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from './client';
-import { commandStateText, ERROR_TEXT, errorText } from './errorText';
-import type { CommandState, KnownErrorCode } from './types';
+import { AGENT_ERROR_TEXT, agentErrorText, commandStateText, ERROR_TEXT, errorText } from './errorText';
+import type { AgentErrorCode, CommandState, KnownErrorCode } from './types';
 
 const DEFAULT = '요청을 처리하지 못했습니다.';
 
@@ -68,5 +68,37 @@ describe('commandStateText — 명령 상태', () => {
     ['REJECTED', '거절'],
   ])('%s → %s', (state, text) => {
     expect(commandStateText(state)).toBe(text);
+  });
+});
+
+describe('부하·장애 명령 오류 (S15P31E110-468)', () => {
+  it('HTTP 오류 AGENT_UNAVAILABLE·MQTT_UNAVAILABLE·COMMAND_NOT_FOUND 도 표의 한글 문구', () => {
+    for (const code of ['AGENT_UNAVAILABLE', 'MQTT_UNAVAILABLE', 'COMMAND_NOT_FOUND'] as const) {
+      expect(
+        errorText(new ApiError(code === 'COMMAND_NOT_FOUND' ? 404 : 409, { code, message: 'raw' })),
+      ).toBe(ERROR_TEXT[code]);
+    }
+    expect(ERROR_TEXT.COMMAND_NOT_FOUND).toMatch(/^명령을 찾을 수 없습니다/);
+  });
+});
+
+describe('agentErrorText — Agent 거절·실패 사유', () => {
+  it('알려진 코드는 전부 한글 문구이고, 코드 이름·괄호를 붙이지 않는다', () => {
+    expect(Object.keys(AGENT_ERROR_TEXT)).toHaveLength(12);
+    for (const [code, text] of Object.entries(AGENT_ERROR_TEXT) as [AgentErrorCode, string][]) {
+      expect(text, code).toMatch(/[가-힣]/);
+      expect(text, code).not.toContain(code);
+      expect(text, code).not.toMatch(/[()]/);
+      expect(agentErrorText(code)).toBe(text);
+    }
+    expect(agentErrorText('BUSY')).toBe('이미 실행 중인 부하가 있습니다. 끝난 뒤 다시 시도해 주세요.');
+  });
+
+  it('코드가 없거나 모르는 코드는 기본 문구, fallback 을 주면 그것', () => {
+    expect(agentErrorText(null)).toBe('명령을 처리하지 못했습니다.');
+    expect(agentErrorText(undefined)).toBe('명령을 처리하지 못했습니다.');
+    expect(agentErrorText('PROCESS_EXITED')).toBe('명령을 처리하지 못했습니다.');
+    expect(agentErrorText('toString')).toBe('명령을 처리하지 못했습니다.');
+    expect(agentErrorText('', '부하 명령이 실패했습니다.')).toBe('부하 명령이 실패했습니다.');
   });
 });

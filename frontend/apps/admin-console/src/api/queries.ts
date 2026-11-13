@@ -1,7 +1,7 @@
 /** TanStack Query 훅. 경로·응답은 VM 관리 API 계약 §5, 인증은 노션 API 명세 */
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { useState } from 'react';
-import { request, requestWithStatus, setSession } from './client';
+import { ApiError, request, requestWithStatus, setSession } from './client';
 import type {
   CreateVmRequest,
   AgentExitCommand,
@@ -233,6 +233,9 @@ export function useStartDomainKill(vmId: string) {
   });
 }
 
+/** 명령이 없다는 응답(404 COMMAND_NOT_FOUND): 다시 물어도 같으므로 재시도·반복 조회를 멈춘다 */
+const commandGone = (error: unknown) => error instanceof ApiError && error.status === 404;
+
 export function useCommandStatus(vmId: string, commandId: string | null, acceptedIsTerminal = false) {
   return useQuery({
     queryKey: keys.command(vmId, commandId ?? ''),
@@ -242,7 +245,9 @@ export function useCommandStatus(vmId: string, commandId: string | null, accepte
         { signal },
       ),
     enabled: Boolean(vmId && commandId),
+    retry: (count, error) => !commandGone(error) && count < 1,
     refetchInterval: (query) => {
+      if (commandGone(query.state.error)) return false;
       const status = query.state.data?.status;
       return status === 'SUCCEEDED' ||
         status === 'FAILED' ||
