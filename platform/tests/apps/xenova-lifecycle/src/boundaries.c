@@ -196,7 +196,11 @@ void unbind_event_channel(unsigned p) { assert(p==11&&event_bound);event_bound=f
 int evtchn_close(unsigned p) { assert(p==11&&!event_bound);return 0; }
 int notify_evtchn(unsigned p) { assert(p==11);return 0; }
 int HYPERVISOR_event_channel_op(unsigned op,void *p) { ARG_UNUSED(op);ARG_UNUSED(p);return is("net-unmask")?-EIO:0; }
-int HYPERVISOR_sched_op(unsigned op,void *p) { assert(op==SCHEDOP_shutdown);assert(((struct sched_shutdown *)p)->reason==1);xl_hypercalls++;return 0; }
+int HYPERVISOR_sched_op(unsigned op,void *p) {
+ assert(op==SCHEDOP_shutdown);
+ unsigned expected=is("shutdown-crash-injection")?SHUTDOWN_crash:SHUTDOWN_reboot;
+ assert(((struct sched_shutdown *)p)->reason==expected);xl_hypercalls++;return 0;
+}
 void net_if_flag_set(struct net_if *i,int f) { ARG_UNUSED(i);ARG_UNUSED(f); }
 void ethernet_init(struct net_if *i) { ARG_UNUSED(i); }
 void net_if_carrier_off(struct net_if *i) { ARG_UNUSED(i); }
