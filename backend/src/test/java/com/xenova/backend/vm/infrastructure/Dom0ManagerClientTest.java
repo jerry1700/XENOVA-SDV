@@ -228,6 +228,24 @@ class Dom0ManagerClientTest {
     }
 
     @Test
+    void killPostsToTheKillPathOnceAndAcceptsNoContent() {
+        AtomicInteger requests = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<String> method = new java.util.concurrent.atomic.AtomicReference<>();
+
+        server.createContext("/api/v1/vms/" + VM_ID + "/kill", exchange -> {
+            requests.incrementAndGet();
+            method.set(exchange.getRequestMethod());
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        client.kill(VM_ID);
+
+        assertThat(requests).hasValue(1);
+        assertThat(method.get()).isEqualTo("POST");
+    }
+
+    @Test
     void rebootPostsTheIdempotencyKeyAndReadsThePendingOperation() {
         AtomicInteger requests = new AtomicInteger();
         AtomicReference<String> method = new AtomicReference<>();

@@ -291,6 +291,47 @@ class VmServiceTest {
     }
 
     @Test
+    void killRemovesOnlyTheDomainThroughDom0AndRecordsTheFault() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.find("vm-1")).thenReturn(Optional.of(new VmRuntime("vm-1", VmState.RUNNING, 1, 256)));
+
+        DomainKill killed = service.kill("vm-1");
+
+        assertThat(killed.vmId()).isEqualTo("vm-1");
+        assertThat(killed.operationId()).isNotBlank();
+        assertThat(killed.submittedAt()).isEqualTo(NOW);
+        verify(vmControlPort).kill("vm-1");
+        verify(vmControlPort, never()).stop(anyString()); // 정지는 의도를 stopped 로 바꿔 복구가 일어나지 않는다
+        verify(vmControlPort, never()).destroy(anyString());
+        verify(eventRecorder).faultInjected("vm-1", "alpine-1", "force_kill");
+        // 사용자 정지가 아니다 — 꺼짐은 다음 동기화가 장애로 감지한다
+        verify(stateTracker, never()).changedByUser(anyString(), any(), any(), anyString());
+    }
+
+    @Test
+    void killOfAVmThatIsNotRunningIsInvalidState() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.find("vm-1")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.kill("vm-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("INVALID_VM_STATE");
+                });
+        verify(vmControlPort, never()).kill(anyString());
+    }
+
+    @Test
+    void killOfAnUnknownVmIsNotFound() {
+        when(vmRecordRepository.findById("vm-x")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.kill("vm-x"))
+                .isInstanceOfSatisfying(ApiException.class, exception ->
+                        assertThat(exception.getCode()).isEqualTo("VM_NOT_FOUND"));
+        verify(vmControlPort, never()).kill(anyString());
+    }
+
+    @Test
     void stopRecordsTheStateItStoppedFrom() {
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
         when(vmControlPort.find("vm-1")).thenReturn(Optional.of(new VmRuntime("vm-1", VmState.RUNNING, 1, 256)));
