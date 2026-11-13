@@ -32,19 +32,25 @@ def call(argv, allow=(0,)):
 
 
 def pty_test(out):
-    """생산 agetty가 issue 갱신을 입력 전까지만 처리하는지 실제 PTY에서 확인한다."""
+    """부팅 상태 변경이 실제 agetty의 로그인 프롬프트를 다시 띄우지 않는지 확인한다."""
     assert os.readlink('/proc/self/ns/mnt') != os.readlink('/proc/1/ns/mnt')
     call(['mount', '-t', 'tmpfs', 'tmpfs', '/run'])
     call(['mount', '-t', 'tmpfs', 'tmpfs', '/var/log'])
     issue = out/'pty.issue'
     issue.write_text('XENOVA_INITIAL\n')
+    runtime = Path('/run/xenova')
+    host = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    unit = 'xenova-first-boot.service'
+    rows = {unit: {'LoadState': 'loaded', 'ActiveState': 'activating', 'SubState': 'start'}}
+    reader = lambda _: (rows, None)
     login = out/'login-boundary.py'
     login.write_text('#!/usr/bin/python3\nimport sys\nprint("PASSWORD_BOUNDARY",flush=True)\ninput()\nprint("SESSION_BOUNDARY",flush=True)\n')
     login.chmod(0o700)
     pid, master = pty.fork()
     if pid == 0:
         os.execvp('agetty', ['agetty', '-L', '-8', '--noclear', '--nohostname',
-                            '--issue-file', str(issue), '--login-program', str(login), '-', '115200', 'vt100'])
+                            '--issue-file', str(issue)+':/run/issue.d',
+                            '--login-program', str(login), '-', '115200', 'vt100'])
     class Child:
         result = None
         def poll(self):
@@ -81,27 +87,23 @@ def pty_test(out):
         if marker:
             assert marker in new, (marker,bytes(new),child.poll())
         return bytes(new)
-    def reload(text):
-        issue.write_text(text+'\n')
-        call(['agetty','--reload'])
     try:
+        boot.refresh(runtime, reader=reader, host=host)
         receive(b'login:')
-        reload('XENOVA_DELAYED')
-        receive(b'XENOVA_DELAYED')
-        os.write(master,b'o')
-        receive(b'o')
-        reload('MUST_NOT_OVERWRITE_USERNAME')
-        assert b'MUST_NOT_OVERWRITE' not in receive(timeout=.3)
-        os.write(master,b'perator\n')
+        rows[unit].update(ActiveState='failed', SubState='failed', Result='exit-code')
+        value = boot.refresh(runtime, reader=reader, host=host)
+        assert value['failure_history'][0]['unit'] == unit
+        assert b'login:' not in receive(timeout=.7)
+        assert not Path('/run/issue.d/90-xenova.issue').exists()
+        os.write(master,b'operator\n')
         receive(b'PASSWORD_BOUNDARY')
-        reload('MUST_NOT_OVERWRITE_PASSWORD')
-        assert b'MUST_NOT_OVERWRITE' not in receive(timeout=.3)
         os.write(master,b'fixture-only\n')
         receive(b'SESSION_BOUNDARY')
         child.wait(timeout=4)
         assert child.returncode == 0
+        assert transcript.count(b'XENOVA_INITIAL') == transcript.count(b'login:') == 1
         (out/'agetty-public.log').write_bytes(bytes(transcript).replace(b'fixture-only',b'<test-input>'))
-        return {'prompt_reload':True,'username_not_overwritten':True,'password_boundary_not_overwritten':True,
+        return {'single_login_prompt':True,'failure_history_recorded':True,
                 'session_boundary_reached':True,'physical_hdmi':False,'real_authentication_tested':False}
     finally:
         if child.poll() is None:
@@ -125,7 +127,7 @@ def systemd_test(out):
     renderer.write_text('import sys,time\nsys.path.insert(0,'+repr(str(MODULES))+')\n'
                         'from pathlib import Path\nimport xenova_boot_status as b\n'
                         'b.STAGES=(("registration","Registration",'+repr(worker)+'),)\n'
-                        'for i in range(15):\n b.refresh(Path('+repr(str(runtime))+'),Path('+repr(str(out/'unit.issue'))+'),Path('+repr(str(out/'reload'))+'))\n time.sleep(.2)\n'
+                        'for i in range(15):\n b.refresh(Path('+repr(str(runtime))+'))\n time.sleep(.2)\n'
                         'raise SystemExit(9)\n')
     evidence = {}
     try:
@@ -148,7 +150,7 @@ def systemd_test(out):
         snap,_=boot.read_json(runtime/'boot-display.json')
         assert snap['stages'][0]['state']=='failed'
         assert snap['failure_history'][0]['unit']==worker
-        assert 'journalctl -b -u '+worker in (out/'unit.issue').read_text()
+        assert 'journalctl -b -u '+worker in boot.render(snap, details=True)
         evidence['failure_and_login_independence']=state
         call(['systemctl','reset-failed',indicator])
         call(['systemd-run','--unit',indicator,'--property=Type=simple','--property=DefaultDependencies=no',sys.executable,str(renderer)])

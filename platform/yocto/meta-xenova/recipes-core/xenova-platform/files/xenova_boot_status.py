@@ -1,7 +1,6 @@
 """systemd와 부가 진행 기록을 읽는 부팅 표시 계층. VM 제어·준비 판정은 하지 않는다.
 
-로그인 전 표시는 agetty의 issue/reload에 맡긴다. 직접 VT 출력·전환·입력 처리,
-Manager/Xen 조회, 실행 잠금, 정책 변경, readiness 소비를 하지 않는다.
+서비스는 관측 이력을 저장하고 CLI는 요청 시 상세 상태를 표시한다.
 """
 import argparse
 import json
@@ -37,7 +36,7 @@ DELAY_MS = 20000  # 표시 주의 기준. 실행 timeout·고장 판단 기준�
 def clean(value, limit=96, ascii_only=False):
     text = str(value) if value is not None else '-'
     text = ''.join(' ' if not c.isprintable() else c for c in text)
-    # agetty issue의 백슬래시 치환 문법도 사용자 문자열에 허용하지 않는다.
+    # 콘솔에 표시하는 사용자 문자열에서 백슬래시 치환을 피한다.
     text = ' '.join(text.replace('\\', '/').split())
     if ascii_only:
         text = text.encode('ascii', 'replace').decode('ascii')
@@ -292,7 +291,7 @@ def render(value, *, ascii_only=False, width=100, details=False):
         lines.append(line('Failure history (may be recovered): '+str(row.get('unit'))+' '+str(row.get('reason'))))
     lines.append('Details: xenova-boot-status --details')
     if details:
-        lines.append('Display does not gate login. agetty pauses refresh on typed input.')
+        lines.append('Boot status is collected independently of login.')
     return '\n'.join(lines)+'\n'
 
 
@@ -322,30 +321,9 @@ def collect(runtime, reader=systemd_units, clock=time.monotonic, host=None):
     return history_update(value, old)
 
 
-def refresh(runtime, issue=Path('/run/issue.d/90-xenova.issue'), reload=Path('/run/agetty.reload'), **kwargs):
-    previous, _ = read_json(Path(runtime)/'boot-display.json')
+def refresh(runtime, **kwargs):
     value = collect(runtime, **kwargs)
     publish(Path(runtime)/'boot-display.json', json.dumps(value, ensure_ascii=True)+'\n')
-    # 상태 변화에만 안내를 갱신한다. 지연의 경과시간은 30초 간격으로 다시 표시한다.
-    text = render(value, ascii_only=True, width=80)
-    prior = issue.read_text() if issue.is_file() and not issue.is_symlink() else None
-    def signature(v):
-        if not v:
-            return None
-        stable = {k: v.get(k) for k in ('host_boot_id', 'vms', 'vm_counts', 'issues', 'failure_history')}
-        stable['stages'] = [{k: x for k, x in row.items() if k not in ('elapsed_ms', 'last_change_ms_ago')} |
-                            ({'delay_bucket': row.get('elapsed_ms', 0)//30000} if row['state'] == 'delayed' else {})
-                            for row in v['stages']]
-        return stable
-    if text != prior and (prior is None or signature(previous) != signature(value)):
-        publish(issue, text)
-        fd = os.open(reload, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise OSError('invalid agetty reload trigger')
-            os.utime(fd, None)
-        finally:
-            os.close(fd)
     return value
 
 
@@ -354,7 +332,7 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true', help='display snapshot JSON (not a Manager envelope)')
     parser.add_argument('--details', action='store_true', help='include unit and VM identifiers')
     parser.add_argument('--ascii', action='store_true', help='use ASCII-safe names for text consoles')
-    parser.add_argument('--watch', action='store_true', help='service mode: update agetty issue until boot settles or 600s')
+    parser.add_argument('--watch', action='store_true', help='service mode: record boot status until it settles or 600s')
     args = parser.parse_args(argv)
     runtime = Path('/run/xenova')
     if args.watch:
