@@ -167,14 +167,20 @@ class BootStatusTest(unittest.TestCase):
                 self.assertFalse(self.progress('storage'))
             self.assertEqual(stream.getvalue(), '')
 
-    def test_unchanged_poll_does_not_reload_prompt_or_repeat_output(self):
-        issue,reload = self.root/'issue/boot.issue',self.root/'reload'
+    def test_state_change_records_failure_without_reprinting_login_prompt(self):
         reader = lambda _: (self.rows, None)
-        status.refresh(self.root, issue, reload, reader=reader, host=HOST, clock=lambda:10)
-        mtime = issue.stat().st_mtime_ns
-        status.refresh(self.root, issue, reload, reader=reader, host=HOST, clock=lambda:15)
-        self.assertEqual(issue.stat().st_mtime_ns, mtime)
-        self.assertIsNotNone(status.read_json(self.root/'boot-display.json')[0])
+        with redirect_stdout(io.StringIO()) as stream:
+            status.refresh(self.root, reader=reader, host=HOST, clock=lambda:10)
+            self.rows['xenova-first-boot.service'].update(ActiveState='failed', Result='exit-code')
+            status.refresh(self.root, reader=reader, host=HOST, clock=lambda:15)
+        self.assertEqual(stream.getvalue(), '')
+        self.assertEqual(list(self.root.iterdir()), [self.root/'boot-display.json'])
+        saved, _ = status.read_json(self.root/'boot-display.json')
+        self.assertEqual(self.stage(saved, 'registration')['state'], 'failed')
+        self.assertEqual(saved['failure_history'][0]['unit'], 'xenova-first-boot.service')
+        with patch.object(status, 'collect', return_value=saved), redirect_stdout(io.StringIO()) as details:
+            self.assertEqual(status.main(['--details']), 0)
+        self.assertIn('journalctl -b -u xenova-first-boot.service', details.getvalue())
 
     def test_normal_selection_pending_fits_console_without_listing_unselected_vms(self):
         for key in ('cpu', 'autostart', 'admission', 'management'):

@@ -551,9 +551,9 @@ bitbake -c package_write_rpm xenova-platform xenova-dom0-manager xenova-gateway
 ```
 
 플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
-`xenova-boot-status.service`와 sysinit enablement를 확인한다. 기존 agetty의
-`/run/issue.d`·reload 기능을 사용하며 새 그래픽 런타임은 필요하지 않다.
-고정 이미지의 getty가 agetty인지도 패키지 manifest와 실제 unit에서 대조한다.
+`xenova-boot-status.service`와 sysinit enablement를 확인한다. Xen 이미지의 로그인
+배너는 기존 agetty가 표시하고, 부팅 상태는 상세 명령에서 조회한다. 이미지 rootfs에서
+`serial-getty@hvc0.service` 활성화 링크와 `serial-getty@ttyS0.service` 링크의 부재를 확인한다.
 다른 renderer를 쓰는 설치본의 화면 인계는 [부팅 표시](management-boot-boundaries.md#부팅-진행지연실패-표시)를 따른다.
 
 Pi 4의 기본 부팅 프로필은 Xen `dom0_max_vcpus=2`와 firmware `force_turbo=1`이다.
@@ -687,6 +687,9 @@ try:
     work.mount(dev+"p2", root, readonly=True)
     installed = assemble.platform_root_ok(root)
     check(bool(installed), "actual dom0 source, units, cfg, Wi-Fi, identity")
+    getty = root/"etc/systemd/system/getty.target.wants"
+    check((getty/"serial-getty@hvc0.service").is_symlink(), "Xen dom0 hvc0 login enabled")
+    check(not os.path.lexists(getty/"serial-getty@ttyS0.service"), "Xen dom0 ttyS0 login disabled")
     check((root/"usr/bin/systemd-run").is_file(), "per-execution scope tool systemd-run")
     broker_sources = {
         "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
