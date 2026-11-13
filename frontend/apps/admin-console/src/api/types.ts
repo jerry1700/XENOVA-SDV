@@ -212,6 +212,20 @@ export interface AutoDelayCommand extends SubmittedCommand {
 /** POST /api/v1/vms/{id}/faults/agent-exit — Linux Agent 종료 데모 명령 */
 export type AgentExitCommand = SubmittedCommand;
 
+/** POST /api/v1/vms/{id}/faults/app-exit — Zephyr 주행 앱의 한 앱(지금은 자율)만 멈추는 장애 주입. VM 은 그대로 */
+export interface AppExitRequest {
+  app_id: 'autonomous';
+}
+
+export type AppExitCommand = SubmittedCommand;
+
+/** POST /api/v1/vms/{id}/faults/domain-kill — 도메인 즉시 소멸(xl destroy). 의도(running)는 남아 복구 워커가 다시 띄운다 */
+export interface DomainKillResponse {
+  operation_id: string;
+  vm_id: string;
+  submitted_at: string;
+}
+
 export type CommandState = 'PENDING' | 'ACCEPTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REJECTED';
 
 export interface CommandStatusResponse {
