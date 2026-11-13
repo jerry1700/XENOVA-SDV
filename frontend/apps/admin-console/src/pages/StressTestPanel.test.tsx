@@ -96,6 +96,26 @@ describe('VM 상세 부하 테스트 카드', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('허용 범위');
   });
 
+  it('메모리 상한은 VM 메모리의 70% (512 MiB VM 이면 358) 이고 안내에 보인다 (QA 1-B3)', async () => {
+    render(<StressTestPanel vm={{ ...vm, memory_mib: 512 }} accent="red" />);
+    const size = screen.getByLabelText('메모리 부하 크기(MiB)');
+    expect(size).toHaveAttribute('max', '358');
+    expect(screen.getByText(/1~358 MiB \(할당 512 MiB의 70%, 최대 512 MiB\)/)).toBeInTheDocument();
+
+    await userEvent.clear(size);
+    await userEvent.type(size, '359');
+    expect(screen.getByRole('button', { name: '메모리 부하 시작' })).toBeDisabled();
+    await userEvent.clear(size);
+    await userEvent.type(size, '358');
+    expect(screen.getByRole('button', { name: '메모리 부하 시작' })).toBeEnabled();
+  });
+
+  it('작은 VM 은 처음 값도 상한 안으로 줄인다 (256 MiB VM → 179)', () => {
+    render(<StressTestPanel vm={{ ...vm, memory_mib: 256 }} accent="red" />);
+    expect(screen.getByLabelText('메모리 부하 크기(MiB)')).toHaveValue(179);
+    expect(screen.getByRole('button', { name: '메모리 부하 시작' })).toBeEnabled();
+  });
+
   it('Agent 가 ONLINE 이 아니면 모든 시작 버튼을 막는다', () => {
     render(<StressTestPanel vm={{ ...vm, agent_status: 'STALE' }} accent="red" />);
     expect(screen.getByText('Agent 연결 필요')).toBeInTheDocument();

@@ -14,6 +14,7 @@ import {
   useVms,
 } from '../api/queries';
 import type { CommandState, StressRequest, Vm } from '../api/types';
+import { defaultMemoryStressMib, maxMemoryStressMib, memoryStressHint } from '../domain/stressLimits';
 import { cpuPercentOf, latest, memoryPercentOf } from '../domain/vmMetrics';
 import { osLabel } from '../domain/roles';
 import { STATE_LABEL } from '../format';
@@ -196,7 +197,11 @@ export function SimulatorStressLab() {
     setNotice(text && vmId ? { vmId, text, fault } : null);
   const [cpuAmount, setCpuAmount] = useState(1);
   const [cpuDuration, setCpuDuration] = useState(30);
-  const [memoryMib, setMemoryMib] = useState(256);
+  // 메모리 부하 값은 입력한 VM 과 함께 둔다. 다른 VM 을 고르면 그 VM 의 상한 안 기본값으로 시작한다 (QA 1-B3)
+  const [memoryInput, setMemoryInput] = useState<{ vmId: string; value: number } | null>(null);
+  const memoryMib =
+    vm && memoryInput?.vmId === vm.vm_id ? memoryInput.value : vm ? defaultMemoryStressMib(vm.memory_mib) : 0;
+  const setMemoryMib = (value: number) => vm && setMemoryInput({ vmId: vm.vm_id, value });
   const [memoryDuration, setMemoryDuration] = useState(30);
   const [delayMs, setDelayMs] = useState(20);
   const [delayDuration, setDelayDuration] = useState(30);
@@ -210,7 +215,6 @@ export function SimulatorStressLab() {
     setSent(null);
     setFeedback(null);
     setCpuAmount(1);
-    setMemoryMib(256);
   }
 
   const samples = metrics.data?.items ?? [];
@@ -246,7 +250,8 @@ export function SimulatorStressLab() {
         : feedback;
   const cpuMin = 1;
   const cpuMax = 4;
-  const memoryMax = 512;
+  // VM 메모리의 70%·최대 512 MiB (백엔드와 같은 규칙, QA 1-B3)
+  const memoryMax = vm ? maxMemoryStressMib(vm.memory_mib) : 0;
 
   async function sendStress(input: StressRequest) {
     if (!vm) return;
@@ -445,6 +450,7 @@ export function SimulatorStressLab() {
                         onChange={setMemoryDuration}
                       />
                     </div>
+                    {vm && <p className={styles.dim}>{memoryStressHint(vm.memory_mib)}</p>}
                     <Button
                       disabled={
                         !ready ||

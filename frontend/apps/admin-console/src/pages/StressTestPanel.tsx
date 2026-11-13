@@ -4,12 +4,12 @@ import { commandErrorCode } from '../api/commandStatus';
 import { agentErrorText, commandStateText, errorText } from '../api/errorText';
 import { useCommandStatus, useStartStress } from '../api/queries';
 import type { CommandState, StressCommand, StressRequest, Vm } from '../api/types';
+import { defaultMemoryStressMib, maxMemoryStressMib, memoryStressHint } from '../domain/stressLimits';
 import styles from './pages.module.css';
 
-/** 백엔드 CpuStressRequest·MemoryStressRequest 검증 범위와 같다 */
+/** 백엔드 CpuStressRequest·MemoryStressRequest 검증 범위와 같다. 메모리 상한은 VM 별(domain/stressLimits) */
 const STRESS_LIMITS = {
   workersMax: 4,
-  memoryMibMax: 512,
   durationSMax: 120,
 } as const;
 
@@ -57,7 +57,8 @@ export function StressTestPanel({ vm, accent }: { vm: Vm; accent: string }) {
   const toast = useToast();
   const [workers, setWorkers] = useState(1);
   const [cpuDuration, setCpuDuration] = useState(30);
-  const [memoryMib, setMemoryMib] = useState(256);
+  const memoryMibMax = maxMemoryStressMib(vm.memory_mib);
+  const [memoryMib, setMemoryMib] = useState(() => defaultMemoryStressMib(vm.memory_mib));
   const [memoryDuration, setMemoryDuration] = useState(30);
   // 보낸 명령 (이 VM 의 것만 조회). 명령이 끝날 때까지 버튼을 잠근다
   const [sent, setSent] = useState<StressCommand | null>(null);
@@ -73,8 +74,7 @@ export function StressTestPanel({ vm, accent }: { vm: Vm; accent: string }) {
   const busy = stress.isPending || running;
   const cpuValid =
     inRange(workers, STRESS_LIMITS.workersMax) && inRange(cpuDuration, STRESS_LIMITS.durationSMax);
-  const memoryValid =
-    inRange(memoryMib, STRESS_LIMITS.memoryMibMax) && inRange(memoryDuration, STRESS_LIMITS.durationSMax);
+  const memoryValid = inRange(memoryMib, memoryMibMax) && inRange(memoryDuration, STRESS_LIMITS.durationSMax);
 
   const start = async (input: StressRequest) => {
     setSendError(null);
@@ -180,11 +180,11 @@ export function StressTestPanel({ vm, accent }: { vm: Vm; accent: string }) {
                 type="number"
                 aria-label="메모리 부하 크기(MiB)"
                 min={1}
-                max={STRESS_LIMITS.memoryMibMax}
+                max={memoryMibMax}
                 step={1}
                 value={memoryMib}
                 disabled={!ready || busy}
-                aria-invalid={!inRange(memoryMib, STRESS_LIMITS.memoryMibMax)}
+                aria-invalid={!inRange(memoryMib, memoryMibMax)}
                 onChange={(event) => setMemoryMib(Number(event.target.value))}
               />
               <span>MiB</span>
@@ -196,8 +196,7 @@ export function StressTestPanel({ vm, accent }: { vm: Vm; accent: string }) {
               onChange={setMemoryDuration}
             />
             <small>
-              1~{STRESS_LIMITS.memoryMibMax} MiB · 1~{STRESS_LIMITS.durationSMax}초 · 할당 메모리{' '}
-              {vm.memory_mib} MiB
+              {memoryStressHint(vm.memory_mib)} · 1~{STRESS_LIMITS.durationSMax}초
             </small>
             <Button
               disabled={!ready || busy || !memoryValid}
