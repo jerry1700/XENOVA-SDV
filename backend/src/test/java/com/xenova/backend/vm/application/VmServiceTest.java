@@ -405,6 +405,7 @@ class VmServiceTest {
 
         assertThat(result.pcpuCount()).isEqualTo(4);
         assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(0, 3)));
+        assertThat(result.sharedPcpus()).containsExactly(0, 3);
         assertThat(result.exclusivePcpus()).containsExactly(1);
         assertThat(result.pcpus()).allSatisfy(pcpu -> assertThat(pcpu.loadPercent()).isNull());
     }

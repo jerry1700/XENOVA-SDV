@@ -316,7 +316,7 @@ public class VmService {
 
     private CpuLayout requireConfiguredCpuLayout(CpuLayout layout) {
         if (layout == null || !layout.configured() || layout.policyRevision() == null
-                || layout.host() == null || layout.vms() == null) {
+                || layout.host() == null || layout.host().desiredDom0Pcpus() == null || layout.vms() == null) {
             throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "CPU 배치 정책이 설정되지 않았습니다.");
         }
         return layout;
@@ -408,7 +408,8 @@ public class VmService {
             statuses.add(new VmResourceView.PcpuStatus(pcpu, null));
         }
         return new VmResourceView(
-                record.getVmId(), record.getVcpus(), record.getMemoryMib(), pcpuCount, pinning, exclusive, statuses,
+                record.getVmId(), record.getVcpus(), record.getMemoryMib(), pcpuCount, pinning,
+                List.copyOf(layout.host().desiredDom0Pcpus()), exclusive, statuses,
                 new VmResourceView.ResourceLimits(
                         fixed ? record.getVcpus() : 1,
                         fixed ? record.getVcpus() : 4,

@@ -9,6 +9,7 @@ public record VmResourceView(
         int memoryMib,
         int pcpuCount,
         List<CpuLayout.VcpuAffinity> vcpuPinning,
+        List<Integer> sharedPcpus,
         List<Integer> exclusivePcpus,
         List<PcpuStatus> pcpus,
         ResourceLimits limits,
