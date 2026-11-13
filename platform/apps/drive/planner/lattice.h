@@ -119,6 +119,8 @@ enum lp_result lp_start_exit(struct lp_search *,const dw_world *,dw_pose,float,
 enum lp_result lp_task_obstructed(const dw_world *,const struct tr_intent *,dw_pose,dw_pose,
  const struct lp_config *,struct lp_budget,struct lp_metrics *,bool *);
 float lp_terminal_clearance(const struct lp_config *);
+float lp_lookahead_distance(const struct lp_config *,float speed);
+float lp_stopping_distance(const struct lp_config *,float speed);
 /* Try a forward lane-guided path whose body fits the observed road. The caller
  * retains the existing path admission and may run the lattice on NOT_FOUND. */
 enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,float,dw_pose,

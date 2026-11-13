@@ -524,8 +524,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
  e->budget=budget;
  if(!rc)rc=task_prepare(e,&map->world,pose,&vehicle,end_clearance,budget,&task,&prefix,&goal,now);
  float speed=fmaxf(0,vehicle.velocity_mps);
- float replan_distance=fmaxf(e->config->lookahead_min,fminf(e->config->lookahead_max,speed*e->config->lookahead_time))+
-                       speed*e->config->reaction_s+speed*speed/(2*e->config->max_brake)+e->config->goal_distance;
+ float replan_distance=lp_lookahead_distance(e->config,speed)+lp_stopping_distance(e->config,speed)+e->config->goal_distance;
  if(!rc&&e->maneuver_active&&!(map->world.required_features&DW_LANE_MODEL)){
   struct lp_road_state current,merge;float steering=vehicle.has_measured_steering_rad?vehicle.measured_steering_rad:vehicle.estimated_steering_rad;
   bool projected=lp_reference_project(&map->world,pose,&current)==LP_PATH_FOUND&&

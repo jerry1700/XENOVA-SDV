@@ -655,6 +655,15 @@ float lp_terminal_clearance(const struct lp_config *c){
  /* Reserve the rotated front corner plus half a sampled motion step. */
  return hypotf(c->front+c->margin+c->tracking_guard+sweep,c->half_width+c->margin+c->tracking_guard+sweep);
 }
+static float nominal_lookahead(const struct lp_config *c,float speed){
+ return speed*c->lookahead_time;
+}
+float lp_lookahead_distance(const struct lp_config *c,float speed){
+ return clamp(nominal_lookahead(c,speed),c->lookahead_min,c->lookahead_max);
+}
+float lp_stopping_distance(const struct lp_config *c,float speed){
+ return speed*c->reaction_s+speed*speed/(2*c->max_brake);
+}
 
 static enum lp_result local_terminal(struct lp_search *s) {
  const struct lp_config *c=s->config;
@@ -891,10 +900,11 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  float length=last.arc-first.arc;
  float cruise=c->narrow_lane_speed_mps>0?c->narrow_lane_speed_mps:c->max_velocity;
  speed=fmaxf(speed,cruise);
- /* Keep enough path for the controller lookahead time and a stop from the
-  * current or intended speed, even when the car starts at rest. */
+ /* The tracker can steer toward a nearer path endpoint. Size the minimum
+  * prefix from cruise time and stopping distance, leaving the lookahead
+  * floor for selecting a target on the available path. */
  float minimum=fmaxf(c->primitive_speed*c->primitive_duration,
-  speed*(c->lookahead_time+c->reaction_s)+speed*speed/(2*c->max_brake));
+  nominal_lookahead(c,speed)+lp_stopping_distance(c,speed));
  if(length<minimum)return LP_NOT_FOUND;
  float step=fminf(c->tracking_guard*.6f,.0015f),dt=step/c->primitive_speed;
  unsigned count=(unsigned)fminf(LP_PATH-1,floorf(length/step));
@@ -1484,7 +1494,7 @@ static enum lp_result track_legacy_forward(struct lp_tracker *tracker,const stru
   if(stopped==LP_PATH_FOUND){tracker->last_pi_us=vehicle->pi_sample_us;tracker->completed++;}
   return out->result;
  }
- float lookahead=clamp(fabsf(vehicle->velocity_mps)*c->lookahead_time,c->lookahead_min,c->lookahead_max);
+ float lookahead=lp_lookahead_distance(c,fabsf(vehicle->velocity_mps));
  size_t target=nearest;float along=0;
  while(target+1<path->count&&along<lookahead){along+=distance(path->points[target].pose,path->points[target+1].pose);target++;}
  dw_pose local=dw_compose(dw_inverse(pose),path->points[target].pose);
@@ -1604,7 +1614,7 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
   tracker->completed++;return LP_STOP;
  }
  if(stopped_result!=LP_PATH_FOUND)return out->result=stopped_result;
- float lookahead=clamp(fabsf(vehicle->velocity_mps)*c->lookahead_time,c->lookahead_min,c->lookahead_max);
+ float lookahead=lp_lookahead_distance(c,fabsf(vehicle->velocity_mps));
  dw_pose target=carrot(path,geometry,segment,tracker->progress+lookahead),local=dw_compose(dw_inverse(pose),target);
  float chord2=local.x*local.x+local.y*local.y;
  if(chord2<1e-8f||gear*local.x<=0)return LP_INPUT;
