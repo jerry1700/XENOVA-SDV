@@ -45,6 +45,7 @@ public class VmService {
     private static final Set<String> REJECTED_BY_DOM0 =
             Set.of("INVALID_ARGUMENT", "INSUFFICIENT_RESOURCES", "VM_CONTROL_NOT_SUPPORTED", "VM_NAME_CONFLICT");
     private static final String DOMAIN_EXISTS = "VM_ALREADY_EXISTS";
+    private static final String INVALID_VM_STATE = "INVALID_VM_STATE";
 
     private final VmControlPort vmControlPort;
     private final VmRecordRepository vmRecordRepository;
@@ -207,7 +208,16 @@ public class VmService {
     public VmControlOperation reboot(String vmId, String requestKey) {
         String validatedKey = validateRequestKey(requestKey);
         findRecord(vmId);
-        return vmControlPort.requestReboot(vmId, validatedKey);
+        try {
+            return vmControlPort.requestReboot(vmId, validatedKey);
+        } catch (ApiException exception) {
+            // Reboot needs a running domain: a stopped VM is started instead, a crashed one is stopped first.
+            if (INVALID_VM_STATE.equals(exception.getCode())) {
+                throw new ApiException(HttpStatus.CONFLICT, INVALID_VM_STATE,
+                        "실행 중인 VM만 재부팅할 수 있습니다. 꺼진 VM은 시작하고, 비정상 상태면 정지한 뒤 시작하세요.");
+            }
+            throw exception;
+        }
     }
 
     public VmControlOperation controlOperation(String vmId, String requestKey) {
@@ -465,6 +475,10 @@ public class VmService {
             try {
                 vmControlPort.destroy(vmId);
             } catch (ApiException exception) {
+                // dom0-manager refuses a delete while the domain exists ("stop it before delete").
+                if (INVALID_VM_STATE.equals(exception.getCode())) {
+                    throw new ApiException(HttpStatus.CONFLICT, INVALID_VM_STATE, "실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.");
+                }
                 if (!"VM_NOT_FOUND".equals(exception.getCode())) {
                     throw exception;
                 }

@@ -748,20 +748,21 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 | `GET /api/v1/logs` | `400 VALIDATION_ERROR` (`errors` 없음) | `limit` 1..500 밖, 음수 `after`, 128자를 넘는 `source_id`·`component`, 허용하지 않는 `level`. dom0 로그 조회도 같은 경우 `400 InvalidArgument` 다([실행 로그 계약](runtime-logs-v1.md)). 단 `vm_id` 가 UUID 형식이 아니거나 `after`·`limit` 이 정수가 아니면 공통 처리로 `422 VALIDATION_ERROR` |
 | `POST /api/v1/vms/registrations` | `400 INVALID_REGISTRATION` | 등록 통지 본문 오류 (서비스 간 경로, 5장) |
 
-**dom0-manager 오류 변환** (dom0 본문의 `code`로 판단하며 `detail`은 로그에만 남김)
+**dom0-manager 오류 변환** (dom0 본문의 `code`·`platform_code`로 판단한다. dom0 `message`(영어, 내부 ID 포함)와 `detail`은 로그에만 남기고 **공개 `message`는 코드별 한글 문구**다. QA 1-B1, 2026-11-13)
 
 | dom0 | Spring 공개 |
 |---|---|
-| `404 VMNotFound` | 단건 조회에서는 오류가 아니라 "도메인 없음"(`stopped`)으로 처리. 그 밖에는 `404 VM_NOT_FOUND` |
-| `409 VMExists` | 생성·시작에서는 성공으로 처리(10.1절). 그 밖에는 `409 VM_ALREADY_EXISTS` |
+| `404 VMNotFound` | 단건 조회에서는 오류가 아니라 "도메인 없음"(`stopped`)으로 처리. 그 밖에는 `404 VM_NOT_FOUND` ("보드에서 VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.") |
+| `409 VMExists` | 생성·시작에서는 성공으로 처리(10.1절). 그 밖에는 `409 VM_ALREADY_EXISTS` ("보드에 같은 VM이 이미 있습니다.") |
 | `409 VMNameConflict` | `409 VM_NAME_CONFLICT`. 생성·시작에서도 **성공으로 처리하지 않는다**(같은 VM 이 아님) |
-| `409 InvalidState` | `409 INVALID_VM_STATE` |
-| `400 InvalidArgument` | `400 INVALID_ARGUMENT` |
+| `409 InvalidState` | `409 INVALID_VM_STATE`. message는 `platform_code`별: `VM_NOT_STOPPED` "VM을 정지한 뒤 다시 시도하세요.", `VM_NOT_RUNNING` "실행 중인 VM에서만 할 수 있는 작업입니다.", `HOST_QUIESCING` "보드가 종료 중이라 새 작업을 받을 수 없습니다.", `BOOT_ADMISSION_REQUIRED` "보드의 VM 실행 정책이 확정되지 않아 지금은 시작할 수 없습니다.", `TARGET_CHANGED`·`INTENT_MISMATCH` "그사이 VM 상태가 바뀌었습니다…", `ASSET_IN_USE` "VM 디스크를 다른 작업이 사용 중입니다…", `VM_PURGED` "이미 완전히 삭제된 VM입니다.", 그 밖·없음 "지금 VM 상태에서는 할 수 없는 작업입니다. VM 상태를 확인한 뒤 다시 시도하세요." 작업을 아는 곳은 더 구체적으로 바꾼다: 삭제 "실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.", 재부팅 "실행 중인 VM만 재부팅할 수 있습니다. 꺼진 VM은 시작하고, 비정상 상태면 정지한 뒤 시작하세요." |
+| `400 InvalidArgument` | `400 INVALID_ARGUMENT`. `platform_code` `TEMPLATE_NOT_FOUND`·`TEMPLATE_VERSION_NOT_FOUND` "보드에 해당 템플릿 버전이 없습니다. 템플릿을 다시 선택하세요.", `RESOURCE_UNSUPPORTED` "이 템플릿이 허용하지 않는 vCPU·메모리 값입니다.", 그 밖 "보드가 요청 값을 받아들이지 않았습니다. 입력값을 확인하세요." |
 | `507 InsufficientResources` | `507 INSUFFICIENT_RESOURCES`. message는 `resource.name`에 따라 메모리·CPU 부족 또는 "VM에 할당할 수 있는 IP 주소가 없습니다."(`ipv4`, Linux VM IP 풀 고갈) |
-| `500 DriverError` | `500 VM_DRIVER_ERROR` |
+| `500 DriverError` | `500 VM_DRIVER_ERROR` ("보드에서 VM 작업을 처리하지 못했습니다. 잠시 후 다시 시도하세요.") |
 | `501 NotSupported` | `501 VM_CONTROL_NOT_SUPPORTED` ("보드가 아직 지원하지 않는 작업입니다."). 생성에서 받으면 dom0가 거부한 것이므로 Spring 기록을 지움 |
 | `503 PlatformUnavailable` | `503 VM_CONTROL_UNAVAILABLE` (전송 실패와 같은 코드, 잠시 후 재시도 가능). 생성에서 받아도 기록은 유지 |
 | `504 DriverTimeout` | `504 VM_CONTROL_TIMEOUT` (응답 타임아웃과 같은 코드) |
+| `404 OperationNotFound` | `404 OPERATION_NOT_FOUND` ("보드에서 요청한 작업 기록을 찾을 수 없습니다.") |
 | `401 Unauthorized` (또는 본문과 관계없이 401) | 서비스 토큰 설정 불일치. 사용자 로그인 문제가 아니므로 `502 VM_CONTROL_BAD_RESPONSE`로 전달하고 로그에 경고 |
 | 해석할 수 없는 본문, 모르는 `code`, 본문이 필요한데 없음 | `502 VM_CONTROL_BAD_RESPONSE` |
 

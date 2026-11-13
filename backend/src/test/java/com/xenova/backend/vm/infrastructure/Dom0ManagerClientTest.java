@@ -626,6 +626,37 @@ class Dom0ManagerClientTest {
         assertThat(requests).hasValue(1);
     }
 
+    // QA 1-B1: the board's English message (with internal ids) must not reach the API; Korean text per code instead.
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0} {1} -> {3}")
+    @org.junit.jupiter.params.provider.CsvSource(delimiter = '|', textBlock = """
+            VMNotFound        |                            | 404 | VM_NOT_FOUND        | 보드에서 VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.
+            VMExists          |                            | 409 | VM_ALREADY_EXISTS   | 보드에 같은 VM이 이미 있습니다.
+            InvalidState      |                            | 409 | INVALID_VM_STATE    | 지금 VM 상태에서는 할 수 없는 작업입니다. VM 상태를 확인한 뒤 다시 시도하세요.
+            InvalidState      | VM_NOT_STOPPED             | 409 | INVALID_VM_STATE    | VM을 정지한 뒤 다시 시도하세요.
+            InvalidState      | VM_NOT_RUNNING             | 409 | INVALID_VM_STATE    | 실행 중인 VM에서만 할 수 있는 작업입니다.
+            InvalidState      | HOST_QUIESCING             | 409 | INVALID_VM_STATE    | 보드가 종료 중이라 새 작업을 받을 수 없습니다.
+            InvalidArgument   |                            | 400 | INVALID_ARGUMENT    | 보드가 요청 값을 받아들이지 않았습니다. 입력값을 확인하세요.
+            InvalidArgument   | TEMPLATE_VERSION_NOT_FOUND | 400 | INVALID_ARGUMENT    | 보드에 해당 템플릿 버전이 없습니다. 템플릿을 다시 선택하세요.
+            OperationNotFound |                            | 404 | OPERATION_NOT_FOUND | 보드에서 요청한 작업 기록을 찾을 수 없습니다.
+            DriverError       |                            | 500 | VM_DRIVER_ERROR     | 보드에서 VM 작업을 처리하지 못했습니다. 잠시 후 다시 시도하세요.
+            """)
+    void boardErrorsAreReturnedInKoreanWithoutTheBoardsOwnWording(
+            String dom0Code, String platformCode, int status, String code, String message) {
+        String platform = platformCode == null ? "" : ",\"platform_code\":\"" + platformCode + "\"";
+        server.createContext(
+                "/api/v1/vms",
+                exchange -> respond(exchange, status, """
+                        {"code":"%s","message":"domain 6f0c-internal is running; stop it before delete"%s}
+                        """.formatted(dom0Code, platform)));
+
+        assertThatThrownBy(() -> client.launch(VM_ID, SPEC))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus().value()).isEqualTo(status);
+                    assertThat(exception.getCode()).isEqualTo(code);
+                    assertThat(exception.getMessage()).isEqualTo(message).doesNotContain("domain", "6f0c");
+                });
+    }
+
     private void assertLaunchFailsWith(
             int dom0Status,
             String body,
