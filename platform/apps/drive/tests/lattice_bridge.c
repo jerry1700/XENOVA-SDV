@@ -473,7 +473,7 @@ int probe_parking_cusp_fixture(void *pointer,unsigned strategy){
 bool probe_prepare_tracking(void *pointer){
  struct probe *p=pointer;
  p->parking_cache.ready=false;
- p->use_prepared_tracking=lp_prepare_tracking(&p->path,&p->tracking_geometry);
+ p->use_prepared_tracking=lp_prepare_tracking(&p->path,&p->config,&p->tracking_geometry);
  return p->use_prepared_tracking;
 }
 int probe_track_sample(void *pointer,unsigned index,uint64_t stamp,float velocity,float *out){

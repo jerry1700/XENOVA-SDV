@@ -47,7 +47,7 @@ static bool prepare_tracking(struct drive_engine *e,struct de_reference h){
  if(h.slot>=DE_PATH_SLOTS)return false;
  struct de_path_slot *slot=&e->paths[h.slot];
  if(slot->generation!=h.generation||!slot->writing)return false;
- if(!slot->tracking_prepared)slot->tracking_prepared=lp_prepare_tracking(&slot->path,&slot->tracking_geometry);
+ if(!slot->tracking_prepared)slot->tracking_prepared=lp_prepare_tracking(&slot->path,e->config,&slot->tracking_geometry);
  return slot->tracking_prepared;
 }
 /* Only the reserving writer can abandon an unpublished slot. Once it clears
@@ -567,7 +567,8 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
    if(previous_gate==DW_BUSY){
     (void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return DE_BUSY;
    }
-   enum lp_result usable=same_intent&&same_goal&&!previous_gate?lp_validate_path(old,&map->world,e->config,&checked,&budget):LP_INPUT;
+   enum lp_result usable=same_intent&&same_goal&&!previous_gate?
+    lp_recheck_path(old,&e->paths[previous.slot].tracking_geometry,&map->world,e->config,&checked,&budget):LP_INPUT;
    if(same_intent&&same_goal&&(usable==LP_COLLISION||usable==LP_INPUT||usable==LP_NUMERIC))e->path_invalidated=true;
    if(usable==LP_PATH_FOUND){
     if(initial_correspondence_pending(e,old)&&initial_correspondence_stale(old,&vehicle,e->config)&&

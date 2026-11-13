@@ -1186,8 +1186,11 @@ static bool path_shape(const struct lp_path *path){
  }
  return true;
 }
-bool lp_prepare_tracking(const struct lp_path *path,struct lp_tracking_geometry *geometry){
- if(!path_shape(path))return false;
+static enum lp_result path_geometry(const struct lp_path *,const dw_world *,const struct lp_config *,
+ struct lp_metrics *,const struct lp_budget *,float *);
+
+bool lp_prepare_tracking(const struct lp_path *path,const struct lp_config *c,struct lp_tracking_geometry *geometry){
+ if(!path_shape(path)||path_geometry(path,NULL,c,NULL,NULL,geometry->sweep_pad)!=LP_PATH_FOUND)return false;
  if(legacy_forward_path(path))return true;
  for(unsigned part=0;part<path_segments(path);part++){
   xenova_drive_GearSegment segment=path_segment(path,part);
@@ -1204,7 +1207,7 @@ bool lp_prepare_tracking(const struct lp_path *path,struct lp_tracking_geometry 
  return true;
 }
 static bool path_matches_world(const struct lp_path *p,const dw_world *w){
- return w&&path_shape(p)&&p->world_features==w->required_features&&
+ return w&&p->world_features==w->required_features&&
   !strcmp(p->frame,w->frame_epoch)&&!strcmp(p->odom,w->odom_epoch)&&
   !strcmp(p->configuration,w->configuration)&&!strcmp(p->reference,w->reference_id)&&
   (!(w->required_features&DW_LANE_MODEL)||(p->task.active&&tr_basis_compatible(&p->basis,w)));
@@ -1235,7 +1238,7 @@ static enum lp_result path_geometry(const struct lp_path *p,const dw_world *w,co
     if(distance(predicted,point->pose)>.001f||fabsf(dw_angle(predicted.yaw-point->pose.yaw))>.001f)return LP_INPUT;
    }
    if(pads){
-    if(!(k&31)){enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;}
+    if(b&&!(k&31)){enum lp_result rc=guard(b,m);if(rc!=LP_SEARCHING)return rc;}
     pads[k]=pad+c->tracking_guard;
    }else{
     enum lp_result rc=footprint(w,point->pose,pad+c->tracking_guard,c,m,b,false,NULL,&p->task,&p->space);
@@ -1247,11 +1250,20 @@ static enum lp_result path_geometry(const struct lp_path *p,const dw_world *w,co
 }
 enum lp_result lp_validate_path(const struct lp_path *p,const dw_world *w,const struct lp_config *c,
  struct lp_metrics *m,const struct lp_budget *b){
- return c&&path_matches_world(p,w)?path_geometry(p,w,c,m,b,NULL):LP_INPUT;
+ return c&&path_shape(p)&&path_matches_world(p,w)?path_geometry(p,w,c,m,b,NULL):LP_INPUT;
+}
+enum lp_result lp_recheck_path(const struct lp_path *p,const struct lp_tracking_geometry *geometry,const dw_world *w,
+ const struct lp_config *c,struct lp_metrics *m,const struct lp_budget *b){
+ if(!path_matches_world(p,w))return LP_INPUT;
+ for(size_t i=0;i<p->count;i++){
+  enum lp_result rc=footprint(w,p->points[i].pose,geometry->sweep_pad[i],c,m,b,false,NULL,&p->task,&p->space);
+  if(rc!=LP_PATH_FOUND)return rc;
+ }
+ return LP_PATH_FOUND;
 }
 enum lp_result lp_clearance_lower(const struct lp_path *p,const dw_world *w,const struct lp_config *c,float maximum,
  struct lp_metrics *m,const struct lp_budget *b,float *out){
- if(!out||!c||!isfinite(maximum)||maximum<=0||!path_matches_world(p,w))return LP_INPUT;
+ if(!out||!c||!isfinite(maximum)||maximum<=0||!path_shape(p)||!path_matches_world(p,w))return LP_INPUT;
  float pads[LP_PATH];
  enum lp_result rc=path_geometry(p,w,c,m,b,pads);if(rc!=LP_PATH_FOUND)return rc;
  float low=0,high=maximum;

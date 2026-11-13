@@ -61,7 +61,8 @@ static void writer_contention(void){
  published_path_during_pass_planning();
  de_init(&engine,&lp_selected_config,&lp_selected_assets);
  struct lp_path *source=&engine.parking.best_maneuver;
- source->count=2;source->points[1].pose.x=.2f;
+ source->count=2;
+ source->points[1].pose.x=lp_selected_config.primitive_speed*lp_selected_config.primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
  engine.budget.deadline_us=200;
  assert(parking_publish(&engine,source,100,true,false)==DE_OK);
  assert(engine.current==0&&engine.path_revision==1);

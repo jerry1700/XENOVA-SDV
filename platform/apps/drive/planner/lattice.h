@@ -79,7 +79,7 @@ struct lp_search {
 struct lp_road_state {dw_pose pose;float arc,offset,curvature,length;};
 /* Geometry of one immutable path, owned by its published slot. Each segment
  * starts at arc zero. Live map and vehicle checks remain in the tracker. */
-struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3];};
+struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3],sweep_pad[LP_PATH];};
 struct lp_parking_cache {struct tr_parking_geometry geometry;bool ready;};
 struct lp_tracker { size_t index;float last_velocity,last_steer;uint64_t completed;
  uint64_t path_token,last_pi_us,gate_revision;unsigned segment;float progress;bool initialized; };
@@ -129,11 +129,14 @@ void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp
 enum lp_result lp_advance(struct lp_search *,unsigned,struct lp_path *);
 enum lp_result lp_footprint(const dw_world *,dw_pose,float,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
 enum lp_result lp_validate_path(const struct lp_path *,const dw_world *,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
+/* Recheck a published path against a new map using its slot's validated geometry. */
+enum lp_result lp_recheck_path(const struct lp_path *,const struct lp_tracking_geometry *,const dw_world *,
+ const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
 enum lp_result lp_clearance_lower(const struct lp_path *,const dw_world *,const struct lp_config *,float,
  struct lp_metrics *,const struct lp_budget *,float *);
 enum lp_result lp_track(struct lp_tracker *,const struct lp_path *,const dw_world *,dw_pose,const dw_vehicle *,
  const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,const struct lp_budget *);
-bool lp_prepare_tracking(const struct lp_path *,struct lp_tracking_geometry *);
+bool lp_prepare_tracking(const struct lp_path *,const struct lp_config *,struct lp_tracking_geometry *);
 /* Only use geometry prepared for this exact path. Reset the optional parking
  * cache whenever the leased map or path generation changes. */
 enum lp_result lp_track_prepared(struct lp_tracker *,const struct lp_path *,const struct lp_tracking_geometry *,
