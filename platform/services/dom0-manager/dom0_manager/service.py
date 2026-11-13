@@ -26,7 +26,8 @@ from uuid import UUID
 from . import budget as request_budget
 from .config import Settings
 from .drivers.base import CreateSpec, Domain, Driver, Provisioner, StatsSample
-from .errors import Dom0ManagerError, InsufficientResources, InvalidArgument, InvalidState, OperationNotFound, VMExists, VMNotFound, VMSpecConflict
+from .errors import (Dom0ManagerError, DriverTimeout, InsufficientResources, InvalidArgument, InvalidState,
+                     OperationNotFound, VMExists, VMNotFound, VMSpecConflict)
 from .models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate,
                      UpdateCpuPolicyRequest, UpdateResourcesRequest, VmOperationAction, VmOperationResult, VmOperationStage, VmState)
 
@@ -53,6 +54,7 @@ def _failure_context(action: VmOperationAction, stage: VmOperationStage, *, befo
                 accepted=False if rejected else None,
                 status=ControlStatus.rejected if rejected else ControlStatus.unknown,
                 next_action="fix_request" if isinstance(exc, (InvalidArgument, VMSpecConflict)) else "check_current_vm",
+                start_submitted=False if action == "start" and before_submission else None,
             )
             if exc.detail is not None:
                 exc.public_message = f"platform {action} failed ({exc.code})"
@@ -140,10 +142,22 @@ class VmService:
                     memory_mib=request.memory_mib,
                     instance=instance,
                 )
-                with _failure_context("start", "preflight", before_submission=True):
-                    request_budget.ensure(f"starting vm {request.vm_id}")
-                with _failure_context("start", "acceptance", before_submission=False):
-                    return self._driver.create(spec)
+                try:
+                    with _failure_context("start", "preflight", before_submission=True):
+                        request_budget.ensure(f"starting vm {request.vm_id}")
+                    with _failure_context("start", "acceptance", before_submission=False):
+                        return self._driver.create(spec)
+                except DriverTimeout as exc:
+                    if (instance.registration_operation_id is not None and exc.context is not None
+                            and exc.context.start_submitted is False):
+                        exc.platform_code = "DEADLINE_EXCEEDED"
+                        exc.public_message = "VM registration completed; Xen start was not submitted before the request deadline"
+                        exc.context = VmOperationResult(
+                            action="create", stage="completion", accepted=True, status=ControlStatus.completed,
+                            operation_id=instance.registration_operation_id, next_action="lookup_original",
+                            start_submitted=False,
+                        )
+                    raise
 
     def stop(self, vm_id: UUID) -> None:
         with _failure_context("stop", "preflight", before_submission=True):

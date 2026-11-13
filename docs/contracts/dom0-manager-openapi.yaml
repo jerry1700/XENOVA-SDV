@@ -1492,6 +1492,12 @@ components:
         platform_code:
           type: [string, 'null']
           description: 조회에서 원 기록에 보존된 오류 코드. 실패 응답은 바깥쪽 Error.platform_code 사용
+        start_submitted:
+          description: 이 HTTP 호출에서 Xen 시작 미제출이 확인되면 false. 그 외에는 생략
+          oneOf:
+            - type: boolean
+              const: false
+            - type: 'null'
     ControlStatus:
       type: string
       description: >-

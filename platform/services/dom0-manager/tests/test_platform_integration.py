@@ -447,6 +447,7 @@ def test_registration_save_failure_does_not_report_acceptance(client, board):
     assert response.status_code == 503
     context = response.json()["context"]
     assert (context["action"], context["stage"], context["accepted"], context["status"]) == ("create", "acceptance", None, "unknown")
+    assert "start_submitted" not in context
     assert context["next_action"] == "lookup_original" and context["operation_id"]
     assert "fixture/private/path" not in response.text and "detail" not in response.json()
     missing = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "create"})
@@ -462,6 +463,7 @@ def test_xen_start_failure_is_separate_from_successful_registration(client, boar
     assert response.status_code == 503, response.text
     context = response.json()["context"]
     assert (context["action"], context["stage"], context["accepted"], context["status"]) == ("start", "start_submit", True, "uncertain")
+    assert "start_submitted" not in context
     original, = (board.data / "operations").glob("*.json")
     registered = client.get(f"/api/v1/vms/{NEW_VM}/operations/{original.stem}", params={"action": "create"})
     assert registered.json()["status"] == "completed"
@@ -566,6 +568,10 @@ def test_create_replay_after_dhcp_deadline_finishes_original_registration(client
             with patch.object(board.manager, "checkpoint", expire_before_start):
                 registration_only = client.post("/api/v1/vms", json=body, headers=headers)
             assert registration_only.status_code == 504, registration_only.text
+            context = registration_only.json()["context"]
+            assert (context["status"], context["operation_id"], context["start_submitted"]) == (
+                "completed", original["operation_id"], False,
+            )
             assert json.loads(journal.read_text())["status"] == "SUCCEEDED"
             assert not list((board.data / "control-requests").glob("*.json"))
             assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
@@ -622,7 +628,8 @@ def test_create_start_timeout_preserves_registration_and_never_launches_over_a_l
     assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
 
 
-def test_create_http_budget_can_expire_after_registration_before_xen_start(board):
+@pytest.mark.parametrize("expiry", ["after-registration", "before-manager-start"])
+def test_create_http_budget_can_expire_after_registration_before_xen_start(board, expiry):
     from dom0_manager import budget
 
     now = [100.]
@@ -634,23 +641,39 @@ def test_create_http_budget_can_expire_after_registration_before_xen_start(board
         budget, "start", side_effect=lambda ms, **kwargs: real_budget(ms, clock=lambda: now[0], **kwargs),
     ):
         def expire(phase, _):
-            if phase == "complete":
+            if phase == "complete" and expiry == "after-registration":
                 now[0] += 11.
 
-        with patch.object(board.manager, "checkpoint", expire):
+        call = SerializedManager.call
+
+        def wait_for_manager(manager, action, *args, **kwargs):
+            if action == "start" and expiry == "before-manager-start":
+                now[0] += 11.
+            return call(manager, action, *args, **kwargs)
+
+        with patch.object(board.manager, "checkpoint", expire), \
+                patch.object(SerializedManager, "call", wait_for_manager), \
+                patch.object(board.manager, "call", wraps=board.manager.call) as manager_call:
             failed = client.post("/api/v1/vms", json=body, headers={"X-Request-Budget-Ms": "10000"})
+        assert [entry.args[0] for entry in manager_call.call_args_list] == ["get", "get", "create"]
         assert failed.status_code == 504, failed.text
-        context = failed.json()["context"]
-        # The create adapter tries a follow-up get before it reaches the start
-        # budget guard. A completed registration can therefore look unknown here.
-        assert (context["action"], context["stage"], context["accepted"], context["operation_id"]) == (
-            "create", "registration", None, None,
-        )
         assert not list((board.data / "control-requests").glob("*.json"))
         assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
         journal, = (board.data / "operations").glob("*.json")
         original = journal.read_bytes()
         assert json.loads(original)["status"] == "SUCCEEDED"
+        error = failed.json()
+        assert (error["code"], error["platform_code"]) == ("DriverTimeout", "DEADLINE_EXCEEDED")
+        assert error["context"] == {
+            "action": "create", "stage": "completion", "accepted": True, "status": "completed",
+            "operation_id": journal.stem, "next_action": "lookup_original", "start_submitted": False,
+        }
+        completed = client.get(f"/api/v1/vms/{NEW_VM}/operations/{journal.stem}", params={"action": "create"})
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["status"] == "completed"
+        assert "start_submitted" not in completed.json()
+        wrong_action = client.get(f"/api/v1/vms/{NEW_VM}/operations/{journal.stem}", params={"action": "start"})
+        assert wrong_action.status_code == 404
         with patch.object(board.manager, "preparer", side_effect=AssertionError("registered disk must not be copied again")):
             recovered = client.post("/api/v1/vms", json=body, headers={"X-Request-Budget-Ms": "10000"})
         assert recovered.status_code == 201, recovered.text

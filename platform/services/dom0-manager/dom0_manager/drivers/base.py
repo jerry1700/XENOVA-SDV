@@ -55,6 +55,8 @@ class InstancePaths:
     kernel: Path | None = None
     ramdisk: Path | None = None
     disk: Path | None = None
+    # 확인한 원 등록 작업. 기록이 없는 드라이버나 구형 등록에서는 None.
+    registration_operation_id: UUID | None = None
 
 
 @dataclass(frozen=True)

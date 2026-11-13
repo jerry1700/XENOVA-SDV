@@ -757,6 +757,8 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 - `status`는 `rejected`(접수 전 거절), `unknown`(접수 여부 미확인), `pending`(접수·진행), `completed`(원 작업 완료), `failed`(원 작업 실패 확정), `uncertain`(수락 후 결과 미확정), `superseded`(이후 의도로 대체)를 구분한다. `completed`는 게스트 OS·앱의 준비를 의미하지 않는다.
 - `next_action`은 `fix_request`(명세/키 점검), `check_current_vm`(현재 등록·실행 확인), `lookup_original`(원 결과 확인), `reconcile_original`(원 자산 작업 조회 후 명시적 수습 판단) 중 하나다. `retryable`은 여전히 하위 원값이며, 새 키·강제 종료·자동 재실행을 결정하는 근거로 단독 사용하지 않는다.
 
+등록을 완료한 뒤 HTTP 호출 기한이 끝나 Xen 시작을 제출하지 못하면 `504 DriverTimeout`을 반환한다. 확인된 원 등록 ID가 있으면 `platform_code: DEADLINE_EXCEEDED`와 함께 `context`에 `action: create`, `stage: completion`, `accepted: true`, `status: completed`, `operation_id: <원 등록 ID>`, `next_action: lookup_original`을 담는다. `start_submitted: false`는 이 HTTP 호출에서 시작을 보내지 않았음을 뜻한다. 시작이 이미 제출됐거나 이전 호출의 결과를 조회할 때는 이 필드를 생략한다.
+
 `GET /api/v1/vms/{vm_id}/operations/{operation_id}?action={action}`에 실패 응답의 VM·`context.operation_id`·`context.action`을 전달한다. 기존 서비스 토큰과 요청 예산을 적용한다. 기본 한도는 5초다. 응답은 같은 상태 구조에 원장에 보존된 `platform_code`를 더한다. 읽기 시점의 원 작업 결과이며, 현재 VM 상태나 새로운 사용자 의도는 별도로 확인한다. 다른 VM·동작 또는 찾을 수 없는 ID는 `404 OperationNotFound`이며, 앞선 제출이 없었다는 근거가 아니다.
 
 정지의 ID를 받지 못했다면 최초 `Idempotency-Key`로 기존 4.8 조회를 사용한다. 두 조회 모두 명령을 실행하거나 원 기한을 바꾸지 않는다. 요청 본문, 경로, 원장 원문, 자격은 ID 조회로 제공하지 않는다. 이 계약은 dom0-manager HTTP까지 적용한다.

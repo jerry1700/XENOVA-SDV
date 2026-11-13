@@ -170,6 +170,16 @@ class VmOperationResult(BaseModel):
     operation_id: UUID | None = None
     next_action: Literal["fix_request", "check_current_vm", "lookup_original", "reconcile_original"] | None = None
     platform_code: str | None = None
+    start_submitted: Literal[False] | None = Field(
+        default=None, description="이 HTTP 호출에서 시작 미제출이 확인되면 false. 그 외에는 생략",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unobserved_start(self, handler):
+        result = handler(self)
+        if self.start_submitted is None:
+            result.pop("start_submitted", None)
+        return result
 
 
 class Error(BaseModel):

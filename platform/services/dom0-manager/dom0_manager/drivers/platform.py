@@ -482,7 +482,10 @@ def _failure_result(
         return _result(action, stage, True, status, operation_id, code)
     elif details.get("accepted") is False or details.get("submitted") is False or code in _REJECTED_CODES:
         # 충돌 봉투의 최상위 ID는 다른 명세/키의 원 작업일 수 있다.
-        return _result(action, stage or "preflight", False, ControlStatus.rejected, None, code)
+        result = _result(action, stage or "preflight", False, ControlStatus.rejected, None, code)
+        if action == "start" and details.get("submitted") is False:
+            result.start_submitted = False
+        return result
     result = _result(action, stage, None, ControlStatus.unknown, operation_id, code)
     if operation is not None and operation.request_key is not None:
         result.next_action = "lookup_original"
@@ -1095,12 +1098,14 @@ class PlatformProvisioner(Provisioner):
 
     def _paths(self, view: dict[str, Any]) -> InstancePaths:
         # 디렉터리는 플랫폼 내부 실행 이름(configuration.id = vm-<hex>)이다. view["name"] 은 표시 이름이라 경로가 아니다
-        internal = (view.get("configuration") or {}).get("id")
+        configuration = view.get("configuration") or {}
+        internal = configuration.get("id")
         if not internal:
             raise DriverError("platform view lacks configuration.id (internal instance name)", detail=f"vm_id={view.get('vm_id')}")
         root = Path(self.manager.data) / "instances" / str(internal)
         return InstancePaths(
-            vm_id=UUID(str(view["vm_id"])), root=root, kernel=root / "Image", ramdisk=root / "initrd", disk=root / "root.raw"
+            vm_id=UUID(str(view["vm_id"])), root=root, kernel=root / "Image", ramdisk=root / "initrd", disk=root / "root.raw",
+            registration_operation_id=_uuid(configuration.get("creation_operation_id")),
         )
 
     def instance_exists(self, vm_id: UUID) -> bool:
@@ -1168,6 +1173,8 @@ class PlatformProvisioner(Provisioner):
             exc.context = _failure_result("create", envelope)
             raise exc
         data = raise_for_envelope(envelope, context=f"create {vm_id}", action="create")
+        if not isinstance(data, dict):
+            raise PlatformUnavailable("platform returned an invalid VM registration result")
         if data.get("effective_status") in ("RUNNING", "RECONCILING", "RECOVERY_REQUIRED"):
             record = data.get("operation")
             record = record if isinstance(record, dict) else {}
@@ -1181,12 +1188,19 @@ class PlatformProvisioner(Provisioner):
             exc.context = _result("create", _asset_stage("create", record.get("phase")), True if bound else None,
                                   status, operation_id if bound else None, exc.platform_code)
             raise exc
-        view = (data.get("vm") or data.get("current") or data.get("original_result") or {}) if isinstance(data, dict) else {}
-        if not (view.get("configuration") or {}).get("id"):
+        # Manager는 첫 등록 완료 결과를 최상위 data에 반환한다. 확인용 get은 이 결과가 없을 때만 필요하다.
+        view = data.get("vm") or data.get("current") or data.get("original_result")
+        if not view:
+            view = data if data.get("lifecycle") == "REGISTERED" else {}
+        if not isinstance(view, dict) or not (view.get("configuration") or {}).get("id"):
             view = self._registration(vm_id) or {}
         if str(view.get("vm_id")) != str(vm_id):
             raise PlatformUnavailable("platform VM registration could not be confirmed")
-        return self._paths(view)
+        instance = self._paths(view)
+        if instance.registration_operation_id is not None:
+            if view.get("lifecycle") != "REGISTERED" or _uuid(envelope.get("operation_id")) != instance.registration_operation_id:
+                raise PlatformUnavailable("platform registration result did not match the original creation operation")
+        return instance
 
     def delete_instance(self, vm_id: UUID) -> None:
         # Manager가 같은 lease에서 현재 세대와 원 작업을 골라 검증한다.
