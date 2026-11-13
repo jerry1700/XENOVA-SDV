@@ -5,6 +5,7 @@
   "nn_requirement": "ABSENT",
   "jpeg_enabled": false,
   "fps": 15,
+  "rgb_sensor_mode": "full",
   "max_bytes": 1073741824,
   "min_free_bytes": 8589934592,
   "startup_timeout_s": 90,

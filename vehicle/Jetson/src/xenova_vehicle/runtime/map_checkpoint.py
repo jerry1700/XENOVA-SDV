@@ -87,6 +87,10 @@ def _pipeline_state(pipeline,context):
     arrays={name:_pack_array(getattr(grid,name)) for name in ('state','observed_us','time_known','support','permission',
         'conflict','hit_origin','unordered_hit','hit_available_us')}
     reference=None if pipeline.reference is None else asdict(pipeline.reference)
+    if reference is not None:
+        for segment in reference['segments']:
+            if segment['support_error_m'] is None:segment.pop('support_error_m')
+            if segment['finite_endpoints']:segment.pop('finite_endpoints')
     window=getattr(grid,'rolling_window',None)
     labels=sorted(set(grid.hit_view.values()) if window is None else {str(value) for value in grid.hit_view.values()})
     if len(labels)>64:raise MapCheckpointNotReady('original hit-view inventory exceeds state capacity')
@@ -312,7 +316,8 @@ class MapCheckpointCollector:
         self._cells={};self._records={};self._contexts={};self._unresolved=set();self._last=None;self._grid=None
         self._rgb_refs={};self._vehicle_refs={};self._alignment_record=None;self._frame_cache=None
         self._propagation_anchor_record=None
-        self._reference_geometry={}
+        self._current_anchor_record=None
+        self._reference_geometry={};self._temporal_rgb={}
         self._alignment_clock=None
         self._durable_tiles={};self._durable_catalog=();self._tile_revision_head=0;self._pending=None;self._retained=None
         self._draft_snapshot=None;self._generation=0
@@ -362,6 +367,7 @@ class MapCheckpointCollector:
         pending.extend(mapper_state_roots(self._subsystem_state))
         pending.extend(self._route_roots)
         pending.extend(self._reference_geometry.values())
+        pending.extend(self._temporal_rgb.values())
         for tile in self._durable_tiles.values():
             if type(tile) is not TileVersion:
                 raise MapCheckpointNotReady('durable tile provenance roots unavailable for trimming')
@@ -369,6 +375,7 @@ class MapCheckpointCollector:
         pending.extend(record.provenance_id for record in self._durable_catalog)
         if self._alignment_record is not None:pending.append(self._alignment_record[1])
         if self._propagation_anchor_record is not None:pending.append(self._propagation_anchor_record[1])
+        if self._current_anchor_record is not None:pending.append(self._current_anchor_record[1])
         records={}
         while pending:
             identity=pending.pop()
@@ -423,7 +430,10 @@ class MapCheckpointCollector:
         alignment_key=None if alignment is None else sha256(canonical(alignment.fields())).hexdigest()
         anchor=None if pipeline is None else pipeline._propagation_anchor
         anchor_key=None if anchor is None else sha256(canonical(anchor.fields())).hexdigest()
-        pin=self._propagation_anchor_record
+        # 기존 지도·목표의 좌표계 식별자는 첫 정합 기록을 계속 사용한다.
+        birth_pin=self._propagation_anchor_record
+        pin=self._current_anchor_record or birth_pin
+        reanchor=False
         if alignment is not None:
             if anchor_key is None:raise MapCheckpointNotReady('actual propagation anchor is missing')
             if pin is None:
@@ -434,9 +444,17 @@ class MapCheckpointCollector:
                         or type(pin[1]) is not int or not 0<pin[1]<2**63 or type(pin[2]) is not str):
                     raise MapCheckpointNotReady('immutable original propagation anchor registration pin required')
                 record=self._records.get(pin[1])
-                if (pin[0]!=anchor_key or record is None or record.provenance_id!=pin[1]
+                if (record is None or record.provenance_id!=pin[1]
                         or PROVENANCE.unpack(record.payload)[2]!=5 or sha256(record.payload).hexdigest()!=pin[2]):
                     raise MapCheckpointNotReady('original propagation anchor registration pin changed')
+                if pin[0]!=anchor_key:
+                    previous=pipeline._previous_propagation_anchor
+                    if (frame.source_kind!='CAMERA' or anchor is not alignment or previous is None
+                            or pin[0]!=sha256(canonical(previous.fields())).hexdigest()
+                            or alignment.observed_j_interval!=frame.observation.capture_interval
+                            or self._alignment_record is None or self._alignment_record[0]==alignment_key):
+                        raise MapCheckpointNotReady('original propagation anchor registration pin changed')
+                    reanchor=True
                 if self._alignment_record is None or self._alignment_record[0]!=alignment_key:
                     # 기존 GEOMETRY→REGISTRATION 경로만 검산한다. 새 부모나 시각을 발급하지 않는다.
                     self._require_propagation_ancestor(self._reference_geometry.values(),pin[1])
@@ -468,8 +486,9 @@ class MapCheckpointCollector:
                 from ..storage.records import REGISTRATION
                 from ..mapping.registration import transform_point,wrap_yaw
                 reference=pipeline.reference
+                sources=set() if reference is None else {segment.capture_id for segment in reference.segments}
                 if (rgb_id is None or reference is None or reference.revision<=0 or not reference.segments
-                        or any(segment.capture_id!=capture for segment in reference.segments)
+                        or capture not in sources or not (sources-{capture}).issubset(self._reference_geometry)
                         or frame.reference_vehicle is None or frame.registration_valid_for_us is None
                         or type(raw_pose) is not PoseEstimate or alignment.context!=raw_pose.sample.context):
                     raise MapCheckpointNotReady('original accepted registration/reference Vehicle/config evidence missing')
@@ -496,7 +515,8 @@ class MapCheckpointCollector:
                     UUID(self.scope.context.origin_mapper_instance).bytes,*position32,*mapped32)
                 actual_parents=tuple(dict.fromkeys((*parents,rgb_id)));mask=0
                 anchors=tuple(dict.fromkeys(self._reference_geometry.values()))
-                while len(anchors)>1:
+                # 부모 슬롯에 들어가는 원 지도 근거는 별도 집계 레코드를 만들지 않는다.
+                while len(anchors)>4-len(actual_parents):
                     combined=[]
                     for at in range(0,len(anchors),4):
                         group=anchors[at:at+4];source_mask=0
@@ -512,7 +532,10 @@ class MapCheckpointCollector:
                     UUID(self.scope.context.pi_host_boot).bytes,*frame.pi_interval,frame.observation_sequence,
                     *(actual_parents+(0,)*(4-len(actual_parents))),body,0,bytes(16)))
                 self._contexts[context.sha256]=context;self._records[identity]=record;self._alignment_record=(alignment_key,identity)
-                if pin is None:self._propagation_anchor_record=(anchor_key,identity,sha256(record.payload).hexdigest())
+                if pin is None or reanchor:
+                    new_pin=(anchor_key,identity,sha256(record.payload).hexdigest())
+                    self._current_anchor_record=new_pin
+                    if birth_pin is None:self._propagation_anchor_record=new_pin
                 self._alignment_clock=_alignment_clock(frame) if alignment.has_metadata else None
                 parents=tuple(dict.fromkeys((*parents,identity)))
         self._frame_cache=(frame,alignment_key,parents)
@@ -595,7 +618,9 @@ class MapCheckpointCollector:
         used={p.context_sha256 for p in self._records.values()}
         self._contexts={c.sha256:c for c in complete.evidence.contexts if c.sha256 in used}
         self._reference_geometry=dict(state['reference_provenance']);self._rgb_refs={};self._vehicle_refs={};self._alignment_record=None
+        self._temporal_rgb={}
         self._propagation_anchor_record=None
+        self._current_anchor_record=None
         self._alignment_clock=None
         head=state['tile_revision_highwater'];uint(head)
         self._tile_revision_head=max(head,max((t.revision for t in complete.tiles),default=0))
@@ -688,22 +713,46 @@ class MapCheckpointCollector:
             raise MapCheckpointNotReady('actual current source pipeline result required')
         if pipeline.grid.frame_id!='odom:'+self.scope.context.odom_epoch:raise MapCheckpointNotReady('frame-local result is not a metric map')
         if not result.summary['rgb_updated']:return False
-        self._grid=pipeline.grid;self._frame_roots(frame,pipeline,raw_pose);self._last=frame
+        self._grid=pipeline.grid;parents=self._frame_roots(frame,pipeline,raw_pose);self._last=frame
         if pipeline.reference is not None:
             needed={segment.capture_id for segment in pipeline.reference.segments}
             capture=sha256(canonical(frame.observation.rgb.stamp.key)).hexdigest()
             if capture in needed and capture not in self._reference_geometry:
-                parents=self._frame_roots(frame,pipeline,raw_pose);mask=1
+                mask=1
                 for identity in parents:mask|=self._records[identity].source_mask
                 self._reference_geometry[capture]=self._record(frame,parents,mask,3,(frame.raw_keys[0],))
             if not needed.issubset(self._reference_geometry):raise MapCheckpointNotReady('original RGB reference source was not collected')
             self._reference_geometry={key:self._reference_geometry[key] for key in needed}
-            self._rgb_refs={key:value for key,value in self._rgb_refs.items() if key in needed}
+            # 정합 reference에 쓰이지 않은 새 RGB도 현재 지도 후보 채택에 필요하다.
+            self._rgb_refs={key:value for key,value in self._rgb_refs.items() if key in needed or key==capture}
         else:
             capture=sha256(canonical(frame.observation.rgb.stamp.key)).hexdigest()
             self._rgb_refs={capture:self._rgb_refs[capture]}
+        active=result.temporal_rgb_sources
+        self._temporal_rgb={key:identity for key,identity in self._temporal_rgb.items() if key in active}
+        key=frame.observation.rgb.stamp.key
+        if key in active and key not in self._temporal_rgb:
+            root=self._reference_geometry.get(capture)
+            if root is None and self._next<self.grant.end_exclusive:
+                mask=1
+                for identity in parents:mask|=self._records[identity].source_mask
+                root=self._record(frame,parents,mask,3,(frame.raw_keys[0],))
+            if root is not None:self._temporal_rgb[key]=root
         self._generation+=1
         return True
+
+    def temporal_lane_root(self,candidate):
+        """누적 차로를 채택할 때만 현재와 이전 RGB의 provenance를 결합한다."""
+        from ..storage.records import aggregate_rgb_provenance
+        if (not candidate.sources.issubset(self._temporal_rgb)
+                or self._next+(len(candidate.sources)+1)//3>self.grant.end_exclusive):
+            return None
+        current=candidate.road.source_key
+        record=self._records[self._temporal_rgb[current]]
+        originals=tuple(self._records[self._temporal_rgb[key]] for key in sorted(candidate.sources-{current}))
+        for record in aggregate_rgb_provenance(record,originals,self._allocate):
+            self._records[record.provenance_id]=record
+        return record.provenance_id
 
     def observe_tof(self,frame,grid,mutation,result,pose,*,raw_pose=None,pipeline=None,certificate=None,cell_bounds=None,targets=()):
         """실제 ToF fusion owner가 GridMutation과 그 원 zone 결과를 그대로 전달한다."""
@@ -1164,11 +1213,15 @@ def restore_pipeline(pipeline,complete,current_scope):
         ref=state['reference'];old_fields={'revision','calibration_id','segments','shared_error_m'}
         if (type(ref) is not dict or set(ref) not in (old_fields,old_fields|{'feature_policy'})
                 or type(ref['segments']) is not list or len(ref['segments'])>64
-                or any(type(v) is not dict or set(v)!={'a','b','error_m','component','capture_id'} for v in ref['segments'])):
+                or any(type(v) is not dict
+                    or not {'a','b','error_m','component','capture_id'}<=set(v)
+                    or not set(v)<={'a','b','error_m','component','capture_id','support_error_m','finite_endpoints'}
+                    for v in ref['segments'])):
             raise MapCheckpointNotReady('unsupported exact original reference fields')
         try:
             reference=FrozenReference(ref['revision'],ref['calibration_id'],
-                tuple(SegmentFeature(tuple(v['a']),tuple(v['b']),v['error_m'],v['component'],v['capture_id']) for v in ref['segments']),
+                tuple(SegmentFeature(tuple(v['a']),tuple(v['b']),v['error_m'],v['component'],v['capture_id'],
+                    v.get('support_error_m'),v.get('finite_endpoints',True)) for v in ref['segments']),
                 ref['shared_error_m'],ref.get('feature_policy','UNSPECIFIED'))
         except (TypeError,ValueError) as error:
             raise MapCheckpointNotReady('invalid original reference feature metadata') from error
@@ -1209,7 +1262,7 @@ def restore_pipeline(pipeline,complete,current_scope):
     identity=state['map_from_odom_identity'] and state['alignment'] is None
     if not identity and (reference is None or not reference.segments):
         raise MapRestoreNotReady('storage COMPLETE has no reference for actual nonidentity map relocalization')
-    if not identity and reference.feature_policy!='PHYSICAL_STRIP_ENDPOINTS_V1':
+    if not identity and reference.feature_policy not in ('PHYSICAL_STRIP_ENDPOINTS_V1','OBSERVED_STRIP_SUPPORT_V1'):
         raise MapRestoreNotReady('original nonidentity reference endpoint policy is unspecified')
     if already:
         if pipeline.grid.clock_id!=current_scope.raw_binding.fields['clock_epoch']:
@@ -1227,6 +1280,9 @@ def restore_pipeline(pipeline,complete,current_scope):
         from ..mapping.rolling_grid import configure_grid
         configure_grid(grid,window)
     pipeline.grid=grid;pipeline.reference=reference;pipeline._alignment=None;pipeline._propagation_anchor=None;pipeline._free_scheduler=None
+    pipeline._previous_propagation_anchor=None;pipeline._registration_history=()
+    pipeline._current_lane=None
+    pipeline._temporal_road.clear()
     pipeline._restore_pending=not identity
     pipeline._context=('LIVE',pipeline.calibration.sha256,grid.clock_id,grid.frame_id)
     pipeline._restored_checkpoint_ref=complete.checkpoint_ref

@@ -2,7 +2,8 @@
 
 관측 후보는 외부 요청을 내보내지 않는다. 최종 채택은 참조 교환이며 maintenance만
 원 request를 offer/소비한다. SQLite·native token·thread·scene/추진 권한은 소유하지 않는다.
-ToF는 source scope에만 보존한다. 실제 ToF 시각의 보간/융합은 별도 연결 전까지 수행하지 않는다.
+ToF는 여기서 source scope에만 보존한다. 발행용 근거리 HIT는 tof_obstacles가
+원 ToF 시각의 odom으로 덧씌우며, 이 owner의 저장 지도에는 쓰지 않는다.
 """
 
 from copy import copy
@@ -243,8 +244,7 @@ class MapperMapping:
             for evidence in inputs.tof:
                 item=self.profile.sensors.tof_leaves.get(evidence.sensor_id)
                 if (item is not None and sensors.sensors.current_tof(evidence,now_us)
-                        and all((item[1].extrinsics_qualified,item[1].first_surface_qualified,
-                                 item[1].coverage_qualified,item[1].time_qualified))):
+                        and item[1].extrinsics_qualified and item[1].time_qualified):
                     sources.append((item[0],item[1],evidence.sensor_instance,evidence.sensor_generation))
         old=() if self._scope is None else self._scope._historical
         if self._scope is not None and (self._scope._tof!=tuple(sources) or self._scope.context!=context):
@@ -550,21 +550,29 @@ class MapperMapping:
                     capture=sha256(canonical(draft.frame.observation.rgb.stamp.key)).hexdigest()
                     root=collector._reference_geometry.get(capture,collector._rgb_refs.get(capture))
                     if root is None:raise MappingNotReady('actual original RGB provenance missing')
+                    temporal_root=None
+                    temporal=result.mapped_road
+                    if (temporal is not None and result.summary.get('localization_qualified') is True
+                            and self._crossing is not None and temporal.within(self.profile.pipeline.registration)):
+                        temporal_root=collector.temporal_lane_root(temporal)
                     evidence=EvidenceTable(tuple(collector._records[key] for key in sorted(collector._records)),
                         tuple(collector._contexts[key] for key in sorted(collector._contexts)))
                     pose=draft.inputs.pose
                     if result.registration is not None and result.registration.status=='BOUNDED':
                         fit=result.registration;pose=replace(pose,sample=replace(pose.sample,x=fit.representative[0],
                             y=fit.representative[1],yaw=fit.representative[2],position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
-                    elif draft.pipeline._alignment is not None:pose=draft.pipeline._alignment.apply(pose)
+                    elif draft.pipeline._alignment is not None:_,pose=draft.pipeline._propagate_odometry(pose)
                     if list((pose.sample.x,pose.sample.y,pose.sample.yaw))!=result.summary.get('mapped_pose'):
                         raise MappingNotReady('catalog pose differs from actual mapped result')
                     grid=draft.pipeline.grid;spec=grid.spec;x,y=spec.origin_xy
+                    alignment=draft.pipeline._alignment
                     catalog=self.catalogs.prepare(draft.original_job,result,context=draft.context,stamp=draft.frame.observation.rgb.stamp,
-                        capture_prior=pose,registration_revision=0 if draft.pipeline.reference is None else draft.pipeline.reference.revision,
+                        capture_prior=pose,registration_revision=0 if alignment is None or not alignment.has_metadata
+                            else alignment.registration_revision,
                         prior_qualified=result.summary.get('localization_qualified') is True,
                         metric_evidence=self.catalogs.metric_from_frame(draft.frame),lane_provenance_ids=(root,root),
-                        base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m))
+                        base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m),
+                        temporal_provenance_id=temporal_root)
                     if self._atlas is not None:
                         atlas=self._atlas.prepare_frame(grid,collector._atlas_proof)
         except AtlasResource:ready=False;reason='ATLAS_RESOURCE'

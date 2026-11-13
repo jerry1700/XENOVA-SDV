@@ -8,6 +8,29 @@ import hashlib
 import json
 
 
+FULL_SENSOR_WH = (4208, 3120)
+FULL_RGB_ROI = (77, 0, 563, 360)
+
+
+def full_sensor_rgb_geometry(default_intrinsics):
+    """IMX214 EEPROM grid를 전체 센서와 640×360 letterbox에 맞춘 후보 K로 옮긴다."""
+    k, width, height = default_intrinsics
+    if (width, height) == (1920, 1080):
+        # 4K 중앙 crop의 2×2 binning으로 저장된 EEPROM도 처리한다.
+        k = [[2*row[0], 2*row[1], 2*row[2]+.5] for row in k[:2]] + [k[2]]
+        width, height = 3840, 2160
+    if (width, height) not in ((3840, 2160), FULL_SENSOR_WH):
+        raise ValueError('unknown IMX214 EEPROM grid for full-sensor projection')
+    left, top, right, bottom = FULL_RGB_ROI
+    sx, sy = (right-left)/FULL_SENSOR_WH[0], (bottom-top)/FULL_SENSOR_WH[1]
+    cx = k[0][2] + (FULL_SENSOR_WH[0]-width)/2
+    cy = k[1][2] + (FULL_SENSOR_WH[1]-height)/2
+    active = [[sx*k[0][0], sx*k[0][1], left + sx*(cx+.5)-.5],
+              [0., sy*k[1][1], top + sy*(cy+.5)-.5], [0., 0., 1.]]
+    return dict(k=active, roi=FULL_RGB_ROI, sensor_wh=FULL_SENSOR_WH,
+                status='EEPROM_CENTER_CROP_TRANSFORM_NOT_ACTIVE_READBACK')
+
+
 def _copy(value, cap=262144):
     raw = json.dumps(value, ensure_ascii=True, allow_nan=False, sort_keys=True,
                      separators=(',', ':')).encode('ascii')
@@ -17,7 +40,7 @@ def _copy(value, cap=262144):
 
 
 def snapshot_factory(calibration, dai, *, eeprom_raw=None, device_id=None, graph_profile=None,
-                     sensors=()):
+                     sensors=(), rgb_sensor_mode='1080p'):
     """고정 v2.29 caller가 제공한 handler에서 읽는다. 원 raw EEPROM은 caller가 읽어 넘긴다."""
     if getattr(dai, '__version__', None) != '2.29.0.0':
         raise ValueError('factory extractor requires fixed DepthAI2.29.0.0')
@@ -37,12 +60,20 @@ def snapshot_factory(calibration, dai, *, eeprom_raw=None, device_id=None, graph
     for name, socket, size in (('rgb', dai.CameraBoardSocket.CAM_A, (640, 360)),
                                 ('left', dai.CameraBoardSocket.CAM_B, (640, 480)),
                                 ('right', dai.CameraBoardSocket.CAM_C, (640, 480))):
-        cameras[name] = dict(socket=str(socket),
-            default_intrinsics=read(name + '.default_k', lambda s=socket: calibration.getDefaultIntrinsics(s)),
+        default_k = read(name + '.default_k', lambda s=socket: calibration.getDefaultIntrinsics(s))
+        camera = dict(socket=str(socket), default_intrinsics=default_k,
             distortion_model=read(name + '.distortion_model', lambda s=socket: str(calibration.getDistortionModel(s))),
             distortion_coefficients=read(name + '.distortion', lambda s=socket: calibration.getDistortionCoefficients(s)),
-            resize_candidate=read(name + '.resize_k', lambda s=socket, z=size: calibration.getCameraIntrinsics(s, z[0], z[1])),
-            resize_candidate_wh=list(size), resize_status='EEPROM_RESIZE_NOT_ACTIVE_READBACK')
+            resize_candidate_wh=list(size))
+        if name == 'rgb' and rgb_sensor_mode == 'full':
+            geometry = read('rgb.full_geometry', lambda: full_sensor_rgb_geometry(default_k))
+            camera.update(full_sensor_geometry=geometry,
+                resize_candidate=None if geometry is None else geometry['k'],
+                resize_status='FULL_SENSOR_GEOMETRY_UNAVAILABLE' if geometry is None else geometry['status'])
+        else:
+            camera.update(resize_status='EEPROM_RESIZE_NOT_ACTIVE_READBACK', resize_candidate=read(
+                name + '.resize_k', lambda s=socket, z=size: calibration.getCameraIntrinsics(s, z[0], z[1])))
+        cameras[name] = camera
     result = dict(schema_version=1, scope='OAK_FACTORY_CALIBRATION_NOT_METRIC_ADMISSION',
         device_id=device_id, depthai_version=dai.__version__, eeprom=eeprom,
         eeprom_json_sha256=None if eeprom is None else hashlib.sha256(json.dumps(eeprom,

@@ -15,10 +15,23 @@
 
 ## 제공 수준
 
+2026-11-10 Pi 4의 승인된 부팅 기본값은 `dom0_max_vcpus=2`와 `force_turbo=1`이다.
+정적 CPU 배치와 guest 자원 수량은 유지한다. 최신 Manager/Gateway/world 소스는 기존
+recipe로 공급하며, 최종 조립의 Python 소스 일치 검사에 Gateway/world도 포함한다.
+정규 boot/config deploy·RPM QA/bytes 대조와 실보드 고정 2-vCPU 재부팅은
+[검증 기록](../verification/dom0-cpu-clock-defaults-20261110.md)에 분리해 기록했다.
+전체 이미지 재조립·실차 수락은 해당 기록의 완료 범위에 포함하지 않는다.
+
 2026-11-02 자격/등록/신호 후속은 `8a23b8a` + 현재 diff/새 파일 후보다.
 [제공자 계약](../contracts/vm-provisioning-v1.md)과 [검증 보고](../verification/recovery-scenario-closure-20261030.md#vm-provisioning-integration)를 따른다.
 `xenova-platform`의 provisioning/profile/registration·Bootstrap·first-boot와 broker provider를 같은 내부 후보로 설치한다.
 일반 full HTTP 호출자까지 새 journal 선택이나 동일 commit 교체를 요구하지 않는다.
+
+병렬 binding 후속의 `xenova_drive_binding`은 같은 후보 `xenova_management.ReadContext.validate_one`의
+call-local 반환 근거를 사용한다. 둘은 기존 `xenova-platform` 패키지에 함께 설치하며 신 reader와 옛 Manager를
+따로 섞지 않는다. Gateway의 feedback/output owner도 같은 패키지 후보로 교체한다. 외부 Worker·HTTP 호출자에게
+새 인자·저장 버전 선택을 요구하지 않는다. [최신 검증 범위](../verification/recovery-scenario-closure-20261030.md#parallel-binding-feedback-20261106)의
+ARM 모듈 설치 fixture와 전체 RPM/이미지·운영 교체를 구분한다. 이번 보드 시험은 임시 module path만 사용한다.
 
 <a id="registration-api"></a>
 ### 등록 조회·FastAPI 통지의 교체
@@ -202,6 +215,20 @@ env example의 선택 입력이다. 파일/차량/시간 승인값은 설치 담
 | Worker·Agent / 제품 담당 | 기존 unit 환경/override와 runtime 경로, Agent별 identity·필수 앱 제공물 | `/run`의 host 재부팅 보존 한계·episode 정책을 영속 이관/SQLite/새 상수로 바꾸지 않음 |
 | 콘솔·진단 / 플랫폼·각 제품 | 기존 optional recorder·trace와 공개 CLI/PTY, 각 제품 logging 설정 | 선택 진단과 필수 원장·Authority·receipt를 분리. 인증/console lease·필수 프로토콜/원 PTY를 보존 |
 
+### 지원 VM 생성 실패의 기본 유한 자동 수습
+
+`xenova-platform`은 `xenova_creation_auto.py`와 설정 형식 예시
+`/usr/share/xenova/creation-reconcile-policy.json.example`을 설치한다. 신규 Debian·Ubuntu·Zephyr 생성은
+enable 파일 없이 `bounded-1-plus-1`로 등록한다. 기존 trial 설정도 지원하며 잘못된 설정은 수락 전 거절한다.
+최초 1회·조건 변화 시 추가 최대 1회만 허용한다. Linux의 원 cleanup 예산과 Zephyr의 기존 명시 수습
+호출 예산/원 budget 중 작은 값을 원장에 고정한다. 생성 기한·운영 정책·E4 예산을 늘리지 않는다.
+기존 기록 변환·부팅 때 일괄 정리·새 daemon은 추가하지 않았다. Linux/Zephyr의 기존 준비 I/O 슬롯을
+각각 재사용하며, 사용 중이거나 신원/저장 효과가 미확정인 자산은 계속 보존한다.
+Manager·creation·automatic helper·preparation은 같은 하위 후보로 설치해야 한다. 기존 외부 HTTP 소비자의
+동시 교체나 내부 journal 버전 지정은 요구하지 않는다. 최종 rootfs의 creation/automatic 모듈 바이트 검사와
+G1 하위 런타임 인계 목록에 포함했다. 현재 로컬 근거와 ARM/RPM·보드 미수행 범위는
+[자동 수습 검증](../verification/automatic-private-reconciliation-20261110.md)을 따른다.
+
 ### 보드별 Recovery Worker와 factory Gateway 설정
 
 `xenova-recovery-config.service`는 첫 설치 성공 뒤 기존 MQTT 원본에서
@@ -313,3 +340,48 @@ fixture의 실제 UUID/template/version/key·기존 예산·관측 지점과 정
 RAM 표시 기준의 최신 후속은 [최근 관측 계약 마감](../verification/recovery-scenario-closure-20261030.md#ram-recent-observation-20261104)이다. 계약·참조 도구의 별도 제공물은 `ram-recent-observation-contract-2.1-20261104.tar.gz`다. 기존 불변 `1.0.8` firmware와 이전 bundle을 덮지 않는다. 이 후속은 host 소비 참조·문서 변경이며 FastAPI 응답·권한·서비스·운영 설정을 확장하지 않는다.
 
 2026-11-05 다음 이미지 선택은 주행 A/B 공통 1.0.8로 맞췄다. default lock·factory metadata·조립 예시는 동일한 불변 manifest를 참조한다. 로컬 release/seed 검증과 실제 전체 이미지 빌드·운영 VM 전환은 [선택 검증](../verification/recovery-scenario-closure-20261030.md#image-default108-20261105)에서 구분한다. 기존 설치·UUID·자격·운영 firmware는 바꾸지 않는다.
+
+2026-11-06 lattice 연결 슬롯 보완은 새 불변1.0.9로 ARM 빌드·포장하고 **소유 시험 B만** 설치했다.
+기존 TCP/UDP 공통 슬롯에 DHCP 직접 handler를 포함하도록 프로필 최소값을 검증한다.
+기본 이미지 lock·factory 선택은1.0.8을 유지하며 새 제공물·실제 TCP4+DHCP1·시험 경계는
+[보드 예산 후속](../verification/recovery-scenario-closure-20261030.md#budget-board-observations-20261106)에 연결한다.
+설치·기동·MQTT 연결 성공은 앱 준비·출력 허가·물리 장치 수락이 아니다.
+
+2026-11-06 저녁~11-07 후속의 1.0.10/1.0.11/1.0.12는 같은 16MiB/1vCPU의 불변 시험 후보다.
+callback 수신 시각·선택 진단·제한 0 명령 시도를 구분하며 기본 image/factory 선택은1.0.8이다.
+Gateway의 첫 제출 odom·외부 Paho loop·native owner read는 기존 package의 관련 모듈을 함께 교체할 대상이다.
+새 42모듈 설치 fixture의 ARM import는 통과했으나 정규 RPM/이미지 갱신은 하지 않았다.
+ARM/QEMU PTY ioctl 실패와 실제 B 시험의 남은 입력 지연·미수락 baseline은
+[제출 경계 후속](../verification/recovery-scenario-closure-20261030.md#clock-retry-submit-20261106)에서 구분한다.
+B는1.0.8·원 통신 설정으로 복원했고 Worker/mock Gateway 복구·소유 broker/자격 사본 정리를 확인했다.
+시험용 `/run` 소스를 운영 설치본으로 취급하거나 새 firmware를 검증된 기본값으로 승격하지 않는다.
+
+2026-11-07 장애 범위 보완의 FW1.0.33은 새 불변 bundle로 ARM 빌드하고 보드 A/B에 개별 적용했다.
+Python은 기존 Manager/Execution/binding·Worker·Gateway·공용 MQTT 설치 경로의 같은 후보를 대조한다.
+paired binding은 기존 `${libexecdir}/xenova-domain-identities-native`를 재사용한다.
+`xenova-platform_1.0.bb`가 이미 이 helper를 빌드해 0755로 설치하므로 새 runtime 의존성이나 recipe 분해는 없다.
+새 필수 공개 옵션·journal 버전 선택·운영 예산은 추가하지 않았다.
+실제 import·설치 파일 hash·서비스 복구는 [시연 범위 검증](../verification/recovery-scenario-closure-20261030.md#recovery-demo-20261107)에 기록한다.
+이는 정규 RPM·전체 이미지 재빌드, 이미지/factory 기본 firmware 변경, 주행 종단 수락의 증거가 아니다.
+
+
+<a id="display-first-install"></a>
+## 표시 역할·첫 설치 자격·연결 검사
+
+새 `guest_display` Debian factory의 first-boot는 토큰을 준비하고 원 hash를 설치 진행에 고정한 뒤
+기존 private root 공급자로 전달한다. 기존 observer 계정의 read-only export, 별도 loopback feed 토큰,
+relay 데이터 설정과 identity plan의 초기 세 역할을 준비한다. 공용 이미지/템플릿에는 보드 비밀을 넣지 않는다.
+완료된 설치에서는 토큰·역할을 초기화하지 않는다. 기존 보드 갱신 시 현재 토큰·env·binding을 보존한다.
+
+배포 묶음은 `xenova-platform`의 display_setup/sync·first_boot·wrapper·check unit과
+`xenova-display`의 relay/feed unit·기존 Python 모듈이다. `assemble.platform_root_ok`는 실제 파일·
+enable·소스 일치를 검사한다. 보드 활성 설정/토큰이 든 공용 이미지는 거절한다. 설치 후 check는
+VM autostart를 막지 않고 한 번 실행하며 조기 부팅/연결 실패는 unconfirmed로 남긴다.
+기존 보드에서 새 package를 설치했다고 첫 설치 공급을 다시 실행하거나 비밀을 회전하지 않는다.
+
+일반 생성으로 Interaction 역할을 자동 바꾸지 않는다. `xenova-display-setup show`, 조건부
+`select --vm-id NEW --expected-vm-id OLD [--execute]`, `check [--live]`를 사용한다.
+서비스 재시작 실패 뒤에는 같은 선택의 `--execute --restart`, 연결 재확인은 `check --live --record`다.
+상세 [설치·실패 처리](../../platform/services/display/router/deploy/guest-display/README.md#표시-담당-선택과-설치-확인)와
+[로컬 검증](../verification/display-installation-closure-20261111.md)을 따른다. EDID/실화면·방화벽·
+실보드 재부팅·새 이미지/SD의 수락은 별도이며 로컬 HTTP 시험으로 완료를 주장하지 않는다.

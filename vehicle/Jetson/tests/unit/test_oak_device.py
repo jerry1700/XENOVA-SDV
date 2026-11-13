@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from xenova_vehicle.capture_profile import CaptureProfile
 from xenova_vehicle.oak import device
+from xenova_vehicle.runtime.health_policy import ConfigurationError
 
 
 def sdk_fixture():
@@ -145,7 +146,7 @@ class OakDeviceTests(unittest.TestCase):
         f.dai.__version__ = "3.0.0"
         with patch.object(device.sys, "platform", "linux"), \
                 patch.object(device.importlib, "import_module", return_value=f.dai):
-            with self.assertRaisesRegex(RuntimeError, "2.29.0.0 required"):
+            with self.assertRaisesRegex(ConfigurationError, "2.29.0.0 required"):
                 device.OakSource(CaptureProfile("OAK_TEST_1")).start(lambda stage: None)
         f.dai.Device.assert_not_called()
 
@@ -159,7 +160,7 @@ class OakDeviceTests(unittest.TestCase):
     def test_actual_source_rejects_non_linux_before_sdk_import(self):
         with patch.object(device.sys, "platform", "win32"), \
                 patch.object(device.importlib, "import_module") as importer:
-            with self.assertRaisesRegex(RuntimeError, "Linux"):
+            with self.assertRaisesRegex(ConfigurationError, "Linux"):
                 device.OakSource(CaptureProfile("OAK_TEST_1")).start(lambda stage: None)
         importer.assert_not_called()
 
@@ -224,6 +225,21 @@ class OakDeviceTests(unittest.TestCase):
             setattr(message.getRaw.return_value.fb, field, 123)
             with self.subTest(stream=stream, field=field), self.assertRaises(ValueError):
                 source._frame(stream, message)
+
+    def test_full_sensor_accepts_out_of_frame_manip_offset_only_for_packed_rgb(self):
+        source = device.OakSource(CaptureProfile("OAK_TEST_1", rgb_sensor_mode="full"))
+        source._dai = sdk_fixture().dai
+        message, _ = frame_message("rgb_video")
+        spec = message.getRaw.return_value.fb
+        spec.p2Offset = 829038336
+        self.assertEqual(len(source._frame("rgb_video", message).payload), 345600)
+        spec.p2Offset = 128
+        with self.assertRaisesRegex(ValueError, "plane offsets"):
+            source._frame("rgb_video", message)
+        spec.p2Offset = 829038336
+        message.getData.return_value = b"\0" * 345599
+        with self.assertRaisesRegex(ValueError, "contiguous byte plane"):
+            source._frame("rgb_video", message)
 
 
 @unittest.skipUnless(sys.platform == "linux", "real flock ownership requires Linux")

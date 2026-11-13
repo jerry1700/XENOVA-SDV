@@ -4,11 +4,17 @@ import { useState } from 'react';
 import { request, setSession } from './client';
 import type {
   CreateVmRequest,
+  AgentExitCommand,
+  AutoDelayCommand,
+  AutoDelayRequest,
+  CommandStatusResponse,
   Display,
   DisplayListResponse,
   EventListResponse,
   LoginRequest,
   MetricHistoryResponse,
+  PhoneLinkStatus,
+  PhonePairingCode,
   ProcessesResponse,
   RouteRequest,
   SignupRequest,
@@ -20,9 +26,11 @@ import type {
   ThreadsResponse,
   TokenResponse,
   UpdateVcpuPinningRequest,
+  UpdateVmResourcesRequest,
   Vm,
   VmListResponse,
-  VmResourceUpdate,
+  VmResourceUpdateResult,
+  VmSynchronizationResult,
   VmResources,
 } from './types';
 import { clearVmList, loadVmList, saveVmList } from './vmListCache';
@@ -37,7 +45,9 @@ export const keys = {
   processes: (id: string) => ['vms', id, 'processes'] as const,
   threads: (id: string) => ['vms', id, 'threads'] as const,
   telemetryHeartbeat: (id: string) => ['vms', id, 'telemetry-heartbeat'] as const,
+  command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
+  phoneLink: ['display', 'phone-link'] as const,
 };
 
 /**
@@ -141,16 +151,16 @@ export function useUpdateVcpuPinning(vmId: string) {
   });
 }
 
-export function useUpdateVmResource(vmId: string) {
+export function useUpdateVmResources(vmId: string) {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ kind, body }: VmResourceUpdate) =>
-      request<VmResources>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources/${kind}`, {
+    mutationFn: (body: UpdateVmResourcesRequest) =>
+      request<VmResourceUpdateResult>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources`, {
         method: 'PUT',
         body,
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
       }),
     onSettled: () => {
-      void client.invalidateQueries({ queryKey: keys.vmResources(vmId) });
       void client.invalidateQueries({ queryKey: keys.vm(vmId) });
       void client.invalidateQueries({ queryKey: keys.vms });
     },
@@ -164,6 +174,46 @@ export function useStartStress(vmId: string) {
         method: 'POST',
         body,
       }),
+  });
+}
+
+export function useStartAutoDelay(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AutoDelayRequest) =>
+      request<AutoDelayCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/auto-delay`, {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartAgentExit(vmId: string) {
+  return useMutation({
+    mutationFn: () =>
+      request<AgentExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/agent-exit`, {
+        method: 'POST',
+      }),
+  });
+}
+
+export function useCommandStatus(vmId: string, commandId: string | null, acceptedIsTerminal = false) {
+  return useQuery({
+    queryKey: keys.command(vmId, commandId ?? ''),
+    queryFn: ({ signal }) =>
+      request<CommandStatusResponse>(
+        `/api/v1/vms/${encodeURIComponent(vmId)}/commands/${encodeURIComponent(commandId!)}`,
+        { signal },
+      ),
+    enabled: Boolean(vmId && commandId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'SUCCEEDED' ||
+        status === 'FAILED' ||
+        status === 'REJECTED' ||
+        (acceptedIsTerminal && status === 'ACCEPTED')
+        ? false
+        : 1000;
+    },
   });
 }
 
@@ -278,6 +328,33 @@ export function useRouteDisplay() {
   });
 }
 
+/** USB 휴대폰 화면 연결 상태 (REST-38). 케이블·테더링 변화가 보이게 몇 초마다 다시 읽는다 */
+export function usePhoneLink() {
+  return useQuery({
+    queryKey: keys.phoneLink,
+    queryFn: ({ signal }) => request<PhoneLinkStatus>('/api/v1/display/phone-link', { signal }),
+    refetchInterval: 5000,
+    retry: false,
+  });
+}
+
+/**
+ * 새 연결번호 발급 (REST-39). 이미 연결된 휴대폰이 끊기고 앞 번호가 무효가 되므로 재시도하지 않는다.
+ * 번호는 호출한 컴포넌트의 상태에만 둔다 (쿼리 캐시에 넣지 않음).
+ */
+export function useIssuePhonePairingCode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<PhonePairingCode>('/api/v1/display/phone-link/pairing-code', { method: 'POST' }),
+    retry: false,
+    // 상태를 다시 읽는 것은 기다리지 않는다 (보드 왕복 동안 번호 표시가 늦어지지 않게)
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.phoneLink });
+    },
+  });
+}
+
 export type VmAction = 'start' | 'stop' | 'delete';
 
 export function useVmAction() {
@@ -288,6 +365,19 @@ export function useVmAction() {
       action === 'delete'
         ? request<void>(`/api/v1/vms/${encodeURIComponent(vmId)}`, { method: 'DELETE' })
         : request<Vm>(`/api/v1/vms/${encodeURIComponent(vmId)}/${action}`, { method: 'POST' }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+/**
+ * 보드 등록 목록과 DB VM 테이블을 맞춘다 (보드에만 있는 VM 등록, 보드에서 사라진 VM 은퇴).
+ * 서버가 주기적으로 돌리지 않으므로 사용자가 버튼으로 요청한다. 끝나면 VM 목록을 다시 읽는다.
+ */
+export function useSynchronizeVms() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => request<VmSynchronizationResult>('/api/v1/vms/synchronizations', { method: 'POST' }),
+    retry: false,
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }

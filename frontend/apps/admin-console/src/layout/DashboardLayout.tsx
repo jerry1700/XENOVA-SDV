@@ -7,6 +7,7 @@ const DASHBOARD_TABS = [
   ['/dashboard/memory', 'Memory'],
   ['/dashboard/network', 'Network'],
   ['/dashboard/console', 'Console'],
+  ['/dashboard/events', 'Events'],
 ] as const;
 
 /** VM 관측 화면의 공통 제목과 2차 탐색. 각 탭은 후속 이슈에서 독립적으로 확장한다. */

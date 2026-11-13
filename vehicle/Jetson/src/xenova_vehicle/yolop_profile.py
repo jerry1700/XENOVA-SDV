@@ -28,6 +28,7 @@ class YolopBenchProfile:
     nn_first_timeout_s: float = 15
     nn_stall_timeout_s: float = 5
     diagnostic_samples: int = 3
+    rgb_sensor_mode: str = "1080p"
 
     def __post_init__(self):
         CaptureProfile(**{name: getattr(self, name) for name in CaptureProfile.__dataclass_fields__})
@@ -43,6 +44,8 @@ class YolopBenchProfile:
 
     def to_dict(self):
         result = asdict(self)
+        if self.rgb_sensor_mode == "1080p":
+            del result["rgb_sensor_mode"]
         result.update({name: str(getattr(self, name)) for name in ("asset_dir", "asset_manifest")})
         return {"schema_version": 1, "profile_id": PROFILE_ID, "nn_requirement": "REQUIRED",
                 "jpeg_enabled": False, **result}

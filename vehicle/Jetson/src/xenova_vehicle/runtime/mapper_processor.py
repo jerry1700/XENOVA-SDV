@@ -452,9 +452,8 @@ class ResidentMapperProcessor:
             leaves=self._config.sensors.tof_leaves
             sources=tuple((leaves[value.sensor_id][0],leaves[value.sensor_id][1],
                            value.sensor_instance,value.sensor_generation) for value in inputs.tof
-                          if value.sensor_id in leaves and all((leaves[value.sensor_id][1].extrinsics_qualified,
-                              leaves[value.sensor_id][1].first_surface_qualified,
-                              leaves[value.sensor_id][1].coverage_qualified,leaves[value.sensor_id][1].time_qualified)))
+                          if value.sensor_id in leaves and leaves[value.sensor_id][1].extrinsics_qualified
+                          and leaves[value.sensor_id][1].time_qualified)
             scope=SceneEvidenceScope(context,self._binding,candidate.calibration,self._config.sha256,
                 tof_sources=sources,approved_tof_assets=self._config.sensors.tof_sources)
             scope=scope.with_complete_history(source,now_us=self.clock())
@@ -588,11 +587,14 @@ class ResidentMapperProcessor:
         from .mapper_publication import PublicationReport
         state=draft.catalog_draft.state;basis=state.view.road_basis
         completed=self.clock();published=self.clock()
+        from .tof_obstacles import TofObstacleOverlay
+        if not hasattr(self,'_tof_obstacles'):self._tof_obstacles=TofObstacleOverlay()
         built=build_mapping_world(draft,state,basis,context=draft.context,source=inputs.source,
             calibration=draft.pipeline.calibration,sensors=sensors.sensors,current_vehicle=inputs.vehicle,
             clock_lease=lease,sequence=self._frame_sequence+1,completed_j_us=completed,published_j_us=published,
             scene_draft=None if frame_state is None else frame_state.scene,
-            hazard_draft=None if frame_state is None else frame_state.hazard,atlas_owner=self._mapping._atlas)
+            hazard_draft=None if frame_state is None else frame_state.hazard,atlas_owner=self._mapping._atlas,
+            tof_overlay=self._tof_obstacles,sensor_snapshot=sensors)
         if built is None:return None,'WORLD_NOT_READY'
         alignment=draft.pipeline._alignment
         trust=decode(lease.trust_bytes,schema.WorldTrust)
@@ -626,10 +628,13 @@ class ResidentMapperProcessor:
                 self._scene.revoke('RESOURCE',now_j_us=now);self._scene_status=hazard.reason
             else:
                 self._scene.hazard(hazard.revision,now_j_us=now)
-                self._scene_draft=self._scene.prepare_frame(draft,draft.result,sensors,
-                    world_sequence=sequence,hazard_revision=hazard.revision,now_j_us=now,
-                    restore_source=self._durable_source,restore_archive=self._scene_restore_archive)
-                self._scene_status=self._scene_draft.reason
+                if draft.result.summary.get('localization_status')=='ODOMETRY_CONTINUED':
+                    self._scene_status='WAIT_VISUAL_REGISTRATION'
+                else:
+                    self._scene_draft=self._scene.prepare_frame(draft,draft.result,sensors,
+                        world_sequence=sequence,hazard_revision=hazard.revision,now_j_us=now,
+                        restore_source=self._durable_source,restore_archive=self._scene_restore_archive)
+                    self._scene_status=self._scene_draft.reason
         except SceneError:
             self._scene.revoke('ALIGNMENT',now_j_us=now);self._scene_status='SCENE_FRAME_NOT_READY'
         return _FrameCandidate(sequence,self._scene_draft,hazard,self._scene_row)

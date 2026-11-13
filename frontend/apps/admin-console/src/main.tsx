@@ -8,16 +8,18 @@ import { ApiError } from './api/client';
 import { RequireAuth } from './auth';
 import { ConsoleLayout } from './layout/ConsoleLayout';
 import { DashboardLayout } from './layout/DashboardLayout';
+import { KeepQueryRedirect } from './layout/KeepQueryRedirect';
 import { ConsolePage } from './pages/ConsolePage';
 import { ControlVmDetailPage } from './pages/ControlVmDetailPage';
 import { DashboardPage, LegacyDashboardPage } from './pages/DashboardPage';
 import { DemoPage } from './pages/DemoPage';
 import { EventsPage } from './pages/EventsPage';
 import { LoginPage } from './pages/LoginPage';
+import { PhoneLinkPage } from './pages/PhoneLinkPage';
 import { ResourcesPage } from './pages/ResourcesPage';
-import { ScreensPage } from './pages/ScreensPage';
 import { SignupPage } from './pages/SignupPage';
 import { ShowcasePage } from './pages/ShowcasePage';
+import { SimulatorStressLab } from './pages/SimulatorStressLab';
 import { VmCreatePage } from './pages/VmCreatePage';
 import { VmDetailPage } from './pages/VmDetailPage';
 import { VmListPage } from './pages/VmListPage';
@@ -57,6 +59,7 @@ const router = createBrowserRouter([
           { path: 'memory', element: <ResourcesPage view="memory" /> },
           { path: 'network', element: <ResourcesPage view="network" /> },
           { path: 'console', element: <ConsolePage /> },
+          { path: 'events', element: <EventsPage /> },
         ],
       },
       { path: '/dashboard/vms/:vmId', element: <VmDetailPage /> },
@@ -65,6 +68,7 @@ const router = createBrowserRouter([
       { path: '/control/vms/new', element: <VmCreatePage /> },
       { path: '/control/vms/:vmId', element: <ControlVmDetailPage /> },
       { path: '/simulator', element: <DemoPage /> },
+      { path: '/simulator/stress', element: <SimulatorStressLab /> },
       // 실차가 안 될 때 쓰는 예비 대시보드 (주·백업 VM 카드 + 시뮬레이터). 메뉴에는 없다
       { path: '/legacy/dashboard', element: <LegacyDashboardPage /> },
 
@@ -75,8 +79,8 @@ const router = createBrowserRouter([
       { path: '/resources', element: <Navigate to="/dashboard/cpu" replace /> },
       { path: '/demo', element: <Navigate to="/simulator" replace /> },
       { path: '/console', element: <Navigate to="/dashboard/console" replace /> },
-      { path: '/events', element: <EventsPage /> },
-      { path: '/screens', element: <ScreensPage /> },
+      { path: '/events', element: <KeepQueryRedirect to="/dashboard/events" /> },
+      { path: '/phone-link', element: <PhoneLinkPage /> },
       { path: '/components', element: <ShowcasePage /> },
     ],
   },

@@ -1,7 +1,7 @@
 """UUID 기반 공통 VM 관리 계약. CLI/백엔드가 같은 잠금·작업 기록·생성 함수를 사용한다.
 
-동기 작업만 제공한다. Linux 준비는 원 실행 소유권을 유지하며 공통 잠금 밖에서 수행한다. 부분 준비 디스크는
-자동 재초기화/정리하지 않는다. root 권한의 외부 xl/파일 변경까지 원자적으로 통제하지 않는다.
+동기 작업만 제공한다. 준비는 원 실행 소유권을 유지하며 공통 잠금 밖에서 수행한다. 실패 private 자산은
+유한한 별도 수습으로만 폐기하며 재초기화하지 않는다. 외부 root의 xl/파일 변경까지 원자적으로 통제하지 않는다.
 """
 from argparse import Namespace
 from _thread import allocate_lock
@@ -32,6 +32,7 @@ CONFLICTS = {'VM_NAME_CONFLICT', 'IP_CONFLICT', 'IDEMPOTENCY_CONFLICT', 'OPERATI
              'VM_NOT_STOPPED', 'TARGET_CHANGED', 'ASSET_IN_USE', 'RESTORE_CONFLICT', 'VM_PURGED',
              'HOST_QUIESCING', 'BOOT_ADMISSION_REQUIRED', 'INTENT_MISMATCH'}
 VALIDATION = {'INVALID_SPEC', 'VM_NOT_FOUND', 'TEMPLATE_NOT_FOUND', 'TEMPLATE_VERSION_NOT_FOUND', 'RESOURCE_UNSUPPORTED', 'RECOVERY_MODE_UNSUPPORTED'}
+_TOKEN_CONTROL_CHAR = re.compile(r'[\x00-\x1f]')
 
 
 class ManagementError(PlatformError):
@@ -90,24 +91,35 @@ class PrivateProvision:
         self.operation,self.resume=operation,resume
 
 
+class PendingRegistration:
+    """Published create waiting to record its lifecycle or initialize its intent."""
+    def __init__(self,operation,tomb,host,tombstone,dhcp_applied=None):
+        self.operation,self.tomb,self.host,self.tombstone=operation,tomb,host,tombstone
+        self.dhcp_applied=dhcp_applied
+
+
 class ReadContext:
     """한 조회 회차의 구성·실행 근거. 원자 파일을 검증하며 잠금 밖에서 외부 관측한다.
 
     실제 제어에는 전달하지 않는다. 변경을 발견하면 호출자가 최대 한 번 새 회차를 만들며,
     다른 요청·다른 host나 새 실행에 이 문맥을 복사하지 않는다.
     """
-    def __init__(self, manager, action, spec, deadline):
+    def __init__(self, manager, action, spec, deadline, *, _input_ids=None):
         self.m,self.action,self.spec,self.deadline=manager,action,spec,deadline
         self.started_ms=int(manager.p.clock()*1000)
         self.observed_ms={}
-        self.e=None if action in ('intents','registrations') else manager.p.execution()
+        self.pending_creations=set()
+        self.e=None if action in ('intents','registrations','recovery-intents') else manager.p.execution()
         self.check()
         self.states,self.tombs=manager._read_states(action,spec,deadline)
         self.by_id={s['vm_id']:s for s in self.states}
         self.lifecycles={s['vm_id']:(s['lifecycle'],s['generation']) for s in self.states}
-        common=self.e.observation_common_inputs() if self.e is not None and self.states else None
+        # A private binding cohort still validates the complete registry; only
+        # the selected targets' execution files are relevant to its observation.
+        input_states=self.states if _input_ids is None else [s for s in self.states if s['vm_id'] in _input_ids]
+        common=self.e.observation_common_inputs() if self.e is not None and input_states else None
         self.inputs={} if action=='registrations' else {s['vm_id']:(read_intent(manager.data,s['vm_id']) if self.e is None else
-                     self.e.observation_inputs(s['record'],self.lifecycles[s['vm_id']],_common=common)) for s in self.states}
+                     self.e.observation_inputs(s['record'],self.lifecycles[s['vm_id']],_common=common)) for s in input_states}
         self.check()
 
     def check(self):
@@ -125,10 +137,15 @@ class ReadContext:
         return self.m._read(path)
 
     def validate_one(self, identity):
-        """관측 게시 직전 해당 VM만 대조한다. 외부 helper나 전체 등록부 검색을 하지 않는다."""
+        """해당 VM을 대조하고 이 호출에서 읽은 파일 근거를 반환한다.
+
+        반환값은 현재 호출의 잠금 범위 안에서만 재사용한다. 외부 helper나 전체
+        등록부 검색은 하지 않으며 다음 검증의 읽기를 생략하지 않는다.
+        """
         self.check()
         state=self.by_id[identity]
-        if self.optional(self.m.data/'tombstones'/(identity+'.json'))!=self.tombs.get(identity):
+        current_tomb=self.optional(self.m.data/'tombstones'/(identity+'.json'))
+        if current_tomb!=self.tombs.get(identity):
             raise ReadChanged()
         record=state['record']
         if state['lifecycle']=='REGISTERED':
@@ -136,21 +153,36 @@ class ReadContext:
         elif state['lifecycle']=='RETIRED':
             directory=self.m._archive(state)
         else:directory=None
+        current_record=None
         if directory is not None:
-            if self.optional(directory/'instance.json')!=record:raise ReadChanged()
+            current_record=self.optional(directory/'instance.json')
+            if current_record!=record:raise ReadChanged()
         creation=record.get('creation_operation_id')
         if creation and state['lifecycle']=='REGISTERED':
             op=self.optional(self.m.data/'operations'/(creation+'.json'))
-            if not op or op.get('vm_id')!=identity or op.get('status')!='SUCCEEDED':raise ReadChanged()
+            if not op or op.get('vm_id')!=identity:raise ReadChanged()
+            if op.get('status')!='SUCCEEDED':
+                template=op.get('template')
+                if (self.action!='recovery-intents' or op.get('action')!='create'
+                        or op.get('operation_id')!=creation or op.get('initial_spec')!=record.get('creation_spec')
+                        or not isinstance(template,dict)
+                        or template.get('manifest_sha256')!=record.get('template_manifest_sha256')
+                        or any(template.get(k)!=record.get(k) for k in ('template_id','template_version','guest_kind'))
+                        or op.get('status') not in ('RUNNING','RECOVERY_REQUIRED')
+                        or op.get('phase') not in ('preparing','published','dhcp-pending','dhcp-applied')):
+                    raise ReadChanged()
+                self.pending_creations.add(identity)
+        current=None
         if self.action!='registrations':
             current=(read_intent(self.m.data,identity) if self.e is None else
                      self.e.observation_inputs(record,self.lifecycles[identity]))
             if current!=self.inputs[identity]:raise ReadChanged()
         self.check()
+        return current_record,current_tomb,current
 
     def validate(self):
         self.check()
-        if self.action=='list' or self.action in ('intents','registrations') and 'vm_id' not in self.spec:
+        if self.action=='list' or self.action in ('intents','registrations','recovery-intents') and 'vm_id' not in self.spec:
             states,_=self.m._read_states(self.action,self.spec,self.deadline)
             if self.revision(states)!=self.revision(self.states):raise ReadChanged()
         # 각 항목은 바로 이어지는 관측 게시 잠금 안에서 한 번 대조한다. 같은 검사를 중복하지 않는다.
@@ -331,7 +363,7 @@ class Manager:
 
     @staticmethod
     def _text_token(value):
-        if not isinstance(value, str) or any(ord(c) < 32 for c in value):
+        if not isinstance(value, str) or _TOKEN_CONTROL_CHAR.search(value):
             return False
         try:
             return 1 <= len(value.encode('utf-8')) <= 200
@@ -344,7 +376,7 @@ class Manager:
                                'reboot', 'destroy', 'autostart-set', 'board-shutdown-set', 'config',
                                'recover_once', 'recovery-operation', 'recovery-reconcile', 'control-operation', 'snapshot', 'probe',
                                'execution-context', 'host-resume', 'cpu-layout', 'cpu-policy-set', 'cpu-host-prepare'}
-        actions.update(('operation-reconcile','provision','provisioning','registrations'))
+        actions.update(('operation-reconcile','provision','provisioning','registrations','recovery-intents'))
         if not isinstance(action, str) or action not in actions:
             fail('INVALID_SPEC', 'unsupported management action')
         if type(execute) is not bool:
@@ -357,6 +389,10 @@ class Manager:
             spec = {}
         if not isinstance(spec, dict):
             fail('INVALID_SPEC', 'request must be an object')
+        if action=='recovery-intents':
+            if execute or key is not None or spec:
+                fail('INVALID_SPEC','recovery-intents is an internal read-only registry query')
+            return spec
         if action=='registrations':
             if execute or key is not None or set(spec)-{'vm_id','timeout_ms'}:
                 fail('INVALID_SPEC','registrations is a read-only UUID query')
@@ -876,12 +912,13 @@ class Manager:
                 self._prepare_dhcp(context)
             self._save_op(op, 'dhcp-applied')
 
-    def _prepare_dhcp(self, context=None):
+    def _prepare_dhcp(self, context=None, *, deadline=None):
         records=self.p.records(validate_assets=False)
         # DHCP는 service 대기 뒤 직접 최신 registry를 얻는다. reload 뒤에는 더 소비하지 않는다.
         outside=(lambda:self._lifecycle_io(context,records,refresh_records=False)) if context and context.get('asset_lease') else None
-        if outside is None:self.p.prepare_dhcp(records)
-        else:self.p.prepare_dhcp(records,_outside=outside)
+        kwargs={} if deadline is None else {'deadline':deadline}
+        if outside is None:self.p.prepare_dhcp(records,**kwargs)
+        else:self.p.prepare_dhcp(records,_outside=outside,**kwargs)
 
     def _allocate_ip(self, spec, records, *, operations=None, pending=None):
         pool, held = self._ip_inventory(records,operations=operations,pending=pending)
@@ -1024,10 +1061,11 @@ class Manager:
         """긴 실행 잠금 없이 짧게 의도를 수락한다. 정상 완료 응답을 만들지는 않는다."""
         execution = self.p.execution()
         receipt = {}
+        prevalidation=execution._prevalidate_requests(deadline)
         admission_end=min(deadline,self.p.clock()+2)
         try:
             with short_lock(self.p.runtime, 'admission', deadline=admission_end,
-                            clock=self.p.clock, sleep=self.p.sleep):
+                            clock=self.p.clock, sleep=self.p.sleep), span('manager.stop_admission'):
                 records = self.p.records(validate_assets=False)
                 tomb = self._state(spec['vm_id'], records)
                 if tomb['lifecycle'] != 'REGISTERED':
@@ -1040,7 +1078,7 @@ class Manager:
                     fail('OPERATION_IN_PROGRESS','asset operation owns stop target',retryable=True)
                 request = {'vm_id':record['uuid'],'action':'stop','force':bool(spec.get('force',False))}
                 intent = execution.intent(record)
-                previous = next((q for q in execution.requests(deadline=admission_end) if key is not None and q['idempotency_key']==key),None)
+                previous = next((q for q in execution._requests_prevalidated(prevalidation,deadline=admission_end) if key is not None and q['idempotency_key']==key),None)
                 if key is None and intent and intent['desired_state']=='stopped':
                     candidate=execution.read(execution._path(execution.data,'control-requests',intent['accepted_operation_id']))
                     if candidate and candidate['request']==request and candidate['phase'] in ('prepared','accepted','executing','uncertain'):
@@ -1077,9 +1115,14 @@ class Manager:
         deadline = self.p.clock()+15 if deadline is None else deadline
         return self._view(tomb, observation=self.p.execution().observe(tomb['record'], deadline))
 
-    def _finish(self, op, tomb):
+    def _finish(self, op, tomb, context=None):
         if op['action'] == 'create':
-            self.p.execution().initialize(tomb['record'], 'stopped', 'create', op['operation_id'])
+            execution=self.p.execution()
+            try:execution.initialize(tomb['record'], 'stopped', 'create', op['operation_id'])
+            except ExecutionError as error:
+                if error.error['code']!='OPERATION_IN_PROGRESS' or error.error['details'].get('lock')!='admission':raise
+                if not context or 'output_stack' not in context:raise
+                return self._defer_registration(op,tomb,context)
         result = self._view(tomb)
         if op['action']=='create' and op.get('error') is not None:
             op.setdefault('first_error',op['error'])
@@ -1089,6 +1132,45 @@ class Manager:
         self._save_op(op, 'complete')
         if notice:self._registration_events.append(tomb['record'])
         return result
+
+    def _defer_registration(self,op,tomb,context,dhcp_applied=None):
+        """기존 원 생성과 대상 lease를 유지해 등록의 같은 단계만 재개한다."""
+        if not context.get('asset_lease'):
+            context['asset_lease']=context['output_stack'].enter_context(
+                AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
+            context['asset_lease'].bind({**op,'expected_generation':tomb['generation']})
+        path=self.data/'tombstones'/(op['vm_id']+'.json')
+        saved=self._read(path) if path.exists() or path.is_symlink() else None
+        return PendingRegistration(op,tomb,self.p.boot_id_reader(),saved,dhcp_applied)
+
+    def _complete_registration(self,pending,context):
+        """공통 잠금 밖에서 기다리고 원 등록 단계만 재개한다.
+
+        복사·수락·원 기한·기존 의도를 새로 만들지 않는다. 아직 필요한 DHCP 효과는
+        기존 생성 실행 기한 안에서만 수행한다.
+        """
+        while isinstance(pending,PendingRegistration):
+            end=self.p.response_deadline
+            if pending.dhcp_applied is False and pending.operation['template']['guest_kind']=='linux':
+                with creation.work(self,pending.operation,context) as physical_end:end=min(end,physical_end)
+            with span('registration.admission_wait'):
+                with short_lock(self.p.runtime,'admission',deadline=end,clock=self.p.clock,sleep=self.p.sleep):pass
+            with operation_lock(self.p.runtime,blocking=True,deadline=end,clock=self.p.clock,sleep=self.p.sleep) as fd:
+                context['common_fd']=fd
+                self._writable()
+                if self.p.clock()>=end:fail('DEADLINE_EXCEEDED','registration call budget expired')
+                if self.p.boot_id_reader()!=pending.host:fail('TARGET_CHANGED','registration host changed')
+                op,tomb=pending.operation,pending.tomb
+                path=self.data/'tombstones'/(op['vm_id']+'.json')
+                current=self._read(path) if path.exists() or path.is_symlink() else None
+                if (self._read(self.data/'operations'/(op['operation_id']+'.json'))!=op
+                        or current!=pending.tombstone
+                        or self._read(self.data/'instances'/tomb['record']['id']/'instance.json')!=tomb['record']):
+                    fail('TARGET_CHANGED','original registration changed while waiting')
+                if context.get('asset_lease'):context['asset_lease'].guard()
+                pending=(self._finish(op,tomb,context) if pending.dhcp_applied is None else
+                         self._register_created(op,tomb['record'],context,pending.dhcp_applied))
+        return pending
 
     def _save_tomb(self, tomb, op, lifecycle, generation, **extra):
         updated = {**tomb, **extra, 'lifecycle':lifecycle,'generation':generation,'last_operation_id':op['operation_id'],
@@ -1101,7 +1183,10 @@ class Manager:
 
     def _owner_state(self, op):
         try:
-            return owner_state(self.p,op)
+            state=owner_state(self.p,op)
+            if state=='absent' and op['action']=='create' and op['template']['guest_kind']=='zephyr':
+                return asset_state(self.p,{**op,'expected_generation':0})
+            return state
         except (PlatformError,OSError,ValueError,KeyError,TypeError) as error:
             fail('OBSERVATION_UNAVAILABLE','original preparation ownership cannot be verified',
                  details={'operation_id':op['operation_id'],'cause_type':type(error).__name__})
@@ -1120,7 +1205,7 @@ class Manager:
             except (PlatformError,OSError,ValueError,KeyError):
                 fail('OBSERVATION_UNAVAILABLE','original firmware preparation ownership cannot be verified')
         if (op['action']=='create' and op['status']!='SUCCEEDED' and effective!='FAILED'
-                and op['template']['guest_kind']=='linux' and self._owner_state(op)=='reconciling'):
+                and self._owner_state(op)=='reconciling'):
             effective='RECONCILING'
         if op['action'] in ('retire','restore','purge','update-resources','firmware-transition') and op['status']!='SUCCEEDED':
             try:
@@ -1217,17 +1302,19 @@ class Manager:
                 context['linux_barrier']=self.p.execution().barrier()
                 # workspace 전 실패의 명시적 재개다. 조회가 상태를 바꾸는 것은 아니다.
                 op['status']='RUNNING'
-            if private_zephyr:op['status']='RUNNING'
+            if private_zephyr:
+                # 수습이 같은 I/O 슬롯을 보유할 수 있다. 원 상태를 쓰기 전에 소유 구간을 확보한다.
+                context['asset_lease']=context['output_stack'].enter_context(
+                    AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
+                context['asset_lease'].bind({**op,'expected_generation':0})
+                context['output_stack'].enter_context(lifecycle_slot(self.p))
+                op['status']='RUNNING'
             self._save_op(op, 'preparing')
             if (op['template']['guest_kind']=='linux'
                     and getattr(self.preparer,'__func__',None) is type(self)._prepare):
                 return PrivateCreate(op)
             if (op['template']['guest_kind']=='zephyr'
                     and getattr(self.preparer,'__func__',None) is type(self)._prepare):
-                context['asset_lease']=context['output_stack'].enter_context(
-                    AssetLease(self.p,op['vm_id'],'create',op['idempotency_key']))
-                context['asset_lease'].bind({**op,'expected_generation':0})
-                context['output_stack'].enter_context(lifecycle_slot(self.p))
                 return PrivateProvision(op,resume=resume)
             try:
                 with tool_output():
@@ -1303,19 +1390,23 @@ class Manager:
     def _register_created(self,op,record,context,dhcp_applied):
         tomb = {'schema_version':'1.0','vm_id':record['uuid'],'name':record['name'],'generation':0,
                 'lifecycle':'REGISTERED','record':record,'history':[]}
-        tomb = self._save_tomb(tomb, op, 'REGISTERED', 0)
+        try:tomb = self._save_tomb(tomb, op, 'REGISTERED', 0)
+        except ExecutionError as error:
+            if error.error['code']!='OPERATION_IN_PROGRESS' or error.error['details'].get('lock')!='admission':raise
+            if not context or 'output_stack' not in context:raise
+            return self._defer_registration(op,tomb,context,dhcp_applied)
         if vm.has_network(record):
             if not dhcp_applied:
                 if record['guest_kind']=='linux':
                     # DHCP 재제출은 결과 조회가 아닌 외부 효과다. 원 생성 기한 밖에서 반복하지 않는다.
                     with creation.work(self,op,context) as end:
                         self._save_op(op, 'dhcp-pending')
-                        with tool_output():self.p.prepare_dhcp(self.p.records(validate_assets=False),deadline=end)
+                        with tool_output():self._prepare_dhcp(context,deadline=end)
                 else:
                     self._save_op(op, 'dhcp-pending')
-                    with tool_output():self.p.prepare_dhcp(self.p.records(validate_assets=False))
+                    with tool_output():self._prepare_dhcp(context)
             self._save_op(op, 'dhcp-applied')
-        return self._finish(op, tomb)
+        return self._finish(op, tomb, context)
 
     @staticmethod
     def _filesystem_revision(path):
@@ -1517,18 +1608,18 @@ class Manager:
                 fail('IDEMPOTENCY_CONFLICT','same key has a different action or request')
             context['replayed']=True
             tomb = self._tombs().get(previous['vm_id'])
-            if action=='create' and creation.released(self,previous,durable=True):
-                error=previous['error']
-                fail(error['code'],error['message'],retryable=False,
-                     details={**error.get('details',{}),'operation_id':previous['operation_id'],
-                              'replayed':True,'original_create_succeeded':False,'reconciliation':previous['reconciliation']})
-            if (action=='create' and previous['template']['guest_kind']=='linux' and previous['status']!='SUCCEEDED'):
+            if action=='create' and previous['status']!='SUCCEEDED':
                 state=self._owner_state(previous)
                 if state in ('active','reconciling'):
                     return self._operation_view(previous)
                 if state=='residual':
                     fail('RECOVERY_REQUIRED','owned preparation child may remain; inspect the original operation',
                          details={'operation_id':previous['operation_id']})
+            if action=='create' and creation.released(self,previous,durable=True):
+                error=previous['error']
+                fail(error['code'],error['message'],retryable=False,
+                     details={**error.get('details',{}),'operation_id':previous['operation_id'],
+                              'replayed':True,'original_create_succeeded':False,'reconciliation':previous['reconciliation']})
             if previous['status']=='SUCCEEDED':
                 if action=='create' and tomb and tomb['lifecycle']!='REGISTERED':
                     fail('VM_PURGED' if tomb['lifecycle']=='PURGED' else 'TARGET_CHANGED',
@@ -1544,6 +1635,13 @@ class Manager:
             if action=='create' and previous['status']=='RECOVERY_REQUIRED':
                 target=self.data/'instances'/previous.get('assigned',{}).get('internal_name',previous['initial_spec']['name'])
                 workspace=self.data/previous['owned_workspace']
+                automatic=previous.get('automatic_cleanup',{})
+                if automatic.get('state','enrolled')!='enrolled':
+                    if not execute:return {'plan':True,'operation':previous}
+                    error=previous['error']
+                    fail(error['code'],error['message'],retryable=False,
+                         details={**error.get('details',{}),'operation_id':previous['operation_id'],
+                                  'replayed':True,'original_create_succeeded':False})
                 resumable_firmware=(previous['template']['guest_kind']=='zephyr'
                     and getattr(self.preparer,'__func__',None) is type(self)._prepare)
                 if (not resumable_firmware and not target.exists() and not target.is_symlink()
@@ -1655,6 +1753,8 @@ class Manager:
             op.update(template=selected,assigned={'internal_name':internal_name(identity), **({'mac':assigned_mac, 'ipv4':assigned_ip} if selected['capabilities'].get('dhcp') else {})},
                       owned_workspace='instances/.operation-'+opid)
             if selected['guest_kind']=='linux':creation.accept(self,op,context)
+            from xenova_creation_auto import enrollment
+            op['automatic_cleanup']=enrollment(self,op,context)
         else:
             op['expected_generation']=tomb['generation']
             op['source']=str((self.data/'instances'/tomb['name'] if action=='retire' else self._archive(tomb)).relative_to(self.data))
@@ -1702,11 +1802,30 @@ class Manager:
                 if had_budget:self.p.response_deadline=previous_budget
                 else:self.p.__dict__.pop('response_deadline',None)
             self.last_output={'bytes':bytes(output.content),'dropped':output.dropped}
+        if action=='create' and execute and not response['ok'] and response['operation_id'] is not None:
+            from xenova_creation_auto import start as automatic_cleanup
+            warning=automatic_cleanup(self,response['operation_id'])
+            if warning:response['error']['details'].setdefault('diagnostic_warnings',[]).append(warning)
         # 원장 완료/관리·대상 FD 반환 뒤 공개 등록 자료만 넘긴다. HTTP를 기다리지 않는다.
         if self._registration_events:
             from xenova_registration_hook import automatic
             events,self._registration_events=self._registration_events,[]
             for record in events:automatic(self.data,self.p.runtime,record)
+            try:
+                from xenova_display_sync import (is_display_registration,
+                                                  restart_changed_services,
+                                                  sync_after_registration)
+                display_events=[record for record in events if is_display_registration(record)]
+                records=self.p.records(validate_assets=False) if display_events else None
+                updates=[sync_after_registration(records,record) for record in display_events]
+                for update in updates:update['services']=restart_changed_services(update)
+                if response['ok'] and updates:
+                    response['data']['display_sync']=updates[0] if len(updates)==1 else updates
+            except (OSError,ValueError,KeyError,TypeError) as error:
+                destination=response['data'] if response['ok'] else response['error']['details']
+                destination.setdefault('diagnostic_warnings',[]).append({
+                    'code':'DISPLAY_SYNC_DEFERRED','sink':'display-configuration',
+                    'cause_type':type(error).__name__})
         try:
             self.last_trace = trace.export()
             if self.trace_sink is not None:
@@ -1848,7 +1967,7 @@ class Manager:
             with span('read.round',count=attempt+1):
                 if self.p.clock()>=deadline:fail('DEADLINE_EXCEEDED','query budget expired')
                 try:
-                    if action in ('get','list','probe','execution-context','intents','registrations'):
+                    if action in ('get','list','probe','execution-context','intents','registrations','recovery-intents'):
                         read=ReadContext(self,action,spec,deadline)
                         records=[s['record'] for s in read.states]
                         if action=='registrations':
@@ -1857,10 +1976,16 @@ class Manager:
                             for state in read.states:read.validate_one(state['vm_id'])
                             views=[registration(s['record']) for s in read.states]
                             result={'registration':views[0]} if 'vm_id' in spec else {'registrations':views}
-                        elif action=='intents':
+                        elif action in ('intents','recovery-intents'):
                             read.validate()
-                            for state in read.states:read.validate_one(state['vm_id'])
-                            views=[self._intent_view(s,read.inputs[s['vm_id']]) for s in read.states]
+                            views=[]
+                            for state in read.states:
+                                identity=state['vm_id']
+                                read.validate_one(identity)
+                                pending=identity in read.pending_creations
+                                view=self._intent_view(state,None if pending else read.inputs[identity])
+                                if pending:view['registration_pending']=True
+                                views.append(view)
                             result={'vm':views[0]} if 'vm_id' in spec else {'vms':views}
                         elif action in ('get','probe','execution-context'):
                             observed=read.e.observe(records[0],deadline,_read_context=read)
@@ -1982,11 +2107,11 @@ class Manager:
         try:
             if budget_ms is not None and (type(budget_ms) is not int or not 0<budget_ms<=(creation.MAX_CALL_MS if action=='create' else 105000)):
                 fail('INVALID_SPEC','budget_ms must be 1..'+str(creation.MAX_CALL_MS if action=='create' else 105000))
-            if budget_ms is not None and action not in ('create','operation-reconcile','start','stop','reboot','destroy','get','list','intents','registrations','probe','execution-context','templates','operation','control-operation','recovery-operation','recovery-reconcile','provision','provisioning'):
+            if budget_ms is not None and action not in ('create','operation-reconcile','start','stop','reboot','destroy','get','list','intents','registrations','recovery-intents','probe','execution-context','templates','operation','control-operation','recovery-operation','recovery-reconcile','provision','provisioning'):
                 fail('INVALID_SPEC','budget_ms is supported only for control and bounded reads')
             spec = self._validate_call(action, spec, execute, idempotency_key, request_id)
             trace_bind(vm_id=spec.get('vm_id'), recovery_attempt_id=spec.get('recovery_attempt_id'))
-            if action not in ('intents','provisioning','registrations'):
+            if action not in ('intents','provisioning','registrations','recovery-intents'):
                 try:
                     trace_bind(host_boot_id=self.p.boot_id_reader())
                 except Exception:
@@ -2017,7 +2142,7 @@ class Manager:
             if action=='operation-reconcile':
                 result=creation.reconcile(self,spec,execute,context,deadline,_output)
                 return {**response,'ok':True,'data':result,'operation_id':context['operation_id']}
-            if action in ('get','list','intents','registrations','probe','execution-context','templates','operation','control-operation','recovery-operation'):
+            if action in ('get','list','intents','registrations','recovery-intents','probe','execution-context','templates','operation','control-operation','recovery-operation'):
                 self.p.response_deadline=min(self.p.response_deadline,deadline)
                 if action in ('get','list','probe','execution-context'):
                     with observation_slot(self.p.runtime,deadline=deadline,clock=self.p.clock) as fd:
@@ -2062,6 +2187,8 @@ class Manager:
                 result=self._complete_private(result,context)
             if isinstance(result,PrivateProvision):
                 result=self._complete_provision(result,context)
+            if isinstance(result,PendingRegistration):
+                result=self._complete_registration(result,context)
             response.update(ok=True,data=result)
         except ManagementError as exc:
             response['error']=exc.error
@@ -2160,6 +2287,9 @@ class Manager:
                         self._writable()
                     if op['status']!='SUCCEEDED':
                         op.update(status='RECOVERY_REQUIRED',error=op.get('error') or response['error'])
+                        if action=='create':
+                            from xenova_creation_auto import failed as automatic_cleanup_failed
+                            automatic_cleanup_failed(self,op)
                         self._save_op(op)
             except (OSError,PlatformError,ValueError):
                 if action=='create':

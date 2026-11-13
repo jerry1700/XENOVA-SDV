@@ -34,7 +34,12 @@ class ManagementTest(unittest.TestCase):
         (self.data/'instances').mkdir()
         self.run=Path(self.tmp.name)/'run'
         self.xen=FakeXen(self.data,{})
-        self.p=vm.Platform(self.data,self.run,command=self.xen,defaults_path=FILES/'defaults.json')
+        # 소스 checkout의 DrvFS mode는 승인된 설치 정책의 권한이 아니다.
+        # 같은 정책 bytes를 소유 Linux fixture에 공급하고 실제 권한 검증은 유지한다.
+        policy=self.data/'execution-policy.json'
+        policy.write_bytes((FILES/'execution-policy.json').read_bytes());policy.chmod(0o600)
+        self.p=vm.Platform(self.data,self.run,command=self.xen,defaults_path=FILES/'defaults.json',
+                           execution_policy_path=policy)
         # 명시적 로컬 시간 프로필. 생성 운영 기본값으로 설치하지 않는다.
         self.p.creation_policy_path=self.data/'creation-policy.json'
         self.p.creation_policy_path.write_text(json.dumps({'schema_version':'1.0','call_ms':3600000,
@@ -106,6 +111,218 @@ class ManagementTest(unittest.TestCase):
         result=self.call('create',self.spec)
         self.assertTrue(result['ok'],result)
         return result['data']['vm_id']
+
+    def test_completed_create_runs_display_sync_after_durable_registration(self):
+        import xenova_display_sync as display_sync
+        with patch('xenova_registration_hook.automatic'), \
+             patch.object(display_sync,'is_display_registration',return_value=True), \
+             patch.object(display_sync,'sync_after_registration',
+                          return_value={'ui':{'state':'not-requested'},
+                                        'bindings':{'state':'pending'}}) as sync, \
+             patch.object(display_sync,'restart_changed_services',
+                          return_value={'state':'unchanged','restarted':[],'skipped':[]}) as restart:
+            result=self.call('create',self.spec,key='display-sync-create')
+        self.assertTrue(result['ok'],result)
+        sync.assert_called_once()
+        records,registered=sync.call_args.args
+        self.assertEqual(registered['uuid'],self.spec['vm_id'])
+        self.assertIn(self.key,records)
+        self.assertEqual(result['data']['display_sync']['bindings']['state'],'pending')
+        restart.assert_called_once_with(sync.return_value)
+
+    def test_display_sync_failure_is_a_warning_not_a_failed_vm_create(self):
+        import xenova_display_sync as display_sync
+        with patch('xenova_registration_hook.automatic'), \
+             patch.object(display_sync,'is_display_registration',return_value=True), \
+             patch.object(display_sync,'sync_after_registration',side_effect=ValueError('fixture')):
+            result=self.call('create',self.spec,key='display-sync-warning')
+        self.assertTrue(result['ok'],result)
+        self.assertEqual(result['data']['diagnostic_warnings'][0]['code'],'DISPLAY_SYNC_DEFERRED')
+        self.assertEqual(self.state(self.spec['vm_id'])['lifecycle'],'REGISTERED')
+
+    def test_create_registration_waits_for_admission_in_the_existing_call_budget(self):
+        import xenova_execution as execution
+        now=[1000.0];holder=[None];waits=[]
+        self.p.clock=lambda:now[0]
+        def checkpoint(phase,op):
+            if phase=='dhcp-applied' and holder[0] is None:
+                holder[0]=execution.short_lock(self.p.runtime,'admission');holder[0].__enter__()
+        def sleep(delay):
+            waits.append(delay);now[0]+=delay
+            from xenova_runtime import operation_lock
+            with operation_lock(self.run):pass  # admission wait holds no common lock
+            self.assertFalse((self.data/'control'/(self.spec['vm_id']+'.json')).exists())
+            holder[0].__exit__(None,None,None);holder[0]=None
+        self.m.checkpoint=checkpoint;self.p.sleep=sleep
+        try:answer=self.m.call('create',self.spec,execute=True,idempotency_key='admission-create',budget_ms=6000)
+        finally:
+            if holder[0] is not None:holder[0].__exit__(None,None,None)
+        self.assertTrue(answer['ok'],answer);self.assertEqual(len(waits),1)
+        self.assertEqual(self.copies,1)
+        intent=json.loads((self.data/'control'/(self.spec['vm_id']+'.json')).read_text())
+        self.assertEqual(intent['desired_state'],'stopped')
+        self.assertEqual(intent['accepted_operation_id'],answer['operation_id'])
+
+    def test_registration_budget_expiry_preserves_original_create_for_same_key_recovery(self):
+        import xenova_execution as execution
+        now=[1000.0];holder=[None]
+        self.p.clock=lambda:now[0];self.p.sleep=lambda delay:now.__setitem__(0,now[0]+delay)
+        def checkpoint(phase,op):
+            if phase=='dhcp-applied' and holder[0] is None:
+                holder[0]=execution.short_lock(self.p.runtime,'admission');holder[0].__enter__()
+        self.m.checkpoint=checkpoint
+        try:first=self.m.call('create',self.spec,execute=True,idempotency_key='admission-expiry',budget_ms=6000)
+        finally:
+            if holder[0] is not None:holder[0].__exit__(None,None,None)
+        self.assertFalse(first['ok']);self.assertEqual(first['error']['code'],'DEADLINE_EXCEEDED')
+        self.assertFalse((self.data/'control'/(self.spec['vm_id']+'.json')).exists())
+        path=self.data/'operations'/(first['operation_id']+'.json');before=json.loads(path.read_text())
+        self.assertEqual(before['status'],'RECOVERY_REQUIRED')
+        self.m.checkpoint=lambda *args:None
+        replay=self.m.call('create',self.spec,execute=True,idempotency_key='admission-expiry',budget_ms=6000)
+        self.assertTrue(replay['ok'],replay);self.assertTrue(replay['replayed'])
+        self.assertEqual(replay['operation_id'],first['operation_id']);self.assertEqual(self.copies,1)
+        after=json.loads(path.read_text())
+        for key in ('request','initial_spec','spec_hash','vm_id','creation'):
+            self.assertEqual(after[key],before[key])
+        self.assertEqual(after['first_error']['code'],'DEADLINE_EXCEEDED')
+
+    def test_recovery_intents_hold_only_a_verified_incomplete_registration(self):
+        healthy = self.create()
+        pending = {**self.spec, 'vm_id':'550e8400-e29b-41d4-a716-446655440001',
+                   'name':'pending', 'ipv4':'192.168.77.31'}
+        with patch.object(self.m,'_save_tomb',side_effect=OSError('fixture storage failure')):
+            failed = self.call('create',pending,key='pending-create')
+        self.assertEqual(failed['error']['code'],'RECOVERY_REQUIRED')
+        original_id = failed['operation_id']
+        path = self.data/'operations'/(original_id+'.json')
+        original = path.read_bytes()
+        op = json.loads(original)
+        self.assertEqual((op['status'], op['phase']), ('RECOVERY_REQUIRED', 'published'))
+        self.assertFalse((self.data/'tombstones'/(pending['vm_id']+'.json')).exists())
+        public = self.m.call('intents')
+        self.assertEqual(public['error']['code'], 'TARGET_CHANGED')
+        recovery = self.m.call('recovery-intents')
+        self.assertTrue(recovery['ok'], recovery)
+        rows = {row['vm_id']:row for row in recovery['data']['vms']}
+        self.assertTrue(rows[healthy]['intent_applicable'])
+        self.assertNotIn('registration_pending', rows[healthy])
+        row = rows[pending['vm_id']]
+        self.assertTrue(row['registration_pending'])
+        self.assertEqual((row['desired_state'], row['intent_revision'], row['intent_applicable']),
+                         ('unknown', None, False))
+        self.assertEqual(path.read_bytes(), original)
+
+        # A mismatched origin still invalidates the snapshot.
+        path.write_text(json.dumps({**op, 'initial_spec':{**op['initial_spec'], 'name':'other'}}))
+        self.assertEqual(self.m.call('recovery-intents')['error']['code'], 'TARGET_CHANGED')
+        path.write_bytes(original)
+        self.m.checkpoint = lambda *args: None
+        replay = self.call('create', pending, key='pending-create')
+        self.assertTrue(replay['ok'], replay)
+        self.assertEqual(replay['operation_id'], original_id)
+        self.assertEqual(self.copies, 2)
+        self.assertTrue(self.m.call('intents')['ok'])
+        self.assertFalse(any('registration_pending' in row for row in
+                             self.m.call('recovery-intents')['data']['vms']))
+
+    def test_initial_registration_wait_releases_common_lock_and_other_vm_can_stop(self):
+        from xenova_execution import short_lock
+        from xenova_runtime import operation_lock
+
+        healthy = self.create()
+        pending = {**self.spec, 'vm_id':'550e8400-e29b-41d4-a716-446655440001',
+                   'name':'pending', 'ipv4':'192.168.77.31'}
+        now=[1000.0];holder=[];seen=[]
+        self.p.clock=lambda:now[0]
+        def checkpoint(phase,op):
+            if phase=='published' and not holder:
+                lock=short_lock(self.run,'admission');lock.__enter__()
+                holder.append(lock)
+        def sleep(delay):
+            now[0]+=delay
+            with operation_lock(self.run):pass
+            self.assertTrue(self.m.fork().call('intents',{'vm_id':healthy})['ok'])
+            holder[0].__exit__(None,None,None);holder[0]=None
+            stopped=self.m.fork().call('stop',{'vm_id':healthy},execute=True,idempotency_key='independent-stop')
+            self.assertTrue(stopped['ok'],stopped)
+            seen.append(stopped['operation_id'])
+        self.m.checkpoint=checkpoint;self.p.sleep=sleep
+        try:
+            result=self.m.call('create',pending,execute=True,idempotency_key='initial-admission',budget_ms=6000)
+        finally:
+            if holder and holder[0] is not None:holder[0].__exit__(None,None,None)
+        self.assertTrue(result['ok'],result)
+        self.assertEqual((len(seen),self.copies),(1,2))
+        intent=json.loads((self.data/'control'/(pending['vm_id']+'.json')).read_text())
+        self.assertEqual(intent['accepted_operation_id'],result['operation_id'])
+
+    def test_initial_registration_wait_expiry_keeps_public_assets_and_origin(self):
+        from xenova_execution import short_lock
+
+        now=[1000.0];holder=[]
+        self.p.clock=lambda:now[0]
+        self.p.sleep=lambda delay:now.__setitem__(0,now[0]+delay)
+        def checkpoint(phase,op):
+            if phase=='published' and not holder:
+                lock=short_lock(self.run,'admission');lock.__enter__()
+                holder.append(lock)
+        self.m.checkpoint=checkpoint
+        try:
+            with patch.object(self.p,'prepare_dhcp',side_effect=AssertionError('no DHCP after admission expiry')):
+                failed=self.m.call('create',self.spec,execute=True,idempotency_key='initial-expiry',budget_ms=6000)
+        finally:
+            for lock in holder:lock.__exit__(None,None,None)
+        self.assertEqual(failed['error']['code'],'DEADLINE_EXCEEDED')
+        path=self.data/'operations'/(failed['operation_id']+'.json')
+        original=path.read_bytes();op=json.loads(original)
+        self.assertEqual((op['phase'],op['status']),('published','RECOVERY_REQUIRED'))
+        self.assertTrue((self.data/'instances'/self.key/'root.raw').exists())
+        self.assertFalse((self.data/'tombstones'/(self.spec['vm_id']+'.json')).exists())
+        self.assertFalse((self.data/'control'/(self.spec['vm_id']+'.json')).exists())
+        rows=self.m.call('recovery-intents')['data']['vms']
+        self.assertTrue(rows[0]['registration_pending'])
+        self.assertEqual(path.read_bytes(),original)
+        self.assertEqual(self.copies,1)
+
+    def test_registration_wait_rechecks_host_operation_lifecycle_and_configuration(self):
+        import itertools
+        import xenova_execution as execution
+        for stage,boundary in itertools.product(('published','dhcp-applied'),
+                                                ('host','operation','lifecycle','configuration')):
+            with self.subTest(stage=stage,boundary=boundary):
+                f=ManagementTest('runTest');f.setUp();holder=[];original=[];now=[1000.0]
+                try:
+                    f.p.clock=lambda:now[0]
+                    def checkpoint(phase,op):
+                        if phase==stage:
+                            original.append(json.loads(json.dumps(op)))
+                            lock=execution.short_lock(f.p.runtime,'admission');lock.__enter__();holder.append(lock)
+                    def changed(delay):
+                        now[0]+=delay
+                        if boundary=='host':f.p.boot_id_reader=lambda:'11111111-1111-4111-8111-111111111111'
+                        else:
+                            path=(f.data/'operations'/(original[0]['operation_id']+'.json') if boundary=='operation'
+                                  else f.data/'tombstones'/(f.spec['vm_id']+'.json') if boundary=='lifecycle'
+                                  else f.data/'instances'/f.key/'instance.json')
+                            value=(json.loads(path.read_text()) if path.exists() else
+                                   f.m._state(f.spec['vm_id'],f.p.records(validate_assets=False)))
+                            field={'operation':'phase','lifecycle':'generation','configuration':'memory_mib'}[boundary]
+                            value[field]='external-change' if boundary=='operation' else value[field]+1
+                            path.parent.mkdir(parents=True,exist_ok=True)
+                            path.write_text(json.dumps(value))  # external writer fixture under its own admission
+                        holder.pop().__exit__(None,None,None)
+                    f.m.checkpoint=checkpoint;f.p.sleep=changed
+                    response=f.m.call('create',f.spec,execute=True,idempotency_key='guard-'+boundary,budget_ms=6000)
+                    self.assertFalse(response['ok']);self.assertEqual(response['error']['code'],'TARGET_CHANGED',response)
+                    self.assertFalse((f.data/'control'/(f.spec['vm_id']+'.json')).exists())
+                    self.assertEqual(f.copies,1)
+                    after=json.loads((f.data/'operations'/(original[0]['operation_id']+'.json')).read_text())
+                    self.assertEqual(after['spec_hash'],original[0]['spec_hash'])
+                    self.assertEqual(after['status'],'RUNNING')  # another writer's result is not rewritten as failure
+                finally:
+                    if holder:holder.pop().__exit__(None,None,None)
+                    f.doCleanups()
 
     def state(self,identity):
         result=self.call('get',{'vm_id':identity})
@@ -398,8 +615,32 @@ class ManagementTest(unittest.TestCase):
         d=self.data/'catalog/zephyr-xenvm-starter-arm64';d.mkdir();(d/'1.0.0.json').write_text(json.dumps(descriptor))
         spec={'vm_id':'650e8400-e29b-41d4-a716-446655440000','name':'rtos-app','template_id':descriptor['template_id'],'template_version':'1.0.0','vcpus':1,'memory_mib':16}
         self.m.preparer=self.m._prepare
-        result=self.call('create',spec,key='zephyr')
+        import xenova_execution as execution
+        holder=[];waits=[];sleep=self.p.sleep
+        save_tomb=self.m._save_tomb
+        def at_publish(phase,op):
+            if phase=='published':
+                lock=execution.short_lock(self.run,'admission');lock.__enter__();holder.append(lock)
+        self.m.checkpoint=at_publish
+        def saved(*args,**kwargs):
+            result=save_tomb(*args,**kwargs)
+            lock=execution.short_lock(self.p.runtime,'admission');lock.__enter__();holder.append(lock)
+            return result
+        def release(delay):
+            waits.append(delay)
+            pending=self.m.fork().call('recovery-intents')
+            self.assertTrue(pending['ok'],pending)
+            self.assertTrue(pending['data']['vms'][0]['registration_pending'])
+            self.assertEqual(pending['data']['vms'][0]['guest_kind'],'zephyr')
+            if holder:holder.pop().__exit__(None,None,None)
+            sleep(delay)
+        self.p.sleep=release
+        try:
+            with patch.object(self.m,'_save_tomb',side_effect=saved):result=self.call('create',spec,key='zephyr')
+        finally:
+            if holder:holder.pop().__exit__(None,None,None)
         self.assertTrue(result['ok'],result)
+        self.assertEqual(len(waits),2)
         r=result['data']['configuration']
         self.assertEqual(r['board_shutdown_policy'],'refuse');self.assertFalse(r['autostart'])
         self.assertNotIn('ipv4',r);self.assertFalse((self.data/('instances/'+management.internal_name(spec['vm_id'])+'/root.raw')).exists())

@@ -1,6 +1,6 @@
 import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { ApiError } from '../api/client';
+import { Link, useNavigate } from 'react-router';
 import {
   driveKeyOf,
   mockDemo,
@@ -12,8 +12,7 @@ import {
   type DriveMode,
   type InputResult,
 } from '../api/drive';
-import { useDisplays, useRouteDisplay, useVms } from '../api/queries';
-import type { Display, DisplayStatus, DisplayView } from '../api/types';
+import { useVms } from '../api/queries';
 import {
   appHealth,
   appHealthLabel,
@@ -32,7 +31,9 @@ import styles from './pages.module.css';
 /**
  * W-07 시연 제어 (화면 정의서 W-07, UI-08·DS-01) — 공병우 -128·-130, 격리 시연 API 는 정송하 -135.
  * 위: 격리 시연 — 세 VM 을 나란히 두고 각자 [강제 종료]. 다른 둘이 계속 도는 것을 같은 줄에서 본다.
- * 아래: 화면 배치(REST-23·24, -129) / 수동주행 입력 + 자율주행 재개(POST /api/v1/drive/resume, 3·2·1).
+ * 아래: 수동주행 입력 + 자율주행 재개(POST /api/v1/drive/resume, 3·2·1).
+ * 화면 배치 카드(REST-23·24, -129)는 2026-11-12 제거 — HDMI 가 합친 한 화면(/display/combined)으로 바뀌어 모니터별 배치가 무의미하고,
+ * 보드엔 그 WebSocket 에 붙는 라우터가 없어 항상 "모니터 꺼짐" 이었다 (계약 display-route-v1 "기존 Spring 화면 배치" 절).
  * 강제 종료 API(-135)는 아직 없다 → mock 에서만 동작.
  */
 export function DemoPage() {
@@ -53,6 +54,12 @@ export function DemoPage() {
           <span className={styles.draft}>강제 종료 API(-135) 미구현 — mock 모드에서만 동작</span>
         )}
       </section>
+      <nav className={styles.simulatorTabs} aria-label="Simulator 하위 메뉴">
+        <Link to="/simulator" aria-current="page">
+          시뮬레이션 제어
+        </Link>
+        <Link to="/simulator/stress">부하 테스트</Link>
+      </nav>
       <div className={styles.cols3}>
         {ROLE_ORDER.map((app) => (
           <IsolationCard key={app} app={app} />
@@ -60,13 +67,11 @@ export function DemoPage() {
       </div>
       {/* 시뮬레이터 구성일 때만 (실차 구성에는 없다) */}
       <SimTrackControl />
-      <div className={styles.cols2}>
-        <ScreenRouting />
-        <Card title="수동주행 입력">
-          <ManualInput />
-          <Resume />
-        </Card>
-      </div>
+      {/* 화면 배치 카드가 빠져 한 장만 남았으므로 한 줄 전체를 쓴다 */}
+      <Card title="수동주행 입력">
+        <ManualInput />
+        <Resume />
+      </Card>
     </div>
   );
 }
@@ -80,6 +85,7 @@ const KILL_EFFECT: Record<AppId, string> = {
 };
 
 function IsolationCard({ app }: { app: AppId }) {
+  const navigate = useNavigate();
   const { drive } = useDrive();
   const vms = useVms();
   const toast = useToast();
@@ -88,7 +94,6 @@ function IsolationCard({ app }: { app: AppId }) {
   const vm = vmOf(app, vms.data?.items, drive);
   const state = drive?.apps[app];
   const health = appHealth(role, vm, state);
-  const linux = vm?.guest_kind === 'linux';
   const down = vm?.state !== 'running' || health === 'recovering' || health === 'fault';
   const active = !!vm && drive?.control?.active_vm_id === vm.vm_id && drive.control.received_ago_ms < 3000;
   return (
@@ -128,14 +133,8 @@ function IsolationCard({ app }: { app: AppId }) {
           >
             강제 종료
           </Button>
-          <Button
-            variant="secondary"
-            disabled
-            title={
-              linux ? '에이전트 부하 명령(-123) 미구현' : 'Zephyr VM 은 에이전트가 없어 부하를 줄 수 없다'
-            }
-          >
-            CPU 부하
+          <Button variant="secondary" disabled={!vm} onClick={() => navigate('/simulator/stress')}>
+            부하 테스트
           </Button>
         </div>
       </div>
@@ -168,117 +167,6 @@ function IsolationCard({ app }: { app: AppId }) {
         <p className={styles.dim}>{KILL_EFFECT[app]}</p>
       </Modal>
     </Card>
-  );
-}
-
-// ---- 화면 배치 (DS-01, REST-23·REST-24 -129) ----
-
-const STATUS_LABEL: Record<DisplayStatus, string> = {
-  DISCONNECTED: '모니터 꺼짐',
-  IDLE: '대기',
-  SWITCHING: '바꾸는 중',
-  ACTIVE: '적용됨',
-  ERROR: '오류',
-};
-const STATUS_HEALTH = {
-  DISCONNECTED: 'stopped',
-  IDLE: 'stopped',
-  SWITCHING: 'recovering',
-  ACTIVE: 'ok',
-  ERROR: 'fault',
-} as const;
-
-interface Choice {
-  key: string;
-  label: string;
-  view: DisplayView;
-  app: AppId | null;
-}
-const CHOICES: Choice[] = [
-  { key: 'split', label: '3분할', view: 'split', app: null },
-  ...ROLE_ORDER.map((app) => ({
-    key: app,
-    label: `${ROLES[app].short} 상세`,
-    view: 'os-face' as const,
-    app,
-  })),
-];
-
-/** 모니터마다 무엇을 띄울지. 고르면 바로 PUT — 표시 서비스가 route.applied 로 답하면 "적용됨" */
-function ScreenRouting() {
-  const displays = useDisplays();
-  return (
-    <Card title="화면 배치">
-      {displays.error && (
-        <p className={styles.error} role="alert">
-          {displays.error instanceof ApiError ? displays.error.message : String(displays.error)}
-        </p>
-      )}
-      {displays.isPending && <p className={styles.dim}>불러오는 중…</p>}
-      <div className={styles.form}>
-        {displays.data?.items.map((d) => (
-          <DisplayRow key={d.display_id} display={d} />
-        ))}
-      </div>
-      <p className={styles.dim}>
-        고르면 백엔드가 dom0 표시 서비스에 전달하고, 키오스크가 화면을 다 띄우면 "적용됨" 이 된다 (화면 배치
-        계약 display-route-v1). mock 에서는 <code>/monitor/?display=display-0</code> 으로 연 모니터가 표시
-        서비스 대신 따라간다.
-      </p>
-    </Card>
-  );
-}
-
-function DisplayRow({ display }: { display: Display }) {
-  const { drive } = useDrive();
-  const vms = useVms();
-  const route = useRouteDisplay();
-  const toast = useToast();
-  const vmIdOf = (app: AppId | null) => (app ? (vmOf(app, vms.data?.items, drive)?.vm_id ?? null) : null);
-  const current = CHOICES.find(
-    (c) => c.view === display.desired_route.view && vmIdOf(c.app) === display.desired_route.vm_id,
-  );
-  const pick = (choice: Choice) => {
-    const vmId = vmIdOf(choice.app);
-    if (choice.app && !vmId) return toast.show(`${ROLES[choice.app].title} VM 을 찾지 못했다`, 'fault', 3000);
-    route.mutate(
-      {
-        displayId: display.display_id,
-        body: { vm_id: vmId, view: choice.view, expected_revision: display.revision },
-      },
-      {
-        onError: (error) =>
-          toast.show(error instanceof ApiError ? error.message : String(error), 'fault', 5000),
-      },
-    );
-  };
-  return (
-    <div className={styles.form}>
-      <span className={styles.row}>
-        <b>{display.label}</b>
-        <span className={styles.eyebrow}>{display.display_id}</span>
-        <span className={styles.grow} />
-        <StatusBadge
-          health={STATUS_HEALTH[display.status]}
-          label={`${STATUS_LABEL[display.status]} · rev ${display.revision}`}
-          size="sm"
-        />
-      </span>
-      <span className={styles.chips}>
-        {CHOICES.map((c) => (
-          <button
-            key={c.key}
-            type="button"
-            className={[styles.chip, current?.key === c.key ? styles.chipOn : ''].join(' ')}
-            disabled={route.isPending || display.status === 'SWITCHING'}
-            onClick={() => current?.key !== c.key && pick(c)}
-          >
-            {c.label}
-          </button>
-        ))}
-      </span>
-      {display.last_error && <span className={styles.error}>{display.last_error}</span>}
-    </div>
   );
 }
 
@@ -398,7 +286,7 @@ function ManualInput() {
 }
 
 /**
- * [자율주행 재개]·[재무장] — 누르면 POST /api/v1/drive/resume (백엔드와 같은 허용 모드, 계약 mqtt 5.2 v1.8.3).
+ * [자율주행 재개]·[수동주행 시작]·[출력 다시 허용] — 누르면 POST /api/v1/drive/resume (백엔드와 같은 허용 모드, 계약 mqtt 5.2 v1.8.3).
  * - AUTO_READY: 게이트웨이가 받아들이면 3·2·1 카운트다운 뒤 AUTO (계약 v1.2 §6, 화면 위 알림).
  *   카운트다운 중에는 [취소]로 멈출 수 있다 (DELETE, 계약 v1.7) — 모드는 그대로다.
  * - MANUAL·AUTO: 출력 금지(disarmed)된 모드를 재무장. 화면은 출력 허가 여부를 모르므로 늘 누를 수 있고,
@@ -407,9 +295,10 @@ function ManualInput() {
  */
 const RESUMABLE: readonly DriveMode[] = ['AUTO_READY', 'MANUAL', 'AUTO', 'SAFE_STOP'];
 
+/** 운영자용 문구 — 계약 용어(재무장)는 쓰지 않는다. 같은 요청이지만 모드마다 게이트웨이가 하는 일이 다르다 */
 function resumeLabel(mode: DriveMode | null | undefined) {
-  if (mode === 'SAFE_STOP') return '▶ 수동주행으로 재무장';
-  if (mode === 'MANUAL' || mode === 'AUTO') return `▶ ${mode} 재무장`;
+  if (mode === 'SAFE_STOP') return '▶ 수동주행 시작';
+  if (mode === 'MANUAL' || mode === 'AUTO') return '▶ 출력 다시 허용';
   return '▶ 자율주행 재개';
 }
 
@@ -456,14 +345,14 @@ function Resume() {
         {counting
           ? '카운트다운 중 — [취소]하면 수동주행을 유지한다. 그 사이 자율주행이 다시 끊겨도 취소된다.'
           : mode === 'SAFE_STOP'
-            ? '안전 정지 중 — 누르면 게이트웨이가 준비된 수동주행 VM 으로 재무장한다 (준비된 VM 이 없으면 무시).'
+            ? '안전 정지 중 — 누르면 게이트웨이가 준비된 수동주행 VM 으로 수동주행을 시작한다 (준비된 VM 이 없으면 무시). 202 는 보냈다는 뜻이고, 적용은 모드가 바뀌는 것으로 확인한다.'
             : mode === 'MANUAL' || mode === 'AUTO'
-              ? '출력이 금지된 상태라면 누르면 재무장한다. 이미 출력 중이면 게이트웨이가 무시한다.'
+              ? '차량 출력이 막힌 상태라면 다시 허용한다. 이미 출력 중이면 게이트웨이가 무시한다. 202 는 보냈다는 뜻이고, 적용은 모드가 바뀌는 것으로 확인한다.'
               : ready
                 ? cancelledByOperator
                   ? '재개를 취소했다. 수동주행 유지 중 — 누르면 다시 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
                   : '자율주행이 준비됐다(AUTO_READY). 누르면 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
-                : '주행 상태를 받으면 [재개]·[재무장]을 누를 수 있다.'}
+                : '주행 상태를 받으면 [자율주행 재개]·[수동주행 시작]·[출력 다시 허용]을 누를 수 있다.'}
       </p>
     </div>
   );

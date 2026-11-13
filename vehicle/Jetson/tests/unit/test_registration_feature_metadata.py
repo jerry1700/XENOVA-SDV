@@ -65,6 +65,22 @@ class RegistrationFeatureMetadataTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name=='posix','실제 D SQLite/lock은 대상 POSIX에서 검사한다')
 class RegistrationFeatureRestoreTests(unittest.TestCase):
+    def test_observed_support_error_and_endpoint_meaning_survive_checkpoint_restore(self):
+        fixture,_,pipeline=self.fixture()
+        def update(reference):
+            reference['feature_policy']='OBSERVED_STRIP_SUPPORT_V1'
+            for segment in reference['segments']:
+                segment['support_error_m']=segment['error_m']+.01
+                segment['finite_endpoints']=False
+        complete=self.rewrite_reference(fixture,update)
+        restored=PerceptionPipeline(fixture.calibration,pipeline.profile)
+        restore_pipeline(restored,complete,fixture.scope)
+        self.assertEqual(restored.reference.feature_policy,'OBSERVED_STRIP_SUPPORT_V1')
+        self.assertTrue(restored._restore_pending)
+        for segment in restored.reference.segments:
+            self.assertFalse(segment.finite_endpoints)
+            self.assertAlmostEqual(segment.support_error_m,segment.error_m+.01)
+
     def fixture(self):
         fixture=checkpoint_fixture.MapCheckpointTests(methodName='runTest');fixture.setUp()
         self.addCleanup(fixture.doCleanups)

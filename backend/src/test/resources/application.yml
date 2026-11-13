@@ -41,7 +41,7 @@ xenova:
   template-catalog:
     templates:
       - template-id: debian-13-arm64
-        version: "1.0.2"
+        version: "1.0.8"
         display-name: Debian 13
         min-memory-mib: 128
       - template-id: ubuntu-24.04-arm64
@@ -62,6 +62,9 @@ xenova:
       enabled: false
       refresh-delay: 1s
       stale-limit: 10s
+    registration-sync:
+      missing-threshold: 2
+      creation-grace: 20m
   event:
     # Tests call AgentStatusWatcher.check() and VmStateWatcher.check() themselves.
     agent-status-check-interval-ms: 3600000

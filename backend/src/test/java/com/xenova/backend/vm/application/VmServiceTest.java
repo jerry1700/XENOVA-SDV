@@ -15,6 +15,7 @@ import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
 import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
+import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.application.VmService.CreateResult;
@@ -26,6 +27,8 @@ import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResources;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
@@ -87,7 +90,7 @@ class VmServiceTest {
         when(vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
                 .thenReturn(List.of(running, stopped));
         when(vmControlPort.list()).thenReturn(List.of(
-                new VmRuntime("vm-1", VmState.RUNNING, 1, 256),
+                new VmRuntime("vm-1", VmState.RUNNING, 2, 512),
                 new VmRuntime("unknown-domain", VmState.RUNNING, 1, 128)));
 
         List<Vm> vms = service.list();
@@ -95,8 +98,37 @@ class VmServiceTest {
         assertThat(vms).extracting(Vm::vmId).containsExactly("vm-1", "vm-2");
         assertThat(vms.get(0).state()).isEqualTo(VmState.RUNNING);
         assertThat(vms.get(0).name()).isEqualTo("alpine-1");
+        assertThat(vms.get(0).templateId()).isEqualTo("alpine");
+        assertThat(vms.get(0).vcpus()).isEqualTo(2);
+        assertThat(vms.get(0).memoryMib()).isEqualTo(512);
         assertThat(vms.get(1).state()).isEqualTo(VmState.STOPPED);
         assertThat(vms.get(1).templateId()).isEqualTo("alpine");
+        assertThat(vms.get(1).vcpus()).isEqualTo(1);
+        assertThat(vms.get(1).memoryMib()).isEqualTo(256);
+        verify(vmRecordRepository).findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED);
+    }
+
+    @Test
+    void listOrdersByRoleThenDriveGuestsThenCreationWhateverFilledTheTable() {
+        // Creation order as a registry sync can leave it: the Linux VM was discovered a few ms first.
+        VmRecord interaction = new VmRecord("vm-d", new CreateVmCommand("debian", "alpine", "1.2.0", 1, 256),
+                GuestKind.LINUX, NOW);
+        VmRecord noRoleDrive = new VmRecord("vm-z", new CreateVmCommand("zephyr-c", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(1));
+        VmRecord backup = new VmRecord("vm-b", new CreateVmCommand("zephyr-b", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(2));
+        VmRecord primary = new VmRecord("vm-a", new CreateVmCommand("zephyr-a", "alpine", "1.2.0", 1, 16),
+                GuestKind.ZEPHYR, NOW.plusMillis(3));
+        VmRecord unassignedLinux = new VmRecord("vm-l", new CreateVmCommand("web-test", "alpine", "1.2.0", 1, 256),
+                GuestKind.LINUX, NOW.plusMillis(4));
+        backup.changeRole(VmRole.BACKUP_DRIVE);
+        primary.changeRole(VmRole.PRIMARY_DRIVE);
+        interaction.changeRole(VmRole.INTERACTION);
+        when(vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
+                .thenReturn(List.of(interaction, noRoleDrive, backup, primary, unassignedLinux));
+        when(vmControlPort.list()).thenReturn(List.of());
+
+        assertThat(service.list()).extracting(Vm::vmId).containsExactly("vm-a", "vm-b", "vm-d", "vm-z", "vm-l");
     }
 
     @Test
@@ -321,6 +353,47 @@ class VmServiceTest {
     }
 
     @Test
+    void linuxResourcesAreUpdatedOnThePlatformAndSavedForTheNextStart() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        VmResourceUpdate update = new VmResourceUpdate(
+                "vm-1", "operation-1", new VmResources(1, 256), new VmResources(2, 512), true);
+        when(vmControlPort.updateResources("vm-1", 2, 512, "resize-1")).thenReturn(update);
+
+        assertThat(service.updateResources("vm-1", 2, 512, "resize-1")).isEqualTo(update);
+
+        assertThat(record.getVcpus()).isEqualTo(2);
+        assertThat(record.getMemoryMib()).isEqualTo(512);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).beginOperation("vm-1");
+        verify(stateTracker).endOperation("vm-1");
+    }
+
+    @Test
+    void zephyrResourcesAreRejectedBeforeCallingThePlatform() {
+        VmRecord record = new VmRecord(
+                "vm-z", new CreateVmCommand("zephyr", "alpine", "1.2.0", 1, 256), GuestKind.ZEPHYR, NOW);
+        when(vmRecordRepository.findById("vm-z")).thenReturn(Optional.of(record));
+
+        assertThatThrownBy(() -> service.updateResources("vm-z", 2, 512, "resize-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getCode()).isEqualTo("RESOURCE_UPDATE_UNSUPPORTED");
+                });
+        verify(vmControlPort, never()).updateResources(anyString(), any(Integer.class), any(Integer.class), anyString());
+    }
+
+    @Test
+    void resourceUpdateRejectsMemoryBelowTheTemplateMinimum() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+
+        assertThatThrownBy(() -> service.updateResources("vm-1", 1, 127, "resize-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception ->
+                        assertThat(exception.getCode()).isEqualTo("VALIDATION_ERROR"));
+        verify(vmControlPort, never()).updateResources(anyString(), any(Integer.class), any(Integer.class), anyString());
+    }
+
+    @Test
     void destroyRetiresDomainAndKeepsTheRecordForRestore() {
         VmRecord record = record("vm-1", "alpine-1");
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
@@ -344,6 +417,22 @@ class VmServiceTest {
 
         assertThatThrownBy(() -> service.destroy("vm-1")).isInstanceOf(ApiException.class);
         verify(inventoryCleaner, never()).vmDeleted(anyString());
+    }
+
+    @Test
+    void destroyOfAVmTheBoardNoLongerRegistersRetiresTheRow() {
+        VmRecord record = record("vm-1", "web-test");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        org.mockito.Mockito.doThrow(new ApiException(HttpStatus.NOT_FOUND, "VM_NOT_FOUND", "instance vm-1 not registered"))
+                .when(vmControlPort).destroy("vm-1");
+
+        service.destroy("vm-1");
+
+        assertThat(record.getLifecycle()).isEqualTo(VmLifecycle.RETIRED);
+        verify(vmRecordRepository).save(record);
+        verify(stateTracker).forget("vm-1");
+        verify(eventRecorder).vmDeleted("vm-1", "web-test", "platform");
+        verify(inventoryCleaner).vmDeleted("vm-1");
     }
 
     @Test

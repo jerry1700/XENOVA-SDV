@@ -1,0 +1,7 @@
+[Unit]
+Description=Xenova display domU web UI (Plan A: served to dom0's HDMI kiosk)
+# Plan B units (xenova-guest-display-session/-sender) are kept but not wanted here.
+Wants=xenova-guest-display-app.service
+
+[Install]
+WantedBy=multi-user.target

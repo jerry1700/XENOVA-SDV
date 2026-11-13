@@ -5,7 +5,6 @@ kind별 unknown payload key/type/role/domain 규칙은 후속 의미 검사 책�
 로컬 encoder 한 packet profile로 leading/trailing whitespace와 BOM을 거절한다.
 """
 
-from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 import math
@@ -47,17 +46,14 @@ def _bounded_tree(root, *, enforce_encoded_cost=True):
     def string(value):
         if len(value) > MAX_PACKET_BYTES:
             _fail("string exceeds bounded character work")
-        charge(2)
-        for char in value:
-            code = ord(char)
-            if 0xD800 <= code <= 0xDFFF:
-                _fail("lone surrogate is not a Unicode scalar")
-            if char in ('"', '\\', '\b', '\f', '\n', '\r', '\t'):
-                charge(2)
-            elif code < 32:
-                charge(6)
-            else:
-                charge(1 if code < 128 else 2 if code < 2048 else 3 if code < 65536 else 4)
+        try:
+            # 길이를 먼저 제한했으므로 escape 임시는 최대 6*4096+2자다.
+            # stdlib JSON escape와 strict UTF-8로 같은 비용·surrogate 검사를 C에서 수행한다.
+            encoded = json.encoder.encode_basestring(value) if enforce_encoded_cost else value
+            cost = len(encoded.encode('utf-8', errors='strict'))
+        except UnicodeEncodeError as error:
+            raise EnvelopeStructureError("lone surrogate is not a Unicode scalar") from error
+        charge(cost)
 
     def visit(value, depth):
         nonlocal nodes
@@ -177,6 +173,13 @@ def _decode(raw):
     return fields
 
 
+def _copy_json(value):
+    """decoder가 만든 유한 exact-builtin 트리만 복사한다. scalar는 모두 불변이다."""
+    if type(value) is dict:return {key:_copy_json(child) for key,child in value.items()}
+    if type(value) is list:return [_copy_json(child) for child in value]
+    return value
+
+
 @dataclass(frozen=True)
 class StructuralPacket:
     """검사한 원 bytes와 바깥 구조. fields/payload는 항상 새 사본이며 허가 증거가 아니다.
@@ -193,11 +196,11 @@ class StructuralPacket:
 
     @property
     def fields(self):
-        return deepcopy(self._parsed)
+        return _copy_json(self._parsed)
 
     @property
     def payload(self):
-        return deepcopy(self._parsed['payload'])
+        return _copy_json(self._parsed['payload'])
 
     @property
     def kind(self):

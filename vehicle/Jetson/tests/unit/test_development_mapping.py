@@ -205,7 +205,7 @@ class DevelopmentMappingTests(unittest.TestCase):
         points = tuple(PointFeature(p, .001, s.component, 'current-independent-leaf', (s.component,))
             for s, endpoints in zip(segments, (((0., 0.), (1., 0.)), ((.5, -.3), (.5, .3)))) for p in endpoints)
         fit = register(points, reference, raw_pose.prior, self.config.pipeline.registration,
-            calibration_id=self.mapping.calibration.sha256)
+            calibration_id=self.mapping.calibration.sha256,position_radius_m=raw_pose.sample.position_error_m)
         self.assertEqual(fit.status, 'BOUNDED'); self.assertTrue(fit.complete)
         fitted = replace(raw_pose, sample=replace(raw_pose.sample, x=fit.representative[0], y=fit.representative[1],
             yaw=fit.representative[2], position_error_m=fit.position_error_m, yaw_error_rad=fit.yaw_error_rad))
@@ -225,8 +225,8 @@ class DevelopmentMappingTests(unittest.TestCase):
         source = LaneSource(capture, self.mapping.calibration.sha256, self.f.context.map_epoch,
             core.grid.frame_id, self.f.context.odom_epoch, core.grid.revision, alignment.registration_revision,
             fit.status == 'BOUNDED' and alignment.valid_at(self.now), 'SYNTHETIC')
-        association = lane.observe(road, source, alignment.apply(raw_pose).prior, prior_qualified=source.qualified,
-            crossing=b'\x00', profile=self.config.pipeline.registration)
+        association = lane.observe(road, source, fitted.prior, prior_qualified=source.qualified,
+            crossing=b'\x00', profile=self.config.pipeline.registration,position_radius_m=fitted.sample.position_error_m)
         self.assertEqual(association.status, 'NEW')
         record, proof = self.mapping._frame_record(self.observation, self.snapshot, inputs)
         self.assertEqual(proof.status, 'COMMITTED')

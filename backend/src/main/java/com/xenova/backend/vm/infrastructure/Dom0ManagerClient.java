@@ -7,6 +7,7 @@ import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
 import com.xenova.backend.vm.domain.VmRegistrationInventory;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
 import com.xenova.backend.vm.domain.VmRuntime;
 import java.io.IOException;
 import java.net.ConnectException;
@@ -62,6 +63,27 @@ public class Dom0ManagerClient implements VmControlPort {
                     filters.keySet().forEach(key -> builder.queryParam(key, "{" + key + "}"));
                     return builder.build(filters);
                 })
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(JsonNode.class)));
+    }
+
+    /** USB phone display relay state on the board (dom0 contract 4.13). Read-only, so retried like other reads. */
+    public JsonNode phoneLink() {
+        return requireBody(executeQuery(() -> queryClient.get()
+                .uri("/api/v1/display/phone-link")
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(JsonNode.class)));
+    }
+
+    /**
+     * Issues a new phone pairing code (dom0 contract 4.13). Each call invalidates the previous code and the paired
+     * phone, so it is retried only when the request never reached dom0-manager. The code is never logged.
+     */
+    public JsonNode issuePhonePairingCode() {
+        return requireBody(executeCommand(() -> queryClient.post()
+                .uri("/api/v1/display/phone-link/pairing-code")
                 .retrieve()
                 .onStatus(status -> status.isError(), this::handleError)
                 .body(JsonNode.class)));
@@ -145,6 +167,17 @@ public class Dom0ManagerClient implements VmControlPort {
                 .retrieve()
                 .onStatus(status -> status.isError(), this::handleError)
                 .body(VmControlOperation.class)));
+    }
+
+    @Override
+    public VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey) {
+        return requireBody(executeCommand(() -> commandClient.put()
+                .uri("/api/v1/vms/{vmId}/resources", vmId)
+                .header("Idempotency-Key", requestKey)
+                .body(new Dom0ResourceUpdateRequest(vcpus, memoryMib))
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleError)
+                .body(VmResourceUpdate.class)));
     }
 
     @Override

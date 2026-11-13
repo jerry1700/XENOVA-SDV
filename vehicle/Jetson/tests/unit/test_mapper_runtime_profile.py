@@ -101,7 +101,7 @@ class MapperRuntimeProfileTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs['perception_profile_bytes'],self.calibration_bytes)
             self.assertNotIn('diagnostics',run.call_args.kwargs)
 
-    def test_prepare_publishes_canonical_pin_and_checks_actual_vehicle_policy_without_id_aliases(self):
+    def test_prepare_pins_canonical_bytes_before_optional_copy_and_checks_vehicle_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             def runtime(name,policy):
                 value=resident_runtime._Runtime.__new__(resident_runtime._Runtime)
@@ -111,10 +111,13 @@ class MapperRuntimeProfileTests(unittest.TestCase):
                 value.mapper_profile_bytes=json.dumps(self.fields,indent=2).encode('ascii')
                 value.jio_profile=SimpleNamespace(source_policy=policy)
                 return value
-            actual=runtime('valid',self.source_policy)._prepare()
+            owner=runtime('valid',self.source_policy)
+            actual=owner._prepare()
             self.assertEqual(actual['manifests']['mapper-profile.json'],self.config.canonical_bytes)
             self.assertEqual(actual['mapper_profile_sha256'],self.config.sha256)
-            self.assertEqual(actual['published']['mapper-profile.json']['sha256'],self.config.sha256)
+            self.assertEqual(actual['published'],{})
+            owner._diagnostics._queue.join()
+            self.assertEqual((owner.output/'artifacts'/'mapper-profile.json').read_bytes(),self.config.canonical_bytes)
             self.assertNotEqual(actual['mapper_profile_sha256'],self.source_policy.configuration)
             self.assertEqual(actual['calibration_bundle'],self.calibration.sha256)
             self.assertNotEqual(actual['calibration_bundle'],self.source_policy.calibration)

@@ -139,7 +139,8 @@ def _profile(value):
     _keys(value, ('profile_id', 'input_kind', 'camera_nodes', 'source_id', 'clock_id',
         'calibration_id', 'approved_asset_device_settings'))
     settings = value['approved_asset_device_settings']
-    names = tuple(YolopBenchProfile.__dataclass_fields__)
+    names = tuple(name for name in YolopBenchProfile.__dataclass_fields__
+                  if name != 'rgb_sensor_mode' or 'rgb_sensor_mode' in settings)
     _keys(settings, (*names, 'schema_version', 'profile_id', 'nn_requirement', 'jpeg_enabled'))
     try:
         owned = YolopBenchProfile(**{name: settings[name] for name in names})

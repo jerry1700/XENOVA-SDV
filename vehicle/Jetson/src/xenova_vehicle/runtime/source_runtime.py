@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from .data_channel import DataLink
 from .source_identity import (IdentityOwner, proposal_metadata, _sample, scene_ref_fields,
-    current_scene_grant, validate_survey_summary)
+    current_scene_grant, validate_survey_summary, PROPOSAL_FIELDS, _sha)
 from .storage_messages import publication_binding
 from .mapper_bootstrap import BootstrapReport,SupervisorBootstrap,load_body,material_bytes
 from ..storage.contracts import StorageContext, canonical, json_bytes
@@ -56,6 +56,7 @@ class SupervisorSource:
         self.bootstrap=SupervisorBootstrap(link.peer,mapper_instance);self._bootstrap_complete=None
         self.counts=Counter()
         self._last_survey=None
+        self._abort_notice=None
         from .mapper_operation import SupervisorOperation
         self.operation_owner=SupervisorOperation(link.peer.service_instance,clock=clock) if operation_owner is None else operation_owner
         if type(self.operation_owner) is not SupervisorOperation:raise ValueError('actual S operation owner required')
@@ -68,19 +69,57 @@ class SupervisorSource:
 
     def _flush(self):
         original=self.link.pending
-        if original is not None and original.kind=='SOURCE_CLOCK_REPLY' and self.clock()>=original.expires_us:
-            self.link.discard_clock_reply(original)
-        if original is not None and original.kind=='SOURCE_OPERATION' and self.clock()>=original.expires_us:
-            self.link.discard_operation(original)
+        if original is not None and self.clock()>=original.expires_us:
+            self._discard_expired_delivery(original)
         try:sent=self.link.flush()
-        except TimeoutError:
+        except TimeoutError as error:
             original=self.link.pending
-            if original is not None and original.kind=='SOURCE_CLOCK_REPLY' and self.clock()>=original.expires_us:
-                self.link.discard_clock_reply(original);return None
-            if original is None or original.kind!='SOURCE_OPERATION' or self.clock()<original.expires_us:raise
-            self.link.discard_operation(original);return None
+            if original is None or self.clock()<original.expires_us:raise
+            # discard는 exact pending/미송신을 다시 증명한다. unknown 송신은 원 예외다.
+            try:self._discard_expired_delivery(original)
+            except Exception:raise error
+            return None
         if sent is not None and sent.packet.kind=='SOURCE_OPERATION':self.operation_owner.sent(sent)
+        if sent is not None and sent.packet.kind=='SOURCE_STORAGE_ABORT':
+            notice=self._abort_notice
+            if (notice is None or sent.packet.body!=canonical(notice.fields)
+                    or sent.packet.header['request_id']!=notice.request_id):
+                raise RuntimeError('storage terminal send lost its original notice')
+            self._abort_notice=None
         return sent
+
+    def _discard_expired_delivery(self, original):
+        self.link.discard_expired(original)
+        self.counts['expired_unsent']+=1
+        self._retry_current_delivery(original.kind)
+
+    def _retry_current_delivery(self, kind):
+        """설치 자료는 현재 snapshot으로 재전달한다. 관측/명령의 원 E는 갱신하지 않는다."""
+        now=self.clock()
+        if kind=='SOURCE_STORAGE' and self._material is not None:
+            self._stage('STORAGE','SOURCE_STORAGE',{},canonical(dict(binding=self._material[0],bootstrap=self._material[1])),
+                issued=now,expires=now+5_000_000)
+        elif kind=='SOURCE_STORAGE_ABORT' and self._abort_notice is not None:
+            self._stage_abort(now)
+        elif kind=='SOURCE_PUBLICATION' and self.owner.binding is not None and self.context is not None:
+            binding=self.owner.binding
+            if binding['scene_admission_ref'] is not None:
+                item=self.jio.current_scene
+                try:
+                    grant,_=current_scene_grant(None if item is None else item.raw,self.jio.current_lease,
+                        self.source,self.origin,now)
+                    if grant.lifecycle_state!=2 or scene_ref_fields(grant.scene)!=binding['scene_admission_ref']:return
+                except (ValueError,TypeError,OverflowError):return
+            self._stage_publication(binding,self.context,now)
+
+    def _stage_publication(self,binding,context,now):
+        # full snapshot은 최신 하나면 충분하다. 중간 scene 전이는 재실행하지 않는다.
+        for key in tuple(self.pending):
+            if type(key) is tuple and key[0]=='PUBLICATION':del self.pending[key]
+        metadata=dict(source=self.source,origin=self.origin,geometry_origin=context.geometry_origin_fields,
+            context_sha256=context.sha256)
+        self._stage(('PUBLICATION',int(binding['source_binding_revision'])),'SOURCE_PUBLICATION',metadata,canonical(binding),
+            issued=now,expires=now+5_000_000,request_id=str(uuid4()))
 
     def _stage(self,key,kind,metadata,body,*,issued,expires,request_id=None):
         if issued>=expires:return
@@ -108,10 +147,13 @@ class SupervisorSource:
             sample=_sample(item.raw)
             if (sample.vehicle,sample.calibration)!=(self.policy.vehicle,self.policy.calibration):
                 raise ValueError('original vehicle differs from installed source policy')
-            if self.origin is not None and (_origin(sample)!=self.origin
-                    or sample.odom_epoch!=self.source['odom_epoch']):
-                self.jio.fence_source()
-                raise SourceChanged('actual Pi/Gateway/device/odom source changed')
+            if self.origin is not None:
+                origin=_origin(sample)
+                changed=[key for key in self.origin if origin[key]!=self.origin[key]]
+                if sample.odom_epoch!=self.source['odom_epoch']:changed.append('odom_epoch')
+                if changed:
+                    self.jio.fence_source()
+                    raise SourceChanged('actual Pi/Gateway/device/odom source changed: '+','.join(changed))
             if self.bootstrap.original is not None and self.owner.binding is None and self.current_vehicle is not None:
                 previous=_sample(self.current_vehicle)
                 if (_origin(sample),sample.odom_epoch,sample.calibration,sample.vehicle)!=(
@@ -138,15 +180,23 @@ class SupervisorSource:
             if self._early_identity is not None and self._early_identity.raw!=packet.raw:
                 raise ValueError('one original early identity cannot be replaced')
             self._early_identity=packet;return
-        proposal=packet.header['metadata'];vehicle=self.vehicles.get(proposal.get('vehicle_sample_sha256'))
-        if vehicle is None:raise ValueError('identity references no original retained VehicleSample')
+        proposal=packet.header['metadata']
+        if set(proposal)!=PROPOSAL_FIELDS:raise ValueError('identity proposal has unsupported fields')
+        vehicle=self.vehicles.get(_sha(proposal['vehicle_sample_sha256']))
+        if vehicle is None:
+            self.counts['identity_wait_current_input']+=1
+            return
         bootstrap=self._material[1]
         if bootstrap['status']=='COMPLETE' and self.owner.binding is None and self.bootstrap.evidence is None:
             if self._early_identity is not None and self._early_identity.raw!=packet.raw:
                 raise ValueError('one original COMPLETE identity cannot be replaced')
             self._early_identity=packet;self.counts['restore_wait']+=1;return
-        binding=self.owner.accept(packet,bootstrap=bootstrap,vehicle_wire=vehicle[0],vehicle_received_us=vehicle[1],
+        from .health_policy import FrameExpired
+        try:binding=self.owner.accept(packet,bootstrap=bootstrap,vehicle_wire=vehicle[0],vehicle_received_us=vehicle[1],
             current_vehicle_wire=self.current_vehicle,now_us=self.clock(),restore_material=self.bootstrap.evidence)
+        except FrameExpired:
+            self.counts['identity_wait_current_input']+=1
+            return
         sample=_sample(vehicle[0]);origin=_origin(sample)
         context=StorageContext(bootstrap['database_uuid'],self.link.peer.mapper_worker,binding['mapper_instance'],
             binding['map_epoch'],binding['frame_epoch'],binding['odom_epoch'],sample.host_boot,
@@ -170,24 +220,22 @@ class SupervisorSource:
         previous=self._acks.get(request)
         if previous is not None:ack=previous  # scene 전환도 원 proposal ACK를 새 사건으로 다시 쓰지 않는다.
         if previous is None:
-            if len(self._acks)>=16:raise RuntimeError('bounded identity ACK history is full')
+            if len(self._acks)>=16:self._acks.popitem(last=False)
             self._acks[request]=ack
         self._stage('ACK','SOURCE_IDENTITY_ACK',ack[0],ack[1],issued=ack[2],expires=ack[3],request_id=request)
         self.counts['identity_accepted']+=1
 
     def _publish_scene(self,on_publication,*,now,expires):
-        if now>=expires:raise TimeoutError('original scene publication event already expired')
+        if now>=expires:
+            self.counts['scene_publication_expired']+=1
+            return
         binding=self.owner.binding
         context=replace(self.context,source_binding=canonical(binding))
         on_publication(binding,context)
         self.context=context
         self.jio.replace_source(self.source,**self.origin)  # 같은 source이므로 token/clock/odom은 유지한다.
         self.jio.replace_publication(binding)
-        metadata=dict(source=self.source,origin=self.origin,geometry_origin=context.geometry_origin_fields,
-            context_sha256=context.sha256)
-        revision=int(binding['source_binding_revision'])
-        self._stage(('PUBLICATION',revision),'SOURCE_PUBLICATION',metadata,canonical(binding),
-            issued=now,expires=min(expires,now+5_000_000),request_id=str(uuid4()))
+        self._stage_publication(binding,context,now)
         self.counts['publication_changed']+=1
 
     def _scene_current(self,on_publication,now):
@@ -237,12 +285,14 @@ class SupervisorSource:
             packet=self._early_identity;self._early_identity=None
             self._identity(packet,bind_ready=True,on_publication=on_publication)
         for packet in self.link.poll():
+            now=self.clock()
             if packet.kind=='OPERATION_RESULT':
-                # 현재 peer의 원 READY 만료는 bootstrap 실패다. 일반 결과의 만료/거절은 history를 유지한다.
+                # 설치/적용의 원 완료 사실을 소비한다. local 전달 E는 설정의 수명이 아니다.
                 try:self.operation_owner.receive(packet,self.link.peer)
                 except (ValueError,TypeError,OverflowError):self.counts['operation_rejected']+=1
                 continue
-            if not packet.issued_us<=now<packet.expires_us:
+            if (now<packet.issued_us or now>=packet.expires_us
+                    and packet.kind!='SOURCE_BOOTSTRAP_COMPLETE'):
                 self.counts['expired']+=1;continue
             if packet.kind=='SOURCE_IDENTITY':
                 self._identity(packet,bind_ready=bind_ready,on_publication=on_publication)
@@ -271,7 +321,6 @@ class SupervisorSource:
         self.bootstrap.dispatch(on_bootstrap_load if bind_ready else None,now)
         if self._bootstrap_complete is not None:
             packet=self._bootstrap_complete
-            if now>=packet.expires_us:raise TimeoutError('original bootstrap complete report expired')
             if self.bootstrap.requests and len(self.bootstrap.physical)==len(self.bootstrap.requests) and self.bootstrap.pending is None:
                 self.bootstrap.accept_complete(packet,self._material,now);self._bootstrap_complete=None
         self._flush()
@@ -282,10 +331,9 @@ class SupervisorSource:
             if packet is not None:self.operation_owner.selected(packet)
             self._flush()
         for key in tuple(self.pending):
-            if now>=self.pending[key][4]:
-                if self.pending[key][0]=='SOURCE_PUBLICATION':
-                    raise TimeoutError('original scene publication delivery expired; explicit source resync required')
-                del self.pending[key];self.counts['expired']+=1
+            if key in self.pending and now>=self.pending[key][4]:
+                expired=self.pending.pop(key);self.counts['expired']+=1
+                self._retry_current_delivery(expired[0])
         if self.pending:
             keys=tuple(self.pending)
             publications=[key for key in keys if type(key) is tuple and key[0]=='PUBLICATION']
@@ -298,13 +346,19 @@ class SupervisorSource:
             self._flush()
 
     def offer_abort(self,notice):
-        """원 job 기한을 보존한 terminal local event. 새 DB RESULT/현재 성공을 발급하지 않는다."""
+        """원 terminal 하나를 실제 full-send까지 보존한다. 새 DB RESULT/성공은 발급하지 않는다."""
         from .resident_db import DbAbort
         if type(notice) is not DbAbort or notice.mapper.worker_instance!=self.link.peer.mapper_worker:
             raise ValueError('storage terminal belongs to another original M owner')
-        now=self.clock();body=canonical(notice.fields)
+        if self._abort_notice is not None:
+            if self._abort_notice!=notice:raise RuntimeError('one original storage terminal is already pending')
+            return
+        self._abort_notice=notice
+        self._stage_abort(self.clock())
+
+    def _stage_abort(self,now):
+        notice=self._abort_notice;body=canonical(notice.fields)
         if len(body)>8192:raise ValueError('bounded original DB abort history exceeded')
-        if 'ABORT' in self.pending:raise RuntimeError('one original storage terminal is already pending')
         self._stage('ABORT','SOURCE_STORAGE_ABORT',{},body,issued=now,expires=now+1_000_000,request_id=notice.request_id)
 
     def close(self):
@@ -323,12 +377,13 @@ class MapperSource:
         self.map_epoch,self.frame_epoch=self._identity_epochs()
         self.material=self.publication=self.source=self.origin=None
         self.storage_context=None
+        self._publication_pending=None
         self.context_sha256=None;self._proposal=None;self._proposal_packet=None
         self.vehicles=OrderedDict();self.probes=OrderedDict();self.tof={};self.scene=None
         self._clock_reply_packets=OrderedDict()
         self._outputs=OrderedDict();self._output_heads={}
         self.active_probe=None;self._vehicle_head=None;self.counts=Counter()
-        self._abort=None
+        self._abort=None;self._abort_history=OrderedDict()
         self._bootstrap_pending=OrderedDict();self._bootstrap_report=None;self._bootstrap_origin=None;self._bootstrap_started=False
         self._pumping=False
         self._operation_controller=None;self._operation_pending=None;self._operation_result=None;self._operation_ready=None
@@ -346,8 +401,7 @@ class MapperSource:
         self._proposal=proposal_metadata(raw_binding=self.raw,mapper_instance=self.mapper_instance,
             bootstrap=bootstrap,vehicle_wire=self._vehicle_head,policy=self.policy,nonce=str(uuid4()),
             map_epoch=self.map_epoch,frame_epoch=self.frame_epoch)
-        expires=now+5_000_000 if bootstrap['status']=='EMPTY' else min(now+5_000_000,self._bootstrap_report.expires_us)
-        if now>=expires:raise TimeoutError('original complete source report expired before identity')
+        expires=now+5_000_000
         self._proposal_packet=self.link.send('SOURCE_IDENTITY',self._proposal,issued_us=now,expires_us=expires)
         self._flush()
 
@@ -357,6 +411,10 @@ class MapperSource:
         if (type(controller) is not MapperOperationController or controller.peer!=self.link.peer
                 or self._operation_controller is not None):raise ValueError('one actual registered M operation consumer required')
         self._operation_controller=controller
+        self._refresh_operation_marker()
+
+    def _refresh_operation_marker(self):
+        """현재 M 채널의 설치 사실을 다시 전달한다. 운행 명령이나 과거 적용 ACK가 아니다."""
         from .operation_request import CONSUMER_READY_PROFILE,TRANSACTION_US
         issued=self.clock()
         body=canonical(dict(profile=CONSUMER_READY_PROFILE,service_instance=self.link.peer.service_instance))
@@ -375,12 +433,18 @@ class MapperSource:
         """같은 main의 fresh ingest 뒤에 호출한다. 원 CONFIG/요청만 처리하고 설정 E를 만들지 않는다."""
         if self._operation_pending is None or self._operation_controller is None:return
         if self._operation_result is not None:return  # 원 result가 선택될 때까지 pending1을 그대로 보존한다.
-        from .operation_request import operation_result,TRANSACTION_US
+        from .operation_request import operation_result
         packet=self._operation_pending
         raw=self._operation_controller.process(packet,inputs=inputs,sensor_state=sensor_state,origin=origin)
-        value=operation_result(raw);completed=int(value['completed_j_us'])
-        self._operation_result=(raw,value['request_id'],completed,min(2**64-1,completed+TRANSACTION_US))
+        value=operation_result(raw)
+        self._retry_operation_result(raw,value['request_id'])
         self._operation_pending=None
+
+    def _retry_operation_result(self,raw,request):
+        """원 ACK 본문은 불변이다. 새 local delivery만 만들며 consumer를 다시 호출하지 않는다."""
+        from .operation_request import TRANSACTION_US
+        now=self.clock()
+        self._operation_result=(raw,request,now,min(2**64-1,now+TRANSACTION_US))
 
     def offer_bootstrap_load(self,request):
         self._bootstrap_started=True
@@ -399,7 +463,8 @@ class MapperSource:
         if self._bootstrap_report is not None and self._bootstrap_report is not report:
             raise ValueError('one original complete source report required')
         self._bootstrap_report=report
-        self._bootstrap_stage('SOURCE_BOOTSTRAP_COMPLETE',report.body,report.request_id,report.issued_us,report.expires_us)
+        now=self.clock()
+        self._bootstrap_stage('SOURCE_BOOTSTRAP_COMPLETE',report.body,report.request_id,now,now+5_000_000)
 
     def _bootstrap_stage(self,kind,body,request_id,issued,expires):
         key=(kind,request_id);value=(kind,body,request_id,issued,expires)
@@ -476,6 +541,9 @@ class MapperSource:
     def _flush(self):
         """기한/문맥을 잃은 미송신 출력만 폐기한다. input/identity/DB 오류는 그대로 전파한다."""
         original=self.link.pending
+        if original is not None and self.clock()>=original.expires_us and original.kind!='OPERATION_RESULT':
+            self._discard_expired_delivery(original)
+        original=self.link.pending
         if original is not None and original.kind in ('WORLD_CANDIDATE','SURVEY_SUMMARY'):
             now=self.clock()
             expired=now>=original.expires_us
@@ -487,21 +555,34 @@ class MapperSource:
         original=self.link.pending
         self._discard_expired_operation(original)
         try:return self.link.flush()
-        except TimeoutError:
+        except TimeoutError as error:
             original=self.link.pending
-            if self._discard_expired_operation(original):return None
-            if (original is None or original.kind not in ('WORLD_CANDIDATE','SURVEY_SUMMARY')
-                    or self.clock()<original.expires_us):raise
-            self.link.discard_pending(original)
-            self.counts['output_expired']+=1
+            if original is None or self.clock()<original.expires_us:raise
+            try:
+                if self._discard_expired_operation(original):return None
+                self._discard_expired_delivery(original)
+            except Exception:raise error
             return None
+
+    def _discard_expired_delivery(self, original):
+        self.link.discard_expired(original)
+        key='output_expired' if original.kind in ('WORLD_CANDIDATE','SURVEY_SUMMARY') else 'expired_unsent'
+        self.counts[key]+=1
+        if original.kind=='SOURCE_BOOTSTRAP_COMPLETE':
+            now=self.clock()
+            self._bootstrap_stage(original.kind,original.body,original.header['request_id'],now,now+5_000_000)
 
     def _discard_expired_operation(self, original):
         if original is None or original.kind!='OPERATION_RESULT' or self.clock()<original.expires_us:return False
         identity=(original.body,original.header['request_id'],original.issued_us,original.expires_us)
         if identity==self._operation_ready:
-            raise TimeoutError('original mapper operation consumer-installed marker expired before send')
-        self.link.discard_operation(original);self.counts['operation_result_expired']+=1
+            self.link.discard_operation(original)
+            self._refresh_operation_marker()
+            self.counts['consumer_marker_retried']+=1
+            return True
+        self.link.discard_operation(original)
+        self._retry_operation_result(original.body,original.header['request_id'])
+        self.counts['operation_result_expired']+=1
         return True
 
     def discard_outputs(self):
@@ -564,32 +645,51 @@ class MapperSource:
         context=replace(self.storage_context,source_binding=canonical(binding))
         if context.sha256!=meta['context_sha256']:raise ValueError('scene publication changed actual context SHA')
         if binding==self.publication:
-            self.counts['publication_duplicate']+=1;return
-        if int(binding['source_binding_revision'])!=int(self.publication['source_binding_revision'])+1:
-            raise ValueError('scene publication revision is not exactly next')
+            self.counts['publication_duplicate']+=1;return True
+        if int(binding['source_binding_revision'])<=int(self.publication['source_binding_revision']):
+            raise ValueError('scene publication revision did not advance')
         scene=binding['scene_admission_ref']
         if scene is not None:
-            if self.scene is None:raise ValueError('positive scene publication has no actual received grant')
+            if self.scene is None:return False
             grant=decode(b64decode(self.scene['raw'],validate=True),schema.SceneGrant)
             if grant.lifecycle_state!=2 or scene_ref_fields(scene)!=scene_ref_fields(grant.scene):
-                raise ValueError('positive scene publication differs from actual ADMITTED grant')
+                return False
             if (grant.pi_host_boot!=self.origin['pi_host_boot'] or grant.gateway_instance!=self.origin['gateway_instance']
                     or grant.mapper_device!=self.device or any(getattr(grant,key)!=self.source[key] for key in
                         ('vehicle','map_epoch','frame_epoch','odom_epoch','configuration','calibration','primitive'))):
                 raise ValueError('positive scene publication changed grant source')
             probe_delivery=self.probes.get(self.active_probe)
-            if probe_delivery is None:raise ValueError('positive scene publication has no actual returned clock')
+            if probe_delivery is None:return False
             probe=decode(b64decode(probe_delivery['raw'],validate=True),schema.MapperClockProbe)
-            if not probe.HasField('mapper_trust'):raise ValueError('positive scene publication has no original returned trust')
+            if not probe.HasField('mapper_trust'):return False
             trust=probe.mapper_trust;now=self.clock()
             if (probe.pi_host_boot!=self.origin['pi_host_boot'] or probe.admission_revision!=grant.source_admission_revision
-                    or any(getattr(trust,key)!=self.source[key] for key in self.source if key!='device')
-                    or grant.issued_pi_us>now+trust.lower_offset_us
-                    or not now<packet.expires_us<=min(grant.valid_until_pi_us,trust.expires_pi_us)-trust.upper_offset_us):
-                raise ValueError('positive scene publication exceeds original clock/grant expiry')
+                    or any(getattr(trust,key)!=self.source[key] for key in self.source if key!='device')):
+                raise ValueError('positive scene publication changed original clock/grant source')
+            if (grant.issued_pi_us>now+trust.lower_offset_us
+                    or not now<min(grant.valid_until_pi_us,trust.expires_pi_us)-trust.upper_offset_us):return False
         self.publication,self.storage_context,self.context_sha256=binding,context,context.sha256
         self._outputs.clear()  # 옛 publication에 결박한 미선택 출력만 철회한다. 원 frame/관측은 유지한다.
         self.counts['publication_changed']+=1
+        return True
+
+    def _receive_publication(self,packet):
+        """최신 full snapshot 하나만 보류한다. 원 Scene/clock이 도착해도 E를 갱신하지 않는다."""
+        pending=self._publication_pending
+        try:
+            if pending is not None and pending is not packet:
+                before=publication_binding(json_bytes(pending.body,2048))
+                after=publication_binding(json_bytes(packet.body,2048))
+                old,new=int(before['source_binding_revision']),int(after['source_binding_revision'])
+                if new<old or new==old and pending.body!=packet.body:
+                    raise ValueError('pending full publication revision regressed or conflicted')
+            if self._publication(packet):self._publication_pending=None
+            else:
+                if pending is not packet:self.counts['publication_wait_current_input']+=1
+                self._publication_pending=packet
+        except (ValueError,TypeError,OverflowError):
+            if pending is packet:self._publication_pending=None
+            self.counts['publication_rejected']+=1
 
     def pump(self,*,before_outputs=None):
         """같은 main owner에서 원 입력을 반영하고 출력 전 metadata/fence를 확인한다.
@@ -613,8 +713,9 @@ class MapperSource:
             before_outputs();now=self.clock()
         self._flush()
         for packet in self.link.poll():
-            if not packet.issued_us<=now<packet.expires_us:
-                if packet.kind=='SOURCE_PUBLICATION':raise TimeoutError('original scene publication delivery expired')
+            now=self.clock()
+            if (now<packet.issued_us or now>=packet.expires_us
+                    and packet.kind not in ('SOURCE_STORAGE','SOURCE_PUBLICATION','SOURCE_STORAGE_ABORT')):
                 self.counts['expired']+=1;continue
             if packet.kind=='SOURCE_STORAGE':
                 value=json_bytes(packet.body,2048)
@@ -623,20 +724,30 @@ class MapperSource:
             elif packet.kind=='SOURCE_STORAGE_ABORT':
                 from .resident_db import DbAbort
                 notice=DbAbort.from_fields(json_bytes(packet.body,8192))
-                if notice.mapper.worker_instance!=self.link.peer.mapper_worker or packet.header['request_id']!=notice.request_id:
+                # binary source와 STORAGE control의 channel epoch는 별개다. 원 Endpoint는
+                # 변형 없이 넘기고 실제 control Endpoint 대조는 storage client가 수행한다.
+                if (notice.mapper.worker_instance!=self.link.peer.mapper_worker
+                        or packet.header['request_id']!=notice.request_id or notice.observed_us>packet.issued_us):
                     raise ValueError('storage terminal changed original M/request')
+                previous=self._abort_history.get(notice.request_id)
+                if previous is not None:
+                    if previous!=notice:raise ValueError('storage terminal retry changed its original notice')
+                    self.counts['storage_terminal_duplicate']+=1
+                    continue
                 if self._abort is not None:raise RuntimeError('bounded M storage terminal slot is full')
                 self._abort=notice
+                self._abort_history[notice.request_id]=notice
+                while len(self._abort_history)>16:self._abort_history.popitem(last=False)
             elif packet.kind=='SOURCE_OPERATION':
                 if self._operation_pending is not None:
                     self.counts['operation_backpressure_rejected']+=1  # 적용0/원 ACK0이며 S는 UNKNOWN을 보존한다.
                 else:self._operation_pending=packet
             elif packet.kind=='SOURCE_PUBLICATION':
-                try:self._publication(packet)
-                except (ValueError,TypeError,OverflowError):self.counts['publication_rejected']+=1
+                self._receive_publication(packet)
             elif packet.kind=='SOURCE_IDENTITY_ACK':
                 if self._proposal_packet is None or packet.header['request_id']!=self._proposal_packet.header['request_id']:
-                    raise ValueError('identity ACK has no original M proposal')
+                    self.counts['identity_ack_unmatched']+=1
+                    continue
                 if (packet.issued_us,packet.expires_us)!=(self._proposal_packet.issued_us,self._proposal_packet.expires_us):
                     raise ValueError('identity ACK renewed its original proposal')
                 binding=publication_binding(json_bytes(packet.body,2048));meta=packet.header['metadata']
@@ -702,6 +813,7 @@ class MapperSource:
                     self.tof[sensor]=delivery
                 else:self.scene=delivery
             else:raise ValueError('unsupported S source statement')
+        if self._publication_pending is not None:self._receive_publication(self._publication_pending)
         if before_outputs is not None:
             before_outputs();now=self.clock()
         else:
@@ -711,14 +823,21 @@ class MapperSource:
             raw,request,issued,expires=self._operation_result
             if now>=expires:
                 if self._operation_result is self._operation_ready:
-                    raise TimeoutError('original mapper operation consumer-installed marker expired before selection')
-                self._operation_result=None;self.counts['operation_result_expired']+=1
+                    self._refresh_operation_marker()
+                else:self._retry_operation_result(raw,request)
+                self.counts['operation_result_expired']+=1
             elif self.link.send('OPERATION_RESULT',{},raw,request_id=request,issued_us=issued,expires_us=expires) is not None:
                 self._operation_result=None
             self._flush()
         if self._bootstrap_pending:
             key=next(iter(self._bootstrap_pending));kind,body,request,issued,expires=self._bootstrap_pending[key]
-            if not issued<=now<expires:raise TimeoutError('original bootstrap transport expired')
+            if not issued<=now<expires:
+                if kind=='SOURCE_BOOTSTRAP_COMPLETE':
+                    self._bootstrap_pending[key]=(kind,body,request,now,now+5_000_000)
+                else:
+                    del self._bootstrap_pending[key]
+                    self.counts['bootstrap_request_expired']+=1
+                return
             if self.link.send(kind,{},body,request_id=request,issued_us=issued,expires_us=expires) is not None:
                 del self._bootstrap_pending[key]
             self._flush();return
@@ -729,7 +848,9 @@ class MapperSource:
             if bootstrap['status']=='COMPLETE' and self._bootstrap_report is None:self.counts['restore_wait']+=1;return
             self._send_identity_proposal(bootstrap,now)
         if self._proposal_packet is not None and self.publication is None and now>=self._proposal_packet.expires_us:
-            raise TimeoutError('original source identity proposal expired without ACK')
+            self._proposal_packet=None
+            if hasattr(self,'_pc_identity_draft'):self._pc_identity_draft=None
+            self.counts['identity_retried']+=1
         for kind in tuple(self._outputs):
             raw,metadata,issued,expires,request=self._outputs[kind]
             if kind=='WORLD_CANDIDATE' and not self.operation_world_enabled:

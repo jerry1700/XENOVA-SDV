@@ -99,9 +99,12 @@ def _tuple(value):
 
 def _typed(cls,value):
     names={f.name for f in fields(cls) if f.init}
-    if type(value) is not dict or set(value)!=names: raise MapperProfileError('all '+cls.__name__+' fields must be explicit')
+    if type(value) is not dict: raise MapperProfileError('all '+cls.__name__+' fields must be explicit')
+    keys=set(value)
+    if keys!=names and not (cls is RoadProfile and keys==names-{'missing_outer_width_bounds_m'}):
+        raise MapperProfileError('all '+cls.__name__+' fields must be explicit')
     for field in fields(cls):
-        if not field.init: continue
+        if not field.init or field.name not in value: continue
         item=value[field.name]
         if field.type in (int,'int') and type(item) is not int: raise MapperProfileError('integer field: '+field.name)
         if field.type in (float,'float') and type(item) not in (int,float): raise MapperProfileError('numeric field: '+field.name)
@@ -264,9 +267,8 @@ class MapperProfile:
             raise MapperProfileError('each aisle needs a declared lane role and no preassigned durable lane ID')
         survey=None if own.get('survey') is None else _typed(SurveyProfile,own['survey'])
         if survey is not None:
-            installed=3
-            for _,leaf in sensors.tof_sources:installed|=4<<leaf.sensor_id
-            if (survey.input_kind!='LIVE' or survey.required_sensor_mask&~installed
+            # 단일 존 ToF는 근거리 HIT 보조이며 정적 지도 조사의 필수 근거가 아니다.
+            if (survey.input_kind!='LIVE' or survey.required_sensor_mask&~3
                     or survey.observation_max_age_us>pipeline.max_observation_age_us
                     or survey.max_pose_gap_us>sensors.max_gap_us
                     or survey.station_window_us>1_000_000 or survey.atlas_cell_capacity>128*4096):

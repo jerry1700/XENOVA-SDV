@@ -72,6 +72,21 @@ export interface VmListResponse {
   observed_at: string;
 }
 
+/** POST /api/v1/vms/synchronizations — 보드 등록 목록 ↔ DB VM 테이블 등록 동기화 결과 */
+export interface VmSynchronizationResult {
+  /** 보드에 등록된 VM 수 */
+  discovered: number;
+  registered: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  incomplete: number;
+  /** DB 에는 있는데 이번에 보드에 없던 VM (연속으로 없으면 retired) */
+  missing_from_board: number;
+  retired: number;
+  results: { vm_id: string; action: string; reason: string | null }[];
+}
+
 /** §5 POST /api/v1/vms 요청 (§9 입력값 규칙) */
 export interface CreateVmRequest {
   /** 1~63자, 앞뒤 공백·제어문자 금지 */
@@ -125,16 +140,27 @@ export interface UpdateVcpuPinningRequest {
   mappings: VcpuPinning[];
 }
 
-export interface UpdateMemoryRequest {
+export interface UpdateVmResourcesRequest {
+  vcpus: number;
   memory_mib: number;
 }
 
+/** Mock 핀닝 계약의 기존 개별 필드 타입. */
 export interface UpdateVcpusRequest {
   vcpus: number;
 }
 
-export type VmResourceUpdate =
-  { kind: 'memory'; body: UpdateMemoryRequest } | { kind: 'vcpus'; body: UpdateVcpusRequest };
+export interface UpdateMemoryRequest {
+  memory_mib: number;
+}
+
+export interface VmResourceUpdateResult {
+  vm_id: string;
+  operation_id: string | null;
+  before: { vcpus: number; memory_mib: number };
+  after: { vcpus: number; memory_mib: number };
+  applies_on_next_start: boolean;
+}
 
 /** POST /api/v1/vms/{id}/stress/cpu — workers 1~4, duration_s 1~120 */
 export interface CpuStressRequest {
@@ -154,16 +180,44 @@ export type StressRequest =
 export type StressType = 'CPU' | 'MEMORY';
 
 /** 202 응답. Agent 에 MQTT agent.command(action=stress)를 보냈다는 뜻이고, 실제 부하는 메트릭으로 확인한다 */
-export interface StressCommand {
+export interface SubmittedCommand {
   command_id: string;
   operation_id: string;
   vm_id: string;
+  submitted_at: string;
+  expires_at: string;
+}
+
+export interface StressCommand extends SubmittedCommand {
   type: StressType;
   /** CPU 는 워커 수, MEMORY 는 MiB */
   amount: number;
+  load_percent?: number | null;
   duration_s: number;
-  submitted_at: string;
-  expires_at: string;
+}
+
+/** POST /api/v1/vms/{id}/faults/auto-delay — Zephyr 주행 연산에 지연을 주는 데모 명령 */
+export interface AutoDelayRequest {
+  delay_ms: number;
+  duration_s: number;
+}
+
+export interface AutoDelayCommand extends SubmittedCommand {
+  delay_ms: number;
+  duration_s: number;
+}
+
+/** POST /api/v1/vms/{id}/faults/agent-exit — Linux Agent 종료 데모 명령 */
+export type AgentExitCommand = SubmittedCommand;
+
+export type CommandState = 'PENDING' | 'ACCEPTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REJECTED';
+
+export interface CommandStatusResponse {
+  command_id: string;
+  vm_id: string;
+  status: CommandState;
+  message?: string | null;
+  updated_at: string;
 }
 
 /** §2.3 */
@@ -439,4 +493,36 @@ export interface RouteRequest {
   vm_id: string | null;
   view: DisplayView;
   expected_revision: number;
+}
+
+// ---- USB 휴대폰 화면 연결 (REST-38·REST-39, docs/contracts/phone-link-v1.md) ----
+
+export type PhoneRelayState = 'listening' | 'waiting_link' | 'starting' | 'stopped' | 'failed' | 'unknown';
+
+export interface PhoneLinkStatus {
+  /** 보드에 휴대폰 중계 설정이 있음 */
+  configured: boolean;
+  relay: PhoneRelayState;
+  /** 휴대폰 브라우저에서 열 주소. relay 가 listening 일 때만 */
+  url: string | null;
+  usb: {
+    interface: string;
+    present: boolean;
+    /** 보드 쪽 주소(주소/접두어) */
+    ipv4: string[];
+    /** 휴대폰 주소 */
+    gateway: string | null;
+  };
+  configured_phone_ipv4: string | null;
+  /** 휴대폰이 테더링 대역을 바꿔 중계가 시작하지 못함. 판단할 수 없으면 null */
+  subnet_mismatch: boolean | null;
+  /** 번호 값은 없다 */
+  pairing: { active: boolean; expires_at: string | null };
+  observed_at: string;
+}
+
+/** 새 연결번호. 화면 상태에만 두고 저장·로그·URL 에 넣지 않는다 */
+export interface PhonePairingCode {
+  code: string;
+  expires_at: string;
 }

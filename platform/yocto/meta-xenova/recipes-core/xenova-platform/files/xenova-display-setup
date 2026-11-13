@@ -1,0 +1,6 @@
+#!/usr/bin/python3
+"""표시 담당의 명시 교체와 읽기 전용 설치 확인 진입점."""
+import sys
+sys.path.insert(0, '/usr/lib/xenova')
+from xenova_display_setup import main
+raise SystemExit(main())

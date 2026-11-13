@@ -171,7 +171,7 @@ dom0-manager가 `xentop -b -i 1 -n -x -f` 한 번의 출력에서 만드는 VM�
 
 | 필드 | xentop 원천 | 의미 |
 |---|---|---|
-| `vm_id` | `NAME` ↔ `xl list -l`의 `config.c_info.uuid` | 같은 호출 안에서 이름으로 대조. `-f`가 없으면 이름이 10자로 잘려 대조가 깨지므로 항상 `-f` |
+| `vm_id` | `NAME` ↔ `xl list -v`의 `UUID` 열 | 같은 요청 안에서 이름으로 대조. `-f`가 없으면 이름이 10자로 잘려 대조가 깨지므로 항상 `-f` |
 | `domid` | `NAME` ↔ `xl list` | 재실행마다 바뀐다. Spring이 누적값 초기화(재시작) 판정에 쓴다 |
 | `source` | 상수 `xen` | 에이전트 보고(`guest_agent`)와 구분. Spring 메트릭 조회(REST-12·WS-01)의 `source` 필터 허용값(`xen`, `guest_agent`)과 같은 문자열 |
 | `sampled_at` | dom0 시각, xentop 종료 시점 | 표본 시각. 단조 시계 간격은 Spring이 수신 시각으로 잰다 |
@@ -218,7 +218,7 @@ dom0-manager가 `xentop -b -i 1 -n -x -f` 한 번의 출력에서 만드는 VM�
 | `recovery_id` | 장애 한 건의 ID. 최초 판정(`detected_at`)부터 최종 성공 또는 포기(`final`)까지 같은 값. Worker가 재시작해도 dom0에 저장된 미완료 `recovery_id`를 이어 간다 |
 | `recovery_attempt_id` | 논리적 복구 시도마다 발급하는 UUID이자 플랫폼 `recover_once` journal 키. **같은 시도의 재전달(응답 유실·Worker 재시작 뒤 재확인)과 결과 조회(`recovery-operation`)에는 반드시 같은 값을 재사용한다.** 이전 시도가 `failed`로 확정되고 backoff 뒤 다음 시도를 시작할 때만 새 UUID를 발급한다. Spring 이벤트의 `operation_id`로 기록 |
 | `attempt` | 같은 `recovery_id` 안의 시도 번호(1부터). 새 `recovery_attempt_id`를 발급할 때만 1씩 증가하고 재전달·재확인에서는 그대로다. 새 `recovery_id`에서 1로 돌아간다. 재시도 한도·대기는 복구 정책(S15P31E110-125) |
-| `reason` | 판정 근거. `HEARTBEAT_LOST`(Linux VM, `agent.heartbeat` 30초 무수신) / `APP_HEARTBEAT_LOST`(Zephyr VM, `app.heartbeat` 15초 무수신, 시나리오 D8. 대상은 템플릿 capability `app_heartbeat` 가 `true` 이거나 신호를 한 번이라도 받은 VM) / `DOMAIN_ABSENT`(의도 running인데 도메인 없음, 60초 유예 뒤) / `DOMAIN_CRASHED`(`crashed`) |
+| `reason` | 판정 근거. `HEARTBEAT_LOST`(Linux VM, `agent.heartbeat` 30초 무수신) / `APP_HEARTBEAT_LOST`(Zephyr VM, `app.heartbeat` 15초 무수신, 시나리오 D8. 대상은 템플릿 capability `app_heartbeat` 가 `true` 이거나 신호를 한 번이라도 받은 VM) / `VM_UNTRUSTED`(binding이 검증된 현재 Zephyr 주행 execution에서 `vm.trust`가 발행되어 Gateway가 출력 신뢰를 철회함) / `DOMAIN_ABSENT`(의도 running인데 도메인 없음, 60초 유예 뒤) / `DOMAIN_CRASHED`(`crashed`) |
 | `mode` | 플랫폼 `recover_once`의 `mode`: `start-if-absent` / `graceful-restart` / `force-restart` |
 | `detected_at` | 장애 판정 시각 (dom0) |
 | `occurred_at` | 이 이벤트의 시각 (dom0) |
@@ -291,6 +291,8 @@ Spring은 3.1의 네 상태에 `stopped`를 더해 다섯 상태를 공개합니
 | `GET` | `/api/v1/cpu-layout` | `200` CPU 배치 (4.11) | `401`, `500`, `501`, `503`, `504` |
 | `GET` | `/api/v1/vms/{vm_id}/cpu-layout` | `200` CPU 배치 (4.11) | `400`, `401`, `404`, `500`, `501`, `503`, `504` |
 | `PUT` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 변경 결과 (4.12) | `400`, `401`, `404`, `409`, `500`, `501`, `503`, `504` |
+| `GET` | `/api/v1/display/phone-link` | `200` 휴대폰 중계 상태 (4.13) | `401`, `503` |
+| `POST` | `/api/v1/display/phone-link/pairing-code` | `200` 새 연결번호 (4.13) | `401`, `409`, `503` |
 | `GET` | `/healthz` | `200` | `401`, `503` |
 
 `/healthz` 를 뺀 모든 엔드포인트는 선택 헤더 `X-Request-Budget-Ms`(요청 예산, 4.9)를 받는다.
@@ -533,6 +535,51 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 - 범위 밖: 실행 중 vCPU 핀·스케줄러 가중치·메모리 변경(플랫폼 미지원), CPU 배치 정책 변경(모든 게스트 정지가 필요한 유지보수 작업, 플랫폼 `cpu-policy-set`).
 - mock 드라이버: 등록됐고 실행 중이 아닌 VM 의 값을 바꾸고 `200`(`operation_id: null`). 같은 키·같은 값은 원 결과, 다른 값은 `409 VMExists`.
 
+### 4.13 `GET /api/v1/display/phone-link`, `POST /api/v1/display/phone-link/pairing-code` — USB 휴대폰 화면 중계
+
+휴대폰을 보드에 USB 테더링으로 연결하면 휴대폰 DHCP 가 보드 `usb0` 주소를 정하고, 그 주소는 연결할 때마다 바뀔 수 있습니다. 관리 콘솔에서 지금 접속 주소를 확인하고 연결번호를 발급할 수 있게 dom0-manager 가 중계(`xenova-display-mobile`)의 상태를 읽어 줍니다. 중계 코드는 바꾸지 않고 밖에서 읽습니다.
+
+| 알아내는 것 | 방법 |
+|---|---|
+| 중계 실행 여부 | `systemctl is-active xenova-display-mobile.service` |
+| 접속 주소 | `/run/xenova-display-mobile/endpoint.json` 의 `url` (쓸 수 있는 링크가 없으면 파일 없음) |
+| 연결번호 남은 시간 | `/run/xenova-display-mobile/pairing-code` 수정 시각 + `pairing_ttl_s`(기본 120초). 연결에 성공하면 파일이 지워진다 |
+| 보드 USB 주소·휴대폰 주소 | `ip -j -4 addr/route show dev <usb_interface>`. 기본 경로의 게이트웨이가 휴대폰 |
+| 새 번호 | `systemctl kill --kill-whom=main --signal=USR1` 후 바뀐 `pairing-code` 를 읽는다 |
+
+`GET` 응답 `200`:
+
+```json
+{
+  "configured": true,
+  "relay": "listening",
+  "url": "http://10.117.188.25:8084/display/mobile",
+  "usb": {"interface": "usb0", "present": true, "ipv4": ["10.117.188.25/24"], "gateway": "10.117.188.86"},
+  "configured_phone_ipv4": "10.117.188.86",
+  "subnet_mismatch": false,
+  "pairing": {"active": true, "expires_at": "2026-11-12T08:31:05Z"},
+  "observed_at": "2026-11-12T08:29:10Z"
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `configured` | 중계 설정 파일 `/etc/xenova/display-mobile.json` 이 있음 |
+| `relay` | `listening` 실행 중이고 접속 주소 있음 · `waiting_link` 실행 중이지만 쓸 수 있는 USB 링크 없음(케이블·테더링·주소) · `starting` 시작 중 또는 자동 재시작 대기 · `stopped` 꺼짐(재부팅 뒤 기본값) · `failed` · `unknown` |
+| `url` | 휴대폰 브라우저에서 열 주소. `relay` 가 `listening` 일 때만 값이 있음 |
+| `usb` | 보드 USB 링크. `present` 는 장치 유무, `ipv4` 는 전역 주소(주소/접두어), `gateway` 는 휴대폰 주소(없으면 `null`) |
+| `configured_phone_ipv4` | 중계 설정의 휴대폰 주소 |
+| `subnet_mismatch` | 보드 USB 주소가 설정된 휴대폰 대역 밖이면 `true`. 휴대폰이 테더링 대역을 바꾼 경우이며 중계는 시작하지 못한다. 판단할 수 없으면 `null` |
+| `pairing` | 쓰지 않았고 만료되지 않은 번호가 있는가와 만료 시각. **번호 값은 담지 않는다** |
+
+`POST .../pairing-code` 응답 `200`: `{"code": "123456", "expires_at": "..."}`.
+
+- 이미 연결된 휴대폰의 세션도 끊긴다(중계의 번호 회전 규칙). 콘솔은 누르기 전에 알린다.
+- 번호는 이 응답에만 있다. dom0-manager·Spring·브라우저 모두 저장하거나 로그에 남기지 않는다. 두 응답 모두 `Cache-Control: no-store`.
+- 요청 하나가 번호 하나를 만들고 앞 번호를 무효로 하므로 Spring 은 자동 재시도하지 않는다. 동시 요청은 dom0-manager 안에서 하나씩 처리한다.
+- `409 InvalidState`: 중계가 `listening` 이 아님(신호를 보내지 않음). `503 PlatformUnavailable`: `systemctl`·`ip`·파일 읽기 실패, 신호 거절, 또는 2초 안에 새 번호가 나오지 않음.
+- 번호를 웹에 보여 주는 근거: 로그인한 운영자는 이미 SSH 로 같은 파일을 읽을 수 있고, 번호는 USB 로 연결된 휴대폰에서만(중계가 `usb0` 에 묶임) 2분·5회 안에 쓸 수 있다.
+
 ---
 
 ## 5. Spring 공개 API
@@ -541,7 +588,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 
 | 메서드 | 경로 | 성공 응답 | 비고 |
 |---|---|---|---|
-| `GET` | `/api/v1/vms` | `200` `{items: VM[], observed_at}` | 자기 레코드와 조합한 전체 목록. 생성 순 정렬. Spring에 레코드가 없는 도메인은 제외. `state`·`vcpus`·`memory_mib`는 Spring이 들고 있는 마지막 dom0 목록에서 오며 `observed_at`은 그 목록을 dom0-manager에서 받은 시각(아래 런타임 캐시) |
+| `GET` | `/api/v1/vms` | `200` `{items: VM[], observed_at}` | 자기 레코드와 조합한 전체 목록. 역할 순(primary_drive → backup_drive → interaction → 역할 없음), 역할 없는 VM 중에서는 Zephyr → Linux, 같은 묶음 안에서는 생성 순 정렬 (보드 동기화로 늦게 발견된 VM 이 순서를 흔들지 않게). Spring에 레코드가 없는 도메인은 제외. `state`·`vcpus`·`memory_mib`는 Spring이 들고 있는 마지막 dom0 목록에서 오며 `observed_at`은 그 목록을 dom0-manager에서 받은 시각(아래 런타임 캐시) |
 | `POST` | `/api/v1/vms` | 신규 `201` VM, 동일 명세 재시도 `200` VM | 같은 이름에 다른 명세면 `409 VM_NAME_CONFLICT` |
 | `GET` | `/api/v1/vms/{vm_id}` | `200` VM | — |
 | `PATCH` | `/api/v1/vms/{vm_id}` | `200` VM (조회 응답과 같은 모양) | 본문 `{"role": "primary_drive"}`, `{"role": null}`이면 역할을 지움. 역할만 바꿀 수 있고 dom0-manager를 호출하지 않으며 이벤트도 남기지 않음. 보관된 VM은 `404 VM_NOT_FOUND` |
@@ -565,9 +612,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 
 모든 공개 API는 `Authorization: Bearer {access_token}`이 필요합니다. 생성·시작·정지·삭제가 성공하면 이벤트(`vm.created`, `vm.state.changed`, `vm.deleted`)가 기록됩니다.
 
-**런타임 캐시 (S15P31E110-344).** 목록·단건 조회는 요청마다 dom0-manager를 부르지 않고 Spring이 들고 있는 마지막 dom0 목록으로 답합니다(실측: 요청마다 부르면 2.7~4.4초). 전용 스레드 하나가 dom0 `GET /api/v1/vms`를 마친 뒤 `VM_RUNTIME_REFRESH_DELAY`(기본 1초) 쉬고 다시 부르므로, 상태 변화는 dom0 목록 한 번 + 1초 안에 반영됩니다. 시작·생성·정지·삭제의 결과는 그 VM에 즉시 반영합니다. 목록이 `VM_RUNTIME_STALE_LIMIT`(기본 10초)보다 오래되면(루프 정지·연속 실패) 그 요청이 dom0-manager를 직접 부르고, 그것도 실패하면 기존과 같은 오류를 돌려줍니다 — 오래된 목록으로 장애를 숨기지 않습니다. `VM_RUNTIME_CACHE_ENABLED=false`면 요청마다 dom0-manager를 부르는 예전 동작입니다.
-
-Xen은 VM 상태 변화를 누구에게도 알리지 않으므로, Spring이 dom0-manager `GET /api/v1/vms`를 주기적으로(위 갱신 루프마다. 캐시를 끄면 `EVENT_VM_STATE_CHECK_INTERVAL_MS`, 기본 5초) 조회해 사용자 조작 없이 바뀐 상태(크래시, 스스로 종료 등)를 `vm.state.changed`(`cause: detected`)로 기록합니다. 조작 중인 VM은 건너뛰고, dom0-manager에 닿지 않으면 그 회차는 아무것도 기록하지 않으며, 서버가 처음 보는 VM은 기준값만 저장합니다.
+Xen은 VM 상태 변화를 누구에게도 알리지 않으므로, Spring은 dom0-manager `GET /api/v1/vms`를 주기적으로(기본 5초, `EVENT_VM_STATE_CHECK_INTERVAL_MS`) 조회하고, 공개 `GET /api/v1/vms` 요청이 들어올 때도 한 번 조회합니다. 두 경우 모두 같은 동기화이며 VM 실행 상태만 다룹니다(VM 추가·은퇴는 `POST /api/v1/vms/synchronizations`의 등록 동기화). Spring은 DB의 등록 VM과 런타임을 결합해 최신 목록을 반환하고, 사용자 조작 없이 바뀐 상태(크래시, 스스로 종료 등)를 `vm.state.changed`(`cause: detected`)로 기록합니다. 조회와 겹친 조작이 있는 VM은 건너뛰고, dom0-manager에 닿지 않으면 기존 상태와 이벤트를 바꾸지 않습니다(공개 요청은 실패, 주기 조회는 그 회차를 건너뜀). 서버가 처음 보는 VM은 기준값만 저장합니다. 동시 동기화 요청은 Spring 프로세스 안에서 순차 실행합니다.
 
 **xentop 통계의 저장과 사용률 계산.** Spring은 4.6절 응답의 VM마다 `MetricSample(source = "xen", boot_id = null, window_ms = null, observed_at = sampled_at)`을 저장합니다. 값 이름과 단위는 다음과 같고, `unavailable`에 있는 필드는 값 `null`에 `unavailableReason`을 그대로 둡니다.
 
@@ -809,7 +854,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 
 dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포함한 내부 API에서 Bearer 서비스 토큰을 검사합니다. Spring은 `DOM0_MANAGER_BASE_URL`에 Tailscale 주소를 설정하고 `DOM0_MANAGER_SERVICE_TOKEN`을 `Authorization: Bearer`로 전송합니다. 연결 실패는 `503 VM_CONTROL_UNAVAILABLE`로 변환합니다.
 
-`vm_id`는 도메인 설정의 `uuid`에 기록하고 `xl list -l`의 `config.c_info.uuid`로 역조회합니다. 동일 VM의 stop/start 및 retire/restore는 같은 UUID를 유지하며, 템플릿 생성·복제·purge 이후 신규 생성은 새 UUID를 사용합니다.
+`vm_id`는 도메인 설정의 `uuid`에 기록하고 `xl list -v`의 `UUID` 열(도메인 handle, `xl list -l`의 `config.c_info.uuid`와 같은 값)로 역조회합니다. 동일 VM의 stop/start 및 retire/restore는 같은 UUID를 유지하며, 템플릿 생성·복제·purge 이후 신규 생성은 새 UUID를 사용합니다.
 
 ---
 
@@ -838,3 +883,6 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.18 | 2026-11-04 | 정지한 Linux VM 의 자원 변경 `PUT /api/v1/vms/{vm_id}/resources`(4.12, S15P31E110-368): 필수 `Idempotency-Key`, 범위 vcpus 1..4·memory_mib 128..1024, 다음 시작부터 적용, 자산·제어 원장 키 조회, `TARGET_CHANGED` 뒤 원 작업 재확인. 재시작(4.2)의 자원 비교 기준을 지금 등록 설정으로 바꾼다. 실행 중 핀·가중치·메모리 변경은 범위 밖 |
 | v1.19 | 2026-11-06 | 구현에 맞춤: `role` 값을 `primary_drive`·`backup_drive`·`interaction` 으로(2.2·5·9장, Spring `VmRole`), 복구 이벤트 심각도 `WARN` → `WARNING`(5장), 재보충 `gap` 은 서버 로그 경고일 뿐 이벤트 로그에 남기지 않음(4.7), Spring VM 관리 엔드포인트 수 7 → 8 과 `/api/v1/vms` 아래 그 밖의 공개 엔드포인트 표(5장), 입력 오류 400 예외(로그 조회·등록 통지, 8.2), Spring 명령 응답 대기 100초 → 15분(10장) |
 | v1.20 | 2026-11-06 | 사용자 결정 반영: VM 목록·단건 조회 한도 5초를 하위 `list`·`get` 에 `timeout_ms` 로 명시(4.1·4.9, 초과 `504`), 플랫폼 `VM_NAME_CONFLICT` 를 `VMExists` 에서 분리해 `409 VMNameConflict`(8.1)로 내고 Spring 은 `409 VM_NAME_CONFLICT`(생성·시작에서도 성공 아님, 8.2), API 문서 경로(`/docs`·`/redoc`·`/openapi.json`) 기본 비활성·켜도 토큰 검사(4장) |
+| v1.21 | 2026-11-12 | USB 휴대폰 화면 중계 상태 조회 `GET /api/v1/display/phone-link` 와 연결번호 발급 `POST /api/v1/display/phone-link/pairing-code`(4.13). 번호는 발급 응답에만 담고 저장·로그·자동 재시도 금지, `Cache-Control: no-store` |
+| v1.22 | 2026-11-12 | v1.17의 런타임 자동 갱신 루프를 제거하고 공개 `GET /api/v1/vms` 요청 시 단일 동기화로 변경. 등록 VM과 dom0 런타임을 결합하고 상태 이벤트를 반영한 최신 목록을 반환하며, 경합 VM 제외·조회 실패 시 기존 상태 보존·프로세스 내 동시 요청 직렬화를 명시 |
+| v1.23 | 2026-11-12 | VM 상태 5초 주기 조회(`EVENT_VM_STATE_CHECK_INTERVAL_MS`)를 되살린다. 공개 `GET /api/v1/vms` 요청 시 동기화와 함께 동작하며 실행 상태만 다룬다. 보드 등록 목록 → VM 테이블 등록 동기화는 주기 실행 없이 `POST /api/v1/vms/synchronizations` 요청 때만 실행한다 |

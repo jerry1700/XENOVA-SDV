@@ -102,7 +102,8 @@ class ResourceError(BaseModel):
 class ErrorCode(str, Enum):
     InvalidArgument = "InvalidArgument"
     VMNotFound = "VMNotFound"
-    VMExists = "VMExists"
+    VMExists = "VMExists"  # 409 같은 vm_id 의 VM 이 이미 있음(생성 재전달) 또는 같은 키가 다른 요청의 원 작업
+    VMNameConflict = "VMNameConflict"  # 409 플랫폼 VM_NAME_CONFLICT: 다른 VM 과 내부 이름·UUID 예약·MAC 이 겹침. 생성 성공이 아니다
     InsufficientResources = "InsufficientResources"
     InvalidState = "InvalidState"  # 현재 생명주기에서 수행할 수 없음 (실행 중 VM 의 DELETE, 플랫폼 VM_NOT_STOPPED 등)
     # 드라이버·플랫폼 실패. HTTP 상태와 1:1 로 둔다 (Spring 이 code 로 매핑하므로 상태만으로 구분하지 않는다)
@@ -302,6 +303,59 @@ class RecoveryEventsResponse(BaseModel):
     next_after_event_id: UUID | None = Field(default=None, description="돌려준 마지막 이벤트의 event_id. events 가 비어 있으면 null")
     oldest_event_id: UUID | None = Field(default=None, description="보관된 가장 오래된 이벤트(진단용)")
     gap: bool = Field(description="after_event_id 가 보관 범위 밖이거나 커서 뒤의 보관 줄이 손상돼 그 이후 이력을 잃었을 수 있음")
+
+
+# ---- USB 휴대폰 화면 중계 (계약 4.13) ----
+
+
+class PhoneRelayState(str, Enum):
+    listening = "listening"  # 실행 중이고 접속 주소가 있음
+    waiting_link = "waiting_link"  # 실행 중이지만 쓸 수 있는 USB 링크가 없음(케이블·테더링·주소)
+    starting = "starting"  # 시작 중 또는 실패 뒤 자동 재시작 대기
+    stopped = "stopped"  # 꺼짐. 재부팅 뒤 기본값(opt-in)
+    failed = "failed"
+    unknown = "unknown"
+
+
+class PhoneUsbLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interface: str
+    present: bool = Field(description="USB 네트워크 장치가 있는가(테더링 켜짐)")
+    ipv4: list[str] = Field(description="보드 쪽 주소(주소/접두어). 휴대폰 DHCP 가 준 값")
+    gateway: str | None = Field(default=None, description="DHCP 기본 경로의 게이트웨이 = 휴대폰 주소. 없으면 null")
+
+
+class PhonePairingStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active: bool = Field(description="아직 쓰지 않았고 만료되지 않은 연결번호가 있음. 번호 값은 담지 않는다")
+    expires_at: datetime | None = None
+
+
+class PhoneLinkStatus(BaseModel):
+    """계약 4.13. 연결번호 값은 담지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool = Field(description="중계 설정 파일이 있음")
+    relay: PhoneRelayState
+    url: str | None = Field(default=None, description="휴대폰 브라우저에서 열 주소. relay 가 listening 일 때만")
+    usb: PhoneUsbLink
+    configured_phone_ipv4: str | None = Field(default=None, description="중계 설정의 휴대폰 주소")
+    subnet_mismatch: bool | None = Field(
+        default=None, description="보드 USB 주소가 설정된 휴대폰 대역 밖(휴대폰이 테더링 대역을 바꿈). 판단할 수 없으면 null")
+    pairing: PhonePairingStatus
+    observed_at: datetime
+
+
+class PhonePairingCode(BaseModel):
+    """새로 발급한 연결번호. 이 응답에만 번호가 있다(저장·로그 금지)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    expires_at: datetime
 
 
 # ---- CPU 배치 조회 (S15P31E110-353, 계약 4.11) ----

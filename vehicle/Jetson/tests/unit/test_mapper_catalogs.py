@@ -21,6 +21,7 @@ from xenova_vehicle.mapping.registration import PoseBox
 from xenova_vehicle.perception.calibration import BodyModel
 from xenova_vehicle.perception.parking import ParkingAisle
 from xenova_vehicle.perception.pipeline import PerceptionResult
+from xenova_vehicle.perception.temporal_road import MappedRoad
 from xenova_vehicle.runtime.mapper_catalogs import MapperCatalogs, CatalogNotReady
 from xenova_vehicle.runtime.mapper_compute import MapperInput
 from xenova_vehicle.runtime.mapper_storage import MapperStorageMailbox
@@ -30,7 +31,7 @@ from xenova_vehicle.storage.contracts import (StorageJob, CatalogHeadSnapshot, C
     ProvenanceRange, canonical)
 from xenova_vehicle.storage.port import CheckpointRequest
 from xenova_vehicle.storage.records import (EvidenceTable, ContextRecord, ProvenanceRecord,
-    CheckpointPayload, PROVENANCE)
+    CheckpointPayload, PROVENANCE, aggregate_rgb_provenance)
 
 
 def uid(n): return '80000000-0000-4000-8000-%012x' % n
@@ -167,6 +168,37 @@ class MapperCatalogsTests(unittest.TestCase):
         self.assertIs(self.owner._accepted, before)
         self.assertEqual(self.owner.view.lane_status, 'UNAVAILABLE')
         self.assertIsNone(self.mailbox.main_peek())
+
+    def test_temporal_lane_reuses_stable_ids_and_keeps_original_rgb_closure(self):
+        previous, _ = self.ready()
+        job,result,args = self.frame()
+        current, = args['base_evidence'].provenance
+        old = next(r for r in previous.state.evidence.provenance
+                   if r.provenance_id == previous.view.lane.provenance_ids[0])
+        root, = aggregate_rgb_provenance(current,(old,),lambda _parents: 100_000)
+        args['base_evidence'] = EvidenceTable((old,current,root),args['base_evidence'].contexts)
+        args['capture_prior'] = PoseBox((-.03,.03),(-.03,.03),(-.01,.01))
+        candidate = MappedRoad(result.road,frozenset((result.road.source_key,previous.view.lane.source.stamp.key)))
+        result = replace(result,road=None,mapped_road=candidate)
+
+        no_proof = self.owner.prepare(job,result,**args)
+        self.assertIn('TEMPORAL_RGB_PROVENANCE_UNAVAILABLE',no_proof.view.reasons)
+        self.owner.discard(no_proof)
+        wide_road = replace(candidate.road,hypotheses=(replace(candidate.road.hypotheses[0],error_m=.051),))
+        wide = self.owner.prepare(job,replace(result,mapped_road=replace(candidate,road=wide_road)),**args)
+        self.assertIn('GEOMETRY_ENVELOPE_TOO_WIDE',wide.view.reasons)
+        self.owner.discard(wide)
+
+        draft = self.owner.prepare(job,result,temporal_provenance_id=root.provenance_id,**args)
+        self.assertEqual(draft.view.lane.lane_ids,previous.view.lane.lane_ids)
+        adopted, = draft.view.lane.road.hypotheses
+        original, = candidate.road.hypotheses
+        self.assertGreaterEqual(adopted.error_m,original.error_m)
+        self.assertAlmostEqual(adopted.error_m,original.error_m,places=7)
+        self.assertEqual(replace(adopted,error_m=original.error_m),original)
+        self.assertEqual(draft.view.road_basis.status,'READY')
+        self.assertEqual(draft.view.lane.provenance_ids,(root.provenance_id,)*2)
+        self.assertTrue(all(r in draft.state.evidence.provenance for r in (root,current,old)))
 
     def test_final_accept_only_swaps_prepared_refs_without_mailbox_lock_copy_or_clock(self):
         job, result, args = self.frame(); draft = self.owner.prepare(job, result, **args)
