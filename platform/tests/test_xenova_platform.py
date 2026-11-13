@@ -291,11 +291,19 @@ class LifecycleTest(unittest.TestCase):
             self.p.finish_board_shutdown('poweroff')
         self.assertFalse(any(c == ['systemctl', 'poweroff'] for c in self.runner.calls))
 
-    def test_board_shutdown_orders_storage_before_poweroff(self):
+    def test_board_shutdown_quiesces_telemetry_before_unmount(self):
         self.p.prepare_board_shutdown([self.r], 'poweroff')
         self.p.finish_board_shutdown('poweroff')
         calls = self.runner.calls
-        self.assertLess(calls.index(['systemctl', 'stop', 'srv-xenova.mount']), calls.index(['systemctl', 'poweroff']))
+        timers = calls.index(['systemctl', 'stop', 'xenova-telemetry-clock.timer',
+                              'xenova-telemetry-evidence.timer'])
+        services = calls.index(['systemctl', 'stop', 'xenova-vms.service',
+                                'xenova-vm-shutdown.service', 'xenova-dhcp.service',
+                                'xenova-telemetry-clock.service', 'xenova-telemetry-evidence.service'])
+        unmount = calls.index(['systemctl', 'stop', 'srv-xenova.mount'])
+        self.assertLess(timers, services)
+        self.assertLess(services, unmount)
+        self.assertLess(unmount, calls.index(['systemctl', 'poweroff']))
 
     def test_non_xen_capability_blocks_start_gate(self):
         with patch.object(vm.Path, 'read_text', return_value=''):
