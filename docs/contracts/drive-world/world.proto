@@ -500,6 +500,8 @@ message LaneGeometry {
   required uint64 revision = 6;
   required fixed32 adjacent_lane_id = 7;
   required bytes point_state = 8; // 0 observed,1 inferred; exactly centerline count.
+  optional float outer_normal_position_bound_m = 9; // Lateral position of the outer boundary in MAP.
+  optional float outer_chord_delta_bound_m = 10; // Outer end minus start error, with common translation canceled.
 }
 message LaneModel {
   repeated LaneGeometry lanes = 1; // Exactly2, sharing divider station indices.
@@ -509,6 +511,7 @@ message LaneModel {
   required uint64 revision = 5;
   required float divider_position_bound_m = 6;
   required float divider_heading_bound_rad = 7;
+  optional float divider_normal_position_bound_m = 8; // Lateral position of the divider in MAP.
 }
 message ParkingSlot {
   required fixed32 slot_id = 1;

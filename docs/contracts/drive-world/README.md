@@ -51,6 +51,11 @@ Pi 제어·차량 상태 연결까지 막는 전역 readiness gate가 아니다.
   LaneModel을 사용하며, global outer의 평균으로 생성하지 않는다. basis의 원 prefix는
   유지하고 실제 끝 연장만 reference revision을 올린다. 차로 선택·관측/ROI 변화로 원점과
   prefix를 바꾸지 않는다. legacy0/1의 reference별 좌우 방향 검사는 유지한다.
+- 관측 구간에는 divider와 양쪽 outer의 지도상 횡방향 위치 상한을 보낼 수 있다.
+  이때 양쪽 outer의 연속 station 쌍별 현 벡터 오차 중 최댓값도 함께 보낸다. 같은 자세에서
+  비롯된 평행이동은 양끝의 차를 계산할 때 상쇄되며 연결부 변위와 회전·반올림 오차는 남는다.
+  Python과 C는 필드 묶음이 완전할 때 모든 연속 station 쌍을 이 상한으로 검증한다. 구 형식에는
+  기존 검증식을 적용한다. 기존 위치·방향 상한은 차량과 경로의 여유 계산에 유지한다.
 - 최대 grid는 64×64, road 배열은 각각 2~64점이다. occupancy는 0~100 또는 255(unknown),
   flag bit는 valid=1/static-retained=2/expired=4, age는 cell별 little-endian uint32 ms다.
   unknown/만료/무효 셀은 통행 가능으로 바꾸지 않는다. 보관 셀의 오래된 원 age와 새 관측의

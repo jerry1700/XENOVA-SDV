@@ -35,7 +35,7 @@ _REPEATED_CAPS={'DriveState.path':512,'DriveState.segments':3,'LaneModel.lanes':
     'LaneGeometry.centerline':32,'LaneModel.divider':32,'WorldSnapshot.parking_slots':8,
     'ParkingSlot.corners':4,'MissionExecution.selected_slot_polygon':4,
     'TaskReferenceState.basis_prefix':64,'EpisodeCore.blocker':8}
-_MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneModel':1408,
+_MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneModel':1424,
     'ParkingSlot':256,'MapLocalization':96,'SceneAdmissionRef':96,'ParkingSetMeta':64,
     'MissionGrant':1024,'MissionBudgetRequest':512,'MissionBudgetReply':1536,
     'MapperClockProbe':1024,'MapperClockReply':1024,'SurveySummary':288,'SceneGrant':1024,
@@ -164,6 +164,9 @@ def _lane_model(model):
     _positive(model,'revision')
     _nonnegative(model,'divider_position_bound_m','divider_heading_bound_rad')
     n=len(model.divider)
+    directional = model.HasField('divider_normal_position_bound_m')
+    if directional:
+        _nonnegative(model, 'divider_normal_position_bound_m')
     if len(model.crossing)!=n-1 or len(model.divider_state)!=n or any(v>1 for v in model.crossing+model.divider_state):
         raise ValueError('divider state/crossing')
     divider=[_xy(p) for p in model.divider]
@@ -175,6 +178,11 @@ def _lane_model(model):
     for lane in model.lanes:
         _positive(lane,'revision')
         _nonnegative(lane,'position_bound_m','heading_bound_rad')
+        if (lane.HasField('outer_normal_position_bound_m') != directional
+                or lane.HasField('outer_chord_delta_bound_m') != directional):
+            raise ValueError('incomplete directional lane bounds')
+        if directional:
+            _nonnegative(lane, 'outer_normal_position_bound_m', 'outer_chord_delta_bound_m')
         if lane.travel_direction!=1 or len(lane.centerline)!=n or len(lane.point_state)!=n or any(v>1 for v in lane.point_state):
             raise ValueError('lane stations/state/direction')
         center=[_xy(p) for p in lane.centerline]
@@ -192,8 +200,9 @@ def _lane_model(model):
                 delta=(divider[i][0]-divider[i-1][0],divider[i][1]-divider[i-1][1])
                 if (p[0]-center[i-1][0])*delta[0]+(p[1]-center[i-1][1])*delta[1]<=0:
                     raise ValueError('lane station order')
-                error=2*lane.position_bound_m+model.divider_position_bound_m
-                if math.hypot(outer[i][0]-outer[i-1][0],outer[i][1]-outer[i-1][1])<=2*error:
+                limit = (lane.outer_chord_delta_bound_m if directional
+                         else 2 * (2 * lane.position_bound_m + model.divider_position_bound_m))
+                if math.hypot(outer[i][0]-outer[i-1][0],outer[i][1]-outer[i-1][1]) <= limit:
                     raise ValueError('unbounded reconstructed lane heading')
         sides.append(sign)
     if sides[0]==sides[1]:raise ValueError('lanes must straddle divider')
@@ -422,6 +431,10 @@ def _validate_one(message):
     elif name=='LaneGeometry':
         _positive(message,'lane_id','adjacent_lane_id','revision')
         _nonnegative(message,'position_bound_m','heading_bound_rad')
+        if message.HasField('outer_normal_position_bound_m') != message.HasField('outer_chord_delta_bound_m'):
+            raise ValueError('incomplete directional lane bounds')
+        if message.HasField('outer_normal_position_bound_m'):
+            _nonnegative(message, 'outer_normal_position_bound_m', 'outer_chord_delta_bound_m')
         if (message.travel_direction!=1 or not 2<=len(message.centerline)<=32
                 or len(message.point_state)!=len(message.centerline) or any(value>1 for value in message.point_state)):
             raise ValueError('lane station/state/direction')

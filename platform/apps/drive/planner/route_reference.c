@@ -5,6 +5,18 @@
 #include <string.h>
 
 static bool point(dw_point a,dw_point b){return a.x==b.x&&a.y==b.y;}
+static bool same_divider_bounds(const xenova_drive_LaneModel *a,const xenova_drive_LaneModel *b){
+ return a->divider_position_bound_m==b->divider_position_bound_m&&a->divider_heading_bound_rad==b->divider_heading_bound_rad&&
+  a->has_divider_normal_position_bound_m==b->has_divider_normal_position_bound_m&&
+  (!a->has_divider_normal_position_bound_m||a->divider_normal_position_bound_m==b->divider_normal_position_bound_m);
+}
+static bool same_lane_bounds(const xenova_drive_LaneGeometry *a,const xenova_drive_LaneGeometry *b){
+ return a->position_bound_m==b->position_bound_m&&a->heading_bound_rad==b->heading_bound_rad&&
+  a->has_outer_normal_position_bound_m==b->has_outer_normal_position_bound_m&&
+  a->has_outer_chord_delta_bound_m==b->has_outer_chord_delta_bound_m&&
+  (!a->has_outer_normal_position_bound_m||a->outer_normal_position_bound_m==b->outer_normal_position_bound_m)&&
+  (!a->has_outer_chord_delta_bound_m||a->outer_chord_delta_bound_m==b->outer_chord_delta_bound_m);
+}
 static bool geometry(const xenova_drive_RoadWindow *a,const xenova_drive_RoadWindow *b,unsigned first,unsigned n){
  if(!a||!b||!n||first+n>a->reference_count||n>b->reference_count||a->road.lanes_count!=2||b->road.lanes_count!=2)return false;
  if(a->heading_error_rad!=b->heading_error_rad||a->road.divider_position_bound_m!=b->road.divider_position_bound_m||
@@ -63,8 +75,7 @@ enum drp_result drr_open(struct drr_view *out,const dw_world *w,const xenova_dri
     memcmp(window->overlap_prefix_sha256.bytes,w->route_view.overlap_prefix_sha256.bytes,32)||
     memcmp(window->geometry_scope_sha256.bytes,plan->geometry_scope_sha256.bytes,32)||
     memcmp(window->topology_sha256.bytes,plan->topology_sha256.bytes,32)||w->reference_count!=window->reference_count||
-    w->lane_model.divider_position_bound_m!=window->road.divider_position_bound_m||
-    w->lane_model.divider_heading_bound_rad!=window->road.divider_heading_bound_rad)return DRP_CONTEXT;
+    !same_divider_bounds(&w->lane_model,&window->road))return DRP_CONTEXT;
  for(unsigned i=0;i<w->reference_count;i++)if(!point(w->reference[i],window->reference[i])||
     (i+1<w->reference_count&&w->lane_model.crossing.bytes[i]!=window->road.crossing.bytes[i]))return DRP_CONTEXT;
  const xenova_drive_RouteOccurrence *o=&plan->occurrences[occurrence];bool found=false;unsigned sections[2]={32,32};
@@ -89,8 +100,7 @@ enum drp_result drr_open(struct drr_view *out,const dw_world *w,const xenova_dri
  if(!tr_open(w,&task,&road))return DRP_CONTEXT;
  const xenova_drive_LaneGeometry *expected=NULL;
  for(unsigned i=0;i<window->road.lanes_count;i++)if(window->road.lanes[i].lane_id==o->lane_id)expected=&window->road.lanes[i];
- if(!expected||expected->centerline_count!=road.count||expected->position_bound_m!=road.selected->position_bound_m||
-    expected->heading_bound_rad!=road.selected->heading_bound_rad)return DRP_CONTEXT;
+ if(!expected||expected->centerline_count!=road.count||!same_lane_bounds(expected,road.selected))return DRP_CONTEXT;
  for(unsigned i=0;i<road.count;i++)if(!point(expected->centerline[i],road.points[i])||expected->point_state.bytes[i]!=road.selected->point_state.bytes[i]||
     !point(window->road.divider[i],w->lane_model.divider[i])||window->road.divider_state.bytes[i]!=w->lane_model.divider_state.bytes[i])return DRP_CONTEXT;
  *out=(struct drr_view){w,window,road,task,c};return DRP_OK;

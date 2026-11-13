@@ -458,6 +458,10 @@ typedef struct _xenova_drive_LaneGeometry {
     uint64_t revision;
     uint32_t adjacent_lane_id;
     xenova_drive_LaneGeometry_point_state_t point_state; /* 0 observed,1 inferred; exactly centerline count. */
+    bool has_outer_normal_position_bound_m;
+    float outer_normal_position_bound_m; /* Lateral position of the outer boundary in MAP. */
+    bool has_outer_chord_delta_bound_m;
+    float outer_chord_delta_bound_m; /* Outer end minus start error, with common translation canceled. */
 } xenova_drive_LaneGeometry;
 
 typedef PB_BYTES_ARRAY_T(31) xenova_drive_LaneModel_crossing_t;
@@ -472,6 +476,8 @@ typedef struct _xenova_drive_LaneModel {
     uint64_t revision;
     float divider_position_bound_m;
     float divider_heading_bound_rad;
+    bool has_divider_normal_position_bound_m;
+    float divider_normal_position_bound_m; /* Lateral position of the divider in MAP. */
 } xenova_drive_LaneModel;
 
 typedef struct _xenova_drive_ParkingSlot {
@@ -1864,8 +1870,8 @@ extern "C" {
 #define xenova_drive_PiAbsoluteMeter_init_default {{0, {0}}, 0, 0, 0, 0, 0}
 #define xenova_drive_StopFacts_init_default      {0, "", "", 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, 0, 0}
 #define xenova_drive_DriveControlFacts_init_default {0, xenova_drive_PiAbsoluteMeter_init_default, false, xenova_drive_StopFacts_init_default, 0}
-#define xenova_drive_LaneGeometry_init_default   {0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0, 0, 0, {0, {0}}}
-#define xenova_drive_LaneModel_init_default      {0, {xenova_drive_LaneGeometry_init_default, xenova_drive_LaneGeometry_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, {0, {0}}, {0, {0}}, 0, 0, 0}
+#define xenova_drive_LaneGeometry_init_default   {0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, 0, 0, 0, 0, {0, {0}}, false, 0, false, 0}
+#define xenova_drive_LaneModel_init_default      {0, {xenova_drive_LaneGeometry_init_default, xenova_drive_LaneGeometry_init_default}, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, {0, {0}}, {0, {0}}, 0, 0, 0, false, 0}
 #define xenova_drive_ParkingSlot_init_default    {0, 0, 0, 0, 0, {xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default, xenova_drive_Point_init_default}, 0, false, xenova_drive_Pose_init_default, false, xenova_drive_Pose_init_default, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define xenova_drive_ParkingSetMeta_init_default {0, 0, 0, 0, 0, 0}
 #define xenova_drive_MapLocalization_init_default {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
@@ -1947,8 +1953,8 @@ extern "C" {
 #define xenova_drive_PiAbsoluteMeter_init_zero   {{0, {0}}, 0, 0, 0, 0, 0}
 #define xenova_drive_StopFacts_init_zero         {0, "", "", 0, 0, 0, {0, {0}}, {0, {0}}, {0, {0}}, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, {0, {0}}, 0, 0, {0, {0}}, 0, 0}
 #define xenova_drive_DriveControlFacts_init_zero {0, xenova_drive_PiAbsoluteMeter_init_zero, false, xenova_drive_StopFacts_init_zero, 0}
-#define xenova_drive_LaneGeometry_init_zero      {0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0, 0, 0, {0, {0}}}
-#define xenova_drive_LaneModel_init_zero         {0, {xenova_drive_LaneGeometry_init_zero, xenova_drive_LaneGeometry_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, {0, {0}}, {0, {0}}, 0, 0, 0}
+#define xenova_drive_LaneGeometry_init_zero      {0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, 0, 0, 0, 0, {0, {0}}, false, 0, false, 0}
+#define xenova_drive_LaneModel_init_zero         {0, {xenova_drive_LaneGeometry_init_zero, xenova_drive_LaneGeometry_init_zero}, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, {0, {0}}, {0, {0}}, 0, 0, 0, false, 0}
 #define xenova_drive_ParkingSlot_init_zero       {0, 0, 0, 0, 0, {xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero, xenova_drive_Point_init_zero}, 0, false, xenova_drive_Pose_init_zero, false, xenova_drive_Pose_init_zero, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 #define xenova_drive_ParkingSetMeta_init_zero    {0, 0, 0, 0, 0, 0}
 #define xenova_drive_MapLocalization_init_zero   {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
@@ -2297,6 +2303,8 @@ extern "C" {
 #define xenova_drive_LaneGeometry_revision_tag   6
 #define xenova_drive_LaneGeometry_adjacent_lane_id_tag 7
 #define xenova_drive_LaneGeometry_point_state_tag 8
+#define xenova_drive_LaneGeometry_outer_normal_position_bound_m_tag 9
+#define xenova_drive_LaneGeometry_outer_chord_delta_bound_m_tag 10
 #define xenova_drive_LaneModel_lanes_tag         1
 #define xenova_drive_LaneModel_divider_tag       2
 #define xenova_drive_LaneModel_crossing_tag      3
@@ -2304,6 +2312,7 @@ extern "C" {
 #define xenova_drive_LaneModel_revision_tag      5
 #define xenova_drive_LaneModel_divider_position_bound_m_tag 6
 #define xenova_drive_LaneModel_divider_heading_bound_rad_tag 7
+#define xenova_drive_LaneModel_divider_normal_position_bound_m_tag 8
 #define xenova_drive_ParkingSlot_slot_id_tag     1
 #define xenova_drive_ParkingSlot_geometry_revision_tag 2
 #define xenova_drive_ParkingSlot_geometry_state_tag 3
@@ -3724,7 +3733,9 @@ X(a, STATIC,   REQUIRED, FLOAT,    position_bound_m,   4) \
 X(a, STATIC,   REQUIRED, FLOAT,    heading_bound_rad,   5) \
 X(a, STATIC,   REQUIRED, UINT64,   revision,          6) \
 X(a, STATIC,   REQUIRED, FIXED32,  adjacent_lane_id,   7) \
-X(a, STATIC,   REQUIRED, BYTES,    point_state,       8)
+X(a, STATIC,   REQUIRED, BYTES,    point_state,       8) \
+X(a, STATIC,   OPTIONAL, FLOAT,    outer_normal_position_bound_m,   9) \
+X(a, STATIC,   OPTIONAL, FLOAT,    outer_chord_delta_bound_m,  10)
 #define xenova_drive_LaneGeometry_CALLBACK NULL
 #define xenova_drive_LaneGeometry_DEFAULT NULL
 #define xenova_drive_LaneGeometry_centerline_MSGTYPE xenova_drive_Point
@@ -3736,7 +3747,8 @@ X(a, STATIC,   REQUIRED, BYTES,    crossing,          3) \
 X(a, STATIC,   REQUIRED, BYTES,    divider_state,     4) \
 X(a, STATIC,   REQUIRED, UINT64,   revision,          5) \
 X(a, STATIC,   REQUIRED, FLOAT,    divider_position_bound_m,   6) \
-X(a, STATIC,   REQUIRED, FLOAT,    divider_heading_bound_rad,   7)
+X(a, STATIC,   REQUIRED, FLOAT,    divider_heading_bound_rad,   7) \
+X(a, STATIC,   OPTIONAL, FLOAT,    divider_normal_position_bound_m,   8)
 #define xenova_drive_LaneModel_CALLBACK NULL
 #define xenova_drive_LaneModel_DEFAULT NULL
 #define xenova_drive_LaneModel_lanes_MSGTYPE xenova_drive_LaneGeometry
@@ -4956,8 +4968,8 @@ extern const pb_msgdesc_t xenova_drive_RouteExchange_msg;
 #define xenova_drive_ExitSpace_size              636
 #define xenova_drive_GearSegment_size            18
 #define xenova_drive_GuestClockReceipt_size      56
-#define xenova_drive_LaneGeometry_size           455
-#define xenova_drive_LaneModel_size              1388
+#define xenova_drive_LaneGeometry_size           465
+#define xenova_drive_LaneModel_size              1413
 #define xenova_drive_MapLocalization_size        70
 #define xenova_drive_MapperClockProbe_size       993
 #define xenova_drive_MapperClockReply_size       921
@@ -4985,9 +4997,9 @@ extern const pb_msgdesc_t xenova_drive_RouteExchange_msg;
 #define xenova_drive_RoadObservationOrigin_size  331
 #define xenova_drive_RoadRegistrationRequest_size 1362
 #define xenova_drive_RoadSectionRef_size         73
-#define xenova_drive_RoadSection_size            3179
+#define xenova_drive_RoadSection_size            3204
 #define xenova_drive_RoadTopology_size           9801
-#define xenova_drive_RoadWindow_size             3326
+#define xenova_drive_RoadWindow_size             3351
 #define xenova_drive_RouteAcceptanceRef_size     178
 #define xenova_drive_RouteBinding_size           137
 #define xenova_drive_RouteCandidate_size         2210
@@ -5016,7 +5028,7 @@ extern const pb_msgdesc_t xenova_drive_RouteExchange_msg;
 #define xenova_drive_WindowTransitionReceipt_size 559
 #define xenova_drive_WindowTransitionRequest_size 1488
 #define xenova_drive_WorldRouteView_size         288
-#define xenova_drive_WorldSnapshot_size          32386
+#define xenova_drive_WorldSnapshot_size          32411
 #define xenova_drive_WorldTrust_size             531
 
 #ifdef __cplusplus

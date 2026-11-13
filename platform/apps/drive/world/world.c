@@ -82,6 +82,8 @@ static enum dw_result lane_validate(const xenova_drive_LaneModel *model){
  size_t n=model->divider_count;
  if(model->lanes_count!=2||n<2||n>32||model->crossing.size!=n-1||model->divider_state.size!=n)return DW_ARRAY;
  if(!positive63(model->revision)||!nonnegative(model->divider_position_bound_m)||!nonnegative(model->divider_heading_bound_rad))return DW_NUMERIC;
+ bool directional=model->has_divider_normal_position_bound_m;
+ if(directional&&!nonnegative(model->divider_normal_position_bound_m))return DW_NUMERIC;
  for(size_t i=0;i<n;i++)if(model->divider_state.bytes[i]>1||(i+1<n&&model->crossing.bytes[i]>1))return DW_ARRAY;
  if(!simple(model->divider,n,false))return DW_GEOMETRY;
  if(!model->lanes[0].lane_id||!model->lanes[1].lane_id||model->lanes[0].lane_id==model->lanes[1].lane_id||
@@ -91,6 +93,8 @@ static enum dw_result lane_validate(const xenova_drive_LaneModel *model){
   const xenova_drive_LaneGeometry *lane=&model->lanes[k];
   if(lane->travel_direction!=1||lane->centerline_count!=n||lane->point_state.size!=n)return DW_ARRAY;
   if(!positive63(lane->revision)||!nonnegative(lane->position_bound_m)||!nonnegative(lane->heading_bound_rad))return DW_NUMERIC;
+  if(lane->has_outer_normal_position_bound_m!=directional||lane->has_outer_chord_delta_bound_m!=directional)return DW_ARRAY;
+  if(directional&&(!nonnegative(lane->outer_normal_position_bound_m)||!nonnegative(lane->outer_chord_delta_bound_m)))return DW_NUMERIC;
   dw_point outer[32],polygon[64];
   for(size_t i=0;i<n;i++){
    if(lane->point_state.bytes[i]>1||!finite_point(lane->centerline[i]))return DW_ARRAY;
@@ -105,8 +109,8 @@ static enum dw_result lane_validate(const xenova_drive_LaneModel *model){
     dw_point p=lane->centerline[i],previous=lane->centerline[i-1];
     dw_point d=model->divider[i],last=model->divider[i-1];
     if((p.x-previous.x)*(d.x-last.x)+(p.y-previous.y)*(d.y-last.y)<=0)return DW_GEOMETRY;
-    float error=2*lane->position_bound_m+model->divider_position_bound_m;
-    if(hypotf(outer[i].x-outer[i-1].x,outer[i].y-outer[i-1].y)<=2*error)return DW_GEOMETRY;
+    float limit=directional?lane->outer_chord_delta_bound_m:2*(2*lane->position_bound_m+model->divider_position_bound_m);
+    if(hypotf(outer[i].x-outer[i-1].x,outer[i].y-outer[i-1].y)<=limit)return DW_GEOMETRY;
    }
   }
   if(!simple(lane->centerline,n,false)||!simple(polygon,2*n,true))return DW_GEOMETRY;
@@ -275,7 +279,7 @@ static size_t message_cap(const pb_msgdesc_t *desc){
  if(desc==xenova_drive_EpisodeReceipt_fields)return 1536;
  if(desc==xenova_drive_GuestClockReceipt_fields)return 64;
  if(desc==xenova_drive_DirectionGateWitness_fields)return 512;
- if(desc==xenova_drive_LaneModel_fields)return 1408;
+ if(desc==xenova_drive_LaneModel_fields)return 1424;
  if(desc==xenova_drive_ParkingSlot_fields)return 256;
  if(desc==xenova_drive_MapLocalization_fields||desc==xenova_drive_SceneAdmissionRef_fields)return 96;
  if(desc==xenova_drive_ParkingSetMeta_fields)return 64;
