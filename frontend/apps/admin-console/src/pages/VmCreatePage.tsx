@@ -155,7 +155,16 @@ export function VmCreatePage() {
           </div>
 
           {templates.isPending && <div className={styles.statePanel}>템플릿을 불러오는 중입니다…</div>}
-          {templates.error && <div className={styles.statePanel}>템플릿을 불러오지 못했습니다.</div>}
+          {templates.error && (
+            <div className={styles.statePanel} role="alert">
+              {templateLoadMessage(templates.error)}
+            </div>
+          )}
+          {templates.data && templates.data.length === 0 && (
+            <div className={styles.statePanel}>
+              보드에 공개된 템플릿이 없습니다. 보드에 템플릿 이미지가 설치됐는지 확인해 주세요.
+            </div>
+          )}
           <div className={styles.templateGrid}>
             {(templates.data ?? []).map((item, index) => {
               const selected =
@@ -470,6 +479,14 @@ export function VmCreatePage() {
       </Modal>
     </div>
   );
+}
+
+/** 템플릿 버전은 보드 카탈로그에서 읽는다. 보드에 한 번도 닿지 못하면 백엔드가 dom0-manager 오류를 그대로 준다 */
+function templateLoadMessage(error: unknown): string {
+  if (error instanceof ApiError && error.code.startsWith('VM_CONTROL_')) {
+    return '보드에 연결할 수 없어 템플릿을 불러오지 못했습니다. 보드 상태를 확인한 뒤 다시 시도해 주세요.';
+  }
+  return '템플릿을 불러오지 못했습니다.';
 }
 
 /** 백엔드는 dom0-manager 응답을 command-timeout(20m)까지 기다린 뒤 504 VM_CONTROL_TIMEOUT으로 끝낸다 */
