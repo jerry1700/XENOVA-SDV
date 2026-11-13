@@ -1397,6 +1397,24 @@ static bool lane_settled(struct drive_engine *e,const dw_world *w,const struct t
  if(!e->episode.settle_since_pi_us)e->episode.settle_since_pi_us=v->pi_sample_us;
  return v->pi_sample_us>=e->episode.settle_since_pi_us&&v->pi_sample_us-e->episode.settle_since_pi_us>=e->behavior_limits.settle_us&&now>=v->pi_sample_us;
 }
+/* The station intervals can still overlap when a second obstacle closes the
+ * lane ahead. End KEEP_TARGET early enough to plan the next crossing; the
+ * episode receipt, swept path and stopping checks still apply. */
+static bool behavior_next_blocker(const struct drive_engine *e,const dw_world *w,const struct tr_intent *task,
+ dw_pose pose,const dw_vehicle *v,float lo,float hi){
+ const struct db_blocker *first=&e->episode.blocker;
+ if(e->episode.policy!=DB_KEEP_TARGET||lo<=first->station_lower||hi<=first->station_upper)return false;
+ float speed=fmaxf(0,v->velocity_mps);
+ float lookahead=lp_lookahead_distance(e->config,speed)+lp_stopping_distance(e->config,speed);
+ struct tr_intent ahead=*task;ahead.changing=false;
+ ahead.from_lane_id=ahead.selected_lane_id=e->episode.target_lane_id;
+ struct db_blocker next;
+ if(!db_blocker_observe(w,&ahead,pose,lookahead+e->config->front,e->config,&next)||!next.present||next.unknown)return false;
+ /* Lift the new blocker onto the same lap as the old one. */
+ next.station_lower=first->station_lower;next.station_upper=first->station_upper;
+ return db_blocker_locate(&e->episode.basis,&next,w->localization.geometry_position_bound_m)&&
+        next.station_lower>first->station_upper&&next.station_lower>hi&&next.station_lower-hi<=e->config->front;
+}
 static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,dw_pose pose,const dw_vehicle *v,
  uint64_t now,float clearance,struct tr_intent *task,dw_pose *goal){
  if(!db_limits_valid(&e->behavior_limits)||e->behavior_failed||!e->facts_current||!e->facts.valid||now>=e->facts.expires_pi_us||!e->episode_state.core.state)return DE_STATE;
@@ -1406,7 +1424,8 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
  }
  /* The registered phase milestone and the swept local terminal have separate lifetimes. */
  const float phase_clearance=e->config->front+e->config->margin;
- if(e->episode.active&&e->episode.terminal&&e->episode.phase==DB_FINISHED){
+ if(e->episode.active&&e->episode.terminal&&e->episode.phase==DB_FINISHED&&
+    e->episode_state.core.phase==DB_FINISHED&&e->episode_status.commit_state==2){
   struct db_blocker next;if(!db_blocker_observe(w,task,pose,e->config->plan_horizon,e->config,&next))return DE_PATH;
   if(next.present&&!next.unknown)e->episode.active=false;
  }
@@ -1441,7 +1460,10 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    float radius=hypotf(e->config->front,e->config->half_width),lo,hi,pad=v->position_error_m+radius*v->heading_error_rad;
    if(!db_station_bounds_near(&e->episode.basis,e->episode.basis.count,pose,pad,e->config,
       e->episode.progress_lower,false,&lo,&hi))return DE_STATE;
-   if(lo>e->episode.blocker.station_upper+e->behavior_limits.pass_margin_m){
+   /* Finish only after the PASS plan has been registered and committed. */
+   if(e->episode_state.core.phase==DB_PASS&&e->episode_status.commit_state==2&&
+      (lo>e->episode.blocker.station_upper+e->behavior_limits.pass_margin_m||
+       behavior_next_blocker(e,w,task,pose,v,lo,hi))){
     if(e->episode.policy==DB_KEEP_TARGET){
      if(!behavior_phase(e,DB_FINISHED,e->episode.phase_goal,now))return DE_STATE;
      e->episode.terminal=true;

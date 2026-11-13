@@ -1053,6 +1053,13 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  if(rc==LP_NOT_FOUND&&retry_inset&&block==LP_GUIDE_OCCUPIED&&make_lane_guide(&view,c,&guide,blocked_bend_inset_scale)){
   rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,response,step,count,minimum,NULL);
  }
+ /* A settled footprint can still point away from the next bend after a
+  * merge. Recover with the bend response when the lane guide runs out. */
+ if(rc==LP_NOT_FOUND&&retry_inset&&block==LP_GUIDE_LANE&&path->count>1&&
+    fabsf(dw_angle(start_pose.yaw-first.pose.yaw))>c->avoid_heading_rad){
+  float bend_response=(c->lookahead_min/.35f)*.17f;
+  rc=roll_lane_guide(path,&guide,w,c,&budget,metrics,bend_response,step,count,minimum,NULL);
+ }
  /* On a straight approach, a bend merge can hit the lane boundary during
   * its initial correction. Retry with a gentler turn toward the destination. */
  if(rc==LP_NOT_FOUND&&blend&&block==LP_GUIDE_LANE&&path->count>1&&
