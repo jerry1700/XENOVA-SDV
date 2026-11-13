@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from ..errors import InvalidArgument
 from ..models import (ControlOperation, ControlStatus, CreateVmRequest, Error, ResourceUpdate, UpdateResourcesRequest,
-                      Vm, VmOperationAction, VmOperationResult)
+                      Vm, VmLifecycle, VmOperationAction, VmOperationResult)
 from ..service import VmService
 from . import get_service
 
@@ -73,9 +73,26 @@ def get_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Vm:
     response_class=Response,
     responses={400: _ERR, 404: _ERR, 409: _ERR, **_COMMAND_ERRS},
 )
-def delete_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Response:
-    service.delete(vm_id)
+def delete_vm(
+    vm_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_lifecycle_generation: int | None = Query(default=None, ge=0),
+    service: VmService = Depends(get_service),
+) -> Response:
+    key = _request_key(idempotency_key, "Idempotency-Key") if idempotency_key is not None else None
+    service.delete(vm_id, key=key, generation=expected_lifecycle_generation)
     return Response(status_code=204)
+
+
+@router.get(
+    "/vms/{vm_id}/lifecycle",
+    operation_id="getVmLifecycle",
+    summary="VM 등록 상태와 세대 조회",
+    response_model=VmLifecycle,
+    responses={400: _ERR, 404: _ERR, 409: _ERR, **_COMMAND_ERRS},
+)
+def get_vm_lifecycle(vm_id: UUID, service: VmService = Depends(get_service)) -> VmLifecycle:
+    return service.vm_lifecycle(vm_id)
 
 
 @router.post(
@@ -179,6 +196,21 @@ def update_vm_resources(
     service: VmService = Depends(get_service),
 ) -> ResourceUpdate:
     return service.update_resources(vm_id, request, _request_key(idempotency_key, "Idempotency-Key"))
+
+
+@router.get(
+    "/vms/{vm_id}/operations",
+    operation_id="getVmRetireOperationByKey",
+    summary="요청 키로 원 보관 결과 조회",
+    response_model=VmOperationResult,
+    responses={400: _ERR, 404: _ERR, **_COMMAND_ERRS},
+)
+def get_vm_retire_operation_by_key(
+    vm_id: UUID,
+    request_key: str = Query(description="최초 DELETE의 Idempotency-Key"),
+    service: VmService = Depends(get_service),
+) -> VmOperationResult:
+    return service.vm_operation(vm_id, action="retire", key=_request_key(request_key, "request_key"))
 
 
 @router.get(

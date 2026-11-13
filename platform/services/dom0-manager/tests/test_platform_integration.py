@@ -182,14 +182,16 @@ def test_delete_preserves_assets_in_use(client, board):
     assert not list((board.data / "operations").glob("*.json"))
 
 
-@pytest.mark.parametrize("legacy_key", [False, True])
+@pytest.mark.parametrize("mode", ["implicit", "legacy", "guarded"])
 @pytest.mark.parametrize("phase", ["moved", "dhcp-pending", "dhcp-applied"])
-def test_delete_resumes_original_retire_after_interruption(client, board, legacy_key, phase):
+def test_delete_resumes_original_retire_after_interruption(client, board, mode, phase):
     spec = {"vm_id": str(DEBIAN)}
     path = f"/api/v1/vms/{DEBIAN}"
     source = board.data / "instances" / "debian-dev"
     disk_inode = (source / "root.raw").stat().st_ino
     operation_ids = []
+    options = {"headers": {"Idempotency-Key": "fixture-interrupted-retire"},
+               "params": {"expected_lifecycle_generation": 0}} if mode == "guarded" else {}
 
     def interrupt(saved_phase, op):
         if saved_phase == phase and not operation_ids:
@@ -197,11 +199,11 @@ def test_delete_resumes_original_retire_after_interruption(client, board, legacy
             raise OSError("fixture interrupted retirement")
 
     with patch.object(board.manager, "checkpoint", interrupt):
-        if legacy_key:
+        if mode == "legacy":
             failure = board.manager.call("retire", spec, execute=True, idempotency_key=f"retire-{DEBIAN}")
             assert not failure["ok"] and failure["error"]["code"] == "RECOVERY_REQUIRED"
         else:
-            failure = client.delete(path)
+            failure = client.delete(path, **options)
             assert failure.status_code == 503 and failure.json()["platform_code"] == "RECOVERY_REQUIRED"
     original, = operation_ids
     lookup_path = f"{path}/operations/{original}"
@@ -215,7 +217,7 @@ def test_delete_resumes_original_retire_after_interruption(client, board, legacy
         "operation_id": original, "next_action": "reconcile_original", "platform_code": "RECOVERY_REQUIRED",
     }
     assert read.status_code == 200
-    if not legacy_key:
+    if mode != "legacy":
         assert failure.json()["context"] == {k: v for k, v in read.json().items() if k != "platform_code"}
         assert "detail" not in failure.json()
     assert client.get(lookup_path, params={"action": "create"}).status_code == 404
@@ -224,7 +226,7 @@ def test_delete_resumes_original_retire_after_interruption(client, board, legacy
     assert original_file.read_bytes() == original_bytes and board.xen.calls == calls
     assert not source.exists()
     with patch.object(board.manager, "_prepare_dhcp", wraps=board.manager._prepare_dhcp) as dhcp:
-        assert client.delete(path).status_code == 204
+        assert client.delete(path, **options).status_code == 204
         assert dhcp.call_count == (0 if phase == "dhcp-applied" else 1)
     operation_path, = (board.data / "operations").glob("*.json")
     op = json.loads(operation_path.read_text())
@@ -338,6 +340,67 @@ def test_delete_does_not_report_success_if_completed_archive_is_missing(client, 
     archive.rename(archive.with_name(".fixture-hidden"))
     assert client.delete(path).status_code == 503
     assert json.loads(operation_path.read_text()) == op
+
+
+def test_guarded_delete_recovers_lost_result_and_blocks_old_generation_after_restore(client, board):
+    path = f"/api/v1/vms/{NEW_VM}"
+    spec = {"vm_id": str(NEW_VM)}
+    body = {**spec, "name": "guarded-retire", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
+            "vcpus": 1, "memory_mib": 512}
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    assert client.post(path + "/stop").status_code == 204
+    registration, = (board.data / "operations").glob("*.json")
+    old = {"Idempotency-Key": "retire-before-restore"}
+    generation = client.get(path + "/lifecycle")
+    assert generation.json() == {**spec, "lifecycle": "REGISTERED", "generation": 0}
+    assert client.delete(path, headers=old).status_code == 400
+    assert client.delete(path, params={"expected_lifecycle_generation": 0}).status_code == 400
+    assert client.delete(path, headers=old, params={"expected_lifecycle_generation": -1}).status_code == 400
+    assert list((board.data / "operations").glob("*.json")) == [registration]
+
+    async def lose_response(scope, receive, send):
+        async def drop(message):
+            if message["type"] == "http.response.start":
+                assert message["status"] == 204
+                raise ConnectionResetError("fixture lost guarded DELETE response")
+
+        await client.app(scope, receive, drop)
+
+    with pytest.raises(ConnectionResetError, match="lost guarded DELETE response"):
+        TestClient(lose_response).delete(path, headers=old, params={"expected_lifecycle_generation": 0})
+    board.manager = board.manager.fork()
+    client = make_client(board)
+    journal, = [p for p in (board.data / "operations").glob("*.json") if p != registration]
+    original = journal.read_bytes()
+    with patch.object(management, "publish", side_effect=AssertionError("same DELETE cannot move twice")):
+        found = client.get(path + "/operations", params={"request_key": old["Idempotency-Key"]})
+        assert found.status_code == 200 and found.json()["status"] == "completed"
+        assert found.json()["operation_id"] == journal.stem
+        assert client.delete(path, headers=old, params={"expected_lifecycle_generation": 0}).status_code == 204
+        assert client.delete(path).status_code == 204
+    assert journal.read_bytes() == original
+    restored = board.manager.call("restore", spec, execute=True, idempotency_key="fixture-restore")
+    assert restored["ok"], restored
+    current = client.get(path + "/lifecycle").json()
+    assert current == {**spec, "lifecycle": "REGISTERED", "generation": 2}
+
+    with patch.object(management, "publish", side_effect=AssertionError("old generation cannot move assets")):
+        for key in (old["Idempotency-Key"], "old-delete-that-never-arrived"):
+            refused = client.delete(path, headers={"Idempotency-Key": key}, params={"expected_lifecycle_generation": 0})
+            assert (refused.status_code, refused.json()["platform_code"]) == (409, "TARGET_CHANGED")
+        conflict = client.delete(path, headers=old, params={"expected_lifecycle_generation": 2})
+        assert (conflict.status_code, conflict.json()["platform_code"]) == (409, "IDEMPOTENCY_CONFLICT")
+    assert len(list((board.data / "operations").glob("*.json"))) == 3  # Registration, original retire and restore.
+    assert client.get(path + "/operations", params={"request_key": old["Idempotency-Key"]}).json() == found.json()
+    assert client.get(path + "/lifecycle").json() == current
+    new = {"Idempotency-Key": "new-delete"}
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    running = client.delete(path, headers=new, params={"expected_lifecycle_generation": 2})
+    assert (running.status_code, running.json()["platform_code"]) == (409, "VM_NOT_STOPPED")
+    assert client.post(path + "/stop").status_code == 204
+    assert client.delete(path, headers=new, params={"expected_lifecycle_generation": 2}).status_code == 204
+    assert client.get(path + "/lifecycle").json() == {**spec, "lifecycle": "RETIRED", "generation": 3}
+    assert journal.read_bytes() == original
 
 
 def test_real_manager_restart_registered_vm(client, board):

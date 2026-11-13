@@ -344,6 +344,10 @@ class Manager:
                 vm.validate_identity(snap.get('record',{}))
                 if snap.get('vm_id')!=op['vm_id'] or snap.get('generation')!=op.get('expected_generation'):
                     fail('RECOVERY_REQUIRED','invalid operation lifecycle snapshot')
+                if op['action']=='retire' and 'expected_lifecycle_generation' in op['initial_spec']:
+                    if (op['request']!=op['initial_spec'] or
+                            op['request']['expected_lifecycle_generation']!=op['expected_generation']):
+                        fail('RECOVERY_REQUIRED','retire request does not match its lifecycle snapshot')
                 source='instances/'+snap['name'] if op['action']=='retire' else str(self._archive(snap).relative_to(self.data))
                 target=f"instances/.retired-{snap['name']}-{op['vm_id']}-g{snap['generation']+1}" if op['action']=='retire' else 'instances/'+snap['name']
                 if op.get('source')!=source or op.get('target')!=target:
@@ -433,6 +437,8 @@ class Manager:
         if action in MUTATIONS:
             if action != 'create' and not (action == 'retire' and execute and key is None) and not self._text_token(key):
                 fail('INVALID_SPEC', 'idempotency_key of 1..200 UTF-8 bytes required')
+            if action=='retire' and 'expected_lifecycle_generation' in spec and key is None:
+                fail('INVALID_SPEC','generation-guarded retire requires an idempotency_key')
             return self._normalize(action, spec)
         if action == 'cpu-policy-set':
             from xenova_cpu import validate_spec
@@ -723,6 +729,11 @@ class Manager:
                 fail('INVALID_SPEC','explicit IP must be 192.168.77.2..99')
             return {**{k:spec[k] for k in sorted(spec)}, 'vm_id':normalize_uuid(spec['vm_id'])}
         required = {'vm_id', 'confirm_vm_id'} if action == 'purge' else {'vm_id'}
+        if action=='retire' and 'expected_lifecycle_generation' in spec:
+            generation=spec['expected_lifecycle_generation']
+            if type(generation) is not int or generation<0:
+                fail('INVALID_SPEC','expected_lifecycle_generation must be a nonnegative integer')
+            required.add('expected_lifecycle_generation')
         if set(spec) != required:
             fail('INVALID_SPEC', 'UUID target required')
         result = {**spec, 'vm_id':normalize_uuid(spec.get('vm_id'))}
@@ -1071,8 +1082,8 @@ class Manager:
                 if not complete(op,spec):return None
             data={'attempt':op,'original_result':op['result'],'current_observation':None}
         elif action in ('retire','restore','purge','update-resources','firmware-transition'):
-            if key is None:
-                return None  # Keyless retire resolves its generation only under the mutation locks.
+            if key is None or (action=='retire' and 'expected_lifecycle_generation' in spec):
+                return None  # HTTP retire resolves or verifies the generation under the mutation locks.
             matches=[q for q in self._operations(deadline=read_end) if q['idempotency_key']==key]
             if len(matches)>1:fail('RECONCILE_REQUIRED','operation selector is ambiguous')
             if not matches:return None
@@ -1664,7 +1675,8 @@ class Manager:
         legacy_key = f'retire-{identity}'
         generation_key = f'{legacy_key}-g{generation}'
         originals = [op for op in operations if op['action'] == 'retire' and op['vm_id'] == identity
-                     and op['idempotency_key'] in (legacy_key, generation_key)
+                     and (op['idempotency_key'] in (legacy_key, generation_key)
+                          or op['request'].get('expected_lifecycle_generation')==generation)
                      and op['expected_generation'] == generation]
         if len(originals) > 1:
             fail('RECONCILE_REQUIRED', 'multiple retire operations match this lifecycle generation')
@@ -1683,6 +1695,21 @@ class Manager:
             fail('RECONCILE_REQUIRED', 'completed retire disagrees with the current lifecycle')
         return (original['idempotency_key'] if original else generation_key), generation
 
+    @staticmethod
+    def _guard_retire_generation(spec, tomb, previous=None):
+        expected=spec['expected_lifecycle_generation']
+        if tomb is None:
+            matches=expected==0 and previous is not None and previous['status']!='SUCCEEDED'
+        elif tomb['lifecycle']=='REGISTERED':
+            matches=tomb['generation']==expected and (previous is None or previous['status']!='SUCCEEDED')
+        else:
+            matches=(previous is not None and tomb['lifecycle']=='RETIRED' and tomb['generation']==expected+1
+                     and tomb.get('last_operation_id')==previous['operation_id']
+                     and tomb.get('archive')==previous['target'])
+        if not matches:
+            fail('TARGET_CHANGED','retire target is no longer in the requested lifecycle generation',
+                 details={'accepted':False})
+
     def _mutate(self, action, spec, execute, key, records, context):
         filesystem_check=None
         if action == 'firmware-transition':
@@ -1693,9 +1720,11 @@ class Manager:
             return mutate(self,spec,execute,key,records,context,fail)
         operations=self._operations()
         implicit_retire = action == 'retire' and key is None
+        guarded_retire = action == 'retire' and 'expected_lifecycle_generation' in spec
         tombstones = None
-        if implicit_retire:
+        if implicit_retire or guarded_retire:
             tombstones = self._tombs()
+        if implicit_retire:
             key, retire_generation = self._retire_key(spec['vm_id'], records, operations, tombstones.get(spec['vm_id']))
         matches=[o for o in operations if o['idempotency_key']==key]
         if len(matches)>1:fail('RECONCILE_REQUIRED','operation selector is ambiguous')
@@ -1704,15 +1733,20 @@ class Manager:
         if previous:
             if action!='create':operations=None
             context['operation_id']=previous['operation_id']
+            if implicit_retire and 'expected_lifecycle_generation' in previous['request']:
+                # 구형 HTTP 호출도 같은 등록 세대의 키 있는 보관을 회수할 수 있다.
+                spec={**spec,'expected_lifecycle_generation':retire_generation}
             same_request=(previous['action']==action and
                           (self._same_create_request(previous,spec) if action=='create' else previous['request']==spec))
             if not same_request:
                 fail('IDEMPOTENCY_CONFLICT','same key has a different action or request')
             if implicit_retire and previous['expected_generation'] != retire_generation:
                 fail('TARGET_CHANGED', 'retire key belongs to a different lifecycle generation')
+            tomb = (self._tombs() if tombstones is None else tombstones).get(previous['vm_id'])
+            if guarded_retire:
+                self._guard_retire_generation(spec, tomb, previous)
             context.update(asset_operation=previous, asset_accepted=True)
             context['replayed']=True
-            tomb = (self._tombs() if tombstones is None else tombstones).get(previous['vm_id'])
             if action=='create' and previous['status']!='SUCCEEDED':
                 state=self._owner_state(previous)
                 if state in ('active','reconciling'):
@@ -1726,7 +1760,9 @@ class Manager:
                      details={**error.get('details',{}),'operation_id':previous['operation_id'],
                               'replayed':True,'original_create_succeeded':False,'reconciliation':previous['reconciliation']})
             if previous['status']=='SUCCEEDED':
-                if implicit_retire:
+                if implicit_retire or guarded_retire:
+                    if guarded_retire and any(record['uuid']==spec['vm_id'] for record in records.values()):
+                        fail('RECONCILE_REQUIRED','registry and tombstone disagree')
                     self._metadata_at(tomb['record'], self._archive(tomb))
                     sync_directory(self.data / 'operations')
                     return {**previous['result'], 'operation':previous,
@@ -1809,6 +1845,8 @@ class Manager:
             tomb=None
         else:
             tomb=self._state(spec['vm_id'],records,tombstones=tombstones)
+            if guarded_retire:
+                self._guard_retire_generation(spec, tomb)
             state=tomb['lifecycle']
             if state=='PURGED':
                 fail('VM_PURGED','VM assets have been purged')

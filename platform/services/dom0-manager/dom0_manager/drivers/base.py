@@ -25,7 +25,7 @@ from uuid import UUID
 
 from ..errors import NotSupportedByPlatform, VMNotFound
 from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, StatsSource, UnavailableReason,
-                      UpdateCpuPolicyRequest, Vm, VmOperationAction, VmOperationResult, VmState, VmStats)
+                      UpdateCpuPolicyRequest, Vm, VmLifecycle, VmOperationAction, VmOperationResult, VmState, VmStats)
 
 
 @dataclass(frozen=True)
@@ -177,8 +177,12 @@ class Driver(ABC):
         """같은 원 시작을 회수한다. 원 기록이 없을 때만 None을 반환한다."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track start operations")
 
-    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
-        """원 작업 ID의 제한된 조회. 작업 기록이 없는 드라이버는 501."""
+    def vm_lifecycle(self, vm_id: UUID) -> VmLifecycle:
+        raise NotSupportedByPlatform(f"{self.name} driver does not expose VM lifecycle")
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction,
+                     operation_id: UUID | None = None, key: str | None = None) -> VmOperationResult:
+        """원 작업 ID 또는 보관 키로 제한된 조회. 작업 기록이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track VM operations")
 
     def reboot(self, vm_id: UUID) -> None:  # S15P31E110-208
@@ -233,6 +237,9 @@ class Provisioner(ABC):
     @abstractmethod
     def delete_instance(self, vm_id: UUID) -> None:
         """등록된 인스턴스를 보관한다. guards_retirement 구현은 대상 검증과 원 작업 회수도 맡는다."""
+
+    def delete_instance_at_generation(self, vm_id: UUID, *, key: str, generation: int) -> None:
+        raise NotSupportedByPlatform("provisioner does not support generation-guarded retirement")
 
     def update_resources(self, vm_id: UUID, *, vcpus: int, memory_mib: int, key: str) -> ResourceUpdate:  # S15P31E110-368
         """정지한 Linux VM 의 등록 설정에서 vCPU·메모리를 바꾼다(계약 4.12). 다음 시작부터 적용되고 게스트를 시작하지 않는다.

@@ -151,6 +151,18 @@ class ControlOperation(BaseModel):
 
 
 VmOperationAction = Literal["create", "start", "stop", "retire"]
+
+
+class VmLifecycle(BaseModel):
+    """등록 수명 조회. 현재 Xen 실행 상태와 독립적이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm_id: UUID
+    lifecycle: Literal["REGISTERED", "RETIRED", "PURGING", "PURGED"]
+    generation: int = Field(ge=0)
+
+
 VmOperationStage = Literal[
     "preflight", "acceptance", "asset_preparation", "registration", "network_apply",
     "start_prepare", "start_submit", "start_confirmation", "shutdown_submit", "shutdown_confirmation",

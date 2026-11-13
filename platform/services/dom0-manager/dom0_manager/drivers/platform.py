@@ -61,7 +61,7 @@ from ..errors import (
     VMSpecConflict,
 )
 from ..models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, UpdateCpuPolicyRequest,
-                      VmOperationAction, VmOperationResult, VmOperationStage, VmResources, VmState)
+                      VmLifecycle, VmOperationAction, VmOperationResult, VmOperationStage, VmResources, VmState)
 from .base import CreateSpec, Domain, Driver, HostInfo, InstancePaths, Provisioner, StatsSample
 from .xentop import Xentop, collect_stats
 from .xl import Xl
@@ -748,6 +748,16 @@ class PlatformDriver(Driver):
         data = raise_for_envelope(call_with_budget(self._request_manager(), "templates"), context="templates")
         return list(data.get("templates") or [])
 
+    def vm_lifecycle(self, vm_id: UUID) -> VmLifecycle:
+        spec = {"vm_id": str(vm_id), "timeout_ms": self._read_timeout_ms}
+        envelope = call_with_budget(self._request_manager(), "intents", spec)
+        view = raise_for_envelope(envelope, context=f"VM lifecycle {vm_id}", hide_detail=True).get("vm")
+        if (not isinstance(view, dict) or _uuid(view.get("vm_id")) != vm_id
+                or not _generation(view.get("generation"))
+                or view.get("lifecycle") not in ("REGISTERED", "RETIRED", "PURGING", "PURGED")):
+            raise PlatformUnavailable("platform returned an invalid VM lifecycle")
+        return VmLifecycle(vm_id=vm_id, lifecycle=view["lifecycle"], generation=view["generation"])
+
     def _views(self, lifecycle: str = "REGISTERED") -> list[dict[str, Any]]:
         # 조회 한도를 하위에 명시한다. 요청 예산이 더 짧으면 call_with_budget 이 그 값으로 줄인다
         spec = {"lifecycle": lifecycle, "timeout_ms": self._read_timeout_ms}
@@ -941,12 +951,14 @@ class PlatformDriver(Driver):
             raise PlatformUnavailable("platform returned a different or unconfirmed original start result")
         return result
 
-    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction,
+                     operation_id: UUID | None = None, key: str | None = None) -> VmOperationResult:
         """원장의 원 결과만 조회한다. 현재 실행·사용자 의도를 다시 판정하거나 작업을 재개하지 않는다."""
         asset = action in ("create", "retire")
         read = "operation" if asset else "control-operation"
+        selector = {"operation_id": str(operation_id)} if key is None else {"idempotency_key": key}
         envelope = call_with_budget(self._request_manager(), read, {
-            "vm_id": str(vm_id), "operation_id": str(operation_id), "timeout_ms": _LOOKUP_TIMEOUT_MS,
+            "vm_id": str(vm_id), "timeout_ms": _LOOKUP_TIMEOUT_MS, **selector,
         })
         missing = OperationNotFound("no matching original VM operation at lookup time")
         if not envelope.get("ok"):
@@ -960,8 +972,10 @@ class PlatformDriver(Driver):
         if not isinstance(data, dict):
             raise PlatformUnavailable("platform returned no original VM operation data")
         record = data.get("operation")
-        if (not isinstance(record, dict) or _uuid(record.get("operation_id")) != operation_id
-                or _uuid(envelope.get("operation_id")) != operation_id):
+        returned_id = _uuid(envelope.get("operation_id"))
+        if (not isinstance(record, dict) or returned_id is None or _uuid(record.get("operation_id")) != returned_id
+                or (operation_id is not None and returned_id != operation_id)
+                or (key is not None and record.get("idempotency_key") != key)):
             raise PlatformUnavailable("platform returned an invalid original VM operation record")
         if _uuid(record.get("vm_id")) != vm_id:
             raise missing
@@ -998,7 +1012,7 @@ class PlatformDriver(Driver):
         code = _str(error.get("code"))
         if code and not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code):
             raise PlatformUnavailable("platform returned an invalid original VM operation error code")
-        return _result(action, stage, accepted, status, operation_id, code)
+        return _result(action, stage, accepted, status, returned_id, code)
 
     # ---- CPU 배치 (S15P31E110-353) ----
 
@@ -1252,6 +1266,16 @@ class PlatformProvisioner(Provisioner):
     def delete_instance(self, vm_id: UUID) -> None:
         # Manager가 같은 lease에서 현재 세대와 원 작업을 골라 검증한다.
         envelope = call_with_budget(self.manager, "retire", {"vm_id": str(vm_id)}, execute=True)
+        self._require_retired(vm_id, envelope)
+
+    def delete_instance_at_generation(self, vm_id: UUID, *, key: str, generation: int) -> None:
+        envelope = call_with_budget(self.manager, "retire", {
+            "vm_id": str(vm_id), "expected_lifecycle_generation": generation,
+        }, execute=True, idempotency_key=key)
+        self._require_retired(vm_id, envelope)
+
+    @staticmethod
+    def _require_retired(vm_id: UUID, envelope: dict[str, Any]) -> None:
         data = raise_for_envelope(envelope, context=f"retire {vm_id}", action="retire")
         if not isinstance(data, dict):
             raise PlatformUnavailable(f"retire {vm_id}: completion was not confirmed", platform_code="RECONCILE_REQUIRED")

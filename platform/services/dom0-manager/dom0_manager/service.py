@@ -31,7 +31,7 @@ from .drivers.base import CreateSpec, Domain, Driver, Provisioner, StatsSample
 from .errors import (Dom0ManagerError, DriverTimeout, InsufficientResources, InvalidArgument, InvalidState,
                      OperationNotFound, VMExists, VMNotFound, VMSpecConflict)
 from .models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate,
-                     UpdateCpuPolicyRequest, UpdateResourcesRequest, VmOperationAction, VmOperationResult, VmOperationStage, VmState)
+                     UpdateCpuPolicyRequest, UpdateResourcesRequest, VmLifecycle, VmOperationAction, VmOperationResult, VmOperationStage, VmState)
 
 
 DOM0_UUID = UUID(int=0)  # xl list -v 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
@@ -265,10 +265,12 @@ class VmService:
             except VMNotFound:
                 raise InvalidState(f"vm {vm_id} has no running domain to kill") from None
 
-    def delete(self, vm_id: UUID) -> None:
+    def delete(self, vm_id: UUID, *, key: str | None = None, generation: int | None = None) -> None:
         """계약 v1.1: 실행 중이면 409, 등록이 없으면 404, 정지된 VM 은 숨김 보관(retire). 강제 종료는 하지 않는다."""
         with _failure_context("retire", "preflight", before_submission=True):
             reject_dom0(vm_id)
+            if (key is None) != (generation is None):
+                raise InvalidArgument("Idempotency-Key and expected_lifecycle_generation must be supplied together")
         with _failure_context("retire", "preflight", before_submission=True), self._vm_lock(vm_id):
             if not self._provisioner.guards_retirement:
                 if self._driver.has_domain(vm_id):
@@ -277,8 +279,18 @@ class VmService:
                     raise VMNotFound(f"instance {vm_id} not registered")
             request_budget.ensure(f"retiring vm {vm_id}")
             with _failure_context("retire", "acceptance", before_submission=False):
-                self._provisioner.delete_instance(vm_id)
+                if key is not None and generation is not None:
+                    self._provisioner.delete_instance_at_generation(vm_id, key=key, generation=generation)
+                else:
+                    self._provisioner.delete_instance(vm_id)
 
-    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
+    def vm_lifecycle(self, vm_id: UUID) -> VmLifecycle:
         reject_dom0(vm_id)
+        return self._driver.vm_lifecycle(vm_id)
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction,
+                     operation_id: UUID | None = None, key: str | None = None) -> VmOperationResult:
+        reject_dom0(vm_id)
+        if key is not None:
+            return self._driver.vm_operation(vm_id, action=action, key=key)
         return self._driver.vm_operation(vm_id, action=action, operation_id=operation_id)

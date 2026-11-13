@@ -321,9 +321,19 @@ paths:
       description: >-
         실행 중인 VM 은 409 로 거부한다. 정지된 VM 은 retire 생명주기로 숨김 보관하며
         tombstone 과 generation 을 유지한다. 같은 디스크를 restore 하면 기존 vm_id 를 유지한다.
+        선택 헤더와 세대 쿼리는 함께 지정한다. 이전 세대 요청은 409 TARGET_CHANGED로 거절한다.
       x-driver-timeout-seconds: 90
       parameters:
         - $ref: '#/components/parameters/RequestBudget'
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
+        - name: expected_lifecycle_generation
+          in: query
+          schema:
+            type: integer
+            minimum: 0
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -333,6 +343,38 @@ paths:
           $ref: '#/components/responses/VMNotFound'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/lifecycle:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [VMs]
+      operationId: getVmLifecycle
+      summary: VM 등록 상태와 세대 조회
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: 등록 수명과 세대
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmLifecycle'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
         '409':
           $ref: '#/components/responses/InvalidState'
         '500':
@@ -574,6 +616,41 @@ paths:
                 $ref: '#/components/schemas/ControlOperation'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/OperationNotFound'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/operations:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [VMs]
+      operationId: getVmRetireOperationByKey
+      summary: 요청 키로 원 보관 결과 조회
+      parameters:
+        - name: request_key
+          in: query
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: 원 보관 작업 상태
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmOperationResult'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/OperationNotFound'
         '500':
@@ -1475,6 +1552,20 @@ components:
             - $ref: '#/components/schemas/VmOperationResult'
             - type: 'null'
           description: 생성·시작·정지·보관 실패에서 확인한 작업 문맥. 원 오류 코드는 Error.platform_code에 있다
+    VmLifecycle:
+      type: object
+      additionalProperties: false
+      required: [vm_id, lifecycle, generation]
+      properties:
+        vm_id:
+          type: string
+          format: uuid
+        lifecycle:
+          type: string
+          enum: [REGISTERED, RETIRED, PURGING, PURGED]
+        generation:
+          type: integer
+          minimum: 0
     VmOperationResult:
       type: object
       additionalProperties: false

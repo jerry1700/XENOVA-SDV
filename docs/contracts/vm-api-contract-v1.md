@@ -392,6 +392,10 @@ raw journal·파일 경로·인증정보는 내지 않는다.
 
 dom0-manager는 기존 DELETE 요청 형식을 사용합니다. 플랫폼은 현재 등록 세대에 연결된 보관 작업을 기존 대상 잠금 안에서 선택합니다. 이동 후 응답에 실패해도 같은 세대의 작업을 이어 가며, 현재 보관 기록이 그 작업의 완료를 확인하면 다시 `204`를 반환합니다. 복원 후 DELETE는 새 등록 세대의 보관입니다. 이 경로는 요청 키를 받지 않으므로 복원 뒤 도착한 지연 재전달도 그 시점의 등록 세대를 대상으로 합니다. 명시적으로 지정한 과거 작업 결과는 기존 플랫폼 `operation` 조회로 확인합니다.
 
+복원과 경합할 수 있는 호출자는 `GET /api/v1/vms/{vm_id}/lifecycle`의 `REGISTERED` 상태와 `generation`을 확인하고, `DELETE /api/v1/vms/{vm_id}?expected_lifecycle_generation=<generation>`에 `Idempotency-Key`를 함께 보냅니다. 둘 중 하나만 보내면 `400`입니다. 같은 키·세대는 같은 작업을 회수합니다. 복원 뒤에는 도착한 적 없는 옛 요청도 `409 TARGET_CHANGED`로 거절합니다. 같은 키의 대상이나 세대를 바꾸면 `409 IDEMPOTENCY_CONFLICT`입니다. 복원한 VM을 새로 보관하려면 새 키와 현재 세대를 사용합니다. 기존 보호에 따라 실행 중이면 거절합니다.
+
+DELETE 응답 전체를 잃었다면 `GET /api/v1/vms/{vm_id}/operations?request_key=<key>`로 보관 원장의 상태와 ID를 조회합니다. 복원 뒤에도 과거 완료 기록을 읽을 수 있습니다. 현재 세대는 `/lifecycle`에서 별도로 확인합니다. 조회의 `404 OperationNotFound`는 그 시점의 검색 부재입니다.
+
 ### 4.5 `GET /healthz`
 
 dom0-manager는 정상이지만 Xen이 응답하지 않는 상황을 구분하기 위한 엔드포인트입니다.
