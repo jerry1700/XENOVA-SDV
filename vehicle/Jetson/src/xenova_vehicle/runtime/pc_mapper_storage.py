@@ -438,7 +438,7 @@ class PcMapperStorage:
             return aggregate.provenance_id
         temporal=result.mapped_road
         temporal_root=(temporal_root_for(temporal.sources) if temporal is not None and prior_qualified
-                       and self._crossing is not None and temporal.within(self.profile.pipeline.registration) else None)
+                       and self._crossing is not None and temporal.within(self.profile.pipeline.road_limits) else None)
         parking_root=(temporal_root_for(frozenset((key,*(source for source,_ in result.parking_tape_history))))
                       if prior_qualified and result.parking_tape_history else None)
         try:evidence=EvidenceTable(tuple(records[k] for k in sorted(records)),tuple(contexts[k] for k in sorted(contexts)))
@@ -457,7 +457,8 @@ class PcMapperStorage:
                 method_manifest_sha256=self.profile.sha256,input_kind='SYNTHETIC',calibration_profile=self.motion_profile.bound_calibration,
                 parking_aisles=self.profile.parking_aisles,
                 aisle_lane_indices=None if self.profile.catalog_policy is None else self.profile.catalog_policy.aisle_lane_indices,
-                crossing=self._crossing,lane_profile=self.profile.pipeline.registration,clock_us=self.clock)
+                crossing=self._crossing,lane_profile=self.profile.pipeline.registration,
+                road_geometry_limits=self.profile.pipeline.road_limits,clock_us=self.clock)
             if self._head is not None:self.catalogs.observe_heads(*self._head,now_us=now_us)
         draft=self.catalogs.prepare_pc(proof,result,capture_prior=capture_prior,registration_revision=registration_revision,
             prior_qualified=prior_qualified,now_us=now_us,roi_bounds=roi_bounds,temporal_provenance_id=temporal_root,

@@ -65,8 +65,8 @@ class PointFeature:
             raise ValueError('explicit point constraint kind required')
         if (type(self.endpoint_matches) is not tuple or self.endpoint_matches and
                 (self.normal_only or tuple(segment for segment,_ in self.endpoint_matches)!=self.compatible
-                 or any(type(end) is not int or end not in (0,1) for _,end in self.endpoint_matches))):
-            raise ValueError('endpoint constraint requires an original finite segment correspondence')
+                 or any(type(end) is not int or end not in (0,1,2) for _,end in self.endpoint_matches))):
+            raise ValueError('finite constraint requires an original finite segment correspondence')
 
 
 @dataclass(frozen=True)
@@ -208,12 +208,13 @@ class RegistrationResult:
 
 
 def overlapping_points(points, reference, prior, profile, *, observed_ends=None, position_radius_m=None,
-                       max_lateral_match_m=None, include_endpoints=False):
+                       max_lateral_match_m=None, include_endpoints=False, include_midpoints=False):
     """공통 구간을 고른다. observed_ends는 조각 ID별 (a, b, 중심선 오차)다.
 
     끝점 검사와 횡방향 대응 상한에는 capture로 조각 ID를 구분한 reference를 사용한다.
     횡방향 상한은 선의 대응을 고르는 조건이다. 잔차 계산의 원 관측 오차는 보존한다.
     include_endpoints는 관측한 중심선 끝과 방향이 확인된 유한 지도 조각에만 적용한다.
+    include_midpoints는 양끝을 확인했으나 끝의 순서는 모호할 수 있는 짧은 조각에 쓴다.
     """
     if max_lateral_match_m is None:
         lateral_limit = math.inf
@@ -295,11 +296,17 @@ def overlapping_points(points, reference, prior, profile, *, observed_ends=None,
         if compatible:
             observed.append(replace(point, compatible=tuple(compatible))
                 if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1' else point)
-            if include_endpoints and matching_ends:
+            if (include_endpoints or include_midpoints) and matching_ends:
                 # 끝점도 같은 횡방향 상한과 원 유한 구간 대응을 통과해야 한다.
-                endpoint_support.setdefault(point.component,(point.capture_id,set()))[1].update(compatible)
-    for component,(capture,compatible) in endpoint_support.items():
+                endpoint_support.setdefault(point.component,(point.capture_id,set(),point.error_xy))[1].update(compatible)
+    for component,(capture,compatible,error_xy) in endpoint_support.items():
         a,b,error=observed_ends[component]
+        if include_midpoints:
+            matches = tuple(segment for segment in end_matches[component] if segment in compatible)
+            observed.append(PointFeature(_midpoint(a,b),error,component,capture,matches,error_xy=error_xy,
+                endpoint_matches=tuple((segment,2) for segment in matches)))
+        if not include_endpoints:
+            continue
         matches=tuple((segment,orientation) for segment,orientation in end_matches[component].items()
                       if segment in compatible and orientation is not None)
         if matches:
@@ -308,6 +315,15 @@ def overlapping_points(points, reference, prior, profile, *, observed_ends=None,
                     tuple(segment for segment,_ in matches),endpoint_matches=tuple(
                         (segment,orientation^end) for segment,orientation in matches)))
     return tuple(observed)
+
+
+def _midpoint(a, b):
+    return (a[0]+b[0])/2,(a[1]+b[1])/2
+
+
+def finite_feature_point(segment, index):
+    """0/1은 실제 조각 양끝, 2는 끝점 순서에 무관한 중점이다."""
+    return _midpoint(segment.a,segment.b) if index == 2 else (segment.a,segment.b)[index]
 
 
 def register(points, reference, prior, profile=RegistrationProfile(), *, calibration_id, position_radius_m=None):
@@ -351,7 +367,7 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     point_terms = []
     for point,segments in zip(points,compatible):
         endpoint_indices = dict(point.endpoint_matches)
-        ends = tuple((s.a,s.b)[endpoint_indices[s.component]] for s in segments) if endpoint_indices else ()
+        ends = tuple(finite_feature_point(s,endpoint_indices[s.component]) for s in segments) if endpoint_indices else ()
         point_terms.append((point,segments,ends,math.hypot(*point.point),
             0. if point.error_xy is None else math.hypot(*point.error_xy)))
     needed = sum(map(len,compatible))

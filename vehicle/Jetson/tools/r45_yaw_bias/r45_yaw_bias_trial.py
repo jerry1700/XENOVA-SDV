@@ -324,6 +324,10 @@ def main():
     parser.add_argument('--online-map', action='store_true', help='run the normal pipeline from an empty map')
     parser.add_argument('--no-online-filter', action='store_true', help='disable the online filter for the paired control')
     parser.add_argument('--rate-limit', type=float, default=.001)
+    parser.add_argument('--position-drift-mps', type=float, help='override the replay-only position drift budget')
+    parser.add_argument('--yaw-drift-rps', type=float, help='override the replay-only yaw drift budget')
+    parser.add_argument('--ground-drift-mps', type=float, nargs=2, metavar=('X','Y'), default=(0.,0.),
+                        help='inject a scene-coordinate position drift without changing the encoder path')
     parser.add_argument('--trace', type=Path, required=True)
     parser.add_argument('--scene', type=Path, required=True)
     parser.add_argument('--profiles', type=Path, required=True)
@@ -339,6 +343,14 @@ def main():
     if (not all(math.isfinite(value) for value in (options.rate,options.rate_limit,options.min_sigma))
             or options.rate_limit <= 0. or options.min_sigma < 0.):
         parser.error('rates and threshold must be finite, with a positive rate limit and nonnegative threshold')
+    overrides = {key: getattr(options,key) for key in ('position_drift_mps','yaw_drift_rps')
+                 if getattr(options,key) is not None}
+    if any(not math.isfinite(value) or value < 0 for value in overrides.values()):
+        parser.error('localization drift budgets must be finite and nonnegative')
+    if not all(math.isfinite(value) for value in options.ground_drift_mps):
+        parser.error('injected ground drift must be finite')
+    if (overrides or any(options.ground_drift_mps)) and not options.online_map:
+        parser.error('ground drift and localization budget overrides require --online-map')
     drive = json.loads(options.trace.read_bytes())
     samples = tuple(drive['trace']) + (dict(pose=drive['final'], step=len(drive['trace'])),)
     if len(samples) < 2 or any(sample['step'] != step for step,sample in enumerate(samples)):
@@ -381,7 +393,8 @@ def main():
             PerceptionPipeline._propagate_odometry = observe_propagation
         online_filter = options.online_map and not options.no_online_filter
         frames,rig,cones = run(route,options.scene,options.profiles,options.rgb_eeprom,factory,
-                               estimate_yaw_bias=online_filter,map_local_origin=options.online_map)
+                               estimate_yaw_bias=online_filter,map_local_origin=options.online_map,
+                               localization_overrides=overrides,ground_drift_mps=options.ground_drift_mps)
     finally:
         MapOdomAlignment._project = project
         PerceptionPipeline._propagate_odometry = propagate
@@ -412,6 +425,8 @@ def main():
         online_map=options.online_map,statuses=dict(Counter(frame['status'] for frame in frames)),
         pose_frames=sum(frame['mapped'] is not None for frame in frames), frames=len(frames),
         cones=cones, rows=scored)
+    if overrides or any(options.ground_drift_mps):
+        metrics.update(localization_overrides=overrides, ground_drift_mps=options.ground_drift_mps)
     options.output.write_text(json.dumps(metrics,indent=2,allow_nan=False),encoding='utf-8')
     print({key:value for key,value in metrics.items() if key!='rows'}, flush=True)
 

@@ -291,7 +291,8 @@ class MapperMapping:
             map_frame_id='odom:'+self._context.odom_epoch,body=self.calibration.body,
             method_manifest_sha256=self.profile.sha256,input_kind='LIVE',calibration_profile=self.calibration,
             parking_aisles=self.profile.parking_aisles,aisle_lane_indices=self._roles,crossing=self._crossing,
-            lane_profile=self.profile.pipeline.registration,clock_us=self._completion_clock)
+            lane_profile=self.profile.pipeline.registration,road_geometry_limits=self.profile.pipeline.road_limits,
+            clock_us=self._completion_clock)
         scope=scope.with_parking_method(catalogs._accepted.parking.method)
         collector.rebind_scope(scope)
         if self._complete is not None:scope=catalogs.restore_complete(self._complete,current_scope=scope,now_us=now_us);collector.rebind_scope(scope)
@@ -553,7 +554,7 @@ class MapperMapping:
                     temporal_root=None
                     temporal=result.mapped_road
                     if (temporal is not None and result.summary.get('localization_qualified') is True
-                            and self._crossing is not None and temporal.within(self.profile.pipeline.registration)):
+                            and self._crossing is not None and temporal.within(self.profile.pipeline.road_limits)):
                         temporal_root=collector.temporal_lane_root(temporal)
                     parking_root=None
                     if result.parking_tape_history and result.summary.get('localization_qualified') is True:

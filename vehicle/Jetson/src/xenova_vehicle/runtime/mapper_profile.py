@@ -20,9 +20,10 @@ from ..perception.depth import DepthConfig
 from ..perception.free_space import TargetClass
 from ..perception.parking import ParkingAisle
 from ..perception.pipeline import PipelineProfile
-from ..perception.road import RoadProfile
+from ..perception.road import RoadGeometryLimits, RoadProfile
 from ..perception.tape import TapeProfile
 from ..perception.tof import TofLeaf
+from ..perception.visual_registration import VisualRegistrationPolicy
 from .scene import SurveyProfile
 
 
@@ -242,10 +243,13 @@ class MapperProfile:
         sensors=SensorLimits.from_dict(own['sensors']); stopping=_typed(StoppingLimits,own['stopping'])
         if stopping.max_speed_mps<sensors.max_speed_mps: raise MapperProfileError('stopping bound cannot understate admitted sensor motion')
         data=own['pipeline']
-        if type(data) is not dict or set(data)!={f.name for f in fields(PipelineProfile) if f.init}:
+        optional={'visual_registration':VisualRegistrationPolicy,'road_geometry_limits':RoadGeometryLimits}
+        pipeline_names={f.name for f in fields(PipelineProfile) if f.init}
+        if type(data) is not dict or set(data)-pipeline_names or pipeline_names-set(optional)-set(data):
             raise MapperProfileError('all PipelineProfile fields must be explicit')
         nested={name:_typed(cls,data[name]) for name,cls in (('grid',GridSpec),('tape',TapeProfile),('road',RoadProfile),
                 ('depth',DepthConfig),('registration',RegistrationProfile))}
+        nested.update((name,_typed(cls,data[name])) for name,cls in optional.items() if data.get(name) is not None)
         _uint(data['free_ttl_us'],1,500000); _uint(data['max_observation_age_us'],1,500000)
         if (not 2<=nested['grid'].width<=64 or not 2<=nested['grid'].height<=64 or nested['depth'].stride!=1):
             raise MapperProfileError('deployment grid/stride1/original500ms age bound exceeded')

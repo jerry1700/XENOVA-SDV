@@ -121,6 +121,33 @@ class AlignmentAnchorTests(unittest.TestCase):
         self.assertAlmostEqual(recovered.summary['mapped_pose'][0], .15, delta=.003)
         self.assertIs(pipeline._propagation_anchor, anchor)
 
+    def test_one_conflicting_rgb_preserves_bounded_odometry_without_updating_map(self):
+        for status in ('BOUNDED', 'INCONSISTENT'):
+            with self.subTest(status=status):
+                pipeline = self.pipeline()
+                anchor = self.seed(pipeline)
+                reference = pipeline.reference
+                revision = pipeline.grid.revision
+
+                def conflicting(points, reference, prior, profile, **kwargs):
+                    fit = register(points,reference,prior,profile,**kwargs)
+                    if status == 'INCONSISTENT':
+                        return replace(fit,status=status,representative=None,feasible=())
+                    x,y,yaw = prior.center
+                    return replace(fit,status=status,representative=(x+.015,y,yaw),
+                                   position_error_m=.003,yaw_error_rad=.002)
+
+                with patch('xenova_vehicle.perception.visual_registration.register',side_effect=conflicting):
+                    result = self.execute(pipeline,3,x=.02,truth_x=.02,error=.02)
+                self.assertEqual(result.summary['localization_status'],'ODOMETRY_CONTINUED')
+                self.assertAlmostEqual(result.summary['mapped_pose'][0],.02)
+                self.assertTrue(result.summary['quarantined'])
+                self.assertFalse(result.summary['localization_qualified'])
+                self.assertIsNone(result.mapped_odometry)
+                self.assertIs(pipeline._alignment,anchor)
+                self.assertIs(pipeline.reference,reference)
+                self.assertEqual(pipeline.grid.revision,revision)
+
     def test_recent_complementary_lines_reduce_propagation_error_and_move_anchor(self):
         self.fixture.profile=replace(self.fixture.profile,registration=replace(
             self.fixture.profile.registration,cell_steps=(.005,.005,.002)))
@@ -152,7 +179,7 @@ class AlignmentAnchorTests(unittest.TestCase):
             return replace(result,status='BOUNDED',complete=True,representative=(x+.04,y,yaw),
                 position_error_m=0.,yaw_error_rad=0.,feasible=(PoseBox((x+.04,x+.04),(y,y),(yaw,yaw)),))
 
-        with patch('xenova_vehicle.perception.pipeline.register',side_effect=fit):
+        with patch('xenova_vehicle.perception.visual_registration.register',side_effect=fit):
             result = self.execute(pipeline,4,x=.04,truth_x=.04)
         self.assertTrue(attempted)
         self.assertEqual(result.registration.status,'BOUNDED')

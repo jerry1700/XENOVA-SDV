@@ -9,7 +9,7 @@ import math
 
 from .odometry import PoseEstimate
 from .registration import transform_point, wrap_yaw
-from .wheel_motion import relative_wheel_bounds
+from .wheel_motion import relative_wheel_bounds, wheel_path_length_bound
 
 
 @dataclass(frozen=True)
@@ -152,8 +152,12 @@ class MapOdomAlignment:
             if yaw_drift_rad is not None:
                 yaw_drift = yaw_drift_rad
             transform_angle=math.nextafter(transform_angle+yaw_drift,math.inf)
+        path_length = (wheel_path_length_bound(original,odom)
+            if self._matched_poses is not None and yaw_drift else None)
+        # 고정 방향 오차는 변위에, 이동 중 누적된 방향 오차는 주행 길이에 적용한다.
+        fixed_angle = transform_angle if path_length is None else self.yaw_error_rad
         x,y=transform_point((raw.x,raw.y),self.pose)
-        rotation_scale=2*math.sin(min(math.pi,transform_angle)/2)
+        rotation_scale=2*math.sin(min(math.pi,fixed_angle)/2)
         rotation=math.hypot(raw.x,raw.y)*rotation_scale
         error=self.position_error_m+raw.position_error_m+rotation+position_drift
         angle=transform_angle+raw.yaw_error_rad
@@ -167,9 +171,12 @@ class MapOdomAlignment:
             wheel_bounds = relative_wheel_bounds(original,odom)
             if wheel_bounds is not None:
                 position, yaw = wheel_bounds
-                anchor_rotation = 2*math.sin(min(math.pi,goal.yaw_error_rad+yaw_drift)/2)
+                anchor_angle = goal.yaw_error_rad + (yaw_drift if path_length is None else 0.)
+                anchor_rotation = 2*math.sin(min(math.pi,anchor_angle)/2)
                 error = combine_wheel_bound(error,goal.position_error_m+position+distance*anchor_rotation+position_drift)
                 angle = combine_wheel_bound(angle,goal.yaw_error_rad+yaw+yaw_drift)
+        if path_length is not None:
+            error += 2*path_length*math.sin(min(math.pi,yaw_drift)/2)
         if angle>math.pi and drift_rates is None:
             raise ValueError('alignment no longer bounds a usable heading')
         if drift_rates is not None:

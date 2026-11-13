@@ -15,7 +15,7 @@ import struct
 from .registration import (PoseBox, PointFeature, SegmentFeature, FrozenReference,
     RegistrationProfile, register, transform_point)
 from ..perception.inputs import FrameStamp
-from ..perception.road import LaneHypothesis, RoadResult
+from ..perception.road import LaneHypothesis, RoadGeometryLimits, RoadResult
 from ..perception.temporal_road import MappedRoad
 from ..storage.contracts import (StorageContext, StorageJob, CatalogHeadSnapshot,
     CatalogReservation, CommitReceipt, canonical, digest, json_bytes, uint)
@@ -286,22 +286,27 @@ class LaneCatalog:
             raise ValueError('lane source changed original geometry/clock domain')
 
     def observe(self, road, source, prior, *, prior_qualified, crossing, profile=RegistrationProfile(),
-                position_radius_m=None):
-        return self._observe(road, source, prior, prior_qualified, crossing, profile, position_radius_m)
+                position_radius_m=None, geometry_limits=None):
+        return self._observe(road, source, prior, prior_qualified, crossing, profile, position_radius_m, geometry_limits)
 
-    def observe_mapped(self, candidate, source, *, prior_qualified, crossing, profile=RegistrationProfile()):
+    def observe_mapped(self, candidate, source, *, prior_qualified, crossing, profile=RegistrationProfile(),
+                       geometry_limits=None):
         """누적 점의 pose 오차는 이미 MAP 형상에 포함되어 있다."""
         if (type(candidate) is not MappedRoad or source.stamp.key not in candidate.sources
                 or len(candidate.sources) < 2):
             raise ValueError('current and historical RGB geometry required')
-        return self._observe(candidate.road, source, _MAP_IDENTITY, prior_qualified, crossing, profile, 0.,
+        return self._observe(candidate.road, source, _MAP_IDENTITY, prior_qualified, crossing, profile, 0., geometry_limits,
                              geometry_sources=tuple(sorted(candidate.sources)))
 
     def _observe(self, road, source, prior, prior_qualified, crossing, profile, position_radius_m,
-                 geometry_sources=()):
+                 geometry_limits, geometry_sources=()):
         self._source(source)
         if type(prior) is not PoseBox or type(profile) is not RegistrationProfile or type(prior_qualified) is not bool or profile.outlier_components:
             raise ValueError('joint actual prior and no-outlier bounded profile required')
+        if geometry_limits is None:
+            geometry_limits = RoadGeometryLimits(profile.max_position_error_m, profile.max_yaw_error_rad)
+        elif type(geometry_limits) is not RoadGeometryLimits:
+            raise ValueError('typed road geometry limits required')
         if position_radius_m is not None and (type(position_radius_m) not in (int, float)
                 or not math.isfinite(position_radius_m) or position_radius_m < 0):
             raise ValueError('original finite position radius required')
@@ -351,7 +356,8 @@ class LaneCatalog:
             pose, position, yaw = prior.center, _position_error(prior, position_radius_m), prior.widths[2] / 2
             ids = ()
         radius = max(math.hypot(*p) for p in h.divider + h.left_outer + h.right_outer)
-        if h.error_m + position + 2 * radius * math.sin(yaw / 2) > profile.max_position_error_m or h.yaw_error_rad + yaw > profile.max_yaw_error_rad:
+        if (h.error_m + position + 2 * radius * math.sin(yaw / 2) > geometry_limits.max_position_error_m
+                or h.yaw_error_rad + yaw > geometry_limits.max_yaw_error_rad):
             return result('UNKNOWN', checked_lanes=checked, reasons=('GEOMETRY_ENVELOPE_TOO_WIDE',))
         return result('UNIQUE' if ids else 'NEW', pose=pose, position_error_m=position,
             yaw_error_rad=yaw, matches=(ids,) if ids else (), checked_lanes=checked)

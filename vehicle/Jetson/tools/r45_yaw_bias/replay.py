@@ -223,8 +223,13 @@ def _cone_metrics(expected, observations, last):
         for identity,hits in observations.items()}
 
 
-def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_bias=False, map_local_origin=False):
-    """Feed only RGB, depth and encoder samples into the unchanged mapping entry point."""
+def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_bias=False, map_local_origin=False,
+        localization_overrides=None, ground_drift_mps=(0., 0.)):
+    """Feed RGB, depth and encoder samples into the mapping entry point.
+
+    Ground drift displaces the rendered vehicle relative to the recorded wheel path
+    in scene coordinates. It is passed to rendering and scoring only.
+    """
     cv2.setNumThreads(1)
     mapper = MapperProfile.from_bytes((profiles/'mapper-profile.json').read_bytes())
     calibration = CalibrationProfile.from_dict(json.loads((profiles/'perception-calibration.json').read_bytes()))
@@ -269,8 +274,12 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
     profile = replace(mapper.pipeline,grid=spec,road=road,tape=replace(mapper.pipeline.tape,x_max_m=1.5))
     core = PerceptionPipeline(live_calibration,profile,targets=mapper.targets,
                               estimate_yaw_bias=estimate_yaw_bias)
-    encoder = make_encoder(live_calibration,[pose for _,pose in route])
     policy = mapper.localization
+    if policy is None:
+        raise ValueError('replay requires an explicit localization policy')
+    if localization_overrides:
+        policy = replace(policy, **localization_overrides)
+    encoder = make_encoder(live_calibration,[pose for _,pose in route])
     origin = route[0][1] if map_local_origin else None
     expected = _cone_cells(track,spec,origin)
     occupied_by_cone = {identity:[] for identity in expected}
@@ -278,6 +287,9 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
     try:
         for index,(elapsed_us,truth) in enumerate(route):
             at = CAPTURE_START_US + elapsed_us
+            seconds = elapsed_us/1e6
+            truth = (truth[0]+seconds*ground_drift_mps[0],
+                     truth[1]+seconds*ground_drift_mps[1],truth[2])
             encoder.advance(index,at)
             observation = camera.capture(SceneSnapshot(str(UUID(int=1)),96+index,at,truth,scene))
             observation,pose = encoder.observe(observation)
@@ -287,7 +299,6 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
                 localization_position_drift_mps=policy.position_drift_mps,
                 localization_yaw_drift_rps=policy.yaw_drift_rps)
             summary = result.summary
-            seconds = elapsed_us/1e6
             if origin is not None:
                 x,y = transform_point((truth[0]-origin[0],truth[1]-origin[1]),(0.,0.,-origin[2]))
                 truth = x,y,wrap_yaw(truth[2]-origin[2])

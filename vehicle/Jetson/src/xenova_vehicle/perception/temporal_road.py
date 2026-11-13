@@ -483,19 +483,19 @@ def _mapped_candidate(run, key, profile):
                                  ('MULTI_FRAME_TAPE',),key,True),sources)
 
 
-def _mapped_parking_approach(sections, span, source_key, road_profile, registration):
+def _mapped_parking_approach(sections, span, source_key, road_profile, geometry_limits):
     """Use the local turn already traced in the map at a confirmed shared edge."""
     role = span.edge_role
     matches = []
     for section in sections:
-        for run in _observed_approach_runs(section.links, role, road_profile, registration):
+        for run in _observed_approach_runs(section.links, role, road_profile, geometry_limits):
             if not any(source == source_key for link in run for source, _ in link.observations[role]):
                 continue
             edge = (run[0].start[role], *(link.end[role] for link in run))
             if parking_approach_contacts(span, edge) is None:
                 continue
             candidate = _mapped_candidate(run, source_key, road_profile)
-            if candidate is not None and len(candidate.sources) >= 2 and candidate.within(registration):
+            if candidate is not None and len(candidate.sources) >= 2 and candidate.within(geometry_limits):
                 shape = candidate.road.hypotheses[0]
                 fitted_edge = shape.left_outer if role == 0 else shape.right_outer
                 if parking_approach_contacts(span, fitted_edge) is not None:
@@ -504,14 +504,14 @@ def _mapped_parking_approach(sections, span, source_key, road_profile, registrat
     return matches[0] if len(matches) == 1 else None
 
 
-def _observed_approach_runs(links, role, road_profile, registration):
+def _observed_approach_runs(links, role, road_profile, geometry_limits):
     run = []
     for link in (*links, None):
         if (link is not None and not link.inferred_roles[role] and link.observations[role]
                 and any(seen for i, seen in enumerate(link.observations) if i != role)
                 and all(point is not None for point in (*link.start, *link.end))
-                and link.error_m + road_profile.station_error_m <= registration.max_position_error_m
-                and link.yaw_error_rad <= registration.max_yaw_error_rad):
+                and link.error_m + road_profile.station_error_m <= geometry_limits.max_position_error_m
+                and link.yaw_error_rad <= geometry_limits.max_yaw_error_rad):
             run.append(link)
             continue
         if run:
@@ -930,7 +930,7 @@ class TemporalRoadMap:
         return frozenset(self._parking_sources)
 
     def observe(self, graph, pose, road_profile, tape_profile, *, stamp=None, capture_pose=None, qualified=True,
-                registration=None):
+                geometry_limits=None):
         self.approach_fit = None
         if (graph is None or graph.source_key is None or graph.source_key == self._last_source
                 or not graph.calibration_qualified):
@@ -1021,16 +1021,16 @@ class TemporalRoadMap:
             self._entrance_recheck = (self._entrance_recheck+1) % _ENTRANCE_RECHECK_FRAMES
         candidates = candidates or interpolated
         candidate = candidates[0] if len(candidates) == 1 else None
-        if candidate is not None and (registration is None or candidate.within(registration)):
+        if candidate is not None and (geometry_limits is None or candidate.within(geometry_limits)):
             return candidate
         if len(candidates) <= 1 and self._parking_entrance_diagnostics:
             nearby = tuple(span for span in entrance_spans(self.parking_branches)
                            if math.dist(transform[:2], span.endpoints[0]) <= tape_profile.x_max_m)
-            if nearby and registration is not None and graph.complete:
+            if nearby and geometry_limits is not None and graph.complete:
                 if sections is None:
                     sections = self.sections(road_profile)
                 curves = tuple(curve for span in nearby if (curve := _mapped_parking_approach(
-                    sections, span, graph.source_key, road_profile, registration)) is not None)
+                    sections, span, graph.source_key, road_profile, geometry_limits)) is not None)
                 if len(curves) == 1:
                     return curves[0]
             if candidate is None and nearby:

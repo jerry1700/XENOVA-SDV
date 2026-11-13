@@ -33,7 +33,10 @@ class YawBiasProjectionTests(unittest.TestCase):
         alignment = MapOdomAlignment.from_match(start,start,observed_j_interval=start.captured_us,
             registration_revision=1,valid_for_us=500_000,position_drift_mps=.001,yaw_drift_rps=.004)
         raw = alignment.apply(end)
-        self.assertEqual(bias.project(alignment,end,RegistrationProfile()),raw)
+        nominal = bias.project(alignment,end,RegistrationProfile()).sample
+        self.assertFalse(bias.applied)
+        self.assertAlmostEqual(nominal.yaw, raw.sample.yaw)
+        self.assertLessEqual(math.dist((nominal.x,nominal.y),(1.,0.)),nominal.position_error_m)
         bias.interval = (.0028,.0032)
         bias.rate = .0031
         bias.variance = .0001**2
@@ -76,3 +79,31 @@ class YawBiasProjectionTests(unittest.TestCase):
         self.assertLessEqual(abs(corrected.yaw-true_yaw(30)),corrected.yaw_error_rad)
         self.assertLessEqual(math.dist((corrected.x,corrected.y),(actual_x,actual_y)),
                              corrected.position_error_m)
+
+    def test_return_to_origin_keeps_position_error_from_heading_drift_without_filter(self):
+        seconds, speed, rate = 30., .26, .001
+        angular_speed = math.tau/seconds
+        radius = speed/angular_speed
+        model = WheelMotionProfile(32,1e-5,1e-5,.18,.0001,.0001)
+        bias = YawBias()
+        for step in range(301):
+            t = step/10
+            at = 1_000_000+step*100_000
+            yaw = angular_speed*t
+            raw = PoseSample('odom','clock','calibration',at,radius*math.sin(yaw),
+                radius*(1-math.cos(yaw)),math.remainder(yaw,math.tau),.0001,.0001)
+            wheel = WheelObservation(('gateway',),step,at,(step,step),0)
+            progress = WheelProgress(('continuous',),wheel,model,speed*t,2*speed*t,yaw)
+            bias.add_pose(PoseEstimate(raw,(at,at),(at,at),WheelCapture(progress,0.,0.)))
+        start,end = bias.path[0],bias.path[-1]
+        alignment = MapOdomAlignment.from_match(start,start,observed_j_interval=start.captured_us,
+            registration_revision=1,valid_for_us=500_000,position_drift_mps=0.,yaw_drift_rps=rate)
+        nominal = bias.project(alignment,end,RegistrationProfile()).sample
+        self.assertFalse(bias.applied)
+        actual_error = 2*speed/(angular_speed+rate)*math.sin(rate*seconds/2)
+        self.assertLessEqual(actual_error,nominal.position_error_m)
+        # Evict the original pose history while retaining the continuous encoder prefix.
+        bias.path.popleft()
+        prefix_only = bias.project(alignment,end,RegistrationProfile()).sample
+        self.assertLessEqual(actual_error,prefix_only.position_error_m)
+        self.assertLess(nominal.position_error_m,prefix_only.position_error_m)

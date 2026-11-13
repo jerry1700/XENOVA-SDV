@@ -97,7 +97,7 @@ def _pipeline_state(pipeline,context):
     view_codes=np.zeros(grid.state.shape,dtype=np.uint8);lookup={label:index+1 for index,label in enumerate(labels)}
     for index,view in grid.hit_view.items():view_codes.reshape(-1)[index]=lookup[view if window is None else str(view)]
     state=dict(profile='mapper-pipeline-state-1',storage_context=context.fields,
-        calibration_id=pipeline.calibration.sha256,pipeline_profile_sha256=sha256(canonical(asdict(pipeline.profile))).hexdigest(),
+        calibration_id=pipeline.calibration.sha256,pipeline_profile_sha256=sha256(canonical(pipeline.profile.identity_fields())).hexdigest(),
         clock_id=grid.clock_id,kind=grid.kind,frame_id=grid.frame_id,
         spec=asdict(grid.spec),free_ttl_us=grid.free_ttl_us,occupied_ttl_us=grid.occupied_ttl_us,
         independent_view_m=grid.independent_view_m,revision=grid.revision,
@@ -1166,7 +1166,7 @@ def restore_pipeline(pipeline,complete,current_scope):
             or context.geometry_origin!=current.geometry_origin or state['calibration_id']!=pipeline.calibration.sha256
             or state['kind']!='LIVE'):
         raise MapCheckpointNotReady('historical geometry/Pi/calibration context cannot be rebased')
-    if state['pipeline_profile_sha256']!=sha256(canonical(asdict(pipeline.profile))).hexdigest():
+    if state['pipeline_profile_sha256']!=sha256(canonical(pipeline.profile.identity_fields())).hexdigest():
         raise MapCheckpointNotReady('original accepted pipeline profile changed')
     uint(state['tile_revision_highwater'])
     if any(tile.revision>state['tile_revision_highwater'] for tile in complete.tiles):raise MapRestoreNotReady('original tile head regressed below manifest versions')
@@ -1284,6 +1284,7 @@ def restore_pipeline(pipeline,complete,current_scope):
         configure_grid(grid,window)
     pipeline.grid=grid;pipeline.reference=reference;pipeline._alignment=None;pipeline._propagation_anchor=None;pipeline._free_scheduler=None
     pipeline._previous_propagation_anchor=None;pipeline._registration_history=()
+    pipeline._mapped_registration.clear()
     pipeline._current_lane=None
     pipeline._temporal_road.clear()
     pipeline._restore_pending=not identity

@@ -15,6 +15,7 @@ from test_parking_catalog import publication_context
 from xenova_vehicle.mapping.lane_catalog import LaneCatalog, LaneSource, LaneModelCandidates
 from xenova_vehicle.mapping.registration import PoseBox, RegistrationProfile
 from xenova_vehicle.perception.inputs import FrameStamp
+from xenova_vehicle.perception.road import RoadGeometryLimits
 from xenova_vehicle.storage.contracts import (StorageJob, CatalogHeadSnapshot, CommitReceipt,
     LoadRequest, canonical, json_bytes)
 from xenova_vehicle.storage.mapper_state import encode_mapper_state
@@ -60,6 +61,9 @@ def test_new_lane_uses_original_circular_position_error():
     fit = catalog.observe(road,source,prior,position_radius_m=.03,**args)
     assert fit.status == 'NEW'
     assert fit.position_error_m == .03
+    tighter = catalog.observe(road, source, prior, position_radius_m=.03,
+        geometry_limits=RoadGeometryLimits(.04,.05), **args)
+    assert tighter.reasons == ('GEOMETRY_ENVELOPE_TOO_WIDE',)
 
 
 def reserve(catalog, association, *, hwm=1, count=64):

@@ -5,7 +5,7 @@ localization 또는 이동권위를 만들지 않으며 최종 World source/adop
 rolling 본문은 명시한 실제 owner의 기존 archive pin 안에서 현재 ROI만 읽는다.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from hashlib import sha256
 
 from ..mapping.local_map import EvidenceGrid, FREE, OCCUPIED, UNKNOWN, GridSpec
@@ -69,7 +69,7 @@ def _metadata(frozen, job, evidence, pipeline):
           'exact original mapper grid spec required')
     spec = GridSpec(fields['width'], fields['height'], fields['resolution_m'], tuple(fields['origin_xy']))
     _need(state['storage_context'] == job.context.fields and state['calibration_id'] == pipeline.calibration.sha256
-          and state['pipeline_profile_sha256'] == sha256(canonical(asdict(pipeline.profile))).hexdigest()
+          and state['pipeline_profile_sha256'] == sha256(canonical(pipeline.profile.identity_fields())).hexdigest()
           and state['frame_id'] == pipeline.grid.frame_id and state['kind'] == pipeline.grid.kind,
           'original mapper profile/calibration/frame differs')
     window = pipeline.grid.rolling_window

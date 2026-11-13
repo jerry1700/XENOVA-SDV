@@ -12,6 +12,19 @@ from .tape import TapeGraph
 
 
 @dataclass(frozen=True)
+class RoadGeometryLimits:
+    """지도에 올릴 차로 형상의 오차 상한."""
+
+    max_position_error_m: float
+    max_yaw_error_rad: float
+
+    def __post_init__(self):
+        for value in (self.max_position_error_m, self.max_yaw_error_rad):
+            if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 10000:
+                raise ValueError('invalid mapped road geometry bound')
+
+
+@dataclass(frozen=True)
 class RoadProfile:
     """폭·오차·gap은 실측 조정 전의 명시 실험 값이며 길이는 m/각도는 rad다."""
 
