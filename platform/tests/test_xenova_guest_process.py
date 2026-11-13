@@ -13,6 +13,7 @@ import test_xenova_recovery_foundation as foundation
 from first_install_contract import uuid4
 import xenova_guest_process as guest
 from xenova_runtime import PlatformError
+from xenova_execution import ExecutionError, fingerprint
 
 
 class GuestProcessTest(unittest.TestCase):
@@ -103,6 +104,74 @@ class GuestProcessTest(unittest.TestCase):
 
     def test_uncertain_scope_command_with_create_effect_never_recreates(self):
         self.failed_scope('scope command response timed out',effect=True)
+
+    def test_recovery_monitor_must_match_scope_domain_and_current_log(self):
+        root = self.p.runtime
+        scope = guest.scope_name(self.r['uuid'], uuid4())
+        group = '/system.slice/'+scope
+        config = root/(self.r['id']+'.cfg')
+        config.write_text(self.p.config(self.r))
+        launch = {'execution_id':scope[-42:-6], 'process_scope':scope,
+                  'configuration_sha256':fingerprint(config.read_text())}
+        row = {'domid':4, 'xen_unique_id':'123'}
+        cgroup = root/'cgroup'
+        members = cgroup/group.lstrip('/')/'cgroup.procs'
+        members.parent.mkdir(parents=True)
+        members.write_text('42\n')
+        process = root/'proc/42'
+        (process/'fd').mkdir(parents=True)
+        (process/'stat').write_text('42 (xl) S '+' '.join(['0']*19))
+        (process/'cmdline').write_bytes(b'xl\0create\0'+os.fsencode(config)+b'\0')
+        (process/'cgroup').write_text('0::'+group+'\n')
+        log = root/('xl-'+self.r['name']+'.log')
+        message = f"Waiting for domain {self.r['name']} (domid 4) to die [pid 42]\n"
+        log.write_text(message)
+        os.utime(log, ns=(2_000_000_000, 2_000_000_000))
+        (process/'fd/1').symlink_to(log)
+        properties = ('LoadState=loaded\nActiveState=active\nControlGroup='+group+
+                      '\nBefore=shutdown.target xenova-vm-shutdown.service\n')
+
+        def confirm(observed, start='1.00'):
+            with patch.object(self.p, 'timed_command', side_effect=[properties, start]):
+                return guest.confirm_created_domain(self.p, self.r, launch, observed, 90,
+                                                     proc_root=root/'proc', cgroup_root=cgroup, log_root=root)
+
+        self.assertEqual(confirm(row)['monitor_pid'], 42)
+        for observed, start in (({**row, 'domid':5}, '1.00'), (row, '3.00')):
+            with self.subTest(observed=observed, start=start), self.assertRaises(ExecutionError):
+                confirm(observed, start)
+        log.write_text(message+'Domain 4 has shut down\n')
+        with self.assertRaises(ExecutionError):
+            confirm(row)
+
+    def test_recovery_can_bind_original_create_after_response_deadline(self):
+        self.f.start()
+        self.f.xen.rows.clear()
+        spec = self.f.spec('start-if-absent')
+        command = self.p.command
+        self.p.process_isolation = True
+
+        def lose_response(argv, **kwargs):
+            if argv[:2] == ['systemd-run', '--scope']:
+                command(['xl', 'create', str(self.p.runtime/(self.r['id']+'.cfg'))], **kwargs)
+                self.f.ticks = spec['deadline_monotonic_ms']/1000
+                raise ExecutionError('DEADLINE_EXCEEDED', 'original command response lost')
+            return command(argv, **kwargs)
+
+        with patch.object(self.p, 'command', side_effect=lose_response), \
+                patch.object(guest, 'confirm_created_domain', return_value={'monitor_pid':42}) as proof:
+            result = self.f.ok(self.f.recover(spec))
+            again = self.f.ok(self.f.recover(spec))
+        proof.assert_called_once()
+        attempt = result['attempt']
+        self.assertEqual(attempt['phase'], 'completed')
+        self.assertEqual(attempt['request'], spec)
+        self.assertEqual(attempt['reconciliation']['original_error']['details']['cause']['code'],
+                         'DEADLINE_EXCEEDED')
+        self.assertEqual(attempt['reconciliation']['physical_commands'], 0)
+        self.assertEqual(result['original_result'], again['original_result'])
+        self.assertEqual(len(self.f.physical('create')), 2)
+        self.assertEqual(self.f.physical('destroy'), [])
 
     def test_isolated_zephyr_reboot_submits_cooperative_request_without_linux_launch(self):
         self.f.start()

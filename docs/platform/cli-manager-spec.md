@@ -1421,6 +1421,11 @@ xenova-vm get "$VM_ID" --json
 
 출력한 attempt ID로 `recovery-operation`을 조회하고 `get/probe`의 새 execution_id를 확인한다. 재전달은 위 Python을 다시 실행하지 않고 **원 RECOVERY_FILE로 실행 명령만 반복**한다. 새 장애는 최신 probe·새 attempt로 요청한다. 계획이 이후 실행을 예약하지 않는다. 만료한 원 파일의 deadline만 고치지 않는다.
 
+Xen 생성 응답을 잃어 실행 신원이 아직 결합되지 않았다면, 원 scope의 현재 `xl` monitor와
+도메인 생성 근거를 대조한다. 같은 실행 신원·의도·구성·CPU 정책이 확인되면 원 호출이나
+동일 요청 재전달에서 `completed`로 종결하고 원 오류를 `reconciliation.original_error`에 보존한다.
+확인 예산으로 Xen 제어 명령을 제출하지 않으며, 근거가 부족하면 원 기록을 미확정으로 유지한다.
+
 **Manager 매핑:** `recover_once / 위 8개 필드`. [중복·만료·중단 판정](#recovery-reconciliation)을 따른다.
 
 [명령어 색인으로](#command-index)

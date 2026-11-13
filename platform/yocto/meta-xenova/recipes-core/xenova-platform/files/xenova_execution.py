@@ -694,18 +694,24 @@ class Execution:
             refuse('DEADLINE_EXCEEDED', 'launch validation exhausted the original execution deadline')
 
     @traced('execution.bind_launch')
-    def bind_launch(self, record, value, row, deadline):
+    def bind_launch(self, record, value, row, deadline, *, reconciling=False):
         if value["host_boot_id"] != self.host:
             refuse("TARGET_CHANGED", "launch belongs to a previous host boot")
+        if reconciling and not row.get('xen_unique_id'):
+            refuse('RECONCILE_REQUIRED', 'recovery binding requires a verified Xen incarnation')
         current = self.p.resolve_domain(record, expected=row, deadline=deadline)
-        unique = self.unique(current, deadline)
-        if row.get('xen_unique_id', unique) != unique:
-            refuse('TARGET_CHANGED', 'candidate incarnation changed before binding')
-        self.p.resolve_domain(record, expected={**row, 'xen_unique_id':unique}, deadline=deadline)
+        if reconciling:
+            # resolve_domain already rechecked the observed incarnation after the monitor proof.
+            unique = row['xen_unique_id']
+        else:
+            unique = self.unique(current, deadline)
+            if row.get('xen_unique_id', unique) != unique:
+                refuse('TARGET_CHANGED', 'candidate incarnation changed before binding')
+            self.p.resolve_domain(record, expected={**row, 'xen_unique_id':unique}, deadline=deadline)
         observed = {**value, "phase":"observed", "domid":current["domid"], "xen_unique_id":unique,
                     "observed_monotonic_ms":int(self.p.clock()*1000)}
         path = self._path(self.runtime, "executions", record["uuid"])
-        if 'reboot_from' in value:
+        if reconciling or 'reboot_from' in value:
             with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
                 self.guard_launch(record, value, deadline)
                 self.write(path, observed)

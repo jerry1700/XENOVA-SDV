@@ -84,7 +84,7 @@ class Recovery:
         self.e.write(self.path(op["recovery_attempt_id"]), op)
         self.e.checkpoint("recovery-"+phase, op)
 
-    def conditions(self, spec, deadline, *, target=True, gate=True):
+    def conditions(self, spec, deadline, *, target=True, gate=True, identity_only=False):
         from xenova_preparation import guard_asset
         guard_asset(self.p, spec['vm_id'])
         if spec["expected_host_boot_id"] != self.e.host:
@@ -110,7 +110,7 @@ class Recovery:
         self.m._record_at(record, self.p.data/"instances"/record["id"])
         if self.p.clock() >= deadline:
             refuse("DEADLINE_EXCEEDED", "recovery deadline expired")
-        observation = self.e.observe(record, deadline)
+        observation = self.e.observe(record, deadline, identity_only=identity_only)
         if target:
             expected = spec["expected_execution"]
             if "absent_observation_revision" in expected:
@@ -424,6 +424,51 @@ class Recovery:
             op["phase"] = previous_phase
             self.unresolved(op, "expiration journal could not be durably closed")
 
+    def confirm_launch(self, op, record, observation, deadline):
+        """원 소유 실행을 관측해 종결한다. Xen 제어 명령이나 신원 공급은 하지 않는다."""
+        spec = op['request']
+        run = self.e.run_record(record)
+        if not run or run.get('owner') != {'kind':'recovery', 'recovery_attempt_id':op['recovery_attempt_id']}:
+            return None
+        expected_cpu = op.get('cpu_policy', {'configured':False})
+        proof = None
+        if observation['execution_status'] == 'managed':
+            self.p.cpu().require(record, deadline, expected=expected_cpu, present=True, expected_identity=run)
+            if run.get('cpu_verification') != 'complete':
+                # An interrupted bind already has the incarnation but still needs CPU verification.
+                run = {**run, 'cpu_verification':'complete'}
+                run.pop('cpu_error', None)
+                self.e.write(self.e._path(self.p.runtime, 'executions', record['uuid']), run)
+                row = {k:observation[k] for k in ('domid', 'xen_state', 'xen_state_flags')}
+                observation = self.e.publish_observation(record, row, observation['xen_unique_id'], deadline)
+        elif (self.p.process_isolation and observation['presence'] == 'present'
+                and observation['xen_state'] in ('running', 'blocked')
+                and run.get('phase') == 'launching' and run.get('domid') is None and run.get('xen_unique_id') is None
+                and run.get('lifecycle_generation') == spec['expected_lifecycle_generation']
+                and run.get('intent_revision') == spec['expected_intent_revision']
+                and run.get('cpu_policy') == expected_cpu):
+            from xenova_guest_process import confirm_created_domain
+            self.e.guard_launch(record, run, deadline)
+            try:
+                proof = confirm_created_domain(self.p, record, run, observation, deadline)
+            except (OSError, ValueError) as error:
+                refuse('RECONCILE_REQUIRED', 'original create monitor evidence is unavailable',
+                       details={'cause_type':type(error).__name__})
+            # bind_launch rechecks the exact Xen incarnation and all accepted context before publication.
+            observation = self.e.bind_launch(record, run, observation, deadline, reconciling=True)['observation']
+        else:
+            return None
+        if self.p.clock() >= deadline:
+            refuse('DEADLINE_EXCEEDED', 'recovery confirmation budget expired')
+        if proof or op.get('error'):
+            op['reconciliation'] = {'status':'confirmed', 'executed':True, 'outcome':'launch_observed',
+                'physical_commands':0, 'checks':{'correlated_execution':True, 'cpu_policy':True}, 'reasons':[],
+                'host_boot_id':self.e.host, 'observed_monotonic_ms':observation['observed_monotonic_ms'],
+                'original_phase':op['phase'], 'original_error':op.get('error'),
+                **({'launch_proof':proof} if proof else {})}
+        result = self.complete(op, observation)
+        return {'attempt':op, 'original_result':result, 'current_observation':observation}
+
     @traced('recovery.once')
     def _once(self, spec, *, execute, context):
         spec = validate_request(spec)
@@ -469,23 +514,10 @@ class Recovery:
                 # 만료 후의 15초는 기존 실행을 확인·종결하는 읽기 예산이다.
                 # 이 분기에는 start/stop/create/repin 경로가 없다.
                 reconcile_end = min(self.p.clock()+15, getattr(self.p, 'response_deadline', float('inf')))
-                record, _, observation = self.conditions(spec, reconcile_end, target=False, gate=False)
-                run = self.e.run_record(record)
-                if (observation["execution_status"] == "managed" and run and
-                        run.get("owner") == {"kind":"recovery", "recovery_attempt_id":identity}):
-                    self.p.cpu().require(record, reconcile_end, expected=op.get('cpu_policy', {'configured':False}),
-                                         present=True, expected_identity=run)
-                    if run.get('cpu_verification') != 'complete':
-                        # An interrupted bind may have stored identity before CPU
-                        # verification. Only this fresh, successful check can close
-                        # that gap; observed by itself is insufficient.
-                        run = {**run, 'cpu_verification':'complete'}
-                        run.pop('cpu_error', None)
-                        self.e.write(self.e._path(self.p.runtime, 'executions', record['uuid']), run)
-                        row = {k:observation[k] for k in ('domid', 'xen_state', 'xen_state_flags')}
-                        observation = self.e.publish_observation(record, row, observation['xen_unique_id'], reconcile_end)
-                    result = self.complete(op, observation)
-                    return {"attempt":op, "original_result":result, "current_observation":observation}
+                record, _, observation = self.conditions(spec, reconcile_end, target=False, gate=False, identity_only=True)
+                result = self.confirm_launch(op, record, observation, reconcile_end)
+                if result is not None:
+                    return result
                 if self.settle_expired(op, reconcile_end):
                     settled = self.read_attempt(identity)
                     error = settled['error']
@@ -595,4 +627,25 @@ class Recovery:
             except OSError:
                 refuse("RECONCILE_REQUIRED", "accepted recovery journal could not be finalized",
                        details={"operation_id":op["operation_id"], "recovery_attempt_id":identity, "accepted":True})
-            raise ExecutionError(**op["error"]) from error
+            original_error = op['error']
+            if (confirmed.get('physical_submitted') and self.p.process_isolation
+                    and original_error['details']['failed_phase'] == 'launching'
+                    and run and run.get('phase') == 'launching'):
+                # The worker can receive a completed result on the original call even if
+                # the physical submission's response was lost. This is observation only.
+                reconcile_end = min(self.p.clock()+15, getattr(self.p, 'response_deadline', float('inf')))
+                try:
+                    record, _, observation = self.conditions(spec, reconcile_end, target=False, gate=False, identity_only=True)
+                    result = self.confirm_launch(op, record, observation, reconcile_end)
+                    if result is not None:
+                        return result
+                except ExecutionError as confirmation_error:
+                    if confirmation_error.error['code'] in ('OBSERVATION_UNAVAILABLE', 'DEADLINE_EXCEEDED'):
+                        # The worker rechecks the same journal within its bounded verification window.
+                        refuse('OBSERVATION_UNAVAILABLE', 'original create outcome could not be observed',
+                               details=original_error['details'])
+                except (PlatformError, OSError, ValueError):
+                    if self.p.clock() >= reconcile_end:
+                        refuse('OBSERVATION_UNAVAILABLE', 'original create outcome could not be observed',
+                               details=original_error['details'])
+            raise ExecutionError(**original_error) from error
