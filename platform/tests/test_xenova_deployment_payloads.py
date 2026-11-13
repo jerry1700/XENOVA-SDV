@@ -109,6 +109,26 @@ class DeploymentPayloadTest(unittest.TestCase):
                     backup.rename(original)
         assemble.platform_root_ok(self.root)
 
+    def test_gate_rejects_missing_journal_persistence(self):
+        platform_root(self.root)
+        for relative in (
+            "var/log",
+            "var/log-persistent/journal",
+            "usr/lib/systemd/system/var-volatile-log-journal.mount",
+            "usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf",
+            "usr/lib/systemd/system/sysinit.target.wants/systemd-journal-flush.service",
+        ):
+            with self.subTest(relative=relative):
+                original = self.root/relative
+                backup = original.with_name(original.name + ".fixture-backup")
+                original.rename(backup)
+                try:
+                    with self.assertRaisesRegex(ValueError, "journal"):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    backup.rename(original)
+        assemble.platform_root_ok(self.root)
+
     def test_gate_rejects_collector_link_to_another_unit(self):
         platform_root(self.root)
         link = self.root/"etc/systemd/system/multi-user.target.wants"/payloads.COLLECTOR
@@ -192,7 +212,16 @@ class DeploymentPayloadTest(unittest.TestCase):
                       worker.read_text().splitlines())
         for source in (payloads.RECIPES/"xenova-platform/files").glob("*.service"):
             (self.root/"usr/lib/systemd/system"/source.name).write_bytes(source.read_bytes())
-        normal=verify(self.root,unit.name,worker.name,config.name)
+        # The target fstab mounts this tmpfs above the new journal bind.
+        (self.root/"var/volatile/log").mkdir(parents=True)
+        (self.root/"var/log").symlink_to("volatile/log")
+        volatile = self.root/"usr/lib/systemd/system/var-volatile.mount"
+        volatile.write_text("[Mount]\nWhat=tmpfs\nWhere=/var/volatile\nType=tmpfs\n")
+        requires = self.root/"etc/systemd/system/local-fs.target.requires"
+        requires.mkdir(exist_ok=True)
+        (requires/volatile.name).symlink_to("/usr/lib/systemd/system/"+volatile.name)
+        normal=verify(self.root,unit.name,worker.name,config.name,
+                      "systemd-journal-flush.service")
         self.assertEqual(normal.returncode,0,normal.stdout+normal.stderr)
         for text in ("Found ordering cycle","deleted to break ordering cycle","Ordering cycle found, skipping"):
             self.assertNotIn(text,normal.stdout+normal.stderr)

@@ -173,7 +173,7 @@ class FreeScheduler:
 
     def plan(self, *, context_key, needed_mask, support, permission, state, observed_us, time_known,
              now_us, capture_lower_us, max_cells, max_ray_tests, cycle_bound_us, completion_bound_us,
-             free_ttl_us=500_000):
+             free_ttl_us=500_000, preferred_surrounding=()):
         """원 live grid만 읽는다. retained mask는 받지 않으며 UNKNOWN/실패도 원 시도 예산을 쓴다.
 
         cycle/completion은 caller의 명시 상한이다. capacity_ok도 그 상한 아래의 필요조건일
@@ -217,7 +217,17 @@ class FreeScheduler:
             (i - self._required_cursor) % count))
         second = sorted(np.flatnonzero(new_or_missing).tolist(), key=lambda i: (i - self._required_cursor) % count)
         excluded = urgent | new_or_missing
-        third = sorted(np.flatnonzero(eligible & ~excluded).tolist(), key=lambda i: (i - self._surround_cursor) % count)
+        third = np.flatnonzero(eligible & ~excluded).tolist()
+        if preferred_surrounding:
+            preferred = {row*self.spec.width+col for col,row in preferred_surrounding}
+            # Use work left after the stopping region to confirm observed bays.
+            def surrounding_order(i):
+                if i in preferred and states[i] != OCCUPIED:
+                    return (0, int(observed[i]) if fresh[i] else -1, (i-self._surround_cursor)%count)
+                return (1, 0, (i-self._surround_cursor)%count)
+            third.sort(key=surrounding_order)
+        else:
+            third.sort(key=lambda i: (i-self._surround_cursor)%count)
         # 같은 정렬 순서의 실제 시도 prefix만 만든다. 전체 due 분모와 cursor는
         # 아래 원 mask에서 그대로 계산하며 미선택 셀의 증거는 만들지 않는다.
         ordered = ((index, priority) for priority, group in

@@ -28,6 +28,14 @@ def scheduler(width=8):
 
 
 class FreeScheduleTests(unittest.TestCase):
+    def test_parking_preference_uses_only_the_budget_left_after_the_stopping_region(self):
+        owner, data = scheduler(), fields()
+        data['needed_mask'][0, 1:] = False
+        result = owner.plan(**data, preferred_surrounding=((5, 0), (6, 0)))
+        self.assertEqual(result.cells, ((0, 0), (5, 0)))
+        self.assertEqual(result.priorities, ('REQUIRED_NEW_OR_UNPROVEN', 'SURROUNDING'))
+        self.assertFalse(result.all_needed_live_fresh)
+
     def test_imminent_required_precedes_new_or_unproven_then_surrounding(self):
         import numpy as np
         owner, data = scheduler(), fields()

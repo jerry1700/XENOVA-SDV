@@ -1050,7 +1050,11 @@ class Platform:
             ensure_quiet(self)
             # 내부 CLI는 marker로 새 기동을 막는다. 외부 xl과 원자적인 배제는 아니다.
             self.confirm_board_empty(self._shutdown_deadline)
-            self.command(['systemctl', 'stop', 'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-dhcp.service'], timeout=110)
+            # A timer can pull srv-xenova.mount back in through its service.
+            self.command(['systemctl', 'stop', 'xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'])
+            self.command(['systemctl', 'stop', 'xenova-vms.service', 'xenova-vm-shutdown.service',
+                          'xenova-dhcp.service', 'xenova-telemetry-clock.service',
+                          'xenova-telemetry-evidence.service'], timeout=110)
             self.confirm_board_empty(self._shutdown_deadline)
             self.command(['systemctl', 'stop', 'srv-xenova.mount'], timeout=30)
             self.command(['systemctl', action])

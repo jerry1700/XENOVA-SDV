@@ -273,19 +273,184 @@ describe('console transport', () => {
     transport.dispose();
   });
 
-  it.each([4401, 4404, 4409, 1006, 1011])(
-    'shows close %s and retries only on explicit action',
-    async (code) => {
+  it.each([4404, 4409, 1006, 1011])('shows close %s and retries only on explicit action', async (code) => {
+    const { transport, callbacks } = setup();
+    await transport.connect();
+    FakeSocket.instances[0]!.onclose?.({ code });
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(callbacks.state).toHaveBeenLastCalledWith('error', consoleCloseMessage(code));
+    expect(FakeSocket.instances).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await transport.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+    transport.dispose();
+  });
+
+  describe('replayed console output', () => {
+    async function connected() {
+      const { transport } = setup();
+      await transport.connect();
+      const ws = FakeSocket.instances[0]!;
+      ws.onopen?.();
+      ws.ready();
+      return { transport, ws };
+    }
+
+    it('drops terminal answers to replayed queries right after connecting', async () => {
+      const { transport, ws } = await connected();
+      // xterm answering ESC[6n / DA found in the replayed boot output.
+      for (const report of [
+        '\x1b[24;1R',
+        '\x1b[24;174R',
+        '\x1b[?1;2c',
+        '\x1b[>0;276;0c',
+        '\x1b[0n',
+        '\x1b[24;1R\x1b[24;174R',
+      ]) {
+        expect(transport.send(report)).toBe(true);
+      }
+      expect(ws.sent).toHaveLength(1); // auth only
+      transport.dispose();
+    });
+
+    it('still sends what a person types during the settle window', async () => {
+      const { transport, ws } = await connected();
+      transport.send('\r');
+      transport.send('root');
+      transport.send('\x1b[A'); // arrow key
+      transport.send('24;1R'); // plain text that only looks like a report
+      expect(ws.sent.slice(1)).toEqual(
+        ['\r', 'root', '\x1b[A', '24;1R'].map((t) => new TextEncoder().encode(t)),
+      );
+      transport.dispose();
+    });
+
+    it('answers live terminal queries after the replay has settled', async () => {
+      const { transport, ws } = await connected();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(transport.send('\x1b[24;174R')).toBe(true);
+      expect(ws.sent[1]).toEqual(new TextEncoder().encode('\x1b[24;174R'));
+      transport.dispose();
+    });
+  });
+
+  describe('login expiry (4401)', () => {
+    const soon = (ms: number) => new Date(Date.now() + ms).toISOString();
+
+    it('renews a token that expires within two minutes before connecting', async () => {
+      auth.getSession.mockReturnValue({ access_token: 'old-jwt', expires_at: soon(60000) });
+      auth.refreshSession.mockImplementation(async () => {
+        auth.getSession.mockReturnValue({ access_token: 'new-jwt', expires_at: soon(900000) });
+        return true;
+      });
+      const { transport } = setup();
+      await transport.connect();
+      expect(auth.refreshSession).toHaveBeenCalledOnce();
+      const ws = FakeSocket.instances[0]!;
+      ws.onopen?.();
+      expect(JSON.parse(ws.sent[0] as string)).toEqual({ type: 'auth', access_token: 'new-jwt' });
+      transport.dispose();
+    });
+
+    it('a token with more than two minutes left is used without renewal', async () => {
+      auth.getSession.mockReturnValue({ access_token: 'user-jwt', expires_at: soon(180000) });
+      const { transport } = setup();
+      await transport.connect();
+      expect(auth.refreshSession).not.toHaveBeenCalled();
+      expect(FakeSocket.instances).toHaveLength(1);
+      transport.dispose();
+    });
+
+    it('expiry close renews once and reconnects without replaying input', async () => {
       const { transport, callbacks } = setup();
       await transport.connect();
-      FakeSocket.instances[0]!.onclose?.({ code });
+      const first = FakeSocket.instances[0]!;
+      first.onopen?.();
+      first.ready();
+      expect(transport.send('typed before expiry')).toBe(true);
+      auth.refreshSession.mockImplementation(async () => {
+        auth.getSession.mockReturnValue({ access_token: 'renewed-jwt', expires_at: '2099-01-01T00:00:00Z' });
+        return true;
+      });
+      first.onclose?.({ code: 4401 });
+      expect(callbacks.state).toHaveBeenLastCalledWith(
+        'connecting',
+        expect.stringContaining('로그인을 갱신'),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(auth.refreshSession).toHaveBeenCalledOnce(); // forced even though the local clock says valid
+      const second = FakeSocket.instances[1]!;
+      second.onopen?.();
+      second.ready();
+      expect(second.sent).toEqual([JSON.stringify({ type: 'auth', access_token: 'renewed-jwt' })]);
+      expect(callbacks.state).toHaveBeenLastCalledWith('connected', expect.any(String));
+      // A later expiry of the renewed session may renew again.
+      second.onclose?.({ code: 4401 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(FakeSocket.instances).toHaveLength(3);
+      transport.dispose();
+    });
+
+    it('a renewed connection that is rejected again shows the login error and stops', async () => {
+      auth.refreshSession.mockResolvedValue(true);
+      const { transport, callbacks } = setup();
+      await transport.connect();
+      FakeSocket.instances[0]!.onclose?.({ code: 4401 });
+      await vi.advanceTimersByTimeAsync(0);
+      FakeSocket.instances[1]!.onclose?.({ code: 4401 });
       await vi.advanceTimersByTimeAsync(30000);
-      expect(callbacks.state).toHaveBeenLastCalledWith('error', consoleCloseMessage(code));
+      expect(callbacks.state).toHaveBeenLastCalledWith('error', consoleCloseMessage(4401));
+      expect(FakeSocket.instances).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+      transport.dispose();
+    });
+
+    it('a failed renewal shows the login error without opening a socket', async () => {
+      const { transport, callbacks } = setup();
+      await transport.connect();
+      auth.refreshSession.mockImplementation(async () => {
+        auth.getSession.mockReturnValue(null);
+        return false;
+      });
+      FakeSocket.instances[0]!.onclose?.({ code: 4401 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(callbacks.state).toHaveBeenLastCalledWith('error', consoleCloseMessage(4401));
+      expect(FakeSocket.instances).toHaveLength(1);
+      transport.dispose();
+    });
+
+    it('waits for the previous lease (4409) only inside the renewal window', async () => {
+      auth.refreshSession.mockResolvedValue(true);
+      const { transport, callbacks } = setup();
+      await transport.connect();
+      FakeSocket.instances[0]!.onclose?.({ code: 4401 });
+      await vi.advanceTimersByTimeAsync(0);
+      for (let i = 1; i <= 5; i++) {
+        FakeSocket.instances[i]!.onclose?.({ code: 4409 });
+        expect(callbacks.state).toHaveBeenLastCalledWith(
+          'connecting',
+          expect.stringContaining('정리를 기다렸다가'),
+        );
+        await vi.advanceTimersByTimeAsync(2000);
+      }
+      expect(FakeSocket.instances).toHaveLength(7);
+      await vi.advanceTimersByTimeAsync(2001); // past the 12 s window opened by the expiry close
+      FakeSocket.instances[6]!.onclose?.({ code: 4409 });
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(callbacks.state).toHaveBeenLastCalledWith('error', consoleCloseMessage(4409));
+      expect(FakeSocket.instances).toHaveLength(7);
+      transport.dispose();
+    });
+
+    it('dispose or a user disconnect cancels a pending renewal reconnect', async () => {
+      auth.refreshSession.mockResolvedValue(true);
+      const { transport } = setup();
+      await transport.connect();
+      FakeSocket.instances[0]!.onclose?.({ code: 4401 });
+      transport.disconnect();
+      await vi.advanceTimersByTimeAsync(30000);
       expect(FakeSocket.instances).toHaveLength(1);
       expect(vi.getTimerCount()).toBe(0);
-      await transport.connect();
-      expect(FakeSocket.instances).toHaveLength(2);
-      transport.dispose();
-    },
-  );
+    });
+  });
 });

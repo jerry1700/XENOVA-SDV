@@ -351,28 +351,27 @@ def _intersection(a, b, c, d):
     return _add(a, u, s), s, t
 
 
-def _intersection_error(a, b, error_ab, c, d, error_cd, nominal):
-    """endpoint box 전체의 교점 interval. denominator가 0을 포함하면 수락하지 않는다."""
-    def point(p, e):
-        return tuple((math.nextafter(v - e, -math.inf), math.nextafter(v + e, math.inf)) for v in p)
-    def minus(x, y):
-        return math.nextafter(x[0] - y[1], -math.inf), math.nextafter(x[1] - y[0], math.inf)
-    def plus(x, y):
-        return math.nextafter(x[0] + y[0], -math.inf), math.nextafter(x[1] + y[1], math.inf)
-    def times(x, y):
-        values = [p * q for p in x for q in y]
-        return math.nextafter(min(values), -math.inf), math.nextafter(max(values), math.inf)
-    def cross(x, y):
-        return minus(times(x[0], y[1]), times(x[1], y[0]))
-    aa, bb, cc, dd = point(a, error_ab), point(b, error_ab), point(c, error_cd), point(d, error_cd)
-    u = tuple(minus(q, p) for p, q in zip(aa, bb)); v = tuple(minus(q, p) for p, q in zip(cc, dd))
-    delta = tuple(minus(q, p) for p, q in zip(aa, cc)); den = cross(u, v)
-    if den[0] <= 0 <= den[1]:
+def _line_angle_bound(length, error):
+    # The perturbed direction vector lies in a disk of radius twice the endpoint error.
+    if 2 * error >= length:
+        return math.pi
+    return math.asin(2 * error / length)
+
+
+def _intersection_error(a, b, error_ab, c, d, error_cd, crossing):
+    """Bound the two line-normal displacements at the nominal intersection."""
+    _, s, t = crossing
+    u, v = _unit(_sub(b, a)), _unit(_sub(d, c))
+    angle = math.atan2(abs(u[0] * v[1] - u[1] * v[0]), abs(_dot(u, v)))
+    angle -= _line_angle_bound(math.dist(a, b), error_ab) + _line_angle_bound(math.dist(c, d), error_cd)
+    if angle <= 1e-12:
         return None
-    reciprocal = (math.nextafter(1 / den[1], -math.inf), math.nextafter(1 / den[0], math.inf))
-    parameter = times(cross(delta, v), reciprocal)
-    result = tuple(plus(origin, times(parameter, direction)) for origin, direction in zip(aa, u))
-    bound = math.hypot(*(max(abs(lo - p), abs(hi - p)) for (lo, hi), p in zip(result, nominal)))
+    # The same affine combination of the perturbed endpoints lies on the true line.
+    # Interpolation costs one endpoint radius. Extrapolation increases that radius.
+    first = (abs(1 - s) + abs(s)) * error_ab
+    second = (abs(1 - t) + abs(t)) * error_cd
+    # Intersect the two uncertainty bands at the smallest possible angle.
+    bound = math.hypot(first + second * math.cos(angle), second * math.sin(angle)) / math.sin(angle)
     return math.nextafter(bound, math.inf) + 1e-12 if math.isfinite(bound) else None
 
 
@@ -383,7 +382,7 @@ def _physical_back(point, line, graph, tolerance):
     return any(j.kind == 'physical_junction' and math.dist(point, j.xy) <= tolerance + error for j in graph.junctions)
 
 
-def extract_slots(graph, aisle, *, source, body, profile=ParkingProfile()):
+def extract_slots(graph, aisle, *, source, body, profile=ParkingProfile(), shared_entry=False):
     """평행 side 쌍과 실제 back/end 근거를 열거한다. missing back은 채우지 않는다.
 
     graph가 불완전하거나 hypothesis cap이 남으면 결과 전체의 complete=False다.
@@ -413,7 +412,7 @@ def extract_slots(graph, aisle, *, source, body, profile=ParkingProfile()):
             if _dot(_sub(entries[1], entries[0]), t) < 0:
                 first, second, left, right = second, first, right, left
                 entries.reverse(); crossing.reverse()
-            entry_errors = [_intersection_error(line[0], line[1], line[3], aisle.a, aisle.b, aisle.error_m, value[0])
+            entry_errors = [_intersection_error(line[0], line[1], line[3], aisle.a, aisle.b, aisle.error_m, value)
                             for line, value in zip((left, right), crossing)]
             if any(v is None for v in entry_errors):
                 continue
@@ -457,7 +456,7 @@ def extract_slots(graph, aisle, *, source, body, profile=ParkingProfile()):
                     continue
                 depth = [_dot(_sub(v[0], entry), n) for v, entry in zip(ends, entries)]
                 if min(depth) > 0:
-                    errors = [_intersection_error(side[0], side[1], side[3], line[0], line[1], line[3], value[0])
+                    errors = [_intersection_error(side[0], side[1], side[3], line[0], line[1], line[3], value)
                               for side, value in zip((left, right), ends)]
                     if any(v is None for v in errors):
                         continue
@@ -487,23 +486,32 @@ def extract_slots(graph, aisle, *, source, body, profile=ParkingProfile()):
                     _polygon(corners)
                 except ValueError:
                     continue
-                aisle_yaw = math.asin(min(1., 2 * aisle.error_m / max(1e-12, math.dist(aisle.a, aisle.b) - 2 * aisle.error_m)))
+                aisle_yaw = _line_angle_bound(math.dist(aisle.a, aisle.b), aisle.error_m)
                 side_yaw = max(abs(math.atan2(_unit(_sub(line[1], line[0]))[0] * n[1]
                                              - _unit(_sub(line[1], line[0]))[1] * n[0],
                                              _dot(_unit(_sub(line[1], line[0])), n)))
-                    + math.asin(min(1., 2 * line[3] / max(1e-12, math.dist(line[0], line[1]) - 2 * line[3])))
+                    + _line_angle_bound(math.dist(line[0], line[1]), line[3])
                     for line in (left, right))
-                yaw_error = min(math.pi, max(side_yaw,
-                    math.asin(min(1., 2 * bound / max(1e-12, depth - 2 * bound)))) + aisle_yaw)
+                # Both corners of each side lie on the same measured line. Their
+                # intersection bounds cannot independently rotate that line again.
+                yaw_error = min(math.pi, max(side_yaw, aisle_yaw))
                 paint = max(first.width_interval_m[1], second.width_interval_m[1]) / 2
                 padding = paint + bound
-                usable_width, usable_depth = width - 2 * padding, depth - 2 * padding
+                # The shared tape is also the approach edge. The stop pose is inset
+                # by goal_candidates; the verified entry must touch the road polygon.
+                entry_padding = 0. if shared_entry else padding
+                usable_width, usable_depth = width - 2 * padding, depth - padding - entry_padding
                 usable = ()
                 if min(usable_width, usable_depth) > 0:
-                    origin = _add(_add(entries[0], t, padding), n, padding)
+                    origin = _add(_add(entries[0], t, padding), n, entry_padding)
                     usable = (origin, _add(origin, t, usable_width),
                               _add(_add(origin, t, usable_width), n, usable_depth), _add(origin, n, usable_depth))
-                    if not all(_inside(p, corners, bound) for p in usable):
+                    # Only the two shared-entry vertices can touch a painted edge.
+                    # Check the corresponding inset points for side-wall clearance.
+                    inset = tuple(_add(p, n, bound) if shared_entry and i < 2 else p
+                                  for i, p in enumerate(usable))
+                    if not all(_inside(p, corners) for p in usable) or not all(
+                            _inside(p, corners, bound) for p in inset):
                         usable = ()
                 valid = entry_complete and usable and bound <= profile.max_position_error_m and yaw_error <= profile.max_heading_error_rad
                 output.append(SlotCandidate(len(output), ids, VALID if valid else PARTIAL, corners, (), tuple(entries), n,
@@ -699,6 +707,29 @@ class OccupancyEvidence:
             raise ValueError('CLEAR_REGION requires actual complete positive-free coverage')
         if self.state == OCCUPIED and not self.hit_cells:
             raise ValueError('OCCUPIED requires a positive hit')
+
+
+def parking_clearance_cells(candidate, spec):
+    """Return grid cells whose free evidence is needed for this mapped bay."""
+    region = candidate.usable_polygon
+    if candidate.geometry_state != VALID or candidate.coordinates != 'MAP' or not region:
+        return ()
+    pad = candidate.position_bound_m
+    ox, oy = spec.origin_xy
+    xs, ys = zip(*region)
+    size = spec.resolution_m
+    x0 = max(0, math.floor((min(xs)-pad-ox)/size)-1)
+    x1 = min(spec.width-1, math.floor((max(xs)+pad-ox)/size))
+    y0 = max(0, math.floor((min(ys)-pad-oy)/size)-1)
+    y1 = min(spec.height-1, math.floor((max(ys)+pad-oy)/size))
+    cells = []
+    for row in range(y0, y1+1):
+        for col in range(x0, x1+1):
+            a, b, c, d = spec.bounds(col, row)
+            cell = ((a-pad,b-pad),(c+pad,b-pad),(c+pad,d+pad),(a-pad,d+pad))
+            if polygons_touch(cell, region):
+                cells.append((col, row))
+    return tuple(cells)
 
 
 def evaluate_occupancy(candidate, evidence, *, now_us, required_region=None, profile=ParkingProfile(), clock_id=None):

@@ -75,6 +75,26 @@ class SyntheticCaptureTests(unittest.TestCase):
         self.assertEqual(pixel(.52), (245, 245, 245))
         self.assertEqual(resolution, .01)
 
+    def test_shared_parking_edge_survives_pavement_but_separate_apron_opens_edge(self):
+        from xenova_vehicle.simulation.capture import _ground_raster
+
+        fields = self.scene.fields
+        fields['track'].update(lane_width_m=.57, centerline=[
+            [0., 0.], [.25, 0.], [.5, 0.], [.75, 0.], [1., 0.], [1., 1.], [0., 1.]])
+        bay = [[.35, -.285], [.65, -.285], [.65, -.75], [.35, -.75]]
+        apron = [[.35, -.28], [.65, -.28], [.65, -.75], [.35, -.75]]
+        layout = fields['track']['layout']
+        layout.update(bounds=[-.5, -1., 1.5, 1.5], paved_areas=[apron], paint_lines=[],
+                      parking_slots=[{'id': 'P1', 'outline': bay}])
+
+        def road_edge_pixel():
+            raster, x0, y0, step = _ground_raster(Scene(canonical(fields)))
+            return tuple(raster[round((-.285-y0)/step), round((.5-x0)/step)])
+
+        self.assertEqual(road_edge_pixel(), (245, 245, 245))
+        layout['parking_slots'][0]['outline'] = [[x, y-.15] for x, y in bay]
+        self.assertEqual(road_edge_pixel(), (35, 35, 35))
+
     def test_axial_z_first_surface_and_near_hit_never_returns_background(self):
         observation = SyntheticCamera(self.calibration).capture(self.snapshot)
         camera = self.calibration.right

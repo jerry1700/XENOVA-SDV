@@ -133,6 +133,7 @@ int xshutdown_start(xshutdown_hook hook,void *context) {
  launched=true;
  k_thread_create(&thread,shutdown_stack,K_THREAD_STACK_SIZEOF(shutdown_stack),watcher,
                  NULL,NULL,NULL,CONFIG_XENOVA_SHUTDOWN_THREAD_PRIORITY,0,K_NO_WAIT);
+ (void)k_thread_name_set(&thread,"xen-shutdown");
  char feature[XS_PATH_LIMIT];
  atomic_set(&features_possible,1); /* Error can follow a successful remote write. */
  snprintf(feature,sizeof(feature),"%s/control/feature-poweroff",domain_path);

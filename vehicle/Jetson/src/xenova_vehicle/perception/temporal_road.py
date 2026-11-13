@@ -5,22 +5,25 @@
 """
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 import math
 from statistics import median
 
 from .inputs import FrameStamp
-from .parking_entrance import observe_entrances
+from .parking_approach import refit_approach
+from .parking_entrance import entrance_spans, observe_entrances, parking_approach_contacts
 from .road import LaneHypothesis, RoadResult
 from .road_normals import ReferenceObservations, heading_error, normal_samples
 from .tape import TapeStrip
 from ..mapping.odometry import PoseEstimate
 from ..mapping.registration import segment_distance, transform_point, wrap_yaw
+from ..mapping.wheel_motion import relative_wheel_bounds
 
 
 _FRAME_LIMIT = 12
 _MAP_FRAME_LIMIT = 32
+_PARKING_HISTORY_US = 3_000_000
 _STRIP_LIMIT = 16
 _MAP_BAND_LIMIT = 32
 _LINK_LIMIT = 512
@@ -43,6 +46,7 @@ class _Strip:
     stamp: FrameStamp | None = None
     capture_pose: PoseEstimate | None = None
     historical: bool = False
+    mapped_pose: PoseEstimate | None = None
 
 
 @dataclass(frozen=True)
@@ -138,7 +142,7 @@ def _project_strips(strips, pose, source, *, stamp=None, capture_pose=None, hist
         headings = tuple(heading_error(a,b,ea,eb)+sample.yaw_error_rad
                          for a,b,ea,eb in zip(strip.points_xy,strip.points_xy[1:],errors,errors[1:]))
         result.append(_Strip(tuple(transform_point(point,transform) for point in strip.points_xy),
-                             error,source,strip.local_id,headings,strip,sample.yaw_error_rad,stamp,capture_pose,historical))
+                             error,source,strip.local_id,headings,strip,sample.yaw_error_rad,stamp,capture_pose,historical,pose))
     return tuple(result)
 
 
@@ -479,6 +483,42 @@ def _mapped_candidate(run, key, profile):
                                  ('MULTI_FRAME_TAPE',),key,True),sources)
 
 
+def _mapped_parking_approach(sections, span, source_key, road_profile, registration):
+    """Use the local turn already traced in the map at a confirmed shared edge."""
+    role = span.edge_role
+    matches = []
+    for section in sections:
+        for run in _observed_approach_runs(section.links, role, road_profile, registration):
+            if not any(source == source_key for link in run for source, _ in link.observations[role]):
+                continue
+            edge = (run[0].start[role], *(link.end[role] for link in run))
+            if parking_approach_contacts(span, edge) is None:
+                continue
+            candidate = _mapped_candidate(run, source_key, road_profile)
+            if candidate is not None and len(candidate.sources) >= 2 and candidate.within(registration):
+                shape = candidate.road.hypotheses[0]
+                fitted_edge = shape.left_outer if role == 0 else shape.right_outer
+                if parking_approach_contacts(span, fitted_edge) is not None:
+                    road = replace(candidate.road, reasons=('MAPPED_PARKING_APPROACH_CURVE',))
+                    matches.append(replace(candidate, road=road))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _observed_approach_runs(links, role, road_profile, registration):
+    run = []
+    for link in (*links, None):
+        if (link is not None and not link.inferred_roles[role] and link.observations[role]
+                and any(seen for i, seen in enumerate(link.observations) if i != role)
+                and all(point is not None for point in (*link.start, *link.end))
+                and link.error_m + road_profile.station_error_m <= registration.max_position_error_m
+                and link.yaw_error_rad <= registration.max_yaw_error_rad):
+            run.append(link)
+            continue
+        if run:
+            yield tuple(run)
+            run.clear()
+
+
 def _link_heading(link):
     a,b = link.start[1],link.end[1]
     return math.atan2(b[1]-a[1],b[0]-a[0])
@@ -719,6 +759,7 @@ class TemporalRoadMap:
     def clear(self, *, keep_startup=False):
         self._frames = deque(maxlen=_MAP_FRAME_LIMIT)
         self._recent_sources = deque(maxlen=_FRAME_LIMIT)
+        self._parking_sources = deque(maxlen=_MAP_FRAME_LIMIT)
         if not keep_startup:
             self._startup = deque(maxlen=_MAP_FRAME_LIMIT)
         self._markings = deque(maxlen=_MARKING_LIMIT)
@@ -729,6 +770,7 @@ class TemporalRoadMap:
         self._normal_traces = {}
         self._last_source = None
         self.parking_branches = ()
+        self.approach_fit = None
         self._entrance_recheck = 0
         self.revision = 0
 
@@ -738,6 +780,7 @@ class TemporalRoadMap:
         memo[id(self)] = clone
         clone._frames = self._frames.copy()
         clone._recent_sources = self._recent_sources.copy()
+        clone._parking_sources = self._parking_sources.copy()
         clone._startup = self._startup.copy()
         clone._markings = self._markings.copy()
         clone._startup_seeds = self._startup_seeds.copy()
@@ -748,6 +791,7 @@ class TemporalRoadMap:
         clone._last_source = self._last_source
         clone._parking_entrance_diagnostics = self._parking_entrance_diagnostics
         clone.parking_branches = self.parking_branches
+        clone.approach_fit = self.approach_fit
         clone._entrance_recheck = self._entrance_recheck
         clone.revision = self.revision
         return clone
@@ -844,7 +888,50 @@ class TemporalRoadMap:
         retained = {frame[0].source for frame in self._frames if frame}
         return frozenset(key for key in self._recent_sources if key in retained)
 
-    def observe(self, graph, pose, road_profile, tape_profile, *, stamp=None, capture_pose=None, qualified=True):
+    def parking_tape_history(self, source):
+        """Recent original strips in the current capture's body frame."""
+        active = self.parking_source_keys
+        frames = {frame[0].source: frame for frame in self._frames if frame and frame[0].source in active}
+        current = frames.get(source)
+        if current is None or current[0].capture_pose is None:
+            return ()
+        anchor = current[0].capture_pose
+        x, y, yaw = anchor.sample.x, anchor.sample.y, anchor.sample.yaw
+        c, s = math.cos(yaw), math.sin(yaw)
+        recent = [(key, frame) for key,frame in frames.items() if key[:-1] == source[:-1]
+                  and key[-1] < source[-1] and frame[0].capture_pose is not None
+                  and 0 <= anchor.captured_us[0]-frame[0].capture_pose.captured_us[0] <= _PARKING_HISTORY_US]
+        if len(recent) > 11:
+            # Keep the newest views and spread the rest over the approach so the
+            # rear paint seen before the mouth can still be used.
+            older = recent[:-4]
+            recent = [older[i*(len(older)-1)//6] for i in range(7)]+recent[-4:]
+        history = []
+        for key, frame in recent:
+            capture = frame[0].capture_pose
+            bounds = relative_wheel_bounds(anchor, capture)
+            if bounds is None:
+                continue
+            dx, dy = capture.sample.x-x, capture.sample.y-y
+            transform = (c*dx+s*dy, -s*dx+c*dy, wrap_yaw(capture.sample.yaw-yaw))
+            strips = []
+            for projected in frame:
+                strip = projected.original
+                radius = max(math.hypot(*point) for point in strip.points_xy)
+                pad = bounds[0]+2*radius*math.sin(bounds[1]/2)
+                strips.append(replace(strip, points_xy=tuple(transform_point(p,transform) for p in strip.points_xy),
+                    error_m=strip.error_m+pad, point_error_xy=(), segment_error_xy=(),
+                    endpoint_error_m=tuple(None if e is None else e+pad for e in strip.endpoint_error_m)))
+            history.append((key,tuple(strips)))
+        return tuple(history)
+
+    @property
+    def parking_source_keys(self):
+        return frozenset(self._parking_sources)
+
+    def observe(self, graph, pose, road_profile, tape_profile, *, stamp=None, capture_pose=None, qualified=True,
+                registration=None):
+        self.approach_fit = None
         if (graph is None or graph.source_key is None or graph.source_key == self._last_source
                 or not graph.calibration_qualified):
             return
@@ -860,6 +947,8 @@ class TemporalRoadMap:
         self._frames.append(strips)
         if qualified:
             self._recent_sources.append(graph.source_key if strips else None)
+            if strips and self._parking_entrance_diagnostics:
+                self._parking_sources.append(graph.source_key)
         active = {(s.source,s.identity) for frame in self._frames for s in frame}
         self._roles = {key:roles for key,roles in self._roles.items() if key in active}
         self._map_roles = {key:roles for key,roles in self._map_roles.items() if key in active}
@@ -919,18 +1008,39 @@ class TemporalRoadMap:
                 run.append(link)
             previous = candidate
         self._retain(run,road_profile,graph.source_key,candidates,interpolated)
+        sections = None
         if self._parking_entrance_diagnostics:
             self.parking_branches = observe_entrances(self.parking_branches, projected, self.links)
             if not self._entrance_recheck:
                 # 코너의 진입선이 먼저 보이고 차로 기준선이 뒤늦게 이어질 수 있다.
                 history = tuple(strip for frame in self._frames for strip in frame
                                 if strip.source in recent_sources)
+                sections = self.sections(road_profile)
                 self.parking_branches = observe_entrances(self.parking_branches, history,
-                    (link for section in self.sections(road_profile) for link in section.links), followed=True)
+                    (link for section in sections for link in section.links), followed=True)
             self._entrance_recheck = (self._entrance_recheck+1) % _ENTRANCE_RECHECK_FRAMES
         candidates = candidates or interpolated
-        if len(candidates) == 1:
-            return candidates[0]
+        candidate = candidates[0] if len(candidates) == 1 else None
+        if candidate is not None and (registration is None or candidate.within(registration)):
+            return candidate
+        if len(candidates) <= 1 and self._parking_entrance_diagnostics:
+            nearby = tuple(span for span in entrance_spans(self.parking_branches)
+                           if math.dist(transform[:2], span.endpoints[0]) <= tape_profile.x_max_m)
+            if nearby and registration is not None and graph.complete:
+                if sections is None:
+                    sections = self.sections(road_profile)
+                curves = tuple(curve for span in nearby if (curve := _mapped_parking_approach(
+                    sections, span, graph.source_key, road_profile, registration)) is not None)
+                if len(curves) == 1:
+                    return curves[0]
+            if candidate is None and nearby:
+                history = tuple(strip for frame in self._frames for strip in frame if strip.source in recent_sources)
+                fits = tuple(fit for span in nearby
+                             if (fit := refit_approach(span,history,graph.source_key,road_profile)) is not None)
+                if len(fits) == 1:
+                    self.approach_fit = fits[0]
+                    return MappedRoad(fits[0].road,fits[0].sources)
+        return candidate
 
     def _retain(self, run, profile, key, candidates, interpolated):
         qualified_run = sum(math.dist(link.start[1],link.end[1]) for link in run) >= profile.min_usable_length_m

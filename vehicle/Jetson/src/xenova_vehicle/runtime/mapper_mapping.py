@@ -555,6 +555,10 @@ class MapperMapping:
                     if (temporal is not None and result.summary.get('localization_qualified') is True
                             and self._crossing is not None and temporal.within(self.profile.pipeline.registration)):
                         temporal_root=collector.temporal_lane_root(temporal)
+                    parking_root=None
+                    if result.parking_tape_history and result.summary.get('localization_qualified') is True:
+                        key=draft.frame.observation.rgb.stamp.key
+                        parking_root=collector.temporal_rgb_root(key,frozenset((key, *(k for k,_ in result.parking_tape_history))))
                     evidence=EvidenceTable(tuple(collector._records[key] for key in sorted(collector._records)),
                         tuple(collector._contexts[key] for key in sorted(collector._contexts)))
                     pose=result.mapped_odometry
@@ -575,7 +579,7 @@ class MapperMapping:
                         prior_qualified=result.summary.get('localization_qualified') is True,
                         metric_evidence=self.catalogs.metric_from_frame(draft.frame),lane_provenance_ids=(root,root),
                         base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m),
-                        temporal_provenance_id=temporal_root)
+                        temporal_provenance_id=temporal_root,parking_provenance_id=parking_root)
                     if self._atlas is not None:
                         atlas=self._atlas.prepare_frame(grid,collector._atlas_proof)
         except AtlasResource:ready=False;reason='ATLAS_RESOURCE'

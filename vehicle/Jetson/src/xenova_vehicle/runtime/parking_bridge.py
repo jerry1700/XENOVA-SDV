@@ -580,7 +580,8 @@ class ParkingBridge:
         return accepted
 
     def process(self, result, *, stamp, capture_prior, aisles, registration_revision, prior_qualified,
-                now_us, metric_evidence=None, source_kinds=1):
+                now_us, metric_evidence=None, source_kinds=1, shared_entry=False,
+                parking_graphs=(), geometry_evidence=None):
         """실제 PerceptionResult를 소비한다. I/O 대기 대신 allocation/provenance wait를 반환한다."""
         from ..perception.pipeline import PerceptionResult
         if (type(result) is not PerceptionResult or type(stamp) is not FrameStamp or type(capture_prior) is not PoseBox
@@ -636,15 +637,27 @@ class ParkingBridge:
             geometry = self._applied_geometry
             reasons = list(geometry.reasons)
         else:
-            rows = []; checked = pairs = 0; complete = True; reasons = []
-            for aisle in aisles:
+            rows = []; checked = pairs = 0; complete = True; reasons = []; used_history = False
+            for index, aisle in enumerate(aisles):
                 remaining = self.profile.hypothesis_cap - checked
                 if remaining <= 0:
                     complete = False; reasons.append('DECLARED_AISLE_WORK_CAP'); break
                 began = perf_counter_ns(); self._geometry_work.add('extract_calls')
                 try:
-                    value = extract_slots(result.tape, aisle, source=source, body=self.body,
-                        profile=replace(self.profile, hypothesis_cap=remaining))
+                    measured = parking_graphs[index] if parking_graphs else None
+                    graph = result.tape if measured is None else measured[0]
+                    value = extract_slots(graph, aisle, source=source, body=self.body,
+                        profile=replace(self.profile, hypothesis_cap=remaining), shared_entry=shared_entry)
+                    if measured is not None and value.status != 'VALID' and value.hypotheses_checked < remaining:
+                        self._geometry_work.add('extract_calls')
+                        fallback = extract_slots(result.tape, aisle, source=source, body=self.body,
+                            profile=replace(self.profile, hypothesis_cap=remaining-value.hypotheses_checked),
+                            shared_entry=shared_entry)
+                        extra = fallback.hypotheses_checked if fallback.status != 'VALID' else value.hypotheses_checked
+                        if fallback.status == 'VALID':
+                            value, measured = fallback, None
+                        checked += extra
+                    used_history |= measured is not None
                 finally:self._geometry_work.add('extract_us', max(0, (perf_counter_ns()-began)//1000))
                 base = len(rows)
                 rows.extend(replace(c, local_id=base + i) for i, c in enumerate(value.candidates))
@@ -659,6 +672,10 @@ class ParkingBridge:
                 rows[i] = replace(rows[i], geometry_state=AMBIGUOUS, reasons=rows[i].reasons + ('DECLARED_ROLE_AMBIGUITY',))
             state = 'UNKNOWN' if not complete else 'AMBIGUOUS' if conflicting else 'PARTIAL' if any(c.geometry_state != VALID for c in rows) else 'VALID' if rows else 'EMPTY'
             geometry = SlotGeometryResult(tuple(rows), source, complete, state, tuple(reasons), checked, pairs)
+            if used_history:
+                if type(geometry_evidence) is not MetricEvidence or geometry_evidence.frame_keys != metric_evidence.frame_keys:
+                    raise ValueError('same capture with original multi-frame parking evidence required')
+                metric_evidence = geometry_evidence
         began = perf_counter_ns(); self._geometry_work.add('association_calls')
         try:
             association = self.catalog.associate(geometry, capture_prior, prior_qualified=prior_qualified, profile=self.association_profile)
@@ -976,7 +993,7 @@ class ParkingBridge:
         self._records = records; self._contexts.update(contexts)
         self._links = {c.stable_id: records[c.provenance_id].parents for c in selected}
 
-    def publication_candidates(self, *, now_us, roi_bounds):
+    def publication_candidates(self, *, now_us, roi_bounds, lane_ids=None):
         from xenova_drive_world import schema
         uint(now_us)
         if self.catalog.revision == 0:
@@ -986,7 +1003,8 @@ class ParkingBridge:
         x0, y0, x1, y1 = roi_bounds
         if x0 >= x1 or y0 >= y1:
             raise ValueError('reversed ROI')
-        tracks = tuple(t for t in self.catalog.tracks if _in_roi(t.candidate, roi_bounds))
+        tracks = tuple(t for t in self.catalog.tracks if _in_roi(t.candidate, roi_bounds)
+                       and (lane_ids is None or t.candidate.approach_lane_id in lane_ids))
         unresolved = (self.last is None or self.last.association is None or not self.last.association.complete
             or self.last.association.status not in ('NEW', 'UNIQUE') or self.last.allocation_wait or self.last.provenance_wait)
         # cadence reuse의 association은 원 geometry의 proof다. 원 capture age는 아래에서 계속 증가한다.

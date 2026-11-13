@@ -389,6 +389,26 @@ def test_bad_callback_then_valid_recovers_with_new_entry_without_replay(client, 
     assert received == [original] and client.latest(HEALTH_TOPIC) is original
 
 
+@pytest.mark.parametrize("field", ["type", "vm_id", "seq"])
+def test_wrongly_typed_envelope_never_escapes_the_callback(client, field):
+    """paho 는 콜백 예외를 다시 던져 네트워크 스레드를 끝낸다 — 남이 보낸 봉투 한 건으로 수신이 멈추면 안 된다."""
+    import re
+
+    received = []
+    client.subscribe(HEALTH_TOPIC, received.append, qos=1)
+    envelope = env.build(Identity(source_id="dom0-server"), "vm.health", {"ok": True}, 1)
+    if field == "seq":  # 4300 자리를 넘는 정수는 json.loads 가 JSONDecodeError 가 아닌 ValueError 를 낸다
+        bad = re.sub(r'"seq": 1\b', '"seq": ' + "9" * 5000, json.dumps(envelope)).encode()
+        assert len(bad) > 5000
+    else:
+        bad = json.dumps({**envelope, field: [1]}).encode()
+    client._on_message(client._fake, None, SimpleNamespace(topic=HEALTH_TOPIC, payload=bad, retain=False))
+    assert received == [] and client.latest(HEALTH_TOPIC) is None
+    good = SimpleNamespace(topic=HEALTH_TOPIC, payload=json.dumps(envelope).encode(), retain=False)
+    client._on_message(client._fake, None, good)
+    assert len(received) == 1
+
+
 def test_slow_validation_keeps_identity_guard_at_current_time_and_recovers(client, monkeypatch):
     from uuid import uuid4
     from xenova_mqtt.drive_binding import BindingCache
