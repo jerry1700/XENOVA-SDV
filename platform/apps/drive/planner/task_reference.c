@@ -69,19 +69,27 @@ static dw_point tape_vertex(const struct tr_view *v,unsigned i,float tape){
  }
  return point;
 }
-static bool inside_with_tape(const struct tr_view *v,dw_point p,float tape){
- bool hit=false;unsigned n=2*v->count;
- for(unsigned i=0,j=n-1;i<n;j=i++){
-  dw_point a=tape_vertex(v,i,tape),b=tape_vertex(v,j,tape);
-  if(((a.y>p.y)!=(b.y>p.y))&&p.x<(b.x-a.x)*(p.y-a.y)/(b.y-a.y)+a.x)hit=!hit;
+/* A footprint shares the same polygon across its axle or corner probes.
+ * Keep the original crossing formula and vertex order at the boundary. */
+static bool points_inside(const struct tr_view *v,const dw_point *points,unsigned count,float tape){
+ unsigned hits=0,n=2*v->count;
+ dw_point b=tape_vertex(v,n-1,tape);
+ for(unsigned i=0;i<n;i++){
+  dw_point a=tape_vertex(v,i,tape);
+  for(unsigned k=0;k<count;k++){
+   dw_point p=points[k];
+   if(((a.y>p.y)!=(b.y>p.y))&&p.x<(b.x-a.x)*(p.y-a.y)/(b.y-a.y)+a.x)hits^=1u<<k;
+  }
+  b=a;
  }
- return hit;
+ return hits==(1u<<count)-1;
 }
-static bool inside(const struct tr_view *v,dw_point p){return inside_with_tape(v,p,0);}
-static bool cuts(dw_point a,dw_point b,dw_pose center,float half,float width){
- float cs=cosf(center.yaw),sn=sinf(center.yaw);
+static bool inside(const struct tr_view *v,dw_point p){return points_inside(v,&p,1,0);}
+static bool cuts(dw_point a,dw_point b,dw_pose center,float cs,float sn,float half,float width){
  float ax=(a.x-center.x)*cs+(a.y-center.y)*sn,ay=-(a.x-center.x)*sn+(a.y-center.y)*cs;
  float bx=(b.x-center.x)*cs+(b.y-center.y)*sn,by=-(b.x-center.x)*sn+(b.y-center.y)*cs;
+ if((ax>half&&bx>half)||(ax< -half&&bx< -half)||
+    (ay>width&&by>width)||(ay< -width&&by< -width))return false;
  float lo=0,hi=1,first[2]={ax,ay},delta[2]={bx-ax,by-ay},bounds[2]={half,width};
  for(unsigned k=0;k<2;k++){
   if(fabsf(delta[k])<1e-9f){if(fabsf(first[k])>=bounds[k])return false;}
@@ -102,20 +110,30 @@ bool tr_contains(const struct tr_view *v,dw_pose pose,float extra,const struct l
  float half=(c->front+c->rear)*.5f+c->margin+extra+error,width=c->half_width+c->margin+extra+error;
  bool changing=v->selected!=v->from;
  float tape=lp_lane_boundary_allowance_m(c);
+ float cs=cosf(pose.yaw),sn=sinf(pose.yaw);
  /* The body may use the boundary allowance. Axle centres stay inside the corridor. */
- if(tape>0&&(!inside(v,(dw_point){pose.x,pose.y})||
-    !inside(v,(dw_point){pose.x+c->wheelbase*cosf(pose.yaw),pose.y+c->wheelbase*sinf(pose.yaw)})))return false;
+ if(tape>0){
+  dw_point axles[2]={{pose.x,pose.y},{pose.x+c->wheelbase*cs,pose.y+c->wheelbase*sn}};
+  if(!points_inside(v,axles,2,0))return false;
+ }
  dw_pose center=pose;float shift=(c->front-c->rear)*.5f;
- center.x+=shift*cosf(pose.yaw);center.y+=shift*sinf(pose.yaw);
+ center.x+=shift*cs;center.y+=shift*sn;
+ dw_point corners[4];
  for(unsigned i=0;i<4;i++){
   float u=i&1?half:-half,z=i&2?width:-width;
-  if(!inside_with_tape(v,(dw_point){center.x+cosf(pose.yaw)*u-sinf(pose.yaw)*z,
-                         center.y+sinf(pose.yaw)*u+cosf(pose.yaw)*z},tape))return false;
+  corners[i]=(dw_point){center.x+cs*u-sn*z,center.y+sn*u+cs*z};
  }
- for(unsigned i=0;i<2*v->count;i++)if(cuts(tape_vertex(v,i,tape),tape_vertex(v,(i+1)%(2*v->count),tape),center,half,width))return false;
+ if(!points_inside(v,corners,4,tape))return false;
+ unsigned n=2*v->count;
+ dw_point a=tape_vertex(v,0,tape);
+ for(unsigned i=0;i<n;i++){
+  dw_point b=tape_vertex(v,i+1==n?0:i+1,tape);
+  if(cuts(a,b,center,cs,sn,half,width))return false;
+  a=b;
+ }
  for(unsigned i=0;(changing||tape<=0)&&i+1<v->count;i++){
-  if(cuts(m->divider[i],m->divider[i+1],center,half,width)&&
-     (!changing||m->crossing.bytes[i]!=1||m->divider_state.bytes[i]||m->divider_state.bytes[i+1]))return false;
+  if(changing&&m->crossing.bytes[i]==1&&!m->divider_state.bytes[i]&&!m->divider_state.bytes[i+1])continue;
+  if(cuts(m->divider[i],m->divider[i+1],center,cs,sn,half,width))return false;
  }
  return true;
 }
@@ -281,7 +299,7 @@ static bool parking_contains(const struct tr_view *v,const dw_point slot[4],floa
   for(unsigned k=0;k<edges->count;k++)if(body_inside(center,half,width,edges->points[k]))return false;
  }else if(!union_edges(v,slot,center,half,width,NULL))return false;
  if(v->selected!=v->from)for(unsigned k=0;k+1<v->count;k++){
-  if(m->crossing.bytes[k]!=1&&cuts(m->divider[k],m->divider[k+1],center,half,width))return false;
+  if(m->crossing.bytes[k]!=1&&cuts(m->divider[k],m->divider[k+1],center,cosf(center.yaw),sinf(center.yaw),half,width))return false;
  }
  return true;
 }
