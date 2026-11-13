@@ -210,8 +210,13 @@ static enum de_result inputs(struct drive_engine *e,const struct dw_snapshot *ma
   if(loc->valid_for_us>UINT64_MAX-start||now<start||now>=start+loc->valid_for_us)return DE_EXPIRED;
   if(deadline&&*deadline>start+loc->valid_for_us)*deadline=start+loc->valid_for_us;
   float age=(float)((double)(now-start)/1000000.);
-  vehicle->position_error_m+=loc->anchor_position_bound_m+loc->geometry_position_bound_m+age*loc->position_drift_bound_mps;
-  vehicle->heading_error_rad+=loc->anchor_heading_bound_rad+loc->geometry_heading_bound_rad+age*loc->heading_drift_bound_rps;
+  vehicle->position_error_m+=loc->anchor_position_bound_m+age*loc->position_drift_bound_mps;
+  vehicle->heading_error_rad+=loc->anchor_heading_bound_rad+age*loc->heading_drift_bound_rps;
+  /* The road basis has its own error. It does not move the localized rear axle. */
+  if(map->world.has_route_view||(e->has_grant&&e->grant.kind==2)){
+   vehicle->position_error_m+=loc->geometry_position_bound_m;
+   vehicle->heading_error_rad+=loc->geometry_heading_bound_rad;
+  }
  }
  if(!isfinite(vehicle->position_error_m)||!isfinite(vehicle->heading_error_rad)||
     vehicle->position_error_m>e->config->max_position_error||vehicle->heading_error_rad>e->config->max_heading_error)return DE_POSE;
@@ -298,8 +303,10 @@ static enum de_result task_prepare(struct drive_engine *e,const dw_world *w,dw_p
  if(!tr_basis_accept(&e->basis,w))return DE_REFERENCE;
  float radius=hypotf(fmaxf(e->config->front,e->config->rear)+e->config->margin,e->config->half_width+e->config->margin);
  float pad=vehicle->position_error_m+radius*vehicle->heading_error_rad;
- uint32_t actual=tr_unique_lane(w,pose,pad+e->config->tracking_guard,e->config,budget.collision_index);
  *task=e->task;
+ float guard=pad+e->config->tracking_guard;
+ uint32_t actual=task->changing?tr_unique_lane(w,pose,guard,e->config,budget.collision_index):
+  tr_live_lane(w,pose,guard,e->config,budget.collision_index);
  if(!task->active){if(!actual)return DE_POSE;*task=(struct tr_intent){true,false,actual,actual,actual,pad};}
  task->vehicle_pad=pad;
  struct tr_view view;if(!tr_open_indexed(w,task,budget.collision_index,&view))return DE_PATH;

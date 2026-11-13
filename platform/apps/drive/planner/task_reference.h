@@ -9,11 +9,15 @@
 struct lp_config;
 struct lp_collision_index;
 struct tr_intent { bool active,changing;uint32_t selected_lane_id,from_lane_id,home_lane_id;float vehicle_pad; };
+static inline bool tr_live_follow(const dw_world *w,const struct tr_intent *task){
+ return task&&task->active&&!task->changing&&!w->has_route_view;
+}
 struct tr_view { const dw_world *world;const xenova_drive_LaneGeometry *selected,*from;
  const dw_point *points;unsigned count;const struct lp_collision_index *index; };
 struct tr_lane_edges {
  dw_point outer[TR_LANE_POINTS],outer_tape[TR_LANE_POINTS],divider_tape[TR_LANE_POINTS];
  float min_half_width;
+ bool observed;
 };
 struct tr_basis { bool bound;unsigned count;uint64_t revision;dw_point points[TR_BASIS_POINTS];
  char id[65],map[37],frame[37],odom[37],configuration[65],calibration[65],primitive[65],vehicle[65],
@@ -25,8 +29,11 @@ void tr_index_lanes(struct lp_collision_index *,const dw_world *,const struct lp
 bool tr_centerline(const dw_world *,const struct tr_intent *,const dw_point **,unsigned *);
 /* 전체 차체 tube와 경계의 교차를 검사한다. CHANGE만 실제 허용 divider 구간을 넘는다. */
 bool tr_contains(const struct tr_view *,dw_pose,float extra,const struct lp_config *);
+/* Lane slice ends are not physical boundaries. The caller still checks the swept grid. */
+bool tr_contains_live(const struct tr_view *,dw_pose,float extra,const struct lp_config *);
 /* 명목 최근접/배열 순서는 쓰지 않는다. 전체 tube가 정확히 한 차로에 있을 때만 ID다. */
 uint32_t tr_unique_lane(const dw_world *,dw_pose,float extra,const struct lp_config *,const struct lp_collision_index *);
+uint32_t tr_live_lane(const dw_world *,dw_pose,float extra,const struct lp_config *,const struct lp_collision_index *);
 bool tr_same_intent(const struct tr_intent *,const struct tr_intent *);
 bool tr_basis_accept(struct tr_basis *,const dw_world *);
 bool tr_basis_compatible(const struct tr_basis *,const dw_world *);

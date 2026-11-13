@@ -294,7 +294,8 @@ static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float ex
   else{
    if(!tr_open_indexed(w,task,b->collision_index,&view))return LP_COLLISION;
    contained=space&&space->exiting?dre_contains(&view,space,pose,extra,c):
-    space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):tr_contains(&view,pose,extra,c);
+    space&&space->parking?tr_parking_contains(&view,space->polygon,space->uncertainty,pose,extra,c):
+    tr_live_follow(w,task)?tr_contains_live(&view,pose,extra,c):tr_contains(&view,pose,extra,c);
   }
   if(!contained)return LP_COLLISION;
  }
@@ -454,8 +455,10 @@ enum lp_result lp_task_goal(const dw_world *w,const struct tr_intent *task,dw_po
  const dw_point *points;unsigned count;
  if(!w||!out||!reference(w,task,&points,&count)||!dw_pose_finite(pose)||!isfinite(horizon)||horizon<=0||!isfinite(end_clearance)||end_clearance<0)return LP_INPUT;
  struct lp_road_state road;enum lp_result rc=lp_task_project(w,task,pose,&road);if(rc!=LP_PATH_FOUND)return rc;
- if(road.length<=end_clearance)return LP_INPUT;
- float goal=fminf(road.length-end_clearance,road.arc+horizon),total=0;
+ /* Keep the target axle just inside the lane slice. Only the actual grid needs the body reserve. */
+ float lane_end_reserve=tr_live_follow(w,task)?1e-4f:end_clearance;
+ if(road.length<=lane_end_reserve)return LP_INPUT;
+ float goal=fminf(road.length-lane_end_reserve,road.arc+horizon),total=0;
  float width=w->width*w->resolution_m,height=w->height*w->resolution_m;
  if(goal<=road.arc||2*end_clearance>=fminf(width,height))return LP_INPUT;
  dw_pose inverse=dw_inverse(w->origin);bool entered=false;
@@ -914,8 +917,9 @@ static enum lp_result guide_terminal(struct lp_search *s,float clearance){
  struct lane_guide guide;
  if(!make_lane_guide(&view,c,&guide,1))return LP_COLLISION;
 
- /* Leave room for the front corner along the inset guide at the observed end. */
+ /* Only a closed corridor needs to reserve body length along the guide. */
  float last_station=goal.length;
+ if(tr_live_follow(s->world,&s->task))clearance=0;
  for(unsigned i=guide.count-1;i>0&&clearance>0;i--){
   float length=guide.length[i-1];
   if(length<=1e-5f)return LP_COLLISION;

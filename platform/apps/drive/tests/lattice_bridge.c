@@ -372,9 +372,9 @@ uint32_t probe_task_lane(void *pointer,float x,float y,float yaw,float error){
  struct probe *p=pointer;
  const dw_world *w=&p->snapshot.world;
  dw_pose pose={x,y,yaw};
- uint32_t direct=tr_unique_lane(w,pose,error,&p->config,NULL);
+ uint32_t direct=tr_live_lane(w,pose,error,&p->config,NULL);
  lp_index_build(&p->search.collision_index,w,&p->config);
- uint32_t indexed=tr_unique_lane(w,pose,error,&p->config,&p->search.collision_index);
+ uint32_t indexed=tr_live_lane(w,pose,error,&p->config,&p->search.collision_index);
  return direct==indexed?direct:UINT32_MAX;
 }
 void probe_task_tape(void *pointer,float half_width){
