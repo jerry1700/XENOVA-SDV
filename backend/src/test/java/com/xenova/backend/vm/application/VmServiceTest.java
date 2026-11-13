@@ -454,6 +454,22 @@ class VmServiceTest {
     }
 
     @Test
+    void exclusivePinningRejectsCoresReservedByDom0OrAnotherVmBeforeCallingThePlatform() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        when(vmControlPort.cpuLayout()).thenReturn(exclusiveCpuLayout());
+
+        assertThatThrownBy(() -> service.updateVcpuPinning(
+                "vm-1", List.of(new CpuLayout.VcpuAffinity(0, List.of(0, 1))), "pin-conflict"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("CPU_PLACEMENT_CONFLICT");
+                    assertThat(exception.getMessage()).contains("0", "1");
+                });
+        verify(vmControlPort, never()).updateCpuPolicy(any(), anyString());
+    }
+
+    @Test
     void destroyRetiresDomainAndKeepsTheRecordForRestore() {
         VmRecord record = record("vm-1", "alpine-1");
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
@@ -545,6 +561,22 @@ class VmServiceTest {
                 List.of(
                         new CpuLayout.VmCpuLayout(
                                 "vm-1", 1, "shared", List.of(new CpuLayout.VcpuAffinity(0, List.of(0, 3)))),
+                        new CpuLayout.VmCpuLayout(
+                                "vm-z", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(1))))));
+    }
+
+    private static CpuLayout exclusiveCpuLayout() {
+        return new CpuLayout(
+                true,
+                2,
+                "2.0",
+                new CpuLayout.CpuHost(List.of(0, 1, 2, 3), 3, List.of(0, 3), true),
+                List.of(
+                        new CpuLayout.CpuReservation("vm-1", List.of(2)),
+                        new CpuLayout.CpuReservation("vm-z", List.of(1))),
+                List.of(
+                        new CpuLayout.VmCpuLayout(
+                                "vm-1", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(2)))),
                         new CpuLayout.VmCpuLayout(
                                 "vm-z", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(1))))));
     }

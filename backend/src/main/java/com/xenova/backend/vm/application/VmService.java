@@ -273,6 +273,22 @@ public class VmService {
         if ("shared".equals(target.allocation()) && !shared.containsAll(requestedMask)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "RESOURCE_UNSUPPORTED", "공유 VM은 공유 pCPU 집합 안에서만 배치할 수 있습니다.");
         }
+        if ("exclusive".equals(target.allocation())) {
+            Set<Integer> unavailable = new java.util.HashSet<>(shared);
+            if (layout.reservations() != null) {
+                layout.reservations().stream()
+                        .filter(reservation -> !vmId.equals(reservation.vmId()))
+                        .filter(reservation -> reservation.pcpus() != null)
+                        .forEach(reservation -> unavailable.addAll(reservation.pcpus()));
+            }
+            List<Integer> conflicts = requestedMask.stream().filter(unavailable::contains).toList();
+            if (!conflicts.isEmpty()) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "CPU_PLACEMENT_CONFLICT",
+                        "선택한 pCPU " + conflicts + "는 dom0 공유 영역이거나 다른 VM이 전용으로 사용 중입니다.");
+            }
+        }
 
         List<CpuPolicyUpdate.CpuPlacement> placements = new ArrayList<>();
         for (CpuLayout.VmCpuLayout item : layout.vms()) {
