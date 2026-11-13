@@ -796,6 +796,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+  /api/v1/templates:
+    get:
+      tags:
+      - Templates
+      summary: 보드에 공개된 템플릿 목록(버전별 전부)
+      description: 보드 카탈로그를 변환 없이 버전별로 전부 돌려준다. 같은 template_id 의 여러 버전이 함께 나온다. platform
+        드라이버 전용(그 외 501)
+      operationId: listTemplates
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Template'
+                type: array
+                title: Response Listtemplates
+        '401':
+          description: 'Unauthorized: Bearer 서비스 토큰 없음·불일치 (미들웨어)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'DriverError: 분류되지 않은 실행 오류'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'PlatformUnavailable: registry·저장소·Xen 일시 장애 (재시도 가능)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: 'DriverTimeout: xl·플랫폼 호출 시한 초과'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '501':
+          description: 'NotSupported: 드라이버·플랫폼이 제공하지 않는 동작'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - $ref: '#/components/parameters/RequestBudget'
   /api/v1/vm-registrations:
     get:
       tags:
@@ -1017,6 +1067,67 @@ components:
       properties:
         accepted: {type: integer}
         duplicates: {type: integer}
+    Template:
+      properties:
+        template_id:
+          type: string
+          title: Template Id
+        template_version:
+          type: string
+          title: Template Version
+        guest_kind:
+          type: string
+          enum:
+          - linux
+          - zephyr
+          title: Guest Kind
+        default_resources:
+          $ref: '#/components/schemas/TemplateResources'
+        resource_limits:
+          $ref: '#/components/schemas/TemplateResourceLimits'
+        capabilities:
+          additionalProperties: true
+          type: object
+          title: Capabilities
+      type: object
+      required:
+      - template_id
+      - template_version
+      - guest_kind
+      - default_resources
+      - resource_limits
+      - capabilities
+      title: Template
+    TemplateResources:
+      properties:
+        vcpus:
+          type: integer
+          title: Vcpus
+        memory_mib:
+          type: integer
+          title: Memory Mib
+      type: object
+      required:
+      - vcpus
+      - memory_mib
+      title: TemplateResources
+    TemplateResourceLimits:
+      properties:
+        vcpus:
+          items:
+            type: integer
+          type: array
+          title: Vcpus
+        memory_mib:
+          items:
+            type: integer
+          type: array
+          title: Memory Mib
+      type: object
+      required:
+      - vcpus
+      - memory_mib
+      title: TemplateResourceLimits
     Registration:
       properties:
         vm_id:

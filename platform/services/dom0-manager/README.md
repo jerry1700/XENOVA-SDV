@@ -1,5 +1,17 @@
 # dom0-manager
 
+## 템플릿 카탈로그 조회
+
+`platform` 드라이버의 `GET /api/v1/templates`는 보드 `/srv/xenova/catalog`에 공개된 템플릿을 버전별로 전부 반환합니다.
+하위 `xenova-vm templates`를 그대로 옮기며 최신 버전 선택·표시 이름은 하지 않습니다(Spring 몫).
+응답 필드는 `template_id`, `template_version`, `guest_kind`, `default_resources`, `resource_limits`, `capabilities`이고
+보드 내부 경로·해시(`directory`, `asset_directory`, `manifest_sha256` 등)는 뺍니다. mock·xen 드라이버는 501입니다.
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $DOM0_SERVICE_TOKEN" \
+  http://127.0.0.1:8081/api/v1/templates
+```
+
 ## 등록 목록과 단건 통지
 
 `platform` 드라이버의 `GET /api/v1/vm-registrations`는 실행 여부와 무관한 REGISTERED 목록을 여덟 필드 배열로 반환합니다.
