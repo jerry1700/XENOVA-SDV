@@ -261,6 +261,18 @@ def test_episode_corners_keep_the_local_station_interval(library):
     assert library.probe_episode_station(1, bounds) == 0
 
 
+def test_episode_station_stays_continuous_across_a_sampled_loop_seam(library):
+    library.probe_episode_seam.argtypes = [C.c_int, C.POINTER(C.c_float)]
+    bounds = (C.c_float * 6)()
+    assert library.probe_episode_seam(0, bounds) == 1
+    before, before_end, after, after_end, blocker, blocker_end = bounds
+    assert 11.8 < before < 12.0 < before_end < 12.3
+    assert .08 < after - before < .12 and .10 < after_end - before_end < .12
+    assert blocker < 12.0 < blocker_end and .13 < blocker_end - blocker < .22
+    assert library.probe_episode_seam(1, bounds) == 1
+    assert bounds[1] < 11.1 and bounds[3] < 11.1
+
+
 def test_occupied_cell_far_past_lane_end_is_not_a_blocker(library):
     library.probe_observed_blocker.argtypes = [C.c_void_p]
     for column, expected in ((63, 0), (59, 1)):

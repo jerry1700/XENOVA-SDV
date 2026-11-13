@@ -895,7 +895,8 @@ static bool completed_episode_progress(const struct lp_path *path,uint32_t gener
  if(vehicle->sequence<progress->vehicle_sequence||used<progress->used_travel_ticks||progress->revision>=INT64_MAX)return false;
  float radius=hypotf(fmaxf(config->front,config->rear)+config->margin,config->half_width+config->margin);
  float pad=vehicle->position_error_m+radius*vehicle->heading_error_rad,lo,hi;
- if(!db_station_bounds(&path->basis,pose,pad,config,&lo,&hi))return false;
+ if(!db_station_bounds_near(&path->basis,core->basis_prefix_count,pose,pad,config,
+    progress->station_lower_m,false,&lo,&hi))return false;
  float remaining=hypotf(pose.x-core->phase_goal.x,pose.y-core->phase_goal.y)+pad;
  if(!isfinite(remaining))return false;
  bool fresh=vehicle->sequence>progress->vehicle_sequence;
@@ -1431,7 +1432,8 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    e->episode_handoff=DE_EPISODE_PASS_PLANNING;
   }else if(e->episode.phase==DB_PASS){
    float radius=hypotf(e->config->front,e->config->half_width),lo,hi,pad=v->position_error_m+radius*v->heading_error_rad;
-   if(!db_station_bounds(&e->episode.basis,pose,pad,e->config,&lo,&hi))return DE_STATE;
+   if(!db_station_bounds_near(&e->episode.basis,e->episode.basis.count,pose,pad,e->config,
+      e->episode.progress_lower,false,&lo,&hi))return DE_STATE;
    if(lo>e->episode.blocker.station_upper+e->behavior_limits.pass_margin_m){
     if(e->episode.policy==DB_KEEP_TARGET){
      if(!behavior_phase(e,DB_FINISHED,e->episode.phase_goal,now))return DE_STATE;
@@ -1483,8 +1485,10 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    e->episode_candidate.core.left_baseline_ticks=birth_vehicle.left_ticks;
    e->episode_candidate.core.right_baseline_ticks=birth_vehicle.right_ticks;
    float lo,hi,radius=hypotf(e->config->front,e->config->half_width),pad=v->position_error_m+radius*v->heading_error_rad;
-   if(!db_station_bounds(&e->episode.basis,pose,pad,e->config,&lo,&hi))return DE_STATE;
-   e->episode.progress_lower=lo;e->episode.remaining_upper=hypotf(pose.x-phase_goal.x,pose.y-phase_goal.y)+pad;
+   if(!db_station_bounds_near(&e->episode.basis,e->episode.basis.count,pose,pad,e->config,
+      blocker.station_upper,true,&lo,&hi))return DE_STATE;
+   e->episode.progress_lower=lo;
+   e->episode.remaining_upper=hypotf(pose.x-phase_goal.x,pose.y-phase_goal.y)+pad;
    e->episode.last_vehicle_sequence=v->sequence;
    if(e->budget.clock)e->budget.clock(e->budget.context,&e->episode_began_guest_us);
    e->phase_began_guest_us=e->episode_began_guest_us;

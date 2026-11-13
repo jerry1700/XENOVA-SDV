@@ -114,6 +114,17 @@ int probe_episode_station(int split,float bounds[2]){
  }
  return db_station_bounds(&basis,pose,.0016f,&lp_selected_config,&bounds[0],&bounds[1]);
 }
+int probe_episode_seam(int large_gap,float out[6]){
+ struct tr_basis basis={.bound=true,.count=6,.points={{.9f,0},{3,0},{3,3},{0,3},{0,0},{.85f,0}}};
+ if(large_gap)basis.points[0].x=1.8f;
+ struct lp_config c=lp_selected_config;
+ c.front=.28f;c.rear=.10f;c.half_width=.105f;
+ struct db_blocker blocker={.lower={.82f,-.02f},.upper={.96f,.02f}};
+ if(!db_blocker_locate(&basis,&blocker,.001f))return 0;
+ out[4]=blocker.station_lower;out[5]=blocker.station_upper;
+ return db_station_bounds_near(&basis,basis.count,(dw_pose){.86f,0,0},.001f,&c,11.8f,false,&out[0],&out[1])&&
+        db_station_bounds_near(&basis,basis.count,(dw_pose){.97f,0,0},.001f,&c,out[0],false,&out[2],&out[3]);
+}
 int probe_observed_blocker(void *pointer){
  struct probe *p=pointer;struct db_blocker blocker;struct tr_intent task={true,false,1,1,1,0};
  if(p->decoded||!db_blocker_observe(&p->snapshot.world,&task,(dw_pose){4.9f,1.2f,0},1.5f,&p->config,&blocker))return -1;
