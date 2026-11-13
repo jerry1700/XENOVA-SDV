@@ -79,6 +79,13 @@ def runtime_artifacts(profile, perception_profile_bytes=None,mapper_profile_byte
         calibration=CalibrationProfile.from_dict(json.loads(perception_profile_bytes))
         if calibration.kind=='SYNTHETIC':
             raise ValueError('live runtime cannot use a synthetic calibration profile')
+        if profile.rgb_sensor_mode == 'full':
+            from ..oak.calibration_snapshot import FULL_RGB_ROI
+            rgb = calibration.rgb
+            # 보정에서 제외할 수 있는 영역은 더 넓지만 letterbox 여백을 포함하면 안 된다.
+            if ((rgb.width,rgb.height) != (640,360) or rgb.roi[0] < FULL_RGB_ROI[0]-2
+                    or rgb.roi[2] > FULL_RGB_ROI[2]+2):
+                raise ValueError('full-sensor RGB calibration must exclude the letterbox padding')
         raw=calibration_canonical(calibration.to_dict())
         if len(raw)>65536:
             raise ValueError('canonical perception calibration exceeds its bound')

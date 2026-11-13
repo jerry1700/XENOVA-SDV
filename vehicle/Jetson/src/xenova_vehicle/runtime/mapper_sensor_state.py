@@ -184,14 +184,16 @@ class MapperSensorState:
     """main owner 하나의 sensor HWM/PoseBuffer. scene/lease 변화는 geometry reset이 아니다."""
 
     def __init__(self,calibration,raw_binding,clock_policy,*,tof_leaves,vehicle_max_age_us,
-                 tof_max_age_us,max_speed_mps,max_yaw_rate_rps,max_gap_us,capacity,mapper_worker,mapper_instance):
+                 tof_max_age_us,max_speed_mps,max_yaw_rate_rps,max_gap_us,capacity,mapper_worker,mapper_instance,
+                 wheel_profile=None):
         self.calibration,self.raw,self.policy=calibration,raw_binding,clock_policy
         from ..storage.contracts import uuid
         self.mapper_worker,self.mapper_instance=uuid(mapper_worker),uuid(mapper_instance)
         self.sensor_args=dict(tof_leaves=dict(tof_leaves),vehicle_max_age_us=vehicle_max_age_us,
             tof_max_age_us=tof_max_age_us,max_speed_mps=max_speed_mps,max_yaw_rate_rps=max_yaw_rate_rps)
         self.pose_args=dict(max_gap_us=max_gap_us,max_speed_mps=max_speed_mps,max_yaw_rate_rps=max_yaw_rate_rps,capacity=capacity)
-        PoseBuffer(**self.pose_args)
+        self._wheel_profile=wheel_profile
+        PoseBuffer(**self.pose_args,wheel_profile=wheel_profile)
         self._thread=threading.get_ident();self._identity=None
         self._development_context=None
         self._pc_binding=None
@@ -226,6 +228,7 @@ class MapperSensorState:
     def for_development(cls,profile,raw_binding,clock_policy,*,sensor_context,mapper_worker,mapper_instance):
         """원 개발 binding만 선택한다. 아래 wire/clock/admission/read 본문은 공유한다."""
         from ..simulation.motion_profile import DevelopmentMotionProfile
+        from ..mapping.wheel_motion import WheelMotionProfile
         from .raw_binding import RawBinding
         if (type(profile) is not DevelopmentMotionProfile or type(sensor_context) is not SensorContext
                 or sensor_context.domain!='DEVELOPMENT_SYNTHETIC'
@@ -239,7 +242,8 @@ class MapperSensorState:
         arguments=profile.sensor_arguments;pose=profile.pose_arguments
         result=cls(profile.bound_calibration,raw_binding,clock_policy,**arguments,
             max_gap_us=pose['max_gap_us'],capacity=pose['capacity'],
-            mapper_worker=mapper_worker,mapper_instance=mapper_instance)
+            mapper_worker=mapper_worker,mapper_instance=mapper_instance,
+            wheel_profile=WheelMotionProfile.from_odometry(profile.odometry_arguments))
         result._development_context=sensor_context
         return result
 
@@ -248,6 +252,7 @@ class MapperSensorState:
         """원 PC descriptor를 명시 선택한다. physical RAW나 same-host SDK binding이 아니다."""
         from ..simulation.pc_input import PcSourceBinding
         from ..simulation.motion_profile import DevelopmentMotionProfile
+        from ..mapping.wheel_motion import WheelMotionProfile
         if (type(profile) is not DevelopmentMotionProfile or type(pc_binding) is not PcSourceBinding
                 or type(sensor_context) is not SensorContext or sensor_context.domain!='DEVELOPMENT_SYNTHETIC'
                 or sensor_context.calibration is not profile.bound_calibration or pc_owner_token is None):
@@ -260,7 +265,8 @@ class MapperSensorState:
         arguments=profile.sensor_arguments;pose=profile.pose_arguments
         result=cls(profile.bound_calibration,pc_binding,clock_policy,**arguments,
             max_gap_us=pose['max_gap_us'],capacity=pose['capacity'],
-            mapper_worker=mapper_worker,mapper_instance=mapper_instance)
+            mapper_worker=mapper_worker,mapper_instance=mapper_instance,
+            wheel_profile=WheelMotionProfile.from_odometry(profile.odometry_arguments))
         result._development_context=sensor_context
         result._pc_binding=pc_binding;result._pc_owner_token=pc_owner_token
         return result
@@ -350,7 +356,7 @@ class MapperSensorState:
                     raise ValueError('development snapshot changed its original explicit source binding')
             else:selected=SensorContext(self.calibration,source,**origin)
             self.sensors=SensorSamples(selected,**self.sensor_args)
-            self.poses=PoseBuffer(**self.pose_args);self._identity=identity
+            self.poses=PoseBuffer(**self.pose_args,wheel_profile=self._wheel_profile);self._identity=identity
         if (type(value['vehicles']) is not list or len(value['vehicles'])>24 or type(value['probes']) is not dict
                 or len(value['probes'])>8 or type(value['tof']) is not dict or set(value['tof'])-{'0','1'}):
             raise ValueError('source history exceeds original bounded heads')
@@ -375,7 +381,7 @@ class MapperSensorState:
                     try:
                         record=VehicleAdmission(evidence,now_us,received)
                         self._vehicle_admissions[evidence.wire_sha256]=record
-                        if self.poses.add(evidence.pose_sample):
+                        if self.poses.add(evidence.pose_sample,wheel=evidence.wheel):
                             self._vehicles[evidence.pose_sample.at_us]=record
                         while len(self._vehicle_admissions)>self.pose_args['capacity']:
                             _,old=self._vehicle_admissions.popitem(last=False)

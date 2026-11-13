@@ -10,6 +10,7 @@ import math
 
 from ..perception.inputs import FrameStamp
 from .registration import wrap_yaw, PoseBox
+from .wheel_motion import WheelCapture, WheelMotionProfile, WheelObservation, wheel_progress
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class PoseEstimate:
     sample: PoseSample
     captured_us: tuple[int, int]
     bracket_us: tuple[int, int]
+    wheel_capture: WheelCapture | None = None
 
     @property
     def prior(self):
@@ -61,7 +63,8 @@ class PoseEstimate:
 class PoseBuffer:
     """최대256 원 sample. 다른 context는 버퍼를 교체하고 구 epoch를 연결하지 않는다."""
 
-    def __init__(self, *, max_gap_us=100_000, max_speed_mps=.5, max_yaw_rate_rps=2., capacity=256):
+    def __init__(self, *, max_gap_us=100_000, max_speed_mps=.5, max_yaw_rate_rps=2., capacity=256,
+                 wheel_profile=None):
         if type(max_gap_us) is not int or not 1 <= max_gap_us <= 1_000_000:
             raise ValueError('invalid odom gap bound')
         if type(capacity) is not int or not 2 <= capacity <= 256:
@@ -71,12 +74,17 @@ class PoseBuffer:
                 raise ValueError('positive finite motion bounds required')
         self.max_gap_us, self.speed, self.yaw_rate = max_gap_us, max_speed_mps, max_yaw_rate_rps
         self._samples = deque(maxlen=capacity)
+        if wheel_profile is not None and type(wheel_profile) is not WheelMotionProfile:
+            raise ValueError('explicit WheelMotionProfile required')
+        self._wheel_profile = wheel_profile
+        self._wheel_progress = deque(maxlen=capacity)
 
-    def add(self, sample):
+    def add(self, sample, *, wheel=None):
         if type(sample) is not PoseSample:
             raise ValueError('expected PoseSample')
         if self._samples and self._samples[-1].context != sample.context:
             self._samples.clear()
+            self._wheel_progress.clear()
         if self._samples and sample.at_us <= self._samples[-1].at_us:
             if sample == self._samples[-1]:
                 return False
@@ -87,6 +95,13 @@ class PoseBuffer:
             if (math.hypot(sample.x-old.x, sample.y-old.y) > self.speed*dt + old.position_error_m + sample.position_error_m + 1e-9
                     or abs(wrap_yaw(sample.yaw-old.yaw)) > self.yaw_rate*dt + old.yaw_error_rad + sample.yaw_error_rad + 1e-9):
                 raise ValueError('odom samples contradict the declared motion bounds')
+        if self._wheel_profile is not None:
+            if wheel is not None and type(wheel) is not WheelObservation:
+                raise ValueError('original wheel observation required')
+            old = self._samples[-1] if self._samples else None
+            previous = self._wheel_progress[-1] if self._wheel_progress else None
+            self._wheel_progress.append(wheel_progress(self._wheel_profile, previous, old, wheel, sample,
+                max_speed=self.speed, max_gap_us=self.max_gap_us))
         self._samples.append(sample)
         return True
 
@@ -97,11 +112,12 @@ class PoseBuffer:
         if stamp.captured_us is None or not self._samples:
             return None
         lo, hi = stamp.captured_us
-        matching = [p for p in self._samples if p.clock_id == stamp.clock_id and p.calibration_id == calibration_id]
-        if not matching or (matching[0].origin == 'ORACLE_SIMULATION' and not allow_oracle):
+        matching = [(i,p) for i,p in enumerate(self._samples)
+                    if p.clock_id == stamp.clock_id and p.calibration_id == calibration_id]
+        if not matching or (matching[0][1].origin == 'ORACLE_SIMULATION' and not allow_oracle):
             return None
-        left = next((p for p in reversed(matching) if p.at_us <= lo), None)
-        right = next((p for p in matching if p.at_us >= hi), None)
+        left_index,left = next(((i,p) for i,p in reversed(matching) if p.at_us <= lo),(None,None))
+        right_index,right = next(((i,p) for i,p in matching if p.at_us >= hi),(None,None))
         if left is None or right is None or left.context != right.context or right.at_us-left.at_us > self.max_gap_us:
             return None
         gap = right.at_us-left.at_us
@@ -119,4 +135,18 @@ class PoseBuffer:
             return None
         sample = PoseSample(left.epoch, left.clock_id, calibration_id, middle, x,y,yaw,
                             position_error,yaw_error,left.origin)
-        return PoseEstimate(sample,stamp.captured_us,(left.at_us,right.at_us))
+        capture = None
+        if (self._wheel_profile is not None and self._wheel_progress[left_index] is not None
+                and self._wheel_progress[right_index] is not None
+                and self._wheel_progress[left_index].segment == self._wheel_progress[right_index].segment):
+            # 촬영 구간 가까이에 있는 원 표본을 사용하고 남는 시간·보간 오차를 포함한다.
+            candidates = []
+            for index, endpoint in ((left_index, left), (right_index, right)):
+                progress = self._wheel_progress[index]
+                duration = (max(abs(hi-endpoint.at_us),abs(lo-endpoint.at_us))
+                            + progress.observation.clock_pad_us) / 1e6
+                candidates.append(WheelCapture(progress,
+                    self.speed*duration+math.hypot(x-endpoint.x,y-endpoint.y),
+                    self.yaw_rate*duration+abs(wrap_yaw(yaw-endpoint.yaw))))
+            capture = min(candidates,key=lambda item: (item.position_pad_m,item.yaw_pad_rad))
+        return PoseEstimate(sample,stamp.captured_us,(left.at_us,right.at_us),capture)

@@ -1,6 +1,6 @@
 """RGB/native depth와 고정 YOLOP를 한 Device/graph에서 수집하는 선택 벤치.
 
-같은 ColorCamera.video를 NN에도 보내 원 입력 key를 대조한다. tensor 해석·
+같은 RGB 출력을 NN에도 보내 원 입력 key를 대조한다. tensor 해석·
 빈공간·주행 허가를 만들지 않으며 no-NN OakSource의 장치 수명을 재사용한다.
 """
 
@@ -14,6 +14,7 @@ import time
 from .device import OakSource, _pipeline, _us
 from .jpeg import MAX_JPEG_BYTES, sdk_jpeg
 from .yolop_asset import ASSET_ID, load_yolop_asset, validated_sdk_blob
+from ..runtime.health_policy import ConfigurationError
 
 
 def compact_yolop_graph(pipeline, asset_receipt: dict, fps: int, *, jpeg_enabled=False) -> dict:
@@ -23,33 +24,33 @@ def compact_yolop_graph(pipeline, asset_receipt: dict, fps: int, *, jpeg_enabled
     방식도 사용하지 않는다. 설정은 host 선언이며 device 설정 readback이 아니다.
     """
     if type(jpeg_enabled) is not bool:
-        raise ValueError('JPEG graph option must be an explicit bool')
+        raise ConfigurationError('JPEG graph option must be an explicit bool')
 
     def text(value, name):
         if type(value) is not str or len(value) > 128:
-            raise ValueError(f"invalid compact graph {name}")
+            raise ConfigurationError(f"invalid compact graph {name}")
         return value
 
     def node_id(value):
         if type(value) is not int or not 0 <= value < 2**63:
-            raise ValueError("invalid compact graph node ID")
+            raise ConfigurationError("invalid compact graph node ID")
         return value
 
     native_nodes = pipeline.getAllNodes()
     if not 1 <= len(native_nodes) <= 16:
-        raise ValueError("YOLOP graph exceeds its node bound")
+        raise ConfigurationError("YOLOP graph exceeds its node bound")
     nodes = [{"id": node_id(node.id), "name": text(node.getName(), "node name")}
              for node in native_nodes]
     ids = {node["id"] for node in nodes}
     if len(ids) != len(nodes):
-        raise ValueError("duplicate compact graph node IDs")
+        raise ConfigurationError("duplicate compact graph node IDs")
     groups = pipeline.getConnectionMap()
     if len(groups) > 16:
-        raise ValueError("YOLOP graph exceeds its connection-group bound")
+        raise ConfigurationError("YOLOP graph exceeds its connection-group bound")
     connections = []
     for group in groups.values():
         if len(group) > 32 or len(connections) + len(group) > 32:
-            raise ValueError("YOLOP graph exceeds its connection bound")
+            raise ConfigurationError("YOLOP graph exceeds its connection bound")
         for connection in group:
             item = {"output_id": node_id(connection.outputId),
                     "output_name": text(connection.outputName, "output name"),
@@ -58,7 +59,7 @@ def compact_yolop_graph(pipeline, asset_receipt: dict, fps: int, *, jpeg_enabled
                     "input_name": text(connection.inputName, "input name"),
                     "input_group": text(connection.inputGroup, "input group")}
             if item["output_id"] not in ids or item["input_id"] not in ids:
-                raise ValueError("compact graph connection references an absent node")
+                raise ConfigurationError("compact graph connection references an absent node")
             connections.append(item)
     result = {"scope": "compact_host_node_connection_declaration", "asset_storage_included": False,
             "device_config_readback": False,
@@ -224,7 +225,7 @@ class YolopOakSource(OakSource):
             raise RuntimeError("YOLOP asset validation must precede graph registration")
         self._blob, self._blob_metadata = validated_sdk_blob(dai, self._asset)
 
-        def extend(pipeline, color, stereo):
+        def extend(pipeline, rgb, stereo):
             pipeline.setOpenVINOVersion(dai.OpenVINO.Version.VERSION_2021_4)
             manip = pipeline.create(dai.node.ImageManip)
             manip.initialConfig.setResizeThumbnail(320, 320, 0, 0, 0)
@@ -241,7 +242,7 @@ class YolopOakSource(OakSource):
             network.setNumPoolFrames(2)
             network.input.setQueueSize(1)
             network.input.setBlocking(False)
-            color.video.link(manip.inputImage)
+            rgb.link(manip.inputImage)
             manip.out.link(network.input)
             for name, output, metadata_only in (("nn_input", network.passthrough, True),
                                                  ("nn_output", network.out, False)):
@@ -258,7 +259,7 @@ class YolopOakSource(OakSource):
                 encoder.setMaxOutputFrameSize(MAX_JPEG_BYTES)
                 encoder.input.setQueueSize(1)
                 encoder.input.setBlocking(False)
-                color.video.link(encoder.input)
+                rgb.link(encoder.input)
                 jpeg_out = pipeline.create(dai.node.XLinkOut)
                 jpeg_out.setStreamName('jpeg')
                 jpeg_out.setMetadataOnly(False)
@@ -268,9 +269,9 @@ class YolopOakSource(OakSource):
             required = str(pipeline.getRequiredOpenVINOVersion())
             expected = self._asset.manifest["sdk_blob_metadata"]["host_graph_required_version"]
             if required != expected or pipeline.getOpenVINOVersion() != dai.OpenVINO.Version.VERSION_2021_4:
-                raise ValueError("YOLOP graph and blob OpenVINO versions differ")
+                raise ConfigurationError("YOLOP graph and blob OpenVINO versions differ")
 
-        return _pipeline(dai, self.profile.fps, graph_extension=extend)
+        return _pipeline(dai, self.profile.fps, rgb_sensor_mode=self.profile.rgb_sensor_mode, graph_extension=extend)
 
     def _queue_sizes(self) -> dict[str, int]:
         sizes = {"rgb_video": 8, "depth_right": 8, "nn_input": 8, "nn_output": 2}
@@ -279,7 +280,12 @@ class YolopOakSource(OakSource):
         return sizes
 
     def _graph_declaration(self, pipeline) -> dict:
-        return compact_yolop_graph(pipeline, self._asset.receipt, self.profile.fps, jpeg_enabled=self._jpeg_enabled)
+        graph = compact_yolop_graph(pipeline, self._asset.receipt, self.profile.fps, jpeg_enabled=self._jpeg_enabled)
+        if self.profile.rgb_sensor_mode == "full":
+            graph['declared_settings']['rgb'].update(sensor_mode='THE_13_MP', isp_scale=[1, 4], resize='letterbox')
+            if self._jpeg_enabled:
+                graph['declared_settings']['jpeg']['input_source'] = 'same_CAM_A_letterbox_as_rgb_video'
+        return graph
 
     def _decorate_receipt(self, receipt: dict) -> dict:
         if self._jpeg_enabled:
@@ -294,7 +300,8 @@ class YolopOakSource(OakSource):
                         "preprocessing": self._asset.manifest["preprocessing_profile"],
                         "nn": {"inference_threads": 1, "pool_frames": 2,
                                "input_queue_size": 1, "input_queue_blocking": False,
-                               "input_source": "same_CAM_A_video_as_rgb_video",
+                               "input_source": ("same_CAM_A_letterbox_as_rgb_video" if self.profile.rgb_sensor_mode == "full"
+                                                else "same_CAM_A_video_as_rgb_video"),
                                "input_type": "BGR888p", "input_size_wh": [320, 320],
                                "passthrough_metadata_only": True,
                                "pixel_equivalence_verified": False,

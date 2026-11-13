@@ -171,8 +171,11 @@ class PcFrameAdmission:
                 == (owned.job_id, phase, owned.expires_j_us, owned.full_key, owned.expected.pc_frame_proof_sha256)
             and original.request_id == owned.job_id and original.expires_us == owned.expires_j_us,
             'PC_ORIGINAL_FILLED_JOB_KEY_PROOF_DIFFERS')
-        _need(filled.completed_us <= original.issued_us <= forward.received_j_us <= received.received_j_us <= now
-            and now + 1 < owned.expires_j_us, 'PC_ORIGINAL_FORWARD_LIFETIME_DIFFERS')
+        _need(filled.completed_us <= original.issued_us <= forward.received_j_us <= received.received_j_us <= now,
+            'PC_ORIGINAL_FORWARD_LIFETIME_DIFFERS')
+        if now+1>=owned.expires_j_us:
+            from .health_policy import FrameExpired
+            raise FrameExpired('PC frame expired before admission')
         digest = sha256(original.raw).hexdigest()
         previous = self._a_heads.get(phase)
         if previous is not None and original.sequence <= previous[0]:
@@ -271,8 +274,10 @@ class PcFrameAdmission:
         self._current(now_us)
         seal = self._original(frame); frame.validate_original()
         _need(seal.revision == self._source_revision == frame._revision
-            and seal.proof_sha256 == sha256(frame.proof_bytes).hexdigest()
-            and now_us + 1 < frame.expires_j_us, 'PC_ORIGINAL_FRAME_OR_FENCE_EXPIRED')
+            and seal.proof_sha256 == sha256(frame.proof_bytes).hexdigest(), 'PC_ORIGINAL_FRAME_OR_FENCE_EXPIRED')
+        if now_us+1>=frame.expires_j_us:
+            from .health_policy import FrameExpired
+            raise FrameExpired('PC frame expired before current admission')
         _need(seal.lease.map_interval(*frame.rgb_pc_interval, now_j=now_us) == frame.mapped_rgb_j_us
             and seal.lease.map_interval(*frame.depth_pc_interval, now_j=now_us) == frame.mapped_depth_j_us
             and frame.expires_j_us == min(seal.lease.deadline_lower(frame.expires_pc_us, now_us),
@@ -297,8 +302,9 @@ class PcFrameAdmission:
             and (owned.context.write_key.slot != seal.write_key.slot or owned.context.write_key.generation > seal.write_key.generation)
             and descriptor.nn_key == owned.nn_key and owned.nn_input is not None and owned.nn_output is not None,
             'PC_ORIGINAL_EARLY_NN_SLOT_JOIN_DIFFERS')
-        # completed는 syscall 뒤 상한이다. peer NN 표본과 두 상한의 순서를 강제하지 않는다.
-        _need(snapshot_ack_sent.started_us <= min(owned.nn_input.received_j_us, owned.nn_output.received_j_us)
+        # NN 후보 계산은 EARLY/snapshot 준비와 병행할 수 있다. 실제 ACK는 채택 전에 완료돼야 한다.
+        _need(original_early.frame_received_j_us <= min(owned.nn_input.received_j_us, owned.nn_output.received_j_us)
+            and snapshot_ack_sent.started_us <= owned.expected.original_filled_info.completed_us
             and snapshot_ack_sent.completed_us <= now_us, 'PC_ORIGINAL_SNAPSHOT_ACK_SEND_DIFFERS')
         result = _fact(PcNnAdmission, frame=original_early, job_id=owned.job_id, purpose=purpose,
             expires_j_us=owned.expires_j_us, nn_input=owned.nn_input, nn_output=owned.nn_output, nn_key=owned.nn_key,

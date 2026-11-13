@@ -244,6 +244,7 @@ class PairedGatewayMotionTests(unittest.TestCase):
         self.assertEqual(result.pose.sample.origin,'SYNTHETIC_ODOMETRY')
         self.assertEqual(result.pose.captured_us,f.observation().capture_interval)
         self.assertEqual(result.vehicle.anchor.odom_epoch,odom.epoch)
+        self.assertIsNotNone(result.pose.wheel_capture)
         self.assertGreater(result.pose.sample.x,0.)
         self.assertLess(result.pose.sample.x,.005)
 

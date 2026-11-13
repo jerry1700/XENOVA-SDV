@@ -2,6 +2,7 @@
 
 from base64 import b64decode
 from collections import deque
+from hashlib import sha256
 import json
 import socket
 from types import SimpleNamespace
@@ -68,6 +69,18 @@ class SourceRuntimeTests(unittest.TestCase):
     def vehicle(self):
         wire=encode(self.sample);self.jio.inputs.append(JioInput('VEHICLE',wire,self.now));return wire
 
+    def storage_abort(self):
+        from xenova_vehicle.runtime.raw_leases import Endpoint
+        from xenova_vehicle.runtime.resident_db import DbAbort
+        from xenova_vehicle.runtime.storage_messages import prepare_payload
+        from xenova_vehicle.storage.contracts import StorageJob
+        from xenova_vehicle.storage.port import CheckpointRequest
+        from xenova_vehicle.storage.records import CheckpointPayload
+        context=self.mapper.storage_context;job=StorageJob(context,uid(),100,200)
+        request=CheckpointRequest(job,CheckpointPayload.build(job,durable_cutoff_pi_us=1))
+        return DbAbort('CHECKPOINT',canonical(prepare_payload(request)['body']),job.job_id,100,200,900,
+            Endpoint(uid(),self.peer.mapper_worker),context.sha256,'D_OWNER_REBOUND_UNKNOWN')
+
     def test_empty_original_vehicle_proposal_ack_and_snapshot_keep_ids_bytes_and_callback_time(self):
         original=self.vehicle();self.cycle()
         self.assertEqual(len(self.publications),1)
@@ -93,6 +106,112 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertIsNone(self.mapper.publication)
         self.assertIsNone(self.mapper._proposal_packet)
         self.assertEqual(self.publications,[])
+
+    def test_expired_storage_delivery_retries_current_material_from_queue_or_selected_packet(self):
+        for selected in (False,True):
+            with self.subTest(selected=selected):
+                self.supervisor._material=self.material
+                body=canonical(dict(binding=self.material[0],bootstrap=self.material[1]))
+                self.supervisor._material_sha=sha256(body).hexdigest()
+                if selected:
+                    old=self.supervisor.link.send('SOURCE_STORAGE',{},body,issued_us=self.now,expires_us=self.now+1)
+                else:
+                    old=None
+                    self.supervisor._stage('STORAGE','SOURCE_STORAGE',{},body,issued=self.now,expires=self.now+1)
+                self.now+=1
+                self.cycle()
+                self.assertEqual(self.mapper.material,self.material)
+                if old is not None:self.assertEqual(old.body,body)
+
+    def test_storage_expiry_between_precheck_and_flush_retries_but_unknown_send_is_preserved(self):
+        self.supervisor._material=self.material
+        body=canonical(dict(binding=self.material[0],bootstrap=self.material[1]))
+        old=self.supervisor.link.send('SOURCE_STORAGE',{},body,issued_us=self.now,expires_us=self.now+1)
+        flush=self.supervisor.link.flush
+        def delayed_flush():
+            self.now=old.expires_us
+            return flush()
+        self.supervisor.link.flush=delayed_flush
+        try:self.assertIsNone(self.supervisor._flush())
+        finally:self.supervisor.link.flush=flush
+        self.assertIsNone(self.supervisor.link.pending)
+        retry=self.supervisor.pending['STORAGE']
+        self.assertEqual(retry[2],old.body);self.assertEqual(retry[3],old.expires_us)
+        unknown=self.supervisor.link.send('SOURCE_STORAGE',{},body,issued_us=self.now,expires_us=self.now+1)
+        self.supervisor.link._send_unknown=True;self.now=unknown.expires_us
+        with self.assertRaises(RuntimeError):self.supervisor._flush()
+        self.assertIs(self.supervisor.link.pending,unknown)
+        self.assertEqual(self.supervisor.counts['expired_unsent'],1)
+
+    def test_transport_timeout_with_unknown_send_is_not_treated_as_local_delivery_expiry(self):
+        body=canonical(dict(binding=self.material[0],bootstrap=self.material[1]))
+        original=self.supervisor.link.send('SOURCE_STORAGE',{},body,issued_us=self.now,expires_us=self.now+1)
+        endpoint=self.supervisor.link.endpoint
+        failure=TimeoutError('actual transport outcome is unknown')
+        class UnknownSend:
+            def __getattr__(self,name):return getattr(endpoint,name)
+            def send(port,raw):
+                self.now=original.expires_us
+                raise failure
+        self.supervisor.link.endpoint=UnknownSend()
+        try:
+            with self.assertRaises(TimeoutError) as caught:self.supervisor._flush()
+            self.assertIs(caught.exception,failure)
+        finally:self.supervisor.link.endpoint=endpoint
+        self.assertIs(self.supervisor.link.pending,original)
+        self.assertTrue(self.supervisor.link._send_unknown)
+        self.assertEqual(self.supervisor.counts['expired_unsent'],0)
+
+    def test_selected_bootstrap_completion_retries_delivery_without_a_new_load(self):
+        body=b'original completed bootstrap evidence'
+        request=uid()
+        original=self.mapper.link.send('SOURCE_BOOTSTRAP_COMPLETE',{},body,request_id=request,
+            issued_us=self.now,expires_us=self.now+1)
+        self.now=original.expires_us
+        self.mapper._flush()
+        retry,=self.mapper._bootstrap_pending.values()
+        self.assertEqual(retry[:3],('SOURCE_BOOTSTRAP_COMPLETE',body,request))
+        self.assertEqual(retry[3],original.expires_us)
+        self.assertFalse(self.mapper._bootstrap_started)
+
+    def test_late_received_storage_is_installation_material_and_not_a_new_observation(self):
+        body=canonical(dict(binding=self.material[0],bootstrap=self.material[1]))
+        old=self.supervisor.link.send('SOURCE_STORAGE',{},body,issued_us=self.now,expires_us=self.now+1)
+        self.supervisor.link.flush();self.now=old.expires_us
+        self.mapper.pump()
+        self.assertEqual(self.mapper.material,self.material)
+        self.assertIsNone(self.mapper.publication);self.assertIsNone(self.mapper._vehicle_head)
+
+    def test_publication_retry_preserves_full_identity_context_and_original_scene_reference(self):
+        self.vehicle();self.cycle()
+        original=self.mapper.publication;context=self.mapper.storage_context
+        for selected in (False,True):
+            with self.subTest(selected=selected):
+                self.supervisor._stage_publication(self.supervisor.owner.binding,self.supervisor.context,self.now)
+                if selected:
+                    key=next(key for key in self.supervisor.pending if type(key) is tuple and key[0]=='PUBLICATION')
+                    kind,metadata,body,issued,expires,request=self.supervisor.pending.pop(key)
+                    old=self.supervisor.link.send(kind,metadata,body,request_id=request,issued_us=issued,expires_us=expires)
+                    self.now=old.expires_us
+                else:self.now+=5_000_000
+                self.cycle()
+                self.assertEqual(self.mapper.publication,original)
+                self.assertEqual(self.mapper.storage_context,context)
+                self.assertEqual(self.supervisor.owner.binding,original)
+                self.assertEqual(len(self.publications),1)
+        self.assertEqual(self.mapper.counts['publication_duplicate'],2)
+
+    def test_evicted_vehicle_proposal_waits_for_fresh_attempt_without_source_recovery(self):
+        self.vehicle();self.cycle(ready=False)
+        original=self.mapper._proposal_packet
+        self.supervisor.vehicles.clear()
+        self.cycle(ready=True)
+        self.assertEqual(self.supervisor.counts['identity_wait_current_input'],1)
+        self.assertEqual(self.publications,[])
+        self.now=original.expires_us;self.mapper.pump()
+        self.vehicle();self.cycle()
+        self.assertEqual(len(self.publications),1)
+        self.assertNotEqual(self.mapper._proposal_packet.header['request_id'],original.header['request_id'])
 
     def test_expired_malformed_ready_does_not_claim_current_peer_bootstrap_failure(self):
         from xenova_vehicle.runtime.operation_request import CONSUMER_READY_PROFILE
@@ -156,6 +275,50 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertLess(result.expires_us,self.now)
         self.assertEqual(self.mapper.take_aborts(),())
 
+    def test_storage_terminal_retries_queue_and_selected_delivery_without_changing_original_job(self):
+        self.vehicle();self.cycle()
+        for selected in (False,True):
+            with self.subTest(selected=selected):
+                notice=self.storage_abort();self.supervisor.offer_abort(notice)
+                self.supervisor.offer_abort(notice)  # 동일 원 알림의 재접수는 bounded1 무효과다.
+                if selected:
+                    kind,metadata,body,issued,expires,request=self.supervisor.pending.pop('ABORT')
+                    original=self.supervisor.link.send(kind,metadata,body,request_id=request,issued_us=issued,expires_us=expires)
+                    self.now=original.expires_us
+                else:self.now+=1_000_000
+                self.cycle()
+                delivered,=self.mapper.take_aborts()
+                self.assertEqual(delivered,notice)
+                self.assertEqual(delivered.expires_us,200)
+                self.assertEqual(delivered.observed_us,900)
+                self.assertFalse(delivered.current)
+                self.assertIsNone(self.supervisor._abort_notice)
+
+    def test_late_and_duplicate_storage_terminal_does_not_overwrite_or_redeliver_consumed_slot(self):
+        self.vehicle();self.cycle();notice=self.storage_abort()
+        self.supervisor.offer_abort(notice)
+        self.supervisor.pump(self.material,bind_ready=True,on_publication=lambda *_:None)
+        self.now+=1_000_000
+        self.mapper.pump()
+        self.assertEqual(self.mapper._abort,notice)
+        for consumed in (False,True):
+            if consumed:self.assertEqual(self.mapper.take_aborts(),(notice,))
+            self.supervisor.offer_abort(notice);self.cycle()
+            self.assertEqual(self.mapper._abort,None if consumed else notice)
+        self.assertEqual(self.mapper.take_aborts(),())
+        self.assertEqual(self.mapper.counts['storage_terminal_duplicate'],2)
+
+    def test_distinct_unconsumed_storage_terminals_preserve_the_first_bounded_slot(self):
+        self.vehicle();self.cycle();first=self.storage_abort();second=self.storage_abort()
+        self.supervisor.offer_abort(first)
+        with self.assertRaises(RuntimeError):self.supervisor.offer_abort(second)
+        self.cycle()
+        self.assertEqual(self.mapper._abort,first)
+        self.supervisor.offer_abort(second)
+        self.supervisor.pump(self.material,bind_ready=True,on_publication=lambda *_:None)
+        with self.assertRaises(RuntimeError):self.mapper.pump()
+        self.assertEqual(self.mapper.take_aborts(),(first,))
+
     def test_early_proposal_waits_actual_raw_ack_without_changing_original_job(self):
         self.vehicle();self.cycle(ready=False)
         original=self.mapper._proposal_packet
@@ -165,17 +328,33 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertEqual(self.mapper._proposal_packet.raw,original.raw)
         self.assertEqual(len(self.publications),1)
 
-    def test_original_pending_identity_expiry_is_not_renewed(self):
+    def test_expired_identity_attempt_is_retired_and_fresh_transaction_can_retry(self):
         self.vehicle();self.cycle(ready=False)
         original=self.mapper._proposal_packet
         self.now=original.expires_us
-        with self.assertRaises(TimeoutError):self.mapper.pump()
-        self.assertEqual(self.mapper._proposal_packet.raw,original.raw)
+        self.mapper.pump()
+        self.assertIsNone(self.mapper._proposal_packet)
+        self.vehicle()
+        self.mapper.pump()
+        retry=self.mapper._proposal_packet
+        self.assertIsNotNone(retry)
+        self.assertNotEqual(retry.header['request_id'],original.header['request_id'])
+        self.assertGreaterEqual(retry.issued_us,original.expires_us)
+        self.assertEqual(original.expires_us,self.now)
 
     def test_new_gateway_or_odom_source_immediately_fences_jio_before_m_recovery(self):
         self.vehicle();self.cycle()
         self.sample.gateway_instance=uid();self.sample.sequence+=1;self.vehicle()
         with self.assertRaises(SourceChanged):self.cycle(count=1)
+        self.assertTrue(self.jio.fenced)
+        self.assertEqual(len(self.publications),1)
+
+    def test_odom_reset_reports_changed_field_without_origin_values(self):
+        self.vehicle();self.cycle()
+        self.sample.odom_epoch=uid();self.sample.sequence+=1;self.vehicle()
+        with self.assertRaisesRegex(SourceChanged, 'changed: odom_epoch$') as failure:
+            self.cycle(count=1)
+        self.assertNotIn(self.sample.odom_epoch,str(failure.exception))
         self.assertTrue(self.jio.fenced)
         self.assertEqual(len(self.publications),1)
 

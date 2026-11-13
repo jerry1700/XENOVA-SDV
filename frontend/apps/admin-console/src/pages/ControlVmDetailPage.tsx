@@ -2,30 +2,22 @@ import { Button, Card, Modal, useToast } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError } from '../api/client';
-import { useVm, useVmResources, useVms, type VmAction } from '../api/queries';
+import { useVm, useVms, type VmAction } from '../api/queries';
 import type { Vm } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
 import { AGENT_LABEL, canStartVm, canStopVm, STATE_HEALTH, STATE_LABEL, VM_ACTION_LABEL } from '../format';
 import styles from './pages.module.css';
 import { ResourceAdjustmentPanel } from './ResourceAdjustmentPanel';
-import { VcpuPinningPanel } from './VcpuPinningPanel';
 import { VmOperationNotice } from './VmOperationProgress';
 import { useVmOperationProgress } from './useVmOperationProgress';
 import { LiveDataAlert } from '../layout/LiveDataAlert';
 
 const VM_ACCENTS = ['var(--x-app-autonomous)', 'var(--x-app-manual)', 'var(--x-app-interaction)'] as const;
 
-function pinningSummary(mappings: { vcpu: number; pcpus: number[] }[]): string {
-  if (!mappings.length) return '조회 대기';
-  const labels = mappings.map((mapping) => mapping.pcpus.join(', '));
-  return labels.every((label) => label === labels[0]) ? `pCPU ${labels[0]}` : 'vCPU별 설정';
-}
-
 /** Dashboard의 관측 상세와 분리된 VM Control 전용 관리 상세. */
 export function ControlVmDetailPage() {
   const { vmId = '' } = useParams();
   const vm = useVm(vmId);
-  const resources = useVmResources(vmId);
   const vms = useVms();
   const vmOperations = useVmOperationProgress();
   const toast = useToast();
@@ -53,6 +45,8 @@ export function ControlVmDetailPage() {
 
   const operation = vmOperations.operations[vmId];
   const operationPending = operation?.status === 'pending';
+  // Zephyr 템플릿은 1 vCPU · 16 MiB 고정 프로필 (ResourceAdjustmentPanel 의 fixedProfile 과 같은 판단)
+  const zephyr = vm.data?.guest_kind === 'zephyr';
 
   return (
     <div className={styles.controlDetailPage} style={{ '--vm-accent': accent } as CSSProperties}>
@@ -160,24 +154,38 @@ export function ControlVmDetailPage() {
             <div className={styles.controlResourceSummary}>
               <div data-available="true">
                 <span>vCPU</span>
-                <strong>{resources.data?.vcpus ?? vm.data.vcpus}</strong>
+                <strong>{vm.data.vcpus}</strong>
                 <small>개</small>
               </div>
               <div data-available="true">
                 <span>메모리</span>
-                <strong>{resources.data?.memory_mib ?? vm.data.memory_mib}</strong>
+                <strong>{vm.data.memory_mib}</strong>
                 <small>MiB</small>
               </div>
-              <div data-available={resources.data ? 'true' : 'false'}>
+              <div data-available="false">
                 <span>vCPU 핀닝</span>
-                <strong>{resources.data ? pinningSummary(resources.data.vcpu_pinning) : '—'}</strong>
-                <small>{resources.data ? 'Xen hard affinity' : '설정 미조회'}</small>
+                <strong>—</strong>
+                <small>변경 API 미연결</small>
               </div>
             </div>
           </Card>
 
-          <ResourceAdjustmentPanel key={`tuning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
-          <VcpuPinningPanel key={`pinning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
+          {/* Zephyr는 고정 프로필이라 조정·핀닝 패널을 두지 않는다 (Linux VM만) */}
+          {!zephyr && (
+            <>
+              <ResourceAdjustmentPanel key={`tuning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
+              <Card
+                title="vCPU 핀닝"
+                accent={accent}
+                actions={<span className={styles.pinningCardTag}>HARD AFFINITY</span>}
+              >
+                <div className={styles.pinningState} data-tone="waiting" role="status">
+                  <strong>vCPU 핀닝 변경 API가 아직 연결되지 않았습니다.</strong>
+                  <span>플랫폼과 백엔드의 Xen hard affinity 변경 계약이 추가되면 활성화됩니다.</span>
+                </div>
+              </Card>
+            </>
+          )}
 
           <section className={styles.dangerZone} aria-labelledby="danger-zone-title">
             <div>

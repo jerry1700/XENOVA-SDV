@@ -12,8 +12,8 @@ import {
   useToast,
 } from '@xenova/ui';
 import type { Health } from '@xenova/ui';
-import type { CSSProperties } from 'react';
-import { Link } from 'react-router';
+import { useId, type CSSProperties } from 'react';
+import { Link, useNavigate } from 'react-router';
 import type { DriveState, SocketState } from '../api/drive';
 import { useEvents, useMetrics, useTelemetryHeartbeat, LIVE_POLL_MS, useVms } from '../api/queries';
 import { restartSimRace, selectSimTrack, useSimState, type SimView } from '../api/sim';
@@ -23,6 +23,7 @@ import { observedControl, vmAppObservations } from '../domain/driveObservations'
 import { clock, describe } from '../domain/events';
 import { publisherObservation } from '../domain/telemetryPublisher';
 import { buildManagedRamSeries, managedRamReason } from '../domain/managedRam';
+import { APP_MEMORY_REGIONS, buildAppMemorySeries, formatAppBytes } from '../domain/appMemory';
 import { vmAuthorityOf } from '../domain/vmAuthority';
 import {
   ago,
@@ -557,6 +558,8 @@ function VmOverviewCard({
   vmStatusError: boolean;
   latestEvent: VmEvent | undefined;
 }) {
+  const navigate = useNavigate();
+  const titleId = useId();
   const role = roleOf(vm, drive);
   const linux = vm.guest_kind === 'linux';
   // 현재값 카드에는 Memory 탭과 같은 짧은 이력·조회 주기를 사용한다.
@@ -585,6 +588,7 @@ function VmOverviewCard({
   const cpu = latest(samples, cpuPercentOf);
   const ram = linux ? null : buildManagedRamSeries(samples, vm.vm_id, now);
   const ramDisplay = ram?.recentObservation ?? ram?.current;
+  const appMemory = linux ? null : appMemoryLayers(samples, vm.vm_id, ramDisplay?.totalBytes, now);
   const memory = linux
     ? latest(samples, (sample) => memoryPercentOf(sample, vm))
     : ramDisplay?.status === 'ok'
@@ -599,12 +603,27 @@ function VmOverviewCard({
   const driving = role ? role.driving : vm.guest_kind === 'zephyr';
 
   const style = { '--vm-accent': role?.color ?? UNASSIGNED_COLOR } as CSSProperties;
+  const detailPath = `/dashboard/vms/${vm.vm_id}`;
   return (
-    <Link className={styles.vmCard} style={style} to={`/dashboard/vms/${vm.vm_id}`}>
+    // 카드 어디를 눌러도 상세로 간다. 키보드는 제목 링크(Tab·Enter). 안쪽 이벤트 링크와 중첩되지 않게 카드 자체는 링크가 아니다
+    <article
+      className={styles.vmCard}
+      style={style}
+      data-linked="true"
+      aria-labelledby={titleId}
+      onClick={(event) => {
+        if ((event.target as Element).closest('a') || window.getSelection()?.toString()) return;
+        navigate(detailPath);
+      }}
+    >
       <div className={styles.vmCardTop}>
         <div>
           <span className={styles.vmKicker}>{role?.title ?? '역할 미지정'}</span>
-          <h3>{vm.name}</h3>
+          <h3 id={titleId}>
+            <Link className={styles.vmCardTitleLink} to={detailPath}>
+              {vm.name}
+            </Link>
+          </h3>
           <p>
             {driving ? 'Drive' : 'Infotainment'} · {osLabel(vm)}
           </p>
@@ -636,6 +655,7 @@ function VmOverviewCard({
           label="Memory"
           value={memory}
           precision={linux ? 0 : 3}
+          layers={appMemory}
           unavailable={
             metrics.isError
               ? '메트릭 조회 불가'
@@ -649,7 +669,9 @@ function VmOverviewCard({
           detail={
             linux
               ? `${vm.memory_mib} MiB allocated`
-              : `정적 예약 포함${ram?.lastObservationAt == null ? '' : ` · ${ago(Math.max(0, now - ram.lastObservationAt))}`}`
+              : appMemory
+                ? `버퍼 사용 ${appMemory.usedLabel} · 예약 ${appMemory.reservedLabel}`
+                : `정적 예약 포함${ram?.lastObservationAt == null ? '' : ` · ${ago(Math.max(0, now - ram.lastObservationAt))}`}`
           }
         />
       </div>
@@ -657,11 +679,19 @@ function VmOverviewCard({
       <div className={styles.vmCardFoot}>
         <div>
           <span>RECENT SIGNAL</span>
-          <p>{eventSummary}</p>
+          <p>
+            <Link
+              className={styles.vmCardEventLink}
+              to={`/dashboard/events?vm=${encodeURIComponent(vm.vm_id)}`}
+              title={`${vm.name} 이벤트 보기`}
+            >
+              {eventSummary}
+            </Link>
+          </p>
         </div>
         <strong>View details ↗</strong>
       </div>
-    </Link>
+    </article>
   );
 }
 
@@ -695,12 +725,14 @@ function OverviewMetricBar({
   precision = 0,
   unavailable,
   detail,
+  layers,
 }: {
   label: string;
   value: number | null;
   precision?: number;
   unavailable: string | null;
   detail?: string;
+  layers?: MemoryLayers | null;
 }) {
   const safeValue = value == null ? 0 : Math.max(0, Math.min(100, value));
   return (
@@ -710,14 +742,67 @@ function OverviewMetricBar({
         <strong>{value == null ? '—' : `${value.toFixed(precision)}%`}</strong>
       </div>
       <div
-        className={styles.metricTrack}
-        aria-label={`${label} ${value == null ? '데이터 없음' : `${value.toFixed(precision)}%`}`}
+        className={`${styles.metricTrack} ${layers ? styles.segmentedMetricTrack : ''}`}
+        aria-label={
+          layers
+            ? `${label} ${value!.toFixed(precision)}%, 앱 버퍼 사용 ${layers.usedLabel}, 예약 ${layers.reservedLabel}`
+            : `${label} ${value == null ? '데이터 없음' : `${value.toFixed(precision)}%`}`
+        }
       >
-        <i style={{ width: `${safeValue}%` }} />
+        {layers ? (
+          <>
+            <i className={styles.committedSegment} style={{ width: `${safeValue}%` }} />
+            <i className={styles.reservedSegment} style={{ width: `${layers.reservedPercent}%` }} />
+            <i className={styles.usedSegment} style={{ width: `${layers.usedPercent}%` }} />
+          </>
+        ) : (
+          <i style={{ width: `${safeValue}%` }} />
+        )}
       </div>
       <small>{unavailable ?? detail ?? '\u00a0'}</small>
     </div>
   );
+}
+
+interface MemoryLayers {
+  usedPercent: number;
+  reservedPercent: number;
+  usedLabel: string;
+  reservedLabel: string;
+}
+
+function appMemoryLayers(
+  samples: Parameters<typeof buildAppMemorySeries>[0],
+  vmId: string,
+  totalBytes: string | null | undefined,
+  now: number,
+): MemoryLayers | null {
+  if (!totalBytes || !/^\d+$/.test(totalBytes)) return null;
+  const total = BigInt(totalBytes);
+  if (total <= 0n) return null;
+  const series = buildAppMemorySeries(samples, vmId, now);
+  let used = 0n;
+  let reserved = 0n;
+  for (const { id } of APP_MEMORY_REGIONS) {
+    const current = series[id].current;
+    if (
+      current.state !== 'ok' ||
+      current.stale ||
+      current.used_bytes == null ||
+      current.reserved_bytes == null
+    )
+      return null;
+    used += current.used_bytes;
+    reserved += current.reserved_bytes;
+  }
+  if (used > reserved || reserved > total) return null;
+  const percent = (bytes: bigint) => Number((bytes * 100_000n) / total) / 1000;
+  return {
+    usedPercent: percent(used),
+    reservedPercent: percent(reserved),
+    usedLabel: formatAppBytes(used),
+    reservedLabel: formatAppBytes(reserved),
+  };
 }
 
 function overviewAppSignal(
@@ -727,7 +812,7 @@ function overviewAppSignal(
   const labels = new Set(reports.map((report) => report[field]));
   if (labels.size === 0) return '미확인';
   if (labels.size === 1) return reports[0]![field];
-  return reports.map((report) => `${report.appId}: ${report[field]}`).join(' · ');
+  return reports.map((report) => `${report.appLabel}: ${report[field]}`).join(' · ');
 }
 
 function overviewMetricUnavailable(pending: boolean, sampleCount: number): string | null {

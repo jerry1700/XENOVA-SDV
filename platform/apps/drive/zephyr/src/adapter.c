@@ -86,9 +86,11 @@ int drive_adapter_run_until(struct drive_adapter *a,struct xm_span control,struc
  }
  if(a->requires_state_sync){
   const char *ready=drive_adapter_qualify(a,input,age);
-  if(ready){out->reason=ready;out->v_mps=out->steer_rad=0;}
+  /* State preparation/planner supervision must not hide a concrete callback
+   * input failure or no-path result. Both still restrict this result now. */
+  if(ready){if(!out->reason||(strcmp(ready,"STATE_PREPARING")&&strcmp(ready,"CALCULATION_FAILED")))out->reason=ready;out->v_mps=out->steer_rad=0;}
  }
- if(a->manual_input){
+ if(a->manual_input&&!out->modern_command){
   struct xm_vehicle_control selected;
   if(!xm_vehicle_control_parse(control,&selected)&&selected.manual_policy[0]){
    struct xm_manual_sample source;

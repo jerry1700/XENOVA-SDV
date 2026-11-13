@@ -75,7 +75,8 @@ describe('VM 생성 진행 상태', () => {
     );
   });
 
-  it('앱을 켜 둔 채로 TTL(16분)이 지나면 새로고침 없이 기록을 지운다', () => {
+  it('앱을 켜 둔 채로 TTL(21분)이 지나면 새로고침 없이 기록을 지운다', () => {
+    expect(PENDING_CREATION_TTL_MS).toBe(21 * 60 * 1000);
     vi.useFakeTimers();
     const { result } = renderHook(() => usePendingVmCreations());
     act(() => startVmCreation('create-test', Date.now()));

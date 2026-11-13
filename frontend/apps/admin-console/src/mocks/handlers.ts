@@ -10,6 +10,7 @@ import { delay, http, HttpResponse, type JsonBodyType } from 'msw';
 import {
   VM_CPU_PERCENT_METRIC,
   type CpuStressRequest,
+  type AutoDelayRequest,
   type CreateVmRequest,
   type LoginRequest,
   type MemoryStressRequest,
@@ -19,13 +20,20 @@ import {
   type UpdateMemoryRequest,
   type UpdateVcpuPinningRequest,
   type UpdateVcpusRequest,
+  type UpdateVmResourcesRequest,
   type VcpuPinning,
   type Vm,
   type VmResources,
 } from '../api/types';
 import { mockBoardDown, setMockBoardDown } from './board';
 import { initialVms, MOCK_PASSWORD, MOCK_USER, TEMPLATES, VM_IDS } from './data';
-import { mockKernelHeapSamples, mockMemoryPoolSamples, mockZephyrNetworkSamples } from './memoryMetrics';
+import {
+  mockAppMemorySamples,
+  mockKernelHeapSamples,
+  mockMemoryPoolSamples,
+  mockZephyrCpuSamples,
+  mockZephyrNetworkSamples,
+} from './memoryMetrics';
 import { mockTelemetryHeartbeat } from './telemetryHeartbeat';
 import { getDisplays, RouteError, scenarioEvents, setRoute, startVm, stopVm, vmStateOf } from './scenario';
 
@@ -43,6 +51,7 @@ let refreshGranted = false;
 let mockUsername = MOCK_USER.username;
 let mockNickname = MOCK_USER.nickname;
 let mockPassword = MOCK_PASSWORD;
+const demoCommands = new Map<string, { vmId: string; createdAt: number; agentExit?: boolean }>();
 
 /** 시험용: 처음 상태로 */
 export function resetMockState(): void {
@@ -55,6 +64,7 @@ export function resetMockState(): void {
   mockUsername = MOCK_USER.username;
   mockNickname = MOCK_USER.nickname;
   mockPassword = MOCK_PASSWORD;
+  demoCommands.clear();
 }
 
 function initialPinning(): Map<string, VcpuPinning[]> {
@@ -137,6 +147,8 @@ function authorized(request: Request): boolean {
 }
 
 const unauthorized = () => error(401, 'INVALID_TOKEN', '인증이 필요합니다.');
+/** mock 휴대폰 연결번호의 만료 시각(ms). 번호 값은 남기지 않는다 */
+let mockPairingExpiresAt: number | null = null;
 /** 자율주행 VM 은 시연 시나리오(강제 종료 → 재시작)를 따른다 */
 const live = (vm: Vm): Vm => ({ ...vm, state: vmStateOf(vm.vm_id) ?? vm.state });
 const find = (id: string) => {
@@ -175,6 +187,41 @@ const boardUnreachable = () =>
     { code: 'VM_CONTROL_BAD_RESPONSE', message: 'VM 제어 서비스와의 연결 설정이 올바르지 않습니다.' },
     { status: 502 },
   );
+
+/**
+ * Zephyr 스레드 CPU 점유(계측 구간 1초, 단일 코어 기준). VM A(주 구동)는 주행 계산 부하가 있고 VM B(백업)는 대기.
+ * idle 은 남은 시간이라 대기 VM 에서 높게 나온다
+ */
+function mockZephyrThreads(vmId: string) {
+  const busy = vmId === VM_IDS.autonomous;
+  const rows: [string, string, number][] = busy
+    ? [
+        ['2', 'drive_worker', 21.4],
+        ['3', 'telemetry', 3.6],
+        ['4', 'net_rx', 2.4],
+        ['5', 'mqtt_client', 1.8],
+        ['6', 'sysworkq', 0.9],
+        ['1', 'main', 0.2],
+        ['7', 'logging', 0.1],
+        ['8', 'idle', 69.6],
+      ]
+    : [
+        ['2', 'drive_worker', 2.1],
+        ['3', 'telemetry', 3.1],
+        ['4', 'net_rx', 1.2],
+        ['5', 'mqtt_client', 1.4],
+        ['6', 'sysworkq', 0.4],
+        ['1', 'main', 0],
+        ['8', 'idle', 91.8],
+      ];
+  return rows.map(([thread_id, thread_name, cpu_percent]) => ({
+    thread_id,
+    thread_name,
+    name_truncated: false,
+    cpu_percent,
+    unavailable_reason: null,
+  }));
+}
 
 export const handlers = [
   // ---- 인증 ----
@@ -275,6 +322,43 @@ export const handlers = [
     return HttpResponse.json(resourcesOf(vm) as unknown as JsonBodyType);
   }),
 
+  http.put('*/api/v1/vms/:vmId/resources', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind === 'zephyr') {
+      return error(400, 'RESOURCE_UPDATE_UNSUPPORTED', 'Zephyr VM은 고정 리소스 프로필을 사용합니다.');
+    }
+    if (vm.state !== 'stopped') {
+      return error(409, 'INVALID_VM_STATE', '자원은 정지된 VM에서만 변경할 수 있습니다.');
+    }
+    const body = (await request.json()) as Partial<UpdateVmResourcesRequest>;
+    const limits = resourcesOf(vm).limits;
+    if (!Number.isInteger(body.vcpus) || body.vcpus! < 1 || body.vcpus! > 4) {
+      return error(400, 'INVALID_ARGUMENT', 'vCPU 수는 1~4 정수여야 합니다.');
+    }
+    if (
+      !Number.isInteger(body.memory_mib) ||
+      body.memory_mib! < limits.memory_mib_min ||
+      body.memory_mib! > limits.memory_mib_max ||
+      body.memory_mib! % limits.memory_mib_step !== 0
+    ) {
+      return error(400, 'INVALID_ARGUMENT', '메모리 용량이 허용 범위와 단위에 맞지 않습니다.');
+    }
+    const before = { vcpus: vm.vcpus, memory_mib: vm.memory_mib };
+    vms = vms.map((item) =>
+      item.vm_id === vm.vm_id ? { ...item, vcpus: body.vcpus!, memory_mib: body.memory_mib! } : item,
+    );
+    return HttpResponse.json({
+      vm_id: vm.vm_id,
+      operation_id: 'mock-resource-update',
+      before,
+      after: { vcpus: body.vcpus!, memory_mib: body.memory_mib! },
+      applies_on_next_start: true,
+    });
+  }),
+
   http.put('*/api/v1/vms/:vmId/resources/vcpus', async ({ request, params }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
@@ -337,7 +421,10 @@ export const handlers = [
     if (!authorized(request)) return unauthorized();
     const vm = find(String(params.vmId));
     if (!vm) return vmNotFound();
-    if (vm.guest_kind !== 'linux' || vm.state !== 'running' || vm.agent_status !== 'ONLINE') {
+    if (vm.guest_kind !== 'linux') {
+      return error(400, 'UNSUPPORTED_GUEST_KIND', 'CPU·메모리 부하는 Linux VM에서만 지원합니다.');
+    }
+    if (vm.state !== 'running' || vm.agent_status !== 'ONLINE') {
       return error(409, 'AGENT_UNAVAILABLE', `VM Agent가 온라인 상태가 아닙니다: ${vm.vm_id}`);
     }
     const kind = String(params.kind);
@@ -362,11 +449,115 @@ export const handlers = [
       vm_id: vm.vm_id,
       type: kind === 'cpu' ? 'CPU' : 'MEMORY',
       amount: amount!,
+      load_percent: null,
       duration_s: body.duration_s!,
       submitted_at: now.toISOString(),
       expires_at: new Date(now.getTime() + 30_000).toISOString(),
     };
+    demoCommands.set(command.command_id, { vmId: vm.vm_id, createdAt: Date.now() });
     return HttpResponse.json(command as unknown as JsonBodyType, { status: 202 });
+  }),
+
+  http.post('*/api/v1/vms/:vmId/faults/auto-delay', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr' || vm.state !== 'running')
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 Zephyr VM이 아닙니다.');
+    const body = (await request.json()) as Partial<AutoDelayRequest>;
+    if (
+      !Number.isInteger(body.delay_ms) ||
+      body.delay_ms! < 1 ||
+      body.delay_ms! > 100 ||
+      !Number.isInteger(body.duration_s) ||
+      body.duration_s! < 1 ||
+      body.duration_s! > 120
+    ) {
+      return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    }
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        delay_ms: body.delay_ms,
+        duration_s: body.duration_s,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.post('*/api/v1/vms/:vmId/faults/agent-exit', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'linux')
+      return error(400, 'UNSUPPORTED_GUEST_KIND', 'agent_exit는 Linux VM에서만 지원합니다.');
+    if (vm.state !== 'running' || vm.agent_status !== 'ONLINE')
+      return error(409, 'AGENT_UNAVAILABLE', `VM Agent가 온라인 상태가 아닙니다: ${vm.vm_id}`);
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now(), agentExit: true });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.get('*/api/v1/vms/:vmId/commands/:commandId', async ({ request, params }) => {
+    await delay(80);
+    if (!authorized(request)) return unauthorized();
+    const item = demoCommands.get(String(params.commandId));
+    if (!item || item.vmId !== params.vmId)
+      return error(404, 'COMMAND_NOT_FOUND', '명령을 찾을 수 없습니다.');
+    const elapsed = Date.now() - item.createdAt;
+    return HttpResponse.json({
+      command_id: params.commandId,
+      vm_id: params.vmId,
+      status: item.agentExit
+        ? 'ACCEPTED'
+        : elapsed > 2200
+          ? 'SUCCEEDED'
+          : elapsed > 600
+            ? 'RUNNING'
+            : 'ACCEPTED',
+      message: item.agentExit
+        ? 'Agent가 종료 명령을 수락했습니다.'
+        : elapsed > 2200
+          ? '명령 실행이 완료되었습니다.'
+          : 'VM에서 명령을 실행하고 있습니다.',
+      updated_at: new Date().toISOString(),
+    });
+  }),
+
+  http.post('*/api/v1/vms/synchronizations', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    // mock 은 보드 목록과 DB 가 같다고 본다
+    return HttpResponse.json({
+      discovered: vms.length,
+      registered: 0,
+      updated: 0,
+      unchanged: vms.length,
+      conflicts: 0,
+      incomplete: 0,
+      missing_from_board: 0,
+      retired: 0,
+      results: vms.map((vm) => ({ vm_id: vm.vm_id, action: 'unchanged', reason: null })),
+    });
   }),
 
   http.post('*/api/v1/vms', async ({ request }) => {
@@ -432,6 +623,37 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 });
   }),
 
+  // ---- USB 휴대폰 화면 연결 (REST-38·REST-39). 테더링이 켜져 중계가 듣고 있는 상태 ----
+  http.get('*/api/v1/display/phone-link', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const active = mockPairingExpiresAt !== null && mockPairingExpiresAt > Date.now();
+    return HttpResponse.json(
+      {
+        configured: true,
+        relay: 'listening',
+        url: 'http://10.117.188.25:8084/display/mobile',
+        usb: { interface: 'usb0', present: true, ipv4: ['10.117.188.25/24'], gateway: '10.117.188.86' },
+        configured_phone_ipv4: '10.117.188.86',
+        subnet_mismatch: false,
+        pairing: { active, expires_at: active ? new Date(mockPairingExpiresAt!).toISOString() : null },
+        observed_at: new Date().toISOString(),
+      },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
+  }),
+
+  http.post('*/api/v1/display/phone-link/pairing-code', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    mockPairingExpiresAt = Date.now() + 120_000;
+    const code = String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
+    return HttpResponse.json(
+      { code, expires_at: new Date(mockPairingExpiresAt).toISOString() },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
+  }),
+
   // ---- 화면 배치 (REST-23·REST-24, 백엔드 -129) ----
   http.get('*/api/v1/displays', async ({ request }) => {
     await delay(LATENCY_MS);
@@ -489,7 +711,9 @@ export const handlers = [
         items: [
           ...mockKernelHeapSamples(vmId),
           ...mockMemoryPoolSamples(vmId),
+          ...mockAppMemorySamples(vmId),
           ...mockZephyrNetworkSamples(vmId),
+          ...mockZephyrCpuSamples(vmId),
         ],
       } as unknown as JsonBodyType);
     }
@@ -601,17 +825,7 @@ export const handlers = [
       part_count: zephyr ? 1 : null,
       complete: zephyr,
       conflicting_pages: false,
-      items: zephyr
-        ? [
-            {
-              thread_id: '1',
-              thread_name: 'telemetry',
-              name_truncated: false,
-              cpu_percent: 1.2,
-              unavailable_reason: null,
-            },
-          ]
-        : [],
+      items: zephyr ? mockZephyrThreads(String(params.vmId)) : [],
     });
   }),
 

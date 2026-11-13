@@ -9,7 +9,7 @@ import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
 
-// Last VM state announced as an event (or first seen), so polling only reports real transitions
+// Last VM state announced as an event (or first seen), so on-demand sync only reports real transitions
 // and a restart does not repeat old ones.
 @Entity
 @Table(name = "reported_vm_states")

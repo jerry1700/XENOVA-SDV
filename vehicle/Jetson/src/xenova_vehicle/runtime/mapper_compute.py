@@ -1,7 +1,7 @@
 """M-main의 제어와 non-daemon 계산 owner 하나를 분리한다.
 
-최종 설계의 직접 thread 상한은 의도적으로7→8이며 M에 compute 하나를 추가한다.
-application process는 늘리지 않는다. SDK/vendor thread의 실제 inventory는 별도다.
+M에는 compute 하나를 추가하며 application process는 늘리지 않는다.
+선택 진단 I/O daemon과 SDK/vendor thread의 실제 inventory는 별도다.
 actor/socket/outbox/arena/token은 호출하지 않는다. 입력은 이미 view 반환과 원 RELEASE
 실송신이 끝난 owned sample이어야 하며 이 선행 사실은 M-main이 소유한다.
 
@@ -326,7 +326,7 @@ class MapperResult:
 class MapperCompute:
     """활성1+최신 RAW1/NN1, phase8, 결과1. native 강제 중지는 주장하지 않는다.
 
-    start/submit/poll/ACK/source 교체/STOP은 생성한 M-main thread만 호출한다.
+    start/submit/poll/source 교체/STOP은 생성한 M-main thread만 호출한다.
     processor와 그 mutable core는 계산 thread 하나만 만진다. source 교체는 즉시
     결과를 fence하고 원 호출이 끝난 뒤에만 새 factory를 직렬 호출한다.
     """
@@ -347,6 +347,7 @@ class MapperCompute:
         self._pending = {'RAW': None, 'NN': None}
         self._last_kind = 'NN'
         self._active = None
+        self._last_parsed_source = None
         self._events = deque()
         self._result = None
         self._stopping = False
@@ -498,10 +499,10 @@ class MapperCompute:
             now = self._now()
             result = tuple(replace(event, accepted=False, reason='FENCED_OR_LATE_DELIVERY')
                 if event.accepted and (self._stopping or event.generation_serial != self._serial
-                    or now >= min(event.expires_us, event.parser_deadline_us
-                        if event.kind == 'PARSER_START_REQUIRED' else U64_MAX))
+                    or now >= event.expires_us)
                 else event for event in self._events)
             self._events.clear()
+            self._condition.notify_all()
             return result
 
     def take_result(self):
@@ -513,57 +514,12 @@ class MapperCompute:
                 result = replace(result, accepted=False, payload=None, reason='FENCED_OR_LATE_DELIVERY')
             return result
 
-    def acknowledge_parser_start(self, job_id, sent):
-        """M-main만 actual SentPacket을 전달한다. 이 값 자체는 OS 송신의 인증 증명이 아니다."""
-        self._main()
-        from .resident_transport import SentPacket
-        from .local_envelope import StructuralPacket
-        if type(sent) is not SentPacket or type(sent.packet) is not StructuralPacket:
-            raise MapperComputeError('expected original actual SentPacket')
-        _uint(sent.started_us)
-        _uint(sent.completed_us)
-        with self._condition:
-            active = self._active
-            if active is None or active['item'].job_id != job_id or not active.get('waiting'):
-                return False
-            now = self._now()
-            if self._stopping or active['serial'] != self._serial or now >= active['parser_deadline']:
-                return False
-            item, packet = active['item'], sent.packet
-            payload, fields = packet.payload, packet.fields
-            if (packet.kind != 'PROGRESS' or fields['binding_domain'] != 'LIFECYCLE' or fields['binding_revision'] != '0'
-                    or fields['request_id'] != job_id
-                    or set(payload) != {'stage', 'source_sequence', 'completed_j_us', 'state', 'reason'}
-                    or payload.get('stage') != 'PARSER_STARTED' or payload['reason'] is not None
-                    or payload.get('source_sequence') != str(item.nn_sequence)
-                    or payload.get('completed_j_us') != str(active['parser_requested'])
-                    or not active['parser_requested'] <= int(fields['issued_j_us']) <= sent.started_us <= sent.completed_us <= now
-                    or sent.completed_us >= active['parser_deadline']):
-                raise MapperComputeError('actual parser-start packet differs from original event')
-            if active.get('ack') is not None:
-                if active['ack'] is not sent:
-                    raise MapperComputeError('parser-start acknowledgement cannot be replaced')
-                return False
-            active['ack'] = sent
-            self._condition.notify_all()
+    def _nn_advances(self, item, serial):
+        previous = self._last_parsed_source
+        if previous is None or previous[0] != serial:
             return True
-
-    def skip_parser(self, job_id):
-        """이미 처리한 NN의 현재 대기를 건너뛴다. main이 원 NN stamp로 판단하며 성공 사실은 없다."""
-        self._main()
-        with self._condition:
-            active = self._active
-            if (active is None or active['item'].job_id != job_id or not active.get('waiting')
-                    or active.get('ack') is not None):
-                return False
-            if (self._stopping or active['serial'] != self._serial
-                    or self._now() >= active['parser_deadline'] or not active['item'].fresh(self._now())):
-                return False
-            active['skip'] = True
-            active['waiting'] = False
-            self._counts['parser_skipped'] += 1
-            self._condition.notify_all()
-            return True
+        old, new = previous[1], item.nn_source_key
+        return all(new[index] > old[index] for index in (0, 1, 2)) and new[3] >= old[3]
 
     def request_stop(self):
         self._main()
@@ -700,7 +656,10 @@ class MapperCompute:
                         self._terminal_error='MAINTENANCE_'+type(error).__name__
                     return
             with self._condition:
-                if not self._stopping and not any(self._pending.values()):
+                # 시작/NN 시작/NN 완료/종료 네 사건을 한 작업 단위로 예약한다.
+                # M-main 지연은 bounded 최신 입력 대기로 처리하며 owner 고장으로 승격하지 않는다.
+                phase_full = sum(event.kind != 'PROGRESS' for event in self._events) > MAX_PHASE_EVENTS - 4
+                if not self._stopping and (not any(self._pending.values()) or phase_full):
                     self._condition.wait(.02)
                     continue
                 if self._stopping:
@@ -723,29 +682,24 @@ class MapperCompute:
                     processor_admission_fence = self._sync_admission(processor,None,processor_serial)
                     self._check(active)
                 parsed = None
-                if item.nn_sequence is not None:
+                if item.nn_sequence is not None and self._nn_advances(item, serial):
                     requested = self._now()
                     if requested > U64_MAX - PARSER_BUDGET_US:
                         raise MapperComputeError('parser deadline overflows original u64 clock')
                     active.update(parser_requested=requested, parser_deadline=min(
                         item.expires_us, requested + PARSER_BUDGET_US,
-                        U64_MAX if item.parser_cap_us is None else item.parser_cap_us), waiting=True)
-                    self._emit(self._event('PARSER_START_REQUIRED', active, requested, accepted=True))
-                    with self._condition:
-                        while active.get('ack') is None and not active.get('skip'):
-                            self._check(active)
-                            if self._now() >= active['parser_deadline']:
-                                raise _Cancelled('PARSER_START_EXPIRED')
-                            self._condition.wait(.02)
-                        active['waiting'] = False
-                    if not active.get('skip'):
-                        active['parsing'] = True
-                        active['decode_started'] = self._check(active)
-                        parsed = processor.parse(item, lambda phase=None: self._check(active, phase))
-                        completed = self._check(active)
-                        active['parsing'] = False
-                        # geometry가 느리거나 실패해도 NN의 실제 완료 사실은 먼저 전달한다.
-                        self._emit(self._event('NN_COMPLETED', active, completed, accepted=True))
+                        U64_MAX if item.parser_cap_us is None else item.parser_cap_us))
+                    active['parsing'] = True
+                    active['decode_started'] = self._check(active)
+                    self._emit(self._event('PARSER_STARTED', active, active['decode_started'], accepted=True))
+                    parsed = processor.parse(item, lambda phase=None: self._check(active, phase))
+                    completed = self._check(active)
+                    active['parsing'] = False
+                    self._last_parsed_source = serial, item.nn_source_key
+                    # 제어 송신 완료를 기다리지 않고 실제 계산 사실을 순서대로 전달한다.
+                    self._emit(self._event('NN_COMPLETED', active, completed, accepted=True))
+                elif item.nn_sequence is not None:
+                    self._counts['parser_skipped'] += 1
                 active['metric_phase'] = True
                 # main은 위 maintenance/NN parse 중 새 revision 입력을 넣을 수 있다.
                 # 최신 프레임이 건강해도 processor의 옛 revision으로 거절하지 않게 한다.

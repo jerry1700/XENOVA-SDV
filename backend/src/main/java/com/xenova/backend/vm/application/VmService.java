@@ -5,6 +5,7 @@ import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
 import com.xenova.backend.template.application.TemplateCatalog;
+import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.vm.domain.CreateVmCommand;
 import com.xenova.backend.vm.domain.Vm;
@@ -13,11 +14,14 @@ import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResources;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -79,7 +83,7 @@ public class VmService {
         return combine(runtimeCache.read());
     }
 
-    // Always asks dom0-manager; the state check uses it so the cache is refreshed by one caller.
+    // Always asks dom0-manager; the on-demand VM synchronization uses it.
     public List<Vm> listLive() {
         return combine(runtimeCache.refresh()).vms();
     }
@@ -93,10 +97,18 @@ public class VmService {
         Map<String, VmRuntime> runtimes = snapshot.runtimes();
         List<Vm> vms = vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED)
                 .stream()
+                .sorted(LIST_ORDER)
                 .map(record -> Vm.of(record, runtimes.get(record.getVmId())))
                 .toList();
         return new VmList(vms, snapshot.observedAt());
     }
+
+    // Screens show VMs in this order whatever filled the table: primary, backup, interaction, then VMs without a role,
+    // drive (Zephyr) guests before Linux among those. The stable sort keeps creation order within each group, so a VM
+    // the board registry sync discovered (created_at = discovery time) does not jump ahead of the drive VMs.
+    private static final Comparator<VmRecord> LIST_ORDER = Comparator
+            .comparingInt((VmRecord record) -> record.getRole() == null ? VmRole.values().length : record.getRole().ordinal())
+            .thenComparingInt(record -> record.getGuestKind() == GuestKind.ZEPHYR ? 0 : 1);
 
     // The role is a console label only: no dom0-manager call, no event, and the VM keeps running as it is.
     public Vm updateRole(String vmId, VmRole role) {
@@ -153,7 +165,7 @@ public class VmService {
             throw exception;
         }
         eventRecorder.vmCreated(record);
-        // vm.created already tells the story; the state is only remembered so polling does not repeat it.
+        // vm.created already tells the story; the state is only remembered so a later sync does not repeat it.
         stateTracker.remember(record.getVmId(), vm.state());
         return vm;
     }
@@ -200,24 +212,80 @@ public class VmService {
         return vmControlPort.findControlOperation(vmId, validatedKey);
     }
 
+    public VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey) {
+        String validatedKey = validateRequestKey(requestKey);
+        VmRecord record = findRecord(vmId);
+        if (record.getGuestKind() != GuestKind.LINUX) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "RESOURCE_UPDATE_UNSUPPORTED",
+                    "자원 변경은 Linux VM만 지원합니다.");
+        }
+        VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
+        if (memoryMib < template.minMemoryMib()) {
+            throw new ApiException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "VALIDATION_ERROR",
+                    "memory_mib는 이 템플릿의 최소값(" + template.minMemoryMib() + ") 이상이어야 합니다.");
+        }
+
+        return underOperation(vmId, () -> {
+            VmResourceUpdate result = vmControlPort.updateResources(vmId, vcpus, memoryMib, validatedKey);
+            validateResourceUpdateResponse(vmId, vcpus, memoryMib, result);
+            record.changeResources(result.after().vcpus(), result.after().memoryMib());
+            vmRecordRepository.save(record);
+            runtimeCache.remove(vmId);
+            return result;
+        });
+    }
+
+    private static void validateResourceUpdateResponse(
+            String vmId, int vcpus, int memoryMib, VmResourceUpdate result) {
+        VmResources after = result == null ? null : result.after();
+        if (result == null || !vmId.equals(result.vmId()) || after == null
+                || after.vcpus() != vcpus || after.memoryMib() != memoryMib
+                || !result.appliesOnNextStart()) {
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "VM_CONTROL_BAD_RESPONSE",
+                    "VM 제어 서비스가 올바른 자원 변경 결과를 반환하지 않았습니다.");
+        }
+    }
+
     // The platform retires the disk instead of deleting it. Keep the specification and vm_id for a future restore,
     // but hide the retired VM from the current v1 list/get/start/stop surface.
+    // dom0-manager answers 404 VMNotFound only when the board has no registration for the VM (contract v1.1):
+    // it was already retired or removed with a platform tool, so the delete is complete and the row is retired too.
     public void destroy(String vmId) {
         VmRecord record = findRecord(vmId);
-        underOperation(vmId, () -> {
-            vmControlPort.destroy(vmId);
+        boolean alreadyGone = underOperation(vmId, () -> {
+            boolean gone = false;
+            try {
+                vmControlPort.destroy(vmId);
+            } catch (ApiException exception) {
+                if (!"VM_NOT_FOUND".equals(exception.getCode())) {
+                    throw exception;
+                }
+                gone = true;
+            }
             runtimeCache.remove(vmId);
             record.retire();
             vmRecordRepository.save(record);
             stateTracker.forget(vmId);
-            return null;
+            return gone;
         });
-        eventRecorder.vmDeleted(vmId, record.getName());
+        if (alreadyGone) {
+            eventRecorder.vmDeleted(vmId, record.getName(), "platform");
+        } else {
+            eventRecorder.vmDeleted(vmId, record.getName());
+        }
         // Only after dom0-manager confirmed the delete. Failures are logged there and never fail the delete.
         inventoryCleaner.vmDeleted(vmId);
     }
 
-    // Marks the VM busy so the periodic state check does not report this operation's
+    // Marks the VM busy so an overlapping on-demand state sync does not report this operation's
     // intermediate states as detected changes.
     private <T> T underOperation(String vmId, Supplier<T> operation) {
         stateTracker.beginOperation(vmId);

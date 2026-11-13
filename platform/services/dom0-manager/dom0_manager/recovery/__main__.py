@@ -61,7 +61,8 @@ def main() -> int:
         from .rejoin import production
         rejoin=production(os.environ['XENOVA_RECOVERY_DRIVE_CONFIG'],manager.data)
     observer = PlatformObserver(manager, _xl(platform_settings), intent_refresh_s=settings.intent_refresh_s,
-        drive_bindings=rejoin.cache if rejoin else None,drive_vm_ids=rejoin.vm_ids if rejoin else ())
+        drive_bindings=rejoin.cache if rejoin else None,drive_vm_ids=rejoin.vm_ids if rejoin else (),
+        intent_action="recovery-intents")
     heartbeats, app_heartbeats = HeartbeatTable(), AppHeartbeatTable()
     client = build_client(settings)
     subscribe_liveness(client, heartbeats, app_heartbeats,rejoin=rejoin)
@@ -110,6 +111,7 @@ def main() -> int:
                             drive_vm_ids=rejoin.vm_ids if rejoin else None, protection=protection)
     log.info("recovery policy=%s max_attempts=%d backoff=%s attempt_deadline=%.0fs verify_timeout=%.0fs", policy.policy, policy.max_attempts,
              ",".join(f"{b:g}" for b in policy.backoff_s), policy.attempt_deadline_s, policy.verify_timeout_s)
+    log.info('E4 VM budget configured=%s stable_s=%s vm_max_attempts=%s', policy.budget_enabled, policy.stable_s, policy.vm_max_attempts)
     # 자가진단(354): 계정·ACL·의도·Gateway 가 막혀도 Worker 는 멈추지 않고 DEGRADED 로 남긴다. 비밀번호는 있는지만 본다
     status = StatusReporter(
         settings.state_dir, policy=policy.policy, broker_configured=bool(settings.broker_username) and bool(settings.broker_password),
@@ -129,7 +131,7 @@ def main() -> int:
         worker.run(stop)
     finally:
         client.stop()
-    log.info("xenova-recovery-worker 종료: 주기 %d, 건너뜀 %d, 판정 %d", worker.ticks, worker.skipped, worker.judgments.qsize())
+    log.info("xenova-recovery-worker 종료: 주기 %d, 건너뜀 %d, 판정 %d", worker.ticks, worker.skipped, worker.judgments_total)
     return 0
 
 

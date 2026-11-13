@@ -124,7 +124,13 @@ M의 계산 대기는 최신 RAW1개·NN1개, 활성 계산1개, phase 사건8�
 
 `--jio-profile /absolute/path/private-jio.json`을 선택하면 S-jio 하나가 Pi의 원 Vehicle·clock·ToF·Scene을 직접 수신한다. 파일은 실행 사용자 소유의 owner-only JSON이며 exact 설치 필드는 [mapper 계약](../../docs/contracts/drive-world/mapper-clock-and-source.md)과 `JetsonJioProfile`에 정의한다. `--perception-profile`의 local SHA와 명시한 전체 차량 bundle 관계가 맞아야 한다. profile을 생략하면 MQTT owner를 만들지 않는다. source identity와 시계 연결은 metric/주행 승인을 뜻하지 않는다.
 
+선택 ToF는 앞 중앙0·뒤 중앙1의 단일존1×1 관측이다. ESP32가 한 관측 한 `TOF_SAMPLE3` 패킷으로 보내고 Pi가 원 시각·순번·보정 leaf를 보존해 전달한다. Jetson은 근거리 장애물 HIT-only로 소비하며 정상 거리·반환 없음·오류를 FREE로 carve하지 않는다. `tof_sources: []`는 유효하다. 새 local ToF leaf는 schema2이며 `zone_bearings` 각 구간1개·외부보정/시간 자격과 명시한 AXIAL_Z/RADIAL을 사용한다. 실제 모델·FOV·측정 오차를 제공해 새 leaf SHA와 bundle 등록 관계를 맞춰야 한다. 구 schema1/8×8 자산을 자동 변환·재사용하지 않는다. [정확 wire·capability](../../docs/contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)는 feedback-3 계약을 따른다.
+
+M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사본에만 반영한다. 저장 지도·도로 형상·주차칸 경계는 바꾸지 않는다. HIT의 원 수명이 끝나면 그 자리는 UNKNOWN이며, 더 새로운 카메라 관측이 확인돼야 이전 FREE를 다시 사용할 수 있다. 미장착·무효 측정·pose 부족은 해당 관측만 생략한다. 정적 지도 조사에 ToF를 필수 센서로 지정할 수 없으며, AUTO/MANUAL·주차 전환이나 ToF 누락이 모델 재적재를 요구하지 않는다.
+
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
+
+`pipeline.road.missing_outer_width_bounds_m`는 가려진 도로 바깥 경계를 추정할 차로 폭 범위(m)다. 폼보드 코스의 초기값은 `[0.26, 0.31]`로, 명목 폭은 0.285m다. 이 항목이 없던 schema1 파일도 원본 바이트를 유지하며 이 초기값을 쓴다. `lane_width_min_m`·`lane_width_max_m`은 영상에 보인 경계 간격을 검사하는 범위다. 인지 요약의 `current_lane`은 지도에 연결한 차로 중심과 원 관측 키·시각을 제공한다. `MAPPED`는 현재 위치에서 앞서 관측한 지도 조각을 사용한다는 뜻이고, `HELD`는 마지막 차로 정보를 보존하는 상태다.
 
 선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": [0]}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 통로별 index는 관측 divider 방향의 왼쪽 차로0·오른쪽 차로1이며 `parking_aisles`와 같은 순서/개수다. 실제 lane ID는 D의 원 내구 예약 뒤 결박하므로 이 정책을 쓸 때 각 aisle의 `approach_lane_id`는0이어야 한다. 생략/null은 미설정이며 자동 횡단·주차 역할을 추정하지 않는다. 이 설정은 FREE/기하/센서 자격이나 추진 승인을 대신하지 않는다.
 
@@ -144,7 +150,7 @@ python -m xenova_vehicle runtime \
   --output /absolute/path/new-runtime-log --json
 ```
 
-`--duration-s 10`을 지정하면 capture·NN parser·DB의 로컬 준비 후 10초 상주하고 종료한다. 생략하면 SIGINT/SIGTERM까지 유지한다. 기존 DB의 기본 정책은 `EXISTING_ONLY`이며, `CREATE_IF_ABSENT`도 기존 DB를 덮어쓰지 않는다. SDK 로그는 stderr, 최종 결과는 stdout과 `output/runtime-result.json`에 기록한다.
+`--duration-s 10`을 지정하면 capture·NN parser·DB의 로컬 준비 후 10초 상주하고 종료한다. 생략하면 SIGINT/SIGTERM까지 유지한다. 기존 DB의 기본 정책은 `EXISTING_ONLY`이며, `CREATE_IF_ABSENT`도 기존 DB를 덮어쓰지 않는다. SDK 로그는 stderr, 최종 결과는 stdout으로 반환한다. `output`의 설정 사본·진단·`runtime-result.json`은 선택 저장이다. 프로세스별 진단 daemon이 최대 8개를 대기열에 보관하고, 대기열 초과·디스크 오류·종료 시 남은 기록은 버릴 수 있다. 실행·준비·STOP·장치 복구는 이 저장을 기다리지 않는다. 자원 manifest 원본과 지도 DB의 필수 영속화는 기존 소유자가 별도로 수행한다.
 
 capture 준비는 실제 RGB/depth 30쌍, NN 준비는 M의 fresh parser 결과 5회로 구별한다. Pi 시각·odom·차량 장착 보정·지도와 provenance가 준비되기 전 `metric_ready=false`, `world_valid=false`를 유지한다. 로컬 준비는 주행 허가가 아니다.
 
@@ -163,6 +169,8 @@ capture 준비는 실제 RGB/depth 30쌍, NN 준비는 M의 fresh parser 결과 
 `capture`는 승인한 OAK 한 대의 RGB NV12 640×360과 RIGHT 기준 native depth 640×480을 원본으로 기록한다. 깊이는 little-endian uint16, mm 단위이며0은 invalid다. RGB 정렬·구멍 채우기·빈공간 판정을 하지 않는다. 고정15Hz는 요청값이며 실제 수신률과 누락 수는 결과에서 확인한다.
 
 `profiles/oak-rgb-depth-bench.example.json`을 저장소 밖에 복사하고 `device_mxid`를 실제 승인 장치 ID로 바꾼다. 예시의 `REPLACE_WITH_OAK_MXID`는 실행 시 거절한다. 프로필은 `schema_version=1`, `profile_id=oak-rgb-depth-bench-v1`, `nn_requirement=ABSENT`, `jpeg_enabled=false`인 수집 벤치 전용이다. NN 모델이나 JPEG encoder를 적재하는 운영 그래프와 구분한다.
+
+`rgb_sensor_mode: "full"`은 IMX214 센서 전체를 읽고 OAK 안에서 ISP 축소와 좌우 여백을 적용해 RGB NV12 640×360을 만든다. `"1080p"` 또는 키 생략은 기존 16:9 센서 모드를 선택한다. `full`의 수집 결과에는 EEPROM에서 변환한 RGB 내부 파라미터와 영상 영역 후보가 담긴다. 실물 지도 투영에는 해당 모드에서 확인한 보정값을 사용하고 좌우 여백을 유효 영상에서 제외한다.
 
 Jetson의 전용 환경에서 다음과 같이 실행한다. 출력 경로는 새 디렉터리여야 하며 기존 디렉터리는 비어 있어도 덮어쓰지 않는다.
 
@@ -193,7 +201,7 @@ bench-001/
 
 ## YOLOP·RGB·native depth 장치 벤치
 
-`yolop-bench`는 같은 CAM_A video에서 RGB NV12와 BGR letterbox→YOLOP를 만들고, native RIGHT depth도 함께 수신한다. 모델은 [고정 자산 명세](assets/yolop-320x320.md)의 로컬 blob만 사용한다. 자산 검사·원 기동 기한·Device owner·단일 graph 시작을 유지하며 부팅 중 다운로드하지 않는다.
+`yolop-bench`는 같은 CAM_A RGB 출력에서 RGB NV12와 320×320 BGR letterbox→YOLOP를 만들고, native RIGHT depth도 함께 수신한다. 모델은 [고정 자산 명세](assets/yolop-320x320.md)의 로컬 blob만 사용한다. 자산 검사·원 기동 기한·Device owner·단일 graph 시작을 유지하며 부팅 중 다운로드하지 않는다.
 
 `profiles/oak-yolop-rgb-depth-bench.example.json`을 저장소 밖에 복사하고 승인 MXID와 자산 디렉터리·manifest 경로를 채운다. 상대 경로는 profile 파일 기준이다. no-JPEG/REQUIRED 벤치 전용이며 기존 ABSENT 수집 profile과 섞지 않는다.
 
@@ -375,7 +383,7 @@ report = run_replay(Path("/data/captures/bench-001"), speed=0, consumer=consume)
 
 - `AbsoluteDeadline.after(event_us, duration_us, now_us=..., cap_us=...)`는 원 사건과 상한으로 한 번 기한을 계산한다. `now >= expires_us`는 만료인 half-open 정책이다. bool/float/음수·u64 overflow·미래 사건은 거절한다.
 - `AStageWatch`는 A의 명시 기동/정리 경로와 원 cold90초·stage15/30/30/15초를 검사한다. 같은 state 재전달은 새 시작이 아니다. `STREAMING`에는 현재 `CaptureWarmup`의 준비 근거가 필요하고, `CLOSED`에는 S가 실제 session 정리·process exit를 확인한 `SessionExitEvidence`가 필요하다. 이 API가 실제 Device/exit 증거를 생성하지 않는다.
-- `LocalSetupWatch`는 M/D의 spawn→HELLO15초만 검사한다. `BindWatch`는 현재 worker·binding hash·원 request ID의 issue/send/ACK를 구분한다. EAGAIN 동안 `sent`를 호출하지 않으며 늦은 송신도 issue+5초를 넘길 수 없다. HELLO 뒤 정상 외부 대기는 cold/setup 기한의 연장이 아니다.
+- `LocalSetupWatch`는 M/D의 spawn→HELLO90초만 검사한다. `BindWatch`는 현재 worker·binding hash·원 request ID의 issue/send/ACK를 구분한다. EAGAIN 동안 `sent`를 호출하지 않으며 늦은 송신도 issue+5초를 넘길 수 없다. HELLO 뒤 정상 외부 대기는 cold/setup 기한의 연장이 아니다.
 - `CaptureWarmup`은 queue 설정 뒤 현재 SDK clock barrier보다 새로운 서로 다른 RGB/depth 후보30개를 센다. 전달받은 원 stage 기한도 시작+15초를 넘길 수 없고 더 짧은 상한은 유지한다. A의 첫 STREAMING은 현재 WARMUP의 start/cap에 결박한 준비만 수락한다. 두 stream의 seq 숫자는 달라도 된다. `ParserWarmup`은 현재 capture 준비와 현재 M의 원 BIND_ACK가 모두 생긴 두 번째 원 사건부터15초 안에 정상 paired parser 결과5개를 연속 확인한다. 출력0개도 이 timer가 만료되며, current fresh parser 실패의 input key도 기억해 같은 입력 재시도를 새 성공으로 세지 않는다. empty detection은 정상 parser 결과일 수 있다.
 
 `CaptureScope`의 RawBinding hash는 pipeline/config/calibration/stream/SDK bridge/clock 등을 포함한 검증된 전체 binding을 뜻한다. canonical hash와 개별 증거의 실제 SDK·형식·동기·원 age·lease 검증은 lower adapter 책임이다. 내부 `SourceStamp`와 개별 `CapturePairEvidence`/`ParserEvidence`는 payload나 wire schema가 아니다. kernel은 stream별 마지막 metadata와 유한 count만 보관한다. REPLAY·외국/과거 scope·중복 입력은 준비에 더하지 않고 원 시각을 현재 now로 바꾸지 않는다.
@@ -500,7 +508,7 @@ calibration_bundle은 전체 차량 보정 manifest SHA 또는null이다. null�
 
 `runtime.slot_messages`는 REQUEST/GRANT/FILLED/OFFER/ACQUIRE/ACQUIRED만 지원한다. PARSER_WARMUP·null publication의 정적 진술이며 RELEASE/REVOKE/METRIC_MAP/non-null publication은 UnsupportedSlotOperation으로 거절한다. 실제 registry·예약·순번·token·송수신·READY를 만들지 않는다.
 
-`SlotTimeLimits(copy_budget_us, offer_budget_us, read_budget_us)`는 caller가 명시 제공하는 positive u64의 frozen 값이며 read≤150000us다. copy/OFFER의 실제 숫자는 후속 pinned runtime profile이 정한다. 제품 API에는 암묵 예산 기본값이 없다. `WriterSlotContext(bind,scope)`는 A용 원 RawBindMessage와 등록 RawScope만 받고 M BIND를 기다리지 않는다. service/raw SHA/A worker·channel/name/size/role 원본을 보유한다. `ReaderSlotContext(writer,bind)`는 별도 M BIND의 canonical body/hash/RAW revision/service와 acquisition Endpoint 전체를 writer에 대조한다. `.reader`는 M peer에서 얻은 Endpoint다. BIND handshake5초는 안정 RawBinding의 상주 수명이 아니며 SLOT 시각을 그 전송 expiry에 제한하지 않는다. 현재성·fence는 실제 S registry가 소유한다.
+`SlotTimeLimits(copy_budget_us, offer_budget_us, read_budget_us)`는 caller가 명시 제공하는 positive u64의 frozen 값이다. 상주 broker/worker의 초기 local copy/read 취득 시작 예산은 각5초, OFFER는500ms다. 이 값은 관측 freshness나 처리율 보장이 아니며, HIL 벤치는150ms처럼 더 짧은 값을 명시할 수 있다. 실제 frame의 원 사용 기한은 별도로 검사하고 거래 예산으로 연장하지 않는다. `WriterSlotContext(bind,scope)`는 A용 원 RawBindMessage와 등록 RawScope만 받고 M BIND를 기다리지 않는다. service/raw SHA/A worker·channel/name/size/role 원본을 보유한다. `ReaderSlotContext(writer,bind)`는 별도 M BIND의 canonical body/hash/RAW revision/service와 acquisition Endpoint 전체를 writer에 대조한다. `.reader`는 M peer에서 얻은 Endpoint다. BIND handshake5초는 안정 RawBinding의 상주 수명이 아니며 SLOT 시각을 그 전송 expiry에 제한하지 않는다. 현재성·fence는 실제 S registry가 소유한다.
 
 `SlotMessage(packet,context,parent=None,*,limits,cap_us=None)`와 `parse_slot_message(...)`는 같은 검사로 원 packet/raw, context/limits/parent, op/request_id/정수 issued_us·expires_us·상속 cap_us와 c1 `.record`를 보유한다. fields/payload는 새 사본이다. parent가 있으면 문맥/limits 전체값을 대조하고 결과에는 원 parent의 context/limits/record를 보존한다. 공개 constructor에 unchecked flag는 없다. SlotMessageError(ValueError)와 그 하위 UnsupportedSlotOperation을 사용한다.
 
@@ -508,12 +516,14 @@ calibration_bundle은 전체 차량 보정 manifest SHA 또는null이다. null�
 |---|---|---|---|
 |REQUEST|None|Qw/Iw/Ew|LeaseRequest|
 |GRANT|REQUEST|같은Qw/예약G/같은Ew|WriteGrant|
-|FILLED|GRANT|같은Qw/완료보고P/같은Ew|FilledInfo|
+|FILLED|GRANT|같은Qw/완료보고P/별도 cleanup 전달 E|FilledInfo|
 |OFFER|None|독립Qo/원P/정확P+offer budget|Offer|
 |ACQUIRE|OFFER|새Qr/Ir/Er|ReadRequest|
 |ACQUIRED|ACQUIRE|같은Qr/예약Gr/같은Er|ReadLease|
 
-원 구간은 Iw≤G≤P<Ew, P≤Ir<Eo, Ir≤Gr<min(Er,Eo)다. copy/read 요청 폭은 각 원 예산 이내다. Qr는 아는 Qo와 달라야 한다. Qo와 Qw의 구별은 M이 Qw를 모르므로 S의 실제 생성 gate다. Eo 합산의 최종u64 초과는 거절하고 clamp/now 갱신을 하지 않는다. REQUEST/ACQUIRE만 optional exactu64 local cap_us를 c1 LeaseRequest에 보존한다. cap 자체는 wire에 없고 caller 독립 입력이며 다른4op에서 새 cap을 주어 바꿀 수 없다. 이미 끝난 COPY cap이나 BIND 전송 expiry를 OFFER/새 READ에 상속하지 않는다.
+원 구간은 Iw≤G≤P, P≤Ir<Eo, Ir≤Gr<min(Er,Eo)다. writer는 native 취득에 들어가기 전에 원 Ew를 검사하며, 유효하게 취득했으면 copy/post를 완결하므로 P<Ew를 요구하지 않는다. FILLED는 같은 원 Qw·full grant key와 실제 완료P를 보존하고, P 이후의 별도 cleanup 전달 E를 쓸 수 있다. 원 request/grant E와 frame/payload E는 바뀌지 않는다. 늦은 FILLED의 수락은 자원 완료 bookkeeping이며 관측 freshness·현재 live READY·출력 권한을 새로 만들지 않는다.
+
+copy/read 요청 폭은 각 원 예산 이내다. Qr는 아는 Qo와 달라야 한다. Qo와 Qw의 구별은 M이 Qw를 모르므로 S의 실제 생성 gate다. Eo 합산의 최종u64 초과는 거절하고 clamp/now 갱신을 하지 않는다. REQUEST/ACQUIRE만 optional exactu64 local cap_us를 c1 LeaseRequest에 보존한다. cap 자체는 wire에 없고 caller 독립 입력이며 다른4op에서 새 cap을 주어 바꿀 수 없다. 이미 끝난 COPY cap이나 BIND 전송 expiry를 OFFER/새 READ에 상속하지 않는다. TTL만으로 실제 WRITING/IN_USE를 회수하지 않고 exact 반환이나 확인된 owner 종료를 기다린다.
 
 payload는 항상 exact13(op/arena_id/slot/generation/write_token/read_token/producer/consumer/raw_binding_sha256/publication_binding_sha256/purpose/payload_length/descriptor_sha256)이다. unused는 missing이 아닌 null이다. REQUEST는 arena/raw/producer만 지정하고 key는 null, GRANT는 slot0/1·positive u64string generation·write UUID, FILLED는 여기에 body length1..2093056·descSHA를 결합한다. OFFER는 원 full writer key/length/SHA와 M consumer를 안내하되 read token/purpose는 null이다. ACQUIRE는 같은 content/M에 PARSER_WARMUP, ACQUIRED만 read UUID를 추가한다. publication은 모두 null이다. slot/length는 exactint이며 bool을 받지 않는다. 원 packet4096B 구조/encoding/duplicate 규칙은 기존 b1을 따른다.
 

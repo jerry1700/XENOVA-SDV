@@ -46,7 +46,7 @@ class DeploymentPayloadTest(unittest.TestCase):
         for key,value in {"D":str(self.root),"S":str(source),
                           "PYTHON_SITEPACKAGES_DIR":"/usr/lib/python3.14/site-packages",
                           "systemd_system_unitdir":"/usr/lib/systemd/system",
-                          "sysconfdir":"/etc","datadir":"/usr/share"}.items():
+                          "sysconfdir":"/etc","datadir":"/usr/share","bindir":"/usr/bin"}.items():
             body=body.replace("${"+key+"}",value)
         self.assertNotIn("${",body)
         subprocess.run(["bash","-eu","-c",body],check=True,capture_output=True,text=True)
@@ -54,6 +54,7 @@ class DeploymentPayloadTest(unittest.TestCase):
     def install_apps(self):
         self.install_recipe("xenova-dom0-manager",payloads.API,"dom0_manager")
         self.install_recipe("xenova-mqtt-client",payloads.MQTT,"xenova_mqtt")
+        self.install_recipe("xenova-gateway",payloads.GATEWAY,"xenova_gateway")
 
     def test_actual_recipe_installs_both_source_trees_and_safe_server_config(self):
         self.install_apps()
@@ -124,14 +125,16 @@ class DeploymentPayloadTest(unittest.TestCase):
                 with self.assertRaises(ValueError):assemble.platform_root_ok(root)
 
     def test_gate_rejects_modified_api_and_mqtt_source(self):
-        for relative in ("dom0_manager/api/vms.py","xenova_mqtt/client.py"):
+        for index,relative in enumerate(("dom0_manager/api/vms.py","xenova_mqtt/client.py",
+                         "dom0_manager/recovery/rejoin.py","xenova_gateway/drive_link.py",
+                         "xenova_drive_world/codec.py")):
             with self.subTest(relative=relative):
-                root=self.base/relative.split("/")[0];platform_root(root)
+                root=self.base/str(index);platform_root(root)
                 (root/"usr/lib/python3.14/site-packages"/relative).write_text("# stale payload\n")
                 with self.assertRaisesRegex(ValueError,"source/installed"):assemble.platform_root_ok(root)
 
     def test_source_contract_refuses_missing_source_package(self):
-        for field in ("API","MQTT"):
+        for field in ("API","MQTT","GATEWAY","WORLD"):
             with self.subTest(field=field),patch.object(payloads,field,self.base/"missing-source"):
                 with self.assertRaisesRegex(ValueError,"source package missing"):
                     payloads.source_files("usr/lib/python3.14/site-packages")

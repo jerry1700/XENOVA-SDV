@@ -29,7 +29,9 @@ C/Gateway가 결과를 소비한다. PC 실행 결과는 실물 보정·정지·
    probe에 응답한다. scope 전달이 늦어 A의 원200ms probe가 만료하면 실패로 남는다.
 5. 기존 Feedback3 listener의 `hil-peer-listening-1` 출력 뒤 caller가 기존 Pi serial bridge와
    실제 Gateway의 한정 HIL 설정을 선택한다. 실제 accepted socket을 받은 뒤에만 가상
-   plant 하나를 만들고 `on_session=producer.attach`로 같은 객체를 renderer에 연결한다.
+   plant 하나를 만들고 같은 객체를 renderer에 연결한다. 선택한
+   `--capture-start-delay-s` 동안은 피드백·물리만 진행하고 영상은 생성하지 않는다.
+   지연 후 현재 plant에서 새 관측을 시작하며, 이 대기는 Gateway/시계/주행 준비 승인이 아니다.
    Pi의 서비스·권한·MQTT·SSH tunnel 설정은 이 CLI가 바꾸지 않는다.
 6. 정상 종료와 오류 모두 원 peer FD를 닫고 renderer/session의 실제 종료를 원 join cap
    안에서 확인한다. source 단절·만료 뒤 자동 재연결, AUTO 재출발, epoch 재발급은 없다.
@@ -48,6 +50,21 @@ bootstrap receipt는 최대4096B의 로컬 복사 선언이며 READY나 source a
 예시의123과 SHA 문자열은 실행 값이 아니다. caller는 실제 이번 S 원본으로 채워야 한다.
 Nano는 자기 descriptor와 실제 clock·frame·source·operation 사실을 다시 검사한다.
 
+## 플랫폼 코스 선택
+
+저장소 루트에서 병합된 코스를 선택하고, 기존 HIL의 개발 프로필을 전달한다.
+
+```powershell
+$env:PYTHONPATH = 'vehicle/Jetson;vehicle/Jetson/src'
+python -m tools.hil_observation.prepare_course --revision origin/platform --track jetson-demo --development-profile 'path/to/development.canonical.json' --output vehicle/Jetson/build/hil-courses/jetson-demo
+```
+
+R55를 선택할 때는 `--track jetson-r55`와 별도 출력 폴더를 사용한다.
+도구는 지정 커밋의 코스 카탈로그를 읽어 장면과 개발 프로필을 생성하고, 해당 파일의 SHA와
+후륜축 초기 자세를 포함한 인자 배열을 출력한다. 저장소 루트에서 PC HIL을 실행하며
+인자 배열로 기존 `--development-profile`·`--scene`·`--initial-pose`와 각 SHA 인자를 교체한다.
+장면에는 코스 원본의 커밋과 SHA가 기록된다. 차량·카메라가 기존 개발 모델과 일치해야 내보낼 수 있다.
+
 ## 명시 실행 인자
 
 일반적인 `--help`는 앱·renderer·연결을 시작하지 않는다. 모든 실험 값은 caller가 지정한다.
@@ -62,6 +79,7 @@ Nano는 자기 descriptor와 실제 clock·frame·source·operation 사실을 �
 | `--scene`, `--scene-sha256` | 기존 canonical scene과 원 SHA |
 | `--capture-epoch` | 이번 renderer의 canonical nonzero UUID |
 | `--capture-lifetime-us`, `--render-interval-us` | 원 capture 수명(최대500000us)과 명시 렌더 간격 |
+| `--capture-start-delay-s` | 개발용 피드백 선기동 시간. 기본 0초, 전체 실험 시간 이내이며 표본·기한을 재사용하지 않음 |
 | `--observation-host`, `--observation-port`, `--observation-connect-timeout-s` | 실제 Nano 또는 기존 SSH forward의 numeric IPv4 연결 |
 | `--bootstrap-receipt`, `--bootstrap-timeout-s` | 이번 공개 metadata copy receipt와 최초 대기 cap |
 | `--observation-duration-s` | 원 PC clock/frame session의 전체 시간 한도 |
@@ -89,3 +107,37 @@ Feedback3 10ms cutoff를 만족하는지는 실행에서 확인한다. 부하 �
 출력의 `session_done`, `failed`, `closed`, `threads_alive`는 실제 sender 종료 진단이다.
 target0·peer FD close·renderer 종료가 실제 stationary나 STOP/APPLIED를 뜻하지 않는다.
 actual current Vehicle/clock/Source/World와 RPi의 제어·정지 수락은 각 실제 owner가 판단한다.
+
+## 선택 PC 실시간 관측 피드
+
+기존 PC 실행 인자에 `--observer-dir <명시 input 폴더>`를 더하면 별도 진단 collector가
+읽을 `pc.json`을 내보낸다. 환경변수 `XENOVA_HIL_OBSERVER_DIR`도 같은 선택이다.
+둘 다 없으면 관측 worker를 만들지 않으며 feed 모듈도 import하지 않는다.
+`--observer-run-id <진단 run ID>`는 collector와 맞추는 식별자다. 생략하면 별도의
+진단 UUID를 만들며 실제 source/session UUID를 대신하지 않는다. 폴더당 PC feed 하나만 쓴다.
+
+파일은 개발 도구용 `pc-live-source-1`이다. 기동 중에는 `CONNECTING_JETSON`,
+`WAITING_BOOTSTRAP`, `WAITING_FEEDBACK`와0프레임을 표시하고, 실제 attach 뒤에는
+`CAPTURING`을 표시한다. 원 bootstrap 확인 전 `binding`, `session_id`는 null이다.
+binding은 원 공개 metadata이며 자격정보가 아니다. `FAILED`/`ENDED`와 실제 원 session
+종료 사유를 내보낸다. 운행 owner가 실제 정리된 CLI 종료에서만 기본0.3초 동안
+최종 진단 전달을 기다리며, 디스크가 막히면 포기한다. 전달 완료는 운행 수락 조건이 아니다.
+
+daemon 하나가 최대0.5초 간격으로 최신 자료만 변환·원자 교체한다. 호출자는 try-lock으로
+작은 상태나 원 immutable frame 참조만 넘기며 운행 중 JSON/base64/hash/파일·join을 수행하지 않는다.
+운행 owner가 진단 파일 저장을 기다리지 않으며 관측 실패는 운행 실패나 모델 재시작을
+일으키지 않는다. 같은 PC에서 진단 변환이 소비하는 CPU와 실제 스케줄링 영향은 별도
+실행에서 측정해야 한다. 이 선택을 실시간성 수락으로 해석하지 않는다.
+
+`sequence`는 관측 heartbeat이고 `source_sequence`는 원 렌더 frame 순번이다. 같은 frame의
+재게시로 원 PC capture interval, 완료 시각, expiry를 바꾸지 않는다. RGB640×360 NV12와
+깊이640×480 RAW16_LE의 원 bytes는 worker에서 base64로 변환하며 전체 파일은2MiB 이하다.
+`media.original_stamp`는 원 frame scope/descriptor/시각을 보존한다. PC clock, collector
+수신 clock, Jetson clock을 epoch 대조 없이 빼지 않는다.
+
+`counters`는 renderer attempted/rendered/expired/replaced/taken 등이며 전송 완료 수가 아니다.
+`producer`에는 원 작은 전체 snapshot을 둔다. `peer.received`는 clock을 포함한 전체 packet 수,
+`command_hwm`은 가상 장치가 수락한 명령 순번, `applied`는 target 적용 횟수다.
+`plant`의 실제 적분 pose/속도·원 wheel feedback은 이동 관측이며 명령 수신·target 적용과 별개다.
+이 값과 영상은 모두 HIL SYNTHETIC이며 GT pose/scene을 Jetson 입력으로 보내지 않는다.
+이 feed만으로 YOLOP 결과·Jetson 지도·Pi 계획 경로가 생성됐다고 표시하지 않는다.

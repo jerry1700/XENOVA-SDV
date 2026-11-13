@@ -1,3 +1,4 @@
+import type { Obstacle, P2 } from './course';
 import type { DisplayVm, Presentation, Source } from './model';
 
 /**
@@ -189,42 +190,117 @@ export function tripOf(p: Presentation | null): { distance_m: number; driving_s:
     : null;
 }
 
-export interface WorldObject {
-  id: string;
-  kind: 'car' | 'traffic_light' | 'unknown';
-  /** 신호등이면 인식한 불빛, 모르면 null */
-  state: 'red' | 'yellow' | 'green' | null;
-  /** 차의 진행 방향: 같은 방향 / 마주 옴 / 교차로를 가로지름 (왼쪽으로·오른쪽으로, 방향 모르면 cross) */
-  heading: 'same' | 'oncoming' | 'cross' | 'cross_left' | 'cross_right';
-  /** 차 기준 상대 위치 (m): x 오른쪽 +, y 앞쪽 + */
-  x_m: number;
-  y_m: number;
+export interface CourseState {
+  trackId: string;
+  /** 후륜축 위치 (코스 좌표 m, yaw 반시계 rad) — 시뮬레이터 sim.pose 와 같은 기준 */
+  pose: { x: number; y: number; yaw: number };
+  /** 코스 위 장애물 (sim.world obstacles 와 같은 꼴: 중심 x·y, 폭 w·깊이 h) */
+  obstacles: Obstacle[];
+  /** 주행 계획 경로 (코스 좌표, 차 앞부터). 수동 운전·정지 중이면 빈 배열 */
+  plan: P2[];
 }
 
-/** 주변 물체 (state.world.objects, 제안). 신선하지 않으면 그리지 않는다 */
-export function worldObjectsOf(p: Presentation | null): WorldObject[] | null {
-  const v = (p?.state as Record<string, unknown> | undefined)?.world;
-  if (!object(v) || source(v.source)?.status !== 'fresh' || !Array.isArray(v.objects)) return null;
-  return v.objects.flatMap((o) =>
-    object(o) && typeof o.id === 'string' && finite(o.x_m) && finite(o.y_m)
-      ? [
-          {
-            id: o.id,
-            kind: (['car', 'traffic_light'].includes(String(o.kind))
-              ? o.kind
-              : 'unknown') as WorldObject['kind'],
-            state: (['red', 'yellow', 'green'].includes(String(o.state))
-              ? o.state
-              : null) as WorldObject['state'],
-            heading: (['oncoming', 'cross', 'cross_left', 'cross_right'].includes(String(o.heading))
-              ? o.heading
-              : 'same') as WorldObject['heading'],
-            x_m: o.x_m,
-            y_m: o.y_m,
-          },
-        ]
-      : [],
-  );
+/**
+ * 코스 위 차 위치·장애물·계획 (state.course, 제안). 신선하지 않으면 null — 지도에 차를 그리지 않는다.
+ * 실보드 수집기는 아직 보내지 않는다 (sim.pose·sim.world 또는 젯슨 위치 추정이 필요)
+ */
+export function courseOf(p: Presentation | null): CourseState | null {
+  const v = (p?.state as Record<string, unknown> | undefined)?.course;
+  if (!object(v) || source(v.source)?.status !== 'fresh') return null;
+  const pose = v.pose;
+  if (!object(pose) || !finite(pose.x) || !finite(pose.y) || !finite(pose.yaw)) return null;
+  const point = (q: unknown): q is P2 => Array.isArray(q) && q.length === 2 && finite(q[0]) && finite(q[1]);
+  return {
+    trackId: typeof v.track_id === 'string' ? v.track_id : '',
+    pose: { x: pose.x, y: pose.y, yaw: pose.yaw },
+    obstacles: (Array.isArray(v.obstacles) ? v.obstacles : []).flatMap((o) =>
+      object(o) && typeof o.id === 'string' && finite(o.x) && finite(o.y) && finite(o.w) && finite(o.h)
+        ? [
+            {
+              id: o.id,
+              kind: typeof o.kind === 'string' ? o.kind : 'unknown',
+              x: o.x,
+              y: o.y,
+              w: o.w,
+              h: o.h,
+            },
+          ]
+        : [],
+    ),
+    plan: Array.isArray(v.plan) ? v.plan.filter(point) : [],
+  };
+}
+
+/**
+ * 배터리 잔량 추정 (운전자 화면). 잔량 센서가 없어 전압에서 선형으로 추정한다.
+ * 실차 배터리 3S LiPo: 셀당 완충 4.2 V(팩 12.6 V) = 100%, 하한 3.5 V(팩 10.5 V) = 0%
+ */
+export const BATTERY_CELLS = 3;
+export const CELL_FULL_V = 4.2;
+export const CELL_EMPTY_V = 3.5;
+
+/** 팩 전압 → 추정 잔량 % (정수, 0~100) */
+export function batteryPercent(packV: number): number {
+  const ratio = (packV / BATTERY_CELLS - CELL_EMPTY_V) / (CELL_FULL_V - CELL_EMPTY_V);
+  return Math.round(Math.min(1, Math.max(0, ratio)) * 100);
+}
+
+/** 신선한 vehicle.status 의 batt_v 로 추정 잔량 %. 없거나 신선하지 않으면 null */
+export function batteryOf(p: Presentation | null): number | null {
+  const v = vehicleOf(p);
+  return v?.source.status === 'fresh' && v.batt_v !== null && v.batt_v > 0 ? batteryPercent(v.batt_v) : null;
+}
+
+/** 운전자 화면 주행 모드 한 줄. 색은 tone (auto 청록 · manual 파랑 · warning 주황 · danger 빨강 · muted 회색) */
+export type DriverModeTone = 'auto' | 'manual' | 'warning' | 'danger' | 'muted';
+
+/**
+ * state.drive.mode 를 운전자에게 보이는 문구로. VM 이름은 넣지 않는다.
+ * summary 는 presentation.driveSummary 결과 (신선하지 않거나 연결이 끊기면 mode 'unknown')
+ */
+export function driverMode(summary: { mode: string; preparing: unknown }): {
+  label: string;
+  tone: DriverModeTone;
+} {
+  const { mode } = summary;
+  if (summary.preparing && (mode === 'AUTO' || mode === 'MANUAL'))
+    return { label: `${mode === 'AUTO' ? '자율' : '수동'} 주행 준비 중`, tone: 'warning' };
+  switch (mode) {
+    case 'AUTO':
+      return { label: '자율 주행', tone: 'auto' };
+    case 'MANUAL':
+      return { label: '수동 주행', tone: 'manual' };
+    case 'AUTO_READY':
+      return { label: '자율 재개 대기', tone: 'warning' };
+    case 'SAFE_STOP':
+      return { label: '안전 정지', tone: 'danger' };
+    default:
+      return { label: '미확인', tone: 'muted' };
+  }
+}
+
+/** 계기판 최대 눈금: 최대 속도 × 2, 최대 속도를 모르면 1.0 m/s */
+export const DEFAULT_GAUGE_MAX_MPS = 1;
+export const gaugeMaxOf = (maxSpeed: number | null) =>
+  maxSpeed !== null && maxSpeed > 0 ? maxSpeed * 2 : DEFAULT_GAUGE_MAX_MPS;
+
+/**
+ * 조향 최대각 (rad). 주행 프로필 platform/apps/drive/profiles/lattice-lab-1.json max_steer 0.55 (약 31.5°).
+ * steer_rad 는 + 가 왼쪽 (MQTT 계약 수동 입력 변환: left = steer_rad +)
+ */
+export const MAX_STEER_RAD = 0.55;
+
+/** 조향각 표시: 정수 도, 좌/우 (1° 미만은 방향 없음), 최대각 대비 비율 -1(오른쪽 끝) ~ 1(왼쪽 끝) */
+export function steeringOf(
+  rad: number | null,
+): { deg: number; side: '좌' | '우' | null; ratio: number } | null {
+  if (rad === null || !Number.isFinite(rad)) return null;
+  const deg = Math.round((Math.abs(rad) * 180) / Math.PI);
+  return {
+    deg,
+    side: deg < 1 ? null : rad > 0 ? '좌' : '우',
+    ratio: Math.max(-1, Math.min(1, rad / MAX_STEER_RAD)),
+  };
 }
 
 /**
@@ -236,68 +312,4 @@ export const RATED_RUNTIME_S = 60 * 60;
 /** 예상 주행 가능 시간 (초): 완충 기준 시간 − 이번 주행에서 달린 시간 (트립 주행 시간). 0 아래로 내려가지 않는다 */
 export function remainingRuntimeS(drivingS: number): number {
   return Math.max(0, RATED_RUNTIME_S - drivingS);
-}
-
-/** 앞에 있는 가장 가까운 신호등 (내 차선 근처, 앞쪽) */
-export function signalAhead(objects: WorldObject[]): WorldObject | null {
-  return (
-    objects
-      .filter((o) => o.kind === 'traffic_light' && o.y_m > 0 && Math.abs(o.x_m) < 0.6)
-      .sort((a, b) => a.y_m - b.y_m)[0] ?? null
-  );
-}
-
-export interface RoadInfo {
-  name: string;
-  /** 한 방향 차로 수 */
-  lanes: number;
-  /** 내 차로 (1 = 중앙선 옆 1차로). 소수면 차로를 옮기는 중 */
-  lane: number;
-  /** 반대 방향 차로 수 */
-  oncomingLanes: number;
-  /**
-   * 앞 사거리 (차 기준 거리, 가로지르는 도로). 거리가 음수면 방금 돌아 나온 사거리이고 가로지르는 도로는 지나온 도로다.
-   * turn: 경로가 이 사거리에서 꺾는 방향 (직진이면 null)
-   */
-  intersection: { y_m: number; crossRoad: string; crossLanes: number; turn: 'left' | 'right' | null } | null;
-  /**
-   * 주행 계획 (차로): lane = 옮겨 갈 차로, 그 뒤 thenAfterM(내 차 앞 RC m) 지점부터 thenLane 으로 돌아간다 (추월).
-   * 없으면 지금 차로 그대로
-   */
-  plan: { lane: number; thenLane: number | null; thenAfterM: number | null } | null;
-}
-
-/** 지금 도로 (state.road, 제안). 신선하지 않으면 null — 장면은 기본 3차로로 그린다 */
-export function roadOf(p: Presentation | null): RoadInfo | null {
-  const v = (p?.state as Record<string, unknown> | undefined)?.road;
-  if (!object(v) || source(v.source)?.status !== 'fresh') return null;
-  if (!Number.isSafeInteger(v.lanes) || !finite(v.lane) || !Number.isSafeInteger(v.oncoming_lanes))
-    return null;
-  const i = v.intersection;
-  return {
-    name: typeof v.name === 'string' ? v.name : '',
-    lanes: Math.max(1, v.lanes as number),
-    lane: v.lane,
-    oncomingLanes: Math.max(0, v.oncoming_lanes as number),
-    intersection:
-      object(i) && finite(i.y_m)
-        ? {
-            y_m: i.y_m,
-            crossRoad: typeof i.cross_road === 'string' ? i.cross_road : '',
-            crossLanes: Number.isSafeInteger(i.cross_lanes) ? (i.cross_lanes as number) : 2,
-            turn: i.turn === 'left' || i.turn === 'right' ? i.turn : null,
-          }
-        : null,
-    plan: planOf(v.plan),
-  };
-}
-
-function planOf(v: unknown): RoadInfo['plan'] {
-  if (!object(v) || !finite(v.lane)) return null;
-  const then = finite(v.then_lane) && finite(v.then_after_m);
-  return {
-    lane: v.lane,
-    thenLane: then ? (v.then_lane as number) : null,
-    thenAfterM: then ? (v.then_after_m as number) : null,
-  };
 }

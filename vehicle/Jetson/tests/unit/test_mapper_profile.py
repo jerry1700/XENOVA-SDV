@@ -35,7 +35,7 @@ def profile_fields(calib=None):
 def tof_leaf():
     return TofLeaf(sensor_id=0,sensor_config_revision=1,model='EXPLICIT_TEST_MODEL',driver_profile_sha256='e'*64,
         rotation=((1.,0.,0.),(0.,1.,0.),(0.,0.,1.)),translation=(.1,0.,.1),
-        zone_bearings=((-0.02,0.02,-0.02,0.02),)*64,distance_convention='AXIAL_Z',
+        zone_bearings=((-0.02,0.02,-0.02,0.02),),distance_convention='AXIAL_Z',
         near_m=.1,far_m=2.,measurement_error_m=.01)
 
 
@@ -77,6 +77,16 @@ class MapperProfileTests(unittest.TestCase):
             del target[path[-1]]
             with self.subTest(path=path),self.assertRaises(MapperProfileError): MapperProfile(value)
 
+    def test_legacy_road_profile_keeps_original_bytes_and_uses_course_width_for_inference(self):
+        value = profile_fields()
+        del value['pipeline']['road']['missing_outer_width_bounds_m']
+        original = MapperProfile.from_dict(value)
+        restored = MapperProfile.from_bytes(original.canonical_bytes)
+        self.assertEqual(restored.sha256, original.sha256)
+        self.assertNotIn('missing_outer_width_bounds_m', restored.to_dict()['pipeline']['road'])
+        self.assertAlmostEqual(restored.pipeline.road.missing_outer_width_m, .285)
+        self.assertAlmostEqual(restored.pipeline.road.missing_outer_width_error_m, .025)
+
     def test_original_work_age_shape_and_stopping_bounds_are_enforced(self):
         changes=(('pipeline','free_ttl_us',500001),('pipeline','max_observation_age_us',500001),
                  ('pipeline','max_free_cells',257),('sensors','max_gap_us',1000001),
@@ -105,7 +115,7 @@ class MapperProfileTests(unittest.TestCase):
         value['sensors']['tof_sources']=[dict(external_leaf_name='front',leaf=leaf.to_dict())]
         parsed=MapperProfile(value); parsed.check(calib,vehicle_configuration='vehicle-config-lab',vehicle_calibration='a'*64)
         leaves=parsed.sensors.tof_leaves; self.assertEqual(leaves[0][1].sha256,leaf.sha256)
-        self.assertFalse(leaves[0][1].first_surface_qualified)
+        self.assertFalse(leaves[0][1].extrinsics_qualified)
         leaves.clear(); self.assertEqual(len(parsed.sensors.tof_leaves),1)
         value['sensors']['tof_sources'][0]['leaf']['model']='ANOTHER_SENSOR'
         changed=MapperProfile(value)

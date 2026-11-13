@@ -16,6 +16,7 @@ from .registration import (PoseBox, PointFeature, SegmentFeature, FrozenReferenc
     RegistrationProfile, register, transform_point)
 from ..perception.inputs import FrameStamp
 from ..perception.road import LaneHypothesis, RoadResult
+from ..perception.temporal_road import MappedRoad
 from ..storage.contracts import (StorageContext, StorageJob, CatalogHeadSnapshot,
     CatalogReservation, CommitReceipt, canonical, digest, json_bytes, uint)
 from ..storage.geometry_scope import same_catalog_geometry
@@ -24,6 +25,7 @@ from ..storage.records import CatalogRecord, CheckpointPayload, LoadedCheckpoint
 
 _RECORD = struct.Struct('<5sBIQ32s32s32s')
 _SHAPES = ('divider', 'left_center', 'right_center', 'left_outer', 'right_outer')
+_MAP_IDENTITY = PoseBox((0., 0.), (0., 0.), (0., 0.))
 
 
 def _tree(value):
@@ -206,11 +208,12 @@ class LaneAllocationNeed:
     catalog_revision: int
 
 
-def _pose_error(prior, points):
-    return math.hypot(*prior.widths[:2]) / 2 + 2 * max(math.hypot(*p) for p in points) * math.sin(prior.widths[2] / 4)
+def _position_error(prior, position_radius_m):
+    box_radius = math.hypot(*prior.widths[:2]) / 2
+    return box_radius if position_radius_m is None else min(box_radius, position_radius_m)
 
 
-def _common_points(road, model, prior, capture):
+def _common_points(road, model, prior, capture, position_radius_m):
     """옛 FOV 끝 밖의 미관측 연장을 배제 근거로 쓰지 않는 공통 범위다."""
     current, old = road.hypotheses[0], model.road.hypotheses[0]
     points, segments = [], []
@@ -232,7 +235,8 @@ def _common_points(road, model, prior, capture):
             samples.append(tuple(a+weight*(b-a) for a, b in zip(path[k], path[k+1])))
         for p in samples:
             q = transform_point(p, prior.center); along = q[0] * axis[0] + q[1] * axis[1]
-            pad = _pose_error(prior, (p,)) + current.error_m
+            pad = (_position_error(prior, position_radius_m)
+                   + 2 * math.hypot(*p) * math.sin(prior.widths[2] / 4) + current.error_m)
             if low <= along - pad and along + pad <= high:
                 selected.append(PointFeature(p, current.error_m, side, capture, (side,)))
         if len(selected) < 2: return (), ()
@@ -281,14 +285,33 @@ class LaneCatalog:
                 self.frame_id, self.context.odom_epoch) or not historical and source.stamp.clock_id != self.clock_id):
             raise ValueError('lane source changed original geometry/clock domain')
 
-    def observe(self, road, source, prior, *, prior_qualified, crossing, profile=RegistrationProfile()):
+    def observe(self, road, source, prior, *, prior_qualified, crossing, profile=RegistrationProfile(),
+                position_radius_m=None):
+        return self._observe(road, source, prior, prior_qualified, crossing, profile, position_radius_m)
+
+    def observe_mapped(self, candidate, source, *, prior_qualified, crossing, profile=RegistrationProfile()):
+        """누적 점의 pose 오차는 이미 MAP 형상에 포함되어 있다."""
+        if (type(candidate) is not MappedRoad or source.stamp.key not in candidate.sources
+                or len(candidate.sources) < 2):
+            raise ValueError('current and historical RGB geometry required')
+        return self._observe(candidate.road, source, _MAP_IDENTITY, prior_qualified, crossing, profile, 0.,
+                             geometry_sources=tuple(sorted(candidate.sources)))
+
+    def _observe(self, road, source, prior, prior_qualified, crossing, profile, position_radius_m,
+                 geometry_sources=()):
         self._source(source)
         if type(prior) is not PoseBox or type(profile) is not RegistrationProfile or type(prior_qualified) is not bool or profile.outlier_components:
             raise ValueError('joint actual prior and no-outlier bounded profile required')
+        if position_radius_m is not None and (type(position_radius_m) not in (int, float)
+                or not math.isfinite(position_radius_m) or position_radius_m < 0):
+            raise ValueError('original finite position radius required')
         valid = _geometry(road, source, crossing)
         if type(crossing) is not bytes: raise ValueError('declared crossing bytes required')
         geometry = _road_fields(road) if valid else (road.status, road.complete, len(road.hypotheses))
-        key = sha256(canonical((asdict(source), geometry, crossing.hex()))).hexdigest()
+        identity = (asdict(source),geometry,crossing.hex())
+        if geometry_sources:
+            identity += (geometry_sources,)
+        key = sha256(canonical(identity)).hexdigest()
         if valid: road = _road_from(json_bytes(canonical(geometry), 65536))
         def result(status, **kw):
             self._observed = LaneAssociation(status, road, source, crossing, self.revision, key, **kw)
@@ -307,13 +330,14 @@ class LaneCatalog:
             return result('UNKNOWN', reasons=('ORIGINAL_GEOMETRY_OR_PRIOR_UNAVAILABLE',))
         h = road.hypotheses[0]; matches = []; unresolved = False; cells = tests = 0
         for model in self._models.values():
-            points, segments = _common_points(road, model, prior, source.sha256)
+            points, segments = _common_points(road, model, prior, source.sha256, position_radius_m)
             if not points: unresolved = True; continue
             if cells >= profile.max_cells or tests >= profile.max_distance_tests:
                 unresolved = True; continue
             remaining = replace(profile, max_cells=profile.max_cells-cells, max_distance_tests=profile.max_distance_tests-tests)
             reference = FrozenReference(model.model_revision, self.calibration_id, segments)
-            fit = register(points, reference, prior, remaining, calibration_id=self.calibration_id)
+            fit = register(points, reference, prior, remaining, calibration_id=self.calibration_id,
+                position_radius_m=position_radius_m)
             cells += fit.tested_cells; tests += fit.distance_tests
             if fit.feasible: matches.append((model.lane_ids, fit))
         checked = sum(len(m.lane_ids) for m in self._models.values())
@@ -324,7 +348,7 @@ class LaneCatalog:
             if fit.status != 'BOUNDED' or not fit.complete: return result('UNKNOWN', matches=(ids,), checked_lanes=checked)
             pose, position, yaw = fit.representative, fit.position_error_m, fit.yaw_error_rad
         else:
-            pose, position, yaw = prior.center, math.hypot(*prior.widths[:2]) / 2, prior.widths[2] / 2
+            pose, position, yaw = prior.center, _position_error(prior, position_radius_m), prior.widths[2] / 2
             ids = ()
         radius = max(math.hypot(*p) for p in h.divider + h.left_outer + h.right_outer)
         if h.error_m + position + 2 * radius * math.sin(yaw / 2) > profile.max_position_error_m or h.yaw_error_rad + yaw > profile.max_yaw_error_rad:

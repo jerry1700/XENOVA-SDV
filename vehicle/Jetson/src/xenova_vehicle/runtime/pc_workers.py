@@ -23,6 +23,7 @@ from .pc_native import PcArenaWriter, PcArenaReader
 from .raw_leases import RawScope
 from .resident_transport import ResidentLink, j_us
 from .resident_workers import _Actor, _StopWork
+from .health_policy import ConfigurationError
 
 
 def pc_worker_release():
@@ -64,7 +65,7 @@ class PcWorkerBoot:
     nn_manifest_bytes: bytes
     raw_tokens: tuple
     startup_deadline_us: int
-    diagnostic_directory: str
+    diagnostic_directory: str | None
     writer_bind_raw: bytes | None = None
 
     def __post_init__(self):
@@ -75,7 +76,8 @@ class PcWorkerBoot:
                 or type(self.arena_spec) is not ArenaSpec or type(self.raw_tokens) is not tuple
                 or len(self.raw_tokens) != 2 or any(type(pair) is not tuple or len(pair) != 2 for pair in self.raw_tokens)
                 or type(self.startup_deadline_us) is not int or not 0 < self.startup_deadline_us < 2**63
-                or type(self.diagnostic_directory) is not str or not self.diagnostic_directory):
+                or self.diagnostic_directory is not None and
+                    (type(self.diagnostic_directory) is not str or not self.diagnostic_directory)):
             raise ValueError('exact PC worker scope, NN profile, tokens and startup cap required')
         binding = PcSourceBinding.from_bytes(self.binding_bytes)
         manifest = SimNnManifest.from_bytes(self.nn_manifest_bytes)
@@ -143,7 +145,8 @@ class PcWorkerActor(_Actor):
             raise ValueError('PC actor accepts one original RAW BIND')
         context = PcBindContext(self.boot.peer, self.boot.raw_scope.writer,
             self.expected_binding, self.boot.raw_scope, self.boot.arena_spec)
-        bind = PcBindMessage(packet, context, cap_us=self.boot.startup_deadline_us)
+        bind = PcBindMessage(packet, context,
+            cap_us=self.boot.startup_deadline_us if self.boot.peer.role=='A' else None)
         if self.boot.peer.role == 'M':
             writer_context = PcBindContext(self.boot.acquisition_peer, self.boot.raw_scope.writer,
                 self.expected_binding, self.boot.raw_scope, self.boot.arena_spec)
@@ -197,7 +200,7 @@ class PcWorkerActor(_Actor):
         asset = load_yolop_asset(self.boot.profile.oak.asset_dir, self.boot.profile.oak.asset_manifest)
         manifest = SimNnManifest.from_current(self.boot.profile, asset)
         if manifest.canonical_bytes != self.boot.nn_manifest_bytes:
-            raise ValueError('actual local PC NN closure differs from S pinned manifest')
+            raise ConfigurationError('actual local PC NN closure differs from S pinned manifest')
         source = SimNnSource(self.boot.profile, context_key=manifest.sha256)
         self._nn_source = source
         self.device_closed = False
@@ -272,4 +275,3 @@ def pc_worker_main(endpoint, boot, loop):
                 actor.finish()
         else:
             endpoint.close()
-

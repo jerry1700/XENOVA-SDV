@@ -11,7 +11,7 @@ PC variant는 pc-frame-evidence-1에 원 descriptor·PC/J clock proof를 보존�
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import math
 import struct
@@ -446,7 +446,15 @@ class DevelopmentMapping:
             qualified = (config.motion_qualified and localization is not None and alignment is not None
                 and alignment.has_metadata and alignment.valid_at(self.clock())
                 and result.summary.get('quarantined') is False and result.summary.get('input_odom_origin') == 'SYNTHETIC_ODOMETRY')
-            mapped = alignment.apply(inputs.pose) if qualified else inputs.pose
+            mapped = inputs.pose
+            if qualified:
+                if result.registration is not None and result.registration.status == 'BOUNDED':
+                    fit = result.registration
+                    x,y,yaw = fit.representative
+                    mapped = replace(inputs.pose,sample=replace(inputs.pose.sample,x=x,y=y,yaw=yaw,
+                        position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
+                else:
+                    _, mapped = core._propagate_odometry(inputs.pose)
             source = LaneSource(observation.rgb.stamp, self.calibration.sha256, self.context.map_epoch,
                 grid.frame_id, self.context.odom_epoch, grid.revision,
                 0 if alignment is None else alignment.registration_revision,
@@ -456,7 +464,8 @@ class DevelopmentMapping:
             if self._crossing is None: raise DevelopmentMappingNotReady('CROSSING_POLICY_UNCONFIGURED')
             crossing = self._crossing(road, observation.rgb.stamp) if callable(self._crossing) else self._crossing
             association = lane.observe(road, source, mapped.prior, prior_qualified=qualified,
-                crossing=crossing, profile=config.pipeline.registration)
+                crossing=crossing, profile=config.pipeline.registration,
+                position_radius_m=mapped.sample.position_error_m)
             if association.status == 'NEW' and lane.available_ids < 2:
                 job = self._job(snapshot); head = self.store.catalog_heads(job, current_context_sha256=self.context.sha256)
                 need = lane.allocation_need(association, head, job, reservation_nonce=str(uuid4()), now_us=self.clock())
