@@ -253,9 +253,11 @@ class Platform:
         from xenova_execution import Execution
         return Execution(self)
 
-    def request_control(self, action, record, *, force=False, idempotency_key=None, deadline=None):
+    def request_control(self, action, record, *, force=False, idempotency_key=None, deadline=None,
+                        create_spec_sha256=None, replay_only=False):
         """Caller holds operation_lock and has verified the mounted registry."""
-        return self.execution().control(action, record, force=force, key=idempotency_key, deadline=deadline)
+        return self.execution().control(action, record, force=force, key=idempotency_key, deadline=deadline,
+                                        create_spec_sha256=create_spec_sha256, replay_only=replay_only)
 
 
     @traced('platform.registry')

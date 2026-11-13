@@ -75,6 +75,8 @@ class FakeManager:
         if action == "get":
             view = self.registry.get(spec.get("vm_id"))
             return _ok({"vm": view}) if view else _err("VM_NOT_FOUND", "registered VM not found")
+        if action == "control-operation":
+            return _err("VM_NOT_FOUND", "operation not found")
         if action in ("create", "retire", "restore", "purge"):
             # 실제 Manager._mutate 순서: 명세 정규화(필수 키·모르는 키) → idempotency_key 검사 → 계획/실행
             required = {"vm_id", "name", "template_id", "template_version", "vcpus", "memory_mib"}

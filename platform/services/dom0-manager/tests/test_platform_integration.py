@@ -628,6 +628,96 @@ def test_create_start_timeout_preserves_registration_and_never_launches_over_a_l
     assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
 
 
+@pytest.mark.parametrize("lost_result", ["completed", "uncertain", "unbound", "replaced", "newer-intent"])
+def test_keyed_create_recovers_original_start_after_lost_response(client, board, lost_result):
+    path = f"/api/v1/vms/{NEW_VM}"
+    body = {"vm_id": str(NEW_VM), "name": "tracked-start", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    headers = {"Idempotency-Key": "fixture-original-start"}
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+
+    if lost_result in ("uncertain", "replaced", "newer-intent"):
+        def expire_after_binding(phase, _):
+            if phase == "launch-observed":
+                now[0] += 91.
+
+        board.platform.execution_checkpoint = expire_after_binding
+    elif lost_result == "unbound":
+        def expire_after_create(argv, *args, **kwargs):
+            result = board.xen(argv, *args, **kwargs)
+            if argv[:2] == ["xl", "create"]:
+                now[0] += 91.
+            return result
+
+        board.platform.command = expire_after_create
+
+    async def lose_response(scope, receive, send):
+        async def drop(message):
+            if message["type"] == "http.response.start":
+                assert message["status"] == (201 if lost_result == "completed" else 503 if lost_result == "unbound" else 500)
+                raise ConnectionResetError("fixture lost start response")
+
+        await client.app(scope, receive, drop)
+
+    with pytest.raises(ConnectionResetError, match="lost start response"):
+        TestClient(lose_response).post("/api/v1/vms", json=body, headers=headers)
+    board.manager = board.manager.fork()
+    client = make_client(board)
+    journal, = (board.data / "control-requests").glob("*.json")
+    asset, = (board.data / "operations").glob("*.json")
+    registration = asset.read_bytes()
+    original = journal.read_bytes()
+    calls = list(board.xen.calls)
+
+    def lookup(vm_id=NEW_VM):
+        return client.get(f"/api/v1/vms/{vm_id}/control-operations", params={"request_key": headers["Idempotency-Key"]})
+
+    found = lookup()
+    assert found.status_code == 200 and found.json()["status"] == ("completed" if lost_result == "completed" else "uncertain")
+    assert (found.json()["action"], found.json()["operation_id"]) == ("start", journal.stem)
+    assert lookup(DEBIAN).status_code == 404
+    assert journal.read_bytes() == original and board.xen.calls == calls
+    changed = client.post("/api/v1/vms", json={**body, "memory_mib": 768}, headers=headers)
+    assert (changed.status_code, changed.json()["code"]) == (409, "VMSpecConflict")
+    other = client.post("/api/v1/vms", json={**body, "vm_id": str(DEBIAN)}, headers=headers)
+    assert (other.status_code, other.json()["code"]) == (409, "VMSpecConflict")
+
+    if lost_result == "replaced":
+        # Same domid/name/UUID, different Xen incarnation.
+        board.xen.rows[-1] = dict(board.xen.rows[-1])
+    if lost_result == "newer-intent":
+        assert client.post(path + "/stop", headers={"Idempotency-Key": "newer-stop"}).status_code == 200
+
+    with patch.object(board.manager, "preparer", side_effect=AssertionError("must not prepare a new disk")):
+        replay = client.post("/api/v1/vms", json=body, headers=headers)
+    if lost_result in ("unbound", "replaced", "newer-intent"):
+        expected_error = (409, "TARGET_CHANGED") if lost_result == "newer-intent" else (503, "RECONCILE_REQUIRED")
+        assert (replay.status_code, replay.json()["platform_code"]) == expected_error
+        assert replay.json()["context"]["operation_id"] == journal.stem
+        assert lookup().json()["status"] == "uncertain"
+        assert journal.read_bytes() == original and asset.read_bytes() == registration
+        assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+        return
+    assert replay.status_code == 200, replay.text
+    assert (replay.json()["operation_id"], replay.json()["status"]) == (journal.stem, "completed")
+    assert lookup().json()["status"] == "completed"
+    assert client.get(path + f"/operations/{journal.stem}", params={"action": "start"}).json()["status"] == "completed"
+    after = json.loads(journal.read_bytes())
+    before = json.loads(original)
+    for field in ("operation_id", "request", "intent_revision", "deadline_monotonic_ms"):
+        assert after[field] == before[field]
+    if lost_result == "uncertain":
+        assert after["reconciliation"]["original_error"] == before["error"]
+    assert asset.read_bytes() == registration
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+    assert client.post(path + "/stop").status_code == 204
+    assert client.post("/api/v1/vms", json=body, headers=headers).json()["operation_id"] == journal.stem
+    assert client.get(path).status_code == 404
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
 @pytest.mark.parametrize("expiry", ["after-registration", "before-manager-start"])
 def test_create_http_budget_can_expire_after_registration_before_xen_start(board, expiry):
     from dom0_manager import budget

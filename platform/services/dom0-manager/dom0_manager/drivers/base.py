@@ -65,6 +65,8 @@ class CreateSpec:
     vcpus: int
     memory_mib: int
     instance: InstancePaths
+    request_key: str | None = None
+    create_spec_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +148,7 @@ class Driver(ABC):
         return self.has_domain(vm_id)
 
     @abstractmethod
-    def create(self, spec: CreateSpec) -> Domain:
+    def create(self, spec: CreateSpec) -> Domain | ControlOperation:
         """도메인을 만들어 실행 상태로 둔다. 이미 있으면 VMExists."""
 
     @abstractmethod
@@ -170,6 +172,10 @@ class Driver(ABC):
     def control_operation(self, vm_id: UUID, *, key: str) -> ControlOperation:
         """요청 키로 원 제어 작업 조회. 작업 기록이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track control operations")
+
+    def replay_start(self, vm_id: UUID, *, key: str, create_spec_sha256: str) -> ControlOperation | None:
+        """같은 원 시작을 회수한다. 원 기록이 없을 때만 None을 반환한다."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not track start operations")
 
     def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
         """원 작업 ID의 제한된 조회. 작업 기록이 없는 드라이버는 501."""

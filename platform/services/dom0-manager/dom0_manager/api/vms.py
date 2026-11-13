@@ -45,10 +45,19 @@ def list_vms(service: VmService = Depends(get_service)) -> list[Vm]:
     summary="VM 생성 또는 재시작",
     status_code=201,
     response_model=Vm,
-    responses={400: _ERR, 409: _ERR, 507: _ERR, **_COMMAND_ERRS},
+    responses={200: {"model": ControlOperation, "description": "같은 키의 원 시작 결과"},
+               400: _ERR, 409: _ERR, 507: _ERR, **_COMMAND_ERRS},
 )
-def create_vm(request: CreateVmRequest, service: VmService = Depends(get_service)) -> Vm:
-    return service.create(request).to_vm()
+def create_vm(
+    request: CreateVmRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    service: VmService = Depends(get_service),
+) -> Vm | Response:
+    key = _request_key(idempotency_key, "Idempotency-Key") if idempotency_key is not None else None
+    result = service.create(request, key=key)
+    if isinstance(result, ControlOperation):
+        return JSONResponse(status_code=200, content=result.model_dump(mode="json"))
+    return result.to_vm()
 
 
 @router.get("/vms/{vm_id}", operation_id="getVm", summary="VM 단건 조회", response_model=Vm, responses={400: _ERR, 404: _ERR, **_DRIVER_ERRS})

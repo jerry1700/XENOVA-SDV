@@ -496,6 +496,13 @@ class Manager:
             allowed = {'lifecycle'} | ({'vm_id'} if action=='intents' else set())
         elif action == 'operation':
             allowed = {'operation_id', 'idempotency_key', 'vm_id', 'timeout_ms'}
+        elif action == 'start':
+            allowed = {'vm_id', 'create_spec_sha256', 'replay_only'}
+            if set(spec)&{'create_spec_sha256','replay_only'}:
+                if (not self._text_token(key) or not isinstance(spec.get('create_spec_sha256'),str)
+                        or not re.fullmatch('[0-9a-f]{64}',spec['create_spec_sha256'])
+                        or ('replay_only' in spec and spec['replay_only'] is not True)):
+                    fail('INVALID_SPEC','tracked start requires a key and original create specification hash')
         else:
             allowed = {'vm_id'} | ({'force'} if action in ('stop', 'reboot', 'destroy')
                                   else {'value'} if action.endswith('-set') else set())
@@ -1044,6 +1051,8 @@ class Manager:
             key=context.get('stop_key',key)
             if key is None:return None
             request={'vm_id':spec['vm_id'],'action':action,'force':bool(spec.get('force',False))}
+            if action=='start' and 'create_spec_sha256' in spec:
+                request['create_spec_sha256']=spec['create_spec_sha256']
             op=context.get('stop_intent')
             if not complete(op,request):
                 with short_lock(self.p.runtime,'admission',deadline=read_end,
@@ -2000,8 +2009,11 @@ class Manager:
                 self._writable()
             with tool_output():
                 if action in ('start', 'stop', 'reboot', 'destroy'):
+                    tracking = ({'create_spec_sha256':spec['create_spec_sha256'], 'replay_only':spec.get('replay_only',False)}
+                                if 'create_spec_sha256' in spec else {})
                     control_result = self.p.request_control(action, record, force=bool(spec.get('force',False)),
-                                                            idempotency_key=context.get('stop_key',idempotency_key), deadline=deadline)
+                                                            idempotency_key=context.get('stop_key',idempotency_key),
+                                                            deadline=deadline, **tracking)
                     context['operation_id'] = control_result['operation_id']
                     context['replayed'] = control_result['replayed']
                     context['diagnostic_warnings'] = control_result.get('diagnostic_warnings', [])

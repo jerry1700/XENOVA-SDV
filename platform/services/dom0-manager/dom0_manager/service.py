@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from collections import defaultdict
 from contextlib import contextmanager
@@ -113,10 +115,17 @@ class VmService:
 
     # ---- 명령 ----
 
-    def create(self, request: CreateVmRequest) -> Domain:
+    def create(self, request: CreateVmRequest, *, key: str | None = None) -> Domain | ControlOperation:
         with _failure_context("create", "preflight", before_submission=True):
             reject_dom0(request.vm_id)
         with _failure_context("create", "preflight", before_submission=True), self._vm_lock(request.vm_id):
+            spec_hash = None
+            if key is not None:
+                encoded = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode("ascii")
+                spec_hash = hashlib.sha256(encoded).hexdigest()
+                original = self._driver.replay_start(request.vm_id, key=key, create_spec_sha256=spec_hash)
+                if original is not None:
+                    return original
             if self._driver.has_domain_for_create(request.vm_id):
                 self._provisioner.check_existing_spec(request)
                 raise VMExists(f"domain {request.vm_id} already exists")
@@ -141,6 +150,8 @@ class VmService:
                     vcpus=request.vcpus,
                     memory_mib=request.memory_mib,
                     instance=instance,
+                    request_key=key,
+                    create_spec_sha256=spec_hash,
                 )
                 try:
                     with _failure_context("start", "preflight", before_submission=True):

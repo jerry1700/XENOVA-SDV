@@ -589,7 +589,7 @@ def control_operation_from_envelope(envelope: dict[str, Any], *, vm_id: UUID, ac
     )
 
 
-_TRACKED_ACTIONS = frozenset({"stop", "reboot"})  # HTTP 가 키로 추적하는 제어 요청(4.3.1, force 없음). 다른 기록은 이 조회의 대상이 아니다
+_TRACKED_ACTIONS = frozenset({"stop", "reboot"})
 
 
 def control_operation_from_record(
@@ -597,18 +597,20 @@ def control_operation_from_record(
 ) -> ControlOperation:
     """control-operation 조회의 원 기록 → 상태. superseded 는 현재 의도와 대조해야 알 수 있어 여기서는 내지 않는다.
 
-    응답 유실 뒤 원 작업을 되찾는 경계라 기록이 정확히 '이 VM·이 키의 graceful stop·reboot' 이어야 한다: 유효한 operation_id 가 봉투의
-    값과 같고, record.vm_id·request.vm_id 가 조회 VM 이고, request 가 stop·reboot(force 없음)이고, idempotency_key 가 조회 키이고, phase 가 알려진
+    응답 유실 뒤 원 작업을 되찾는 경계라 기록이 정확히 이 VM·이 키의 제어 작업이어야 한다. 유효한 operation_id 가 봉투의
+    값과 같고, record.vm_id·request.vm_id 가 조회 VM 이고, request 가 지원 제어(force 없음)이고, idempotency_key 가 조회 키이고, phase 가 알려진
     값. 하나라도 어긋나면 기록 손상이나 하위 버전 불일치이므로 200 으로 꾸미지 않고 503 이다.
     """
     phase = _str(record.get("phase"))
     request = record.get("request") if isinstance(record.get("request"), dict) else {}
     operation_id = _uuid(record.get("operation_id"))
+    action = request.get("action")
+    tracked_start = action == "start" and record.get("source") == "user" and _sha256(request.get("create_spec_sha256"))
     problems = [name for name, bad in (
         ("operation_id", operation_id is None or _uuid(envelope_operation_id) != operation_id),
         ("vm_id", _uuid(record.get("vm_id")) != vm_id),
         ("request.vm_id", _uuid(request.get("vm_id")) != vm_id),
-        ("request.action", request.get("action") not in _TRACKED_ACTIONS),
+        ("request.action", not isinstance(action, str) or (action not in _TRACKED_ACTIONS and not tracked_start)),
         ("request.force", request.get("force") is not False),  # 빠진 필드를 False 로 채우지 않는다
         ("idempotency_key", record.get("idempotency_key") != key),
         ("phase", phase not in _PHASE_STATUS),
@@ -795,10 +797,21 @@ class PlatformDriver(Driver):
 
     # ---- 명령 ----
 
-    def create(self, spec: CreateSpec) -> Domain:
+    def create(self, spec: CreateSpec) -> Domain | ControlOperation:
         """registry 에 등록된 VM 을 시작한다. 등록은 Provisioner.ensure_instance 가 먼저 한다."""
-        envelope = call_with_budget(self.manager, "start", {"vm_id": str(spec.vm_id)})
+        start = {"vm_id": str(spec.vm_id)}
+        options = {}
+        if spec.request_key is not None:
+            start["create_spec_sha256"] = spec.create_spec_sha256
+            options["idempotency_key"] = spec.request_key
+        envelope = call_with_budget(self.manager, "start", start, **options)
+        if spec.request_key is not None and (envelope.get("error") or {}).get("code") == "IDEMPOTENCY_CONFLICT":
+            raise VMSpecConflict("start key belongs to a different request", platform_code="IDEMPOTENCY_CONFLICT")
         data = raise_for_envelope(envelope, context=f"start {spec.vm_id}", action="start")
+        if spec.request_key is not None and envelope.get("replayed"):
+            if (data.get("original_result") or {}).get("accepted") is not True:
+                raise PlatformUnavailable("platform returned an unconfirmed original start result")
+            return control_operation_from_envelope(envelope, vm_id=spec.vm_id, action="start", key=spec.request_key)
         domain = view_to_domain(data.get("vm") or {})
         if domain is None:
             exc = DriverError(f"start {spec.vm_id}: platform returned without a live domain")
@@ -871,8 +884,15 @@ class PlatformDriver(Driver):
         raise AssertionError("raise_for_envelope raises when not ok")
 
     def control_operation(self, vm_id: UUID, *, key: str) -> ControlOperation:
+        record, observation, operation_id = self._control_record(vm_id, key)
+        return control_operation_from_record(record, observation, vm_id=vm_id, key=key,
+                                             envelope_operation_id=operation_id)
+
+    def _control_record(self, vm_id: UUID, key: str, *, check_key_owner: bool = False) -> tuple[dict[str, Any], dict[str, Any], Any]:
         """원 제어 작업을 요청 키로 읽는다. 짧은 admission 잠금만 쓰고 시작·정지·이행이나 Xen 관측을 하지 않는다."""
-        spec = {"vm_id": str(vm_id), "idempotency_key": key, "timeout_ms": _LOOKUP_TIMEOUT_MS}
+        spec: dict[str, Any] = {"idempotency_key": key, "timeout_ms": _LOOKUP_TIMEOUT_MS}
+        if not check_key_owner:
+            spec["vm_id"] = str(vm_id)
         envelope = call_with_budget(self._request_manager(), "control-operation", spec)
         if not envelope.get("ok"):
             error = envelope.get("error") or {}
@@ -891,8 +911,35 @@ class PlatformDriver(Driver):
         if record is None:
             raise DriverError("platform control-operation returned no operation record", platform_code=None)
         observation = data.get("deadline_observation") if isinstance(data.get("deadline_observation"), dict) else {}
-        return control_operation_from_record(record, observation, vm_id=vm_id, key=key,
-                                             envelope_operation_id=envelope.get("operation_id"))
+        return record, observation, envelope.get("operation_id")
+
+    def replay_start(self, vm_id: UUID, *, key: str, create_spec_sha256: str) -> ControlOperation | None:
+        try:
+            record, observation, operation_id = self._control_record(vm_id, key, check_key_owner=True)
+        except OperationNotFound:
+            return None
+        request = record.get("request")
+        if (_uuid(record.get("vm_id")) != vm_id or not isinstance(request, dict) or request.get("action") != "start"
+                or request.get("create_spec_sha256") != create_spec_sha256):
+            raise VMSpecConflict("start key belongs to a different request", platform_code="IDEMPOTENCY_CONFLICT")
+        operation = control_operation_from_record(record, observation, vm_id=vm_id, key=key,
+                                                  envelope_operation_id=operation_id)
+        if operation.status == ControlStatus.completed:
+            return operation
+        envelope = call_with_budget(self._request_manager(), "start", {
+            "vm_id": str(vm_id), "create_spec_sha256": create_spec_sha256, "replay_only": True,
+        }, idempotency_key=key)
+        try:
+            data = raise_for_envelope(envelope, context=f"start {vm_id}", action="start")
+        except Dom0ManagerError as exc:
+            if exc.context is not None and exc.context.accepted is not True:
+                exc.context = _result("start", exc.context.stage, operation.accepted, operation.status,
+                                      operation.operation_id, exc.platform_code)
+            raise
+        result = control_operation_from_envelope(envelope, vm_id=vm_id, action="start", key=key)
+        if result.operation_id != operation.operation_id or (data.get("original_result") or {}).get("accepted") is not True:
+            raise PlatformUnavailable("platform returned a different or unconfirmed original start result")
+        return result
 
     def vm_operation(self, vm_id: UUID, *, action: VmOperationAction, operation_id: UUID) -> VmOperationResult:
         """원장의 원 결과만 조회한다. 현재 실행·사용자 의도를 다시 판정하거나 작업을 재개하지 않는다."""
