@@ -155,9 +155,14 @@ describe('MSW mock API', () => {
     const before = await request<VmResources>(`/api/v1/vms/${id}/resources`);
     expect(before.vcpu_pinning).toEqual([{ vcpu: 0, pcpus: [0, 3] }]);
 
+    await Promise.all(
+      Object.values(VM_IDS).map((vmId) => request(`/api/v1/vms/${vmId}/stop`, { method: 'POST' })),
+    );
+
     await request<VmResources>(`/api/v1/vms/${id}/resources/vcpu-pinning`, {
       method: 'PUT',
       body: { mappings: [{ vcpu: 0, pcpus: [3] }] },
+      headers: { 'Idempotency-Key': 'pinning-test-1' },
     });
 
     const after = await request<VmResources>(`/api/v1/vms/${id}/resources`);

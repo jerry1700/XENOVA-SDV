@@ -3660,8 +3660,21 @@ button.chip:hover:not(.chipOn) {
   font-weight: 800;
   letter-spacing: 0.04em;
 }
-.pinningTable thead th[data-exclusive='true'] {
+.pinningTable thead th[data-core-state='current'] {
   box-shadow: inset 0 3px 0 var(--vm-accent);
+}
+.pinningTable thead th[data-core-state='shared'] {
+  box-shadow: inset 0 3px 0 var(--x-primary);
+}
+.pinningTable thead th[data-core-state='free'] {
+  box-shadow: inset 0 3px 0 var(--x-ok);
+}
+.pinningTable thead th[data-core-state='unavailable'] {
+  background: color-mix(in srgb, var(--x-fault) 5%, var(--x-surface-3));
+}
+.pinningTable thead th[data-core-state='unavailable'] > em {
+  background: color-mix(in srgb, var(--x-fault) 10%, transparent);
+  color: var(--x-fault);
 }
 .pinningTable tbody th {
   padding: 20px;
@@ -3724,6 +3737,12 @@ button.chip:hover:not(.chipOn) {
 .pinningCell:disabled {
   cursor: not-allowed;
   opacity: 0.72;
+}
+.pinningCell[data-unavailable='true'] {
+  border-style: dashed;
+  background: color-mix(in srgb, var(--x-fault) 5%, var(--x-surface));
+  color: var(--x-text-muted);
+  opacity: 0.55;
 }
 .pinningCell > span {
   font-size: 21px;

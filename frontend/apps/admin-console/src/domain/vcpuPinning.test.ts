@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizePinning, pinningEqual, togglePcpu } from './vcpuPinning';
+import { normalizePinning, pinningEqual, togglePcpu, toggleVmPcpu } from './vcpuPinning';
 
 describe('vCPU pinning draft', () => {
   it('서버 순서와 무관하게 같은 affinity를 같은 값으로 본다', () => {
@@ -15,6 +15,21 @@ describe('vCPU pinning draft', () => {
         ],
       ),
     ).toBe(true);
+  });
+
+  it('VM 단위 토글은 모든 vCPU에 같은 pCPU 집합을 적용한다', () => {
+    const current = [
+      { vcpu: 0, pcpus: [0, 3] },
+      { vcpu: 1, pcpus: [0, 3] },
+    ];
+    expect(toggleVmPcpu(current, 0)).toEqual([
+      { vcpu: 0, pcpus: [3] },
+      { vcpu: 1, pcpus: [3] },
+    ]);
+    expect(toggleVmPcpu(current, 2)).toEqual([
+      { vcpu: 0, pcpus: [0, 2, 3] },
+      { vcpu: 1, pcpus: [0, 2, 3] },
+    ]);
   });
 
   it('셀 토글 시 중복 없이 정렬하고 마지막 pCPU는 해제하지 않는다', () => {

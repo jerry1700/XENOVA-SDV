@@ -146,6 +146,7 @@ export function useUpdateVcpuPinning(vmId: string) {
       request<VmResources>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources/vcpu-pinning`, {
         method: 'PUT',
         body,
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
       }),
     onSettled: () => client.invalidateQueries({ queryKey: keys.vmResources(vmId) }),
   });
