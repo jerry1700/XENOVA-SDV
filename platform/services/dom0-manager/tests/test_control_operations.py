@@ -475,11 +475,29 @@ def test_create_is_not_submitted_after_the_budget_ran_out(manager):
 
 
 def test_retire_is_not_submitted_after_the_budget_ran_out(manager):
-    manager.responses["get"] = slow_second_get(sleep_s=0.4, registered=True)  # 정지된 등록 VM: 도메인 없음, 등록 있음
-    client = TestClient(app_for(manager, response_reserve_s=0))
-    response = client.delete(f"/api/v1/vms/{VM_A}", headers={"X-Request-Budget-Ms": "300"})
-    assert response.status_code == 504 and response.json()["code"] == "DriverTimeout"  # 서비스의 변경 직전 검사가 먼저 막는다
-    assert [c["action"] for c in manager.calls] == ["get", "get"]  # 보관(retire) 없음
+    import threading
+
+    app = app_for(manager, response_reserve_s=0)
+    # A prior request for the same VM holds the service lock past this request's budget.
+    service = app.state.service
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with service._vm_lock(VM_A):
+            locked.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert locked.wait(5)
+        response = TestClient(app).delete(f"/api/v1/vms/{VM_A}", headers={"X-Request-Budget-Ms": "200"})
+        assert response.status_code == 504 and response.json()["code"] == "DriverTimeout"
+        assert manager.calls == []
+    finally:
+        release.set()
+        thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("submit", [

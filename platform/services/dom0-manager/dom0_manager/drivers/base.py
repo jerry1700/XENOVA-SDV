@@ -201,6 +201,8 @@ class Driver(ABC):
 class Provisioner(ABC):
     """템플릿 → 인스턴스(디스크·커널·initrd) 준비. 실제 구현은 플랫폼 관리 계층(xenova_management)과 연결한다."""
 
+    guards_retirement: ClassVar[bool] = False
+
     @abstractmethod
     def ensure_instance(
         self, vm_id: UUID, template_id: str, template_version: str, *, name: str, vcpus: int, memory_mib: int
@@ -212,7 +214,7 @@ class Provisioner(ABC):
 
     @abstractmethod
     def delete_instance(self, vm_id: UUID) -> None:
-        """디스크를 포함한 인스턴스 삭제. 없으면 아무것도 하지 않는다(계약 4.4)."""
+        """등록된 인스턴스를 보관한다. guards_retirement 구현은 대상 검증과 원 작업 회수도 맡는다."""
 
     def update_resources(self, vm_id: UUID, *, vcpus: int, memory_mib: int, key: str) -> ResourceUpdate:  # S15P31E110-368
         """정지한 Linux VM 의 등록 설정에서 vCPU·메모리를 바꾼다(계약 4.12). 다음 시작부터 적용되고 게스트를 시작하지 않는다.

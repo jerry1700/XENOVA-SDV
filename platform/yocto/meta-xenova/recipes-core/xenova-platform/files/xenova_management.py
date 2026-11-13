@@ -409,7 +409,7 @@ class Manager:
             return {**spec,'vm_id':normalize_uuid(spec['vm_id']),'timeout_ms':timeout}
         if action=='operation-reconcile':return creation.validate_request(self,spec,key)
         if action in MUTATIONS:
-            if action != 'create' and not self._text_token(key):
+            if action != 'create' and not (action == 'retire' and execute and key is None) and not self._text_token(key):
                 fail('INVALID_SPEC', 'idempotency_key of 1..200 UTF-8 bytes required')
             return self._normalize(action, spec)
         if action == 'cpu-policy-set':
@@ -1039,6 +1039,8 @@ class Manager:
                 if not complete(op,spec):return None
             data={'attempt':op,'original_result':op['result'],'current_observation':None}
         elif action in ('retire','restore','purge','update-resources','firmware-transition'):
+            if key is None:
+                return None  # Keyless retire resolves its generation only under the mutation locks.
             matches=[q for q in self._operations(deadline=read_end) if q['idempotency_key']==key]
             if len(matches)>1:fail('RECONCILE_REQUIRED','operation selector is ambiguous')
             if not matches:return None
@@ -1449,12 +1451,16 @@ class Manager:
         desired = 'RETIRED' if action=='retire' else 'REGISTERED' if action=='restore' else 'PURGED'
         if tomb.get('last_operation_id') == op['operation_id']:
             if tomb['lifecycle'] == desired:
+                if action == 'retire':
+                    self._record_at(tomb['record'], self._archive(tomb))
+                    # A previous tombstone rename can be visible after a failed parent sync.
+                    sync_directory(self.data / 'tombstones')
                 if action == 'restore':
                     directory = self.data / op['target']
                     self._record_at(tomb['record'], directory)
                     self._restore_ip(tomb['record'], records)
                     self._reserve_space(0, records, restored=(tomb['record'], directory))
-                if action in ('retire', 'restore'):
+                if action == 'restore' or (action == 'retire' and op['phase'] != 'dhcp-applied'):
                     self._apply_dhcp(op,context)
                 return self._finish(op, tomb)
         if tomb['generation'] != expected:
@@ -1513,6 +1519,8 @@ class Manager:
                     fail('TARGET_CHANGED','restore root changed before publication')
                 publish(source, target, allow_hidden=action=='retire')
             self._record_at(record, target)
+            if action == 'retire' and not moving:
+                sync_directory(target.parent)  # Recover an archive rename whose sync may have failed.
             self._save_op(op, 'moved')
             tomb = self._save_tomb(tomb, op, desired, expected+1, admission_held=True,
                                    archive=op['target'] if action=='retire' else None)
@@ -1591,6 +1599,34 @@ class Manager:
         finally:
             os.close(fd)
 
+    def _retire_key(self, identity, records, operations, tomb):
+        """Resolve keyless HTTP retirement under the existing asset and operation locks."""
+        retired = tomb is not None and tomb['lifecycle'] == 'RETIRED'
+        generation = tomb['generation'] if tomb else 0
+        if retired:
+            generation -= 1  # A completed retire advances the source generation once.
+        legacy_key = f'retire-{identity}'
+        generation_key = f'{legacy_key}-g{generation}'
+        originals = [op for op in operations if op['action'] == 'retire' and op['vm_id'] == identity
+                     and op['idempotency_key'] in (legacy_key, generation_key)
+                     and op['expected_generation'] == generation]
+        if len(originals) > 1:
+            fail('RECONCILE_REQUIRED', 'multiple retire operations match this lifecycle generation')
+        original = originals[0] if originals else None
+        if retired:
+            if any(record['uuid'] == identity for record in records.values()):
+                fail('RECONCILE_REQUIRED', 'registry and tombstone disagree')
+            if not original:
+                fail('VM_NOT_FOUND', 'VM is not currently registered')
+            if (tomb.get('last_operation_id') != original['operation_id']
+                    or tomb.get('archive') != original['target']):
+                fail('RECONCILE_REQUIRED', 'retire archive does not match the current lifecycle')
+        elif tomb and tomb['lifecycle'] != 'REGISTERED':
+            fail('VM_NOT_FOUND', 'VM is not currently registered')
+        elif original and original['status'] == 'SUCCEEDED':
+            fail('RECONCILE_REQUIRED', 'completed retire disagrees with the current lifecycle')
+        return (original['idempotency_key'] if original else generation_key), generation
+
     def _mutate(self, action, spec, execute, key, records, context):
         filesystem_check=None
         if action == 'firmware-transition':
@@ -1600,19 +1636,26 @@ class Manager:
             from xenova_resources import mutate
             return mutate(self,spec,execute,key,records,context,fail)
         operations=self._operations()
+        implicit_retire = action == 'retire' and key is None
+        tombstones = None
+        if implicit_retire:
+            tombstones = self._tombs()
+            key, retire_generation = self._retire_key(spec['vm_id'], records, operations, tombstones.get(spec['vm_id']))
         matches=[o for o in operations if o['idempotency_key']==key]
         if len(matches)>1:fail('RECONCILE_REQUIRED','operation selector is ambiguous')
         previous=matches[0] if matches else None
         # 새 create만 후속 판정에 전체 사본을 쓴다. 장기 restore/purge가 이력을 붙잡지 않는다.
-        if action!='create':operations=None
         if previous:
+            if action!='create':operations=None
             context['operation_id']=previous['operation_id']
             same_request=(previous['action']==action and
                           (self._same_create_request(previous,spec) if action=='create' else previous['request']==spec))
             if not same_request:
                 fail('IDEMPOTENCY_CONFLICT','same key has a different action or request')
+            if implicit_retire and previous['expected_generation'] != retire_generation:
+                fail('TARGET_CHANGED', 'retire key belongs to a different lifecycle generation')
             context['replayed']=True
-            tomb = self._tombs().get(previous['vm_id'])
+            tomb = (self._tombs() if tombstones is None else tombstones).get(previous['vm_id'])
             if action=='create' and previous['status']!='SUCCEEDED':
                 state=self._owner_state(previous)
                 if state in ('active','reconciling'):
@@ -1626,6 +1669,11 @@ class Manager:
                      details={**error.get('details',{}),'operation_id':previous['operation_id'],
                               'replayed':True,'original_create_succeeded':False,'reconciliation':previous['reconciliation']})
             if previous['status']=='SUCCEEDED':
+                if implicit_retire:
+                    self._metadata_at(tomb['record'], self._archive(tomb))
+                    sync_directory(self.data / 'operations')
+                    return {**previous['result'], 'operation':previous,
+                            'original_result':previous['result'], 'current':None}
                 if action=='create' and tomb and tomb['lifecycle']!='REGISTERED':
                     fail('VM_PURGED' if tomb['lifecycle']=='PURGED' else 'TARGET_CHANGED',
                          'the original VM is retired/purged; create cannot restore it')
@@ -1702,14 +1750,17 @@ class Manager:
             # Linux 내용 검증은 원 작업/예약을 저장한 뒤 실제 복사 바이트에 대해 한 번 수행한다.
             tomb=None
         else:
-            tomb=self._state(spec['vm_id'],records)
+            tomb=self._state(spec['vm_id'],records,tombstones=tombstones)
             state=tomb['lifecycle']
             if state=='PURGED':
                 fail('VM_PURGED','VM assets have been purged')
             if (action=='retire' and state!='REGISTERED') or (action in ('restore','purge') and state!='RETIRED'):
+                if implicit_retire:
+                    fail('VM_NOT_FOUND', 'VM is not currently registered')
                 fail('INVALID_SPEC','lifecycle does not permit this operation')
-            if any(o['vm_id']==tomb['vm_id'] and creation.holds(self,o) for o in self._operations()):
+            if any(o['vm_id']==tomb['vm_id'] and creation.holds(self,o) for o in operations):
                 fail('OPERATION_IN_PROGRESS','an incomplete operation owns this VM; retry its original key',retryable=True)
+            operations=None
             directory = self.data/'instances'/tomb['name'] if action=='retire' else self._archive(tomb)
             if action=='purge':
                 self._metadata_at(tomb['record'],directory)

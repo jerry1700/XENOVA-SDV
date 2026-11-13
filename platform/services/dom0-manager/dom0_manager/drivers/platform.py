@@ -876,6 +876,8 @@ class PlatformDriver(Driver):
 class PlatformProvisioner(Provisioner):
     """플랫폼 create/retire 로 registry 를 만들고 보관한다. 디스크·설정 파일은 전부 플랫폼이 만든다."""
 
+    guards_retirement = True
+
     def __init__(self, manager: ManagerLike) -> None:
         self.manager = manager
 
@@ -958,10 +960,13 @@ class PlatformProvisioner(Provisioner):
         return self._paths(view)
 
     def delete_instance(self, vm_id: UUID) -> None:
-        envelope = call_with_budget(self.manager, "retire", {"vm_id": str(vm_id)}, execute=True, idempotency_key=f"retire-{vm_id}")
-        if not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "VM_NOT_FOUND":
-            raise VMNotFound(f"instance {vm_id} not registered")
-        raise_for_envelope(envelope, context=f"retire {vm_id}")
+        # Manager가 같은 lease에서 현재 세대와 원 작업을 골라 검증한다.
+        envelope = call_with_budget(self.manager, "retire", {"vm_id": str(vm_id)}, execute=True)
+        data = raise_for_envelope(envelope, context=f"retire {vm_id}")
+        if not isinstance(data, dict) or data.get("lifecycle") != "RETIRED" or data.get("vm_id") != str(vm_id):
+            raise PlatformUnavailable(
+                f"retire {vm_id}: completion was not confirmed", platform_code="RECONCILE_REQUIRED",
+            )
 
     # ---- 자원 변경 (S15P31E110-368) ----
 

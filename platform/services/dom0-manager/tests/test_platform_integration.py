@@ -139,12 +139,16 @@ def board():
             b.close()
 
 
-@pytest.fixture
-def client(board):
+def make_client(board):
     manager = SerializedManager(board.manager)  # 실제 조립 경로(load_manager)와 같은 포장
     driver = PlatformDriver(manager, Xl(FakeRunner({("xl", "info"): XL_INFO})))
     app = create_app(Settings(driver="platform", log_level="WARNING"), driver=driver, provisioner=PlatformProvisioner(manager))
     return TestClient(app)
+
+
+@pytest.fixture
+def client(board):
+    return make_client(board)
 
 
 def test_real_manager_list_and_get(client):
@@ -162,6 +166,154 @@ def test_real_manager_stop_then_delete(client, board):
     assert client.get("/api/v1/vms").json() == []
     assert client.delete(f"/api/v1/vms/{DEBIAN}").status_code == 204  # 정지 상태 등록 VM → retire
     assert client.get(f"/api/v1/vms/{DEBIAN}").status_code == 404
+
+
+def test_delete_preserves_assets_in_use(client, board):
+    failure = management.ManagementError("ASSET_IN_USE", "test disk is in use")
+    with patch.object(board.manager, "usage_check", side_effect=failure):
+        response = client.delete(f"/api/v1/vms/{DEBIAN}")
+    assert (response.status_code, response.json()["platform_code"]) == (409, "ASSET_IN_USE")
+    assert (board.data / "instances" / "debian-dev" / "root.raw").is_file()
+    assert not list((board.data / "operations").glob("*.json"))
+
+
+@pytest.mark.parametrize("legacy_key", [False, True])
+@pytest.mark.parametrize("phase", ["moved", "dhcp-pending", "dhcp-applied"])
+def test_delete_resumes_original_retire_after_interruption(client, board, legacy_key, phase):
+    spec = {"vm_id": str(DEBIAN)}
+    path = f"/api/v1/vms/{DEBIAN}"
+    source = board.data / "instances" / "debian-dev"
+    disk_inode = (source / "root.raw").stat().st_ino
+    operation_ids = []
+
+    def interrupt(saved_phase, op):
+        if saved_phase == phase and not operation_ids:
+            operation_ids.append(op["operation_id"])
+            raise OSError("fixture interrupted retirement")
+
+    with patch.object(board.manager, "checkpoint", interrupt):
+        if legacy_key:
+            failure = board.manager.call("retire", spec, execute=True, idempotency_key=f"retire-{DEBIAN}")
+            assert not failure["ok"] and failure["error"]["code"] == "RECOVERY_REQUIRED"
+        else:
+            failure = client.delete(path)
+            assert failure.status_code == 503 and failure.json()["platform_code"] == "RECOVERY_REQUIRED"
+    original, = operation_ids
+    assert not source.exists()
+    with patch.object(board.manager, "_prepare_dhcp", wraps=board.manager._prepare_dhcp) as dhcp:
+        assert client.delete(path).status_code == 204
+        assert dhcp.call_count == (0 if phase == "dhcp-applied" else 1)
+    operation_path, = (board.data / "operations").glob("*.json")
+    op = json.loads(operation_path.read_text())
+    assert (op["operation_id"], op["status"], op["phase"]) == (original, "SUCCEEDED", "complete")
+    assert (board.data / op["target"] / "root.raw").stat().st_ino == disk_inode
+
+
+@pytest.mark.parametrize("parent", ["instances", "tombstones", "operations"])
+def test_delete_reconfirms_failed_parent_sync(client, board, parent):
+    import errno
+    import artifact_io
+    import xenova_runtime
+
+    path = f"/api/v1/vms/{DEBIAN}"
+    source = board.data / "instances" / "debian-dev"
+    sync = xenova_runtime.sync_directory
+    if parent == "instances":
+        def rename_then_fail(*args, **kwargs):
+            publish(*args, **kwargs)
+            raise OSError(errno.EIO, "archive parent sync unconfirmed")
+
+        publish = artifact_io.publish
+        fault = patch.object(management, "publish", side_effect=rename_then_fail)
+    else:
+        def fail_sync(directory):
+            if directory == board.data / parent:
+                record = directory / f"{DEBIAN}.json" if parent == "tombstones" else next(directory.glob("*.json"))
+                if record.exists() and json.loads(record.read_text()).get("status") in (None, "SUCCEEDED"):
+                    raise OSError(errno.EIO, "record parent sync unconfirmed")
+            sync(directory)
+
+        fault = patch.object(xenova_runtime, "sync_directory", side_effect=fail_sync)
+    with fault:
+        assert client.delete(path).status_code == 503
+    assert not source.exists()
+    original_path, = (board.data / "operations").glob("*.json")
+    def fail_retry_sync(directory):
+        if directory == board.data / parent:
+            raise OSError(errno.EIO, "parent sync still failing")
+        sync(directory)
+
+    with patch.object(management, "sync_directory", side_effect=fail_retry_sync) as retry_sync:
+        assert client.delete(path).status_code == 503
+        retry_sync.assert_any_call(board.data / parent)
+    assert client.delete(path).status_code == 204
+    assert list((board.data / "operations").glob("*.json")) == [original_path]
+    assert json.loads(original_path.read_text())["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("legacy_key", [False, True])
+def test_delete_after_lost_response_and_after_restore(client, board, legacy_key):
+    spec = {"vm_id": str(NEW_VM)}
+    body = {**spec, "name": "retire-restore", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
+            "vcpus": 1, "memory_mib": 512}
+    path = f"/api/v1/vms/{NEW_VM}"
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    running = client.delete(path)
+    assert (running.status_code, running.json()["platform_code"]) == (409, "VM_NOT_STOPPED")
+    assert client.post(path + "/stop").status_code == 204
+    source = board.data / "instances" / management.internal_name(str(NEW_VM))
+    disk_inode = (source / "root.raw").stat().st_ino
+
+    # The caller does not consume the first success. A new service instance reads the same journal.
+    if legacy_key:
+        assert board.manager.call("retire", spec, execute=True, idempotency_key=f"retire-{NEW_VM}")["ok"]
+    else:
+        async def lose_response(scope, receive, send):
+            async def drop(message):
+                if message["type"] == "http.response.start":
+                    assert message["status"] == 204
+                    raise ConnectionResetError("fixture lost delete response")
+
+            await client.app(scope, receive, drop)
+
+        with pytest.raises(ConnectionResetError, match="fixture lost delete response"):
+            TestClient(lose_response).delete(path)
+    first_path, = [p for p in (board.data / "operations").glob("*.json") if json.loads(p.read_text())["action"] == "retire"]
+    first_bytes = first_path.read_bytes()
+    first = json.loads(first_bytes)
+    board.manager = board.manager.fork()
+    with patch.object(management, "publish", side_effect=AssertionError("completed retire must not move assets again")):
+        retry_client = make_client(board)
+        assert retry_client.delete(path).status_code == 204
+    assert first_path.read_bytes() == first_bytes
+    assert not source.exists()
+    assert (board.data / first["target"] / "root.raw").stat().st_ino == disk_inode
+
+    restored = board.manager.call("restore", spec, execute=True, idempotency_key="restore-before-next-delete")
+    assert restored["ok"], restored
+    second = retry_client.delete(path)
+    assert second.status_code == 204, second.text
+    view = board.manager.call("get", spec)["data"]["vm"]
+    assert (view["lifecycle"], view["generation"]) == ("RETIRED", 3)
+    assert not source.exists()
+    retires = [json.loads(p.read_text()) for p in (board.data / "operations").glob("*.json")]
+    retires = [op for op in retires if op["action"] == "retire"]
+    assert len(retires) == 2
+    latest, = [op for op in retires if op["expected_generation"] == 2]
+    assert latest["operation_id"] != first["operation_id"] and latest["status"] == "SUCCEEDED"
+    assert (board.data / latest["target"] / "root.raw").stat().st_ino == disk_inode
+    assert first_path.read_bytes() == first_bytes
+
+
+def test_delete_does_not_report_success_if_completed_archive_is_missing(client, board):
+    path = f"/api/v1/vms/{DEBIAN}"
+    assert client.delete(path).status_code == 204
+    operation_path, = (board.data / "operations").glob("*.json")
+    op = json.loads(operation_path.read_text())
+    archive = board.data / op["target"]
+    archive.rename(archive.with_name(".fixture-hidden"))
+    assert client.delete(path).status_code == 503
+    assert json.loads(operation_path.read_text()) == op
 
 
 def test_real_manager_restart_registered_vm(client, board):

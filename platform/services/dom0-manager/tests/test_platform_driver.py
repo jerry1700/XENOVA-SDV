@@ -80,7 +80,8 @@ class FakeManager:
             required = {"vm_id", "name", "template_id", "template_version", "vcpus", "memory_mib"}
             if action == "create" and (set(spec) - (required | {"ipv4"}) or not required <= set(spec)):
                 return _err("INVALID_SPEC", "vm_id, name, exact template ID/version and resources required")
-            if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.encode("utf-8")) <= 200:
+            implicit_retire = action == "retire" and execute and idempotency_key is None
+            if not implicit_retire and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.encode("utf-8")) <= 200):
                 return _err("INVALID_SPEC", "idempotency_key of 1..200 UTF-8 bytes required")
         if action == "create":
             if self.fail_create:
@@ -129,7 +130,7 @@ class FakeManager:
             if execute:
                 view["lifecycle"] = "RETIRED"
                 view["registered"] = False
-            return _ok({"vm": view}, operation_id="op-2")
+            return _ok(view, operation_id="op-2")
         return _err("INVALID_SPEC", "unsupported management action")
 
 
@@ -415,8 +416,9 @@ def test_delete_requires_stopped_and_retires(client, manager):
     assert client.post(f"/api/v1/vms/{VM_A}/stop").status_code == 204
     assert client.delete(f"/api/v1/vms/{VM_A}").status_code == 204
     assert manager.registry[str(VM_A)]["lifecycle"] == "RETIRED"
-    assert manager.calls[-1][:2] == ("retire", {"vm_id": str(VM_A)}) and manager.calls[-1][2] is True
-    assert client.delete(f"/api/v1/vms/{VM_A}").status_code == 404  # RETIRED 는 등록 아님
+    assert manager.calls[-1] == ("retire", {"vm_id": str(VM_A)}, True, None)
+    assert client.delete(f"/api/v1/vms/{VM_A}").status_code == 204  # 원 보관 완료 회수
+    assert client.delete(f"/api/v1/vms/{VM_B}").status_code == 404
 
 
 def test_stop_missing_registration_is_204(client):

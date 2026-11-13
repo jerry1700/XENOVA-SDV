@@ -216,9 +216,10 @@ class VmService:
         """계약 v1.1: 실행 중이면 409, 등록이 없으면 404, 정지된 VM 은 숨김 보관(retire). 강제 종료는 하지 않는다."""
         reject_dom0(vm_id)
         with self._vm_lock(vm_id):
-            if self._driver.has_domain(vm_id):
-                raise InvalidState(f"domain {vm_id} is running; stop it before delete")
-            if not self._provisioner.instance_exists(vm_id):
-                raise VMNotFound(f"instance {vm_id} not registered")
+            if not self._provisioner.guards_retirement:
+                if self._driver.has_domain(vm_id):
+                    raise InvalidState(f"domain {vm_id} is running; stop it before delete")
+                if not self._provisioner.instance_exists(vm_id):
+                    raise VMNotFound(f"instance {vm_id} not registered")
             request_budget.ensure(f"retiring vm {vm_id}")
             self._provisioner.delete_instance(vm_id)
