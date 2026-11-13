@@ -1,4 +1,6 @@
 """조건을 다시 확인하는 일회성 복구 실행. 감시·정책·반복 실행 서비스는 아니다."""
+from subprocess import TimeoutExpired
+
 from first_install_contract import uuid4
 from xenova_execution import EARLIER_LAUNCH, ExecutionError, fingerprint, refuse, short_lock, read_record
 from xenova_runtime import PlatformError
@@ -430,6 +432,9 @@ class Recovery:
         run = self.e.run_record(record)
         if not run or run.get('owner') != {'kind':'recovery', 'recovery_attempt_id':op['recovery_attempt_id']}:
             return None
+        if observation['xen_state'] == 'unknown' and (run['phase'] == 'launching'
+                or observation['execution_status'] == 'managed'):
+            refuse('OBSERVATION_UNAVAILABLE', 'Xen state of the original launch is not yet known')
         expected_cpu = op.get('cpu_policy', {'configured':False})
         proof = None
         if observation['execution_status'] == 'managed':
@@ -456,6 +461,8 @@ class Recovery:
                        details={'cause_type':type(error).__name__})
             # bind_launch rechecks the exact Xen incarnation and all accepted context before publication.
             observation = self.e.bind_launch(record, run, observation, deadline, reconciling=True)['observation']
+            if observation['xen_state'] == 'unknown':
+                refuse('OBSERVATION_UNAVAILABLE', 'Xen state changed to unknown while confirming the original launch')
         else:
             return None
         if self.p.clock() >= deadline:
@@ -468,6 +475,27 @@ class Recovery:
                 **({'launch_proof':proof} if proof else {})}
         result = self.complete(op, observation)
         return {'attempt':op, 'original_result':result, 'current_observation':observation}
+
+    def observe_original_launch(self, op, deadline):
+        """확인 기한 초과는 원 시도의 실패가 아니며, 같은 기록만 다시 확인할 수 있다."""
+        try:
+            record, _, observation = self.conditions(op['request'], deadline, target=False,
+                                                     gate=False, identity_only=True)
+            return observation, self.confirm_launch(op, record, observation, deadline)
+        except ExecutionError as error:
+            cause = error.error
+            if cause['code'] == 'CPU_APPLY_INCOMPLETE':
+                cause = cause['details'].get('cause', cause)
+            if cause['code'] not in ('OBSERVATION_UNAVAILABLE', 'DEADLINE_EXCEEDED'):
+                raise
+            reason = cause['message']
+        except (PlatformError, OSError, ValueError) as error:
+            if self.p.clock() < deadline and not isinstance(error.__cause__, TimeoutExpired):
+                raise
+            reason = str(error)
+        refuse('OBSERVATION_UNAVAILABLE', reason, retryable=True,
+               details={'operation_id':op['operation_id'], 'recovery_attempt_id':op['recovery_attempt_id'],
+                        'accepted':True})
 
     @traced('recovery.once')
     def _once(self, spec, *, execute, context):
@@ -514,11 +542,10 @@ class Recovery:
                 # 만료 후의 15초는 기존 실행을 확인·종결하는 읽기 예산이다.
                 # 이 분기에는 start/stop/create/repin 경로가 없다.
                 reconcile_end = min(self.p.clock()+15, getattr(self.p, 'response_deadline', float('inf')))
-                record, _, observation = self.conditions(spec, reconcile_end, target=False, gate=False, identity_only=True)
-                result = self.confirm_launch(op, record, observation, reconcile_end)
+                observation, result = self.observe_original_launch(op, reconcile_end)
                 if result is not None:
                     return result
-                if self.settle_expired(op, reconcile_end):
+                if observation['presence'] == 'absent' and self.settle_expired(op, reconcile_end):
                     settled = self.read_attempt(identity)
                     error = settled['error']
                     refuse(error['code'], error['message'],
@@ -635,17 +662,12 @@ class Recovery:
                 # the physical submission's response was lost. This is observation only.
                 reconcile_end = min(self.p.clock()+15, getattr(self.p, 'response_deadline', float('inf')))
                 try:
-                    record, _, observation = self.conditions(spec, reconcile_end, target=False, gate=False, identity_only=True)
-                    result = self.confirm_launch(op, record, observation, reconcile_end)
+                    _, result = self.observe_original_launch(op, reconcile_end)
                     if result is not None:
                         return result
                 except ExecutionError as confirmation_error:
-                    if confirmation_error.error['code'] in ('OBSERVATION_UNAVAILABLE', 'DEADLINE_EXCEEDED'):
-                        # The worker rechecks the same journal within its bounded verification window.
-                        refuse('OBSERVATION_UNAVAILABLE', 'original create outcome could not be observed',
-                               details=original_error['details'])
+                    if confirmation_error.error['code'] == 'OBSERVATION_UNAVAILABLE':
+                        raise
                 except (PlatformError, OSError, ValueError):
-                    if self.p.clock() >= reconcile_end:
-                        refuse('OBSERVATION_UNAVAILABLE', 'original create outcome could not be observed',
-                               details=original_error['details'])
+                    pass
             raise ExecutionError(**original_error) from error

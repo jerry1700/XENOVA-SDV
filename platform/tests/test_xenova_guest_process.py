@@ -173,6 +173,50 @@ class GuestProcessTest(unittest.TestCase):
         self.assertEqual(len(self.f.physical('create')), 2)
         self.assertEqual(self.f.physical('destroy'), [])
 
+    def test_recovery_unknown_state_and_confirmation_timeout_keep_original_attempt(self):
+        self.f.start()
+        self.f.xen.rows.clear()
+        spec = self.f.spec('start-if-absent')
+        command = self.p.command
+        self.p.process_isolation = True
+        from xenova_recovery import Recovery
+        conditions = Recovery.conditions
+        confirmation_states = iter(('unknown', 'timeout', 'live'))
+
+        def lose_response(argv, **kwargs):
+            if argv[:2] == ['systemd-run', '--scope']:
+                command(['xl', 'create', str(self.p.runtime/(self.r['id']+'.cfg'))], **kwargs)
+                self.f.ticks = spec['deadline_monotonic_ms']/1000
+                raise ExecutionError('DEADLINE_EXCEEDED', 'original command response lost')
+            return command(argv, **kwargs)
+
+        def observe(recovery, request, deadline, **kwargs):
+            record, records, row = conditions(recovery, request, deadline, **kwargs)
+            if kwargs.get('identity_only'):
+                state = next(confirmation_states)
+                if state == 'timeout':
+                    raise ExecutionError('DEADLINE_EXCEEDED', 'confirmation budget expired')
+                if state == 'unknown':
+                    row = {**row, 'xen_state':'unknown', 'xen_state_flags':'------'}
+            return record, records, row
+
+        with patch.object(self.p, 'command', side_effect=lose_response), \
+                patch.object(Recovery, 'conditions', observe), \
+                patch.object(guest, 'confirm_created_domain', return_value={'monitor_pid':42}) as proof:
+            first = self.f.fails(self.f.recover(spec), 'OBSERVATION_UNAVAILABLE')
+            second = self.f.fails(self.f.recover(spec), 'OBSERVATION_UNAVAILABLE')
+            self.assertEqual(first['operation_id'], second['operation_id'])
+            proof.assert_not_called()
+            completed = self.f.ok(self.f.recover(spec))['attempt']
+        proof.assert_called_once()
+        self.assertEqual(completed['phase'], 'completed')
+        self.assertEqual(completed['operation_id'], first['operation_id'])
+        self.assertEqual(completed['request'], spec)
+        self.assertEqual(completed['reconciliation']['original_error']['details']['cause']['code'],
+                         'DEADLINE_EXCEEDED')
+        self.assertEqual(len(self.f.physical('create')), 2)
+        self.assertEqual(self.f.physical('destroy'), [])
+
     def test_isolated_zephyr_reboot_submits_cooperative_request_without_linux_launch(self):
         self.f.start()
         expected=self.p.resolve_domain(self.r,deadline=90)

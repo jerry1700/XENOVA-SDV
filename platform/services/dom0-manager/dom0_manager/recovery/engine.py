@@ -312,7 +312,7 @@ class RecoveryEngine:
 
     # ---- 주기 ----
 
-    def collect(self, now: float | None = None) -> None:
+    def collect(self, now: float | None = None, *, observations_available: bool = True) -> None:
         """끝난 실행 결과를 회수하고, 저장 못 한 상태·이벤트를 다시 저장한다. 플랫폼·Xen 관측에 실패한 주기에도 부른다."""
         now = self._clock() if now is None else now
         with self._lock:
@@ -324,6 +324,13 @@ class RecoveryEngine:
                 record = self._records.get(recovery_id)
                 if record is not None:
                     self._finish(record, future, now)
+            if not observations_available:
+                # Journal rechecks can continue without the watcher's health sample.
+                for record in list(self._records.values()):
+                    if (record.status == RecoveryStatus.EXECUTING and record.replay
+                            and record.request is not None and self._due(record, now)
+                            and record.recovery_id not in self._futures):
+                        self._start(record, now, journal_only=True)
 
     def tick(self, now: float | None = None) -> None:
         """관측이 성공한 주기: 결과 회수 → 감시기 대조 → 시도 시작·backoff·재관측 만료."""
@@ -382,7 +389,7 @@ class RecoveryEngine:
 
     # ---- 시도 ----
 
-    def _start(self, record: RecoveryRecord, now: float) -> None:
+    def _start(self, record: RecoveryRecord, now: float, *, journal_only: bool = False) -> None:
         if self._lost:
             if not self._lost_warned:
                 self._lost_warned = True
@@ -398,7 +405,7 @@ class RecoveryEngine:
             record.replay = False
             record.due_monotonic = None
             self._save()
-            self._submit(record, lambda: self._task_replay(record), now)
+            self._submit(record, lambda: self._task_replay(record, journal_only=journal_only), now)
         else:
             self._submit(record, lambda: self._task_attempt(record), now)
 
@@ -465,7 +472,7 @@ class RecoveryEngine:
             log.warning("vm %s: recovery %s attempt %d %s (attempt_id %s)", record.vm_id, record.recovery_id, record.attempt, record.mode, record.recovery_attempt_id)
         return self._platform.recover_once(spec, execute=True)
 
-    def _task_replay(self, record: RecoveryRecord) -> dict[str, Any]:
+    def _task_replay(self, record: RecoveryRecord, *, journal_only: bool = False) -> dict[str, Any]:
         """같은 attempt id 로 결과를 조회하고, journal 이 없으면 같은 spec 을 다시 보낸다. 새 attempt id 는 만들지 않는다."""
         with self._lock:
             spec, attempt_id = dict(record.request or {}), record.recovery_attempt_id
@@ -482,6 +489,9 @@ class RecoveryEngine:
         if attempt is not None and attempt.get("phase") == "failed":
             error = attempt.get("error") or {}
             raise _platform_error(error.get("code", "XEN_EXECUTION_FAILED"), error.get("message", "recovery attempt failed"))
+        confirming_launch = attempt is not None and attempt.get("phase") in ("launching", "observed", "uncertain")
+        if journal_only and not confirming_launch:
+            raise DriverTimeout("awaiting observation before resuming the original recovery")
         if attempt is None:
             # 플랫폼에 닿은 적이 없다: 다시 보내기 전에 지금 상태를 본다. 그 사이 건강해졌거나 꺼졌으면 건강한 VM 을 재시작하지 않는다
             with self._lock:
@@ -493,7 +503,14 @@ class RecoveryEngine:
             if health is not None and health.intent_known and (health.state == HealthState.STOPPED or health.desired_state != "running"):
                 raise _NotEligible(f"desired_state={health.desired_state}, state={health.state.value}")
         # 의도를 못 읽은 건강 스냅샷으로는 취소하지 않는다. 원 spec 의 expected_intent_revision 을 플랫폼이 다시 확인한다
-        return self._platform.recover_once(spec, execute=True)  # 진행 중·불확실·미도달: 플랫폼이 멱등하게 이어 가거나 RECONCILE_REQUIRED
+        try:
+            return self._platform.recover_once(spec, execute=True)
+        except Dom0ManagerError as exc:
+            if exc.platform_code == "DEADLINE_EXCEEDED" and confirming_launch:
+                # Only a terminal journal can turn this confirmation timeout into
+                # a failed launch. Recheck the same journal on the next pass.
+                raise DriverTimeout("original launch confirmation timed out") from exc
+            raise
 
     def _submit(self, record: RecoveryRecord, work: Callable[[], dict[str, Any]], now: float) -> None:
         if self._inline or self._executor is None:

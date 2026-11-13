@@ -260,6 +260,43 @@ def test_response_loss_queries_journal_and_finishes_without_resending(tmp_path):
     assert len(w.platform.recover_calls()) == 1 and record.status == RecoveryStatus.COMPLETED and record.execution_id == "exec-journal"
 
 
+@pytest.mark.parametrize("guest_kind", ["linux", "zephyr"])
+def test_confirmation_replays_original_attempt_through_health_recovery(tmp_path, guest_kind):
+    w = make(tmp_path)
+    w.platform.views[VM] = view(present=False)
+    w.platform.results = [
+        PlatformUnavailable("Xen state unknown", platform_code="OBSERVATION_UNAVAILABLE"),
+        DriverTimeout("confirmation deadline", platform_code="DEADLINE_EXCEEDED"),
+        {"attempt": {}, "original_result": {"execution_id": "exec-confirmed"}},
+    ]
+    w.engine.on_judgment(judgment(reason=FailureReason.DOMAIN_ABSENT, kind=guest_kind))
+    w.tick()
+    record = w.record()
+    spec = dict(record.request)
+    w.platform.journal[spec["recovery_attempt_id"]] = {"phase": "uncertain"}
+    w.watcher.set(VM, HealthState.HEALTHY)
+    w.advance(115)
+    w.engine.collect(observations_available=False)
+    assert record.status == RecoveryStatus.EXECUTING and record.replay and record.attempt == 1
+    assert len(w.platform.recover_calls()) == 2
+    w.advance(5)
+    w.tick()
+    assert record.status == RecoveryStatus.COMPLETED and record.execution_id == "exec-confirmed"
+    assert [call[1] for call in w.platform.recover_calls()] == [spec] * 3
+    assert [event["type"] for event in w.events] == ["recovery.started", "recovery.completed"]
+
+
+def test_missing_journal_during_unavailable_observation_does_not_submit(tmp_path):
+    w = make(tmp_path)
+    w.platform.results = [DriverTimeout("manager call timed out")]
+    w.engine.on_judgment(judgment())
+    w.tick()
+    w.advance(5)
+    w.engine.collect(observations_available=False)
+    assert w.platform.calls[-1][0] == "attempt" and len(w.platform.recover_calls()) == 1
+    assert w.record().status == RecoveryStatus.EXECUTING and w.record().replay
+
+
 def test_failures_back_off_and_stop_after_max_attempts_with_new_attempt_ids(tmp_path):
     w = make(tmp_path)
     w.platform.results = [DriverError("xl failed", platform_code="XEN_EXECUTION_FAILED")] * 3

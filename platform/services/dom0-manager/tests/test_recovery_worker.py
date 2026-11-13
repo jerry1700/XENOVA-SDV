@@ -479,14 +479,15 @@ def test_worker_collects_engine_results_even_when_observation_fails():
     calls = []
     engine = SimpleNamespace(on_judgment=lambda j, now: calls.append(("judgment", j.vm_id)), tick=lambda now: calls.append(("tick", now)),
                              observation_unavailable=lambda: calls.append(('unavailable',)),
-                             collect=lambda now: calls.append(("collect", now)), shutdown=lambda: calls.append(("shutdown",)))
+                             collect=lambda now, *, observations_available: calls.append(("collect", now, observations_available)),
+                             shutdown=lambda: calls.append(("shutdown",)))
 
     def observer():
         raise PlatformUnavailable("busy")
 
     worker = RecoveryWorker(SETTINGS, observer, Watcher(SETTINGS, HeartbeatTable(), AppHeartbeatTable(), clock=lambda: clock[0]),
                             link=LinkState.up, engine=engine, clock=lambda: clock[0])
-    assert worker.run_once() == [] and calls == [('unavailable',), ("collect", 1000.0)]  # 안정 근거를 끊고 원 결과는 회수한다.
+    assert worker.run_once() == [] and calls == [('unavailable',), ("collect", 1000.0, False)]
     worker.shutdown()
     assert calls[-1] == ("shutdown",)
 
