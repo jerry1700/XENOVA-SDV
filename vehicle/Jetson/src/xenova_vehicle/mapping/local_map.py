@@ -241,9 +241,6 @@ class EvidenceGrid:
         if observer is not None and not callable(observer):raise ValueError('grid observer must be callable')
         if not certificate_complete or observed is None:
             return 0
-        if self.rolling_window is not None:
-            from .rolling_grid import view_key
-            view_id=view_key(view_id)
         applied = 0
         if observer is not None:
             import numpy as np
@@ -255,11 +252,11 @@ class EvidenceGrid:
             if self.time_known[row,col] and observed < int(self.observed_us[row,col]):
                 continue
             if self.state[row,col] == OCCUPIED:
-                if self.unordered_hit[row,col]:
+                # A new capture can come from the same stream. Require both a
+                # newer capture time and a spatially independent observation.
+                if (self.unordered_hit[row,col] or not self.time_known[row,col]
+                        or observed <= int(self.observed_us[row,col])):
                     self.conflict[row,col] = True
-                    continue
-                if self.rolling_window is not None and self.hit_view.get(row*self.spec.width+col)==view_id:
-                    self.conflict[row,col]=True
                     continue
                 baseline = math.hypot(*(a-b for a,b in zip(origin_xy,self.hit_origin[row,col])))
                 if baseline < self.independent_view_m:

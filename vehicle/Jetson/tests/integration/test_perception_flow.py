@@ -12,7 +12,10 @@ import tempfile
 import unittest
 import uuid
 
-from xenova_vehicle.mapping.local_map import GridSpec
+from xenova_vehicle.mapping.local_map import FREE, OCCUPIED, UNKNOWN, GridSpec
+from xenova_vehicle.mapping.map_lattice import GridWindow
+from xenova_vehicle.mapping.odometry import PoseEstimate, PoseSample
+from xenova_vehicle.mapping.rolling_grid import configure_grid
 from xenova_vehicle.oak.yolop_frames import NNPacket, RuntimeTensor
 from xenova_vehicle.perception.bench import run_perception_bench
 from xenova_vehicle.perception.calibration import CalibrationProfile, synthetic_calibration
@@ -102,6 +105,54 @@ class PerceptionFlowTests(unittest.TestCase):
         self.assertEqual(result.depth.mode, 'UNKNOWN')
         self.assertFalse(result.summary['geometric_model_qualified'])
         self.assertEqual(result.summary['map_counts']['free'], 0)
+
+    def test_same_depth_stream_clears_removed_cone_and_keeps_out_of_view_cone(self):
+        fields = demo_scene().fields
+        layout = fields['track']['layout']
+        layout['obstacle_seeds'] = [dict(id='cone', kind='cone', x=.95, y=.025, w=.06, h=.13)]
+        with_cone = Scene(scene_canonical(fields))
+        layout['obstacle_seeds'] = []
+        empty = Scene(scene_canonical(fields))
+        spec = GridSpec(1, 1, .1, (.90, -.025))
+        profile = replace(self.profile, grid=spec, max_free_ray_tests=200_000)
+
+        def configure_window(core, _pose):
+            if core.grid.rolling_window is None:
+                configure_grid(core.grid, GridWindow.from_spec(spec))
+            return False
+
+        cases = (
+            ('cone_removed', empty, (.05, 0., 0.), 'CLEAR_REGION', FREE),
+            ('cone_out_of_view', with_cone, (.05, 0., math.pi / 2), 'UNKNOWN', OCCUPIED),
+        )
+        for name, scene, pose, certificate, state in cases:
+            with self.subTest(name=name):
+                epoch = str(uuid.uuid4())
+                camera = SyntheticCamera(self.calibration)
+                pipeline = PerceptionPipeline(camera.calibration, profile, targets=self.targets)
+
+                def observe(sequence, vehicle_pose, observed_scene):
+                    at = sequence * 100_000
+                    observation = camera.capture(SceneSnapshot(epoch, sequence, at, vehicle_pose, observed_scene))
+                    stamp = observation.depth.stamp
+                    sample = PoseSample(epoch, stamp.clock_id, camera.calibration.sha256, at,
+                                        *vehicle_pose, 0., 0., origin='ORACLE_SIMULATION')
+                    result = pipeline.process(observation, pose=PoseEstimate(sample, (at, at), (at, at)),
+                                              roi_reframe=configure_window)
+                    return stamp, result
+
+                first_stamp, first = observe(1, (0., 0., 0.), with_cone)
+                self.assertEqual(int(first.map_snapshot['arrays']['state'][0, 0]), OCCUPIED)
+                second_stamp, second = observe(2, pose, scene)
+                self.assertEqual(second_stamp.key[:-1], first_stamp.key[:-1])
+                self.assertEqual(second.summary['free_certificates'][0]['status'], certificate)
+                self.assertEqual(len(second.depth.hit_boxes), 0)
+                self.assertEqual(int(second.map_snapshot['arrays']['state'][0, 0]), state)
+                last_observation = second_stamp if state == FREE else first_stamp
+                self.assertEqual(int(pipeline.grid.observed_us[0, 0]), last_observation.captured_us[0])
+                if state == OCCUPIED:
+                    expired = pipeline.grid.snapshot(5_100_001, clock_id=first_stamp.clock_id)
+                    self.assertEqual(int(expired['arrays']['state'][0, 0]), UNKNOWN)
 
     def test_empty_scene_center_cell_has_conditional_free_with_original_target_and_quantization(self):
         # demo의 차폐/FOV 조건과 분리한 독립 입력이다. 실제 demo 주행 성공을 뜻하지 않는다.
