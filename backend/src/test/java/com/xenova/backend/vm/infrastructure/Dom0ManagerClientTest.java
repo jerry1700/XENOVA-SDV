@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmResourceUpdate;
 import com.xenova.backend.vm.domain.VmRuntime;
@@ -290,6 +292,55 @@ class Dom0ManagerClientTest {
         assertThat(result.after().vcpus()).isEqualTo(2);
         assertThat(result.after().memoryMib()).isEqualTo(512);
         assertThat(result.appliesOnNextStart()).isTrue();
+    }
+
+    @Test
+    void cpuLayoutReadsThePlatformPolicy() {
+        server.createContext("/api/v1/cpu-layout", exchange -> respond(exchange, 200, """
+                {
+                  "configured":true,
+                  "policy_revision":2,
+                  "policy_schema_version":"2.0",
+                  "host":{"online_pcpus":[0,1,2,3],"max_cpu_id":3,"desired_dom0_pcpus":[0,3],"ready":true},
+                  "reservations":[{"vm_id":"%s","pcpus":[2]}],
+                  "vms":[{"vm_id":"%s","vcpus":1,"allocation":"shared",
+                    "desired_hard_affinity":[{"vcpu":0,"pcpus":[0,3]}]}]
+                }
+                """.formatted(VM_ID, VM_ID)));
+
+        CpuLayout layout = client.cpuLayout();
+
+        assertThat(layout.policyRevision()).isEqualTo(2);
+        assertThat(layout.host().desiredDom0Pcpus()).containsExactly(0, 3);
+        assertThat(layout.vms()).singleElement().satisfies(vm ->
+                assertThat(vm.desiredHardAffinity().getFirst().pcpus()).containsExactly(0, 3));
+    }
+
+    @Test
+    void cpuPolicyUpdatePutsFullPolicyAndIdempotencyKey() throws IOException {
+        AtomicReference<String> requestKey = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/api/v1/cpu-policy", exchange -> {
+            requestKey.set(exchange.getRequestHeaders().getFirst("Idempotency-Key"));
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {"policy":{"schema_version":"2.0","operation_id":"operation-1","policy_revision":3,
+                    "pool_name":"Pool-0","shared_pcpus":[0,3],"placements":[
+                    {"vm_id":"%s","mode":"shared","pcpus":[3]}]},"host_preparation_required":true}
+                    """.formatted(VM_ID));
+        });
+        CpuPolicyUpdate.Request request = new CpuPolicyUpdate.Request(
+                2, List.of(0, 3), List.of(new CpuPolicyUpdate.CpuPlacement(VM_ID, "shared", List.of(3))));
+
+        CpuPolicyUpdate result = client.updateCpuPolicy(request, "pin-1");
+
+        assertThat(requestKey.get()).isEqualTo("pin-1");
+        assertThat(objectMapper.readTree(body.get())).isEqualTo(objectMapper.readTree("""
+                {"expected_policy_revision":2,"shared_pcpus":[0,3],"placements":[
+                {"vm_id":"%s","mode":"shared","pcpus":[3]}]}
+                """.formatted(VM_ID)));
+        assertThat(result.policy().policyRevision()).isEqualTo(3);
+        assertThat(result.hostPreparationRequired()).isTrue();
     }
 
     // Visible ASCII keys may hold '+', '{' or '&': they must reach dom0-manager unchanged, not as a space,
