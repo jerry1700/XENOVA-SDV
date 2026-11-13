@@ -14,7 +14,7 @@ import {
 } from '../api/types';
 import { canStartVm, canStopVm } from '../format';
 import { setMockBoardDown } from './board';
-import { MOCK_PASSWORD, VM_IDS } from './data';
+import { MOCK_PASSWORD, MOCK_USER, VM_IDS } from './data';
 import { handlers, resetMockState } from './handlers';
 
 // 화면이 쓰는 실제 클라이언트(api/client.ts)로 mock 흐름을 돌린다
@@ -40,7 +40,7 @@ afterAll(() => {
 async function login(password = MOCK_PASSWORD) {
   const token = await request<TokenResponse>('/api/v1/auth/login', {
     method: 'POST',
-    body: { username: 'admin', password },
+    body: { username: MOCK_USER.username, password },
     auth: false,
   });
   setSession(token);
@@ -50,7 +50,7 @@ async function login(password = MOCK_PASSWORD) {
 describe('MSW mock API', () => {
   it('로그인 → 목록 → 상세', async () => {
     const token = await login();
-    expect(token.user.username).toBe('admin');
+    expect(token.user.username).toBe(MOCK_USER.username);
 
     const list = await request<VmListResponse>('/api/v1/vms');
     expect(list.items.map((vm) => vm.name)).toEqual(['autonomous', 'manual', 'interaction']);

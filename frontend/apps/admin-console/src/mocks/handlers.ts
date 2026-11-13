@@ -15,7 +15,6 @@ import {
   type CreateVmRequest,
   type LoginRequest,
   type MemoryStressRequest,
-  type SignupRequest,
   type StressCommand,
   type TokenResponse,
   type UpdateMemoryRequest,
@@ -265,26 +264,6 @@ function mockZephyrThreads(vmId: string) {
 
 export const handlers = [
   // ---- 인증 ----
-  http.post('*/api/v1/auth/signup', async ({ request }) => {
-    await delay(LATENCY_MS);
-    const body = (await request.json()) as Partial<SignupRequest>;
-    if (!body.username || !body.nickname || !body.password) {
-      return error(422, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
-    }
-    mockUsername = body.username;
-    mockNickname = body.nickname;
-    mockPassword = body.password;
-    return HttpResponse.json(
-      {
-        user_id: MOCK_USER.user_id,
-        username: body.username,
-        nickname: body.nickname,
-        created_at: new Date().toISOString(),
-      } as JsonBodyType,
-      { status: 201 },
-    );
-  }),
-
   http.post('*/api/v1/auth/login', async ({ request }) => {
     await delay(LATENCY_MS);
     const body = (await request.json()) as Partial<LoginRequest>;

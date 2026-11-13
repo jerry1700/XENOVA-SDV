@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, getSession, request, requestWithStatus, setSession } from './client';
+import { ApiError, getSession, request, requestWithStatus, setSession, SHARED_ACCOUNT } from './client';
 import type { TokenResponse } from './types';
 
 const token = (value: string): TokenResponse => ({
@@ -47,11 +47,29 @@ describe('API 클라이언트', () => {
     expect(retry.Authorization).toBe('Bearer new');
   });
 
-  it('재발급도 실패하면 세션을 지우고 오류 코드를 그대로 낸다', async () => {
+  it('재발급이 안 되면 로그인 화면 대신 공용 계정으로 자동 로그인하고 다시 보낸다', async () => {
     fetchMock
       .mockResolvedValueOnce(json(401, { code: 'INVALID_TOKEN', message: '만료' }))
       .mockResolvedValueOnce(json(401, { code: 'INVALID_REFRESH_TOKEN', message: '재로그인' }))
-      .mockResolvedValueOnce(json(401, { code: 'INVALID_TOKEN', message: '만료' }));
+      .mockResolvedValueOnce(json(200, token('shared')))
+      .mockResolvedValueOnce(json(200, { ok: true }));
+    await expect(request('/api/v1/vms')).resolves.toEqual({ ok: true });
+
+    expect(fetchMock.mock.calls[2]![0]).toBe('/api/v1/auth/login');
+    expect(JSON.parse(fetchMock.mock.calls[2]![1]!.body as string)).toEqual({
+      username: SHARED_ACCOUNT.username,
+      password: SHARED_ACCOUNT.password,
+    });
+    expect(getSession()?.access_token).toBe('shared');
+    const retry = fetchMock.mock.calls[3]![1]!.headers as Record<string, string>;
+    expect(retry.Authorization).toBe('Bearer shared');
+  });
+
+  it('공용 계정 로그인까지 실패하면 세션을 지우고 원래 오류 코드를 낸다', async () => {
+    fetchMock
+      .mockResolvedValueOnce(json(401, { code: 'INVALID_TOKEN', message: '만료' }))
+      .mockResolvedValueOnce(json(401, { code: 'INVALID_REFRESH_TOKEN', message: '재로그인' }))
+      .mockResolvedValueOnce(json(401, { code: 'INVALID_CREDENTIALS', message: '계정 없음' }));
     await expect(request('/api/v1/vms')).rejects.toMatchObject({ status: 401, code: 'INVALID_TOKEN' });
     expect(getSession()).toBeNull();
   });
