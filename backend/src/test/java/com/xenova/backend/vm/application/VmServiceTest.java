@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,6 +44,9 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -613,6 +619,78 @@ class VmServiceTest {
         assertThatThrownBy(() -> service.get("missing"))
                 .isInstanceOfSatisfying(ApiException.class, exception ->
                         assertThat(exception.getCode()).isEqualTo("VM_NOT_FOUND"));
+    }
+
+    // ---- QA 1-B2: 같은 VM 동시 작업 거절 ----
+
+    @Test
+    void anotherRequestForAVmWithAnOperationInFlightIsRefusedWithoutReachingDom0() throws Exception {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            entered.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        }).when(vmControlPort).stop("vm-1");
+
+        CompletableFuture<Vm> stopping = CompletableFuture.supplyAsync(() -> service.stop("vm-1"));
+        assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // 다른 종류(삭제·재부팅)도, 같은 종류(정지)도 거절된다
+        assertInProgress(() -> service.destroy("vm-1"));
+        assertInProgress(() -> service.stop("vm-1"));
+        assertInProgress(() -> service.reboot("vm-1", "reboot-1"));
+        verify(vmControlPort, never()).destroy("vm-1");
+        verify(vmControlPort, never()).requestReboot(anyString(), anyString());
+
+        release.countDown();
+        assertThat(stopping.get(5, TimeUnit.SECONDS).state()).isEqualTo(VmState.STOPPED);
+        verify(vmControlPort, times(1)).stop("vm-1");
+    }
+
+    @Test
+    void anOperationOnAnotherVmIsNotBlocked() throws Exception {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmRecordRepository.findById("vm-2")).thenReturn(Optional.of(record("vm-2", "alpine-2")));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            entered.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        }).when(vmControlPort).stop("vm-1");
+
+        CompletableFuture<Vm> stopping = CompletableFuture.supplyAsync(() -> service.stop("vm-1"));
+        assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(service.stop("vm-2").state()).isEqualTo(VmState.STOPPED);
+        verify(vmControlPort).stop("vm-2");
+
+        release.countDown();
+        stopping.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void aFailedOperationReleasesTheVmForTheNextRequest() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        doThrow(new ApiException(HttpStatus.GATEWAY_TIMEOUT, "VM_CONTROL_TIMEOUT", "시간 초과"))
+                .doNothing()
+                .when(vmControlPort).stop("vm-1");
+
+        assertThatThrownBy(() -> service.stop("vm-1"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        exception -> assertThat(exception.getCode()).isEqualTo("VM_CONTROL_TIMEOUT"));
+        assertThat(service.stop("vm-1").state()).isEqualTo(VmState.STOPPED);
+        verify(vmControlPort, times(2)).stop("vm-1");
+    }
+
+    private static void assertInProgress(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
+        assertThatThrownBy(call).isInstanceOfSatisfying(ApiException.class, exception -> {
+            assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(exception.getCode()).isEqualTo("VM_OPERATION_IN_PROGRESS");
+            assertThat(exception.getMessage()).isEqualTo("이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요.");
+        });
     }
 
     private static VmRecord record(String vmId, String name) {
