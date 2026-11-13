@@ -117,13 +117,24 @@ class Timex(C.Structure):
         ('stabil',C.c_long),('jitcnt',C.c_long),('calcnt',C.c_long),
         ('errcnt',C.c_long),('stbcnt',C.c_long),('tai',C.c_int),('padding',C.c_int*11)]
 
+class ClockSyncPending(Exception):
+    """The host clock reports that it has not synchronized yet."""
+
+
 def clock_sample():
     if os.uname().machine!='aarch64' or Path('/sys/devices/system/clocksource/clocksource0/current_clocksource').read_text().strip()!='arch_sys_counter':
         raise ValueError('UTC correspondence requires the fixed ARM architectural clock profile')
     tx=Timex();lib=C.CDLL(None,use_errno=True)
     before=time.monotonic_ns()
     state=lib.adjtimex(C.byref(tx))
-    if state<0 or state==5 or tx.status&0x1040 or not 0<=tx.maxerror<=10000000:
+    if state < 0:
+        error = C.get_errno()
+        raise OSError(error, os.strerror(error))
+    if tx.status & 0x1000 or tx.maxerror < 0:  # STA_CLOCKERR or invalid error estimate
+        raise ValueError('host UTC clock sample is invalid')
+    if tx.status & 0x0040:  # STA_UNSYNC
+        raise ClockSyncPending()
+    if state == 5 or tx.maxerror > 10000000:  # TIME_ERROR or excessive uncertainty
         raise ValueError('host UTC is not synchronized within the supported bound')
     utc=time.time_ns();after=time.monotonic_ns()
     return {'unix_ms':utc//1000000,'source_error_ms':(tx.maxerror+999)//1000+(after-before+999999)//1000000,
@@ -174,7 +185,7 @@ def clock_once():
     """
     from xenova_vm import Platform,storage_check
     from xenova_drive_binding import observe
-    from xenova_execution import ReadChanged,fingerprint
+    from xenova_execution import ExecutionError,ReadChanged,fingerprint
     from provision_xenova_telemetry import XenStore
     storage_check()
     platform=Platform();end=platform.clock()+6
@@ -184,6 +195,7 @@ def clock_once():
         if platform.clock()>=end:raise TimeoutError('clock response deadline')
         if platform.boot_id_reader()!=execution.host:raise ReadChanged()
     store=XenStore();handled=0
+    waiting_for_sync = False
     try:
         for record in platform.records(validate_assets=False).values():
             if record.get('guest_kind')!='zephyr' or platform.clock()>=end:continue
@@ -236,7 +248,13 @@ def clock_once():
                 answered=_clock_answered(store.read(tx,parent+'/response'),request,context)
                 current()
                 if answered:continue
-                answer=clock_response(context,request,clock_sample())
+                try:
+                    sample = clock_sample()
+                except ClockSyncPending:
+                    current()
+                    waiting_for_sync = True
+                    continue
+                answer=clock_response(context,request,sample)
                 wire=json.dumps(answer,separators=(',',':')).encode()
                 current()
                 if not store.lib.xs_write(store.handle,tx,(parent+'/response').encode(),wire,len(wire)):
@@ -246,8 +264,16 @@ def clock_once():
                 open_tx=False;handled+=1
             finally:
                 if open_tx:store.lib.xs_transaction_end(store.handle,tx,True)
+    except ExecutionError as error:
+        if error.error['code'] != 'HOST_QUIESCING':
+            raise
+        return {'responses':handled, 'status':'skipped', 'reason':'HOST_QUIESCING',
+                'message':'Host is shutting down; guest UTC response skipped'}
     finally:store.close()
-    return handled
+    if waiting_for_sync:
+        return {'responses':handled, 'status':'waiting', 'reason':'CLOCK_SYNC_PENDING',
+                'message':'Waiting for host UTC synchronization'}
+    return {'responses':handled}
 
 def main(argv=None):
     import argparse
@@ -266,7 +292,9 @@ def main(argv=None):
             atomic_write(Path('/run/xenova-console-evidence/enable.env'),'XENCONSOLED_TRACE='+mode+'\n',0o600)
             return 0
         storage_check()
-        if a.action=='clock-once':print(json.dumps({'responses':clock_once()}));return 0
+        if a.action == 'clock-once':
+            print(json.dumps(clock_once()))
+            return 0
         if a.action=='capture-once':print(json.dumps({'sources':capture_once()}));return 0
         if a.archive is None:p.error('--archive required')
         base=Path('/srv/xenova/diagnostics/telemetry')
