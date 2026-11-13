@@ -10,6 +10,24 @@ static dw_vehicle feedback;
 static bool contend,source_busy;
 static uint64_t checked_deadline,guest;
 
+static void published_path_during_pass_planning(void){
+ de_init(&engine,&lp_selected_config,&lp_selected_assets);
+ struct lp_path *path=&engine.paths[0].path;
+ path->execution.mission.kind=1;
+ path->has_episode=true;path->episode.core.state=2;path->episode.core.phase=DB_CHANGE_OUT;
+ path->episode.core.target_lane_id=2;
+ path->task=(struct tr_intent){true,false,2,2,1,0};
+ engine.episode_transition=engine.episode_pass_planning=true;
+ assert(!episode_transition_blocks_path(&engine,path));
+ engine.path_invalidated=true;
+ assert(episode_transition_blocks_path(&engine,path));
+ engine.path_invalidated=false;
+ path->task.changing=true;
+ assert(episode_transition_blocks_path(&engine,path));
+ path->task.changing=false;engine.episode_pass_planning=false;
+ assert(episode_transition_blocks_path(&engine,path));
+}
+
 static int fixture_clock(void *unused,uint64_t *out){
  (void)unused;*out=guest;return 0;
 }
@@ -40,6 +58,7 @@ enum lp_result __wrap_lp_validate_path(const struct lp_path *path,const dw_world
 }
 
 static void writer_contention(void){
+ published_path_during_pass_planning();
  de_init(&engine,&lp_selected_config,&lp_selected_assets);
  struct lp_path *source=&engine.parking.best_maneuver;
  source->count=2;source->points[1].pose.x=.2f;

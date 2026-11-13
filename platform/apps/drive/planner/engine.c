@@ -147,6 +147,7 @@ enum de_result de_mission(struct drive_engine *e,const xenova_drive_MissionGrant
   atomic_store(&e->parking_stop_generation,0);
   memset(&e->episode,0,sizeof(e->episode));memset(&e->episode_state,0,sizeof(e->episode_state));
   memset(&e->parking,0,sizeof(e->parking));e->episode_transition=e->episode_request_ready=e->episode_receipt_pending=false;
+  e->episode_pass_planning=false;
   e->phase_state_message_id[0]=0;
   e->behavior_failed=false;e->parking_boundary_pending=false;
  }
@@ -812,6 +813,14 @@ static bool completed_episode_progress(const struct lp_path *path,uint32_t gener
  progress->vehicle_sequence=vehicle->sequence;progress->used_travel_ticks=used;progress->revision++;
  out->valid=true;(void)hi;return true;
 }
+static bool episode_transition_blocks_path(const struct drive_engine *e,const struct lp_path *path){
+ if(!e->episode_transition)return false;
+ /* Before registration, a settled vehicle may still follow the published
+  * target-lane path. The caller checks the current map and stopping sweep. */
+ return !e->episode_pass_planning||e->path_invalidated||path->execution.mission.kind!=1||
+  !path->has_episode||path->episode.core.state!=2||path->episode.core.phase!=DB_CHANGE_OUT||
+  !path->task.active||path->task.changing||path->task.selected_lane_id!=path->episode.core.target_lane_id;
+}
 static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,uint64_t now,float dt,struct lp_command *command,
  dw_vehicle *vehicle,struct lp_budget budget,struct de_reference *completed,struct de_witness *witness,
  const xenova_drive_MissionGrant *mission,bool enforce_mission_profile,const xenova_drive_DriveControlFacts *current_facts){
@@ -845,7 +854,7 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
   else if(map_gate||path_gate)rc=DE_CHANGED;
   else if(map_scene&&(e->paths[ph.slot].scene_generation!=map_scene||!scene_mission(&map->world,scene_grant)))rc=DE_STATE;
   else if(enforce_mission_profile&&(map->world.required_features&DW_LANE_MODEL)&&!lp_mission_matches(path,mission))rc=DE_STATE;
-  else if(e->behavior_enabled&&(e->episode_transition||e->behavior_failed||!facts_ready))rc=DE_STATE;
+  else if(e->behavior_enabled&&(e->behavior_failed||!facts_ready||episode_transition_blocks_path(e,path)))rc=DE_STATE;
   else if(path->has_episode&&path->episode.core.state==2&&path->episode.core.phase<DB_FINISHED&&
     (now>=path->episode.core.deadline_pi_us||now>=path->episode.core.phase_deadline_pi_us||
      !facts.valid||!facts.meter_valid||now>=facts.expires_pi_us||memcmp(facts.meter_epoch,path->episode.core.meter_epoch.bytes,16)||
@@ -1074,6 +1083,7 @@ enum de_result de_restart(struct drive_engine *e){
  if(e->behavior_enabled){
   memset(&e->episode,0,sizeof(e->episode));memset(&e->episode_state,0,sizeof(e->episode_state));memset(&e->parking,0,sizeof(e->parking));
   e->episode_request_ready=e->episode_receipt_pending=e->episode_transition=false;e->local_owner=false;
+  e->episode_pass_planning=false;
   e->behavior_failed=e->facts_current=e->parking_boundary_pending=false;e->phase_state_message_id[0]=0;
  }
  memset(&e->task,0,sizeof(e->task));memset(&e->basis,0,sizeof(e->basis));
@@ -1258,11 +1268,12 @@ static bool behavior_restore(struct drive_engine *e,const struct lp_path *p,bool
   if(e->grant.has_locked_goal_sha256)memcpy(parking->selected_goal_sha256,e->grant.locked_goal_sha256.bytes,32);
   parking->terminal=m->phase==DP_HOLD;parking->result=m->result==1?DP_FEASIBLE:DP_PENDING;
  }
- e->episode_transition=false;e->behavior_failed=false;return true;
+ e->episode_transition=e->episode_pass_planning=false;e->behavior_failed=false;return true;
 }
 static bool behavior_phase(struct drive_engine *e,enum db_phase phase,dw_pose goal,uint64_t now){
  bool changed=e->episode.phase!=phase;
  if(!db_episode_phase(&e->episode,phase,goal,now,&e->behavior_limits))return false;
+ if(changed)e->episode_pass_planning=false;
  if(changed&&(!e->budget.clock||e->budget.clock(e->budget.context,&e->phase_began_guest_us))){e->behavior_failed=true;return false;}
  return true;
 }
@@ -1461,7 +1472,8 @@ static enum de_result behavior_candidate(struct drive_engine *e,struct lp_path *
  r->expected_registry_revision=e->episode_state.acceptance.registry_revision;
  memcpy(r->expected_episode_id.bytes,e->episode_state.core.episode_id.bytes,16);r->expected_episode_revision=e->episode_state.core.revision;
  r->plan_revision=path->revision;r->phase_revision=path->maneuver_revision;r->calculation_sequence=e->last_actual_calculation;
- r->vehicle_sequence=e->facts.vehicle_sequence;e->episode_request_ready=true;e->episode_transition=true;
+ r->vehicle_sequence=e->facts.vehicle_sequence;e->episode_pass_planning=false;
+ e->episode_request_ready=true;e->episode_transition=true;
  (void)now;return DE_BUSY;
 }
 static void parking_metadata(struct drive_engine *e,struct lp_path *p,const xenova_drive_MissionGrant *g){

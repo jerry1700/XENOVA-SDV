@@ -63,7 +63,7 @@ struct drive_engine {
  atomic_int search_reason,last_state_result,last_world_result;struct lp_budget budget;
  unsigned search_outcomes[LP_CLOCK+1];enum lp_result first_search_failure;
  /* One planner owner mutates behavior; tracker reads immutable path snapshots. */
- atomic_bool behavior_enabled,local_owner,episode_transition,behavior_failed,facts_current;
+ atomic_bool behavior_enabled,local_owner,episode_transition,episode_pass_planning,behavior_failed,facts_current;
  bool episode_request_ready,episode_receipt_pending;
  struct db_limits behavior_limits;struct dp_limits parking_limits;struct db_facts facts;
  struct db_episode episode,restore_episode;struct dp_state parking;
