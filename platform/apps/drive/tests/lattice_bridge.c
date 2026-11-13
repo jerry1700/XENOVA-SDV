@@ -352,7 +352,7 @@ int probe_lane_guide(void *pointer,uint32_t from,uint32_t to,float y,float goal_
  uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
  struct lp_budget budget={now+1000000,clock_us,NULL,NULL,NULL};
  struct lp_metrics metrics={0};
- return lp_lane_guide(&p->search,&p->path,w,(dw_pose){.6f,y,0},0,(dw_pose){2.f,goal_y,0},
+ return lp_lane_guide(&p->search,&p->path,w,(dw_pose){.6f,y,0},0,0,(dw_pose){2.f,goal_y,0},
   &p->config,budget,&task,&p->basis,&metrics);
 }
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){

@@ -8,7 +8,7 @@ static bool take(struct drive_engine *e){
  atomic_fetch_add(&e->resource_contention,1);return false;
 }
 static void give(struct drive_engine *e){atomic_flag_clear_explicit(&e->lock,memory_order_release);}
-static enum de_result behavior_prepare(struct drive_engine *,const dw_world *,dw_pose,const dw_vehicle *,uint64_t,struct tr_intent *,dw_pose *);
+static enum de_result behavior_prepare(struct drive_engine *,const dw_world *,dw_pose,const dw_vehicle *,uint64_t,float,struct tr_intent *,dw_pose *);
 static enum de_result behavior_candidate(struct drive_engine *,struct lp_path *,const dw_world *,uint64_t);
 static bool grant_same(const xenova_drive_MissionGrant *,const xenova_drive_MissionGrant *);
 static bool grant_key_same(const xenova_drive_MissionGrant *,const xenova_drive_MissionGrant *);
@@ -296,7 +296,7 @@ static enum de_result task_prepare(struct drive_engine *e,const dw_world *w,dw_p
  if(!task->active){if(!actual)return DE_POSE;*task=(struct tr_intent){true,false,actual,actual,actual,pad};}
  task->vehicle_pad=pad;
  struct tr_view view;if(!tr_open_indexed(w,task,budget.collision_index,&view))return DE_PATH;
- if(e->behavior_enabled)return behavior_prepare(e,w,pose,vehicle,now,task,goal);
+ if(e->behavior_enabled)return behavior_prepare(e,w,pose,vehicle,now,clearance,task,goal);
  if(task->changing){
   if(actual==task->selected_lane_id){task->changing=false;task->from_lane_id=actual;}
   else if(!tr_contains(&view,pose,pad+e->config->tracking_guard,e->config))return DE_POSE;
@@ -508,11 +508,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
    (void)dw_release(&e->maps,h);return before!=after?DE_OK:DE_WAITING;
   }
  }
- float terminal_sweep=.5f*e->config->primitive_speed*e->config->primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
- /* The terminal node may retain a valid nonzero heading. A front-only
-  * clearance misses the rotated outer corner; reserve its circumscribed radius. */
- float end_clearance=hypotf(e->config->front+e->config->margin+e->config->tracking_guard+terminal_sweep,
-                           e->config->half_width+e->config->margin+e->config->tracking_guard+terminal_sweep);
+ float end_clearance=lp_terminal_clearance(e->config);
  struct tr_intent task={0};struct lp_metrics prefix={0};
  e->budget=budget;
  if(!rc)rc=task_prepare(e,&map->world,pose,&vehicle,end_clearance,budget,&task,&prefix,&goal,now);
@@ -617,7 +613,8 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
  else if(task.active){
   e->search_reason=LP_NOT_FOUND;
   if((e->episode.active||(!task.changing&&!e->maneuver_active))&&e->has_grant&&e->grant.kind==1)
-   e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,goal,e->config,budget,&task,&e->basis,&prefix);
+   e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,vehicle.velocity_mps,goal,
+    e->config,budget,&task,&e->basis,&prefix);
   if(e->search_reason==LP_NOT_FOUND)
    e->search_reason=lp_start_task(&e->search,&map->world,pose,steering,goal,e->config,e->assets,budget,&task,&e->basis,&prefix);
   else{e->search.metrics=prefix;e->search.used=0;}
@@ -1289,12 +1286,15 @@ static bool lane_settled(struct drive_engine *e,const dw_world *w,const struct t
  if(!e->episode.settle_since_pi_us)e->episode.settle_since_pi_us=v->pi_sample_us;
  return v->pi_sample_us>=e->episode.settle_since_pi_us&&v->pi_sample_us-e->episode.settle_since_pi_us>=e->behavior_limits.settle_us&&now>=v->pi_sample_us;
 }
-static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,dw_pose pose,const dw_vehicle *v,uint64_t now,struct tr_intent *task,dw_pose *goal){
+static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,dw_pose pose,const dw_vehicle *v,
+ uint64_t now,float clearance,struct tr_intent *task,dw_pose *goal){
  if(!db_limits_valid(&e->behavior_limits)||e->behavior_failed||!e->facts_current||!e->facts.valid||now>=e->facts.expires_pi_us||!e->episode_state.core.state)return DE_STATE;
  if(e->episode_state.core.state==1&&!e->episode_state.core.phase&&e->episode_status.commit_state<2){
   float horizon=fmaxf(e->config->goal_distance*2,e->config->primitive_speed*e->config->primitive_duration);
   return lp_task_goal(w,task,pose,horizon,e->config->front+e->config->margin,goal)==LP_PATH_FOUND?DE_OK:DE_PATH;
  }
+ /* The registered phase milestone and the swept local terminal have separate lifetimes. */
+ const float phase_clearance=e->config->front+e->config->margin;
  if(e->episode.active&&e->episode.terminal&&e->episode.phase==DB_FINISHED){
   struct db_blocker next;if(!db_blocker_observe(w,task,pose,e->config->plan_horizon,e->config,&next))return DE_PATH;
   if(next.present&&!next.unknown)e->episode.active=false;
@@ -1322,8 +1322,10 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
   bool contained=arrival&&tr_unique_lane(w,pose,task->vehicle_pad+e->config->tracking_guard,e->config)==arrival;
   if(e->episode.phase==DB_CHANGE_OUT&&lane_settled(e,w,task,pose,v,e->episode.target_lane_id,contained,now)){
    task->changing=false;task->from_lane_id=task->selected_lane_id=e->episode.target_lane_id;
-   if(lp_task_goal(w,task,pose,e->config->plan_horizon,e->config->front+e->config->margin,goal)!=LP_PATH_FOUND)return DE_PATH;
-   if(!behavior_phase(e,DB_PASS,*goal,now))return DE_STATE;
+   dw_pose phase_goal;
+   if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND)return DE_PATH;
+   if(!behavior_phase(e,DB_PASS,phase_goal,now))return DE_STATE;
+   e->episode_pass_planning=true;
    e->episode_transition=true;
   }else if(e->episode.phase==DB_PASS){
    float radius=hypotf(e->config->front,e->config->half_width),lo,hi,pad=v->position_error_m+radius*v->heading_error_rad;
@@ -1335,8 +1337,9 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
      task->home_lane_id=task->from_lane_id=task->selected_lane_id=e->episode.target_lane_id;task->changing=false;
     }else{
      task->from_lane_id=e->episode.target_lane_id;task->selected_lane_id=e->episode.home_lane_id;task->changing=true;
-     if(lp_task_goal(w,task,pose,e->config->plan_horizon,e->config->front+e->config->margin,goal)!=LP_PATH_FOUND)return DE_PATH;
-     if(!behavior_phase(e,DB_REJOIN,*goal,now))return DE_STATE;
+     dw_pose phase_goal;
+     if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND)return DE_PATH;
+     if(!behavior_phase(e,DB_REJOIN,phase_goal,now))return DE_STATE;
     }
     e->episode_transition=true;
    }
@@ -1352,7 +1355,6 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
   else if(e->episode.phase==DB_REJOIN){task->selected_lane_id=e->episode.home_lane_id;
    task->from_lane_id=contained?task->selected_lane_id:e->episode.target_lane_id;task->changing=!contained;}
  }
- if(lp_task_goal(w,task,pose,e->config->plan_horizon,e->config->front+e->config->margin,goal)!=LP_PATH_FOUND)return DE_PATH;
  if(!e->episode.active){
   struct db_blocker blocker;if(!db_blocker_observe(w,task,pose,e->config->plan_horizon,e->config,&blocker))return DE_PATH;
   if(blocker.present){
@@ -1367,9 +1369,10 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    uint8_t id[16];memcpy(id,e->behavior_incarnation,16);uint64_t n=++e->episode_counter;
    for(unsigned k=0;k<8;k++)id[15-k]^=(uint8_t)(n>>(k*8));
    uint32_t target=view.selected->adjacent_lane_id;task->from_lane_id=task->selected_lane_id;task->selected_lane_id=target;task->changing=true;
-   if(lp_task_goal(w,task,pose,e->config->plan_horizon,e->config->front+e->config->margin,goal)!=LP_PATH_FOUND||
-      !db_episode_begin(&e->episode,id,task->home_lane_id,target,&e->basis,&blocker,*goal,now,&e->facts,&e->behavior_limits)||
-      !db_episode_phase(&e->episode,DB_CHANGE_OUT,*goal,now,&e->behavior_limits))return DE_STATE;
+   dw_pose phase_goal;
+   if(lp_task_goal(w,task,pose,e->config->plan_horizon,phase_clearance,&phase_goal)!=LP_PATH_FOUND||
+      !db_episode_begin(&e->episode,id,task->home_lane_id,target,&e->basis,&blocker,phase_goal,now,&e->facts,&e->behavior_limits)||
+      !db_episode_phase(&e->episode,DB_CHANGE_OUT,phase_goal,now,&e->behavior_limits))return DE_STATE;
    /* Search completion may arrive after several newer Vehicle samples. Keep
     * the actual birth witness; those newer samples are current progress, not
     * permission to move the original birth/meter baseline forward. */
@@ -1378,14 +1381,14 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
    e->episode_candidate.core.right_baseline_ticks=birth_vehicle.right_ticks;
    float lo,hi,radius=hypotf(e->config->front,e->config->half_width),pad=v->position_error_m+radius*v->heading_error_rad;
    if(!db_station_bounds(&e->episode.basis,pose,pad,e->config,&lo,&hi))return DE_STATE;
-   e->episode.progress_lower=lo;e->episode.remaining_upper=hypotf(pose.x-goal->x,pose.y-goal->y)+pad;
+   e->episode.progress_lower=lo;e->episode.remaining_upper=hypotf(pose.x-phase_goal.x,pose.y-phase_goal.y)+pad;
    e->episode.last_vehicle_sequence=v->sequence;
    if(e->budget.clock)e->budget.clock(e->budget.context,&e->episode_began_guest_us);
    e->phase_began_guest_us=e->episode_began_guest_us;
    e->episode_transition=true;
   }
  }
- return DE_OK;
+ return lp_task_goal(w,task,pose,e->config->plan_horizon,clearance,goal)==LP_PATH_FOUND?DE_OK:DE_PATH;
 }
 static void source_context(const dw_world *w,xenova_drive_EpisodeSourceContext *s){
  memset(s,0,sizeof(*s));strcpy(s->vehicle,w->vehicle);strcpy(s->mapper_boot,w->mapper_boot);strcpy(s->mapper_instance,w->mapper_instance);

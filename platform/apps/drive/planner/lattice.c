@@ -647,16 +647,20 @@ static enum lp_result reference_obstruction(struct lp_search *s,struct lp_road_s
 
 static enum lp_result guide_terminal(struct lp_search *s,float clearance);
 
+float lp_terminal_clearance(const struct lp_config *c){
+ float sweep=.5f*c->primitive_speed*c->primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
+ /* Reserve the rotated front corner plus half a sampled motion step. */
+ return hypotf(c->front+c->margin+c->tracking_guard+sweep,c->half_width+c->margin+c->tracking_guard+sweep);
+}
+
 static enum lp_result local_terminal(struct lp_search *s) {
  const struct lp_config *c=s->config;
- float dt=c->primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
  /* A candidate goal is a pose. Motion edges and path adoption check the
   * actual swept travel separately. A hypothetical max-steer step here can
   * reject a stationary goal that has a safe straight approach. */
  enum lp_result rc=footprint(s->world,s->goal,c->tracking_guard,c,&s->metrics,&s->budget,false,NULL,&s->task,&s->space);
  if(rc!=LP_COLLISION)return rc;
- float clearance=hypotf(c->front+c->margin+c->tracking_guard+.5f*c->primitive_speed*dt,
-                       c->half_width+c->margin+c->tracking_guard+.5f*c->primitive_speed*dt);
+ float clearance=lp_terminal_clearance(c);
  rc=guide_terminal(s,clearance);
  if(rc!=LP_COLLISION)return rc;
  dw_pose previous=s->goal;
@@ -864,17 +868,23 @@ static float guide_curvature(const struct lane_guide *g,dw_pose pose,float respo
 }
 
 enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_world *w,dw_pose start_pose,
- float steer,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
+ float steer,float speed,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
  const struct tr_basis *basis,struct lp_metrics *metrics){
  struct tr_view view;
  if(!narrow_lane(w,task,c,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
-    fabsf(steer)>c->max_steer)return LP_NOT_FOUND;
+    fabsf(steer)>c->max_steer||!isfinite(speed))return LP_NOT_FOUND;
  struct lane_guide guide;
  if(!make_lane_guide(&view,c,&guide))return LP_NOT_FOUND;
  struct lp_road_state first,last;
  if(lp_task_project(w,task,start_pose,&first)!=LP_PATH_FOUND||lp_task_project(w,task,nominal,&last)!=LP_PATH_FOUND)return LP_NOT_FOUND;
  float length=last.arc-first.arc;
- if(length<=c->goal_distance)return LP_NOT_FOUND;
+ float cruise=c->narrow_lane_speed_mps>0?c->narrow_lane_speed_mps:c->max_velocity;
+ speed=fmaxf(speed,cruise);
+ /* Keep enough path for the controller lookahead time and a stop from the
+  * current or intended speed, even when the car starts at rest. */
+ float minimum=fmaxf(c->primitive_speed*c->primitive_duration,
+  speed*(c->lookahead_time+c->reaction_s)+speed*speed/(2*c->max_brake));
+ if(length<minimum)return LP_NOT_FOUND;
  float step=fminf(c->tracking_guard*.6f,.0015f),dt=step/c->primitive_speed;
  unsigned count=(unsigned)fminf(LP_PATH-1,floorf(length/step));
  if(!budget.collision_index){lp_index_build(&s->collision_index,w,c);budget.collision_index=&s->collision_index;}
@@ -902,7 +912,7 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
   path->points[path->count++]=(xenova_drive_PathPoint){.pose=moved,.steering_rad=next,.velocity_mps=c->primitive_speed};
   pose=moved;steer=next;
  }
- if((path->count-1)*step<c->goal_distance*2)return LP_NOT_FOUND;
+ if((path->count-1)*step<minimum)return LP_NOT_FOUND;
  path->goal=path->merge_goal=pose;
  enum lp_result checked=lp_validate_path(path,w,c,metrics,&budget);
  return checked==LP_COLLISION?LP_NOT_FOUND:checked;

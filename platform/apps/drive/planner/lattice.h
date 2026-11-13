@@ -117,11 +117,12 @@ enum lp_result lp_start_exit(struct lp_search *,const dw_world *,dw_pose,float,
  const struct tr_intent *,const struct tr_basis *,const struct lp_config *,const struct lp_assets *,struct lp_budget);
 enum lp_result lp_task_obstructed(const dw_world *,const struct tr_intent *,dw_pose,dw_pose,
  const struct lp_config *,struct lp_budget,struct lp_metrics *,bool *);
-/* Build once per immutable map/configuration; 64 rows, no global cache. */
-/* Try a forward same-lane path whose body fits the observed bend. The caller
+float lp_terminal_clearance(const struct lp_config *);
+/* Try a forward lane-guided path whose body fits the observed road. The caller
  * retains the existing path admission and may run the lattice on NOT_FOUND. */
-enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,dw_pose,
+enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,float,dw_pose,
  const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *);
+/* Build once per immutable map/configuration; 64 rows, no global cache. */
 void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp_config *);
 /* Maximum expansions per slice; collision and cancellation checks are also
  * bounded inside each primitive/footprint. SEARCHING is not completed progress. */
