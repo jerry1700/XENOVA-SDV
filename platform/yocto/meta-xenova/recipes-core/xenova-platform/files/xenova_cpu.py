@@ -89,6 +89,11 @@ def selected_cpus(value):
     return set(value['shared_pcpus']) | {c for item in placements(value) for c in item['pcpus']}
 
 
+def vm_placement(policy, identity):
+    placement = next((v for v in placements(policy) if v['vm_id'] == identity), None)
+    return (placement['mode'], placement['pcpus']) if placement else ('shared', policy['shared_pcpus'])
+
+
 def affinity_text(context):
     """xl scalar cpus applies the same mask to every max_vcpu; a list maps individual vCPUs."""
     if not context or not context['configured']:
@@ -154,6 +159,9 @@ class CPU:
                         not isinstance(op['idempotency_key'],str) or not op['idempotency_key'] or
                         candidate.get('schema_version') not in ('1.0','2.0') or
                         op.get('schema_version') != candidate['schema_version'] or
+                        type(op.get('guest_only', False)) is not bool or
+                        type(op.get('host_preparation_required', True)) is not bool or
+                        (op.get('host_preparation_required') is False and not op.get('guest_only')) or
                         candidate != policy_candidate(request,path.stem,candidate['pool_name'],
                                                       legacy=candidate['schema_version']=='1.0')):
                     raise ValueError('CPU journal mismatch')
@@ -211,18 +219,55 @@ class CPU:
         return value, operations
 
     def context(self, record, policy=None):
-        policy = self.policy() if policy is None else policy
-        return self._context(record,policy)
+        if policy is not None:
+            return self._context(record, policy)
+        policy, operations = self._policy_state()
+        return self._vm_context(record, policy, operations)
+
+    @staticmethod
+    def _guest_policy_chain(policy, operations):
+        """Follow only recorded guest-only publications back to the last host policy."""
+        by_revision = {op['candidate']['policy_revision']: op for op in operations}
+        while policy is not None:
+            op = by_revision.get(policy['policy_revision'])
+            if not op or op['candidate'] != policy:
+                refuse('CPU_POLICY_INVALID', 'CPU publication missing from verified history')
+            if not op.get('guest_only'):
+                yield policy
+                return
+            base = by_revision.get(op['base_revision'])
+            if (not base or base['phase'] != 'completed' or
+                    any(base['candidate'][field] != policy[field] for field in ('pool_name', 'shared_pcpus'))):
+                refuse('CPU_POLICY_INVALID', 'guest-only CPU publication has no matching host policy')
+            yield policy
+            policy = base['candidate']
+
+    def _vm_context(self, record, policy, operations):
+        if policy is not None:
+            placement = vm_placement(policy, record['uuid'])
+            # Keep the context recorded by start/recovery until this VM or the host changes.
+            for version in self._guest_policy_chain(policy, operations):
+                if vm_placement(version, record['uuid']) != placement:
+                    break
+                policy = version
+        return self._context(record, policy)
+
+    @staticmethod
+    def _affected_vms(previous, candidate):
+        if not previous or any(previous[field] != candidate[field] for field in ('pool_name', 'shared_pcpus')):
+            return None
+        identities = {v['vm_id'] for policy in (previous, candidate) for v in placements(policy)}
+        return {identity for identity in identities
+                if vm_placement(previous, identity) != vm_placement(candidate, identity)}
 
     @staticmethod
     def _context(record,policy):
         """검증된 한 정책의 순수 투영. 미설정도 다시 디스크에서 읽지 않는다."""
         if policy is None:
             return {'configured':False}
-        placement = next((v for v in placements(policy) if v['vm_id'] == record['uuid']), None)
-        cores = placement['pcpus'] if placement else policy['shared_pcpus']
+        mode, cores = vm_placement(policy, record['uuid'])
         return {'configured':True, 'policy_revision':policy['policy_revision'],
-                'policy_sha256':fingerprint(policy), 'allocation':placement['mode'] if placement else 'shared',
+                'policy_sha256':fingerprint(policy), 'allocation':mode,
                 'desired_hard_affinity':[{'vcpu':v, 'pcpus':cores} for v in range(record['vcpus'])]}
 
     def command(self, argv, deadline):
@@ -336,6 +381,41 @@ class CPU:
             refuse('DEADLINE_EXCEEDED', 'CPU observation completed after deadline')
         return first
 
+    def _host_matches(self, policy, sample):
+        hardware, dom0 = sample['hardware'], sample['domains'][0]
+        return (hardware['pool_name'] == policy['pool_name'] and
+                all(v['pcpus'] == policy['shared_pcpus'] for v in dom0['hard_affinity']) and
+                selected_cpus(policy) <= set(hardware['online_pcpus']))
+
+    def _receipt_matches(self, receipt, policy, operations, dom0):
+        if (not receipt or receipt.get('host_boot_id') != self.e.host or
+                receipt.get('dom0_unique_id') != dom0['xen_unique_id'] or receipt.get('vcpus') != dom0['vcpus']):
+            return False
+        version = next((v for v in self._guest_policy_chain(policy, operations)
+                        if v['policy_revision'] == receipt.get('policy_revision')), None)
+        return version is not None and receipt.get('policy_sha256') == fingerprint(version)
+
+    def _placement_issues(self, policy, records, domains):
+        issues = []
+        managed = {r['uuid']:r for r in records.values()}
+        names = {r['name']:r['uuid'] for r in records.values()}
+        seen = set()
+        for row in domains.values():
+            if row['domid'] == 0:
+                continue
+            record = managed.get(row['vm_id'])
+            if ((record and (row['name'] != record['name'] or row['vm_id'] in seen)) or
+                    (row['name'] in names and names[row['name']] != row['vm_id'])):
+                refuse('TARGET_CHANGED', 'managed UUID and Xen name do not match')
+            if record:
+                seen.add(row['vm_id'])
+            expected = self._context(record, policy)['desired_hard_affinity'] if record else [
+                {'vcpu':v, 'pcpus':policy['shared_pcpus']} for v in range(row['vcpus'])]
+            if row['hard_affinity'] != expected:
+                issues.append({'code':'AFFINITY_MISMATCH', 'domid':row['domid'], 'vm_id':row['vm_id'],
+                               'name':row['name'], 'expected':expected, 'actual':row['hard_affinity']})
+        return issues
+
     @traced('cpu.layout')
     def layout(self, records, deadline, vm_id=None):
         policy = self.policy()
@@ -348,25 +428,12 @@ class CPU:
         hardware, domains = sample['hardware'], sample['domains']
         receipt = self.read(self.receipt_path) if policy else None
         desired = policy['shared_pcpus'] if policy else None
-        host_matches = bool(policy and hardware['pool_name'] == policy['pool_name'] and
-                            all(v['pcpus'] == desired for v in domains[0]['hard_affinity']) and
-                            selected_cpus(policy) <= set(hardware['online_pcpus']))
-        all_issues = []
-        managed = {r['uuid']:r for r in records.values()}
-        for row in domains.values():
-            if not policy or row['domid'] == 0:
-                continue
-            record = managed.get(row['vm_id'])
-            expected = self._context(record, policy)['desired_hard_affinity'] if record else [
-                {'vcpu':v, 'pcpus':desired} for v in range(row['vcpus'])]
-            if row['hard_affinity'] != expected:
-                all_issues.append({'code':'AFFINITY_MISMATCH', 'domid':row['domid'], 'vm_id':row['vm_id'],
-                                   'name':row['name'], 'expected':expected, 'actual':row['hard_affinity']})
+        all_issues = self._placement_issues(policy, records, domains) if policy else []
         vms = []
         for record in records.values():
             context = self._context(record, policy)
             row = next((v for v in domains.values() if v['vm_id'] == record['uuid']), None)
-            if row and row['name'] != record['name']:
+            if not policy and row and row['name'] != record['name']:
                 refuse('TARGET_CHANGED', 'managed UUID has an unexpected Xen name')
             matches, exclusive, issues = None, None, []
             if policy and row:
@@ -397,11 +464,8 @@ class CPU:
         # 정책 값이 그대로여도 관측 중 새 prepared journal이 생길 수 있다.
         # 관측 이후의 완전 검증 이력으로 준비 여부를 판정한다.
         pending = [v['operation_id'] for v in operations if v['phase'] != 'completed']
-        ready = bool(not pending and host_matches and receipt and receipt.get('phase') == 'ready' and
-                     receipt.get('host_boot_id') == self.e.host and receipt.get('policy_sha256') == fingerprint(policy) and
-                     receipt.get('policy_revision') == policy['policy_revision'] and
-                     receipt.get('dom0_unique_id') == domains[0]['xen_unique_id'] and
-                     receipt.get('vcpus') == domains[0]['vcpus'])
+        ready = bool(policy and not pending and receipt and receipt.get('phase') == 'ready' and
+                     self._host_matches(policy, sample) and self._receipt_matches(receipt, policy, operations, domains[0]))
         all_issues = ([{'code':'POLICY_PUBLICATION_PENDING', 'operation_id':v} for v in pending]+
                       ([{'code':'CPU_NOT_READY','domid':0}] if policy and not ready else [])+all_issues)
         return {'configured':policy is not None, 'policy_revision':policy['policy_revision'] if policy else None,
@@ -419,7 +483,7 @@ class CPU:
         if self.p.clock() >= deadline:
             refuse('DEADLINE_EXCEEDED', 'CPU validation deadline expired')
         policy,operations=self._policy_state()
-        context = self._context(record,policy)
+        context = self._vm_context(record, policy, operations)
         if expected is not None and expected != context:
             refuse('TARGET_CHANGED', 'accepted CPU policy context changed')
         if not context['configured']:
@@ -501,31 +565,42 @@ class CPU:
                        details={'operation_id':op['operation_id']})
         return pending
 
-    def guard_stopped(self, records, sample, *, policy_operation=None, isolated_creations=()):
-        from xenova_preparation import assets_quiet
-        assets_quiet(self.p)
+    def guard_stopped(self, records, sample, *, policy_operation=None, isolated_creations=(), affected=None):
+        from xenova_preparation import assets_quiet, guard_asset
+        if affected is None:
+            assets_quiet(self.p)
+        else:
+            for identity in sorted(affected):
+                guard_asset(self.p, identity)
+            running = sorted({row['vm_id'] for row in sample['domains'].values() if row['vm_id'] in affected})
+            if running:
+                refuse('VM_NOT_STOPPED', 'stop the VMs whose CPU placement changes',
+                       details={'vm_ids':running})
+        domains = [{'domid':v['domid'], 'config':{'c_info':{'uuid':v['vm_id'], 'name':v['name']}}}
+                   for v in sample['domains'].values()]
         for record in records.values():
-            if self.p.matching(record, [{'domid':v['domid'], 'config':{'c_info':{'uuid':v['vm_id'], 'name':v['name']}}} for v in sample['domains'].values()]):
+            if affected is not None and record['uuid'] not in affected:
+                continue
+            if self.p.matching(record, domains):
                 refuse('VM_NOT_STOPPED', 'all managed guests must be stopped before CPU policy or host preparation')
             run = self.e.run_record(record)
             if run and run.get('phase') in ('launching', 'uncertain'):
                 refuse('RECONCILE_REQUIRED', 'unfinished launch owns CPU configuration')
-        for op in self.operations():
-            if op['phase'] != 'completed' and op['operation_id'] != policy_operation:
-                refuse('RECONCILE_REQUIRED', 'finish the pending CPU policy publication first')
+        if any(op['phase'] != 'completed' and op['operation_id'] != policy_operation for op in self.operations()):
+            refuse('RECONCILE_REQUIRED', 'finish the pending CPU policy publication first')
         from xenova_management import Manager
         from xenova_creation import holds
         manager=Manager(self.p)
         for op in manager._operations():
-            if op not in isolated_creations and holds(manager,op):
+            if (affected is None or op['vm_id'] in affected) and op not in isolated_creations and holds(manager,op):
                 refuse('OPERATION_IN_PROGRESS', 'unfinished asset operation blocks CPU policy', retryable=True,
                        details={'operation_id':op['operation_id']})
         from xenova_recovery import Recovery
-        for op in self.e.requests()+Recovery(Manager(self.p)).attempts():
+        for op in self.e.requests()+Recovery(manager).attempts():
+            if affected is not None and op['request']['vm_id'] not in affected:
+                continue
             if op.get('host_boot_id') == self.e.host and op.get('phase') not in ('completed', 'failed'):
                 refuse('RECONCILE_REQUIRED', 'unfinished control/recovery blocks CPU policy')
-        # Unknown domains are never silently moved. They must already respect the
-        # proposed shared set; checked separately once the candidate is known.
 
     def set_policy(self, spec, records, *, execute, key, context, deadline=None):
         # 등록 검증과 factory 준비도 호출자의 전체 기한을 공유한다.
@@ -540,12 +615,14 @@ class CPU:
         if op:
             context.update(operation_id=op['operation_id'], replayed=True)
             if op['phase'] == 'completed':
-                return {'policy':op['candidate'], 'current_policy':self.policy(), 'historical':True}
-        previous = self.policy(pending=op)
+                return {'policy':op['candidate'], 'current_policy':self.policy(), 'historical':True,
+                        'host_preparation_required':op.get('host_preparation_required', True)}
+        previous, history = self._policy_state(pending=op)
         if op and previous == op['candidate']:
             if execute:
                 op['phase'] = 'completed'; self.e.write(self.journals/(op['operation_id']+'.json'), op)
-            return {'policy':previous, 'plan':not execute}
+            return {'policy':previous, 'plan':not execute,
+                    'host_preparation_required':op.get('host_preparation_required', True)}
         revision = previous['policy_revision'] if previous else None
         if spec['expected_policy_revision'] != revision:
             refuse('TARGET_CHANGED', 'CPU policy revision changed', details={'current_policy_revision':revision})
@@ -555,7 +632,6 @@ class CPU:
         if receipt and receipt.get('host_boot_id') == self.e.host and receipt.get('phase') in ('applying', 'failed', 'restoring'):
             refuse('RECONCILE_REQUIRED', 'finish or restore partial dom0 affinity before changing policy')
         sample = self.observe(deadline)
-        self.guard_stopped(records, sample, policy_operation=op['operation_id'] if op else None)
         available = set(sample['hardware']['online_pcpus'])
         if not selected_cpus(spec) <= available:
             refuse('RESOURCE_UNSUPPORTED', 'selected pCPU is not online in the existing Xen pool')
@@ -564,26 +640,45 @@ class CPU:
             if record is None:
                 if previous and entry in placements(previous):continue
                 refuse('VM_NOT_FOUND', 'new placement requires an existing registered UUID')
-        self.check_unknown(records, sample, spec['shared_pcpus'])
         opid = op['operation_id'] if op else uuid4()
         candidate = policy_candidate(spec,opid,sample['hardware']['pool_name'],
                                      legacy=bool(op and op['candidate']['schema_version']=='1.0'))
-        if self.p.clock() >= deadline:
-            refuse('DEADLINE_EXCEEDED', 'CPU policy validation exceeded the original deadline')
-        if not execute:
-            return {'plan':True, 'policy':candidate, 'host_preparation_required':True}
         if op and op['candidate'] != candidate:
             refuse('TARGET_CHANGED', 'pending CPU publication no longer fits the observed host')
+        # An older pending request keeps its original host-wide admission rules.
+        affected = self._affected_vms(previous, candidate) if not op or op.get('guest_only') else None
+        self.guard_stopped(records, sample, policy_operation=op['operation_id'] if op else None, affected=affected)
+        self.check_unknown(records, sample, spec['shared_pcpus'])
+        ready = False
+        if affected is not None:
+            issues = self._placement_issues(candidate, records, sample['domains'])
+            if issues:
+                refuse('CPU_APPLY_INCOMPLETE', 'running domains do not match the candidate CPU policy',
+                       details={'issues':issues})
+            ready = (bool(receipt and receipt.get('phase') == 'ready') and
+                     self._host_matches(candidate, sample) and
+                     self._receipt_matches(receipt, previous, history, sample['domains'][0]))
+            if not ready and set(sample['domains']) != {0}:
+                refuse('CPU_NOT_READY', 'verify host preparation before changing guest placement with running domains')
+        if self.p.clock() >= deadline:
+            refuse('DEADLINE_EXCEEDED', 'CPU policy validation exceeded the original deadline')
+        host_required = not ready
+        if not execute:
+            return {'plan':True, 'policy':candidate, 'host_preparation_required':host_required}
         op = op or {'schema_version':'2.0', 'operation_id':opid, 'idempotency_key':key, 'request':spec,
-                    'base_revision':revision, 'candidate':candidate, 'phase':'prepared'}
+                    'base_revision':revision, 'candidate':candidate, 'phase':'prepared', 'guest_only':affected is not None}
+        op['host_preparation_required'] = host_required
         context['operation_id'] = opid
+        if self.p.boot_id_reader() != self.e.host:
+            refuse('TARGET_CHANGED', 'host boot changed before CPU policy publication')
+        self.e.gate()
         self.e.write(self.journals/(opid+'.json'), op)
         self.e.checkpoint('cpu-policy-prepared', op)
         self.e.write(self.anchor, {'schema_version':'1.0', 'activation_operation_id':opid})
         self.e.write(self.policy_path, candidate)
         self.e.checkpoint('cpu-policy-published', op)
         op['phase'] = 'completed'; self.e.write(self.journals/(opid+'.json'), op)
-        return {'policy':candidate, 'host_preparation_required':True}
+        return {'policy':candidate, 'host_preparation_required':host_required}
 
     def check_unknown(self, records, sample, shared):
         managed = {r['uuid'] for r in records.values()}
@@ -618,7 +713,7 @@ class CPU:
             display('preparing' if not restore else 'restoring')
         if execute and not restore:
             self.factory(records, deadline)
-        policy = self.policy()
+        policy, operations = self._policy_state()
         if not policy:
             if execute:
                 display('complete', configured=False)
@@ -632,9 +727,7 @@ class CPU:
             refuse('CPU_NOT_READY', 'saved CPU policy does not fit the current Xen pool/topology')
         row = sample['domains'][0]
         receipt = self.read(self.receipt_path)
-        same = bool(receipt and receipt.get('host_boot_id') == self.e.host and
-                    receipt.get('policy_sha256') == fingerprint(policy) and receipt.get('dom0_unique_id') == row['xen_unique_id'] and
-                    receipt.get('vcpus') == row['vcpus'])
+        same = self._receipt_matches(receipt, policy, operations, row)
         if restore and not same:
             refuse('TARGET_CHANGED', 'no matching dom0 preparation receipt to restore')
         if not execute:
@@ -652,7 +745,8 @@ class CPU:
         original = receipt['original_hard_affinity']
         if any(a not in (original[i], {'vcpu':i, 'pcpus':policy['shared_pcpus']}) for i,a in enumerate(row['hard_affinity'])):
             refuse('TARGET_CHANGED', 'dom0 affinity was changed externally; receipt cannot be resumed safely')
-        receipt.update(phase='restoring' if restore else 'applying', error=None)
+        receipt.update(phase='restoring' if restore else 'applying', error=None,
+                       policy_revision=policy['policy_revision'], policy_sha256=fingerprint(policy))
         self.e.write(self.receipt_path, receipt)
         try:
             for affinity in desired:

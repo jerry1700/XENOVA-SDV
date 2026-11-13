@@ -435,6 +435,40 @@ static void test_auto_delay_pair_bounds(void)
 	CHECK(!memcmp(&command,zero,sizeof(command)),"auto delay token-bound rejection has no unsafe correlation");
 }
 
+static void test_vm_crash_command(void)
+{
+	struct xm_vm_crash_command command;
+	const char *valid[] = {
+		"{\"command_id\":\"crash-1\",\"expected_boot_id\":\"boot\",\"expires_at\":\"2026-11-13T00:00:00Z\",\"action\":\"vm_crash\",\"parameters\":{}}",
+		"{\"parameters\":{},\"action\":\"vm_crash\",\"expires_at\":\"2026-11-13T00:00:00Z\",\"expected_boot_id\":\"boot\",\"operation_id\":\"op-1\",\"command_id\":\"crash-1\"}"
+	};
+	for (size_t i = 0; i < sizeof(valid) / sizeof(valid[0]); i++) {
+		CHECK(xm_vm_crash_command_parse(sp(valid[i]), &command) == 0,
+		      "vm crash valid command %zu", i);
+		CHECK(!strcmp(command.command_id, "crash-1") &&
+		      !strcmp(command.operation_id, i ? "op-1" : ""),
+		      "vm crash correlation %zu", i);
+	}
+	const char *invalid[] = {
+		"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_delay\",\"parameters\":{}}",
+		"{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"vm_crash\",\"parameters\":{},\"extra\":true}",
+		"{\"command_id\":\"c\",\"command_id\":\"other\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"vm_crash\",\"parameters\":{}}"
+	};
+	for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++)
+		CHECK(xm_vm_crash_command_parse(sp(invalid[i]), &command) == -EINVAL,
+		      "vm crash invalid command %zu", i);
+	CHECK(xm_vm_crash_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"vm_crash\",\"parameters\":{\"duration_s\":1}}"), &command) == -ERANGE,
+	      "vm crash parameters must be empty");
+
+	char out[384];
+	CHECK(xm_vm_crash_result_json(out, sizeof(out), &command, "ACCEPTED", NULL) > 0 &&
+	      strstr(out, "\"result\":{\"action\":\"vm_crash\"}") && strstr(out, "\"error\":null"),
+	      "vm crash accepted result %s", out);
+	CHECK(xm_vm_crash_result_json(out, sizeof(out), &command, "FAILED", "CRASH_FAILED") > 0 &&
+	      strstr(out, "\"result\":null") && strstr(out, "\"code\":\"CRASH_FAILED\""),
+	      "vm crash failed result %s", out);
+}
+
 static void test_lifecycle(void)
 {
  char out[256];
@@ -458,6 +492,7 @@ int main(int argc, char **argv)
 	test_payloads();
 	test_auto_delay_closed_keys();
 	test_auto_delay_pair_bounds();
+	test_vm_crash_command();
 	test_uuid();
 	test_lifecycle();
 	printf("%d checks, %d failures\n", checks, failures);

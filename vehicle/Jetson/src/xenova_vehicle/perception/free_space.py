@@ -104,11 +104,12 @@ def _inside_box(bounds, support, guard=1e-10):
 
 
 def certify_cell(cell_xy_bounds, patches, targets, profile, *, permission_polygon=None,
-                 max_tiles=4096, max_ray_tests=200000, tile_size_m=None, hazards=()):
+                 max_tiles=4096, max_ray_tests=200000, tile_size_m=None, hazards=(), work_allowed=None):
     """미검사 placement가 하나라도 남으면 UNKNOWN이다. 후보 ray 순서는 증명 범위를 줄이지 않는다.
 
     image-space 근접32개는 witness 탐색 힌트다. 그 안에서 증명되지 않은 tile을
     불가능/빈 공간으로 바꾸지 않으며 전체 target placement-domain cover는 유지한다.
+    work_allowed가 False를 반환하면 미완료 증명은 UNKNOWN으로 돌려준다.
     """
     bounds = vector(cell_xy_bounds, 4)
     x0, y0, x1, y1 = bounds
@@ -193,6 +194,9 @@ def certify_cell(cell_xy_bounds, patches, targets, profile, *, permission_polygo
                 if floor is None:
                     return result('UNKNOWN', 'PLANE_INTERVAL_UNBOUNDED', tested, required, work, sorted(keys, key=repr), rank_work)
                 for iz in range(nz):
+                    if work_allowed is not None and tested % 8 == 0 and not work_allowed():
+                        return result('UNKNOWN', 'COMPLETION_BUDGET', tested, required, work,
+                                      sorted(keys, key=repr), rank_work)
                     if tested >= max_tiles:
                         return result('UNKNOWN', 'UNTESTED_PLACEMENT_TILES', tested, required, work, sorted(keys, key=repr), rank_work)
                     a, b = (target.base_height_m[0] + (target.base_height_m[1] - target.base_height_m[0]) * i / nz

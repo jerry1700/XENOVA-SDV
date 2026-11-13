@@ -65,8 +65,8 @@ class PointFeature:
             raise ValueError('explicit point constraint kind required')
         if (type(self.endpoint_matches) is not tuple or self.endpoint_matches and
                 (self.normal_only or tuple(segment for segment,_ in self.endpoint_matches)!=self.compatible
-                 or any(type(end) is not int or end not in (0,1) for _,end in self.endpoint_matches))):
-            raise ValueError('endpoint constraint requires an original finite segment correspondence')
+                 or any(type(end) is not int or end not in (0,1,2) for _,end in self.endpoint_matches))):
+            raise ValueError('finite constraint requires an original finite segment correspondence')
 
 
 @dataclass(frozen=True)
@@ -208,12 +208,13 @@ class RegistrationResult:
 
 
 def overlapping_points(points, reference, prior, profile, *, observed_ends=None, position_radius_m=None,
-                       max_lateral_match_m=None, include_endpoints=False):
+                       max_lateral_match_m=None, include_endpoints=False, include_midpoints=False):
     """공통 구간을 고른다. observed_ends는 조각 ID별 (a, b, 중심선 오차)다.
 
     끝점 검사와 횡방향 대응 상한에는 capture로 조각 ID를 구분한 reference를 사용한다.
     횡방향 상한은 선의 대응을 고르는 조건이다. 잔차 계산의 원 관측 오차는 보존한다.
     include_endpoints는 관측한 중심선 끝과 방향이 확인된 유한 지도 조각에만 적용한다.
+    include_midpoints는 양끝을 확인했으나 끝의 순서는 모호할 수 있는 짧은 조각에 쓴다.
     """
     if max_lateral_match_m is None:
         lateral_limit = math.inf
@@ -295,11 +296,17 @@ def overlapping_points(points, reference, prior, profile, *, observed_ends=None,
         if compatible:
             observed.append(replace(point, compatible=tuple(compatible))
                 if reference.feature_policy == 'OBSERVED_STRIP_SUPPORT_V1' else point)
-            if include_endpoints and matching_ends:
+            if (include_endpoints or include_midpoints) and matching_ends:
                 # 끝점도 같은 횡방향 상한과 원 유한 구간 대응을 통과해야 한다.
-                endpoint_support.setdefault(point.component,(point.capture_id,set()))[1].update(compatible)
-    for component,(capture,compatible) in endpoint_support.items():
+                endpoint_support.setdefault(point.component,(point.capture_id,set(),point.error_xy))[1].update(compatible)
+    for component,(capture,compatible,error_xy) in endpoint_support.items():
         a,b,error=observed_ends[component]
+        if include_midpoints:
+            matches = tuple(segment for segment in end_matches[component] if segment in compatible)
+            observed.append(PointFeature(_midpoint(a,b),error,component,capture,matches,error_xy=error_xy,
+                endpoint_matches=tuple((segment,2) for segment in matches)))
+        if not include_endpoints:
+            continue
         matches=tuple((segment,orientation) for segment,orientation in end_matches[component].items()
                       if segment in compatible and orientation is not None)
         if matches:
@@ -308,6 +315,15 @@ def overlapping_points(points, reference, prior, profile, *, observed_ends=None,
                     tuple(segment for segment,_ in matches),endpoint_matches=tuple(
                         (segment,orientation^end) for segment,orientation in matches)))
     return tuple(observed)
+
+
+def _midpoint(a, b):
+    return (a[0]+b[0])/2,(a[1]+b[1])/2
+
+
+def finite_feature_point(segment, index):
+    """0/1은 실제 조각 양끝, 2는 끝점 순서에 무관한 중점이다."""
+    return _midpoint(segment.a,segment.b) if index == 2 else (segment.a,segment.b)[index]
 
 
 def register(points, reference, prior, profile=RegistrationProfile(), *, calibration_id, position_radius_m=None):
@@ -347,7 +363,15 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
         for segment in reference.segments:
             length=math.dist(segment.a,segment.b)
             normals[segment]=((segment.b[1]-segment.a[1])/length,(segment.a[0]-segment.b[0])/length)
-    endpoint_indices = tuple(dict(point.endpoint_matches) for point in points)
+    # 탐색 중 바뀌는 것은 cell 자세와 폭이다. 원 관측과 segment 조합은 고정이다.
+    point_terms = []
+    for point,segments in zip(points,compatible):
+        endpoint_indices = dict(point.endpoint_matches)
+        ends = tuple(finite_feature_point(s,endpoint_indices[s.component]) for s in segments) if endpoint_indices else ()
+        point_terms.append((point,segments,ends,math.hypot(*point.point),
+            0. if point.error_xy is None else math.hypot(*point.error_xy)))
+    needed = sum(map(len,compatible))
+    origin = prior.center
     pending, leaves = deque((prior,)), []
     tested = distance_tests = 0
     candidates = []
@@ -355,46 +379,47 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     while pending:
         cell = pending.popleft()
         if position_radius_m is not None:
-            dx=max(cell.x[0]-prior.center[0],0.,prior.center[0]-cell.x[1])
-            dy=max(cell.y[0]-prior.center[1],0.,prior.center[1]-cell.y[1])
+            dx=max(cell.x[0]-origin[0],0.,origin[0]-cell.x[1])
+            dy=max(cell.y[0]-origin[1],0.,origin[1]-cell.y[1])
             if math.hypot(dx,dy)>position_radius_m+profile.numeric_guard_m:
                 continue
-        needed = sum(len(s) for s in compatible)
         if tested >= profile.max_cells or distance_tests + needed > profile.max_distance_tests:
             pending.appendleft(cell)
             exhausted = True
             break
         tested += 1
         center = cell.center
-        ex, ey, etheta = (w / 2 for w in cell.widths)
+        widths = cell.widths
+        ex, ey, etheta = (w / 2 for w in widths)
         translation = math.hypot(ex, ey)
         rotation=2*math.sin(etheta/2)
         cosine,sine=math.cos(center[2]),math.sin(center[2])
         violations, nominal_violations, costs = set(), set(), {}
-        for point, segments, ends in zip(points, compatible, endpoint_indices):
+        for point, segments, ends, point_radius, axis_radius in point_terms:
             if not segments:
                 violations.add(point.component)
                 nominal_violations.add(point.component)
                 costs.setdefault(point.component, []).append(.25)
                 continue
-            location = transform_point(point.point, center)
+            x,y = point.point
+            location = center[0]+cosine*x-sine*y,center[1]+sine*x+cosine*y
+            point_rotation=point_radius*rotation
             if point.normal_only:
                 distances, errors, motions = [], [], []
-                point_rotation=math.hypot(*point.point)*rotation
                 for s in segments:
                     nx,ny=normals[s]
                     distances.append(abs((location[0]-s.a[0])*nx+(location[1]-s.a[1])*ny))
                     bx,by=cosine*nx+sine*ny,-sine*nx+cosine*ny
                     axis_error=(point.error_m if point.error_xy is None else
                         abs(bx)*point.error_xy[0]+abs(by)*point.error_xy[1]
-                        +math.hypot(*point.error_xy)*rotation)
+                        +axis_radius*rotation)
                     errors.append(axis_error)
                     motions.append(abs(nx)*ex+abs(ny)*ey+point_rotation)
             else:
-                distances = ([math.dist(location,(s.a,s.b)[ends[s.component]]) for s in segments] if ends
+                distances = ([math.dist(location,end) for end in ends] if ends
                              else [segment_distance(location, s.a, s.b) for s in segments])
                 errors=[point.error_m]*len(segments)
-                motions=[translation+math.hypot(*point.point)*rotation]*len(segments)
+                motions=[translation+point_rotation]*len(segments)
             distance_tests += len(segments)
             # 연속 yaw 구간의 이동 상한을 사용한다.
             lower = min(max(0., d - motion - error - s.error_m
@@ -415,7 +440,7 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
             candidates.append((rank, center))
             if len(candidates) > profile.max_cells:
                 raise AssertionError('representative pool exceeded the tested-cell cap')
-        if all(w <= step for w, step in zip(cell.widths, profile.cell_steps)):
+        if all(w <= step for w, step in zip(widths, profile.cell_steps)):
             leaves.append(cell)
         else:
             split = cell.split(profile.cell_steps)
@@ -429,11 +454,10 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
                                   tested, distance_tests, True)
     # 최종 F에 포함된 후보만 쓴다. 배제된 조상 cell의 후보를 자동 채택하지 않는다.
     def inside(pose):
-        return ((position_radius_m is None or math.dist(pose[:2],prior.center[:2])<=position_radius_m)
+        return ((position_radius_m is None or math.dist(pose[:2],origin[:2])<=position_radius_m)
             and any(all(lo <= v <= hi for v, (lo, hi) in zip(pose, (b.x, b.y, b.yaw))) for b in feasible))
     # 관측 오차 안에서 이미 성립하는 자세를 잔차 최솟값을 위해 밀어내지 않는다.
     # 모든 후보는 위에서 잔차를 통과했다. 허용 집합 전체로 위치 오차를 계산한다.
-    origin = prior.center
     candidates.sort(key=lambda c: (sum((a-b)**2 for a,b in zip(c[1],origin)), c[0], c[1]))
     representative = next((c for c in candidates if inside(c[1])), None)
     if representative is None:
@@ -443,7 +467,7 @@ def register(points, reference, prior, profile=RegistrationProfile(), *, calibra
     position_error = max(math.hypot(max(abs(b.x[0]-pose[0]), abs(b.x[1]-pose[0])),
                                    max(abs(b.y[0]-pose[1]), abs(b.y[1]-pose[1]))) for b in feasible)
     if position_radius_m is not None:
-        position_error=min(position_error,position_radius_m+math.dist(pose[:2],prior.center[:2]))
+        position_error=min(position_error,position_radius_m+math.dist(pose[:2],origin[:2]))
     yaw_error = max(max(abs(b.yaw[0]-pose[2]), abs(b.yaw[1]-pose[2])) for b in feasible)
     position_error += reference.shared_error_m + profile.shared_bias_m + profile.numeric_guard_m
     yaw_error += profile.shared_bias_rad

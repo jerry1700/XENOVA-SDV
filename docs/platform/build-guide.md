@@ -551,9 +551,9 @@ bitbake -c package_write_rpm xenova-platform xenova-dom0-manager xenova-gateway
 ```
 
 플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
-`xenova-boot-status.service`와 sysinit enablement를 확인한다. 기존 agetty의
-`/run/issue.d`·reload 기능을 사용하며 새 그래픽 런타임은 필요하지 않다.
-고정 이미지의 getty가 agetty인지도 패키지 manifest와 실제 unit에서 대조한다.
+`xenova-boot-status.service`와 sysinit enablement를 확인한다. Xen 이미지의 로그인
+배너는 기존 agetty가 표시하고, 부팅 상태는 상세 명령에서 조회한다. 이미지 rootfs에서
+`serial-getty@hvc0.service` 활성화 링크와 `serial-getty@ttyS0.service` 링크의 부재를 확인한다.
 다른 renderer를 쓰는 설치본의 화면 인계는 [부팅 표시](management-boot-boundaries.md#부팅-진행지연실패-표시)를 따른다.
 
 Pi 4의 기본 부팅 프로필은 Xen `dom0_max_vcpus=2`와 firmware `force_turbo=1`이다.
@@ -687,6 +687,9 @@ try:
     work.mount(dev+"p2", root, readonly=True)
     installed = assemble.platform_root_ok(root)
     check(bool(installed), "actual dom0 source, units, cfg, Wi-Fi, identity")
+    getty = root/"etc/systemd/system/getty.target.wants"
+    check((getty/"serial-getty@hvc0.service").is_symlink(), "Xen dom0 hvc0 login enabled")
+    check(not os.path.lexists(getty/"serial-getty@ttyS0.service"), "Xen dom0 ttyS0 login disabled")
     check((root/"usr/bin/systemd-run").is_file(), "per-execution scope tool systemd-run")
     broker_sources = {
         "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
@@ -1089,6 +1092,12 @@ CPU 정책이 없는 기존 설치의 활성화는 모든 관리 게스트가 �
 공통 이미지에는 HTTP 토큰·MQTT 암호·개인 Wi-Fi 설정을 넣지 않는다. 설치 후 `xenova-dom0-manager.service`가 `dom0_manager.service_token`을 실행해 `/etc/xenova/dom0-manager-token.env`를 0600으로 준비한다. `/etc/xenova/dom0-manager.env`의 기존 서비스 토큰은 우선하며 자동 회전하지 않는다. worker는 `/etc/xenova/recovery-worker.env`의 `XENOVA_RECOVERY_*` 설정을 읽고, broker 연결 문제로 VM 자동 시작이나 host admission을 외부 online 대기에 묶지 않는다.
 
 Debian·Ubuntu 게스트의 내부 DHCP는 `192.168.77.1`을 NTP 서버로 전달한다. `xenova-guest-ntp.service`는 `xenbr0`에서만 듣고, dom0의 `systemd-timesyncd`가 첫 동기화를 마치고 커널의 UTC 오차 한도를 확인한 뒤 응답한다. 게스트 자동 시작은 이 동기화를 기다리지 않는다. 보드에서는 `ss -lun 'sport = :123'`, 게스트에서는 `timedatectl timesync-status`와 `timedatectl show -p NTPSynchronized`로 확인한다. Zephyr는 실행별 XenStore UTC 대응을 사용한다.
+
+Zephyr UTC 저널은 `journalctl -b -u xenova-telemetry-clock.service`로 확인한다.
+dom0 시계가 미동기화 상태이면 `CLOCK_SYNC_PENDING`을 남기고 기존 타이머가 다음
+회차에 다시 확인한다. 동기화 뒤 `responses`가 1 이상이면 그 회차에 XenStore에
+응답을 저장한 건수다. 종료로 호스트 접근이 닫히면 `HOST_QUIESCING`으로 건너뛰며,
+시계 오류, 잘못된 요청, 저장 실패는 계속 서비스 오류로 기록한다.
 
 pinning 기능 수락과 성능 효과는 나누어 기록한다. 동일 펌웨어·입력·broker 설정에서 pinning 전/후 × Debian 부하 유무를 비교하고, guest 계산 주기와 Gateway 지연 각각의 p95/p99·관측 최대·deadline miss·오류/손실을 보관한다. 실제 주행 앱이 없는 경우 타이밍 harness 결과로 범위를 명시한다.
 

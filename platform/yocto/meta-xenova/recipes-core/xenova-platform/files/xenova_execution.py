@@ -21,6 +21,8 @@ import xenova_catalog as catalog
 import xenova_vm as vm
 from xenova_trace import bind as trace_bind, event as trace_event, traced
 
+EARLIER_LAUNCH = "an earlier launch may still exist; administrator reconciliation required"
+
 
 class ExecutionError(PlatformError):
     def __init__(self, code, message, *, retryable=False, details=None):
@@ -30,8 +32,8 @@ class ExecutionError(PlatformError):
 
 class ReadChanged(ExecutionError):
     """요청 안에서 한 번만 새 관측 회차로 재확인할 수 있는 메타데이터 변경."""
-    def __init__(self):
-        super().__init__('TARGET_CHANGED','read configuration or execution changed during observation')
+    def __init__(self, *, details=None):
+        super().__init__('TARGET_CHANGED','read configuration or execution changed during observation',details=details)
 
 
 def refuse(code, message, **kwargs):
@@ -565,7 +567,37 @@ class Execution:
         guard_asset(self.p, record['uuid'])
         previous = self.run_record(record)
         if previous and previous.get("phase") in ("launching", "uncertain"):
-            refuse("RECONCILE_REQUIRED", "an earlier launch may still exist; administrator reconciliation required")
+            refuse("RECONCILE_REQUIRED", EARLIER_LAUNCH)
+
+    def settle_expired_launch(self, record, deadline):
+        """실행 잠금 안에서 현재 VM을 막는 원 작업 하나만 확인한다."""
+        run = self.run_record(record)
+        if not run or run.get('phase') not in ('launching', 'uncertain'):
+            return
+        owner = run.get('owner') or {}
+        if owner.get('kind') == 'recovery':
+            from xenova_management import Manager
+            from xenova_recovery import Recovery
+            recovery = Recovery(Manager(self.p))
+            attempt = recovery.read_attempt(owner.get('recovery_attempt_id'))
+            if attempt['request'].get('vm_id') != record['uuid']:
+                refuse('RECONCILE_REQUIRED', 'launch owner belongs to a different VM')
+            recovery.settle_expired(attempt, deadline)
+        elif owner.get('kind') == 'user':
+            identity = owner.get('operation_id')
+            previous = self.read(self._path(self.data, 'control-requests', identity))
+            end = (previous or {}).get('deadline_monotonic_ms')
+            if not previous or type(end) is not int or not 0 < end <= self.p.clock()*1000:
+                return
+            if (previous.get('phase') not in ('executing', 'uncertain', 'failed')
+                    or not isinstance(previous.get('request'), dict)
+                    or previous['request'].get('action') not in ('start', 'reboot')):
+                return
+            from xenova_management import Manager
+            _validate_request(previous, identity, Manager._text_token)
+            intent = self.intent(record)
+            observed = self.observe(record, deadline)
+            self._reconcile_expired_control_launch(record, previous, intent, run, observed, deadline)
 
     @traced('execution.prepare_launch')
     def prepare_launch(self, record, owner=None, *, deadline=None, expected_cpu=None, cpu_evidence=None,
@@ -662,18 +694,24 @@ class Execution:
             refuse('DEADLINE_EXCEEDED', 'launch validation exhausted the original execution deadline')
 
     @traced('execution.bind_launch')
-    def bind_launch(self, record, value, row, deadline):
+    def bind_launch(self, record, value, row, deadline, *, reconciling=False):
         if value["host_boot_id"] != self.host:
             refuse("TARGET_CHANGED", "launch belongs to a previous host boot")
+        if reconciling and not row.get('xen_unique_id'):
+            refuse('RECONCILE_REQUIRED', 'recovery binding requires a verified Xen incarnation')
         current = self.p.resolve_domain(record, expected=row, deadline=deadline)
-        unique = self.unique(current, deadline)
-        if row.get('xen_unique_id', unique) != unique:
-            refuse('TARGET_CHANGED', 'candidate incarnation changed before binding')
-        self.p.resolve_domain(record, expected={**row, 'xen_unique_id':unique}, deadline=deadline)
+        if reconciling:
+            # resolve_domain already rechecked the observed incarnation after the monitor proof.
+            unique = row['xen_unique_id']
+        else:
+            unique = self.unique(current, deadline)
+            if row.get('xen_unique_id', unique) != unique:
+                refuse('TARGET_CHANGED', 'candidate incarnation changed before binding')
+            self.p.resolve_domain(record, expected={**row, 'xen_unique_id':unique}, deadline=deadline)
         observed = {**value, "phase":"observed", "domid":current["domid"], "xen_unique_id":unique,
                     "observed_monotonic_ms":int(self.p.clock()*1000)}
         path = self._path(self.runtime, "executions", record["uuid"])
-        if 'reboot_from' in value:
+        if reconciling or 'reboot_from' in value:
             with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
                 self.guard_launch(record, value, deadline)
                 self.write(path, observed)
@@ -777,8 +815,10 @@ class Execution:
             failure = ExecutionError('DEADLINE_EXCEEDED' if expired else 'OBSERVATION_UNAVAILABLE', 'Xen list observation could not be verified',
                                      details={'cause_type':type(error).__name__})
         for record in records:
-            if _read_context is None:self.note_probe_error(record['uuid'],failure.error)
-            else:self.note_probe_error(record['uuid'],failure.error,_started_ms=_read_context.started_ms)
+            if _read_context is not None and self.p.clock() >= deadline:
+                break
+            started_ms = _read_context.started_ms if _read_context is not None else None
+            self.note_probe_error(record['uuid'], failure.error, _started_ms=started_ms)
         failure.observation_error_handled = True
         raise failure
 
@@ -886,8 +926,6 @@ class Execution:
         path = self._path(self.runtime, "observations", record["uuid"])
         with short_lock(self.runtime, "observation-"+record["uuid"], deadline=deadline,
                         clock=self.p.clock, sleep=self.p.sleep):
-            if _read_context is not None:
-                _read_context.validate_one(record['uuid'])
             previous = self.read(path)
             last = previous.get("last_success") if previous and previous.get("host_boot_id") == self.host else None
             revision = previous["observation_revision"] if last else 0
@@ -901,6 +939,8 @@ class Execution:
                 if newer and (not last or not same_read_execution(last['value'], observation)
                               or previous.get('last_error') is not None):
                     raise ReadChanged()
+            if _read_context is not None:
+                _read_context.validate_one(record['uuid'], domain_absent=row is None)
             # A delayed read does not publish a new revision. Scheduler-only
             # differences may be returned with its original clock, not a
             # fabricated revision newer than the already-published sample.
@@ -938,8 +978,10 @@ class Execution:
             value = previous if previous and previous.get("host_boot_id") == self.host else {
                 "schema_version":"1.0", "vm_id":identity, "host_boot_id":self.host,
                 "observation_revision":0, "last_success":None}
+            # 조회 실패의 순서는 종료 시점이 아니라 관측을 시작한 시점으로 비교한다.
+            attempt_ms = _started_ms if _started_ms is not None else int(self.p.clock()*1000)
             self.write(path, {**value, "last_error":{"code":code},
-                             "last_attempt_monotonic_ms":int(self.p.clock()*1000)})
+                             "last_attempt_monotonic_ms":attempt_ms})
 
     def snapshot(self, identity, max_age_ms):
         if type(max_age_ms) is not int or not 0 < max_age_ms <= 120000:
@@ -1070,6 +1112,8 @@ class Execution:
         else:
             sync_directory(self.data/"control")
         self.save_request(op, "accepted")
+        if receipt is not None:
+            receipt["accepted"] = True
         self.checkpoint("intent-admission-pending", op)
         self.set_admission(record, op["desired_state"] == "running",
                            "user-stop" if op["desired_state"] == "stopped" else "user-reboot" if request["action"] == "reboot" else "user-start",
@@ -1215,17 +1259,109 @@ class Execution:
                              **({'rollback_error':rollback_error} if rollback_error else {})}) from storage_error
         return settled
 
-    def _reconcile_expired_start(self, record, previous, intent, run, observed, deadline):
-        """만료된 같은 start의 부재·정확한 scope 종결만 확인한다. 새 실행은 제출하지 않는다."""
+    def _complete_replayed_stop(self, record, previous, intent, run, observation, deadline):
+        """늦은 정상 종료를 같은 의도와 작업에 귀속한다. 물리 명령은 보내지 않는다."""
+        if self.p.process_isolation or (run or {}).get('process_scope'):
+            from xenova_guest_process import cleanup
+            try:
+                cleanup(self.p, record, run, deadline, observe_only=True)
+            except (PlatformError, OSError, ValueError) as error:
+                raise ExecutionError('RECONCILE_REQUIRED', 'domain absent but owned process cleanup is unconfirmed; no signal sent',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                             'cause_type':type(error).__name__}) from error
+
+        self.checkpoint('stop-reconcile-before-guard', previous)
+        path = self._path(self.data, 'control-requests', previous['operation_id'])
+        with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
+            if (self.p.boot_id_reader() != self.host
+                    or self.lifecycle(record) != ('REGISTERED', previous['lifecycle_generation'])
+                    or self.intent(record) != intent or self.run_record(record) != run or self.read(path) != previous
+                    or intent.get('desired_state') != 'stopped' or intent.get('intent_revision') != previous['intent_revision']
+                    or intent.get('accepted_host_boot_id') != self.host
+                    or intent.get('lifecycle_generation') != previous['lifecycle_generation']
+                    or observation['intent_revision'] != previous['intent_revision']):
+                refuse('TARGET_CHANGED', 'stop reconciliation context changed before completion')
+            settled = {**previous, 'events':list(previous['events']), 'error':None,
+                       'result':{'accepted':True, 'observation':observation, 'intent_revision':previous['intent_revision']}}
+            if previous['error'] is not None:
+                settled['reconciliation'] = {'outcome':'late_stop_confirmed', 'metadata_only':True,
+                                              'original_error':previous['error']}
+            try:
+                if run and run.get('phase') != 'stopped':
+                    self.end_run(record)
+                self.save_request(settled, 'completed')
+            except OSError as error:
+                # A failed parent sync may leave a visible rename. Restore the
+                # uncertain record so a read cannot mistake it for confirmed completion.
+                try:
+                    if self.read(path) == settled:
+                        self.write(path, previous)
+                except (PlatformError, OSError, ValueError):
+                    raise ExecutionError('RECONCILE_REQUIRED', 'stop completion and journal restore are unconfirmed',
+                        details={'operation_id':previous['operation_id'], 'replayed':True,
+                                 'completion':'uncertain', 'stage':'completion'}) from error
+                raise ExecutionError('RECONCILE_REQUIRED', 'stop completion could not be durably reconciled',
+                    details={'operation_id':previous['operation_id'], 'replayed':True,
+                             'completion':'uncertain', 'stage':'completion'}) from error
+        return settled['result']
+
+    def _complete_replayed_start(self, record, previous, run, observation, deadline):
+        """이미 결합된 실행만 원 시작에 귀속한다. 새 Xen 시작은 제출하지 않는다."""
+        if observation['xen_state'] not in ('running', 'blocked'):
+            refuse('RECONCILE_REQUIRED', 'original start execution is no longer running')
+        self.p.cpu().require(record, deadline, expected=previous.get('cpu_policy', {'configured':False}),
+                             present=True, expected_identity=observation)
+        try:
+            self.p.supply_execution(record, deadline)
+        except TimeoutError as error:
+            raise ExecutionError('RECONCILE_REQUIRED','original start execution supply could not be confirmed') from error
+        path=self._path(self.data,'control-requests',previous['operation_id'])
+        self.checkpoint('start-reconcile-before-guard', previous)
+        current=self.p.resolve_domain(record,expected=observation,deadline=deadline)
+        vm.started_state(record,current)
+        with short_lock(self.runtime,'admission',deadline=deadline,clock=self.p.clock,sleep=self.p.sleep):
+            self.guard_launch(record,run,deadline)
+            if self.read(path)!=previous:
+                refuse('TARGET_CHANGED','original start changed before completion')
+            if run.get('cpu_verification')!='complete':
+                run={**run,'cpu_verification':'complete'}
+                run.pop('cpu_error',None)
+                self.write(self._path(self.runtime,'executions',record['uuid']),run)
+            result={'accepted':True,'observation':observation,'intent_revision':previous['intent_revision']}
+            settled={**previous,'events':list(previous['events']),'result':result,'error':None}
+            if previous['error'] is not None:
+                settled['reconciliation']={'outcome':'late_start_confirmed','original_error':previous['error']}
+            try:
+                self.save_request(settled,'completed')
+            except OSError as error:
+                try:
+                    if self.read(path)==settled:self.write(path,previous)
+                except (PlatformError,OSError,ValueError):
+                    refuse('RECONCILE_REQUIRED','start completion and journal restore are unconfirmed')
+                raise ExecutionError('RECONCILE_REQUIRED','start completion could not be durably reconciled') from error
+        return result
+
+    def _reconcile_expired_control_launch(self, record, previous, intent, run, observed, deadline):
+        """만료된 원 실행의 부재와 정확한 scope 종료를 확인한다."""
         from xenova_guest_process import cleanup, scope_name
         original_end = previous.get('deadline_monotonic_ms')
         owner = {'kind':'user', 'operation_id':previous['operation_id']}
+        request = previous.get('request', {})
+        action = request.get('action')
+        expected_request = {'vm_id':record['uuid'], 'action':action, 'force':False}
+        if action == 'start' and 'create_spec_sha256' in request:
+            spec_hash = request['create_spec_sha256']
+            if not isinstance(spec_hash, str) or not re.fullmatch('[0-9a-f]{64}', spec_hash):
+                return None
+            expected_request['create_spec_sha256'] = spec_hash
+        reboot = action == 'reboot' and vm.guest_kind(record) == 'linux'
         marker = {'operation_id':previous['operation_id'], 'deadline_monotonic_ms':original_end,
-                  'outcome':'expired_absent_start'}
+                  'outcome':'expired_absent_reboot' if reboot else 'expired_absent_start'}
         resuming = bool(previous.get('phase') == 'failed' and run
             and run.get('control_reconciliation') == marker
             and (previous.get('reconciliation') or {}).get('outcome') == marker['outcome'])
-        if (previous.get('request') != {'vm_id':record['uuid'], 'action':'start', 'force':False}
+        if (not (action == 'start' or reboot)
+                or request != expected_request
                 or previous.get('vm_id') != record['uuid']
                 or previous.get('source') != 'user' or previous.get('desired_state') != 'running'
                 or type(original_end) is not int or original_end <= 0 or self.p.clock()*1000 < original_end
@@ -1235,15 +1371,17 @@ class Execution:
                 or not self.p.process_isolation or not run or run.get('owner') != owner
                 or run.get('phase') not in ('launching', 'uncertain')
                 or run.get('domid') is not None or run.get('xen_unique_id') is not None
-                or run.get('process_scope') != scope_name(record['uuid'], run['execution_id'])
+                or not reboot and run.get('process_scope') != scope_name(record['uuid'], run['execution_id'])
                 or run.get('host_boot_id') != self.host or previous.get('host_boot_id') != self.host
                 or run.get('intent_revision') != previous.get('intent_revision')
                 or run.get('lifecycle_generation') != previous.get('lifecycle_generation')
                 or not intent or intent.get('desired_state') != 'running'
                 or intent.get('accepted_host_boot_id') != self.host
-                or intent.get('accepted_operation_id') != previous['operation_id']
-                or intent.get('intent_revision') != previous.get('intent_revision')
+                or not reboot and (intent.get('accepted_operation_id') != previous['operation_id']
+                                   or intent.get('intent_revision') != previous['intent_revision'])
                 or intent.get('lifecycle_generation') != previous.get('lifecycle_generation')):
+            return None
+        if previous['phase'] == 'failed' and not resuming:
             return None
         if run.get('control_reconciliation') not in (None, marker):
             refuse('RECONCILE_REQUIRED', 'launch reconciliation marker is invalid')
@@ -1259,11 +1397,15 @@ class Execution:
             return None
         snapshot = {'record':fingerprint(record), 'config':fingerprint(self.p.config(record)),
                     'intent':fingerprint(intent), 'cpu':self.p.cpu().context(record)}
+        original_intent = {**intent, 'intent_revision':previous['intent_revision'],
+                           'accepted_operation_id':previous['operation_id'], 'source':previous['source']}
         if (run.get('record_sha256') != snapshot['record'] or run.get('configuration_sha256') != snapshot['config']
-                or run.get('intent_sha256') != snapshot['intent']
+                or run.get('intent_sha256') != fingerprint(original_intent if reboot else intent)
                 or run.get('cpu_policy') != previous.get('cpu_policy', {'configured':False})
                 or snapshot['cpu'] != previous.get('cpu_policy', {'configured':False})):
-            refuse('TARGET_CHANGED', 'expired start configuration or policy changed')
+            refuse('TARGET_CHANGED', 'expired launch configuration or policy changed')
+        if reboot:
+            self._verify_expired_reboot(record, previous, intent, run, deadline)
         try:
             cleanup(self.p, record, run, deadline, observe_only=True)
         except (PlatformError, OSError, ValueError) as error:
@@ -1271,9 +1413,12 @@ class Execution:
                 details={'operation_id':previous['operation_id'], 'replayed':True,
                          'cause_type':type(error).__name__}) from error
         self.checkpoint('control-start-reconcile-before-guard', previous)
+        if reboot:
+            from xenova_guest_process import check_reboot_quiescent
+            check_reboot_quiescent(self.p, record, run, deadline)
         final = self.observe(record, deadline)
         if final.get('presence') != 'absent' or final.get('execution_status') != 'absent':
-            refuse('TARGET_CHANGED', 'domain appeared after expired start cleanup')
+            refuse('TARGET_CHANGED', 'domain appeared after expired launch cleanup')
         path = self._path(self.data, 'control-requests', previous['operation_id'])
         run_path = self._path(self.runtime, 'executions', record['uuid'])
         with short_lock(self.runtime, 'admission', deadline=deadline, clock=self.p.clock, sleep=self.p.sleep):
@@ -1283,16 +1428,16 @@ class Execution:
                     or self.intent(record) != intent or self.run_record(record) != run
                     or self.read(path) != previous or fingerprint(self.p.config(record)) != snapshot['config']
                     or self.p.cpu().context(record) != snapshot['cpu']):
-                refuse('TARGET_CHANGED', 'expired start owner or context changed before settlement')
+                refuse('TARGET_CHANGED', 'expired launch owner or context changed before settlement')
             if self.p.clock() >= deadline:
                 refuse('DEADLINE_EXCEEDED', 'expired start reconciliation observation budget expired')
             code = cause['code'] if cause else 'DEADLINE_EXCEEDED'
             settled = {**previous, 'events':list(previous.get('events', [])), 'result':None,
                 'reconciliation':{'outcome':marker['outcome'], 'metadata_only':True,
                                   'original_error':original_error, 'physical_commands':0},
-                'error':{'code':code, 'message':'original start ended without an observed execution',
+                'error':{'code':code, 'message':f'original {action} ended without an observed execution',
                     'retryable':False, 'details':{**details, 'operation_id':previous['operation_id'],
-                        'accepted':True, 'reconciliation_outcome':marker['outcome'],
+                        'accepted':True, 'completion':'failed', 'reconciliation_outcome':marker['outcome'],
                         'next_action':'observe_current_intent_before_any_new_request'}}}
             pending = {**run, 'phase':'uncertain', 'control_reconciliation':marker}
             try:
@@ -1313,14 +1458,59 @@ class Execution:
                         raise ExecutionError('TARGET_CHANGED', 'launch changed during settlement failure')
                 except (PlatformError, OSError, ValueError) as rollback:
                     rollback_error = {'cause_type':type(rollback).__name__, 'errno':getattr(rollback, 'errno', None)}
-                raise ExecutionError('RECONCILE_REQUIRED', 'expired start settlement durability is unconfirmed',
+                raise ExecutionError('RECONCILE_REQUIRED', f'expired {action} settlement durability is unconfirmed',
                     details={'operation_id':previous['operation_id'], 'replayed':True,
                         'storage_cause_type':type(error).__name__, 'storage_errno':getattr(error, 'errno', None),
                         **({'rollback_error':rollback_error} if rollback_error else {})}) from error
         return settled
 
+    def _verify_expired_reboot(self, record, previous, intent, run, deadline):
+        """옛 Xen 실행과 재사용 scope를 이전 성공 원장으로 연결한다."""
+        from xenova_guest_process import owned_scope
+        scope = run.get('process_scope')
+        source = run.get('reboot_from')
+        identity = record['uuid']
+        if (not owned_scope(identity, scope) or not isinstance(source, dict)
+                or type(source.get('domid')) is not int or source['domid'] <= 0
+                or not isinstance(source.get('xen_unique_id'), str)
+                or not re.fullmatch(r'[1-9][0-9]{0,19}', source['xen_unique_id'])):
+            refuse('RECONCILE_REQUIRED', 'expired reboot lacks its original execution identity or scope')
+        requests = self.requests(deadline=deadline)
+
+        def observed(op):
+            return (op.get('result') or {}).get('observation') or {}
+
+        def matches(op):
+            sample = observed(op)
+            return (op.get('vm_id') == identity and op.get('host_boot_id') == self.host
+                    and op.get('lifecycle_generation') == previous['lifecycle_generation']
+                    and op.get('phase') == 'completed' and sample.get('presence') == 'present'
+                    and sample.get('domid') == source['domid']
+                    and sample.get('xen_unique_id') == source['xen_unique_id'])
+
+        prior_execution = scope[len('xenova-vm-'+identity+'-'):-len('.scope')]
+        if not any(matches(op) and type(op.get('intent_revision')) is int
+                   and op['intent_revision'] < previous['intent_revision']
+                   and observed(op).get('execution_id') == prior_execution
+                   and observed(op).get('execution_status') == 'managed'
+                   and (observed(op).get('_description', {}).get('execution_context') or {}).get('process_scope') == scope
+                   for op in requests):
+            refuse('RECONCILE_REQUIRED', 'expired reboot scope is not bound to the original Xen execution')
+        if intent['accepted_operation_id'] == previous['operation_id']:
+            if intent['intent_revision'] != previous['intent_revision']:
+                refuse('RECONCILE_REQUIRED', 'reboot intent revision changed')
+            return
+        latest = next((op for op in requests if op['operation_id'] == intent['accepted_operation_id']), None)
+        if (not latest or not matches(latest) or latest['request'].get('action') != 'start'
+                or latest['request'].get('vm_id') != identity or latest.get('desired_state') != 'running'
+                or latest.get('intent_revision') != intent['intent_revision']
+                or latest.get('base_revision') != previous['intent_revision']
+                or intent['intent_revision'] != previous['intent_revision']+1):
+            refuse('RECONCILE_REQUIRED', 'current intent does not confirm the same pre-reboot Xen execution')
+
     @traced('execution.control')
-    def control(self, action, record, *, force=False, key=None, deadline=None):
+    def control(self, action, record, *, force=False, key=None, deadline=None,
+                create_spec_sha256=None, replay_only=False):
         from xenova_preparation import guard_asset
         guard_asset(self.p, record['uuid'])
         end = deadline if deadline is not None else self.p.clock()+90
@@ -1341,20 +1531,25 @@ class Execution:
             from xenova_zephyr_control import reboot
             return reboot(self,record,key,deadline=end)
         request = {"vm_id":record["uuid"], "action":action, "force":force}
+        if create_spec_sha256 is not None:
+            request['create_spec_sha256']=create_spec_sha256
         requests = self.requests()
         previous = next((q for q in requests if key is not None and q["idempotency_key"] == key), None)
         if previous and previous["request"] != request:
             refuse("IDEMPOTENCY_CONFLICT", "control key has a different request")
+        if replay_only and previous is None:
+            refuse('TARGET_CHANGED','original start is no longer available; no start was submitted')
         prior_reconciliation = previous.get('reconciliation') if previous else None
         if prior_reconciliation is not None and not isinstance(prior_reconciliation, dict):
             refuse('RECONCILE_REQUIRED', 'control reconciliation record is invalid')
-        pending_start = (self.run_record(record) if previous and action == 'start' and previous['phase'] == 'failed'
-                         and (prior_reconciliation or {}).get('outcome') == 'expired_absent_start' else None)
-        reconciliable = previous and (previous['phase'] == 'uncertain' or bool(pending_start
-            and pending_start.get('phase') == 'uncertain' and pending_start.get('owner') ==
+        outcome = f'expired_absent_{action}'
+        pending_launch = (self.run_record(record) if previous and action in ('start', 'reboot') and previous['phase'] == 'failed'
+                          and (prior_reconciliation or {}).get('outcome') == outcome else None)
+        reconciliable = previous and (previous['phase'] == 'uncertain' or bool(pending_launch
+            and pending_launch.get('phase') == 'uncertain' and pending_launch.get('owner') ==
                 {'kind':'user', 'operation_id':previous['operation_id']}
-            and pending_start.get('control_reconciliation') == {'operation_id':previous['operation_id'],
-                'deadline_monotonic_ms':previous.get('deadline_monotonic_ms'), 'outcome':'expired_absent_start'}))
+            and pending_launch.get('control_reconciliation') == {'operation_id':previous['operation_id'],
+                'deadline_monotonic_ms':previous.get('deadline_monotonic_ms'), 'outcome':outcome}))
         if previous and previous["phase"] in ("completed", "failed", "uncertain") and not reconciliable:
             event("control-replayed", record, previous["operation_id"])
             if previous["error"]:
@@ -1399,8 +1594,8 @@ class Execution:
                 observation = self.observe(record, readonly_end)
             else:
                 run = self.run_record(record)
-            if action == 'start' and observation['presence'] == 'absent':
-                settled = self._reconcile_expired_start(record, previous, intent, run, observation, readonly_end)
+            if action in ('start', 'reboot') and observation['presence'] == 'absent':
+                settled = self._reconcile_expired_control_launch(record, previous, intent, run, observation, readonly_end)
                 if settled:
                     error = settled['error']
                     refuse(error['code'], error['message'],
@@ -1415,6 +1610,14 @@ class Execution:
             if not confirmed:
                 refuse("RECONCILE_REQUIRED", "physical control result is uncertain; command not repeated",
                        details={"operation_id":previous["operation_id"], "replayed":True})
+            if action == 'start' and create_spec_sha256 is not None:
+                result = self._complete_replayed_start(record, previous, run, observation, readonly_end)
+                return {'operation_id':previous['operation_id'], 'replayed':True,
+                        'original_result':result, 'diagnostic_warnings':diagnostics}
+            if action == 'stop':
+                result = self._complete_replayed_stop(record, previous, intent, run, observation, readonly_end)
+                return {'operation_id':previous['operation_id'], 'replayed':True,
+                        'original_result':result, 'diagnostic_warnings':diagnostics}
             if action in ('start', 'reboot') and not bound_reboot:
                 self.p.cpu().require(record, readonly_end, expected=previous.get('cpu_policy', {'configured':False}),
                                      present=True, expected_identity=observation)
@@ -1424,7 +1627,7 @@ class Execution:
                     self.write(self._path(self.runtime, 'executions', record['uuid']), run)
                     row = {k:observation[k] for k in ('domid', 'xen_state', 'xen_state_flags')}
                     observation = self.publish_observation(record, row, observation['xen_unique_id'], readonly_end)
-            if action in ("stop", "destroy"):
+            if action == "destroy":
                 if self.p.process_isolation:
                     from xenova_guest_process import cleanup
                     try:
@@ -1444,9 +1647,11 @@ class Execution:
             return {"operation_id":previous["operation_id"], "replayed":True, "original_result":previous["result"], "diagnostic_warnings":diagnostics}
         accepted = None
         receipt = {}
+        confirmed = {'stage':'preflight'}
 
         def admit():
             nonlocal accepted
+            confirmed['stage'] = 'acceptance'
             accepted = self.accept(record, request, key, previous=previous, receipt=receipt, deadline=end)
             if action in ('start', 'reboot'):
                 # Actual layout is checked by the launch primitive immediately before
@@ -1455,13 +1660,13 @@ class Execution:
             self.save_request(accepted, "executing")
             event("xen-action-requested", record, accepted["operation_id"], {"action":action})
             if action == "start" and vm.has_network(record):
+                confirmed['stage'] = 'network_apply'
                 self.p.prepare_dhcp(records, deadline=end)
             return {"kind":"user", "operation_id":accepted["operation_id"]}
 
         try:
             if self.p.clock() >= end:
                 refuse('DEADLINE_EXCEEDED', 'original control execution deadline expired')
-            confirmed = {}
             if action == "start":
                 self.p.check_xen(deadline=end)
                 records = self.p.records(validate_assets=False)
@@ -1482,6 +1687,7 @@ class Execution:
             result = {"accepted":True, "physical_result":physical, "observation":observation,
                       "intent_revision":accepted["intent_revision"], "app_readiness":"unknown"}
             accepted["result"] = result
+            confirmed['stage'] = 'completion'
             try:
                 self.save_request(accepted, "completed")
             except OSError as error:
@@ -1491,9 +1697,18 @@ class Execution:
         except (PlatformError, OSError, ValueError) as error:
             if accepted is None:
                 prepared = receipt.get("operation")
+                if action in ('start','stop') and receipt.get('accepted') and isinstance(error, ExecutionError):
+                    error.error['details'].update(operation_id=prepared['operation_id'], accepted=True,
+                                                  completion='uncertain', stage='acceptance')
                 if prepared and isinstance(error, OSError):
+                    if action in ('start','stop') and receipt.get('accepted'):
+                        refuse("STORAGE_UNAVAILABLE", "accepted intent could not finish admission",
+                               details={"operation_id":prepared["operation_id"], "accepted":True,
+                                        "completion":"uncertain", "stage":"acceptance"})
                     refuse("STORAGE_UNAVAILABLE", "intent acceptance was not durably confirmed; no Xen action issued",
-                           details={"operation_id":prepared["operation_id"], "acceptance":"unconfirmed"})
+                           details={"operation_id":prepared["operation_id"], "acceptance":"unconfirmed", "stage":"acceptance"})
+                if action in ('start','stop') and previous is None and not prepared and isinstance(error, ExecutionError):
+                    error.error['details'].update(accepted=False, stage=confirmed['stage'])
                 event("control-rejected", record, details={"error":getattr(error, "error", {}).get("code", "PREFLIGHT_REFUSED")})
                 raise
             code = error.error["code"] if isinstance(error, ExecutionError) else "XEN_EXECUTION_FAILED"
@@ -1508,6 +1723,8 @@ class Execution:
             # ownership even when no physical result was returned; replay cannot issue
             # another command merely because result is null.
             uncertain = bool(confirmed.get('physical_submitted') or owned_launch or accepted.get('result'))
+            if action in ('start','stop'):
+                accepted['error']['details'].update(stage=confirmed['stage'], completion='uncertain' if uncertain else 'failed')
             if uncertain and code in ('XEN_EXECUTION_FAILED', 'DEADLINE_EXCEEDED'):
                 accepted['error']['code'] = 'RECONCILE_REQUIRED'
                 accepted['error']['details'].setdefault('cause', {'code':code, 'message':str(error),
@@ -1517,7 +1734,8 @@ class Execution:
             except OSError as journal_error:
                 refuse("RECONCILE_REQUIRED", "accepted control journal could not be finalized",
                        details={"operation_id":accepted["operation_id"], "accepted":True,
-                                "intent_revision":accepted["intent_revision"]})
+                                "intent_revision":accepted["intent_revision"], "stage":confirmed['stage'],
+                                "completion":"uncertain"})
             raise ExecutionError(**accepted["error"]) from error
 
     def event(self, event, record=None, operation_id=None, details=None):

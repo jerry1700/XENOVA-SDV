@@ -48,6 +48,7 @@ int net_pkt_read(struct net_pkt *,void *,size_t);
 #define SCHEDOP_shutdown 2
 #define SHUTDOWN_poweroff 0
 #define SHUTDOWN_reboot 1
+#define SHUTDOWN_crash 3
 struct evtchn_unmask { unsigned port; };
 struct sched_shutdown { unsigned reason; };
 int alloc_unbound_event_channel(unsigned);

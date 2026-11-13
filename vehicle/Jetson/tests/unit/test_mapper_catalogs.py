@@ -20,6 +20,7 @@ from xenova_vehicle.mapping.local_map import EvidenceGrid, GridSpec
 from xenova_vehicle.mapping.registration import PoseBox
 from xenova_vehicle.perception.calibration import BodyModel
 from xenova_vehicle.perception.parking import ParkingAisle
+from xenova_vehicle.perception.parking_entrance import EntranceSpan
 from xenova_vehicle.perception.pipeline import PerceptionResult
 from xenova_vehicle.perception.temporal_road import MappedRoad
 from xenova_vehicle.runtime.mapper_catalogs import MapperCatalogs, CatalogNotReady
@@ -55,6 +56,7 @@ class MapperCatalogsTests(unittest.TestCase):
         support = np.ones((20, 20), dtype=bool)
         self.grid.set_domain(support, support)
         self.sequence = 0; self.job_number = 100
+        self.observed_entrances = ()
 
     def make_owner(self, *, crossing=b'\0', roles=(0,), aisles=None):
         aisles = (ParkingAisle((-.1, 0.), (.9, 0.), 1, .001),) if aisles is None else aisles
@@ -63,7 +65,7 @@ class MapperCatalogsTests(unittest.TestCase):
             input_kind='SYNTHETIC', parking_aisles=aisles,
             aisle_lane_indices=roles, crossing=crossing)
 
-    def frame(self, *, owner=None, ambiguous=False, evidence_missing=False):
+    def frame(self, *, owner=None, ambiguous=False, evidence_missing=False, depth=False):
         owner = self.owner if owner is None else owner
         self.sequence += 1; sequence = self.sequence; now = 1_000_000+sequence*10_000
         original = parking_fixture.source(sequence, captured=(now-100_000, now-99_990), available=now)
@@ -82,7 +84,8 @@ class MapperCatalogsTests(unittest.TestCase):
             rgb_source_key=stamp.key, rgb_captured_us=stamp.captured_us, now_us=now,
             geometric_model_qualified=True, quarantined=False)
         result = PerceptionResult(summary, graph, road, None, None,
-            self.grid.snapshot(now, clock_id=parking_fixture.CLOCK), None)
+            self.grid.snapshot(now, clock_id=parking_fixture.CLOCK), None,
+            parking_entrances=self.observed_entrances)
         sample = compute_sample(sequence)
         rgb = replace(sample.rgb, sdk_us=now-100_000, device_us=now-100_000, received_j_us=now)
         depth = replace(sample.depth, sdk_us=now-100_000, device_us=now-100_000, received_j_us=now)
@@ -100,8 +103,10 @@ class MapperCatalogsTests(unittest.TestCase):
             UUID(owner.context.pi_host_boot).bytes, *interval, sequence, 0, 0, 0, 0,
             struct.pack('<16sQQ', UUID(raw_key[0]).bytes, *raw_key[1:])+bytes(96), 0, bytes(16)))
         evidence = EvidenceTable(() if evidence_missing else (record,), (context,))
-        metric = MetricEvidence((stamp.key,), owner.context.pi_host_boot, interval,
-            sequence, 17, raw_keys=(raw_key,), parent_ids=(identity,))
+        keys = (stamp.key, (stamp.source_id, 'depth', stamp.clock_id, sequence)) if depth else (stamp.key,)
+        raw_keys = (raw_key, (uid(91), sequence, now-100_000)) if depth else (raw_key,)
+        metric = MetricEvidence(keys, owner.context.pi_host_boot, interval,
+            sequence, 19 if depth else 17, raw_keys=raw_keys, parent_ids=(identity,))
         args = dict(context=owner.context, stamp=stamp, capture_prior=FIXED,
             registration_revision=sequence, prior_qualified=True, metric_evidence=metric,
             lane_provenance_ids=(identity, identity), base_evidence=evidence, now_us=now,
@@ -153,6 +158,33 @@ class MapperCatalogsTests(unittest.TestCase):
         self.complete(now, result=grant)
         draft, now = self.accept_frame()
         return draft, now
+
+    def test_parking_slot_publication_keeps_both_rgb_originals_for_combined_walls(self):
+        self.owner = self.make_owner(roles=(),aisles=())
+        self.observed_entrances = (EntranceSpan(((0.,0.),(.4,0.)),(0.,1.),0,.04),)
+        self.ready()
+        previous_job, previous, previous_args = self.frame()
+        previous_draft = self.owner.prepare(previous_job,previous,**previous_args)
+        self.owner.accept(previous_draft)
+        job,result,args = self.frame()
+        left, *current = result.tape.strips
+        original = previous_args['base_evidence'].provenance[0]
+        evidence = args['base_evidence']
+        current_root, = evidence.provenance
+        combined, = aggregate_rgb_provenance(current_root,(original,),lambda parents: 999)
+        result = replace(result,tape=replace(result.tape,strips=tuple(current)),
+            parking_tape_history=((previous.tape.source_key,(left,)),))
+        args.update(base_evidence=EvidenceTable((original,current_root,combined),evidence.contexts),
+                    parking_provenance_id=combined.provenance_id)
+        draft = self.owner.prepare(job,result,**args)
+        published, = draft.view.parking.slots
+        slot = schema.ParkingSlot.FromString(published)
+        self.assertTrue(slot.geometry_complete)
+        track, = draft.state.parking.catalog.tracks
+        self.assertEqual(slot.slot_id,track.slot_id)
+        self.assertEqual(track.candidate.source.stamp,args['stamp'])
+        self.assertEqual(draft.state.parking._records[track.provenance_id].parents,(combined.provenance_id,))
+        self.assertEqual(set(combined.parents),{original.provenance_id,current_root.provenance_id})
 
     def test_tentative_geometry_and_discard_never_offer_or_mutate_accepted_catalog(self):
         job, result, args = self.frame()
@@ -224,6 +256,24 @@ class MapperCatalogsTests(unittest.TestCase):
         self.assertEqual(state.parking.catalog.tracks[0].candidate.source.stamp, state.parking.last.geometry.source.stamp)
         self.assertEqual(state.parking.catalog.tracks[0].candidate.source.stamp.sequence, draft.original_job.sample.rgb.sequence)
         self.assertIsNone(self.mailbox.main_peek())
+
+    def test_observed_entrance_uses_the_adjacent_lane_and_waits_for_depth(self):
+        self.owner = self.make_owner(roles=(), aisles=())
+        self.observed_entrances = (EntranceSpan(((0.,0.),(.4,0.)), (0.,1.), 0, .12),)
+        draft, now = self.ready()
+        slot, = draft.view.parking.slots
+        value = schema.ParkingSlot.FromString(slot)
+        self.assertEqual(value.approach_lane_id, draft.view.lane.lane_ids[0])
+        self.assertTrue(value.geometry_complete)
+        self.assertEqual(value.occupancy_state, 0)
+        self.assertEqual((value.corners[0].y,value.corners[1].y), (0.,0.))
+
+        evidence = draft.state.parking.catalog.tracks[0].candidate.source.stamp
+        self.grid.add_free(tuple((x,y) for y in range(20) for x in range(20)), evidence,
+            view_id='certified-depth', origin_xy=(0.,-.1), certificate_complete=True)
+        draft, _ = self.accept_frame(depth=True)
+        value = schema.ParkingSlot.FromString(draft.view.parking.slots[0])
+        self.assertEqual(value.occupancy_state, 2)
 
     def test_unconfigured_crossing_or_unbound_aisle_role_never_selects_default_lane(self):
         for crossing, roles, reason in ((None, (0,), 'CROSSING_POLICY_UNCONFIGURED'),

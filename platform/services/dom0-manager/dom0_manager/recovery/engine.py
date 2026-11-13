@@ -53,7 +53,7 @@ from .budget import StableRun, host_boot_id
 from .platform_recovery import RecoveryPlatform
 from .policy import RecoveryPolicy
 from .protection import HISTORICAL, LIVE, LOST, PROTECTED, GatewayProtection, Outcome, ProtectionHold
-from .state import RecoveryRecord, RecoveryStatus, RecoveryStore
+from .state import RecoveryRecord, RecoveryStatus, RecoveryStore, validate_event
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ FINAL_CODES = frozenset({"RECONCILE_REQUIRED", "IDEMPOTENCY_CONFLICT", "INVALID_
 GONE_CODES = frozenset({"VM_NOT_FOUND", "VM_PURGED"})
 # graceful-restart 가 "정상 종료에 실패"했다고 플랫폼이 명시한 경우에만 force-restart 로 올린다. 정체 모를 오류로는 올리지 않는다
 GRACEFUL_FAILURE_CODES = frozenset({"RECOVERY_MODE_UNSUPPORTED", "DEADLINE_EXCEEDED"})
+UNRESOLVED_ATTEMPT = "original attempt outcome unresolved after bounded journal recheck; no new physical attempt"
+LAUNCH_PHASES = frozenset({"launching", "observed", "uncertain"})
 KEEP_CLOSED = 20  # 닫힌 복구를 저장소에 남기는 수(진단용)
 
 
@@ -91,6 +93,14 @@ class _Recovered(Exception):
 
 class _NotSaved(Exception):
     """시도를 저장하지 못해 플랫폼을 부르지 않았다."""
+
+
+class _JournalReadFailed(Exception):
+    """시도 원장을 읽지 못해 원 시도의 결과를 아직 모른다."""
+
+    def __init__(self, error: Dom0ManagerError) -> None:
+        super().__init__(error.message)
+        self.error = error
 
 
 class _Held(Exception):
@@ -154,6 +164,7 @@ class RecoveryEngine:
         self._non_drive_vm_ids = frozenset(str(UUID(str(v))) for v in non_drive_vm_ids)
         self._protection = protection  # 없으면 주행 VM force 는 보류된다
         self._settle_due: dict[UUID, float] = {}  # 닫힌 복구의 보호 정산을 다음에 시도할 시각(메모리. 재시작하면 바로 다시 본다)
+        self._closed_recheck_due: dict[UUID, float] = {}
         self._held: dict[UUID, str] = {}  # 근거 부족으로 보류 중인 복구의 마지막 사유. 바뀔 때만 로그한다
         self._executor: ThreadPoolExecutor | None = None if inline else ThreadPoolExecutor(max_workers=1, thread_name_prefix="recovery")
         self._futures: dict[UUID, Future] = {}
@@ -312,7 +323,7 @@ class RecoveryEngine:
 
     # ---- 주기 ----
 
-    def collect(self, now: float | None = None) -> None:
+    def collect(self, now: float | None = None, *, observations_available: bool = True) -> None:
         """끝난 실행 결과를 회수하고, 저장 못 한 상태·이벤트를 다시 저장한다. 플랫폼·Xen 관측에 실패한 주기에도 부른다."""
         now = self._clock() if now is None else now
         with self._lock:
@@ -324,6 +335,13 @@ class RecoveryEngine:
                 record = self._records.get(recovery_id)
                 if record is not None:
                     self._finish(record, future, now)
+            if not observations_available:
+                # Journal rechecks can continue without the watcher's health sample.
+                for record in list(self._records.values()):
+                    if (record.status == RecoveryStatus.EXECUTING and record.replay
+                            and record.request is not None and self._due(record, now)
+                            and record.recovery_id not in self._futures):
+                        self._start(record, now, journal_only=True)
 
     def tick(self, now: float | None = None) -> None:
         """관측이 성공한 주기: 결과 회수 → 감시기 대조 → 시도 시작·backoff·재관측 만료."""
@@ -348,6 +366,7 @@ class RecoveryEngine:
                 elif record.status == RecoveryStatus.VERIFYING and self._due(record, now):
                     self._attempt_failed(record, now, {"code": "REOBSERVE_TIMEOUT", "platform_code": None,
                                                        "message": f"target changed but neither HEALTHY nor STOPPED within {self._policy.verify_timeout_s:g}s"})
+            self._schedule_closed_recheck(now)
             self._schedule_settlements(now)
             self._prune()
 
@@ -382,7 +401,7 @@ class RecoveryEngine:
 
     # ---- 시도 ----
 
-    def _start(self, record: RecoveryRecord, now: float) -> None:
+    def _start(self, record: RecoveryRecord, now: float, *, journal_only: bool = False) -> None:
         if self._lost:
             if not self._lost_warned:
                 self._lost_warned = True
@@ -398,7 +417,7 @@ class RecoveryEngine:
             record.replay = False
             record.due_monotonic = None
             self._save()
-            self._submit(record, lambda: self._task_replay(record), now)
+            self._submit(record, lambda: self._task_replay(record, journal_only=journal_only), now)
         else:
             self._submit(record, lambda: self._task_attempt(record), now)
 
@@ -439,7 +458,9 @@ class RecoveryEngine:
             budget_before = self._budget_used(record.vm_id)
             if self._store.budget_tracking:
                 self._store.vm_budget_used[record.vm_id] = None if budget_before is None else budget_before + 1
-            previous_closed = record.attempt_closed
+            previous_attempt = (
+                record.recovery_attempt_id, record.request, record.mode, record.attempt_started_monotonic, record.attempt_closed,
+            )
             record.attempt += 1
             record.attempt_closed = False
             record.recovery_attempt_id = UUID(spec["recovery_attempt_id"])
@@ -449,23 +470,25 @@ class RecoveryEngine:
             record.due_monotonic = None
             record.replay = False
             record.status = RecoveryStatus.EXECUTING
-            self._emit(record, "recovery.started", now)
-            if not self._save():
+            queued = self._emit(record, "recovery.started", now)
+            if not queued or not self._save():
                 if budget_present:
                     self._store.vm_budget_used[record.vm_id] = budget_before
                 else:
                     self._store.vm_budget_used.pop(record.vm_id, None)
-                record.pending_events.pop()
+                if queued:
+                    record.pending_events.pop()
                 record.attempt -= 1
-                record.attempt_closed = previous_closed
-                record.recovery_attempt_id, record.request, record.mode, record.attempt_started_monotonic = None, None, None, None
+                (
+                    record.recovery_attempt_id, record.request, record.mode, record.attempt_started_monotonic, record.attempt_closed,
+                ) = previous_attempt
                 record.status = RecoveryStatus.DETECTED if record.attempt == 0 else RecoveryStatus.BACKOFF
                 raise _NotSaved()
             self._flush_pending(record)
             log.warning("vm %s: recovery %s attempt %d %s (attempt_id %s)", record.vm_id, record.recovery_id, record.attempt, record.mode, record.recovery_attempt_id)
         return self._platform.recover_once(spec, execute=True)
 
-    def _task_replay(self, record: RecoveryRecord) -> dict[str, Any]:
+    def _task_replay(self, record: RecoveryRecord, *, journal_only: bool = False) -> dict[str, Any]:
         """같은 attempt id 로 결과를 조회하고, journal 이 없으면 같은 spec 을 다시 보낸다. 새 attempt id 는 만들지 않는다."""
         with self._lock:
             spec, attempt_id = dict(record.request or {}), record.recovery_attempt_id
@@ -474,7 +497,10 @@ class RecoveryEngine:
         try:
             attempt = self._platform.attempt(attempt_id)
         except Dom0ManagerError as exc:
-            if (exc.platform_code or "") not in GONE_CODES:
+            code = exc.platform_code or exc.code
+            if code in TRANSIENT_CODES or code in REOBSERVE_CODES or isinstance(exc, DriverTimeout):
+                raise _JournalReadFailed(exc) from exc
+            if code not in GONE_CODES:
                 raise
             attempt = None  # 플랫폼에 도달한 적이 없다
         if attempt is not None and attempt.get("phase") == "completed":
@@ -482,6 +508,9 @@ class RecoveryEngine:
         if attempt is not None and attempt.get("phase") == "failed":
             error = attempt.get("error") or {}
             raise _platform_error(error.get("code", "XEN_EXECUTION_FAILED"), error.get("message", "recovery attempt failed"))
+        confirming_launch = attempt is not None and attempt.get("phase") in LAUNCH_PHASES
+        if journal_only and not confirming_launch:
+            raise DriverTimeout("awaiting observation before resuming the original recovery")
         if attempt is None:
             # 플랫폼에 닿은 적이 없다: 다시 보내기 전에 지금 상태를 본다. 그 사이 건강해졌거나 꺼졌으면 건강한 VM 을 재시작하지 않는다
             with self._lock:
@@ -493,9 +522,74 @@ class RecoveryEngine:
             if health is not None and health.intent_known and (health.state == HealthState.STOPPED or health.desired_state != "running"):
                 raise _NotEligible(f"desired_state={health.desired_state}, state={health.state.value}")
         # 의도를 못 읽은 건강 스냅샷으로는 취소하지 않는다. 원 spec 의 expected_intent_revision 을 플랫폼이 다시 확인한다
-        return self._platform.recover_once(spec, execute=True)  # 진행 중·불확실·미도달: 플랫폼이 멱등하게 이어 가거나 RECONCILE_REQUIRED
+        try:
+            return self._platform.recover_once(spec, execute=True)
+        except Dom0ManagerError as exc:
+            if exc.platform_code == "DEADLINE_EXCEEDED" and confirming_launch:
+                # Only a terminal journal can turn this confirmation timeout into
+                # a failed launch. Recheck the same journal on the next pass.
+                raise DriverTimeout("original launch confirmation timed out") from exc
+            raise
 
-    def _submit(self, record: RecoveryRecord, work: Callable[[], dict[str, Any]], now: float) -> None:
+    def _schedule_closed_recheck(self, now: float) -> None:
+        """현재 도메인이 보일 때 결과 확인 기한으로 닫힌 가장 최근 시도만 다시 확인한다."""
+        if self._lost or not self._policy.enabled:
+            return
+        newest = {}
+        for record in sorted(self._records.values(), key=lambda r: r.detected_monotonic):
+            newest[record.vm_id] = record
+        for record in sorted(newest.values(), key=lambda r: self._closed_recheck_due.get(r.recovery_id, 0.0)):
+            spec = record.request
+            if (record.status != RecoveryStatus.FAILED or not spec or not record.recovery_attempt_id
+                    or record.last_error != {"code": "RECONCILE_REQUIRED", "platform_code": None, "message": UNRESOLVED_ATTEMPT}
+                    or record.recovery_id in self._futures
+                    or now < self._closed_recheck_due.get(record.recovery_id, 0.0)
+                    or type(spec.get("deadline_monotonic_ms")) is not int
+                    or now * 1000 < spec["deadline_monotonic_ms"]):
+                continue
+            health = self._watcher.health(record.vm_id)
+            if health is None or not health.intent_known or health.desired_state != "running" or health.domid is None:
+                continue
+            self._closed_recheck_due[record.recovery_id] = now + self._policy.transient_retry_s
+            self._submit(record, lambda: self._task_confirm_closed(record), now)
+            break
+
+    def _task_confirm_closed(self, record: RecoveryRecord) -> dict[str, Any] | None:
+        """저널의 동일 요청을 확인한다. 만료한 원 spec은 저널이 사라져도 새 실행을 수락할 수 없다."""
+        spec = record.request
+        attempt_id = record.recovery_attempt_id
+        assert spec is not None and attempt_id is not None
+        try:
+            attempt = self._platform.attempt(attempt_id)
+            if attempt.get("request") != spec or attempt.get("recovery_attempt_id") != str(attempt_id):
+                return None
+            if attempt.get("phase") in LAUNCH_PHASES:
+                result = self._platform.recover_once(spec, execute=True)
+                attempt = result.get("attempt") or {}
+                # 새로 확인한 결과는 플랫폼이 현재 도메인과 실행 소유자를 대조했다.
+                original = attempt.get("result") or {}
+                observed = original.get("observation")
+                if (attempt.get("phase") == "completed" and attempt.get("request") == spec
+                        and attempt.get("recovery_attempt_id") == str(attempt_id)
+                        and observed and observed == result.get("current_observation")):
+                    return {"original_result": original}
+            if (attempt.get("phase") == "completed" and attempt.get("request") == spec
+                    and attempt.get("recovery_attempt_id") == str(attempt_id)):
+                # 이전 주기에 원장만 완료한 경우에도 현재 실행인지 대조한 뒤 이력을 정정한다.
+                result = attempt.get("result") or {}
+                view = self._platform.view(record.vm_id)
+                if (view.get("host_boot_id") == spec["expected_host_boot_id"]
+                        and view.get("intent_revision") == spec["expected_intent_revision"]
+                        and view.get("generation") == spec["expected_lifecycle_generation"]
+                        and view.get("intent_applicable") and view.get("desired_state") == "running"
+                        and view.get("domid") is not None and view.get("execution_id") == result.get("execution_id")):
+                    return {"original_result": result}
+        except Dom0ManagerError as exc:
+            log.info("vm %s: late confirmation of recovery %s deferred (%s)", record.vm_id, record.recovery_id,
+                     exc.platform_code or exc.code)
+        return None
+
+    def _submit(self, record: RecoveryRecord, work: Callable[[], dict[str, Any] | _Settlement | None], now: float) -> None:
         if self._inline or self._executor is None:
             future: Future = Future()
             try:
@@ -507,14 +601,20 @@ class RecoveryEngine:
         self._futures[record.recovery_id] = self._executor.submit(work)
 
     def _finish(self, record: RecoveryRecord, future: Future, now: float) -> None:
-        if not record.open:  # 닫힌 복구의 실행 스레드 일은 보호 정산뿐이다
+        if not record.open:
             try:
-                settlement = future.result()
-            except Exception:  # noqa: BLE001 - 정산 실패는 기록을 바꾸지 않고 다음 차례에 다시 본다
-                log.exception("vm %s: recovery %s Gateway protection settlement raised", record.vm_id, record.recovery_id)
+                outcome = future.result()
+            except Exception:  # noqa: BLE001 - 닫힌 이력은 다음 차례까지 그대로 둔다
+                log.exception("vm %s: closed recovery %s follow-up failed", record.vm_id, record.recovery_id)
                 return
-            if self._note_protection(record, settlement.entry, settlement.outcome) not in LIVE:
-                self._settle_due.pop(record.recovery_id, None)
+            if isinstance(outcome, _Settlement):
+                if self._note_protection(record, outcome.entry, outcome.outcome) not in LIVE:
+                    self._settle_due.pop(record.recovery_id, None)
+            elif outcome is not None and not any(
+                other.vm_id == record.vm_id and other.detected_monotonic > record.detected_monotonic
+                for other in self._records.values()
+            ):
+                self._on_result(record, outcome, now)
             return
         try:
             result = future.result()
@@ -541,12 +641,12 @@ class RecoveryEngine:
                             self._policy.transient_retry_s)
         except _NotSaved:
             record.due_monotonic = now + self._policy.transient_retry_s  # 상태는 _task_attempt 가 되돌렸다
-            if record.status == RecoveryStatus.DETECTED:
-                record.status = RecoveryStatus.BACKOFF if record.attempt > 0 else RecoveryStatus.DETECTED
             log.error("vm %s: recovery %s attempt not recorded; retrying in %.0fs", record.vm_id, record.recovery_id, self._policy.transient_retry_s)
+        except _JournalReadFailed as exc:
+            self._on_error(record, exc.error, now, journal_read_failed=True)
         except Dom0ManagerError as exc:
             confirmed_failure = exc.platform_code in (GONE_CODES | REOBSERVE_CODES | {'XEN_EXECUTION_FAILED','DEADLINE_EXCEEDED','RECOVERY_MODE_UNSUPPORTED'})
-            if record.cancel_requested and confirmed_failure:
+            if record.cancel_requested and (record.status != RecoveryStatus.EXECUTING or confirmed_failure):
                 self._close(record, RecoveryStatus.CANCELLED, now, error={"code": "TARGET_NOT_ELIGIBLE", "platform_code": exc.platform_code, "message": f"cancelled; last platform error: {exc.message}"})
             else:
                 self._on_error(record, exc, now)
@@ -726,15 +826,17 @@ class RecoveryEngine:
         previous = ((record.request or {}).get("expected_execution") or {}).get("execution_id")
         if not isinstance(execution_id, str) or not execution_id or execution_id == previous:
             # completed 인데 새 실행 ID 가 없다: 계약 2.5 의 완료 조건(이 시도로 새 Xen 실행 관측)을 확인할 수 없다. 재시작하지 않고 운영자에게 넘긴다
-            self._close(record, RecoveryStatus.FAILED, now, final=True, error={
-                "code": "RECONCILE_REQUIRED", "platform_code": None,
-                "message": f"platform reported completed without a new execution_id (got {execution_id!r}, expected other than {previous!r})"})
+            if record.open:
+                self._close(record, RecoveryStatus.FAILED, now, final=True, error={
+                    "code": "RECONCILE_REQUIRED", "platform_code": None,
+                    "message": f"platform reported completed without a new execution_id (got {execution_id!r}, expected other than {previous!r})"})
             return
         record.execution_id = execution_id
-        record.last_error = None
+        if record.open:
+            record.last_error = None
         self._close(record, RecoveryStatus.COMPLETED, now)
 
-    def _on_error(self, record: RecoveryRecord, exc: Dom0ManagerError, now: float) -> None:
+    def _on_error(self, record: RecoveryRecord, exc: Dom0ManagerError, now: float, *, journal_read_failed: bool = False) -> None:
         code = exc.platform_code or exc.code
         error = {"code": code, "platform_code": exc.platform_code, "message": exc.message}
         log.warning("vm %s: recovery %s attempt %d: %s (%s)", record.vm_id, record.recovery_id, record.attempt, code, exc.message)
@@ -742,22 +844,24 @@ class RecoveryEngine:
             self._store.vm_budget_used.pop(record.vm_id, None)
             self._stable.pop(record.vm_id, None)  # 플랫폼이 등록 부재/영구 제거를 확인한 경우만 해제한다.
             self._close(record, RecoveryStatus.CANCELLED, now, error=error)
-        elif code in TRANSIENT_CODES or (exc.platform_code is None and
-                (isinstance(exc, DriverTimeout) or (record.request is not None and record.status==RecoveryStatus.EXECUTING))):
+        elif record.status != RecoveryStatus.EXECUTING:
+            # 다음 시도를 준비하는 중에는 직전 시도의 spec 이 남아 있어도 그 시도의 결과로 처리하지 않는다.
+            if code in TRANSIENT_CODES or code in REOBSERVE_CODES or isinstance(exc, DriverTimeout):
+                record.last_error = error
+                record.due_monotonic = now + self._policy.transient_retry_s
+                self._save()
+            else:
+                self._close(record, RecoveryStatus.FAILED, now, error=error, final=True)
+        elif journal_read_failed or code in TRANSIENT_CODES or exc.platform_code is None:
             # 일시 거절 또는 응답 유실: 결과를 모르는 시도로 두고(EXECUTING) journal 을 먼저 조회한 뒤 같은 시도를 다시 보낸다.
             # spec 의 deadline 이 지났으면 플랫폼이 DEADLINE_EXCEEDED 로 닫아 준다
             if record.request is not None and now*1000 >= record.request['deadline_monotonic_ms'] + self._policy.verify_timeout_s*1000:
                 self._close(record, RecoveryStatus.FAILED, now, final=True, error={
                     'code':'RECONCILE_REQUIRED','platform_code':None,
-                    'message':'original attempt outcome unresolved after bounded journal recheck; no new physical attempt'})
+                    'message':UNRESOLVED_ATTEMPT})
                 return
             record.last_error = error
-            if record.status == RecoveryStatus.EXECUTING and record.request is not None:
-                record.replay = True
-            elif record.status == RecoveryStatus.DETECTED and record.attempt == 0:
-                pass  # 시도 전 view 가 거절됨: DETECTED 로 두고 잠시 뒤 다시 시작
-            else:
-                record.status = RecoveryStatus.BACKOFF
+            record.replay = True
             record.due_monotonic = now + self._policy.transient_retry_s
             self._save()
         elif code in REOBSERVE_CODES:
@@ -791,6 +895,7 @@ class RecoveryEngine:
                     error.get("platform_code") or error.get("code"), wait)
 
     def _close(self, record: RecoveryRecord, status: RecoveryStatus, now: float, *, error: dict[str, Any] | None = None, final: bool = False) -> None:
+        was_open = record.open
         record.status = status
         record.closed_monotonic = now
         record.due_monotonic = None
@@ -800,10 +905,12 @@ class RecoveryEngine:
         if error is not None:
             record.last_error = error
         self._futures.pop(record.recovery_id, None)
+        self._closed_recheck_due.pop(record.recovery_id, None)
         if status == RecoveryStatus.COMPLETED:
             log.warning("vm %s: recovery %s completed after %d attempt(s) in %.0fs (execution %s)", record.vm_id, record.recovery_id, record.attempt,
                         now - record.detected_monotonic, record.execution_id)
-            if record.attempt > 0:
+            # 기한 초과로 닫혔던 시도에는 이미 종료 이벤트가 있다. 확인된 결과는 상태에만 반영한다.
+            if record.attempt > 0 and was_open:
                 self._emit(record, "recovery.completed", now)
         else:
             level = log.error if status == RecoveryStatus.FAILED else log.warning
@@ -814,13 +921,13 @@ class RecoveryEngine:
                     self._emit(record, "recovery.recovered", now)
                 elif status == RecoveryStatus.CANCELLED:
                     self._emit(record, "recovery.cancelled", now)
-                else:
+                elif not record.attempt_closed:
                     self._emit(record, "recovery.failed", now, final=True)
         self._commit(record)
 
     # ---- 이벤트 (계약 2.5) ----
 
-    def _emit(self, record: RecoveryRecord, event_type: str, now: float, *, final: bool | None = None, next_retry_at: str | None = None) -> None:
+    def _emit(self, record: RecoveryRecord, event_type: str, now: float, *, final: bool | None = None, next_retry_at: str | None = None) -> bool:
         """이벤트를 레코드의 발행 대기 목록에 넣는다(event_id 는 여기서 고정). 레코드가 저장된 뒤 _flush_pending 이 outbox 로 옮긴다."""
         attempt_ms = None if record.attempt_started_monotonic is None else int((now - record.attempt_started_monotonic) * 1000)
         completed = event_type == "recovery.completed"
@@ -850,7 +957,13 @@ class RecoveryEngine:
                 "message": record.last_error.get("message"),
             },
         }
+        try:
+            validate_event(event)
+        except ValueError as exc:
+            log.error("vm %s: recovery %s %s event rejected before state save: %s", record.vm_id, record.recovery_id, event_type, exc)
+            return False
         record.pending_events.append(event)
+        return True
 
     def _commit(self, record: RecoveryRecord) -> bool:
         """상태 전이를 저장하고, 저장됐을 때만 대기 중인 이벤트를 outbox 로 옮긴다."""
@@ -921,10 +1034,11 @@ class RecoveryEngine:
     def _prune(self) -> None:
         closed = sorted((r for r in self._records.values() if not r.open and not r.pending_events
                          and (r.protection is None or r.protection["phase"] not in LIVE)), key=lambda r: r.closed_monotonic or 0.0)
-        stale = closed[:-KEEP_CLOSED] if len(closed) > KEEP_CLOSED else []
+        stale = [r for r in closed[:-KEEP_CLOSED] if r.recovery_id not in self._futures]
         for record in stale:
             del self._records[record.recovery_id]
             self._skipped.discard(record.recovery_id)
+            self._closed_recheck_due.pop(record.recovery_id, None)
         if stale:
             self._save()
 

@@ -256,7 +256,7 @@ class MapperHazard:
                 or method!=scope.method_manifest_sha256 or state['kind']!='LIVE' or grid.kind!='LIVE'
                 or state['calibration_id']!=pipeline.calibration.sha256 or grid.calibration_id!=state['calibration_id']
                 or state['frame_id']!='odom:'+scope.context.odom_epoch or grid.frame_id!=state['frame_id']
-                or state['pipeline_profile_sha256']!=sha256(canonical(asdict(pipeline.profile))).hexdigest()):
+                or state['pipeline_profile_sha256']!=sha256(canonical(pipeline.profile.identity_fields())).hexdigest()):
             raise ValueError('retained hazard map/calibration/method/profile differs')
         spec=dict(state['spec']);spec['origin_xy']=tuple(spec['origin_xy']);spec=GridSpec(**spec)
         window=None

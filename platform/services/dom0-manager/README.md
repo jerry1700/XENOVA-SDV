@@ -1,5 +1,17 @@
 # dom0-manager
 
+## 템플릿 카탈로그 조회
+
+`platform` 드라이버의 `GET /api/v1/templates`는 보드 `/srv/xenova/catalog`에 공개된 템플릿을 버전별로 전부 반환합니다.
+하위 `xenova-vm templates`를 그대로 옮기며 최신 버전 선택·표시 이름은 하지 않습니다(Spring 몫).
+응답 필드는 `template_id`, `template_version`, `guest_kind`, `default_resources`, `resource_limits`, `capabilities`이고
+보드 내부 경로·해시(`directory`, `asset_directory`, `manifest_sha256` 등)는 뺍니다. mock·xen 드라이버는 501입니다.
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $DOM0_SERVICE_TOKEN" \
+  http://127.0.0.1:8081/api/v1/templates
+```
+
 ## 등록 목록과 단건 통지
 
 `platform` 드라이버의 `GET /api/v1/vm-registrations`는 실행 여부와 무관한 REGISTERED 목록을 여덟 필드 배열로 반환합니다.
@@ -205,15 +217,18 @@ tests/
 | `health()` | O | `xl info` 응답과 registry 저장소(`instances/`) 존재 → `/healthz` 503 판정. Manager 를 거치지 않아 조회 한도 안에 끝남 |
 | `reboot(vm_id)` / `request_reboot(vm_id, key)` | platform·mock | 실행 중인 도메인을 같은 디스크로 새 실행으로 재시작(S15P31E110-208). 제공하지 않는 드라이버는 501 |
 | `cpu_layout(vm_id?)` | platform | 정책 CPU 배치와 실제 Xen hard affinity(S15P31E110-353). 제공하지 않는 드라이버는 501 |
+| `update_cpu_policy(request, key)` | platform | 배치가 바뀌는 VM을 정지한 뒤 전체 CPU 정책을 revision 조건부로 교체. 최초 설정이나 호스트 배치 변경은 전체 정지. 제공하지 않는 드라이버는 501 |
 | `collect_stats()` | platform·xen·mock | xentop 원시값(S15P31E110-112) |
 
-실행 중 vCPU 핀·스케줄러 가중치·메모리 변경은 플랫폼이 지원하지 않아 드라이버에 없습니다(`docs/platform/cli-manager-spec.md` CPU 배치 절). CPU 배치는 플랫폼 CPU 정책이 시작·재부팅·복구 때 적용·검증합니다.
+CPU 정책은 한 VM의 모든 vCPU에 같은 pCPU 마스크를 지정합니다. 영향받는 VM의 새 마스크는 다음
+기동 때 적용·검증합니다. 최초 설정이나 호스트 배치 변경에는 전체 정지와 호스트 준비가 필요합니다.
+스케줄러 가중치와 실행 중인 VM의 vCPU 핀·메모리 변경은 지원하지 않습니다.
 
 `Provisioner`는 `ensure_instance(vm_id, template_id, template_version, name=, vcpus=, memory_mib=) / instance_exists / delete_instance` 와 `update_resources(vm_id, vcpus=, memory_mib=, key=)` 입니다. platform 모드에서는 플랫폼 `create`(등록 + 디스크)·`retire`(숨김 보관)·`update-resources`(정지 Linux 의 등록 설정 변경)로 구현되며, dom0-manager 안에 디스크 생성기는 없습니다. xen 모드는 조회 전용이라 `ensure_instance`가 501이고 `update_resources` 도 501입니다. mock 은 등록의 자원값과 키별 원 결과를 메모리에 둡니다.
 
 `DELETE /api/v1/vms/{vm_id}`는 v1.1 의미입니다. 실행 중이면 409 `InvalidState`, 등록이 없으면 404, 정지된 VM은 숨김 보관(retire)으로 204. 강제 종료는 하지 않습니다.
 
-`POST /api/v1/vms`로 같은 `vm_id`가 다시 오면 등록된 명세와 비교합니다. 템플릿 ID·버전은 최초 명세와, vcpus·memory_mib 는 지금 등록 설정(자원 변경 반영)과 비교합니다. 같으면 디스크를 재사용해 다시 띄우고(재시작), 다르면 409 `VMExists`입니다(계약 4.2 불변조건).
+`POST /api/v1/vms`로 같은 `vm_id`가 다시 오면 실행 여부와 관계없이 등록 명세를 확인합니다. 템플릿 ID·버전은 최초 명세 또는 factory의 등록 메타데이터에서, vcpus·memory_mib는 현재 등록 설정에서 읽습니다. 같은 명세의 정지 VM은 디스크를 재사용해 시작하고 실행 도메인이 있으면 409 `VMExists`를 반환합니다. 다른 명세 또는 원 생성 키 충돌은 409 `VMSpecConflict`입니다.
 
 상태 매핑은 계약 3.2장을 따릅니다. `b`(blocked)는 I/O 대기 중인 정상 상태이고, 플래그가 없는 `------`도 running으로 봅니다. 그 외 모르는 문자는 조용히 running으로 넘기지 않고 `DriverError`를 냅니다.
 
@@ -242,6 +257,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 | `POST /vms/{id}/stop` | `stop` (`force=false`, 플랫폼이 최대 90초 대기). 시한 초과는 504. `Idempotency-Key` 가 있으면 아래 "정지 요청 추적" |
 | `POST /vms/{id}/reboot` | `reboot` (`force=false`, 플랫폼이 새 실행까지 최대 90초 대기). 신규 재부팅은 키 유무와 관계없이 먼저 등록(없으면 404)·실행 중(아니면 409)을 확인한다. 키 있으면 같은 키의 원 작업을 먼저 조회해 있으면 재전달로 보고 상태 확인 없이 보낸다(작업 상태 `action: reboot`). 명령 제출 뒤 새 실행 미확인은 503(`RECONCILE_REQUIRED`). 꺼진 VM·비협력 Zephyr 거절은 플랫폼이 `ARTIFACT_INVALID` 문구로만 알려 그 두 문구만 409·501 로 바꾼다(계약 4.10) |
 | `GET /cpu-layout`, `GET /vms/{id}/cpu-layout` | `cpu-layout` (`vm_id?`, `timeout_ms` 기본 5000). 조회 전용. 하위는 `budget_ms` 를 받지 않아 요청 예산은 `timeout_ms` 로만 줄이고, 플랫폼이 operation lock 을 기다리지 않으므로 요청별 Manager(fork)로 부른다. 응답은 공개 필드만 고정 모델로 형식·의미값(presence·allocation·issue code·예약 형식)까지 검증해 옮긴다. 어긋나거나 한 VM 조회가 그 VM 하나가 아니면 503. 관측 중 바뀜(`TARGET_CHANGED`)은 409 가 아니라 503(계약 4.11) |
+| `PUT /cpu-policy` | 전체 `expected_policy_revision`·`shared_pcpus`·`placements`를 `cpu-policy-set`(`execute=true`, `Idempotency-Key`)으로 전달한다. VM별 placement는 `shared` 또는 `exclusive`이며 모든 vCPU에 같은 pCPU 집합을 적용한다. 정지가 필요한 VM이 실행 중이거나 revision·키가 충돌하면 409, 구버전 Manager는 501. `host_preparation_required=true`이면 재기동 전 호스트 준비가 필요하다. |
 | `GET /vms/{id}/control-operations?request_key=` | `control-operation` (`vm_id`, `idempotency_key`, `timeout_ms` 기본 5000). 읽기만 한다. stop·reboot(force 없음) 기록만 돌려준다 |
 | `PUT /vms/{id}/resources` | `control-operation`·`operation`(키로 원 작업 조회, `vm_id` 없이) → 원 작업이 있으면 원 요청을, 없으면 `get` 의 generation·`configuration_sha256` 으로 만든 요청을 `update-resources`(`execute=true`, `idempotency_key`=요청 키)로. 하위는 `budget_ms` 를 받지 않는다. 아래 "자원 변경" |
 | `DELETE /vms/{id}` | 실행 중 409 → 정지 후 `retire`(숨김 보관) |
@@ -549,7 +565,8 @@ python -m pytest
 | `InvalidArgument` | 400 | 입력 검증, nil UUID(Domain-0) 대상 호출, 플랫폼 `INVALID_SPEC`·템플릿 없음 |
 | `VMNotFound` | 404 | 도메인 없음(단건), 등록 없음(삭제) |
 | `OperationNotFound` | 404 | 요청 키로 원 제어 작업을 찾지 못함(조회). 검색 부재이며 미수락 증거가 아님 |
-| `VMExists` | 409 | 같은 vm_id가 떠 있음, 다른 명세로 재생성, 이름·멱등성 충돌 |
+| `VMExists` | 409 | 같은 명세의 VM 실행이 이미 있음 또는 생성 외 기존 작업의 키 충돌 |
+| `VMSpecConflict` | 409 | 같은 UUID에 다른 명세가 등록되어 있거나 원 생성 작업과 충돌 |
 | `InvalidState` | 409 | 실행 중 삭제, `VM_NOT_STOPPED`·IP 충돌 등 |
 | `InsufficientResources` | 507 | vcpus·memory_mib 부족, 플랫폼 Linux IP 풀 고갈(`ipv4`), 보드 저장소 부족 |
 | `NotSupported` | 501 | 드라이버·플랫폼이 제공하지 않는 동작. xen 모드의 생성·정지·삭제 명령 |

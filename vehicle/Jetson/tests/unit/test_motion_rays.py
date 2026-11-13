@@ -45,6 +45,25 @@ def pose(calibration, *, captured=None):
 
 
 class MotionRayTests(unittest.TestCase):
+    def test_capture_midpoint_uses_exposure_motion_with_absolute_pose_kept_separate(self):
+        calibration, original = profile(), stamp()
+        buffer = PoseBuffer(max_speed_mps=.5, max_yaw_rate_rps=2.)
+        estimate = pose(calibration)
+        for at_us in estimate.bracket_us:
+            buffer.add(replace(estimate.sample, at_us=at_us, position_error_m=.15, yaw_error_rad=.2))
+        bound = buffer.at(original, calibration.sha256)
+        self.assertGreater(bound.sample.position_error_m, .15)
+        self.assertAlmostEqual(bound.exposure_motion[0], .01)
+        self.assertAlmostEqual(bound.exposure_motion[1], .04)
+        actual = widen_motion_rays(rays(original), original, calibration, bound,
+            input_kind='SYNTHETIC', motion_qualified=True, relative_to_capture_midpoint=True)
+        expected = widen_motion_rays(rays(original), original, calibration,
+            replace(bound, sample=replace(bound.sample, position_error_m=.01,yaw_error_rad=.04)),
+            input_kind='SYNTHETIC', motion_qualified=True)
+        for values, reference in zip(actual.numbers, expected.numbers):
+            for first, second in zip(values, reference):
+                self.assertAlmostEqual(first, second)
+
     def test_small_qualified_exposure_motion_retains_conditional_positive_certificate(self):
         from test_depth_evidence import profile as ideal_profile, witness_rays
         calibration = ideal_profile()

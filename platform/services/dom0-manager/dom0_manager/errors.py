@@ -10,7 +10,10 @@ retryable 은 플랫폼이 준 원본 값이다(코드의 고정 속성이 아�
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .models import VmOperationResult
 
 
 class Dom0ManagerError(Exception):
@@ -34,10 +37,12 @@ class Dom0ManagerError(Exception):
         self.platform_code = platform_code
         self.retryable = retryable
         self.operation = operation
+        self.context: VmOperationResult | None = None
+        self.public_message: str | None = None
 
     def body(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"code": self.code, "message": self.message}
-        if self.detail is not None:
+        out: dict[str, Any] = {"code": self.code, "message": self.public_message or self.message}
+        if self.detail is not None and self.public_message is None:
             out["detail"] = self.detail
         if self.resource is not None:
             out["resource"] = self.resource
@@ -47,6 +52,8 @@ class Dom0ManagerError(Exception):
             out["retryable"] = self.retryable
         if self.operation is not None:
             out["operation"] = self.operation
+        if self.context is not None:
+            out["context"] = self.context.model_dump(mode="json", exclude={"platform_code"})
         return out
 
 
@@ -70,6 +77,13 @@ class OperationNotFound(Dom0ManagerError):
 class VMExists(Dom0ManagerError):
     status_code = 409
     code = "VMExists"
+
+
+class VMSpecConflict(Dom0ManagerError):
+    """요청한 생성 명세가 같은 UUID의 기존 등록 또는 원 생성 작업과 충돌한다."""
+
+    status_code = 409
+    code = "VMSpecConflict"
 
 
 class VMNameConflict(Dom0ManagerError):

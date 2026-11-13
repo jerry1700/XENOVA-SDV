@@ -85,7 +85,7 @@ static void row(const struct k_thread *thread,void *ctx)
  if(s->rows==XDR_THREADS||!life){s->threads_rc=-ENOSPC;k_spin_unlock(&registry_lock,key);return;}
  struct xdr_thread *r=&s->threads[s->rows++];r->rc=rc;r->lifetime=life->id;
  const char *name=k_thread_name_get((k_tid_t)thread);
- if(!name)name="unnamed";
+ if(!name||!*name)name="unnamed";
  size_t bytes=strlen(name);r->name_truncated=bytes>=sizeof(r->name);
  memcpy(r->name,name,MIN(bytes,sizeof(r->name)-1));
  r->accounted=accounted;r->previous=prior;

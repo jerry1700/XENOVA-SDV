@@ -97,7 +97,7 @@ def _pipeline_state(pipeline,context):
     view_codes=np.zeros(grid.state.shape,dtype=np.uint8);lookup={label:index+1 for index,label in enumerate(labels)}
     for index,view in grid.hit_view.items():view_codes.reshape(-1)[index]=lookup[view if window is None else str(view)]
     state=dict(profile='mapper-pipeline-state-1',storage_context=context.fields,
-        calibration_id=pipeline.calibration.sha256,pipeline_profile_sha256=sha256(canonical(asdict(pipeline.profile))).hexdigest(),
+        calibration_id=pipeline.calibration.sha256,pipeline_profile_sha256=sha256(canonical(pipeline.profile.identity_fields())).hexdigest(),
         clock_id=grid.clock_id,kind=grid.kind,frame_id=grid.frame_id,
         spec=asdict(grid.spec),free_ttl_us=grid.free_ttl_us,occupied_ttl_us=grid.occupied_ttl_us,
         independent_view_m=grid.independent_view_m,revision=grid.revision,
@@ -728,7 +728,7 @@ class MapCheckpointCollector:
         else:
             capture=sha256(canonical(frame.observation.rgb.stamp.key)).hexdigest()
             self._rgb_refs={capture:self._rgb_refs[capture]}
-        active=result.temporal_rgb_sources
+        active=result.temporal_rgb_sources | result.parking_rgb_sources
         self._temporal_rgb={key:identity for key,identity in self._temporal_rgb.items() if key in active}
         key=frame.observation.rgb.stamp.key
         if key in active and key not in self._temporal_rgb:
@@ -743,13 +743,16 @@ class MapCheckpointCollector:
 
     def temporal_lane_root(self,candidate):
         """누적 차로를 채택할 때만 현재와 이전 RGB의 provenance를 결합한다."""
+        return self.temporal_rgb_root(candidate.road.source_key,candidate.sources)
+
+    def temporal_rgb_root(self,current,sources):
+        """Keep the original camera records and their pose ancestry for a multi-frame fit."""
         from ..storage.records import aggregate_rgb_provenance
-        if (not candidate.sources.issubset(self._temporal_rgb)
-                or self._next+(len(candidate.sources)+1)//3>self.grant.end_exclusive):
+        if (current not in sources or not 2 <= len(sources) <= 12 or not sources.issubset(self._temporal_rgb)
+                or self._next+(len(sources)+1)//3>self.grant.end_exclusive):
             return None
-        current=candidate.road.source_key
         record=self._records[self._temporal_rgb[current]]
-        originals=tuple(self._records[self._temporal_rgb[key]] for key in sorted(candidate.sources-{current}))
+        originals=tuple(self._records[self._temporal_rgb[key]] for key in sorted(sources-{current}))
         for record in aggregate_rgb_provenance(record,originals,self._allocate):
             self._records[record.provenance_id]=record
         return record.provenance_id
@@ -1163,7 +1166,7 @@ def restore_pipeline(pipeline,complete,current_scope):
             or context.geometry_origin!=current.geometry_origin or state['calibration_id']!=pipeline.calibration.sha256
             or state['kind']!='LIVE'):
         raise MapCheckpointNotReady('historical geometry/Pi/calibration context cannot be rebased')
-    if state['pipeline_profile_sha256']!=sha256(canonical(asdict(pipeline.profile))).hexdigest():
+    if state['pipeline_profile_sha256']!=sha256(canonical(pipeline.profile.identity_fields())).hexdigest():
         raise MapCheckpointNotReady('original accepted pipeline profile changed')
     uint(state['tile_revision_highwater'])
     if any(tile.revision>state['tile_revision_highwater'] for tile in complete.tiles):raise MapRestoreNotReady('original tile head regressed below manifest versions')
@@ -1281,6 +1284,7 @@ def restore_pipeline(pipeline,complete,current_scope):
         configure_grid(grid,window)
     pipeline.grid=grid;pipeline.reference=reference;pipeline._alignment=None;pipeline._propagation_anchor=None;pipeline._free_scheduler=None
     pipeline._previous_propagation_anchor=None;pipeline._registration_history=()
+    pipeline._mapped_registration.clear()
     pipeline._current_lane=None
     pipeline._temporal_road.clear()
     pipeline._restore_pending=not identity

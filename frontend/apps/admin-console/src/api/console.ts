@@ -11,6 +11,22 @@ const MAX_PENDING_INPUT = 262144;
 const CONNECT_TIMEOUT_MS = 15000;
 // Spring waits up to 8 seconds for upstream PTY/lease cleanup.
 const DISCONNECT_TIMEOUT_MS = 10000;
+// The server closes the console (4401) at the access token's exp, so a token that is
+// about to expire is renewed before connecting instead of giving a short session.
+const REFRESH_MARGIN_MS = 120000;
+// After an expiry close the previous lease may still be held (4409) while the server
+// cleans up (up to 8 s); the single automatic reconnect retries within this window.
+const RECONNECT_WINDOW_MS = 12000;
+const RECONNECT_RETRY_MS = 2000;
+// On attach, `xl console` replays the guest's earlier output. Terminal queries in it
+// (e.g. systemd's ESC[6n size probe at boot) make xterm answer now, and the answers
+// would land as typed text after "login:". Answers produced while the replay settles
+// are dropped; later live queries are answered normally.
+const REPLAY_SETTLE_MS = 2000;
+// Only whole terminal-generated reports: cursor position (ESC[r;cR), device
+// attributes (ESC[?…c / ESC[>…c) and status (ESC[0n). Nothing a person types.
+const ESC = String.fromCharCode(27);
+const TERMINAL_REPORTS = new RegExp(`^(?:${ESC}\\[(?:\\d+;\\d+R|[?>][\\d;]*c|0n))+$`);
 const encoder = new TextEncoder();
 
 export function consoleUrl(vmId: string): string {
@@ -43,7 +59,10 @@ export function consoleCloseMessage(code: number): string {
   }
 }
 
-/** No automatic reconnect or input replay. A new connection requires an explicit user action. */
+/**
+ * Never replays input. The only automatic reconnect is one renewal after the server
+ * closes for an expired login (4401); every other close needs an explicit user action.
+ */
 export class ConsoleTransport {
   private socket: WebSocket | null = null;
   private generation = 0;
@@ -51,6 +70,10 @@ export class ConsoleTransport {
   private closing = false;
   private authenticated = false;
   private waitTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private renewAllowed = true;
+  private renewUntil: number | null = null;
+  private connectedAt = 0;
 
   constructor(
     private readonly vmId: string,
@@ -58,6 +81,14 @@ export class ConsoleTransport {
   ) {}
 
   async connect(): Promise<void> {
+    if (this.closing) return;
+    this.clearRetry();
+    this.renewAllowed = true;
+    this.renewUntil = null;
+    await this.open(false);
+  }
+
+  private async open(forceRefresh: boolean): Promise<void> {
     if (this.closing) return;
     const generation = ++this.generation;
     this.stopSocket();
@@ -69,7 +100,8 @@ export class ConsoleTransport {
     );
     let session = getSession();
     try {
-      if (!session || !(Date.parse(session.expires_at) > Date.now())) {
+      // Renew when missing, expiring soon, or after a 4401 (the browser clock may lag the server's).
+      if (forceRefresh || !session || !(Date.parse(session.expires_at) - Date.now() > REFRESH_MARGIN_MS)) {
         await refreshSession();
         session = getSession();
       }
@@ -115,6 +147,9 @@ export class ConsoleTransport {
           if (frame.type === 'connected' && frame.vm_id === this.vmId) {
             this.clearWait();
             this.ready = true;
+            this.connectedAt = Date.now();
+            this.renewAllowed = true; // the next expiry may renew once again
+            this.renewUntil = null;
             this.callbacks.state('connected', '콘솔이 연결되었습니다.');
             return;
           }
@@ -126,12 +161,24 @@ export class ConsoleTransport {
     };
     ws.onclose = (event) => {
       if (generation !== this.generation) return;
+      const userClosing = this.closing;
       ++this.generation;
       this.clearWait();
       this.socket = null;
       this.ready = false;
       this.closing = false;
       this.authenticated = false;
+      if (!userClosing && event.code === 4401 && this.renewAllowed) {
+        this.renewAllowed = false;
+        this.renewUntil = Date.now() + RECONNECT_WINDOW_MS;
+        this.scheduleReopen(0, true, '로그인을 갱신해 콘솔에 다시 연결하는 중…');
+        return;
+      }
+      if (!userClosing && event.code === 4409 && this.renewUntil !== null && Date.now() < this.renewUntil) {
+        this.scheduleReopen(RECONNECT_RETRY_MS, false, '이전 콘솔 정리를 기다렸다가 다시 연결하는 중…');
+        return;
+      }
+      this.renewUntil = null;
       this.callbacks.state(
         event.code === 1000 || event.code === 1001 ? 'disconnected' : 'error',
         consoleCloseMessage(event.code),
@@ -140,6 +187,9 @@ export class ConsoleTransport {
   }
 
   send(text: string): boolean {
+    if (this.ready && Date.now() - this.connectedAt < REPLAY_SETTLE_MS && TERMINAL_REPORTS.test(text)) {
+      return true; // an answer to replayed output, not user input
+    }
     return this.sendBytes(encoder.encode(text));
   }
 
@@ -182,7 +232,24 @@ export class ConsoleTransport {
 
   dispose(): void {
     ++this.generation;
+    this.clearRetry();
+    this.renewUntil = null;
     this.stopSocket();
+  }
+
+  private scheduleReopen(delay: number, forceRefresh: boolean, message: string): void {
+    const generation = this.generation;
+    this.clearRetry();
+    this.callbacks.state('connecting', message);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (generation === this.generation) void this.open(forceRefresh);
+    }, delay);
+  }
+
+  private clearRetry(): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
   }
 
   private stopSocket(code?: number): void {

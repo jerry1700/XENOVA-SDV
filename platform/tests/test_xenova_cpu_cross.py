@@ -151,7 +151,8 @@ class CPUCrossTest(unittest.TestCase):
             'normal':c.ok(c.layout(vm_id=c.linux['uuid']))})
 
     def test_prejournal_restore_lease_blocks_policy_writer_then_releases(self):
-        c=self.case();c.activate()
+        c=self.case()
+        c.ok(c.policy(self.spec(c,pinned=True)));c.ok(c.prepare())
         c.ok(c.m.call('retire',{'vm_id':c.linux['uuid']},execute=True,idempotency_key='lease-retire'))
         entered,release=threading.Event(),threading.Event();out=[];request=c.m.fork();command=request.p.command
         def delayed(args,**kwargs):

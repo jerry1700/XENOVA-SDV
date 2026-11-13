@@ -128,10 +128,11 @@ static unsigned prep_diag_count,prep_diag_seen;
 static void prep_diagnostic(unsigned phase,int rc,int returned,int why,const struct prep_observation *v){
  if(!phase||phase>16||prep_diag_count>=16||(prep_diag_seen&(1U<<(phase-1))))return;
  prep_diag_seen|=1U<<(phase-1);unsigned index=++prep_diag_count;
- unsigned flags=(engine.episode_transition?1U:0U)|(engine.behavior_failed?2U:0U)|
+ enum de_episode_handoff handoff=engine.episode_handoff;
+ unsigned flags=(handoff!=DE_EPISODE_IDLE?1U:0U)|(engine.behavior_failed?2U:0U)|
   (atomic_load(&engine.facts_current)?4U:0U)|(engine.facts.valid?8U:0U)|(engine.facts.meter_valid?16U:0U)|
   (engine.planning?32U:0U)|(engine.plan_finalized?64U:0U)|(engine.plan_valid?128U:0U)|
-  (engine.episode_receipt_pending?256U:0U);
+  (handoff==DE_EPISODE_AWAITING_RECEIPT?256U:0U);
  LOG_INF("XD_PREP_DIAG n=%u cap=16 phase=%u rc=%d ret=%d why=%d p=%u path=%u proof=%u rev=%llu seq=%llu pi=%llu guest=%llu until=%llu flags=%u factsE=%llu factsVehicle=%llu episode=%u localPhase=%u",
   index,phase,rc,returned,why,v->present|((phase>=2&&phase<=5)?64U:0U),v->path,v->proof,(unsigned long long)v->rev,
   (unsigned long long)v->seq,(unsigned long long)v->pi,(unsigned long long)v->guest,(unsigned long long)v->until,
@@ -640,7 +641,7 @@ static uint64_t request_deadline(const struct dl_clock *clock,uint64_t completed
 static void behavior_io(const struct dl_clock *clock,uint64_t now,uint64_t guest){
  /* Bind the real phase event to the proof reserved before the engine turn.
   * A concurrent P4 promotion/search cannot map birth with a later G0. */
- if(engine.episode.active&&engine.episode_transition&&engine.phase_began_guest_us){
+ if(engine.episode.active&&engine.episode_handoff!=DE_EPISODE_IDLE&&engine.phase_began_guest_us){
   bool birth=engine.episode_state.core.state!=2||memcmp(engine.episode_state.core.episode_id.bytes,engine.episode.id,16);
   (void)dl_episode_event_clock(birth?engine.episode_began_guest_us:0,engine.phase_began_guest_us,&registration_event_clock);
  }
@@ -671,9 +672,9 @@ static void behavior_io(const struct dl_clock *clock,uint64_t now,uint64_t guest
   k_mutex_unlock(&app_metadata);
  }
  if(registered)dl_snapshot_request();
- if(!dl_budget_take(&budget_request,&budget_reply)){
-  xenova_drive_MissionGrant grant;
-  if(!dl_mission_get(&grant,now))(void)de_mission(&engine,&grant,now);
+ xenova_drive_MissionGrant grant;
+ if(!dl_budget_take(&budget_reply,&grant,now)){
+  if(!grant.major||de_mission(&engine,&grant,now)!=DE_OK)(void)de_mission(&engine,NULL,now);
   if(de_budget_reply(&engine,&budget_reply,now)==DE_OK)dl_snapshot_request();
  }
  if(de_budget_request(&engine,&budget_request)&&de_registration_state(&engine,&registration_state)){
@@ -757,7 +758,7 @@ static int planner_step(void){
        (planner_operation.vehicle_phase==2||planner_operation.vehicle_phase==3))return 1;
     /* Reserve before any engine work can create a phase or be preempted by
      * newer I/O. This numeric proof is not a mission/output grant. */
-    if(engine.behavior_enabled&&engine.local_owner&&(!engine.episode.active||!engine.episode_transition)&&dl_episode_event_prepare())return 1;
+    if(engine.behavior_enabled&&engine.local_owner&&(!engine.episode.active||engine.episode_handoff==DE_EPISODE_IDLE)&&dl_episode_event_prepare())return 1;
     struct lp_budget budget={guest+lp_selected_config.planner_budget_us,clock_us,cancelled,NULL,NULL};
     drive_planner_health_begin(&planner_health,budget.deadline_us);
     enum de_result started=de_plan_start(&engine,now,budget);

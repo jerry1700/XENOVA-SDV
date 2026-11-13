@@ -268,6 +268,35 @@ class NetworkPlatformTest(unittest.TestCase):
         self.assertEqual(result["original_result"]["app_readiness"],"unknown")
         self.assertEqual(self.physical("destroy"),[])
 
+    def test_absent_recovery_create_uses_remaining_request_deadline(self):
+        first = self.upgrade_start()
+        self.xen.rows.clear()
+        absent = self.state()
+        spec = {"vm_id": self.zid, "recovery_attempt_id": "70000000-1111-4222-8333-123456789abc",
+                "expected_host_boot_id": self.host, "expected_lifecycle_generation": absent["generation"],
+                "expected_intent_revision": absent["intent_revision"],
+                "expected_execution": {"absent_observation_revision": absent["observation_revision"]},
+                "mode": "start-if-absent", "deadline_monotonic_ms": int((self.ticks + 90) * 1000)}
+        self.ticks += 7
+        original = self.p.command
+        timeouts = []
+
+        def slow_create(argv, **kwargs):
+            if argv[:2] == ["xl", "create"]:
+                timeouts.append(kwargs["timeout"])
+                if kwargs["timeout"] < 60:
+                    raise vm.PlatformError("device setup did not finish before create timeout")
+                self.ticks += 60
+            return original(argv, **kwargs)
+
+        with patch.object(self.p, "command", side_effect=slow_create), patch.object(vm.os, "sync"):
+            result = self.ok(self.m.call("recover_once", spec, execute=True))
+        self.assertEqual(timeouts, [83])
+        self.assertEqual(result["attempt"]["phase"], "completed")
+        self.assertEqual(result["attempt"]["request"], spec)
+        self.assertNotEqual(result["original_result"]["execution_id"], first["execution_id"])
+        self.assertEqual(self.state()["intent_revision"], first["intent_revision"])
+
     def test_new_catalog_create_allocates_network_identity_without_start(self):
         target=self.p.data/"rtos-templates"/"xenova-zephyr-network-starter-1.1.0"
         target.parent.mkdir()

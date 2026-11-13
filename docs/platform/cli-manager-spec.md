@@ -569,6 +569,12 @@ lifecycle·실행 owner·구성·CPU 문맥이 같고, 원 기한 만료 뒤 Xen
 별도의 명시 요청이다. scope가 살아 있거나 근거가 없고, 실행/의도/구성이 바뀌었거나 저장이 미확정이면
 기존 보호를 유지한다. `control-operation` 조회 자체는 이 종결을 수행하지 않는다.
 
+새 `start` 또는 복구 실행을 요청하면, 도메인이 없는 대상에서 기존 실행을 막는 만료 기록을 같은 근거로 먼저
+종결할 수 있다. Linux의 협조형 `reboot`는 이전 성공 기록이 원 Xen 실행과 재사용 scope를 연결하고,
+해당 scope와 reboot helper가 종료됐을 때만 종결한다. 이후의 `start`가 원 Xen 실행을 그대로 관측해
+다음 의도 revision을 만들었다면 그 의도를 보존한다. 종결 기록에는 원 오류·작업 ID·기한을 남기며,
+새 Xen 실행은 현재 요청의 별도 검증을 거친다.
+
 **Manager 매핑:** `start / {vm_id}`.
 
 [명령어 색인으로](#command-index)
@@ -621,6 +627,7 @@ xenova-vm get "$VM_ID" --json
 `completion=pending`으로 반환할 수 있다. 이는 실제 정지 완료가 아니다. 원 key와
 operation을 기록하고 같은 stop을 재전달한다. 기록 조회만으로 정지가 실행되지는 않는다.
 원 기한이 만료됐거나 후속 사용자 의도가 수락됐다면 먼저 원 journal과 현재 실행을 대조한다.
+실행 전 원 기한 만료는 `DEADLINE_EXCEEDED`이며 이행하지 않는다. 이미 명령이 제출된 미확정 정지는 같은 키 재전달로 늦은 종료를 확인할 수 있다. 현재 host·수명·정지 의도와 소유 프로세스 종료를 확인한 경우에 원 작업만 완료로 저장하고 최초 오류를 보존한다. 그동안 더 새 의도가 수락되면 그 의도를 유지한다. 완료된 원 정지는 같은 키로 재전달하면 보관 이후에도 과거 완료를 회수할 수 있다.
 응답 전체와 재개 조건은 [공통 수락 계약](#acceptance-contract)을 따른다.
 
 **Manager 매핑:** `stop / {vm_id,force?}`.
@@ -1231,7 +1238,9 @@ CPU 재배치나 새 attempt·operation·실행 신원·물리 deadline 발급�
 만료한 미결합 launch의 종결에는 두 번의 현재 부재 관측, 원 host·의도·등록·CPU 정책과
 원 operation/run의 재검증, 정확한 VM/execution scope의 observe-only 무잔존 확인이 모두 필요하다.
 이 명령이 남은 domain이나 helper를 정지시키지는 않는다. 미확정 runtime 표지→원 attempt 실패→
-runtime stopped 순서로 필수 저장하고, 중간 중단은 같은 원 attempt의 명시 재호출로 회수한다.
+runtime stopped 순서로 필수 저장한다. 중간 중단은 같은 원 attempt의 명시 재호출로 회수할 수 있다.
+새 복구 실행과 원 복구의 재전달도 실행 잠금 안에서 같은 종결을 시도한다. 이전 실행 보호에 걸려
+제출 전에 거절된 것으로 확인되는 구형 복구 원장도 원 오류를 보존해 `failed/not_submitted`로 종결한다.
 제출 뒤 실패를 `launch_aborted_before_submit`로 꾸미거나 원 기한·hash를 바꾸지 않는다.
 단일 저장 실패 때는 같은 실행의 미확정 표지를 복원한다. 복원 저장도 실패하면 두 원인을 구분한
 `RECONCILE_REQUIRED`이며, 저장소가 회복된 뒤 원 결과를 다시 확인해야 한다.
@@ -1412,6 +1421,11 @@ xenova-vm get "$VM_ID" --json
 **확인 방법**
 
 출력한 attempt ID로 `recovery-operation`을 조회하고 `get/probe`의 새 execution_id를 확인한다. 재전달은 위 Python을 다시 실행하지 않고 **원 RECOVERY_FILE로 실행 명령만 반복**한다. 새 장애는 최신 probe·새 attempt로 요청한다. 계획이 이후 실행을 예약하지 않는다. 만료한 원 파일의 deadline만 고치지 않는다.
+
+Xen 생성 응답을 잃어 실행 신원이 아직 결합되지 않았다면, 원 scope의 현재 `xl` monitor와
+도메인 생성 근거를 대조한다. 같은 실행 신원·의도·구성·CPU 정책이 확인되면 원 호출이나
+동일 요청 재전달에서 `completed`로 종결하고 원 오류를 `reconciliation.original_error`에 보존한다.
+확인 예산으로 Xen 제어 명령을 제출하지 않으며, 근거가 부족하면 원 기록을 미확정으로 유지한다.
 
 **Manager 매핑:** `recover_once / 위 8개 필드`. [중복·만료·중단 판정](#recovery-reconciliation)을 따른다.
 
@@ -1832,7 +1846,12 @@ stop/reboot/recovery·retire/restore/purge는 CPU 예약을 해제하지 않는�
 
 **사용 조건**
 
-모든 관리 게스트가 실제 정지했고 미완료 launch/reboot/control/recovery/자산 작업·uncertain 실행이 없어야 한다. 검사와 저장은 공통 잠금 안에서 진행한다. 명령이 게스트를 대신 정지하지 않는다. 미등록 도메인이 있으면 제안한 공유 집합을 이미 준수해야 한다.
+dom0 공유 집합과 Xen 풀이 같으면 유효 마스크나 전용 예약이 달라지는 VM만 실제 정지를
+확인한다. 해당 VM의 미완료 launch/reboot/control/recovery/자산 작업은 변경을 막는다.
+계속 실행하는 도메인의 실제 배치와 기존 호스트 준비 근거도 확인한다. 최초 설정이나
+호스트 배치 변경은 모든 관리 게스트의 정지와 기존 호스트 준비 절차를 요구한다.
+검사와 저장은 공통 잠금 안에서 진행한다. 정지는 운영자가 수행하며, 미등록 도메인은
+제안한 공유 집합을 이미 준수해야 한다.
 
 **실행 예시**
 
@@ -1867,9 +1886,9 @@ xenova-vm cpu-policy-set --spec-file "$REQUEST" --idempotency-key "$KEY" --execu
 
 **정상 응답**
 
-계획 data는 `{plan:true,policy:후보,host_preparation_required:true}`다. 파일·intent·affinity를 바꾸지 않고 계획 후보의 operation UUID도 저장 확정 ID가 아니다. 최초 실행 data는 `{policy:저장된_정책,host_preparation_required:true}`이며 envelope.operation_id가 publication journal을 가리킨다. 정책에는 schema_version, 단조 정수 policy_revision, operation_id, pool_name, shared_pcpus와 버전에 따른 exclusive 또는 placements가 저장된다.
+계획 data는 `{plan:true,policy:후보,host_preparation_required:bool}`이다. 파일·intent·affinity를 바꾸지 않고 계획 후보의 operation UUID도 저장 확정 ID가 아니다. 최초 실행 data는 `{policy:저장된_정책,host_preparation_required:bool}`이며 envelope.operation_id가 publication journal을 가리킨다. 기존 dom0 준비가 검증된 게스트 배치 변경은 `false`를 반환한다. 정책에는 schema_version, 단조 정수 policy_revision, operation_id, pool_name, shared_pcpus와 버전에 따른 exclusive 또는 placements가 저장된다.
 
-완료 key 재전달은 `replayed=true`, data의 policy·current_policy·historical=true로 과거 결과와 현재 정책을 구분한다. 과거 결과가 현재 정책을 덮어쓰지 않는다. 정책 저장 성공은 현재 dom0 적용 성공이 아니다.
+완료 key 재전달은 `replayed=true`, data의 policy·current_policy·historical=true로 과거 결과와 현재 정책을 구분한다. `host_preparation_required`는 그 작업의 결과이며, 현재 준비 상태는 `cpu-layout`에서 확인한다.
 
 **오류 응답**
 
@@ -1877,7 +1896,7 @@ xenova-vm cpu-policy-set --spec-file "$REQUEST" --idempotency-key "$KEY" --execu
 
 **확인 방법**
 
-`cpu-layout --json`의 policy_revision·reservations를 확인한다. 현재 host 적용은 [내부 CPU 준비](#cmd-cpu-host-prepare)에서 별도로 수행한다. 새 정책은 새 key와 최신 revision, 중단된 동일 정책은 원 spec/key로 재전달한다. journal·anchor를 삭제해 우회하지 않는다.
+`cpu-layout --json`의 policy_revision·reservations·host.ready를 확인한다. 호스트 적용이 필요하면 [내부 CPU 준비](#cmd-cpu-host-prepare)를 수행한다. 새 정책은 새 key와 최신 revision, 중단된 동일 정책은 원 spec/key로 재전달한다.
 
 **Manager 매핑:** `cpu-policy-set / {expected_policy_revision,shared_pcpus,placements}` 또는 기존 exclusive 입력. `execute`·`idempotency_key`는 call 키워드 인자.
 
@@ -2945,7 +2964,7 @@ xenova-boot-status --json
 
 **정상 응답**
 
-기본 평문은 `Xenova startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
+기본 평문은 `XENOVA startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
 진행 중인 서비스는 `[START]`, 아직 미시작인 서비스는 `[WAIT; reason unconfirmed]`로 묶어 표시한다.
 `--details`의 `COMPLETE/PROGRESS/WAITING/DELAYED/DEFERRED/FAILED/UNKNOWN/UNAVAILABLE`은
 같은 snapshot의 표시 상태다. 지연·실패·미확정은 기본 출력에도 남는다.
@@ -4107,7 +4126,7 @@ boot allowed는 boolean이며 해당 host·세대·revision에만 유효하다. 
 
 현재 Network Starter 종료 구현은 refuse 값만으로 별도 veto 분기를 만들지 않는다. force-allowed는 timeout 후 자동 force로 승격하는 정책이 아니다. 명시 --force는 Linux를 포함한 전체 대상에 적용된다.
 
-shutdown-all은 guest를 정리하고 gate를 닫아 둔다. poweroff/reboot-board는 추가로 미등록 실행 도메인·잔여 실행·신원 변경을 검사한 뒤 VM/종료/DHCP 서비스 정리 → /srv 데이터 unmount → host 전원 동작을 진행한다. 실제 제거가 확인되지 않으면 후속 host 종료를 진행하지 않는다. 사용자 stopped 의도를 모든 VM에 일괄 생성하지 않는다.
+shutdown-all은 guest를 정리하고 gate를 닫아 둔다. poweroff/reboot-board는 추가로 미등록 실행 도메인·잔여 실행·신원 변경을 검사한 뒤 UTC 제공·콘솔 증거 수집 타이머를 먼저 멈춘다. 이어 실행 중인 수집 작업과 VM/종료/DHCP 서비스를 정리하고, /srv 데이터 unmount 성공 뒤 host 전원 동작을 요청한다. 실제 제거나 마운트 해제가 확인되지 않으면 후속 host 종료를 진행하지 않는다. 사용자 stopped 의도를 모든 VM에 일괄 생성하지 않는다.
 
 종료 결과는 action, attempt_id, stopped, already_stopped, forced, graceful_shutdown_requested, instances, board_shutdown, global_force, observation을 제공한다. observation에는 samples/changed_pairs/recent_changes, VM별 결과에는 method/stage/xen_state/error 등이 있다. shutdown-requested가 있으면 단순 host-resume을 허용하지 않는다.
 

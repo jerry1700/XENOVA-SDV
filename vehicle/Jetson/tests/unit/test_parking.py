@@ -6,6 +6,7 @@
 
 from dataclasses import replace
 import math
+from itertools import product
 import struct
 import unittest
 
@@ -14,7 +15,7 @@ from xenova_vehicle.perception.inputs import FrameStamp
 from xenova_vehicle.perception.tape import TapeGraph, TapeJunction, TapeStrip
 from xenova_vehicle.perception.parking import (ParkingAisle, ParkingProfile, SlotSource, ClearanceMap,
     PARTIAL, VALID, AMBIGUOUS, UNKNOWN, OCCUPIED, CLEAR_REGION, extract_slots, goal_candidates,
-    to_map, evaluate_occupancy)
+    to_map, evaluate_occupancy, _intersection, _intersection_error)
 from xenova_vehicle.mapping.local_map import GridSpec
 
 
@@ -61,6 +62,23 @@ def clearance(*, state=1, age_ms=0, support=1, permission=1, conflict=0, revisio
 
 
 class ParkingGeometryTests(unittest.TestCase):
+    def test_corner_bound_keeps_shared_line_errors_correlated(self):
+        a, b, c, d = (0., 0.), (.6, 0.), (0., 0.), (0., .4)
+        crossing = _intersection(a, b, c, d)
+        bound = _intersection_error(a, b, .03, c, d, .02, crossing)
+        self.assertLess(bound, .041)
+        directions = tuple((math.cos(i * math.pi / 4), math.sin(i * math.pi / 4)) for i in range(8))
+        for shifts in product(directions, repeat=4):
+            ends = [(x + dx * radius, y + dy * radius)
+                    for (x, y), (dx, dy), radius in zip((a, b, c, d), shifts, (.03, .03, .02, .02))]
+            actual, _, _ = _intersection(*ends)
+            self.assertLessEqual(math.dist(actual, crossing[0]), bound)
+
+    def test_uncertainty_that_can_make_lines_parallel_remains_unresolved(self):
+        a, b, c, d = (0., 0.), (.5, 0.), (0., 0.), (.5, .02)
+        crossing = _intersection(a, b, c, d)
+        self.assertIsNone(_intersection_error(a, b, .01, c, d, .01, crossing))
+
     def test_observed_u_has_four_corners_and_original_frame_source(self):
         result = batch()
         self.assertTrue(result.complete)

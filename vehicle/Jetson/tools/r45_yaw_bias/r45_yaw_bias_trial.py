@@ -218,23 +218,16 @@ class ResidualBounds:
         return replace(base, sample=sample)
 
 
-class BiasedEncoderReplay(EncoderReplay):
-    def __init__(self, calibration, poses, samples, indices, motion_profile, *, rate, estimator,
-                 apply_filter, minimum_sigma, residual_bounds):
+class InjectedEncoderReplay(EncoderReplay):
+    """Inject a repeatable rate into the simulator wheel stream before the Gateway."""
+
+    def __init__(self, calibration, poses, samples, indices, motion_profile, *, rate, start_at_zero=False):
         super().__init__(calibration, poses, motion_profile,
-            wheel_speed_limit_mps=wheel_speed_limit(samples,motion_profile['encoder']))
+            wheel_speed_limit_mps=wheel_speed_limit(samples,motion_profile['encoder']),start_at_zero=start_at_zero)
         self.samples, self.frames = samples, indices
         self.rate = rate
-        self.estimator = estimator
-        self.apply_filter = apply_filter
-        self.minimum_sigma = minimum_sigma
-        self.residual_bounds = residual_bounds
-        self.filter = ScalarBiasFilter()
-        self.camera_rows = []
-        self.corrected = None
-        self.previous_raw = None
         self.start_us = None
-        self.motion_s = 0.
+        self.camera_rows = []
 
     def advance(self, index, at):
         if index == 0:
@@ -247,6 +240,27 @@ class BiasedEncoderReplay(EncoderReplay):
             steer = math.atan(self.odom.config.wheelbase_m * turn / distance) if distance else 0.
             bias = self.rate * DRIVE_STEP_US / 1e6 if abs(distance) > MIN_MOVING_STEP_M else 0.
             self._sample(base + step * DRIVE_STEP_US, distance, turn + bias, steer)
+
+    def observe(self, observation):
+        observation, pose = super().observe(observation)
+        raw = pose.sample.x, pose.sample.y, pose.sample.yaw
+        at = (observation.rgb.stamp.captured_us[0] - self.start_us) / 1e6
+        self.camera_rows.append(dict(at=at,raw=raw,corrected=raw,visual=None))
+        return observation, pose
+
+
+class BiasedEncoderReplay(InjectedEncoderReplay):
+    def __init__(self, calibration, poses, samples, indices, motion_profile, *, rate, estimator,
+                 apply_filter, minimum_sigma, residual_bounds):
+        super().__init__(calibration,poses,samples,indices,motion_profile,rate=rate)
+        self.estimator = estimator
+        self.apply_filter = apply_filter
+        self.minimum_sigma = minimum_sigma
+        self.residual_bounds = residual_bounds
+        self.filter = ScalarBiasFilter()
+        self.corrected = None
+        self.previous_raw = None
+        self.motion_s = 0.
 
     def _receive_vehicle(self, row):
         super()._receive_vehicle(row)
@@ -275,7 +289,7 @@ class BiasedEncoderReplay(EncoderReplay):
         self.previous_raw = raw, at
 
     def observe(self, observation):
-        observation, pose = super().observe(observation)
+        observation, pose = EncoderReplay.observe(self, observation)
         raw = pose.sample.x, pose.sample.y, pose.sample.yaw
         at = (observation.rgb.stamp.captured_us[0] - self.start_us) / 1e6
         measured = self.estimator.observe(observation.rgb.array(), self.calibration, raw)
@@ -307,7 +321,13 @@ def main():
     parser.add_argument('--filter', action='store_true')
     parser.add_argument('--min-sigma', type=float, default=0.)
     parser.add_argument('--residual-bounds', action='store_true')
+    parser.add_argument('--online-map', action='store_true', help='run the normal pipeline from an empty map')
+    parser.add_argument('--no-online-filter', action='store_true', help='disable the online filter for the paired control')
     parser.add_argument('--rate-limit', type=float, default=.001)
+    parser.add_argument('--position-drift-mps', type=float, help='override the replay-only position drift budget')
+    parser.add_argument('--yaw-drift-rps', type=float, help='override the replay-only yaw drift budget')
+    parser.add_argument('--ground-drift-mps', type=float, nargs=2, metavar=('X','Y'), default=(0.,0.),
+                        help='inject a scene-coordinate position drift without changing the encoder path')
     parser.add_argument('--trace', type=Path, required=True)
     parser.add_argument('--scene', type=Path, required=True)
     parser.add_argument('--profiles', type=Path, required=True)
@@ -316,17 +336,28 @@ def main():
     options = parser.parse_args()
     if options.residual_bounds and not options.filter:
         parser.error('--residual-bounds requires --filter')
+    if options.online_map and (options.filter or options.residual_bounds):
+        parser.error('--online-map uses the runtime filter instead of the surveyed prototype')
+    if options.no_online_filter and not options.online_map:
+        parser.error('--no-online-filter requires --online-map')
     if (not all(math.isfinite(value) for value in (options.rate,options.rate_limit,options.min_sigma))
             or options.rate_limit <= 0. or options.min_sigma < 0.):
         parser.error('rates and threshold must be finite, with a positive rate limit and nonnegative threshold')
+    overrides = {key: getattr(options,key) for key in ('position_drift_mps','yaw_drift_rps')
+                 if getattr(options,key) is not None}
+    if any(not math.isfinite(value) or value < 0 for value in overrides.values()):
+        parser.error('localization drift budgets must be finite and nonnegative')
+    if not all(math.isfinite(value) for value in options.ground_drift_mps):
+        parser.error('injected ground drift must be finite')
+    if (overrides or any(options.ground_drift_mps)) and not options.online_map:
+        parser.error('ground drift and localization budget overrides require --online-map')
     drive = json.loads(options.trace.read_bytes())
     samples = tuple(drive['trace']) + (dict(pose=drive['final'], step=len(drive['trace'])),)
     if len(samples) < 2 or any(sample['step'] != step for step,sample in enumerate(samples)):
         parser.error('trace must provide consecutive 20 ms steps and a final pose')
     indices = tuple(range(0, len(samples)-1, CAMERA_EVERY_STEPS)) + (len(samples)-1,)
     route = tuple((i*DRIVE_STEP_US, tuple(samples[i]['pose'])) for i in indices)
-    track = json.loads(options.scene.read_bytes())['track']
-    estimator = TapeHeading(track)
+    estimator = None if options.online_map else TapeHeading(json.loads(options.scene.read_bytes())['track'])
     motion_profile = json.loads((options.profiles/'development-motion.json').read_bytes())
     residual_bounds = ResidualBounds(options.rate_limit) if options.residual_bounds else None
     project = MapOdomAlignment._project
@@ -348,6 +379,9 @@ def main():
         return prior, selected
 
     def factory(calibration, poses):
+        if options.online_map:
+            return InjectedEncoderReplay(calibration,poses,samples,indices,motion_profile,rate=options.rate,
+                                         start_at_zero=True)
         return BiasedEncoderReplay(calibration, poses, samples, indices, motion_profile,
             rate=options.rate, estimator=estimator, apply_filter=options.filter, minimum_sigma=options.min_sigma,
             residual_bounds=residual_bounds)
@@ -355,8 +389,12 @@ def main():
     try:
         if residual_bounds is not None:
             MapOdomAlignment._project = project_residual
-        PerceptionPipeline._propagate_odometry = observe_propagation
-        frames,rig,cones = run(route,options.scene,options.profiles,options.rgb_eeprom,factory)
+        if not options.online_map:
+            PerceptionPipeline._propagate_odometry = observe_propagation
+        online_filter = options.online_map and not options.no_online_filter
+        frames,rig,cones = run(route,options.scene,options.profiles,options.rgb_eeprom,factory,
+                               estimate_yaw_bias=online_filter,map_local_origin=options.online_map,
+                               localization_overrides=overrides,ground_drift_mps=options.ground_drift_mps)
     finally:
         MapOdomAlignment._project = project
         PerceptionPipeline._propagate_odometry = propagate
@@ -372,17 +410,23 @@ def main():
             errors[f'{key}_error'] = (math.hypot(x-truth[0], y-truth[1]), wrap_yaw(yaw-truth[2]))
         if row['visual'] is not None:
             errors['visual_angle_residual'] = wrap_yaw(row['visual'][0] - errors['raw_error'][1])
+        if options.online_map and frame['mapped'] is not None:
+            mapped = frame['mapped']
+            errors['map_error'] = (math.dist(mapped[:2],truth[:2]),wrap_yaw(mapped[2]-truth[2]))
         scored.append(dict(**row, **errors, status=frame['status'], mapped=frame['mapped'],
             bound=frame['position_error_m'], yaw_bound=frame['yaw_error_rad'], qualified=frame['qualified'], truth=truth,
-            propagation=propagation.get(rig.start_us + round(row['at']*1e6))))
-    metrics = dict(rate=options.rate, filter_applied=options.filter, minimum_sigma=options.min_sigma,
-        residual_bounds=options.residual_bounds, rate_limit=options.rate_limit,
+            yaw_bias=frame['yaw_bias'],propagation=propagation.get(rig.start_us + round(row['at']*1e6))))
+    metrics = dict(rate=options.rate, filter_applied=options.filter or online_filter, minimum_sigma=options.min_sigma,
+        residual_bounds=options.residual_bounds or online_filter, rate_limit=options.rate_limit,
         interval_contradiction_at=None if residual_bounds is None else residual_bounds.contradiction_at,
         interval_update_count=0 if residual_bounds is None else residual_bounds.update_count,
         samples=rig.stats(),
-        updates=rig.filter.updates, statuses=dict(Counter(frame['status'] for frame in frames)),
+        updates=[] if options.online_map else rig.filter.updates,
+        online_map=options.online_map,statuses=dict(Counter(frame['status'] for frame in frames)),
         pose_frames=sum(frame['mapped'] is not None for frame in frames), frames=len(frames),
         cones=cones, rows=scored)
+    if overrides or any(options.ground_drift_mps):
+        metrics.update(localization_overrides=overrides, ground_drift_mps=options.ground_drift_mps)
     options.output.write_text(json.dumps(metrics,indent=2,allow_nan=False),encoding='utf-8')
     print({key:value for key,value in metrics.items() if key!='rows'}, flush=True)
 

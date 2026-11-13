@@ -56,7 +56,7 @@ class _OperationLock:
 
 
 @contextmanager
-def observation_slot(runtime, *, deadline, clock=time.monotonic):
+def observation_slot(runtime, *, deadline, clock=time.monotonic, whole_registry=False):
     """읽기 전용 외부 관측만 제한한다. 변경/원 작업 조회는 이 슬롯을 기다리지 않는다.
 
     파일은 삭제하지 않는다. 호출자는 FD를 소유 helper에도 전달해 부모 소멸을 슬롯 회수로
@@ -66,9 +66,11 @@ def observation_slot(runtime, *, deadline, clock=time.monotonic):
     directory.mkdir(mode=0o700,exist_ok=True)
     if directory.is_symlink() or directory.resolve()!=directory:
         raise PlatformError('invalid observation slot directory')
+    # 2-vCPU Dom0에서 전체 목록이 동시에 레지스트리를 훑으면 제어와 복구 조회도 밀린다.
+    slots = 1 if whole_registry and (os.cpu_count() or 1) <= 2 else OBSERVATION_SLOTS
     held=None
     try:
-        for number in range(OBSERVATION_SLOTS):
+        for number in range(slots):
             if clock()>=deadline:
                 from xenova_execution import refuse
                 refuse('DEADLINE_EXCEEDED','observation admission deadline expired')

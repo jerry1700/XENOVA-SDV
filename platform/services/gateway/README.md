@@ -405,7 +405,7 @@ python3 -m xenova_gateway --sink serial --serial-port /dev/ttyUSB0
 | `--host` / `--port` | `XENOVA_GATEWAY_BROKER_HOST` / `_PORT` | `127.0.0.1` / `1883` | dom0 Mosquitto |
 | `--username` / `--password` | `XENOVA_GATEWAY_BROKER_USERNAME` / `_PASSWORD` | `gateway` / 없음 | 비밀번호는 환경변수로 (ps 에 보이지 않게) |
 | `--sink` | `XENOVA_GATEWAY_SINK` | `mock` | `mock`(기록만) / `serial` |
-| `--serial-port` / `--serial-baud` | `XENOVA_GATEWAY_SERIAL_PORT` / `_BAUD` | `/dev/ttyUSB0` / `115200` | |
+| `--serial-port` / `--serial-baud` | `XENOVA_GATEWAY_SERIAL_PORT` / `_BAUD` | `/dev/ttyUSB0` / `115200` | 설치한 펌웨어의 속도를 명시한다. `vehicle/ESP32` feedback-3 펌웨어의 개발용 기본값은 `460800` |
 | `--frame-log` | `XENOVA_GATEWAY_FRAME_LOG` | 없음 | 목 싱크가 프레임을 한 줄씩 기록할 파일, `-` 는 표준출력 |
 | `--start-mode` | `XENOVA_GATEWAY_START_MODE` | `AUTO` | `SAFE_STOP` 이면 수동 명령이 올 때까지 정지 (시나리오 F5 "자동 출발 없음") |
 | `--retained-wait-s` | `XENOVA_GATEWAY_RETAINED_WAIT_S` | `1.0` | 시작 시 이전 `vehicle/control` 을 기다리는 시간 |
@@ -612,6 +612,9 @@ sample CRC domain은141B다. cap 부족·센서 오류·누락은 ToF만 폐기�
 원 capture 시각·CRC·generation/instance와 TTL을 보존한1×1 `TofObservation`을 기존 J port로 보낸다.
 ToF는 근거리 장애물 HIT-only이며 정상 거리·NO_TARGET·out-of-range를 FREE로 carve하지 않는다.
 모델·FOV·측정 오차·native 상태 매핑·baud/율과 물리 수락은 별도 확인한다. 새 thread/serial handle은 없다.
+근거리 제동을 하는 MCU(cap0x1000)는 표본 quality의 앞 막힘8/뒤 막힘16과 DRIVE의 REJECTED/reason21로 알린다.
+Gateway는 두 bit를 odometry에 넘기지 않고 view의 `proximity_front_blocked`/`proximity_rear_blocked`로 내며,
+그 거절을 `DEVICE_REJECTED`·`DEVICE_APPLY_TIMEOUT`으로 묶지 않는다. 막힌 방향의 DRIVE를 미리 막지는 않는다.
 [정확 계약과 시험 경계](../../../docs/contracts/gateway-feedback-3.md#91-optional-tof의-합의-wire와-선택형-pi-연결)를 따른다.
 
 actor는 권한·입력·기한을 판정하고, serial owner 하나가 실제 출력/feedback을 소유한다.

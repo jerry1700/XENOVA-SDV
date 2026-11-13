@@ -12,6 +12,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import time
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -154,12 +155,33 @@ def parse_xrandr(text):
     return rows
 
 
+FULL_PROBE_S = 30
+
+
+def kernel_connectors(root):
+    """Hot-plug fingerprint from the kernel's cached DRM connector state.
+
+    Reading status/edid in sysfs does not re-probe the monitor, unlike
+    `xrandr --query`, which makes Xorg read EDID over DDC each time.
+    """
+    try:
+        return tuple(sorted(
+            (path.name, (path / "status").read_text().strip(),
+             hashlib.sha256((path / "edid").read_bytes()).hexdigest())
+            for path in Path(root).glob("card*-*") if (path / "status").is_file()))
+    except OSError:
+        return None
+
+
 class X11Layout:
-    def __init__(self, config, *, allow_virtual=False, runner=subprocess.run):
+    def __init__(self, config, *, allow_virtual=False, runner=subprocess.run,
+                 sysfs="/sys/class/drm", clock=time.monotonic):
         if config.backend == "virtual_x11" and not allow_virtual:
             raise ValueError("virtual layout requires --allow-virtual; not a physical HDMI test")
         self.config, self.runner = config, runner
         self.initialised = set()
+        self.sysfs, self.clock = sysfs, clock
+        self.probe_key = self.probed_at = None
 
     def command(self, args):
         result = self.runner(["xrandr", "--display", self.config.display, *args],
@@ -168,8 +190,19 @@ class X11Layout:
             raise RuntimeError("X11 layout query/configuration failed")
         return result.stdout
 
-    def inspect(self):
-        return parse_xrandr(self.command(["--query", "--props"]))
+    def inspect(self, full=True):
+        # --current reads X's cached outputs; only --query makes Xorg re-probe the monitors.
+        return parse_xrandr(self.command(["--query" if full else "--current", "--props"]))
+
+    def _observe(self):
+        """Re-probe on a kernel hot-plug change, on unknown kernel state, or every FULL_PROBE_S."""
+        key, now = kernel_connectors(self.sysfs), self.clock()
+        full = (key is None or key != self.probe_key or self.probed_at is None
+                or not 0 <= now - self.probed_at < FULL_PROBE_S)
+        rows = self.inspect(full)
+        if full:  # remembered only after the probe succeeded
+            self.probe_key, self.probed_at = key, now
+        return rows
 
     def reconcile(self):
         if self.config.backend == "virtual_x11":
@@ -179,7 +212,7 @@ class X11Layout:
             if not size or any(o.x+o.width > int(size[1]) or o.y+o.height > int(size[2]) for o in self.config.outputs):
                 raise RuntimeError("virtual root is smaller than the configured test rectangles")
             return {o.output_id: {"status": "mapped", "physical_verified": False} for o in self.config.outputs}
-        rows = self.inspect()
+        rows = self._observe()
         states, args = {}, []
         for o in self.config.outputs:
             row = rows.get(o.connector)

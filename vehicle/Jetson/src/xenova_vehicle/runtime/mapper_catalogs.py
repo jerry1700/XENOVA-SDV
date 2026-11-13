@@ -22,8 +22,10 @@ from ..mapping.road_basis import RoadBasis
 from ..mapping.parking_catalog import AssociationProfile
 from ..perception.calibration import BodyModel
 from ..perception.inputs import FrameStamp
-from ..perception.parking import ParkingAisle, ParkingProfile
+from ..perception.parking import ParkingAisle, ParkingProfile, VALID
+from ..perception.parking_entrance import parking_aisles as observed_parking_aisles, parking_slot_tape
 from ..perception.pipeline import PerceptionResult
+from ..perception.road import RoadGeometryLimits
 from ..storage.contracts import (StorageContext, StorageJob, CatalogHeadSnapshot, CommitReceipt,
     ProvenanceRange, LoadRequest, canonical, json_bytes, uint)
 from ..storage.port import CheckpointRequest
@@ -158,7 +160,7 @@ class MapperCatalogs:
     """
     def __init__(self, context, *, mailbox, clock_id, map_frame_id, body,
             method_manifest_sha256, input_kind, calibration_profile=None, parking_aisles=(),
-            aisle_lane_indices=None, crossing=None, lane_profile=RegistrationProfile(),
+            aisle_lane_indices=None, crossing=None, lane_profile=RegistrationProfile(), road_geometry_limits=None,
             parking_profile=ParkingProfile(), association_profile=AssociationProfile(), clock_us=None,
             parking_geometry_interval_us=None):
         if type(context) is not StorageContext or type(mailbox) is not MapperStorageMailbox or mailbox.context_sha256 != context.sha256:
@@ -168,6 +170,10 @@ class MapperCatalogs:
         self._completion_clock=clock_us
         if type(body) is not BodyModel or type(lane_profile) is not RegistrationProfile:
             raise ValueError('explicit body/registration policy required')
+        if road_geometry_limits is None:
+            road_geometry_limits = RoadGeometryLimits(lane_profile.max_position_error_m, lane_profile.max_yaw_error_rad)
+        elif type(road_geometry_limits) is not RoadGeometryLimits:
+            raise ValueError('typed road geometry limits required')
         if (type(parking_aisles) is not tuple or len(parking_aisles) > 4
                 or any(type(a) is not ParkingAisle for a in parking_aisles)):
             raise ValueError('at most four declared parking aisles required')
@@ -190,6 +196,7 @@ class MapperCatalogs:
         self._queued = self._head = self._delivery = self._terminal = None
         self._submitted = False
         self._crossing, self._lane_profile = crossing, lane_profile
+        self._road_limits = road_geometry_limits
         self._aisles, self._roles = parking_aisles, aisle_lane_indices
 
     def _owner(self):
@@ -224,7 +231,7 @@ class MapperCatalogs:
 
     def prepare(self, original_job, result, *, context, stamp, capture_prior, registration_revision,
             prior_qualified, metric_evidence, lane_provenance_ids, base_evidence, now_us, roi_bounds,
-            temporal_provenance_id=None):
+            temporal_provenance_id=None, parking_provenance_id=None):
         self._owner();uint(now_us)
         if type(original_job) is not MapperInput:
             raise ValueError('original physical MapperInput required')
@@ -232,10 +239,10 @@ class MapperCatalogs:
             registration_revision=registration_revision,prior_qualified=prior_qualified,metric_evidence=metric_evidence,
             lane_provenance_ids=lane_provenance_ids,base_evidence=base_evidence,now_us=now_us,roi_bounds=roi_bounds,
             original_rgb_sequence=original_job.sample.rgb.sequence,original_context_bytes=original_job.context_bytes,
-            temporal_provenance_id=temporal_provenance_id)
+            temporal_provenance_id=temporal_provenance_id,parking_provenance_id=parking_provenance_id)
 
     def prepare_pc(self,proof,result,*,capture_prior,registration_revision,prior_qualified,now_us,roi_bounds,
-                   temporal_provenance_id=None):
+                   temporal_provenance_id=None, parking_provenance_id=None):
         """원 PC/D-range proof만 별도 입구로 받는다. CAMERA FrameEvidence를 가장하지 않는다."""
         from .pc_mapper_storage import PcFrameProofDraft
         self._owner();uint(now_us)
@@ -247,11 +254,12 @@ class MapperCatalogs:
             capture_prior=capture_prior,registration_revision=registration_revision,prior_qualified=prior_qualified,
             metric_evidence=proof.metric_evidence,lane_provenance_ids=(identity,identity),base_evidence=proof.evidence,
             now_us=now_us,roi_bounds=roi_bounds,original_rgb_sequence=proof.rgb_sequence,
-            original_context_bytes=proof.context_bytes,temporal_provenance_id=temporal_provenance_id)
+            original_context_bytes=proof.context_bytes,temporal_provenance_id=temporal_provenance_id,
+            parking_provenance_id=parking_provenance_id)
 
     def _prepare(self,original_job,result,*,context,stamp,capture_prior,registration_revision,
                  prior_qualified,metric_evidence,lane_provenance_ids,base_evidence,now_us,roi_bounds,
-                 original_rgb_sequence,original_context_bytes,temporal_provenance_id=None):
+                 original_rgb_sequence,original_context_bytes,temporal_provenance_id=None,parking_provenance_id=None):
         self._owner(); uint(now_us)
         if self._staged is not None or self._transition is not None:
             raise CatalogNotReady('original draft/publication transition is unresolved')
@@ -302,9 +310,14 @@ class MapperCatalogs:
         temporal = result.mapped_road
         if temporal_provenance_id is not None:
             uint(temporal_provenance_id, positive=True)
-            if temporal is None or not temporal.within(self._lane_profile):
+            if temporal is None or not temporal.within(self._road_limits):
                 raise ValueError('provenance requires actual bounded mapped road')
             parent_roots.add(temporal_provenance_id)
+        if parking_provenance_id is not None:
+            uint(parking_provenance_id,positive=True)
+            if not result.parking_tape_history:
+                raise ValueError('multi-frame parking evidence requires original tape history')
+            parent_roots.add(parking_provenance_id)
         checked = _closure(merged, parent_roots, context)
         by_id = {r.provenance_id: r for r in checked.provenance}
         for identity in lane_provenance_ids:
@@ -314,7 +327,7 @@ class MapperCatalogs:
                 raise ValueError('lane provenance is not the original full RGB capture')
         if self._crossing is None:
             lane_status = 'UNCONFIGURED'; reasons.append('CROSSING_POLICY_UNCONFIGURED')
-        elif temporal is not None and not temporal.within(self._lane_profile):
+        elif temporal is not None and not temporal.within(self._road_limits):
             lane_status = 'UNKNOWN'; reasons.append('GEOMETRY_ENVELOPE_TOO_WIDE')
         elif temporal is not None and temporal_provenance_id is None:
             lane_status = 'UNKNOWN'; reasons.append('TEMPORAL_RGB_PROVENANCE_UNAVAILABLE')
@@ -331,7 +344,7 @@ class MapperCatalogs:
             if temporal is None:
                 proof = state.lane.observe(road, source, capture_prior,
                     prior_qualified=prior_qualified, crossing=crossing, profile=self._lane_profile,
-                    position_radius_m=position_radius_m)
+                    position_radius_m=position_radius_m, geometry_limits=self._road_limits)
             else:
                 record = by_id[temporal_provenance_id]
                 if (PROVENANCE.unpack(record.payload)[2] != 4 or len(record.parents) < 2
@@ -339,7 +352,7 @@ class MapperCatalogs:
                         or record.pi_lower > metric_evidence.pi_interval[0] or record.pi_upper < metric_evidence.pi_interval[1]):
                     raise ValueError('original temporal RGB closure required')
                 proof = state.lane.observe_mapped(temporal, source, prior_qualified=prior_qualified,
-                    crossing=crossing, profile=self._lane_profile)
+                    crossing=crossing, profile=self._lane_profile, geometry_limits=self._road_limits)
                 lane_provenance_ids = (temporal_provenance_id,)*2
             lane_status = 'AMBIGUOUS' if road.complete and road.status == 'AMBIGUOUS' else proof.status
             lane_model = state.lane.update(proof, provenance_ids=lane_provenance_ids)
@@ -351,23 +364,42 @@ class MapperCatalogs:
             if type(spec) is not GridSpec:raise ValueError('actual map snapshot grid resolution required for road basis')
             basis_snapshot=state.road_basis.observe(state.lane,lane_model,current_stamp=stamp,resolution_m=spec.resolution_m,
                 now_us=now_us,max_age_us=original_job.expires_us-stamp.captured_us[0])
+        aisles = ()
         if lane_model is not None and self._aisles and self._roles is not None:
             aisles = []
             for aisle, index in zip(self._aisles, self._roles):
                 identity = lane_model.lane_ids[index]
                 if aisle.approach_lane_id not in (0, identity): raise ValueError('declared aisle names another stable lane')
                 aisles.append(replace(aisle, approach_lane_id=identity))
+            aisles = tuple(aisles)
+        elif not self._aisles and prior_qualified and state.lane.latest is not None:
+            # The bay may fill the camera before a new complete two-lane observation is available.
+            aisles = observed_parking_aisles(result.parking_entrances, result.tape, state.lane.latest, capture_prior.center)
+        if aisles:
+            parking_graphs = ()
+            geometry_evidence = None
+            if not self._aisles and parking_provenance_id is not None:
+                record = by_id[parking_provenance_id]
+                if (PROVENANCE.unpack(record.payload)[2] != 4 or not record.source_mask & 1
+                        or record.observation_sequence != metric_evidence.observation_sequence
+                        or record.pi_lower > metric_evidence.pi_interval[0] or record.pi_upper < metric_evidence.pi_interval[1]):
+                    raise ValueError('original multi-frame parking RGB closure required')
+                parking_graphs = tuple(parking_slot_tape(result.tape, aisle, result.parking_tape_history) for aisle in aisles)
+                geometry_evidence = replace(metric_evidence,parent_ids=(parking_provenance_id,))
             update = state.parking.process(result, stamp=stamp, capture_prior=capture_prior,
-                aisles=tuple(aisles), registration_revision=registration_revision, prior_qualified=prior_qualified,
-                now_us=now_us, metric_evidence=metric_evidence)
+                aisles=aisles, registration_revision=registration_revision, prior_qualified=prior_qualified,
+                now_us=now_us, metric_evidence=metric_evidence, shared_entry=not self._aisles,
+                parking_graphs=parking_graphs,geometry_evidence=geometry_evidence)
             reasons.extend(update.reasons)
-            if state.parking.catalog.revision:
-                parking_publication = state.parking.publication_candidates(now_us=now_us, roi_bounds=roi_bounds)
-        elif self._aisles:
-            reasons.append('WAIT_CURRENT_LANE_IDS' if self._roles is not None else 'PARKING_LANE_ROLES_UNCONFIGURED')
+        else:
+            if self._aisles:
+                reasons.append('WAIT_CURRENT_LANE_IDS' if self._roles is not None else 'PARKING_LANE_ROLES_UNCONFIGURED')
             if state.parking.catalog.tracks:
                 state.parking.refresh_occupancy(result.map_snapshot, snapshot_us=result.summary['now_us'],
                     now_us=now_us, metric_evidence=metric_evidence)
+        if lane_model is not None and state.parking.catalog.revision:
+            parking_publication = state.parking.publication_candidates(now_us=now_us, roi_bounds=roi_bounds,
+                lane_ids=lane_model.lane_ids)
         # 오래된 source의 부모도 보존하되 catalog/현재 관측에 닿지 않는 metadata는 남기지 않는다.
         roots = set(state.lane.originals()) | parent_roots
         roots.update(_basis_roots(state))
@@ -387,6 +419,14 @@ class MapperCatalogs:
         if draft is not self._staged or draft.accepted_revision != self._revision:
             raise ValueError('not the original staged catalog draft')
         self._accepted = draft.state; self._revision += 1; self._staged = None
+
+    def parking_clearance_targets(self, now_us):
+        """Return the currently usable map geometry for scheduling depth evidence."""
+        self._owner()
+        parking = self._accepted.parking
+        return tuple(track.candidate for track in parking.catalog.tracks
+                     if track.candidate.geometry_state == VALID
+                     and track.geometry_age_ms(now_us, parking.clock_id) < 500)[:8]
 
     def discard(self, draft):
         self._owner()

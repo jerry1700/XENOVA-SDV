@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch
 
 from first_install_fixture import ROOT, FILES
@@ -533,6 +533,47 @@ class ManagementTest(unittest.TestCase):
             self.m.checkpoint=lambda *args:None
             result=self.call(action,{'vm_id':identity})
             self.assertTrue(result['ok'],result)
+
+    def test_restore_admission_contention_retries_same_move_and_finishes_registration(self):
+        identity = self.create()
+        spec = {'vm_id': identity}
+        target = self.data / 'instances' / self.key
+        inode = (target / 'root.raw').stat().st_ino
+        self.assertTrue(self.call('retire', spec)['ok'])
+        key = 'restore-after-admission-contention'
+        observed = []
+
+        with ExitStack() as holder:
+            def hold_before_move(phase, op):
+                if phase == 'moving' and op['action'] == 'restore' and not observed:
+                    holder.enter_context(management.short_lock(self.run, 'admission'))
+                    observed.append(op['operation_id'])
+
+            with patch.object(self.m, 'checkpoint', hold_before_move):
+                blocked = self.call('restore', spec, key=key)
+            self.assertEqual(blocked['error']['code'], 'OPERATION_IN_PROGRESS')
+            self.assertEqual(blocked['operation_id'], observed[0])
+            self.assertFalse(target.exists())
+            self.assertEqual(self.state(identity)['lifecycle'], 'RETIRED')
+
+        def contend_after_move(phase, op):
+            if phase == 'moved' and op['action'] == 'restore':
+                self.assertTrue(target.is_dir())
+                with self.assertRaises(management.ExecutionError) as busy:
+                    with management.short_lock(self.run, 'admission'):
+                        pass
+                self.assertEqual(busy.exception.error['code'], 'OPERATION_IN_PROGRESS')
+
+        with patch.object(self.m, 'checkpoint', contend_after_move):
+            result = self.call('restore', spec, key=key)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['operation_id'], blocked['operation_id'])
+        self.assertEqual(self.state(identity)['generation'], 2)
+        self.assertEqual((target / 'root.raw').stat().st_ino, inode)
+        for action in ('list', 'recovery-intents'):
+            response = self.m.call(action)
+            self.assertTrue(response['ok'], response)
+            self.assertEqual(response['data']['vms'][0]['lifecycle'], 'REGISTERED')
 
     def test_running_vm_cannot_retire_and_identity_mismatch_is_not_a_stopped_vm(self):
         identity=self.create();r=json.loads((self.data/f'instances/{self.key}/instance.json').read_text())

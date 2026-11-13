@@ -51,18 +51,19 @@ def test_geometry_parameters_move_road_obstacles_and_rear_axle_start(tmp_path):
     layout = track["layout"]
     assert layout["vehicle"]["length_m"] == .38
     assert layout["vehicle"]["width_m"] == .21
-    assert layout["vehicle"]["min_turn_radius_m"] == pytest.approx(.20 / math.tan(math.radians(40)))
+    assert layout["vehicle"]["wheelbase_m"] == .18
+    assert layout["vehicle"]["min_turn_radius_m"] == pytest.approx(.18 / math.tan(math.radians(40)))
     assert layout["tape_width_m"] == .012
     assert layout["camera"]["height_m"] == .14
-    assert layout["start_pose"] == pytest.approx([2.43, .505, math.pi])
+    assert layout["start_pose"] == pytest.approx([2.42, .505, math.pi])
     assert [cone["y"] for cone in layout["obstacle_seeds"]] == pytest.approx([.505, .235])
     rendered = Track(replace(sources()["jetson-r55"], centerline=track["centerline"],
                              lane_width_m=track["lane_width_m"], layout=layout))
     x, y, yaw = rendered.start_pose()
     car = placement.Car(x, y, yaw, 0, 0, rendered.start_index)
     polygon = placement.car_polygon(rendered, car)
-    assert min(px for px, _ in polygon) == pytest.approx(x - .29)
-    assert max(px for px, _ in polygon) == pytest.approx(x + .09)
+    assert min(px for px, _ in polygon) == pytest.approx(x - .28)
+    assert max(px for px, _ in polygon) == pytest.approx(x + .10)
     assert max(py for _, py in polygon) - min(py for _, py in polygon) == pytest.approx(.21)
 
 

@@ -1,5 +1,6 @@
 """Prepare matching synthetic Scene, Jetson mapper/calibration and Pi model metadata."""
 import argparse
+from dataclasses import asdict, replace
 from hashlib import sha256
 import json
 import math
@@ -8,12 +9,14 @@ from pathlib import Path
 from generate_jetson_tracks import VARIANTS, generate, read_geometry
 from tools.hil_observation.resident import load_motion_profile
 from xenova_vehicle.perception.calibration import canonical as canonical_calibration
+from xenova_vehicle.perception.tape import TapeProfile
 from xenova_vehicle.runtime.mapper_profile import MapperProfile
 from xenova_vehicle.simulation.profile import DevelopmentProfile
 from xenova_vehicle.simulation.scene import Scene, canonical, demo_scene
 
 
-def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sha256):
+def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sha256,
+            position_drift_mps=None, yaw_drift_rps=None):
     """Use the frozen demo model as the parent of an explicitly derived synthetic run."""
     geometry = read_geometry(geometry_path)
     if 'lane_width_tolerance_m' not in geometry:
@@ -61,8 +64,25 @@ def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sh
         raise ValueError('base mapper must be bound to the parent calibration')
     mapper_fields = original_mapper.to_dict()
     mapper_fields['calibration_profile_sha256'] = motion.bound_calibration.sha256
+    drift_overrides = {name: value for name, value in (
+        ('position_drift_mps', position_drift_mps), ('yaw_drift_rps', yaw_drift_rps)) if value is not None}
+    if drift_overrides:
+        if original_mapper.localization is None:
+            raise ValueError('drift override requires a parent localization policy')
+        mapper_fields['localization'] = asdict(replace(original_mapper.localization, **drift_overrides))
+    tape = TapeProfile()
+    mapper_fields['pipeline']['tape'].update(
+        value_min=tape.value_min, min_strip_length_m=tape.min_strip_length_m)
+    # R45 replay acceptance limit for the measured-course development profile.
+    pipeline = mapper_fields['pipeline']
+    pipeline['registration']['max_position_error_m'] = .065
+    if pipeline.get('road_geometry_limits') is None:
+        pipeline['road_geometry_limits'] = {
+            name: pipeline['registration'][name] for name in ('max_position_error_m','max_yaw_error_rad')}
     width, tolerance = geometry['lane_width_m'], geometry['lane_width_tolerance_m']
-    mapper_fields['pipeline']['road'].update(lane_width_min_m=width - tolerance, lane_width_max_m=width + tolerance)
+    width_bounds = (width-tolerance,width+tolerance)
+    pipeline['road'].update(lane_width_min_m=width_bounds[0],lane_width_max_m=width_bounds[1],
+                            missing_outer_width_bounds_m=width_bounds)
     mapper = MapperProfile.from_dict(mapper_fields)
     mapper.check(motion.bound_calibration, vehicle_configuration=identity['configuration'],
         vehicle_calibration=motion.sha256)
@@ -91,10 +111,13 @@ def main():
     parser.add_argument('--metadata-root', type=Path, required=True)
     parser.add_argument('--metadata-receipt-sha256', required=True)
     parser.add_argument('--mapper-profile', type=Path, required=True)
+    parser.add_argument('--position-drift-mps', type=float, help='position drift budget for this synthetic profile')
+    parser.add_argument('--yaw-drift-rps', type=float, help='yaw drift budget for this synthetic profile')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     print(json.dumps(prepare(args.geometry, args.metadata_root, args.mapper_profile, args.output,
-        metadata_receipt_sha256=args.metadata_receipt_sha256), indent=2))
+        metadata_receipt_sha256=args.metadata_receipt_sha256, position_drift_mps=args.position_drift_mps,
+        yaw_drift_rps=args.yaw_drift_rps), indent=2))
 
 
 if __name__ == '__main__':

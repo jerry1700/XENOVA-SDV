@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, Header, Query, Response
 from fastapi.responses import JSONResponse
 
 from ..errors import InvalidArgument
-from ..models import ControlOperation, ControlStatus, CreateVmRequest, Error, ResourceUpdate, UpdateResourcesRequest, Vm
+from ..models import (ControlOperation, ControlStatus, CreateVmRequest, Error, ResourceUpdate, UpdateResourcesRequest,
+                      Vm, VmLifecycle, VmOperationAction, VmOperationResult)
 from ..service import VmService
 from . import get_service
 
@@ -44,10 +45,19 @@ def list_vms(service: VmService = Depends(get_service)) -> list[Vm]:
     summary="VM 생성 또는 재시작",
     status_code=201,
     response_model=Vm,
-    responses={400: _ERR, 409: _ERR, 507: _ERR, **_COMMAND_ERRS},
+    responses={200: {"model": ControlOperation, "description": "같은 키의 원 시작 결과"},
+               400: _ERR, 409: _ERR, 507: _ERR, **_COMMAND_ERRS},
 )
-def create_vm(request: CreateVmRequest, service: VmService = Depends(get_service)) -> Vm:
-    return service.create(request).to_vm()
+def create_vm(
+    request: CreateVmRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    service: VmService = Depends(get_service),
+) -> Vm | Response:
+    key = _request_key(idempotency_key, "Idempotency-Key") if idempotency_key is not None else None
+    result = service.create(request, key=key)
+    if isinstance(result, ControlOperation):
+        return JSONResponse(status_code=200, content=result.model_dump(mode="json"))
+    return result.to_vm()
 
 
 @router.get("/vms/{vm_id}", operation_id="getVm", summary="VM 단건 조회", response_model=Vm, responses={400: _ERR, 404: _ERR, **_DRIVER_ERRS})
@@ -63,8 +73,38 @@ def get_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Vm:
     response_class=Response,
     responses={400: _ERR, 404: _ERR, 409: _ERR, **_COMMAND_ERRS},
 )
-def delete_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Response:
-    service.delete(vm_id)
+def delete_vm(
+    vm_id: UUID,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_lifecycle_generation: int | None = Query(default=None, ge=0),
+    service: VmService = Depends(get_service),
+) -> Response:
+    key = _request_key(idempotency_key, "Idempotency-Key") if idempotency_key is not None else None
+    service.delete(vm_id, key=key, generation=expected_lifecycle_generation)
+    return Response(status_code=204)
+
+
+@router.get(
+    "/vms/{vm_id}/lifecycle",
+    operation_id="getVmLifecycle",
+    summary="VM 등록 상태와 세대 조회",
+    response_model=VmLifecycle,
+    responses={400: _ERR, 404: _ERR, 409: _ERR, **_COMMAND_ERRS},
+)
+def get_vm_lifecycle(vm_id: UUID, service: VmService = Depends(get_service)) -> VmLifecycle:
+    return service.vm_lifecycle(vm_id)
+
+
+@router.post(
+    "/vms/{vm_id}/kill",
+    operation_id="killVm",
+    summary="장애 주입: 도메인 즉시 소멸 (등록·의도 유지 → 복구 워커가 다시 띄움)",
+    status_code=204,
+    response_class=Response,
+    responses={400: _ERR, 404: _ERR, 409: _ERR, **_COMMAND_ERRS},
+)
+def kill_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Response:
+    service.kill(vm_id)
     return Response(status_code=204)
 
 
@@ -76,7 +116,7 @@ def delete_vm(vm_id: UUID, service: VmService = Depends(get_service)) -> Respons
     response_class=Response,
     responses={
         200: {"model": ControlOperation, "description": "Idempotency-Key 가 있을 때: 원 작업 완료(재전달 포함)"},
-        202: {"model": ControlOperation, "description": "Idempotency-Key 가 있을 때: 정지 의도를 내구 수락했고 실행이 남음. 같은 키로 재전달·조회"},
+        202: {"model": ControlOperation, "description": "Idempotency-Key 가 있을 때: 정지 의도를 내구 수락했고 원 기한 안에 실행이 남음. 같은 키로 재전달·조회"},
         204: {"description": "키 없음: 정지 완료. 키 유무와 무관하게 등록이 없으면 정지 목표 달성(작업 기록 없음)"},
         400: _ERR,
         409: _ERR,
@@ -156,6 +196,37 @@ def update_vm_resources(
     service: VmService = Depends(get_service),
 ) -> ResourceUpdate:
     return service.update_resources(vm_id, request, _request_key(idempotency_key, "Idempotency-Key"))
+
+
+@router.get(
+    "/vms/{vm_id}/operations",
+    operation_id="getVmRetireOperationByKey",
+    summary="요청 키로 원 보관 결과 조회",
+    response_model=VmOperationResult,
+    responses={400: _ERR, 404: _ERR, **_COMMAND_ERRS},
+)
+def get_vm_retire_operation_by_key(
+    vm_id: UUID,
+    request_key: str = Query(description="최초 DELETE의 Idempotency-Key"),
+    service: VmService = Depends(get_service),
+) -> VmOperationResult:
+    return service.vm_operation(vm_id, action="retire", key=_request_key(request_key, "request_key"))
+
+
+@router.get(
+    "/vms/{vm_id}/operations/{operation_id}",
+    operation_id="getVmOperation",
+    summary="작업 ID로 원 생성·시작·정지·보관 결과 조회",
+    response_model=VmOperationResult,
+    responses={400: _ERR, 404: _ERR, **_COMMAND_ERRS},
+)
+def get_vm_operation(
+    vm_id: UUID,
+    operation_id: UUID,
+    action: VmOperationAction = Query(description="실패 응답의 context.action"),
+    service: VmService = Depends(get_service),
+) -> VmOperationResult:
+    return service.vm_operation(vm_id, action=action, operation_id=operation_id)
 
 
 @router.get(

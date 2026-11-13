@@ -1,4 +1,4 @@
-/* Host fault injection at the parking writer's publication boundary. */
+/* Host fault injection at the planner's publication boundary. */
 #include <assert.h>
 #include "engine.c"
 
@@ -9,6 +9,26 @@ static struct dw_snapshot snapshot;
 static dw_vehicle feedback;
 static bool contend,source_busy;
 static uint64_t checked_deadline,guest;
+
+static void published_path_during_pass_planning(void){
+ de_init(&engine,&lp_selected_config,&lp_selected_assets);
+ struct lp_path *path=&engine.paths[0].path;
+ path->execution.mission.kind=1;
+ path->has_episode=true;path->episode.core.state=2;path->episode.core.phase=DB_CHANGE_OUT;
+ path->episode.core.target_lane_id=2;
+ path->task=(struct tr_intent){true,false,2,2,1,0};
+ engine.episode_handoff=DE_EPISODE_PASS_PLANNING;
+ assert(!episode_transition_blocks_path(&engine,path));
+ engine.path_invalidated=true;
+ assert(episode_transition_blocks_path(&engine,path));
+ engine.path_invalidated=false;
+ path->task.changing=true;
+ assert(episode_transition_blocks_path(&engine,path));
+ path->task.changing=false;engine.episode_handoff=DE_EPISODE_REQUEST_READY;
+ assert(episode_transition_blocks_path(&engine,path));
+ engine.episode_handoff=DE_EPISODE_AWAITING_RECEIPT;
+ assert(episode_transition_blocks_path(&engine,path));
+}
 
 static int fixture_clock(void *unused,uint64_t *out){
  (void)unused;*out=guest;return 0;
@@ -29,20 +49,23 @@ enum dw_result __wrap_dw_current_pose(const dw_world *world,struct dw_odometry *
  (void)now;(void)age;assert(world==&snapshot.world&&odom==&engine.odometry);
  *pose=feedback.odom_pose;if(vehicle)*vehicle=feedback;return DW_OK;
 }
-enum lp_result __wrap_lp_validate_path(const struct lp_path *path,const dw_world *world,
- const struct lp_config *config,struct lp_metrics *metrics,const struct lp_budget *budget){
- (void)config;(void)metrics;
+enum lp_result __wrap_lp_validate_path_prepared(const struct lp_path *path,const dw_world *world,
+ const struct lp_config *config,struct lp_metrics *metrics,const struct lp_budget *budget,struct lp_tracking_geometry *geometry){
+ (void)metrics;
  assert(path->count>=2&&world==&snapshot.world);
  checked_deadline=budget->deadline_us;
  if(guest>=checked_deadline)return LP_DEADLINE;
+ if(!lp_prepare_tracking(path,config,geometry))return LP_INPUT;
  if(contend)assert(take(&engine));
  return LP_PATH_FOUND;
 }
 
 static void writer_contention(void){
+ published_path_during_pass_planning();
  de_init(&engine,&lp_selected_config,&lp_selected_assets);
  struct lp_path *source=&engine.parking.best_maneuver;
- source->count=2;source->points[1].pose.x=.2f;
+ source->count=2;
+ source->points[1].pose.x=lp_selected_config.primitive_speed*lp_selected_config.primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
  engine.budget.deadline_us=200;
  assert(parking_publish(&engine,source,100,true,false)==DE_OK);
  assert(engine.current==0&&engine.path_revision==1);
@@ -191,10 +214,60 @@ static void parking_deadlines(void){
  assert(parking->phase==DP_HOLD&&parking->terminal&&engine.behavior_failed);
 }
 
+static void plan_source_retry(bool expire){
+ parking_fixture();
+ unsigned old_slot=(unsigned)engine.current;
+ const struct lp_path *old=&engine.paths[old_slot].path;
+ feedback.odom_pose=old->points[1].pose;
+ struct lp_path *candidate;
+ assert(reserve(&engine,&engine.planning_path,&candidate)==DE_OK);
+ *candidate=*old;
+ engine.planning=true;engine.planning_snapshot=&snapshot;
+ engine.planning_vehicle_pi_us=feedback.pi_sample_us;
+ engine.search_reason=LP_PATH_FOUND;
+ uint32_t generation=engine.planning_path.generation;
+ source_busy=true;
+ assert(de_plan_slice(&engine,4,1000)==DE_BUSY);
+ assert(engine.planning&&!engine.plan_finalized&&engine.discarded==0);
+ assert(engine.current==(int)old_slot&&engine.planning_path.generation==generation);
+ assert(engine.search_reason==LP_PATH_FOUND&&engine.budget.deadline_us==100);
+
+ source_busy=expire;
+ guest=expire?100:99;
+ assert(de_plan_slice(&engine,4,1001)==(expire?DE_PATH:DE_OK));
+ assert(!engine.planning);
+ if(expire){
+  assert(engine.search_reason==LP_DEADLINE&&engine.discarded==1&&engine.current==(int)old_slot);
+ }else{
+  assert(engine.discarded==0&&engine.paths[engine.current].generation==generation);
+ }
+}
+
+static void budget_reply_requires_current_grant(bool current){
+ parking_fixture();
+ xenova_drive_MissionGrant old=engine.grant;
+ old.admitted=true;old.grant_revision=7;old.execution_deadline_pi_us=0;
+ xenova_drive_MissionGrant grant=old;
+ grant.grant_revision=8;grant.has_locked_goal_sha256=true;grant.execution_deadline_pi_us=4000000;
+ xenova_drive_MissionBudgetReply reply={.result=1,.has_grant=true,.grant=grant};
+ engine.grant=grant;engine.has_grant=current;engine.parking.original_grant=old;
+ engine.parking.phase=DP_EVALUATE;engine.parking.budget_pending=true;
+ engine.parking.request.action=1;engine.parking.request.valid_until_pi_us=2000;
+ engine.parking.request.expected_grant_revision=7;
+ engine.parking.best_approach=engine.parking.best_maneuver;
+ assert(de_budget_reply(&engine,&reply,1001)==(current?DE_OK:DE_STATE));
+ assert(!engine.parking.budget_pending&&engine.parking.terminal==!current);
+ assert(engine.parking.phase==(current?DP_TARGET_LOCKED:DP_HOLD));
+}
+
 int main(int argc,char **argv){
  assert(argc==2);
  if(!strcmp(argv[1],"writer"))writer_contention();
  else if(!strcmp(argv[1],"handoff"))parking_handoff();
  else if(!strcmp(argv[1],"deadlines"))parking_deadlines();
+ else if(!strcmp(argv[1],"plan-source-retry"))plan_source_retry(false);
+ else if(!strcmp(argv[1],"plan-source-expiry"))plan_source_retry(true);
+ else if(!strcmp(argv[1],"budget-current"))budget_reply_requires_current_grant(true);
+ else if(!strcmp(argv[1],"budget-revoked"))budget_reply_requires_current_grant(false);
  else assert(false);
 }
