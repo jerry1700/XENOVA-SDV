@@ -46,6 +46,28 @@ class GuestProcessTest(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertEqual(calls[0].kwargs['timeout'],45)
 
+    def test_linux_recovery_can_finish_slow_create_within_original_deadline(self):
+        self.f.start()
+        self.f.xen.rows.clear()
+        spec = self.f.spec('start-if-absent')
+        original = self.p.command
+        timeouts = []
+
+        def slow_create(argv, **kwargs):
+            if argv[:2] == ['xl', 'create']:
+                timeouts.append(kwargs['timeout'])
+                if kwargs['timeout'] < 60:
+                    raise PlatformError('device setup did not finish before create timeout')
+                self.f.ticks += 60
+            return original(argv, **kwargs)
+
+        with patch.object(self.p, 'command', side_effect=slow_create):
+            result = self.f.ok(self.f.recover(spec))
+        self.assertEqual(timeouts, [90])
+        self.assertEqual(result['attempt']['phase'], 'completed')
+        self.assertEqual(result['attempt']['request'], spec)
+        self.assertLess(self.f.ticks*1000, spec['deadline_monotonic_ms'])
+
     def failed_scope(self,reason,*,effect=False):
         """실제 제출 경로의 실패가 raw xl fallback이나 같은 요청 재생성을 만들지 않는다."""
         self.p.process_isolation=True

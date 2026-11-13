@@ -746,7 +746,10 @@ class Platform:
                     if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
                         raise PlatformError(f'{disk} became attached before launch')
             execution.guard_launch(record, launch, deadline)
-            command_deadline = min(deadline, self.clock()+45)
+            # Linux recovery already has a bounded attempt deadline. Cutting
+            # xl off earlier can leave Xen paused before device setup finishes.
+            recovery_launch = owner and owner.get('kind') == 'recovery' and guest_kind(record) == 'linux'
+            command_deadline = deadline if recovery_launch else min(deadline, self.clock()+45)
             with span('external.command', command_kind='xl.create',
                       timeout_seconds=max(0, command_deadline-self.clock())):
                 if self.process_isolation:
