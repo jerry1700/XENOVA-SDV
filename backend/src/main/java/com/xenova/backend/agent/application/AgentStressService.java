@@ -24,6 +24,10 @@ import org.springframework.stereotype.Service;
 public class AgentStressService {
 
     private static final int COMMAND_TTL_SECONDS = 30;
+    // A memory load is capped at this share of the VM's own memory, so the agent and apps keep room to run (QA 1-B3).
+    static final int MEMORY_STRESS_PERCENT_OF_VM = 70;
+    // The agent refuses more than this (xenova_agent/commands.py MAX_MEMORY_MIB), so it is never exceeded either.
+    static final int MAX_MEMORY_STRESS_MIB = 512;
     private static final String SCHEMA_VERSION = "1.0";
 
     private final VmService vmService;
@@ -74,6 +78,14 @@ public class AgentStressService {
         GuestKind guestKind = vm.guestKind();
         if (guestKind != GuestKind.LINUX) {
             throw unsupportedGuestKind();
+        }
+        if (type == AgentStressCommand.StressType.MEMORY) {
+            int maximum = maxMemoryStressMib(vm.memoryMib());
+            if (amount > maximum) {
+                throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "VALIDATION_ERROR",
+                        "이 VM에는 최대 " + maximum + " MiB까지 메모리 부하를 줄 수 있습니다. (VM 메모리의 "
+                                + MEMORY_STRESS_PERCENT_OF_VM + "%, 최대 " + MAX_MEMORY_STRESS_MIB + " MiB)");
+            }
         }
         Instant now = clock.instant();
         String bootId = currentBootId(vmId, now);
@@ -135,6 +147,11 @@ public class AgentStressService {
         parameters.put("memory_mib", type == AgentStressCommand.StressType.MEMORY ? amount : 0);
         parameters.put("duration_s", durationS);
         return parameters;
+    }
+
+    /** Largest memory load for a VM with this much memory: 70% rounded down, and never above 512 MiB. */
+    static int maxMemoryStressMib(int vmMemoryMib) {
+        return Math.min(vmMemoryMib * MEMORY_STRESS_PERCENT_OF_VM / 100, MAX_MEMORY_STRESS_MIB);
     }
 
     private static ApiException unsupportedGuestKind() {

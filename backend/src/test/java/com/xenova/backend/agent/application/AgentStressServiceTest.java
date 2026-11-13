@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 
 class AgentStressServiceTest {
 
@@ -85,6 +87,36 @@ class AgentStressServiceTest {
         assertThat(parameters.path("cpu_workers").asInt()).isZero();
         assertThat(parameters.path("memory_mib").asInt()).isEqualTo(128);
         assertThat(parameters.path("duration_s").asInt()).isEqualTo(45);
+    }
+
+    @Test
+    void memoryLoadUpTo70PercentOfTheVmIsSent() {
+        // vm(...) has 512 MiB: 70% is 358 MiB (rounded down)
+        service.memory(VM_ID, 358, 30);
+
+        assertThat(sent).hasSize(1);
+        assertThat(sent.get(0).path("payload").path("parameters").path("memory_mib").asInt()).isEqualTo(358);
+    }
+
+    @Test
+    void memoryLoadAbove70PercentOfTheVmIsRejectedWithoutSending() {
+        assertThatThrownBy(() -> service.memory(VM_ID, 359, 30))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
+                    assertThat(exception.getCode()).isEqualTo("VALIDATION_ERROR");
+                    assertThat(exception.getMessage()).contains("358 MiB");
+                });
+        assertThat(sent).isEmpty();
+        verify(commandResultStore, never()).recordPending(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void theMemoryCapIs70PercentOfTheVmButNeverAbove512() {
+        assertThat(AgentStressService.maxMemoryStressMib(512)).isEqualTo(358);
+        assertThat(AgentStressService.maxMemoryStressMib(256)).isEqualTo(179);
+        // 70% of these would pass 512, which the agent refuses
+        assertThat(AgentStressService.maxMemoryStressMib(832)).isEqualTo(512);
+        assertThat(AgentStressService.maxMemoryStressMib(1024)).isEqualTo(512);
     }
 
     @Test
