@@ -5,32 +5,18 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api/client';
 import { DemoPage, failureText } from './DemoPage';
 
-const appExit = vi.hoisted(() => ({
-  mutate: vi.fn(),
-  isPending: false,
-  isError: false,
-  isSuccess: false,
-  error: null,
-}));
-const domainKill = vi.hoisted(() => ({
-  mutate: vi.fn(),
-  isPending: false,
-  isError: false,
-  isSuccess: false,
-  error: null,
-}));
-const vmState = vi.hoisted(() => ({ state: 'running' as string }));
+const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const driveState = vi.hoisted(() => ({ activeId: 'vm-a', mode: 'AUTO' as string, age: 100 }));
 
 vi.mock('../api/queries', () => ({
   useVms: () => ({
-    isLoading: false,
     data: {
       items: [
         {
           vm_id: 'vm-a',
           name: 'Zephyr 주행 A',
           role: 'primary_drive',
-          state: vmState.state,
+          state: 'running',
           guest_kind: 'zephyr',
         },
         {
@@ -43,15 +29,18 @@ vi.mock('../api/queries', () => ({
       ],
     },
   }),
-  useStartAppExit: () => appExit,
-  useStartDomainKill: () => domainKill,
+  useStartVmCrash: () => vmCrash,
   useCommandStatus: () => ({ data: undefined }),
+  useEvents: () => ({ data: { items: [] } }),
 }));
 vi.mock('../layout/DriveContext', () => ({
   useDrive: () => ({
     drive: {
-      control: { mode: 'AUTO' },
-      apps: { autonomous: { command_fresh: true, command_hz: 50, heartbeat_ago_ms: 400 } },
+      control: {
+        mode: driveState.mode,
+        active_vm_id: driveState.activeId,
+        received_ago_ms: driveState.age,
+      },
     },
     socket: 'open',
   }),
@@ -67,12 +56,12 @@ function show() {
   );
 }
 
-describe('시뮬레이션 제어 — VM1 장애 주입만 남긴다', () => {
+describe('장애 시연 1', () => {
   beforeEach(() => {
-    appExit.mutate.mockClear();
-    domainKill.mutate.mockClear();
-    vmState.state = 'running';
-    // jsdom 에는 <dialog> 메서드가 없다
+    vmCrash.mutate.mockClear();
+    driveState.activeId = 'vm-a';
+    driveState.mode = 'AUTO';
+    driveState.age = 100;
     HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
       this.open = true;
     };
@@ -81,57 +70,38 @@ describe('시뮬레이션 제어 — VM1 장애 주입만 남긴다', () => {
     };
   });
 
-  it('부하 테스트 탭은 남고, 격리 시연·트랙 조작·수동주행 입력·재개는 없다', () => {
+  it('네 시연 책갈피와 기존 부하 테스트 메뉴를 표시한다', () => {
     show();
     expect(screen.getByRole('link', { name: '부하 테스트' })).toBeInTheDocument();
-    expect(screen.queryByText('격리 시연')).toBeNull();
-    expect(screen.queryByText('수동주행 입력')).toBeNull();
-    expect(screen.queryByText(/트랙 조작/)).toBeNull();
-    expect(screen.queryByText(/강제 종료 API\(-135\)/)).toBeNull();
-    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
-      '자율주행 앱 종료',
-      'VM1 강제 종료',
-    ]);
+    expect(screen.getAllByRole('button', { name: /시연 [1-4]/ })).toHaveLength(4);
   });
 
-  it('VM1 = 주 구동 VM 의 상태·자율 명령·생존 신호를 보인다', () => {
+  it('활성 VM과 두 주행 VM, 현재 모드를 표시한다', () => {
     show();
-    expect(screen.getByText('VM1 · Zephyr 주행 A')).toBeInTheDocument();
-    expect(screen.getByText('50 Hz')).toBeInTheDocument();
-    expect(screen.getByText('0.4초 전')).toBeInTheDocument();
+    expect(screen.getAllByText('Zephyr 주행 A').length).toBeGreaterThan(0);
+    expect(screen.getByText('Zephyr 주행 B')).toBeInTheDocument();
+    expect(screen.getByText('자율주행')).toBeInTheDocument();
+    expect(screen.getByText('ACTIVE')).toBeInTheDocument();
   });
 
-  it('[자율주행 앱 종료] 는 확인 뒤 app_id=autonomous 로 한 번만 보낸다', () => {
+  it('확인 후 현재 활성 VM에 vm-crash 명령을 보낸다', () => {
     show();
-    fireEvent.click(screen.getByRole('button', { name: '자율주행 앱 종료' }));
-    expect(appExit.mutate).not.toHaveBeenCalled();
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '자율주행 앱 종료' }));
-    expect(appExit.mutate).toHaveBeenCalledTimes(1);
-    expect(appExit.mutate.mock.calls[0]![0]).toEqual({ app_id: 'autonomous' });
-    expect(domainKill.mutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    expect(vmCrash.mutate).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '장애 발생' }));
+    expect(vmCrash.mutate).toHaveBeenCalledTimes(1);
   });
 
-  it('[VM1 강제 종료] 는 확인 뒤 domain-kill 을 보낸다', () => {
+  it('활성 VM을 확인할 수 없으면 시작할 수 없다', () => {
+    driveState.activeId = 'missing';
     show();
-    fireEvent.click(screen.getByRole('button', { name: 'VM1 강제 종료' }));
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'VM1 강제 종료' }));
-    expect(domainKill.mutate).toHaveBeenCalledTimes(1);
-    expect(appExit.mutate).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
+    expect(screen.getByText('현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.')).toBeInTheDocument();
   });
 
-  it('VM1 이 실행 중이 아니면 두 버튼 모두 비활성', () => {
-    vmState.state = 'stopped';
-    show();
-    expect(screen.getByRole('button', { name: '자율주행 앱 종료' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'VM1 강제 종료' })).toBeDisabled();
-  });
-
-  it('백엔드에 API 가 없으면(404) 그렇게 알리고, VM 없음 404 는 원래 문구', () => {
-    expect(failureText(new ApiError(404, { code: 'NOT_FOUND', message: 'No static resource' }))).toBe(
-      '백엔드에 이 장애 주입 API가 아직 없습니다.',
-    );
-    expect(failureText(new ApiError(404, { code: 'VM_NOT_FOUND', message: 'VM을 찾을 수 없습니다.' }))).toBe(
-      'VM을 찾을 수 없습니다.',
+  it('배포 API가 없으면 별도 문구로 안내한다', () => {
+    expect(failureText(new ApiError(405, { code: 'METHOD_NOT_ALLOWED', message: '지원하지 않음' }))).toBe(
+      '배포된 백엔드에 VM 장애 시연 API가 아직 없습니다.',
     );
   });
 });

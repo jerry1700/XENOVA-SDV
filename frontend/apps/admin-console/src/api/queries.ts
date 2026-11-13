@@ -31,6 +31,7 @@ import type {
   UpdateVcpuPinningRequest,
   UpdateVmResourcesRequest,
   Vm,
+  VmCrashCommand,
   VmListResponse,
   VmResourceUpdateResult,
   VmSynchronizationResult,
@@ -197,6 +198,17 @@ export function useStartAgentExit(vmId: string) {
       request<AgentExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/agent-exit`, {
         method: 'POST',
       }),
+  });
+}
+
+export function useStartVmCrash(vmId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<VmCrashCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/vm-crash`, {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }
 

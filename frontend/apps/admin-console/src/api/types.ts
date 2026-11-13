@@ -212,6 +212,9 @@ export interface AutoDelayCommand extends SubmittedCommand {
 /** POST /api/v1/vms/{id}/faults/agent-exit — Linux Agent 종료 데모 명령 */
 export type AgentExitCommand = SubmittedCommand;
 
+/** POST /api/v1/vms/{id}/faults/vm-crash — 실행 중인 Zephyr 도메인이 스스로 crash 하게 하는 시연 명령 */
+export type VmCrashCommand = SubmittedCommand;
+
 /** POST /api/v1/vms/{id}/faults/app-exit — Zephyr 주행 앱의 한 앱(지금은 자율)만 멈추는 장애 주입. VM 은 그대로 */
 export interface AppExitRequest {
   app_id: 'autonomous';
