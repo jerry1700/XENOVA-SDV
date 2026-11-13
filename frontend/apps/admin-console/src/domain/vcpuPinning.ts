@@ -24,6 +24,15 @@ export function togglePcpu(mappings: VcpuPinning[], vcpu: number, pcpu: number):
   );
 }
 
+/** 플랫폼은 한 VM의 모든 vCPU에 같은 hard-affinity mask를 적용한다. */
+export function toggleVmPcpu(mappings: VcpuPinning[], pcpu: number): VcpuPinning[] {
+  const normalized = normalizePinning(mappings);
+  const representative = normalized[0];
+  if (!representative) return normalized;
+  const changed = togglePcpu([representative], representative.vcpu, pcpu)[0] ?? representative;
+  return normalized.map((mapping) => ({ ...mapping, pcpus: [...changed.pcpus] }));
+}
+
 export function mappingLabel(mapping: VcpuPinning): string {
   return mapping.pcpus.map((pcpu) => `pCPU ${pcpu}`).join(', ');
 }

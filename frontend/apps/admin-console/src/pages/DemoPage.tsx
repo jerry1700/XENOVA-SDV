@@ -217,8 +217,14 @@ function ManualInput() {
     }
     const onKey = (down: boolean) => (event: KeyboardEvent) => {
       const key = driveKeyOf(event.key);
-      if (!key || (event.target as HTMLElement | null)?.closest?.('input, textarea, select')) return;
-      event.preventDefault(); // 화살표·스페이스로 페이지가 스크롤되지 않게
+      if (!key) return;
+      // 누를 때만 거른다: 폼 요소 안의 입력과 Ctrl·Meta·Alt 조합(Ctrl+S 등)은 주행 입력이 아니다.
+      // 뗄 때는 거르지 않는다 — 키를 누른 채 포커스가 select 로 넘어가면 keyup 이 버려져 백엔드가 20Hz 로 계속 보낸다
+      if (down) {
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        if ((event.target as HTMLElement | null)?.closest?.('input, textarea, select')) return;
+        event.preventDefault(); // 화살표·스페이스로 페이지가 스크롤되지 않게
+      }
       press(key, down);
     };
     const down = onKey(true);

@@ -128,6 +128,8 @@ export interface VmResources {
   memory_mib: number;
   pcpu_count: number;
   vcpu_pinning: VcpuPinning[];
+  /** dom0와 공유 VM이 사용할 수 있는 pCPU 집합. 전용 VM은 선택할 수 없다. */
+  shared_pcpus: number[];
   /** 서버가 전용으로 검증한 코어만 강조한다. 이름이나 OS로 전용 여부를 추론하지 않는다. */
   exclusive_pcpus: number[];
   pcpus: PcpuStatus[];

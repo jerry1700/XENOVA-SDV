@@ -129,9 +129,15 @@ export function SimTrackControl() {
         })
         .catch(fail);
     } else if (e.type === 'up') {
-      if (!drag.current)
+      const d = drag.current;
+      if (!d)
         void placeSimObstacle(kind, e.x, e.y)
           .then((r) => shown(r, e))
+          .catch(fail);
+      // 끄는 동안은 120ms 에 한 번만 보내므로, 놓은 자리를 한 번 더 보내야 장애물이 커서 뒤에 남지 않는다
+      else if (d.moved)
+        void moveSimObstacle(d.id, e.x, e.y)
+          .then((r) => void (r && !r.ok && shown(r, e)))
           .catch(fail);
       drag.current = null;
       setSelected(null);
