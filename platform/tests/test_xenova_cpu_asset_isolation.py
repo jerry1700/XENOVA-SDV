@@ -59,9 +59,10 @@ class CPUAssetIsolationTest(unittest.TestCase):
             self.m._reserve_space(0, self.p.records(validate_assets=False))
         self.assertGreater(reserved[0], 0)
         self.case.error(self.m.call('create', self.case.spec, execute=True), op['error']['code'])
-        # 같은 정책을 host에 준비하는 예외를 새 CPU 정책 게시에 사용하지 않는다.
-        self.case.error(self.m.call('cpu-policy-set', {**self.spec, 'expected_policy_revision':1},
-                                   execute=True, idempotency_key='cpu-new'), 'OPERATION_IN_PROGRESS')
+        # 공유 집합을 바꾸는 게시에는 기존 호스트 전체 자산 검사가 적용된다.
+        self.case.error(self.m.call('cpu-policy-set', {**self.spec, 'expected_policy_revision':1,
+                                                       'shared_pcpus':[0]},
+                                   execute=True, idempotency_key='cpu-host-change'), 'OPERATION_IN_PROGRESS')
         self.assertEqual(self.snapshot(op), before)
         result = self.m.call('operation-reconcile', self.case.request(op), execute=True)
         self.ok(result)

@@ -1845,7 +1845,12 @@ stop/reboot/recovery·retire/restore/purge는 CPU 예약을 해제하지 않는�
 
 **사용 조건**
 
-모든 관리 게스트가 실제 정지했고 미완료 launch/reboot/control/recovery/자산 작업·uncertain 실행이 없어야 한다. 검사와 저장은 공통 잠금 안에서 진행한다. 명령이 게스트를 대신 정지하지 않는다. 미등록 도메인이 있으면 제안한 공유 집합을 이미 준수해야 한다.
+dom0 공유 집합과 Xen 풀이 같으면 유효 마스크나 전용 예약이 달라지는 VM만 실제 정지를
+확인한다. 해당 VM의 미완료 launch/reboot/control/recovery/자산 작업은 변경을 막는다.
+계속 실행하는 도메인의 실제 배치와 기존 호스트 준비 근거도 확인한다. 최초 설정이나
+호스트 배치 변경은 모든 관리 게스트의 정지와 기존 호스트 준비 절차를 요구한다.
+검사와 저장은 공통 잠금 안에서 진행한다. 정지는 운영자가 수행하며, 미등록 도메인은
+제안한 공유 집합을 이미 준수해야 한다.
 
 **실행 예시**
 
@@ -1880,9 +1885,9 @@ xenova-vm cpu-policy-set --spec-file "$REQUEST" --idempotency-key "$KEY" --execu
 
 **정상 응답**
 
-계획 data는 `{plan:true,policy:후보,host_preparation_required:true}`다. 파일·intent·affinity를 바꾸지 않고 계획 후보의 operation UUID도 저장 확정 ID가 아니다. 최초 실행 data는 `{policy:저장된_정책,host_preparation_required:true}`이며 envelope.operation_id가 publication journal을 가리킨다. 정책에는 schema_version, 단조 정수 policy_revision, operation_id, pool_name, shared_pcpus와 버전에 따른 exclusive 또는 placements가 저장된다.
+계획 data는 `{plan:true,policy:후보,host_preparation_required:bool}`이다. 파일·intent·affinity를 바꾸지 않고 계획 후보의 operation UUID도 저장 확정 ID가 아니다. 최초 실행 data는 `{policy:저장된_정책,host_preparation_required:bool}`이며 envelope.operation_id가 publication journal을 가리킨다. 기존 dom0 준비가 검증된 게스트 배치 변경은 `false`를 반환한다. 정책에는 schema_version, 단조 정수 policy_revision, operation_id, pool_name, shared_pcpus와 버전에 따른 exclusive 또는 placements가 저장된다.
 
-완료 key 재전달은 `replayed=true`, data의 policy·current_policy·historical=true로 과거 결과와 현재 정책을 구분한다. 과거 결과가 현재 정책을 덮어쓰지 않는다. 정책 저장 성공은 현재 dom0 적용 성공이 아니다.
+완료 key 재전달은 `replayed=true`, data의 policy·current_policy·historical=true로 과거 결과와 현재 정책을 구분한다. `host_preparation_required`는 그 작업의 결과이며, 현재 준비 상태는 `cpu-layout`에서 확인한다.
 
 **오류 응답**
 
@@ -1890,7 +1895,7 @@ xenova-vm cpu-policy-set --spec-file "$REQUEST" --idempotency-key "$KEY" --execu
 
 **확인 방법**
 
-`cpu-layout --json`의 policy_revision·reservations를 확인한다. 현재 host 적용은 [내부 CPU 준비](#cmd-cpu-host-prepare)에서 별도로 수행한다. 새 정책은 새 key와 최신 revision, 중단된 동일 정책은 원 spec/key로 재전달한다. journal·anchor를 삭제해 우회하지 않는다.
+`cpu-layout --json`의 policy_revision·reservations·host.ready를 확인한다. 호스트 적용이 필요하면 [내부 CPU 준비](#cmd-cpu-host-prepare)를 수행한다. 새 정책은 새 key와 최신 revision, 중단된 동일 정책은 원 spec/key로 재전달한다.
 
 **Manager 매핑:** `cpu-policy-set / {expected_policy_revision,shared_pcpus,placements}` 또는 기존 exclusive 입력. `execute`·`idempotency_key`는 call 키워드 인자.
 

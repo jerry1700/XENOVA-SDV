@@ -64,6 +64,17 @@ def test_completed_replay_defaults_host_preparation_required():
     assert response.json()["host_preparation_required"] is True
 
 
+def test_guest_only_policy_returns_no_host_preparation_for_original_and_replay():
+    for replayed in (False, True):
+        data = {"policy": POLICY, "host_preparation_required": False}
+        if replayed:
+            data.update(current_policy=POLICY, historical=True)
+        client, _ = client_for(envelope(data=data, replayed=replayed))
+        response = put(client)
+        assert response.status_code == 200, response.text
+        assert response.json() == {"policy": POLICY, "host_preparation_required": False}
+
+
 def test_policy_validation_rejects_overlaps_before_platform_call():
     client, manager = client_for(envelope(data={"policy": POLICY}))
     body = {**BODY, "placements": [{"vm_id": str(VM_A), "mode": "exclusive", "pcpus": [0]}]}
