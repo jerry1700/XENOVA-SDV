@@ -18,6 +18,15 @@ const REFRESH_MARGIN_MS = 120000;
 // cleans up (up to 8 s); the single automatic reconnect retries within this window.
 const RECONNECT_WINDOW_MS = 12000;
 const RECONNECT_RETRY_MS = 2000;
+// On attach, `xl console` replays the guest's earlier output. Terminal queries in it
+// (e.g. systemd's ESC[6n size probe at boot) make xterm answer now, and the answers
+// would land as typed text after "login:". Answers produced while the replay settles
+// are dropped; later live queries are answered normally.
+const REPLAY_SETTLE_MS = 2000;
+// Only whole terminal-generated reports: cursor position (ESC[r;cR), device
+// attributes (ESC[?…c / ESC[>…c) and status (ESC[0n). Nothing a person types.
+const ESC = String.fromCharCode(27);
+const TERMINAL_REPORTS = new RegExp(`^(?:${ESC}\\[(?:\\d+;\\d+R|[?>][\\d;]*c|0n))+$`);
 const encoder = new TextEncoder();
 
 export function consoleUrl(vmId: string): string {
@@ -64,6 +73,7 @@ export class ConsoleTransport {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private renewAllowed = true;
   private renewUntil: number | null = null;
+  private connectedAt = 0;
 
   constructor(
     private readonly vmId: string,
@@ -137,6 +147,7 @@ export class ConsoleTransport {
           if (frame.type === 'connected' && frame.vm_id === this.vmId) {
             this.clearWait();
             this.ready = true;
+            this.connectedAt = Date.now();
             this.renewAllowed = true; // the next expiry may renew once again
             this.renewUntil = null;
             this.callbacks.state('connected', '콘솔이 연결되었습니다.');
@@ -176,6 +187,9 @@ export class ConsoleTransport {
   }
 
   send(text: string): boolean {
+    if (this.ready && Date.now() - this.connectedAt < REPLAY_SETTLE_MS && TERMINAL_REPORTS.test(text)) {
+      return true; // an answer to replayed output, not user input
+    }
     return this.sendBytes(encoder.encode(text));
   }
 
