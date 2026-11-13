@@ -62,6 +62,10 @@ int main(void) {
   unsigned revokes=xl_revokes;assert(!xnet_close(k_uptime_get()+100));assert(xl_revokes==revokes);
   assert(xnet_start()==-EALREADY);
  } else {
+  if(!strcmp(xl_case,"shutdown-crash-injection")) {
+   assert(xshutdown_crash()==-EIO);assert(xl_hypercalls==1&&!hooks&&!xl_closed);
+   puts("PASS explicit Xen crash shutdown reason");exit(0);
+  }
   int rc=xshutdown_start(hook,NULL);
   if(!strcmp(xl_case,"shutdown-external-read-poison")||!strcmp(xl_case,"shutdown-external-watch-poison")) {
    assert(!rc);k_sleep(K_MSEC(250));

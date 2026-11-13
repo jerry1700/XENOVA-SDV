@@ -62,6 +62,15 @@ config XENOVA_AUTO_DELAY_INJECTION
 	  does not declare a VM trust failure. This is a test fault
 	  injector, not an operating driving policy, and is excluded from normal builds.
 
+config XENOVA_VM_CRASH_INJECTION
+	bool "Test-only Xen VM crash injection"
+	depends on XENOVA_DRIVE_WORKERS && XENOVA_RUNTIME
+	default n
+	help
+	  Accepts a bounded, boot-bound vm_crash demo command and submits Xen's
+	  crash shutdown reason without changing the platform desired state. This
+	  is a test fault injector and must not be enabled in normal builds.
+
 config XENOVA_DRIVE_WARM
 	bool "Explicit warm-drive-1 app lifecycle profile"
 	depends on XENOVA_DRIVE_WORKERS

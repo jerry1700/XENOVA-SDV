@@ -73,6 +73,11 @@ static int terminate(void *p,unsigned reason) {
  BUILD_ASSERT(SHUTDOWN_poweroff==0&&SHUTDOWN_reboot==1,"fixed Xen shutdown ABI");
  return HYPERVISOR_sched_op(SCHEDOP_shutdown,&op);
 }
+int xshutdown_crash(void) {
+ int rc=terminate(NULL,SHUTDOWN_crash);
+ /* A successful crash shutdown never returns to the guest. */
+ return rc?rc:-EIO;
+}
 static void watcher(void *a,void *b,void *c) {
  ARG_UNUSED(a);ARG_UNUSED(b);ARG_UNUSED(c);
  /* All paths after creation release this barrier, including publication failure. */
