@@ -192,6 +192,17 @@ export function useStartAutoDelay(vmId: string) {
   });
 }
 
+/** 현재 AUTO 제어권을 가진 VM을 백엔드가 판정해 연산 지연을 적용한다. */
+export function useStartActiveDriveAutoDelay() {
+  return useMutation({
+    mutationFn: (body: AutoDelayRequest) =>
+      request<AutoDelayCommand>('/api/v1/drive/faults/auto-delay', {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
 export function useStartAgentExit(vmId: string) {
   return useMutation({
     mutationFn: () =>

@@ -6,6 +6,7 @@ import { ApiError } from '../api/client';
 import { DemoPage, failureText } from './DemoPage';
 
 const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const autoDelay = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const driveState = vi.hoisted(() => ({ activeId: 'vm-a', mode: 'AUTO' as string, age: 100 }));
 /** 명령 상태 조회 결과 (기본: 응답 전) */
 const commandStatus = vi.hoisted(() => ({ data: undefined as unknown }));
@@ -32,6 +33,7 @@ vi.mock('../api/queries', () => ({
     },
   }),
   useStartVmCrash: () => vmCrash,
+  useStartActiveDriveAutoDelay: () => autoDelay,
   useCommandStatus: () => commandStatus,
   useEvents: () => ({ data: { items: [] } }),
 }));
@@ -62,6 +64,7 @@ describe('장애 시연 1', () => {
   beforeEach(() => {
     vmCrash.mutate.mockReset();
     commandStatus.data = undefined;
+    autoDelay.mutate.mockClear();
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
     driveState.age = 100;
@@ -146,7 +149,43 @@ describe('장애 시연 1', () => {
 
   it('배포 API가 없으면 별도 문구로 안내한다', () => {
     expect(failureText(new ApiError(405, { code: 'METHOD_NOT_ALLOWED', message: '지원하지 않음' }))).toBe(
-      '배포된 백엔드에 VM 장애 시연 API가 아직 없습니다.',
+      '배포된 백엔드에 장애 시연 API가 아직 없습니다.',
     );
+  });
+});
+
+describe('장애 시연 2', () => {
+  beforeEach(() => {
+    autoDelay.mutate.mockClear();
+    driveState.activeId = 'vm-a';
+    driveState.mode = 'AUTO';
+    driveState.age = 100;
+  });
+
+  it('현재 AUTO VM과 고정 지연 프리셋을 표시한다', () => {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 2/ }));
+    expect(screen.getByRole('heading', { name: '반복 연산 지연과 주행 제어권 승계' })).toBeInTheDocument();
+    expect(screen.getAllByText('100ms · 30초').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Zephyr 주행 A').length).toBeGreaterThan(0);
+  });
+
+  it('확인 후 VM ID 없이 활성 주행 지연 API를 호출한다', () => {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 2/ }));
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '지연 발생' }));
+    expect(autoDelay.mutate).toHaveBeenCalledWith(
+      { delay_ms: 100, duration_s: 30 },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  it('AUTO가 아니면 시연을 시작할 수 없다', () => {
+    driveState.mode = 'MANUAL';
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 2/ }));
+    expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
+    expect(screen.getByText('자동주행 중에만 연산 지연 시연을 시작할 수 있습니다.')).toBeInTheDocument();
   });
 });
