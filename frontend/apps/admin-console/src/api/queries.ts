@@ -1,7 +1,7 @@
 /** TanStack Query 훅. 경로·응답은 VM 관리 API 계약 §5, 인증은 노션 API 명세 */
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { useState } from 'react';
-import { request, setSession } from './client';
+import { request, requestWithStatus, setSession } from './client';
 import type {
   CreateVmRequest,
   AgentExitCommand,
@@ -383,10 +383,19 @@ export function useSynchronizeVms() {
   });
 }
 
+/** 201 = 새로 만듦. 200 = 같은 이름·같은 사양의 재요청이라 서버가 기존 VM 을 시작해 돌려줌 (backend VmService.create) */
+export interface CreateVmResult {
+  vm: Vm;
+  created: boolean;
+}
+
 export function useCreateVm() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (body: CreateVmRequest) => request<Vm>('/api/v1/vms', { method: 'POST', body }),
+    mutationFn: async (body: CreateVmRequest): Promise<CreateVmResult> => {
+      const { data, status } = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+      return { vm: data, created: status !== 200 };
+    },
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }

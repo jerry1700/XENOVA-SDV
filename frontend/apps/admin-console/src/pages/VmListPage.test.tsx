@@ -166,3 +166,33 @@ describe('VM 자원 요약', () => {
     expect(screen.queryByText('ALLOCATED VCPU')).not.toBeInTheDocument();
   });
 });
+
+describe('VM 삭제 — 정지된 VM만 (QA 1-F1·1-F9)', () => {
+  const listWith = (state: string) => () =>
+    new Response(JSON.stringify({ items: [{ ...VM, state }], observed_at: new Date().toISOString() }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  it('실행 중이면 [삭제] 가 꺼져 있고 정지 후 삭제할 수 있다고 알린다', async () => {
+    stubBackend(listWith('running'), () => Promise.resolve(new Response(null, { status: 500 })));
+    renderPage();
+    const button = await screen.findByRole('button', { name: '삭제' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', '정지 후 삭제할 수 있습니다.');
+  });
+
+  it('정지된 VM 은 삭제할 수 있고, 확인 창은 실제 동작대로 안내한다', async () => {
+    HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
+      this.open = true;
+    };
+    stubBackend(listWith('stopped'), () => Promise.resolve(new Response(null, { status: 500 })));
+    renderPage();
+    const button = await screen.findByRole('button', { name: '삭제' });
+    expect(button).toBeEnabled();
+    await userEvent.click(button);
+    expect(screen.getByText(/정지된 VM만 삭제할 수 있습니다/)).toBeInTheDocument();
+    expect(screen.getByText(/삭제한 VM은 목록에서 사라지며 되돌릴 수 없습니다/)).toBeInTheDocument();
+    expect(screen.queryByText(/VM을 종료하고 연결된 디스크를 삭제합니다/)).toBeNull();
+  });
+});

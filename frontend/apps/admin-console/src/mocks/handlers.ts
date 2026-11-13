@@ -604,8 +604,17 @@ export const handlers = [
     if (!template) return error(404, 'TEMPLATE_NOT_FOUND', '템플릿을 찾을 수 없습니다.');
     const errors = validate(body);
     if (errors.length) return error(422, 'VALIDATION_ERROR', '입력값을 확인해 주세요.', errors);
-    if (vms.some((vm) => vm.name === body.name))
-      return error(409, 'VM_NAME_CONFLICT', '같은 이름의 VM이 있습니다.');
+    const same = vms.find((vm) => vm.name === body.name);
+    if (same) {
+      // backend VmService.create: 같은 이름·같은 사양 재요청은 기존 VM 을 시작해 200, 사양이 다르면 409
+      const sameSpec =
+        same.template_id === template.template_id &&
+        same.template_version === template.version &&
+        same.vcpus === body.vcpus &&
+        same.memory_mib === body.memory_mib;
+      if (!sameSpec) return error(409, 'VM_NAME_CONFLICT', '같은 이름의 VM이 있습니다.');
+      return HttpResponse.json(live(same) as unknown as JsonBodyType, { status: 200 });
+    }
     const vm: Vm = {
       vm_id: crypto.randomUUID(),
       name: body.name!,
@@ -651,7 +660,11 @@ export const handlers = [
   http.delete('*/api/v1/vms/:vmId', async ({ request, params }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
-    if (!find(String(params.vmId))) return vmNotFound();
+    const target = find(String(params.vmId));
+    if (!target) return vmNotFound();
+    // 보드 계약 v1.1: 도메인이 남아 있으면 삭제하지 않는다 (강제 종료 없음)
+    if (target.state !== 'stopped')
+      return error(409, 'INVALID_VM_STATE', `domain ${target.vm_id} is running; stop it before delete`);
     vms = vms.filter((vm) => vm.vm_id !== params.vmId);
     pinningByVm.delete(String(params.vmId));
     return new HttpResponse(null, { status: 204 });

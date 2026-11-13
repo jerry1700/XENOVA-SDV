@@ -54,3 +54,12 @@ describe('VM Control 상세 자원 패널', () => {
     expect(screen.getByText('vCPU 핀닝 변경 API가 아직 연결되지 않았습니다.')).toBeInTheDocument();
   });
 });
+
+describe('VM Control 상세 삭제 — 정지된 VM만 (QA 1-F1·1-F9)', () => {
+  it('실행 중이면 [VM 삭제] 가 꺼져 있고 정지 후 삭제할 수 있다고 알린다', () => {
+    renderDetail(VM_IDS.interaction);
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeDisabled();
+    expect(screen.getAllByText(/정지 후 삭제할 수 있습니다/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/VM을 종료하고 연결된 디스크를 삭제합니다/)).toBeNull();
+  });
+});

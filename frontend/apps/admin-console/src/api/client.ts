@@ -98,6 +98,14 @@ export function refreshSession(): Promise<boolean> {
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return (await requestWithStatus<T>(path, options)).data;
+}
+
+/** request 와 같고 성공 상태 코드를 함께 준다 — 같은 요청의 200(기존 것)과 201(새로 만듦)을 화면이 가를 때 */
+export async function requestWithStatus<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<{ data: T; status: number }> {
   let response = await send(path, options);
   if (response.status === 401 && options.auth !== false && (await refreshSession())) {
     response = await send(path, options);
@@ -107,5 +115,5 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     if (response.status === 401 && options.auth !== false) setSession(null);
     throw new ApiError(response.status, body ?? {});
   }
-  return parse<T>(response);
+  return { data: await parse<T>(response), status: response.status };
 }

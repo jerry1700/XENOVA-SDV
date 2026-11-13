@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useBlocker, useNavigate } from 'react-router';
 import { ApiError } from '../api/client';
 import { errorText } from '../api/errorText';
-import { useCreateVm, useTemplates } from '../api/queries';
+import { useCreateVm, useTemplates, useVms } from '../api/queries';
 import type { Template } from '../api/types';
 import { loadVmList } from '../api/vmListCache';
 import styles from './pages.module.css';
@@ -44,7 +44,10 @@ export function VmCreatePage() {
   const leaveBlocker = useBlocker(create.isPending);
   const zephyr = template?.guest_kind === 'zephyr';
   const spec = zephyr ? ZEPHYR_PROFILE : { vcpus, memory_mib: memory };
-  const nameOk = name.length >= 1 && name.length <= 63 && name.trim() === name;
+  const vms = useVms();
+  // 같은 이름이 있으면 서버는 409(사양 다름) 또는 200(같은 사양 = 기존 VM 시작)이라 새 VM 이 생기지 않는다 (QA 1-F2)
+  const duplicateName = name.length > 0 && (vms.data?.items ?? []).some((vm) => vm.name === name);
+  const nameOk = name.length >= 1 && name.length <= 63 && name.trim() === name && !duplicateName;
   const resourcesOk =
     template !== null &&
     Number.isInteger(spec.vcpus) &&
@@ -215,7 +218,13 @@ export function VmCreatePage() {
                   onChange={(event) => setName(event.target.value)}
                   placeholder="예: drive-vm-a"
                   aria-invalid={name.length > 0 && !nameOk}
+                  aria-describedby={duplicateName ? 'vm-name-duplicate' : undefined}
                 />
+                {duplicateName && (
+                  <small id="vm-name-duplicate" role="alert">
+                    같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.
+                  </small>
+                )}
 
                 {zephyr ? (
                   <div className={styles.fixedProfile}>
@@ -410,7 +419,7 @@ export function VmCreatePage() {
 
       <Modal
         open={create.data !== undefined}
-        title="VM 생성 완료"
+        title={create.data?.created === false ? '기존 VM 시작' : 'VM 생성 완료'}
         onClose={goToList}
         footer={<Button onClick={goToList}>VM 목록으로</Button>}
       >
@@ -418,8 +427,12 @@ export function VmCreatePage() {
           <div className={styles.createSuccess}>
             <span aria-hidden="true">✓</span>
             <div>
-              <strong>‘{create.data.name}’</strong>
-              <p>새 VM이 성공적으로 생성되었습니다.</p>
+              <strong>‘{create.data.vm.name}’</strong>
+              <p>
+                {create.data.created
+                  ? '새 VM이 성공적으로 생성되었습니다.'
+                  : '같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'}
+              </p>
             </div>
             <dl className={styles.createSuccessMeta}>
               <div>
