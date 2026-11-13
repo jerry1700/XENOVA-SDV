@@ -20,6 +20,8 @@ import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.CreateVmCommand;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.VmControlOperation;
@@ -29,6 +31,7 @@ import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
 import com.xenova.backend.vm.domain.VmResourceUpdate;
 import com.xenova.backend.vm.domain.VmResources;
+import com.xenova.backend.vm.domain.VmResourceView;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
@@ -394,6 +397,63 @@ class VmServiceTest {
     }
 
     @Test
+    void resourcesExposeThePlatformHardAffinity() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.cpuLayout()).thenReturn(cpuLayout());
+
+        VmResourceView result = service.resources("vm-1");
+
+        assertThat(result.pcpuCount()).isEqualTo(4);
+        assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(0, 3)));
+        assertThat(result.exclusivePcpus()).containsExactly(1);
+        assertThat(result.pcpus()).allSatisfy(pcpu -> assertThat(pcpu.loadPercent()).isNull());
+    }
+
+    @Test
+    void pinningUpdateRebuildsTheFullPolicyAndPreservesOtherVmPlacements() {
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        when(vmControlPort.cpuLayout()).thenReturn(cpuLayout());
+        CpuPolicyUpdate update = new CpuPolicyUpdate(
+                new CpuPolicyUpdate.CpuPolicy(
+                        "2.0", "operation-1", 3, "Pool-0", List.of(0, 3), List.of(
+                        new CpuPolicyUpdate.CpuPlacement("vm-1", "shared", List.of(3)),
+                        new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)))),
+                true);
+        when(vmControlPort.updateCpuPolicy(any(), eq("pin-1"))).thenReturn(update);
+
+        VmResourceView result = service.updateVcpuPinning(
+                "vm-1", List.of(new CpuLayout.VcpuAffinity(0, List.of(3))), "pin-1");
+
+        ArgumentCaptor<CpuPolicyUpdate.Request> request = ArgumentCaptor.forClass(CpuPolicyUpdate.Request.class);
+        verify(vmControlPort).updateCpuPolicy(request.capture(), eq("pin-1"));
+        assertThat(request.getValue().expectedPolicyRevision()).isEqualTo(2);
+        assertThat(request.getValue().sharedPcpus()).containsExactly(0, 3);
+        assertThat(request.getValue().placements()).containsExactly(
+                new CpuPolicyUpdate.CpuPlacement("vm-1", "shared", List.of(3)),
+                new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)));
+        assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(3)));
+        assertThat(result.exclusivePcpus()).containsExactly(1);
+    }
+
+    @Test
+    void differentMasksPerVcpuAreRejectedBeforeCallingThePlatform() {
+        VmRecord record = new VmRecord(
+                "vm-2", new CreateVmCommand("linux-2", "alpine", "1.2.0", 2, 256), GuestKind.LINUX, NOW);
+        when(vmRecordRepository.findById("vm-2")).thenReturn(Optional.of(record));
+
+        assertThatThrownBy(() -> service.updateVcpuPinning("vm-2", List.of(
+                new CpuLayout.VcpuAffinity(0, List.of(0)),
+                new CpuLayout.VcpuAffinity(1, List.of(3))), "pin-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getCode()).isEqualTo("RESOURCE_UNSUPPORTED");
+                });
+        verify(vmControlPort, never()).cpuLayout();
+        verify(vmControlPort, never()).updateCpuPolicy(any(), anyString());
+    }
+
+    @Test
     void destroyRetiresDomainAndKeepsTheRecordForRestore() {
         VmRecord record = record("vm-1", "alpine-1");
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
@@ -473,6 +533,20 @@ class VmServiceTest {
 
     private static VmRecord record(String vmId, String name) {
         return new VmRecord(vmId, new CreateVmCommand(name, "alpine", "1.2.0", 1, 256), NOW);
+    }
+
+    private static CpuLayout cpuLayout() {
+        return new CpuLayout(
+                true,
+                2,
+                "2.0",
+                new CpuLayout.CpuHost(List.of(0, 1, 2, 3), 3, List.of(0, 3), true),
+                List.of(new CpuLayout.CpuReservation("vm-z", List.of(1))),
+                List.of(
+                        new CpuLayout.VmCpuLayout(
+                                "vm-1", 1, "shared", List.of(new CpuLayout.VcpuAffinity(0, List.of(0, 3)))),
+                        new CpuLayout.VmCpuLayout(
+                                "vm-z", 1, "exclusive", List.of(new CpuLayout.VcpuAffinity(0, List.of(1))))));
     }
 
     private static VmControlOperation operation(String vmId, String requestKey, String status) {

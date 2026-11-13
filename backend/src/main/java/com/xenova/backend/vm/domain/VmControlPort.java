@@ -26,6 +26,10 @@ public interface VmControlPort {
     // Updates the persisted Linux guest specification. The new resources apply on its next start.
     VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey);
 
+    CpuLayout cpuLayout();
+
+    CpuPolicyUpdate updateCpuPolicy(CpuPolicyUpdate.Request request, String requestKey);
+
     // Forced shutdown and disk deletion. Idempotent.
     void destroy(String vmId);
 }
