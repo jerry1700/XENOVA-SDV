@@ -309,6 +309,43 @@ class PerceptionPipeline:
             points=[transform_point(v,(p.x,p.y,p.yaw)) for v in points]
         return min(v[0] for v in points)-error,min(v[1] for v in points)-error,max(v[0] for v in points)+error,max(v[1] for v in points)+error
 
+    def _free_visibility(self, grid, pose):
+        """현재 depth 영상 안의 셀을 먼저 시도한다. FREE 증명은 별도로 수행한다."""
+        import numpy as np
+        camera, plane = self.calibration.right, self.calibration.plane
+        if abs(plane.normal[2]) < 1e-9:
+            return None
+        rows, cols = np.indices(grid.state.shape)
+        resolution = grid.spec.resolution_m
+        x = grid.spec.origin_xy[0] + (cols+.5)*resolution
+        y = grid.spec.origin_xy[1] + (rows+.5)*resolution
+        if pose is not None:
+            p = pose.sample
+            x, y = x-p.x, y-p.y
+            c, s = math.cos(p.yaw), math.sin(p.yaw)
+            x, y = c*x+s*y, -s*x+c*y
+        z = -(plane.normal[0]*x+plane.normal[1]*y+plane.offset)/plane.normal[2]
+        z += min(t.base_height_m[0]+t.core_height_m/2 for t in self.targets)
+        xyz = np.stack((x,y,z),axis=-1)-camera.translation
+        transform = np.asarray(camera.rotation) @ np.asarray(camera.rectification).T
+        optical = xyz @ transform
+        projection = transform @ np.asarray(camera.k).T
+        image = xyz @ projection
+        left, top, right, bottom = camera.roi
+        # A cell can contain the edge of an obstacle whose core is outside the cell.
+        # Prefer cells whose whole nominal core-placement area is in the depth FOV.
+        extent = max(t.max_extent_m for t in self.targets)+resolution/math.sqrt(2.)
+        def margin(direction):
+            return extent*(abs(direction[0]-plane.normal[0]*direction[2]/plane.normal[2])
+                           +abs(direction[1]-plane.normal[1]*direction[2]/plane.normal[2]))
+        depth_margin = margin(transform[:,2])
+        visible = ((optical[...,2] >= camera.near_m+depth_margin)
+                   & (optical[...,2] <= camera.far_m-depth_margin))
+        for axis, lower, upper in ((0,left,right),(1,top,bottom)):
+            visible &= image[...,axis]-lower*image[...,2] >= margin(projection[:,axis]-lower*projection[:,2])
+            visible &= upper*image[...,2]-image[...,axis] > margin(upper*projection[:,2]-projection[:,axis])
+        return visible
+
     def _domain(self, pose, grid):
         import numpy as np
         if pose is None and self._domain_cache is not None:
@@ -871,9 +908,12 @@ class PerceptionPipeline:
                 evidence=ray_inputs.materialize(evidence,diagnostics)
                 free_patches=evidence.patches
             if not instantaneous_synthetic:
-                # 정합이 좁힌 자세 대신 원 exposure의 pose bound를 사용한다.
+                # Cell bounds already account for the MAP pose at the capture midpoint.
+                # The ray only needs motion within the original exposure around that midpoint.
                 free_patches=widen_motion_rays(free_patches,observation.depth.stamp,self.calibration,motion_pose,
-                    input_kind=observation.kind,motion_qualified=True,capture_interval=capture_interval)
+                    input_kind=observation.kind,motion_qualified=True,capture_interval=capture_interval,
+                    relative_to_capture_midpoint=pose is not None and pose.captured_us==capture_interval
+                    and pose.sample.at_us==motion_pose.sample.at_us)
                 can_free=temporal_possible=bool(np.any(free_patches.qualified))
                 temporal_free_status='FULL_CAPTURE_MOTION_RAY_TUBE' if can_free else 'MOTION_RAY_TUBE_UNAVAILABLE'
         del ray_inputs
@@ -889,11 +929,12 @@ class PerceptionPipeline:
                     self._free_scheduler=scheduler
                 else:scheduler=self._free_scheduler
                 parking_cells = {cell for bay in parking_clearance for cell in parking_clearance_cells(bay, grid.spec)} if can_free else ()
+                visible = self._free_visibility(grid, pose) if can_free else None
                 plan=scheduler.plan(context_key=schedule_context,needed_mask=needed,support=grid.support,permission=grid.permission,
                     state=grid.state,observed_us=grid.observed_us,time_known=grid.time_known,now_us=now_us,
                     capture_lower_us=None if capture_interval is None else capture_interval[0],max_cells=self.profile.max_free_cells,
                     max_ray_tests=remaining,cycle_bound_us=cycle_bound_us,completion_bound_us=completion_bound_us,
-                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells)
+                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells,visible_mask=visible)
                 selected=plan.cells
                 if not plan.needed_count:can_free=False
                 if scheduling_status not in ('NEEDED_REGION_OUTSIDE_GRID','NEEDED_REGION_EXPIRED','NEEDED_POSE_CHANGED'):scheduling_status=plan.status

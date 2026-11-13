@@ -28,6 +28,17 @@ def scheduler(width=8):
 
 
 class FreeScheduleTests(unittest.TestCase):
+    def test_visible_surroundings_can_use_budget_when_required_cells_are_blind(self):
+        owner, data = scheduler(), fields()
+        data['needed_mask'][0, 3:] = False
+        visible = data['needed_mask'].copy()
+        visible[0, :2] = False
+        visible[0, 5] = True
+        result = owner.plan(**data, visible_mask=visible)
+        self.assertEqual(result.cells, ((2, 0), (5, 0)))
+        self.assertEqual(result.due_not_scheduled_count, 2)
+        self.assertFalse(result.all_needed_live_fresh)
+
     def test_parking_preference_uses_only_the_budget_left_after_the_stopping_region(self):
         owner, data = scheduler(), fields()
         data['needed_mask'][0, 1:] = False
