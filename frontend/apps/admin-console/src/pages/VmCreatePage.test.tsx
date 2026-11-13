@@ -146,6 +146,24 @@ describe('VM 생성 중 기록 정리', () => {
     expect(pendingNames()).toEqual([]);
   });
 
+  it('생성 실패는 한글 문구만 보이고 서버 원문·(코드)를 붙이지 않는다 (코드는 title 에만)', () => {
+    createMutation.error = new ApiError(409, {
+      code: 'VM_NAME_CONFLICT',
+      message: 'name already used by a retained VM',
+    });
+    renderCreatePage();
+    goToReviewStep();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.');
+    expect(alert).not.toHaveTextContent('VM_NAME_CONFLICT');
+    expect(alert).not.toHaveTextContent('name already used');
+    expect(within(alert).getByText('같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.')).toHaveAttribute(
+      'title',
+      'VM_NAME_CONFLICT',
+    );
+  });
+
   it('504 타임아웃이면 실패 대신 진행 중일 수 있음과 재시도 방법을 안내한다', () => {
     createMutation.error = new ApiError(504, {
       code: 'VM_CONTROL_TIMEOUT',

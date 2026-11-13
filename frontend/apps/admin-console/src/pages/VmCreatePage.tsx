@@ -2,6 +2,7 @@ import { Button, Card, Modal } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useBlocker, useNavigate } from 'react-router';
 import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useCreateVm, useTemplates } from '../api/queries';
 import type { Template } from '../api/types';
 import { loadVmList } from '../api/vmListCache';
@@ -26,13 +27,6 @@ const TEMPLATE_ACCENTS = [
 const MAX_MEMORY = 1024;
 const MEMORY_STEP = 64;
 const ZEPHYR_PROFILE = { vcpus: 1, memory_mib: 16 };
-
-const ERROR_HINT: Record<string, string> = {
-  VM_NAME_CONFLICT: '같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.',
-  INSUFFICIENT_RESOURCES: '사용 가능한 CPU 또는 메모리가 부족합니다. 할당량을 조정해 주세요.',
-  VALIDATION_ERROR: '입력한 VM 정보와 자원 값을 다시 확인해 주세요.',
-  TEMPLATE_NOT_FOUND: '선택한 템플릿을 찾을 수 없습니다. 템플릿을 다시 선택해 주세요.',
-};
 
 export function VmCreatePage() {
   const templates = useTemplates();
@@ -364,8 +358,7 @@ export function VmCreatePage() {
 
           {create.error && !timedOut && (
             <div className={styles.createError} role="alert">
-              <strong>{error ? `${error.message} (${error.code})` : String(create.error)}</strong>
-              {error && ERROR_HINT[error.code] && <span>{ERROR_HINT[error.code]}</span>}
+              <strong title={error?.code}>{errorText(create.error, 'VM을 생성하지 못했습니다.')}</strong>
             </div>
           )}
 
