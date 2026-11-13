@@ -2,7 +2,7 @@ import { Button, Card, Modal, useToast } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError } from '../api/client';
-import { useVm, useVms, type VmAction } from '../api/queries';
+import { useVm, useVmResources, useVms, type VmAction } from '../api/queries';
 import type { Vm } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
 import {
@@ -18,6 +18,7 @@ import {
 } from '../format';
 import styles from './pages.module.css';
 import { ResourceAdjustmentPanel } from './ResourceAdjustmentPanel';
+import { VcpuPinningPanel } from './VcpuPinningPanel';
 import { VmOperationNotice } from './VmOperationProgress';
 import { useVmOperationProgress } from './useVmOperationProgress';
 import { LiveDataAlert } from '../layout/LiveDataAlert';
@@ -172,30 +173,16 @@ export function ControlVmDetailPage() {
                 <strong>{vm.data.memory_mib}</strong>
                 <small>MiB</small>
               </div>
-              <div data-available="false">
-                <span>vCPU 핀닝</span>
-                <strong>—</strong>
-                <small>변경 API 미연결</small>
-              </div>
+              <PinningSummary vmId={vm.data.vm_id} />
             </div>
           </Card>
 
-          {/* Zephyr는 고정 프로필이라 조정·핀닝 패널을 두지 않는다 (Linux VM만) */}
+          {/* Zephyr는 1 vCPU · 16 MiB 고정 프로필이라 vCPU·메모리 조정은 Linux VM만.
+              핀닝은 Zephyr도 전용 코어를 바꿀 수 있어 모든 VM에 둔다 (백엔드 PUT /resources/vcpu-pinning) */}
           {!zephyr && (
-            <>
-              <ResourceAdjustmentPanel key={`tuning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
-              <Card
-                title="vCPU 핀닝"
-                accent={accent}
-                actions={<span className={styles.pinningCardTag}>HARD AFFINITY</span>}
-              >
-                <div className={styles.pinningState} data-tone="waiting" role="status">
-                  <strong>vCPU 핀닝 변경 API가 아직 연결되지 않았습니다.</strong>
-                  <span>플랫폼과 백엔드의 Xen hard affinity 변경 계약이 추가되면 활성화됩니다.</span>
-                </div>
-              </Card>
-            </>
+            <ResourceAdjustmentPanel key={`tuning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
           )}
+          <VcpuPinningPanel key={`pinning-${vm.data.vm_id}`} vm={vm.data} accent={accent} />
 
           <section className={styles.dangerZone} aria-labelledby="danger-zone-title">
             <div>
@@ -247,6 +234,19 @@ export function ControlVmDetailPage() {
           </div>
         )}
       </Modal>
+    </div>
+  );
+}
+
+/** 할당 자원 카드의 핀닝 칸. 핀닝 패널과 같은 조회(useVmResources)를 공유한다 */
+function PinningSummary({ vmId }: { vmId: string }) {
+  const resources = useVmResources(vmId);
+  const pcpus = resources.data?.vcpu_pinning[0]?.pcpus;
+  return (
+    <div data-available={pcpus ? 'true' : 'false'}>
+      <span>vCPU 핀닝</span>
+      <strong>{pcpus ? pcpus.join(', ') : '—'}</strong>
+      <small>{pcpus ? 'pCPU' : resources.error ? '조회 실패' : '조회 중'}</small>
     </div>
   );
 }
