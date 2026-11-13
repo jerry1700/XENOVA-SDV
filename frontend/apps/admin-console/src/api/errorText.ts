@@ -19,6 +19,8 @@ export const ERROR_TEXT = {
   VM_NOT_FOUND: 'VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.',
   VM_NAME_CONFLICT: '같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.',
   INVALID_VM_STATE: '지금 VM 상태에서는 할 수 없는 작업입니다. VM 상태를 확인해 주세요.',
+  // 다른 탭·사용자가 같은 VM 에 작업을 보낸 상태 (백엔드 QA 1-B2). 요청은 쌓이지 않는다
+  VM_OPERATION_IN_PROGRESS: '이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도해 주세요.',
   VM_ALREADY_EXISTS: '이미 같은 VM이 있습니다.',
   INVALID_ARGUMENT: '보드가 요청 값을 받아들이지 않았습니다. 템플릿과 자원 값을 확인해 주세요.',
   INSUFFICIENT_RESOURCES: '사용 가능한 CPU 또는 메모리가 부족합니다. 할당량을 조정해 주세요.',
