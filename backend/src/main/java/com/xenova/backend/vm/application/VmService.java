@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -55,6 +56,8 @@ public class VmService {
     private final VmRuntimeCache runtimeCache;
     private final AgentInventoryCleaner inventoryCleaner;
     private final Clock clock;
+    // VMs with a state-changing request in flight in this instance (exclusively)
+    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
     public VmService(
             VmControlPort vmControlPort,
@@ -209,7 +212,7 @@ public class VmService {
         String validatedKey = validateRequestKey(requestKey);
         findRecord(vmId);
         try {
-            return vmControlPort.requestReboot(vmId, validatedKey);
+            return exclusively(vmId, () -> vmControlPort.requestReboot(vmId, validatedKey));
         } catch (ApiException exception) {
             // Reboot needs a running domain: a stopped VM is started instead, a crashed one is stopped first.
             if (INVALID_VM_STATE.equals(exception.getCode())) {
@@ -309,8 +312,8 @@ public class VmService {
             placements.add(new CpuPolicyUpdate.CpuPlacement(item.vmId(), item.allocation(), mask));
         }
         placements.sort(Comparator.comparing(CpuPolicyUpdate.CpuPlacement::vmId));
-        CpuPolicyUpdate update = vmControlPort.updateCpuPolicy(
-                new CpuPolicyUpdate.Request(layout.policyRevision(), sortedUnique(shared), placements), validatedKey);
+        CpuPolicyUpdate update = exclusively(vmId, () -> vmControlPort.updateCpuPolicy(
+                new CpuPolicyUpdate.Request(layout.policyRevision(), sortedUnique(shared), placements), validatedKey));
         validateCpuPolicyResponse(update, vmId, target.allocation(), requestedMask, layout.policyRevision());
 
         List<CpuLayout.VcpuAffinity> applied = new ArrayList<>();
@@ -500,13 +503,31 @@ public class VmService {
     }
 
     // Marks the VM busy so an overlapping on-demand state sync does not report this operation's
-    // intermediate states as detected changes.
+    // intermediate states as detected changes. Only one such operation runs per VM (see exclusively).
     private <T> T underOperation(String vmId, Supplier<T> operation) {
-        stateTracker.beginOperation(vmId);
+        return exclusively(vmId, () -> {
+            stateTracker.beginOperation(vmId);
+            try {
+                return operation.get();
+            } finally {
+                stateTracker.endOperation(vmId);
+            }
+        });
+    }
+
+    // QA 1-B2: a second create/start/stop/delete/resource/pinning/reboot request for a VM that already has one in
+    // flight (another tab or user) is refused at once instead of queueing behind it in dom0-manager, where it would
+    // wait silently and then run against whatever state the first one left (e.g. stop then delete).
+    // The set is per Spring instance, which is enough while the backend runs as a single instance.
+    private <T> T exclusively(String vmId, Supplier<T> operation) {
+        if (!inFlight.add(vmId)) {
+            throw new ApiException(HttpStatus.CONFLICT, "VM_OPERATION_IN_PROGRESS",
+                    "이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요.");
+        }
         try {
             return operation.get();
         } finally {
-            stateTracker.endOperation(vmId);
+            inFlight.remove(vmId);
         }
     }
 
