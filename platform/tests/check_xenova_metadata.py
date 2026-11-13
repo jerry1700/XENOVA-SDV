@@ -57,6 +57,9 @@ for unit in installed_units:
 assert 'xenova-xen-ready.service' not in platform['SYSTEMD_SERVICE:xenova-platform'].split()
 assert 'xenova-data-prepare.service' not in platform['SYSTEMD_SERVICE:xenova-platform'].split()
 assert selected(platform, 'first_install_contract.py').resolve() == ROOT / 'platform/first-install/first_install_contract.py'
+assert 'file://creation-policy.json' in platform['SRC_URI'].split()
+assert selected(platform, 'creation-policy.json') == LAYER / 'recipes-core/xenova-platform/files/creation-policy.json'
+assert '/etc/xenova/creation-policy.json' in platform['CONFFILES:xenova-platform'].split()
 assert selected(platform, 'xenova-wifi-modprobe.conf') == LAYER / 'recipes-core/xenova-platform/files/xenova-wifi-modprobe.conf'
 assert '/etc/modprobe.d/xenova-wifi.conf' in platform['FILES:xenova-platform'].split()
 assert '/etc/modprobe.d/xenova-wifi.conf' in platform['CONFFILES:xenova-platform'].split()

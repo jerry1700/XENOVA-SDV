@@ -89,6 +89,22 @@ class DeploymentPayloadTest(unittest.TestCase):
         for source in payloads.source_files("usr/lib/python3/site-packages").values():
             self.assertIn(str(source.relative_to(ROOT)),inputs)
 
+    def test_gate_rejects_missing_or_changed_creation_policy(self):
+        platform_root(self.root)
+        target = self.root/'etc/xenova/creation-policy.json'
+        before = target.read_bytes()
+        for changed in (None, b'{"schema_version":"1.0","call_ms":120000}'):
+            with self.subTest(changed=changed):
+                if changed is None:
+                    target.unlink()
+                else:
+                    target.write_bytes(changed)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'source/installed contract mismatch'):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    target.write_bytes(before)
+
     def test_gate_rejects_each_missing_runtime_log_installation(self):
         platform_root(self.root)
         collector = payloads.COLLECTOR

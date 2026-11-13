@@ -958,9 +958,13 @@ create/retire/restore/purge의 같은 key 재전달도 완전하게 읽은 원�
 정확한 key는 `schema_version="1.0", call_ms, execution_ms, cleanup_ms`다. 정수 양수이며
 call_ms>cleanup_ms여야 한다. call/실행의 직렬화 입력 상한은 86460000ms,
 cleanup_ms 상한은 60000ms다. 이는 운영 기본값·보드 지연 보장이 아니다.
-recipe는 값이 null인 예시를 `/usr/share/xenova/creation-policy.json.example`로만 설치한다.
-승인된 보드 정책을 별도로 공급하기 전 새 Linux create는 수락 전 RECONCILE_REQUIRED,
-accepted=false다. 완료 replay·조회·기한 불명 작업의 명시 수습은 이 설정 부재로 막지 않는다.
+이미지는 승인된 기본 정책을 `/etc/xenova/creation-policy.json`에 root:root·0600으로 설치한다.
+기본값은 `call_ms=1200000`(20분), `execution_ms=1140000`(19분), `cleanup_ms=30000`(30초)다.
+정리는 호출 예산 안에서 확보하며, 잠금·순서 대기에 시간이 쓰이면 실제 실행 여유는 아래 식에 따라 줄어든다.
+이 값은 하위 Linux 생성의 상한이며 HTTP·Spring·클라이언트의 응답 대기를 자동으로 늘리지 않는다.
+정책은 CONFFILES로 관리한다. RPM 갱신에서 벤더 기본값도 달라지면 운영 수정본이 `.rpmsave`로 이동할 수 있으므로 갱신 후 활성값과 보존본을 확인한다. null 예시는 기존 `/usr/share/xenova/creation-policy.json.example`에 별도로 남긴다.
+정책 부재·무효에서는 새 Linux create를 수락 전 RECONCILE_REQUIRED, accepted=false로 거절한다.
+완료 replay·조회·기한 불명 작업의 명시 수습은 이 설정 부재로 막지 않는다.
 Zephyr의 기존 bundle·독립 factory seed 준비 계약은 유지한다.
 
 | 시간 | 현재 의미 |

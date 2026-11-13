@@ -148,6 +148,7 @@ def platform_root(root):
     root = Path(root)
     mapping = {'usr/lib/xenova/xenova_vm.py': FILES / 'xenova_vm.py',
                'etc/xenova/defaults.json': FILES / 'defaults.json',
+               'etc/xenova/creation-policy.json': FILES / 'creation-policy.json',
                'usr/lib/xenova/xenova_first_boot.py': FILES / 'xenova_first_boot.py',
                'usr/lib/xenova/first_install_contract.py': ROOT / 'platform/first-install/first_install_contract.py',
                'usr/sbin/xenova-first-boot': FILES / 'xenova-first-boot',

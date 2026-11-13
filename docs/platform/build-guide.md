@@ -187,6 +187,8 @@ A/B UUID·실행 바인딩·권한 원본·broker·시리얼 장치를 확인한
 [Gateway 운영 절차](../../platform/services/gateway/README.md#verified-프로필-운영)로 설정한다.
 패키지 포함·ARM 실행과 물리 HDMI·실제 장치 출력 수락은 별개다.
 
+새 Linux VM 생성에는 이미지의 `/etc/xenova/creation-policy.json`을 사용한다. 승인 기본값은 호출 20분·실행 19분·정리 30초이며 root:root·0600으로 설치한다. 정책은 CONFFILES로 관리하며 패키지 갱신 후 활성값과 보존본을 확인한다. null 예시는 활성 설정으로 복사하지 않는다. 시간 단위·대기 차감·재전달은 [생성 시간 계약](cli-manager-spec.md#creation-deadline)을 따른다.
+
 ### ARM64 사용자 공간 실행
 
 Linux 템플릿의 apt·SSH·Agent 검사는 ARM64 chroot에서 실행한다.
@@ -715,6 +717,13 @@ try:
           "installed USB phone address-only policy matches source")
     check(phone_policy.stat().st_uid == 0 and phone_policy.stat().st_mode & 0o777 == 0o644,
           "USB phone policy root ownership and mode 0644")
+    creation_policy = root/"etc/xenova/creation-policy.json"
+    check(creation_policy.is_file() and creation_policy.read_bytes() ==
+          (repo/"platform/yocto/meta-xenova/recipes-core/xenova-platform/files/creation-policy.json").read_bytes(),
+          "installed approved creation time policy matches source")
+    policy_stat = creation_policy.stat()
+    check((policy_stat.st_uid, policy_stat.st_gid, policy_stat.st_mode & 0o777) == (0, 0, 0o600),
+          "creation policy root:root ownership and mode 0600")
     broker_sources = {
         "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
         "platform/deploy/mosquitto/etc/policy.json": "usr/share/xenova/mqtt/policy.json",

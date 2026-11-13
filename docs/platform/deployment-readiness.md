@@ -209,7 +209,7 @@ env example의 선택 입력이다. 파일/차량/시간 승인값은 설치 담
 
 | 입력·공급 담당 | 실제 원천·권한 | 없거나 실패할 때 |
 |---|---|---|
-| 생성 시간 정책 / 플랫폼·운영 승인 | `/etc/xenova/creation-policy.json`을 승인값으로 별도 공급. `/usr/share/xenova/creation-policy.json.example`의 null은 활성값이 아님 | 신규 Linux create 운영 수락 대기. 기존 완료 회수·지원 수습·조회/stop까지 전역 차단하지 않음. 승인 없는 fallback 숫자 없음 |
+| 생성 시간 정책 / 플랫폼·운영 승인 | `/etc/xenova/creation-policy.json`을 root:root·0600으로 설치. 기본 호출 20분·실행 19분·정리 30초이며 CONFFILES로 관리하며 패키지 갱신 뒤 활성값을 확인. null 예시는 활성 설정과 별도 | [원 기한·예산 계약](cli-manager-spec.md#creation-deadline)을 유지. 정책 부재·무효는 새 Linux create만 수락 전 거절하며 완료 회수·지원 수습·조회/stop은 전역 차단하지 않음. 새 이미지의 실제 생성·상위 응답 대기 수락은 별도 |
 | CPU / 플랫폼·운영 | `/etc/xenova/cpu-policy-preset.json`은 최초 공급, 현재 `/srv/xenova` 정책·anchor와 이번 host receipt는 기존 CPU 경로가 소유 | empty placements도 정상 현재 정책. 과거 factory가 현재 해제를 덮지 않음. 준비 오류는 새 start/recover 허가를 제한하고 정확한 기존 실행 stop은 별도 guard |
 | Gateway / 플랫폼·Gateway·차량 | `/usr/share/xenova/gateway.env.example`에서 승인한 설정만 root:root 0600 `/etc/xenova/gateway.env`로 별도 공급. 실제 UUID 쌍·profile·broker/ACL·device·root 소유 차량 한계 필요 | 운영 설정과 승인된 자산이 없으면 실제 차량 출력 대기. factory 기본의 mock 기동 조건은 아래 절 참조 |
 | Authority·binding / Gateway·신원 공급 | 기존 `/srv/xenova/drive-control`, `/run/xenova/drive-bindings.json`, 단일 Gateway lease와 현재 host 검증 | package hook의 initialize/backup 복원/자동 이동 없음. 설치·프로세스 생존이 재무장·출력 허가가 아님 |

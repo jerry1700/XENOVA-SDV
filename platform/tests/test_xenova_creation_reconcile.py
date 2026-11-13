@@ -11,6 +11,8 @@ import signal
 import subprocess
 import sys
 import threading
+import tempfile
+from types import MethodType, SimpleNamespace
 import time
 import unittest
 from unittest.mock import patch
@@ -27,6 +29,43 @@ import xenova_vm as vm
 
 
 class Interrupted(BaseException):pass
+
+
+class CreationPolicyPackageTest(unittest.TestCase):
+    def setUp(self):
+        from dom0_ssh_fixture import install_policy
+        self.temp = tempfile.TemporaryDirectory(prefix="xenova-creation-policy-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        install_policy(self.root, replay_recipe=True)
+        self.path = self.root / "etc/xenova/creation-policy.json"
+
+    def manager(self, now):
+        manager = SimpleNamespace(
+            p=SimpleNamespace(creation_policy_path=self.path, clock=lambda: now,
+                              boot_id_reader=lambda: "10000000-1111-4222-8333-123456789abc"),
+            defaults_path=self.path.with_name("defaults.json"))
+        manager._read = MethodType(management.Manager._read, manager)
+        return manager
+
+    def test_installed_policy_is_active_private_and_distinct_from_null_example(self):
+        expected = {"schema_version": "1.0", "call_ms": 1200000,
+                    "execution_ms": 1140000, "cleanup_ms": 30000}
+        self.assertEqual(creation.policy(self.manager(10.0)), expected)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+        example = json.loads((self.root / "usr/share/xenova/creation-policy.json.example").read_text())
+        self.assertIsNone(example["call_ms"])
+        self.assertIsNone(example["execution_ms"])
+        self.assertIsNone(example["cleanup_ms"])
+
+    def test_installed_limits_leave_cleanup_room_after_admission_wait(self):
+        context = {"entered": 10.0}
+        operation = {"schema_version": "1.0"}
+        creation.accept(self.manager(100.0), operation, context)
+        self.assertEqual(context["create_call_deadline"], 1210.0)
+        self.assertEqual(operation["creation"]["accepted_monotonic_ms"], 100000)
+        self.assertEqual(operation["creation"]["deadline_monotonic_ms"], 1180000)
+        self.assertEqual(operation["creation"]["limits"]["cleanup_ms"], 30000)
 
 
 class CreationReconcileTest(FollowupFixture):
