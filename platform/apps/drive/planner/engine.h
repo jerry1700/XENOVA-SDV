@@ -15,7 +15,7 @@ enum de_episode_handoff { DE_EPISODE_IDLE,DE_EPISODE_PLANNING,DE_EPISODE_PASS_PL
 /* Tracker, supervisor, state exporter and one planner preparation probe. */
 #define DE_READERS 4
 struct de_path_slot {struct lp_path path;struct lp_tracking_geometry tracking_geometry;
- atomic_uint generation,leases[DE_READERS];atomic_bool writing;bool tracking_prepared;uint64_t scene_generation;};
+ atomic_uint generation,leases[DE_READERS];atomic_bool writing;bool tracking_prepared,lane_guide;uint64_t scene_generation;};
 struct de_reference {unsigned slot;uint32_t generation,lease;};
 /* Actual successful tracker sample, separate from immutable registered Core/ref.
  * Missing/exact-meter mismatch withholds a progress export, not numeric clock

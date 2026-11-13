@@ -357,3 +357,44 @@ def test_changed_obstacle_invalidates_path_and_final_command(library):
         rc,cmd=product.track((.3,1.6,0),.4,0)
         assert rc==10 and cmd[0]==0 and cmd[7]
     finally:product.close()
+
+
+def test_recheck_suffix_ignores_passed_obstacle_but_checks_remaining_path(library):
+    from test_world import modern_world
+    library.probe_recheck_suffix.argtypes = [C.c_void_p, C.c_uint]
+    library.probe_prepare_forward_lane.argtypes = [C.c_void_p]
+    world = modern_world()
+    product = Product(library, world)
+    try:
+        assert library.probe_prepare_forward_lane(product.handle) == FOUND
+        index = next(i for i, point in enumerate(product.path()) if point[0] >= 2)
+        world.sequence = 2
+        obstacle(world, 5, 6, 11, 13)
+        product.update(world)
+        assert library.probe_valid(product.handle) == 10
+        assert library.probe_recheck_suffix(product.handle, index) == FOUND
+        obstacle(world, 30, 31, 11, 13)
+        product.update(world)
+        assert library.probe_recheck_suffix(product.handle, index) == 10
+    finally:
+        product.close()
+
+
+def test_lane_continuation_checks_space_beyond_valid_terminal(library):
+    from test_world import modern_world
+    library.probe_lane_continuation.argtypes = [C.c_void_p]
+    world = modern_world()
+    for boundary, y in ((world.left_boundary, 1.9), (world.right_boundary, 1.3)):
+        for point in boundary:
+            point.y = y
+    for lane, y in zip(world.lane_model.lanes, (1.45, 1.75)):
+        for point in lane.centerline:
+            point.y = y
+    product = Product(library, world)
+    try:
+        assert library.probe_lane_continuation(product.handle) == FOUND
+        obstacle(world, 25, 26, 14, 15, unknown=True)
+        product.update(world)
+        assert library.probe_lane_continuation(product.handle) == 10
+    finally:
+        product.close()

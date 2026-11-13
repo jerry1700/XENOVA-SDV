@@ -32,7 +32,7 @@ static enum de_result reserve(struct drive_engine *e,struct de_reference *h,stru
  else if(e->next_generation==UINT32_MAX)rc=DE_LIMIT;
  else for(unsigned i=0;i<DE_PATH_SLOTS;i++)if((int)i!=e->current&&!readers(&e->paths[i])&&!e->paths[i].writing){
   struct de_path_slot *slot=&e->paths[i];slot->writing=true;slot->generation=++e->next_generation;slot->scene_generation=0;
-  slot->tracking_prepared=false;
+  slot->tracking_prepared=slot->lane_guide=false;
   *h=(struct de_reference){i,slot->generation,0};*path=&slot->path;rc=DE_OK;
   unsigned used=0;
   for(unsigned j=0;j<DE_PATH_SLOTS;j++)if((int)j==e->current||e->paths[j].writing||readers(&e->paths[j]))used++;
@@ -333,13 +333,51 @@ static bool initial_correspondence_stale(const struct lp_path *p,const dw_vehicl
 /* Geometry alone does not prove a usable current tracker correspondence.
  * A stale correspondence takes the ordinary new-search/registration path; the
  * published tracker, original episode and its clocks are never reset here. */
-static enum de_result correspondence_current(struct drive_engine *e,const struct lp_path *p,uint32_t generation,const dw_vehicle *v){
- uint64_t anchor=p->initial_pi_us;
- if(!take(e))return DE_BUSY;
- if(e->progress_generation==generation&&e->progress_snapshot.initialized)anchor=e->progress_snapshot.last_pi_us;
+static bool correspondence_current(const struct lp_path *p,const struct lp_tracker *progress,
+ const dw_vehicle *v,const struct lp_config *c){
+ uint64_t anchor=progress->initialized?progress->last_pi_us:p->initial_pi_us;
+ return !anchor||(v->pi_sample_us>=anchor&&v->pi_sample_us-anchor<=(uint64_t)c->pose_age_us);
+}
+static bool changing_on_bend(const struct drive_engine *e,const dw_world *world,struct tr_intent task){
+ if(!task.changing||!e->episode.active||!e->episode.blocker.present)return false;
+ const struct db_blocker *blocker=&e->episode.blocker;
+ dw_pose center={.5f*(blocker->lower.x+blocker->upper.x),.5f*(blocker->lower.y+blocker->upper.y),0};
+ task.selected_lane_id=task.from_lane_id;task.changing=false;
+ struct lp_road_state road;
+ /* A turn across one wheelbase comparable to the heading tolerance needs
+  * a continuous merge into the arrival lane. */
+ return lp_task_project(world,&task,center,&road)==LP_PATH_FOUND&&
+  fabsf(road.curvature)*e->config->wheelbase>e->config->goal_heading;
+}
+/* Replacing a live merge guide is optional while its remaining arc and a
+ * command with a safe stop still fit the latest map. */
+static enum de_result merge_guide_current(struct drive_engine *e,const struct dw_snapshot *map,
+ uint64_t scene,const struct tr_intent *task,dw_pose pose,const dw_vehicle *vehicle,const struct lp_budget *budget,
+ enum lp_result *checked){
+ struct de_reference ref;const struct lp_path *path;
+ enum de_result acquired=de_path_acquire(e,&ref,&path);
+ if(acquired)return acquired;
+ const struct de_path_slot *slot=&e->paths[ref.slot];
+ struct lp_tracker progress={0};
+ enum de_result result=DE_PATH;
+ if(!take(e)){(void)de_path_release(e,ref);return DE_BUSY;}
+ if(e->progress_generation==ref.generation)progress=e->progress_snapshot;
  give(e);
- if(!anchor)return DE_OK; /* existing explicit new-plan correspondence */
- return v->pi_sample_us>=anchor&&v->pi_sample_us-anchor<=(uint64_t)e->config->pose_age_us?DE_OK:DE_PATH;
+ const struct lp_tracking_geometry *geometry=&slot->tracking_geometry;
+ float renewal=e->config->goal_distance+lp_stopping_distance(e->config,fmaxf(0,vehicle->velocity_mps))+
+  e->config->primitive_speed*e->config->primitive_duration;
+ if(slot->lane_guide&&slot->scene_generation==scene&&progress.initialized&&progress.index<path->count&&
+    geometry->arc[path->count-1]-progress.progress>renewal&&
+    e->episode_handoff==DE_EPISODE_IDLE&&path->has_episode&&path->episode.core.state==2&&
+    !memcmp(path->episode.core.episode_id.bytes,e->episode.id,16)&&path->episode.core.phase_revision==e->episode.phase_revision&&
+    tr_same_intent(&path->task,task)&&lp_mission_matches(path,&e->grant)){
+  struct lp_metrics measured={0};struct lp_command command;
+  *checked=lp_recheck_suffix(path,geometry,&map->world,e->config,&measured,budget,&progress);
+  if(*checked==LP_PATH_FOUND)*checked=lp_track_prepared(&progress,path,geometry,&map->world,pose,vehicle,e->config,.02f,&command,&measured,budget,NULL);
+  if(*checked==LP_PATH_FOUND&&!command.emergency&&command.velocity>0)result=DE_OK;
+ }
+ (void)de_path_release(e,ref);
+ return result;
 }
 static enum de_result initial_correspondence_unrun(struct drive_engine *e,const struct lp_path *p,uint32_t generation){
  if(p->origin.retained||p->initial_tracker_index||!p->execution.present||p->execution.mission.kind!=1||
@@ -570,6 +608,11 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
    bool same_intent=(!e->behavior_enabled||old->has_episode)&&e->episode_handoff==DE_EPISODE_IDLE&&same_mission&&tr_same_intent(&old->task,&task)&&
                     ((old->direction!=0)==e->maneuver_active)&&
                     old->merge_passed_reference_revision==e->merge_passed_reference_revision;
+   struct lp_tracker progress={0};
+   if(!take(e)){(void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return DE_BUSY;}
+   if(e->progress_generation==previous.generation)progress=e->progress_snapshot;
+   give(e);
+   const struct lp_tracking_geometry *geometry=&e->paths[previous.slot].tracking_geometry;
    float remaining=lp_path_remaining(old,pose,NULL);
    bool same_goal=hypotf(goal.x-old->goal.x,goal.y-old->goal.y)<e->config->goal_distance||remaining>replan_distance;
    uint64_t previous_scene=e->paths[previous.slot].scene_generation;
@@ -579,7 +622,7 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
     (void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return DE_BUSY;
    }
    enum lp_result usable=same_intent&&same_goal&&!previous_gate?
-    lp_recheck_path(old,&e->paths[previous.slot].tracking_geometry,&map->world,e->config,&checked,&budget):LP_INPUT;
+    lp_recheck_suffix(old,geometry,&map->world,e->config,&checked,&budget,&progress):LP_INPUT;
    if(same_intent&&same_goal&&(usable==LP_COLLISION||usable==LP_INPUT||usable==LP_NUMERIC))e->path_invalidated=true;
    if(usable==LP_PATH_FOUND){
     if(initial_correspondence_pending(e,old)&&initial_correspondence_stale(old,&vehicle,e->config)&&
@@ -600,10 +643,11 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
      if(!adopted)e->started=request;
      return adopted;
     }
-    enum de_result correspondence=correspondence_current(e,old,previous.generation,&vehicle);
-    if(correspondence==DE_BUSY){(void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return DE_BUSY;}
-    if(correspondence==DE_OK){
-     e->path_invalidated=false;e->started=request;(void)de_path_release(e,previous);(void)dw_release(&e->maps,h);return DE_OK;
+    if(correspondence_current(old,&progress,&vehicle,e->config)){
+     enum dw_result source=dw_source_valid(&e->maps,h);
+     if(!source){e->path_invalidated=false;e->started=request;}
+     (void)de_path_release(e,previous);(void)dw_release(&e->maps,h);
+     return source==DW_BUSY?DE_BUSY:source?DE_CHANGED:DE_OK;
     }
     e->path_invalidated=true; /* fresh search below, no old anchor mutation */
    }
@@ -626,9 +670,10 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
   e->search_reason=LP_NOT_FOUND;
   if((e->episode.active||(!task.changing&&!e->maneuver_active))&&e->has_grant&&e->grant.kind==1){
    struct de_path_slot *slot=&e->paths[e->planning_path.slot];
+   bool bend=changing_on_bend(e,&map->world,task);
    e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,vehicle.velocity_mps,goal,
-    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry);
-   slot->tracking_prepared=e->search_reason==LP_PATH_FOUND;
+    e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry,bend);
+   slot->tracking_prepared=slot->lane_guide=e->search_reason==LP_PATH_FOUND;
   }
   if(e->search_reason==LP_NOT_FOUND)
    e->search_reason=lp_start_task(&e->search,&map->world,pose,steering,goal,e->config,e->assets,budget,&task,&e->basis,&prefix);
@@ -689,6 +734,22 @@ enum de_result de_plan_slice(struct drive_engine *e,unsigned expansions,uint64_t
      else{
       enum lp_result result=planning_correspondence(e,slot,&snapshot->world,pose,&vehicle,now,&probe,&command,&measured,&current_budget);
       if(result!=LP_PATH_FOUND&&result!=LP_STOP){e->search_reason=result;valid=false;}
+      /* A new guide integrates the same controller from the current pose.
+       * A lattice fallback can end off that guide even if it reaches the
+       * goal tolerance. Require onward motion before replacing a safe guide. */
+      if(valid&&e->episode.active&&e->episode_handoff==DE_EPISODE_IDLE&&path->task.changing&&!slot->lane_guide){
+       enum lp_result checked=LP_NOT_FOUND;
+       enum de_result retained=merge_guide_current(e,snapshot,slot->scene_generation,&path->task,pose,&vehicle,&current_budget,&checked);
+       if(retained==DE_BUSY)input=DE_BUSY;
+       else if(retained==DE_OK){
+        bool bend=changing_on_bend(e,&snapshot->world,path->task);
+        result=lp_continue_lane(path,&snapshot->world,e->config,&measured,&current_budget,bend);
+        if(result!=LP_PATH_FOUND){e->search_reason=result;valid=false;}
+       }
+       else if(checked==LP_DEADLINE||checked==LP_CLOCK||checked==LP_CANCELLED||checked==LP_WORK_BUDGET){
+        e->search_reason=checked;valid=false;
+       }
+      }
      }
     }
     enum dw_result source=valid?dw_source_valid(&e->maps,current):DW_OK;

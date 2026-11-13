@@ -122,10 +122,11 @@ float lp_terminal_clearance(const struct lp_config *);
 float lp_lookahead_distance(const struct lp_config *,float speed);
 float lp_stopping_distance(const struct lp_config *,float speed);
 /* Try a forward lane-guided path whose body fits the observed road. The caller
- * retains the existing path admission and may run the lattice on NOT_FOUND. */
+ * retains the existing path admission and may run the lattice on NOT_FOUND.
+ * curve_blocker selects a continuous merge for avoidance on a bend. */
 enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,float,dw_pose,
  const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *,
- struct lp_tracking_geometry *);
+ struct lp_tracking_geometry *,bool curve_blocker);
 /* Build once per immutable map/configuration; 64 rows, no global cache. */
 void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp_config *);
 /* Maximum expansions per slice; collision and cancellation checks are also
@@ -138,6 +139,12 @@ enum lp_result lp_validate_path_prepared(const struct lp_path *,const dw_world *
 /* Recheck a published path against a new map using its slot's validated geometry. */
 enum lp_result lp_recheck_path(const struct lp_path *,const struct lp_tracking_geometry *,const dw_world *,
  const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
+/* Check the untravelled suffix, including the edge that contains progress. */
+enum lp_result lp_recheck_suffix(const struct lp_path *,const struct lp_tracking_geometry *,const dw_world *,
+ const struct lp_config *,struct lp_metrics *,const struct lp_budget *,const struct lp_tracker *);
+/* Roll the actual terminal pose and steering toward the lane on the current map. */
+enum lp_result lp_continue_lane(const struct lp_path *,const dw_world *,const struct lp_config *,
+ struct lp_metrics *,const struct lp_budget *,bool bend);
 enum lp_result lp_clearance_lower(const struct lp_path *,const dw_world *,const struct lp_config *,float,
  struct lp_metrics *,const struct lp_budget *,float *);
 enum lp_result lp_track(struct lp_tracker *,const struct lp_path *,const dw_world *,dw_pose,const dw_vehicle *,

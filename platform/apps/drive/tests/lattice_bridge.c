@@ -180,6 +180,15 @@ int probe_valid(void *pointer) {
  struct lp_budget b={now+1000000,clock_us,NULL,NULL,&p->collision_index};
  return lp_validate_path(&p->path,&p->snapshot.world,&p->config,&m,&b);
 }
+int probe_recheck_suffix(void *pointer,unsigned index){
+ struct probe *p=pointer;uint64_t now;
+ if(index>=p->path.count||!lp_prepare_tracking(&p->path,&p->config,&p->tracking_geometry))return LP_INPUT;
+ if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_tracker progress={.initialized=true,.index=index,.progress=p->tracking_geometry.arc[index]};
+ struct lp_metrics metrics={0};
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
+ return lp_recheck_suffix(&p->path,&p->tracking_geometry,&p->snapshot.world,&p->config,&metrics,&budget,&progress);
+}
 /* One bounded test owner retains the Vehicle/path/World witness from the same
  * successful calculation. Prepared geometry inspection has no completed calc. */
 struct engine_fixture {
@@ -361,7 +370,41 @@ int probe_lane_guide(void *pointer,uint32_t from,uint32_t to,float y,float goal_
  struct lp_budget budget={now+1000000,clock_us,NULL,NULL,NULL};
  struct lp_metrics metrics={0};
  return lp_lane_guide(&p->search,&p->path,w,(dw_pose){.6f,y,0},0,0,(dw_pose){2.f,goal_y,0},
-  &p->config,budget,&task,&p->basis,&metrics,NULL);
+  &p->config,budget,&task,&p->basis,&metrics,NULL,false);
+}
+static bool fixture_forward_lane(struct probe *p){
+ const dw_world *w=&p->snapshot.world;
+ if(!tr_basis_accept(&p->basis,w))return false;
+ struct lp_path *path=&p->path;
+ path->task=(struct tr_intent){true,false,1,1,1,0};
+ path->basis=p->basis;path->world_features=w->required_features;
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ return true;
+}
+int probe_prepare_forward_lane(void *pointer){
+ struct probe *p=pointer;if(!fixture_forward_lane(p))return LP_INPUT;
+ struct lp_path *path=&p->path;
+ path->count=301;
+ for(size_t i=0;i<path->count;i++)path->points[i].pose=(dw_pose){.5f+.01f*i,1.2f,0};
+ path->goal=path->points[path->count-1].pose;
+ return probe_valid(p);
+}
+int probe_lane_continuation(void *pointer){
+ struct probe *p=pointer;const dw_world *w=&p->snapshot.world;
+ if(!fixture_forward_lane(p))return LP_INPUT;
+ struct lp_path *path=&p->path;path->count=2;
+ path->points[0].pose=(dw_pose){1.995f,1.45f,0};
+ path->points[1].pose=(dw_pose){2.f,1.45f,0};
+ path->goal=path->points[1].pose;
+ p->config.margin=.002f;p->config.tracking_guard=.0025f;p->config.primitive_duration=.3f;
+ lp_index_build(&p->collision_index,w,&p->config);
+ uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
+ struct lp_metrics metrics={0};
+ enum lp_result rc=lp_validate_path(path,w,&p->config,&metrics,&budget);
+ if(rc!=LP_PATH_FOUND)return -(int)rc;
+ return lp_continue_lane(path,w,&p->config,&metrics,&budget,false);
 }
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;
