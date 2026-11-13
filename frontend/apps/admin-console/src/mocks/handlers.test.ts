@@ -1,6 +1,6 @@
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { getSession, refreshSession, request, setSession } from '../api/client';
+import { getSession, refreshSession, request, requestWithStatus, setSession } from '../api/client';
 import {
   VM_CPU_PERCENT_METRIC,
   type AgentExitCommand,
@@ -103,7 +103,7 @@ describe('MSW mock API', () => {
     expect(canStopVm('stopped')).toBe(false);
   });
 
-  it('생성은 입력값을 검사하고, 같은 이름은 VM_NAME_CONFLICT', async () => {
+  it('생성은 입력값을 검사하고, 같은 이름·다른 사양은 VM_NAME_CONFLICT, 같은 사양 재요청은 200 + 기존 VM (backend VmService.create)', async () => {
     await login();
     const body = {
       name: 'extra',
@@ -112,12 +112,15 @@ describe('MSW mock API', () => {
       vcpus: 1,
       memory_mib: 256,
     };
-    const created = await request<Vm>('/api/v1/vms', { method: 'POST', body });
-    expect(created.name).toBe('extra');
-    await expect(request('/api/v1/vms', { method: 'POST', body })).rejects.toMatchObject({
-      status: 409,
-      code: 'VM_NAME_CONFLICT',
-    });
+    const created = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+    expect(created.status).toBe(201);
+    expect(created.data.name).toBe('extra');
+    const again = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+    expect(again.status).toBe(200);
+    expect(again.data.vm_id).toBe(created.data.vm_id);
+    await expect(
+      request('/api/v1/vms', { method: 'POST', body: { ...body, memory_mib: 512 } }),
+    ).rejects.toMatchObject({ status: 409, code: 'VM_NAME_CONFLICT' });
     await expect(
       request('/api/v1/vms', { method: 'POST', body: { ...body, name: ' x', vcpus: 9 } }),
     ).rejects.toMatchObject({
@@ -129,9 +132,20 @@ describe('MSW mock API', () => {
     });
   });
 
-  it('삭제 뒤 상세는 VM_NOT_FOUND', async () => {
+  it('실행 중 VM 삭제는 409 INVALID_VM_STATE (보드 계약 — 정지된 VM만 삭제)', async () => {
     await login();
     const id = '22222222-2222-4222-8222-222222222222';
+    await expect(request(`/api/v1/vms/${id}`, { method: 'DELETE' })).rejects.toMatchObject({
+      status: 409,
+      code: 'INVALID_VM_STATE',
+    });
+    await expect(request<Vm>(`/api/v1/vms/${id}`)).resolves.toMatchObject({ vm_id: id });
+  });
+
+  it('정지 뒤 삭제하면 상세는 VM_NOT_FOUND', async () => {
+    await login();
+    const id = '22222222-2222-4222-8222-222222222222';
+    await request(`/api/v1/vms/${id}/stop`, { method: 'POST' });
     await request(`/api/v1/vms/${id}`, { method: 'DELETE' });
     await expect(request(`/api/v1/vms/${id}`)).rejects.toMatchObject({ status: 404, code: 'VM_NOT_FOUND' });
   });

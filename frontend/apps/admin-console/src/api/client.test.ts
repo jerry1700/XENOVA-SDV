@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, getSession, request, setSession } from './client';
+import { ApiError, getSession, request, requestWithStatus, setSession } from './client';
 import type { TokenResponse } from './types';
 
 const token = (value: string): TokenResponse => ({
@@ -67,6 +67,20 @@ describe('API 클라이언트', () => {
     const error = await request('/api/v1/vms', { method: 'POST', body: {} }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 422, code: 'VALIDATION_ERROR', fieldErrors: [{ field: 'name' }] });
+  });
+
+  it('requestWithStatus 는 성공 상태 코드를 함께 돌려준다 (200 재요청과 201 생성을 화면이 가른다)', async () => {
+    fetchMock
+      .mockResolvedValueOnce(json(200, { vm_id: 'a' }))
+      .mockResolvedValueOnce(json(201, { vm_id: 'b' }));
+    await expect(requestWithStatus('/api/v1/vms', { method: 'POST', body: {} })).resolves.toEqual({
+      status: 200,
+      data: { vm_id: 'a' },
+    });
+    await expect(requestWithStatus('/api/v1/vms', { method: 'POST', body: {} })).resolves.toEqual({
+      status: 201,
+      data: { vm_id: 'b' },
+    });
   });
 
   it('204 는 본문 없이 끝난다', async () => {

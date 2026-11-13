@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useVmAction, type VmAction } from '../api/queries';
 import type { Vm } from '../api/types';
 
@@ -62,8 +62,9 @@ export function useVmOperationProgress() {
 
 export { formatElapsedTime } from '../format';
 
+/** 서버·보드 원문(예: `domain … is running; stop it before delete`) 대신 한글 문구 */
 export function vmOperationErrorMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : String(error);
+  return errorText(error, 'VM 작업을 처리하지 못했습니다.');
 }
 
 function withoutOperation(

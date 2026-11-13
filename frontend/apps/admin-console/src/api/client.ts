@@ -74,22 +74,58 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
   }
 }
 
+// ---- 탭 사이 재발급 (QA 2-2) ---------------------------------------------------------------
+// 서버는 refresh 토큰을 쓸 때마다 회전시키고, 이미 쓴 토큰이 다시 오면 재사용으로 보고 그 계정의 토큰을 전부 폐기한다.
+// 탭 여러 개가 동시에 새로고침하면 같은 쿠키로 refresh 가 겹쳐 모든 탭이 로그아웃됐다.
+// → navigator.locks 로 탭 사이를 줄 세우고, 먼저 받은 탭이 새 토큰을 BroadcastChannel 로 나눈다.
+//   락을 기다린 탭은 그 사이 받은 토큰이 있으면 refresh 를 보내지 않는다. 둘 중 하나가 없는 브라우저는 예전 동작.
+
+const REFRESH_LOCK = 'xenova-refresh';
+type SessionMessage = { type: 'refreshed'; session: TokenResponse };
+
+const sessionChannel: BroadcastChannel | null =
+  typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('xenova-session');
+/** 다른 탭이 나눈 토큰을 마지막으로 받은 순번 (재발급을 기다리는 동안 받았는지 가른다) */
+let sharedSeq = 0;
+
+if (sessionChannel) {
+  sessionChannel.onmessage = (event: MessageEvent<SessionMessage>) => {
+    if (event.data?.type !== 'refreshed') return;
+    sharedSeq += 1;
+    setSession(event.data.session);
+  };
+}
+
 let refreshing: Promise<boolean> | null = null;
 
-/** 동시에 여러 요청이 401 을 받아도 재발급은 한 번만 (서버가 토큰을 회전시키므로) */
-export function refreshSession(): Promise<boolean> {
-  refreshing ??= (async () => {
-    try {
-      const response = await send('/api/v1/auth/refresh', { method: 'POST', auth: false });
-      if (!response.ok) {
-        setSession(null);
-        return false;
-      }
-      setSession(await parse<TokenResponse>(response));
-      return true;
-    } catch {
+async function refreshOnce(seqAtStart: number): Promise<boolean> {
+  // 락을 기다리는 동안 다른 탭이 재발급해 토큰을 나눴다 — 같은 쿠키로 또 보내면 재사용 판정이 난다
+  if (sharedSeq !== seqAtStart && session) return true;
+  try {
+    const response = await send('/api/v1/auth/refresh', { method: 'POST', auth: false });
+    if (!response.ok) {
       setSession(null);
       return false;
+    }
+    const next = await parse<TokenResponse>(response);
+    setSession(next);
+    sessionChannel?.postMessage({ type: 'refreshed', session: next } satisfies SessionMessage);
+    return true;
+  } catch {
+    setSession(null);
+    return false;
+  }
+}
+
+/** 동시에 여러 요청이 401 을 받아도 재발급은 한 번만 (서버가 토큰을 회전시키므로) — 탭 사이도 한 번에 하나 */
+export function refreshSession(): Promise<boolean> {
+  refreshing ??= (async () => {
+    const seqAtStart = sharedSeq;
+    try {
+      const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+      return locks
+        ? await locks.request(REFRESH_LOCK, () => refreshOnce(seqAtStart))
+        : await refreshOnce(seqAtStart);
     } finally {
       refreshing = null;
     }
@@ -98,6 +134,14 @@ export function refreshSession(): Promise<boolean> {
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return (await requestWithStatus<T>(path, options)).data;
+}
+
+/** request 와 같고 성공 상태 코드를 함께 준다 — 같은 요청의 200(기존 것)과 201(새로 만듦)을 화면이 가를 때 */
+export async function requestWithStatus<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<{ data: T; status: number }> {
   let response = await send(path, options);
   if (response.status === 401 && options.auth !== false && (await refreshSession())) {
     response = await send(path, options);
@@ -107,5 +151,5 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     if (response.status === 401 && options.auth !== false) setSession(null);
     throw new ApiError(response.status, body ?? {});
   }
-  return parse<T>(response);
+  return { data: await parse<T>(response), status: response.status };
 }

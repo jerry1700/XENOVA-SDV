@@ -46,6 +46,12 @@ export function formatElapsedTime(elapsedMs: number): string {
  */
 export const canStartVm = (state: VmState): boolean => state === 'stopped';
 export const canStopVm = (state: VmState): boolean => state !== 'stopped';
+/** 보드 계약: 도메인이 남아 있으면(running·paused·crashed·stopping) 삭제는 409 — 정지된 VM만 */
+export const canDeleteVm = (state: VmState): boolean => state === 'stopped';
+export const DELETE_BLOCKED_HINT = '정지 후 삭제할 수 있습니다.';
+/** 삭제는 보드에서 숨김 보관(retire)이고 화면에서 되살리는 수단은 없다 */
+export const DELETE_CONFIRM_TEXT =
+  '정지된 VM만 삭제할 수 있습니다. 삭제한 VM은 목록에서 사라지며 되돌릴 수 없습니다.';
 
 /** VM 생명주기 요청 이름 (진행 표시·완료 알림이 같이 쓴다) */
 export const VM_ACTION_LABEL: Record<VmAction, string> = {
