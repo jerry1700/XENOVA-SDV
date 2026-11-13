@@ -50,9 +50,10 @@ class EpisodeOwner:
 
     def declare(self,peer,features):
         # Binding/transport origin has already been checked by DriveLinkProvider.
+        now=self.r._clock()
+        bindings={vm:self.r.bindings.current(vm,now) for vm in {key[0] for key in self.peers}}
         self.peers={key:value for key,value in self.peers.items()
-            if self.r.bindings.current(key[0],self.r._clock()) is not None
-            and self.r.bindings.current(key[0],self.r._clock())['execution_id']==key[1]}
+            if bindings[key[0]] is not None and bindings[key[0]]['execution_id']==key[1]}
         self.activated.intersection_update(self.peers)
         if len(self.peers)<4 or peer in self.peers:self.peers[peer]=features or 0
         machine=self.r.machine

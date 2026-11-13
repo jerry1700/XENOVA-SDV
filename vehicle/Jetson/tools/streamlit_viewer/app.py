@@ -1,5 +1,6 @@
 """별도 PC Streamlit 관측기. 주행 조작은 기존 터미널에 남기며 제품 import/driver가 없다."""
 from pathlib import Path
+import os
 import time
 from uuid import uuid4
 
@@ -8,18 +9,18 @@ import streamlit as st
 from adapter import OfflineDataset
 from course_catalog import load_catalog,plan_bytes,NATIVE,LEGACY
 from representative_adapter import RepresentativeDataset
-from render import map_svg,preview,unknown_keys_svg
-from presentation import TERMINAL_COMMANDS,input_stages,metric_rows,observation_label,operation_cards,value
+from render import map_panels,preview,unknown_keys_svg
+from presentation import TERMINAL_COMMANDS,input_stages,live_status,metric_rows,observation_label,operation_cards,value
 from snapshot import Result,SnapshotReader,age
 
 
 st.set_page_config(page_title='RC 주행 관측',page_icon='🚗',layout='wide')
 st.title('RC 주행 대시보드')
-st.caption('PC 관측 전용 · 조작은 기존 터미널 · LIVE 수집 미연결 · 화면 종료는 주행에 신호를 보내지 않음')
+st.caption('PC 파일 관측 전용 · 조작은 기존 터미널 · 화면 종료는 주행에 신호를 보내지 않음')
 with st.sidebar:
     st.subheader('관측 입력')
     mode=st.selectbox('형식',('snapshot.json','SyntheticDatasetWriter offline','실제 OAK 대표 장면 기록 (HISTORICAL)'))
-    folder=st.text_input('PC 관측 폴더',placeholder=r'C:\drive-observations')
+    folder=st.text_input('PC 관측 폴더',value=os.environ.get('XENOVA_VIEWER_OBSERVATION_DIR',''),placeholder=r'C:\drive-observations')
     ordinal=int(st.number_input('Offline ordinal (-1 = 마지막)',min_value=-1,max_value=255,value=-1,disabled=mode=='snapshot.json'))
     show_gt=st.checkbox('snapshot의 GT 층 표시',value=False)
     st.caption('GT는 뷰어 표시용입니다. oracle.jsonl은 읽지 않으며 GT를 제품에 전달하지 않습니다.')
@@ -88,26 +89,48 @@ def observe():
     st.caption(f"관측 {scope} · 최초 수신 후 {value(round(result.received_age_s,3) if result.received_age_s is not None else None)}s · "
                f"원 입력 age {source_age['state']} · 화면 갱신2Hz ≠ 주행 FPS")
 
+    live=live_status(body,result_state=result.state)
+    if live is not None:
+        st.subheader('현재 run · 연결 진행')
+        st.info(f"{live['stage']} · {live['state']}")
+        st.caption(f"run={live['run_id']} · session={live['session_id']} · collector={live['collector']['id']} / {live['collector']['epoch']}")
+        st.caption(('LIVE_HIL · 실제 보드 연산 + 가상 센서·차량. 실물 차량 이동 관측이 아닙니다.' if source.get('kind')=='LIVE_HIL' else
+            'DIAGNOSTIC · 현재 실험 연결 대기. run/session·프레임을 만들지 않습니다.')+' PC 수집 시각과 원 source clock은 별도입니다.')
+        if live['streams']:st.table(live['streams'])
+        else:st.info('수신 입력0 · collector의 다음 관측을 기다립니다. 출발·프레임 수신 전에도 연결 상태를 표시합니다.')
+        st.caption('수신 수는 관측기가 채택한 서로 다른 원 순번 수입니다. 최신 사본만 읽으므로 전체 주행 프레임 수와 다릅니다. 원 render/taken 카운터는 성능 표에 따로 표시합니다.')
+        st.caption('정지/대기 이유 · '+live['stop_reason'])
+        if live['last_error']!='UNKNOWN':st.warning('최근 수집 오류 · '+live['last_error'])
+        st.caption('수신 age는 수집 당시 PC 수신 기준 보고입니다. collector가 멈추면 파일은 STALE이며 원 stream을 새 관측으로 갱신하지 않습니다.')
+        st.subheader('운영 관측보고')
+        gateway=body.get('identities',{}).get('gateway') or {}
+        if gateway.get('channel')=='G1_CONTEXT':
+            st.caption('Gateway 기본 관리 채널 응답 · HIL 운영 인터페이스 '+str(gateway['operator_interface'])+
+                ' · 주차/출발 조작 준비는 별도입니다. 조회 시각은 원 제품 발행 시각이 아닙니다.')
+            st.caption('선택된 VM · '+value(gateway.get('selected_owner'))+' · 출력 허가 보고 · '+value(gateway.get('output_permitted')))
+
     cards=operation_cards(body,result_state=result.state,source_age_state=source_age['state'])
     for offset in (0,3):
         for column,card in zip(st.columns(3),cards[offset:offset+3]):
             with column,st.container(border=True):
                 st.metric(card.label,card.current)
                 st.caption('원 보고: '+card.reported)
-    st.caption('대기 이유 · 현재 '+cards[6].current+' / 원 보고: '+cards[6].reported+
-        '　|　브로커·장치 연결: UNKNOWN (typed 연결 관측 미제공)')
+    st.caption('대기 이유 · 표시 '+cards[6].current+' / 원 보고: '+cards[6].reported+
+        ('　|　연결 보고는 위의 입력별 관측을 확인합니다.' if live is not None else '　|　브로커·장치 연결: UNKNOWN (typed 연결 관측 미제공)'))
     st.caption('UNKNOWN/UNVERIFIED는 원 보고와 현재 자격을 구분합니다. 이 화면이 READY·권한·장치 적용을 승인하지 않습니다.')
 
     left,right=st.columns((1.5,1))
     with left,st.container(border=True):
         st.subheader('전체 코스 · 지도 · 경로')
-        st.caption('GT 보라 점선 / 추정 파랑 / 불확실성 주황 / 경로 민트 · 같은 frame만 겹침')
+        st.caption('원 모델 회청 / GT 보라 점선 / 추정 파랑 / 불확실성 주황 / 경로 민트 · frame별 분리')
         try:
-            svg=map_svg(body,show_gt=show_gt)
-            if svg:st.image(svg,width='stretch')
-            else:st.info('UNKNOWN · 지도/코스/경로 artifact 미연결')
+            panels=map_panels(body,show_gt=show_gt)
+            if not panels or not any(svg for _,svg in panels):st.info('UNKNOWN · 지도/코스/경로 artifact 미연결')
+            for frame,svg in panels:
+                if svg:
+                    st.caption('원 frame · '+frame);st.image(svg,width='stretch')
         except ValueError as error:st.error(str(error))
-        st.caption('점은 원 위치 관측입니다. 차체·방향은 yaw/치수 입력 미연결로 UNKNOWN이며 경로 방향에서 추정하지 않습니다.')
+        st.caption('점은 원 위치 관측입니다. 원 yaw가 있을 때만 흰 방향선을 표시합니다. 차체 치수·이동 방향을 경로에서 추정하지 않습니다.')
     with right,st.container(border=True):
         st.subheader('원 RGB · YOLOP · 깊이 · grid')
         media={x.descriptor['panel']:x for x in result.snapshot.media} if result.snapshot else {}
@@ -138,11 +161,11 @@ def observe():
         st.subheader('입력 → 수락 → 적용 → 이동')
         keys,stages=st.columns((1,2))
         with keys:st.image(unknown_keys_svg(),width='stretch')
-        with stages:st.table(input_stages())
-        st.caption('화살표는 관측 표시입니다. 현재 전부 UNKNOWN이며 눌림/해제를 확인하지 못합니다. 입력만으로 수락/APPLIED/이동을 채우지 않습니다.')
+        with stages:st.table(input_stages(body,result_state=result.state))
+        st.caption('키 입력은 전용 관측이 없어 UNKNOWN입니다. 명령 송신·가상 장치 APPLIED·가상 차량 이동은 독립 보고이며 앞 단계로 뒤 단계를 채우지 않습니다.')
     with right,st.container(border=True):
         st.subheader('성능 · 최근 이벤트')
-        st.caption('Jetson FPS / 종단 지연 / encoder 속도·조향: UNKNOWN · 전용 관측 미연결')
+        st.caption('원 성능 보고의 단위·출처를 확인합니다. 화면 갱신률은 주행 FPS·종단 지연이 아닙니다.' if live is not None else 'Jetson FPS / 종단 지연 / encoder 속도·조향: UNKNOWN · 전용 관측 미연결')
         rows,omitted=metric_rows(body)
         if rows:
             st.table(rows)
@@ -168,7 +191,7 @@ def observe():
 
     with st.expander('원 식별자 · clock/epoch · hash · JSON'):
         st.caption('서로 다른 clock을 빼지 않습니다. 최초 수신 age와 원 capture age는 별개입니다.')
-        st.json(dict(source=source,source_age=source_age,identities=body.get('identities'),metrics=body.get('metrics')))
+        st.json(dict(source=source,source_age=source_age,live=body.get('live'),identities=body.get('identities'),metrics=body.get('metrics')))
         if result.last_error:
             owner=reader.reader if isinstance(reader,(OfflineDataset,RepresentativeDataset)) else reader
             if owner is not None and owner.error_raw is not None:

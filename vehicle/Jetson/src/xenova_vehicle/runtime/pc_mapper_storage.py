@@ -21,7 +21,8 @@ from ..simulation.pc_input import PcFrameInput, PcSourceBinding
 from ..storage.contracts import (StorageContext, ProvenanceRequest, LoadRequest, CommitReceipt,
     canonical, json_bytes, selected_checkpoint_reference, uint,uuid,digest)
 from ..storage.port import CheckpointRequest
-from ..storage.records import ContextRecord, EvidenceTable, LoadedCheckpoint, PROVENANCE, ProvenanceRecord
+from ..storage.records import (ContextRecord, EvidenceTable, LoadedCheckpoint, PROVENANCE, ProvenanceRecord,
+    aggregate_rgb_provenance)
 
 
 PC_CLOCK_BASIS = 'PC_MONOTONIC_TO_J_FIXED_LEASE_INTERVALS_1'
@@ -100,6 +101,7 @@ class PcFrameProofDraft:
 class PcStorageDraft:
     proof: PcFrameProofDraft
     catalog: object
+    recent_rgb: dict
 
 
 @dataclass(frozen=True)
@@ -177,7 +179,7 @@ class PcMapperStorage:
         self._next=0;self._highwater=0;self._submitted=False;self._fault=None
         self._unknown=False
         self._evidence=EvidenceTable();self._retired=None;self.catalogs=None;self._head=None
-        self._accepted_frame_key=None
+        self._accepted_frame_key=None;self._recent_rgb={}
         policy=mapper_profile.catalog_policy
         self._crossing=crossing if crossing is not None or policy is None else policy.crossing
         if complete is not None:self.adopt_complete(complete)
@@ -415,8 +417,31 @@ class PcMapperStorage:
         record=ProvenanceRecord(identity,PROVENANCE.pack(bytes.fromhex(record_context.sha256),3,0,4,0,
             UUID(self.context.pi_host_boot).bytes,lo,hi,observation.rgb.stamp.sequence,0,0,0,0,
             b''.join(struct.pack('<16sQQ',UUID(stream).bytes,seq,at) for stream,seq,at in keys),0,bytes(16)))
+        active=result.temporal_rgb_sources | result.parking_rgb_sources
+        recent={k:pair for k,pair in self._recent_rgb.items() if k in active}
+        if key in active:recent[key]=record,record_context
         contexts={c.sha256:c for c in self._evidence.contexts};contexts[record_context.sha256]=record_context
-        try:evidence=EvidenceTable(self._evidence.provenance+(record,),tuple(contexts[k] for k in sorted(contexts)))
+        records={r.provenance_id:r for r in self._evidence.provenance};records[identity]=record
+        def temporal_root_for(sources):
+            if (key not in sources or not 2<=len(sources)<=12 or not sources.issubset(recent)
+                    or self._next+(len(sources)+1)//3>self._grant.end_exclusive):
+                return None
+            originals=[]
+            for source in sorted(sources-{key}):
+                parent,parent_context=recent[source];originals.append(parent)
+                records[parent.provenance_id]=parent;contexts[parent_context.sha256]=parent_context
+            def allocate(_parents):
+                identity=self._next;self._next+=1
+                return identity
+            for aggregate in aggregate_rgb_provenance(record,originals,allocate):
+                records[aggregate.provenance_id]=aggregate
+            return aggregate.provenance_id
+        temporal=result.mapped_road
+        temporal_root=(temporal_root_for(temporal.sources) if temporal is not None and prior_qualified
+                       and self._crossing is not None and temporal.within(self.profile.pipeline.road_limits) else None)
+        parking_root=(temporal_root_for(frozenset((key,*(source for source,_ in result.parking_tape_history))))
+                      if prior_qualified and result.parking_tape_history else None)
+        try:evidence=EvidenceTable(tuple(records[k] for k in sorted(records)),tuple(contexts[k] for k in sorted(contexts)))
         except ValueError as error:raise PcStorageNotReady('ORIGINAL_PC_EVIDENCE_CAPACITY') from error
         metric=MetricEvidence((observation.rgb.stamp.key,observation.depth.stamp.key),self.context.pi_host_boot,
             (lo,hi),record.observation_sequence,3,keys,(identity,))
@@ -432,11 +457,13 @@ class PcMapperStorage:
                 method_manifest_sha256=self.profile.sha256,input_kind='SYNTHETIC',calibration_profile=self.motion_profile.bound_calibration,
                 parking_aisles=self.profile.parking_aisles,
                 aisle_lane_indices=None if self.profile.catalog_policy is None else self.profile.catalog_policy.aisle_lane_indices,
-                crossing=self._crossing,lane_profile=self.profile.pipeline.registration,clock_us=self.clock)
+                crossing=self._crossing,lane_profile=self.profile.pipeline.registration,
+                road_geometry_limits=self.profile.pipeline.road_limits,clock_us=self.clock)
             if self._head is not None:self.catalogs.observe_heads(*self._head,now_us=now_us)
         draft=self.catalogs.prepare_pc(proof,result,capture_prior=capture_prior,registration_revision=registration_revision,
-            prior_qualified=prior_qualified,now_us=now_us,roi_bounds=roi_bounds)
-        self._staged=PcStorageDraft(proof,draft)
+            prior_qualified=prior_qualified,now_us=now_us,roi_bounds=roi_bounds,temporal_provenance_id=temporal_root,
+            parking_provenance_id=parking_root)
+        self._staged=PcStorageDraft(proof,draft,recent)
         return self._staged
 
     def accepted(self,draft):
@@ -446,7 +473,7 @@ class PcMapperStorage:
         draft.proof.validate_owner_seal(self.context)
         self._retired=self._evidence
         self.catalogs.accept(draft.catalog);self._evidence=draft.catalog.state.evidence
-        self._accepted_frame_key=draft.proof.frame.observation.rgb.stamp.key;self._staged=None
+        self._accepted_frame_key=draft.proof.frame.observation.rgb.stamp.key;self._recent_rgb=draft.recent_rgb;self._staged=None
 
     def cancelled(self,draft):
         self._owner()

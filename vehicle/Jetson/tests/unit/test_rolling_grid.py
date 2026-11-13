@@ -149,9 +149,9 @@ class RollingGridTests(unittest.TestCase):
         self.assertEqual(grid.hit_view[0], key)
         newer = FrameStamp('original-A', 'original-depth', 2, 'original-J', (1100, 1100), 1105)
         self.assertEqual(grid.add_free(((0, 0),), newer, view_id='original-capture-A',
-            origin_xy=(.1, 0.), certificate_complete=True), 0)
+            origin_xy=(.02, 0.), certificate_complete=True), 0)
         self.assertEqual(int(grid.state[0, 0]), OCCUPIED)
-        self.assertEqual(grid.add_free(((0, 0),), newer, view_id='different-capture-B', origin_xy=(.1, 0.),
+        self.assertEqual(grid.add_free(((0, 0),), newer, view_id='original-capture-A', origin_xy=(.03, 0.),
             certificate_complete=True, observer=mutations.append), 1)
         self.assertEqual(mutations[-1].window_offset_xy, (-1, -1))
         reframe_grid(grid, window.shifted((0, 0)), pool)
@@ -160,7 +160,7 @@ class RollingGridTests(unittest.TestCase):
         old_constructor = GridMutation('HIT', stamp, (1, 1), b'\1', b'\1')
         self.assertIsNone(old_constructor.window_offset_xy)
 
-    def test_fixed_grid_view_policy_and_existing_five_argument_mutation_stay_unchanged(self):
+    def test_fixed_grid_requires_new_time_and_keeps_the_same_view_label(self):
         grid = EvidenceGrid(GridSpec(2, 2, .125, (0., 0.)), frame_id='fixed', calibration_id='a'*64,
             clock_id='original-J', kind='LIVE')
         domain = self.np.ones((2, 2), dtype=bool); grid.set_domain(domain, domain)
@@ -168,7 +168,11 @@ class RollingGridTests(unittest.TestCase):
         deltas = []
         grid.add_hits(((.03, .03, .04, .04),), stamp, view_id='raw-fixed-view', origin_xy=(0., 0.), observer=deltas.append)
         self.assertIs(type(grid.hit_view[0]), str)
-        self.assertEqual(grid.add_free(((0, 0),), stamp, view_id='raw-fixed-view', origin_xy=(.1, 0.),
+        same_time = FrameStamp('A', 'depth', 2, 'original-J', (1000, 1000), 1010)
+        self.assertEqual(grid.add_free(((0, 0),), same_time, view_id='new-view', origin_xy=(.1, 0.),
+            certificate_complete=True, observer=deltas.append), 0)
+        newer = FrameStamp('A', 'depth', 3, 'original-J', (1100, 1100), 1105)
+        self.assertEqual(grid.add_free(((0, 0),), newer, view_id='raw-fixed-view', origin_xy=(.1, 0.),
             certificate_complete=True, observer=deltas.append), 1)
         self.assertTrue(all(delta.window_offset_xy is None for delta in deltas))
         self.assertIsNone(grid.rolling_window)

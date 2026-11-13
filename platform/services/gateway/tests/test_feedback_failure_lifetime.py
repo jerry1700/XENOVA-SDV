@@ -202,8 +202,10 @@ def test_cached_vehicle_view_expires_while_its_owner_is_delayed(feedback2, monke
         assert polling.wait(1)
         original = sink.snapshot['vehicle_sample']
         assert owner.device_view()['vehicle_sample'] == original
+        assert owner.vehicle_sample() is original
         now[0] += .3
         assert owner.device_view()['vehicle_sample'] is None
+        assert owner.vehicle_sample() is None
         assert sink.snapshot['vehicle_sample'] is original
         assert owner.device_view()['fault'] == 'DEVICE_APPLY_TIMEOUT'
     finally:

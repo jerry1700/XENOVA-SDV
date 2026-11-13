@@ -226,6 +226,21 @@ class OakDeviceTests(unittest.TestCase):
             with self.subTest(stream=stream, field=field), self.assertRaises(ValueError):
                 source._frame(stream, message)
 
+    def test_full_sensor_accepts_out_of_frame_manip_offset_only_for_packed_rgb(self):
+        source = device.OakSource(CaptureProfile("OAK_TEST_1", rgb_sensor_mode="full"))
+        source._dai = sdk_fixture().dai
+        message, _ = frame_message("rgb_video")
+        spec = message.getRaw.return_value.fb
+        spec.p2Offset = 829038336
+        self.assertEqual(len(source._frame("rgb_video", message).payload), 345600)
+        spec.p2Offset = 128
+        with self.assertRaisesRegex(ValueError, "plane offsets"):
+            source._frame("rgb_video", message)
+        spec.p2Offset = 829038336
+        message.getData.return_value = b"\0" * 345599
+        with self.assertRaisesRegex(ValueError, "contiguous byte plane"):
+            source._frame("rgb_video", message)
+
 
 @unittest.skipUnless(sys.platform == "linux", "real flock ownership requires Linux")
 class LinuxDeviceLockTests(unittest.TestCase):

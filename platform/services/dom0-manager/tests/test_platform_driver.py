@@ -75,12 +75,15 @@ class FakeManager:
         if action == "get":
             view = self.registry.get(spec.get("vm_id"))
             return _ok({"vm": view}) if view else _err("VM_NOT_FOUND", "registered VM not found")
+        if action == "control-operation":
+            return _err("VM_NOT_FOUND", "operation not found")
         if action in ("create", "retire", "restore", "purge"):
             # 실제 Manager._mutate 순서: 명세 정규화(필수 키·모르는 키) → idempotency_key 검사 → 계획/실행
             required = {"vm_id", "name", "template_id", "template_version", "vcpus", "memory_mib"}
             if action == "create" and (set(spec) - (required | {"ipv4"}) or not required <= set(spec)):
                 return _err("INVALID_SPEC", "vm_id, name, exact template ID/version and resources required")
-            if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.encode("utf-8")) <= 200:
+            implicit_retire = action == "retire" and execute and idempotency_key is None
+            if not implicit_retire and (not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key.encode("utf-8")) <= 200):
                 return _err("INVALID_SPEC", "idempotency_key of 1..200 UTF-8 bytes required")
         if action == "create":
             if self.fail_create:
@@ -129,7 +132,7 @@ class FakeManager:
             if execute:
                 view["lifecycle"] = "RETIRED"
                 view["registered"] = False
-            return _ok({"vm": view}, operation_id="op-2")
+            return _ok(view, operation_id="op-2")
         return _err("INVALID_SPEC", "unsupported management action")
 
 
@@ -292,8 +295,9 @@ def test_restart_reuses_registration(client, manager):
 
 
 def test_create_running_vm_is_409(client, manager):
-    manager.register(VM_A, running=True)
-    assert client.post("/api/v1/vms", json=create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0")).status_code == 409
+    manager.register(VM_A, running=True, memory_mib=256)
+    response = client.post("/api/v1/vms", json=create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0"))
+    assert (response.status_code, response.json()["code"]) == (409, "VMExists")
 
 
 def test_platform_assigns_ip_without_dom0_manager_hint(client, manager):
@@ -335,7 +339,7 @@ def test_restart_with_different_spec_is_409(client, manager):
         body = create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0") | change
         different = client.post("/api/v1/vms", json=body)
         assert different.status_code == 409, change
-        assert different.json()["code"] == "VMExists"
+        assert different.json()["code"] == "VMSpecConflict"
 
 
 def test_error_bodies_carry_distinct_codes(client, manager):
@@ -356,7 +360,9 @@ def test_platform_invalid_spec_is_400(client, manager):
     manager.fail_create = {"code": "INVALID_SPEC", "message": "invalid VM name"}
     rejected = client.post("/api/v1/vms", json=create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0"))
     assert rejected.status_code == 400, rejected.text
-    assert rejected.json()["code"] == "InvalidArgument" and "invalid VM name" in rejected.json()["message"]
+    assert rejected.json()["code"] == "InvalidArgument"
+    assert rejected.json()["platform_code"] == "INVALID_SPEC"
+    assert rejected.json()["context"]["next_action"] == "fix_request"
 
 
 def test_instance_paths_use_platform_internal_name(manager):
@@ -415,8 +421,9 @@ def test_delete_requires_stopped_and_retires(client, manager):
     assert client.post(f"/api/v1/vms/{VM_A}/stop").status_code == 204
     assert client.delete(f"/api/v1/vms/{VM_A}").status_code == 204
     assert manager.registry[str(VM_A)]["lifecycle"] == "RETIRED"
-    assert manager.calls[-1][:2] == ("retire", {"vm_id": str(VM_A)}) and manager.calls[-1][2] is True
-    assert client.delete(f"/api/v1/vms/{VM_A}").status_code == 404  # RETIRED 는 등록 아님
+    assert manager.calls[-1] == ("retire", {"vm_id": str(VM_A)}, True, None)
+    assert client.delete(f"/api/v1/vms/{VM_A}").status_code == 204  # 원 보관 완료 회수
+    assert client.delete(f"/api/v1/vms/{VM_B}").status_code == 404
 
 
 def test_stop_missing_registration_is_204(client):
@@ -605,6 +612,6 @@ def test_create_name_conflict_is_409_vm_name_conflict_not_vm_exists(client, mana
     assert (body["code"], body["platform_code"]) == ("VMNameConflict", "VM_NAME_CONFLICT")
     assert "start" not in [c[0] for c in manager.calls]  # 충돌한 등록을 시작하지 않는다
 
-    manager.register(VM_B, running=True)  # 같은 VM 이 이미 실행 중인 것만 VMExists 다
+    manager.register(VM_B, running=True, memory_mib=256)
     again = client.post("/api/v1/vms", json=create_body(VM_B, template_id=TEMPLATE["template_id"], template_version="1.0.0"))
     assert (again.status_code, again.json()["code"]) == (409, "VMExists")

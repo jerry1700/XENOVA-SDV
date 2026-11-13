@@ -1,8 +1,9 @@
 import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router';
-import { useVms, type VmAction } from '../api/queries';
-import type { Vm } from '../api/types';
+import { ApiError } from '../api/client';
+import { useSynchronizeVms, useVms, type VmAction } from '../api/queries';
+import type { Vm, VmSynchronizationResult } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
 import { canStartVm, canStopVm, STATE_HEALTH, STATE_LABEL, VM_ACTION_LABEL } from '../format';
 import styles from './pages.module.css';
@@ -20,12 +21,25 @@ const VM_ACCENTS = ['var(--x-app-autonomous)', 'var(--x-app-manual)', 'var(--x-a
 
 /** VM 생명주기와 할당 자원을 관리하는 목록. 주행 모드·제어권은 Overview에서만 다룬다. */
 export function VmListPage() {
-  const vms = useVms(1000);
+  const vms = useVms(1000, { keepLastData: true });
   const vmOperations = useVmOperationProgress();
   const toast = useToast();
   const navigate = useNavigate();
   const [deleting, setDeleting] = useState<Vm | null>(null);
   const pendingCreations = usePendingVmCreations();
+
+  const registrationSync = useSynchronizeVms();
+
+  // 보드 등록 목록 ↔ DB 등록 동기화. VM 실행 상태는 목록 자동 갱신이 따로 맡는다.
+  const synchronize = async () => {
+    try {
+      const result = await registrationSync.mutateAsync();
+      toast.show(synchronizationSummary(result), 'ok', 5000);
+    } catch (error) {
+      const message = error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
+      toast.show(`VM 동기화에 실패했습니다. ${message}`, 'fault', 5000);
+    }
+  };
 
   const run = (vm: Vm, kind: VmAction) =>
     vmOperations.run(vm, kind, {
@@ -34,9 +48,11 @@ export function VmListPage() {
     });
 
   const items = useMemo(() => sortVms(vms.data?.items ?? []), [vms.data?.items]);
-  const running = items.filter((vm) => vm.state === 'running').length;
-  const vcpus = items.reduce((sum, vm) => sum + vm.vcpus, 0);
-  const memory = items.reduce((sum, vm) => sum + vm.memory_mib, 0);
+  const runningVms = items.filter((vm) => vm.state === 'running');
+  const running = runningVms.length;
+  // 사용 중 = 실행 중 VM 의 할당 합계. 등록된 VM 전체 합계는 보조 줄
+  const usage = resourceTotals(runningVms);
+  const registered = resourceTotals(items);
   const visiblePendingCreations = useMemo(
     () =>
       pendingCreations.filter(
@@ -69,6 +85,14 @@ export function VmListPage() {
               refreshing={!vms.isFetchedAfterMount}
             />
           )}
+          <Button
+            variant="secondary"
+            onClick={() => void synchronize()}
+            disabled={registrationSync.isPending}
+            title="보드에 등록된 VM과 서버 목록을 맞춥니다 (보드에만 있는 VM 추가, 보드에서 사라진 VM 정리)"
+          >
+            {registrationSync.isPending ? '동기화 중…' : 'VM 동기화'}
+          </Button>
           <Button onClick={() => navigate('/control/vms/new')}>+ VM 생성</Button>
         </div>
       </header>
@@ -76,8 +100,16 @@ export function VmListPage() {
       <section className={styles.controlSummary} aria-label="VM 자원 요약">
         <SummaryItem label="TOTAL VMS" value={`${items.length}대`} />
         <SummaryItem label="RUNNING" value={`${running}대`} tone="ok" />
-        <SummaryItem label="ALLOCATED VCPU" value={`${vcpus} / 4 cores`} />
-        <SummaryItem label="ALLOCATED MEMORY" value={`${memory} MiB`} />
+        <SummaryItem
+          label="VCPU IN USE"
+          value={`${usage.vcpus} vCPU`}
+          note={`등록 ${registered.vcpus} vCPU · 물리 4코어 공유`}
+        />
+        <SummaryItem
+          label="MEMORY IN USE"
+          value={formatMiB(usage.memoryMib)}
+          note={`등록 ${formatMiB(registered.memoryMib)}`}
+        />
       </section>
 
       <LiveDataAlert />
@@ -243,13 +275,50 @@ export function VmListPage() {
   );
 }
 
-function SummaryItem({ label, value, tone }: { label: string; value: string; tone?: 'ok' }) {
+function SummaryItem({
+  label,
+  value,
+  tone,
+  note,
+}: {
+  label: string;
+  value: string;
+  tone?: 'ok';
+  /** 값 아래 작은 보조 줄 */
+  note?: string;
+}) {
   return (
     <div className={styles.controlSummaryItem} data-tone={tone}>
       <span>{label}</span>
       <strong>{value}</strong>
+      {note && <small>{note}</small>}
     </div>
   );
+}
+
+/** VM 들의 vCPU·메모리 할당 합계 */
+function resourceTotals(vms: readonly Pick<Vm, 'vcpus' | 'memory_mib'>[]) {
+  return vms.reduce(
+    (sum, vm) => ({ vcpus: sum.vcpus + vm.vcpus, memoryMib: sum.memoryMib + vm.memory_mib }),
+    { vcpus: 0, memoryMib: 0 },
+  );
+}
+
+const formatMiB = (mib: number) => `${mib.toLocaleString('ko-KR')} MiB`;
+
+/** 등록 동기화 결과를 한 줄로. 바뀐 것이 없으면 그렇게 말한다 */
+function synchronizationSummary(result: VmSynchronizationResult): string {
+  const parts = [
+    result.registered && `추가 ${result.registered}`,
+    result.updated && `갱신 ${result.updated}`,
+    result.retired && `정리 ${result.retired}`,
+    result.missing_from_board && `보드에 없음 ${result.missing_from_board}`,
+    result.conflicts && `충돌 ${result.conflicts}`,
+    result.incomplete && `정보 부족 ${result.incomplete}`,
+  ].filter(Boolean);
+  return parts.length === 0
+    ? `VM 동기화 완료: 보드 ${result.discovered}대, 바뀐 것 없음`
+    : `VM 동기화 완료: 보드 ${result.discovered}대 · ${parts.join(' · ')}`;
 }
 
 /** 서버가 dom0 목록을 받은 시각(observed_at). 읽을 수 없으면 화면이 응답을 받은 시각 */

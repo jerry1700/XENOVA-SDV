@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ToastProvider } from '@xenova/ui';
-import { MemoryRouter, Route, Routes } from 'react-router';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DriveState } from '../api/drive';
 import type { MetricSample } from '../api/types';
@@ -61,6 +61,7 @@ function fixture(stackSupported = true) {
         status,
         publisher_state: status === 'UNKNOWN' ? null : 'running',
         last_collection_success_uptime_ms: status === 'UNKNOWN' ? null : '12000',
+        last_collection_success_age_ms: status === 'UNKNOWN' ? null : 1200,
         collection_failures_total: status === 'UNKNOWN' ? null : 2,
         received_at: status === 'UNKNOWN' ? null : received,
       });
@@ -181,6 +182,11 @@ function fixture(stackSupported = true) {
   return fetch;
 }
 
+function EventsRouteProbe() {
+  const { search } = useLocation();
+  return <p>events route {search}</p>;
+}
+
 function renderPage(path = '/dashboard/memory') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const page = render(
@@ -191,6 +197,7 @@ function renderPage(path = '/dashboard/memory') {
             <Route path="/dashboard/overview" element={<DashboardPage />} />
             <Route path="/dashboard/vms/:vmId" element={<VmDetailPage />} />
             <Route path="/dashboard/memory" element={<ResourcesPage view="memory" />} />
+            <Route path="/dashboard/events" element={<EventsRouteProbe />} />
           </Routes>
         </MemoryRouter>
       </ToastProvider>
@@ -264,15 +271,15 @@ describe('VM telemetry dashboard', () => {
       return Response.json({ items: [sample] });
     });
     const page = renderPage('/dashboard/overview');
-    const autonomous = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const autonomous = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(await autonomous.findByLabelText('Memory 25.000%')).toBeInTheDocument();
     expect(autonomous.getByText(/정적 예약 포함/)).toBeInTheDocument();
     expect(autonomous.queryByText('Kernel heap')).not.toBeInTheDocument();
     expect(
-      await within(screen.getByRole('link', { name: /manual/ })).findByLabelText('Memory 0.000%'),
+      await within(screen.getByRole('article', { name: /manual/ })).findByLabelText('Memory 0.000%'),
     ).toBeInTheDocument();
     expect(
-      await within(screen.getByRole('link', { name: /interaction/ })).findByLabelText('Memory 0%'),
+      await within(screen.getByRole('article', { name: /interaction/ })).findByLabelText('Memory 0%'),
     ).toBeInTheDocument();
     page.unmount();
     renderPage();
@@ -297,7 +304,7 @@ describe('VM telemetry dashboard', () => {
         : original(url),
     );
     const page = renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const card = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(await card.findByLabelText('Memory 25.000%')).toBeInTheDocument();
     now += 6001;
     act(() => vi.advanceTimersByTime(1000));
@@ -332,7 +339,7 @@ describe('VM telemetry dashboard', () => {
         return Response.json({ items });
       });
       renderPage('/dashboard/overview');
-      const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+      const card = within(await screen.findByRole('article', { name: /autonomous/ }));
       const reason =
         state === 'heap-only'
           ? '관리 RAM 표본을 확인할 수 없습니다.'
@@ -393,16 +400,16 @@ describe('VM telemetry dashboard', () => {
   it('shows VM / APP / LINK and uses Agent for Linux and telemetry heartbeat for Zephyr', async () => {
     const fetch = fixture();
     renderPage('/dashboard/overview');
-    const autonomous = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const autonomous = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(autonomous.getByText('대기')).toBeInTheDocument();
     const aLink = within(autonomous.getByTitle('Zephyr Telemetry heartbeat (v2)').parentElement!);
     expect(await aLink.findByText('연결됨')).toBeInTheDocument();
     expect(aLink.getByText('Telemetry')).toBeInTheDocument();
     expect(autonomous.queryByText('앱 HB')).not.toBeInTheDocument();
-    const manual = within(screen.getByRole('link', { name: /manual/ }));
+    const manual = within(screen.getByRole('article', { name: /manual/ }));
     expect(within(manual.getByText('APP').parentElement!).getByText('실행 중')).toBeInTheDocument();
     expect(await within(manual.getByText('LINK').parentElement!).findByText('미수신')).toBeInTheDocument();
-    const linux = within(screen.getByRole('link', { name: /interaction/ }));
+    const linux = within(screen.getByRole('article', { name: /interaction/ }));
     const agentLink = within(linux.getByTitle('Linux Agent heartbeat (v1)').parentElement!);
     expect(agentLink.getByText('연결됨')).toBeInTheDocument();
     expect(agentLink.getByText('Agent')).toBeInTheDocument();
@@ -445,7 +452,7 @@ describe('VM telemetry dashboard', () => {
         });
       });
       const page = renderPage('/dashboard/overview');
-      const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+      const card = within(await screen.findByRole('article', { name: /autonomous/ }));
       const row = card.getByText('LINK').parentElement!;
       expect(await within(row).findByText('연결됨')).toBeInTheDocument();
       expect(row).toHaveAttribute('data-tone', 'ok');
@@ -454,8 +461,8 @@ describe('VM telemetry dashboard', () => {
       renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
       const diagnostics = within(await screen.findByRole('region', { name: '텔레메트리 수집기 상태' }));
       expect(await diagnostics.findByText(label)).toBeInTheDocument();
-      expect(diagnostics.getByText('7')).toBeInTheDocument();
-      expect(screen.getByText('앱 heartbeat · drive')).toBeInTheDocument();
+      expect(diagnostics.getByText(/실패 7회/)).toBeInTheDocument();
+      expect(screen.queryByText(/앱 heartbeat/)).not.toBeInTheDocument();
     },
   );
 
@@ -477,7 +484,7 @@ describe('VM telemetry dashboard', () => {
       );
     });
     renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const card = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(within(card.getByText('VM').parentElement!).getByText('실행 중')).toBeInTheDocument();
     expect(within(card.getByText('APP').parentElement!).getByText('대기')).toBeInTheDocument();
     const link = within(card.getByText('LINK').parentElement!);
@@ -491,9 +498,36 @@ describe('VM telemetry dashboard', () => {
     stale.vm_apps![VM_IDS.autonomous]!.drive!.lifecycle_source.status = 'stale';
     useDrive.mockReturnValue({ drive: stale, socket: 'open' });
     renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /autonomous/ }));
+    const card = within(await screen.findByRole('article', { name: /autonomous/ }));
     expect(within(card.getByText('APP').parentElement!).getByText('관측 만료')).toBeInTheDocument();
     expect(await within(card.getByText('LINK').parentElement!).findByText('연결됨')).toBeInTheDocument();
+  });
+
+  it('keeps the overview card clickable without nesting the recent event link inside another link', async () => {
+    fixture();
+    renderPage('/dashboard/overview');
+    const article = await screen.findByRole('article', { name: /autonomous/ });
+    // 카드 자체는 링크가 아니고, 안쪽 링크끼리도 중첩되지 않는다
+    expect(article.closest('a')).toBeNull();
+    expect(article.querySelector('a a')).toBeNull();
+    const card = within(article);
+    const links = card.getAllByRole('link');
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      `/dashboard/vms/${VM_IDS.autonomous}`,
+      `/dashboard/events?vm=${VM_IDS.autonomous}`,
+    ]);
+    // 이벤트 줄은 해당 VM 필터가 켜진 이벤트 화면으로
+    fireEvent.click(links[1]!);
+    expect(await screen.findByText(`events route ?vm=${VM_IDS.autonomous}`)).toBeInTheDocument();
+  });
+
+  it('opens the VM detail when the card body is clicked, as the whole-card link did', async () => {
+    fixture();
+    renderPage('/dashboard/overview');
+    const article = await screen.findByRole('article', { name: /autonomous/ });
+    fireEvent.click(within(article).getByText('RECENT SIGNAL'));
+    const name = vms.find((vm) => vm.vm_id === VM_IDS.autonomous)!.name;
+    expect(await screen.findByRole('heading', { level: 1, name })).toBeInTheDocument();
   });
 
   it('does not present cached Linux Agent status as a current connection when VM lookup fails', async () => {
@@ -504,7 +538,7 @@ describe('VM telemetry dashboard', () => {
       failList && url === '/api/v1/vms' ? Response.json({}, { status: 503 }) : original(url),
     );
     const page = renderPage('/dashboard/overview');
-    const card = within(await screen.findByRole('link', { name: /interaction/ }));
+    const card = within(await screen.findByRole('article', { name: /interaction/ }));
     const link = within(card.getByText('LINK').parentElement!);
     expect(await link.findByText('연결됨')).toBeInTheDocument();
     failList = true;
@@ -513,25 +547,380 @@ describe('VM telemetry dashboard', () => {
     expect(link.queryByText('연결됨')).not.toBeInTheDocument();
   });
 
+  it('shows the detail header like VM Control with the authority badge beside a driving VM title', async () => {
+    fixture();
+    useDrive.mockReturnValue({
+      drive: {
+        ...drive,
+        control: {
+          mode: 'AUTO',
+          generation: 1,
+          active_app: 'autonomous',
+          active_vm_id: VM_IDS.autonomous,
+          reason: null,
+          received_ago_ms: 100,
+          source: { status: 'fresh', age_ms: 100 },
+        },
+      },
+      socket: 'open',
+    });
+    const name = vms.find((vm) => vm.vm_id === VM_IDS.autonomous)!.name;
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const title = await screen.findByRole('heading', { level: 1, name });
+    expect(screen.getByRole('link', { name: /VM Dashboard/ })).toHaveAttribute('href', '/dashboard/overview');
+    expect(screen.getByText('VIRTUAL MACHINE MONITORING')).toBeInTheDocument();
+    expect(screen.getByText('주 구동 VM · Zephyr')).toBeInTheDocument();
+    // 제어권 배지는 제목 줄 오른쪽 (같은 줄 묶음 안)
+    expect(within(title.parentElement!).getByText('ACTIVE')).toBeInTheDocument();
+    // 왼쪽 "운영 상태" 타일 2×2, 오른쪽 "구성" 타일 3개 + 짧은 목록
+    const ops = within(screen.getByRole('heading', { name: '운영 상태' }).closest('section')!);
+    for (const label of ['VM 상태', '제어권', '주행 모드']) expect(ops.getByText(label)).toBeInTheDocument();
+    // 머리말에는 앱 ID 를 붙이지 않고, 줄마다 앞에 앱 라벨 (모르는 앱 ID 는 원문)
+    expect(ops.getByText('앱 상태').querySelector('small')).toBeNull();
+    expect(ops.getByText('앱 상태').nextElementSibling).toHaveTextContent(
+      /^drive · 대기 · 준비 미충족 · awaiting_input$/,
+    );
+    expect(ops.getByText('자율주행')).toBeInTheDocument();
+    const config = within(screen.getByRole('heading', { name: 'VM 구성' }).closest('section')!);
+    for (const label of ['vCPU', '메모리', '예약 IPv4', '역할', '템플릿', '버전', 'VM ID'])
+      expect(config.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText('VM 기본 정보')).not.toBeInTheDocument();
+    expect(screen.queryByText('할당 자원')).not.toBeInTheDocument();
+    expect(screen.queryByText('Identity & state')).not.toBeInTheDocument();
+    expect(screen.queryByText(/앱 heartbeat/)).not.toBeInTheDocument();
+    // 맨 아래 "생명주기 제어" 안내 카드와 VM Control 링크는 없앴다 (머리말 뒤로가기만 남음)
+    expect(screen.queryByText('생명주기 제어')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /VM Control에서 관리/ })).not.toBeInTheDocument();
+  });
+
+  it('shows the INFOTAINMENT badge beside the title of the Linux interaction VM', async () => {
+    fixture();
+    const name = vms.find((vm) => vm.vm_id === VM_IDS.interaction)!.name;
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const title = await screen.findByRole('heading', { level: 1, name });
+    // Memory·Network 탭 카드와 같은 배지·색 규칙 (data-authority)
+    const badge = within(title.parentElement!).getByText('INFOTAINMENT');
+    expect(badge).toHaveAttribute('data-authority', 'infotainment');
+    // 주행 VM 이 아니면 제어권·주행 모드 타일은 "해당 없음"
+    const ops = within(screen.getByRole('heading', { name: '운영 상태' }).closest('section')!);
+    expect(ops.getByText('제어권').nextElementSibling).toHaveTextContent('해당 없음');
+    expect(ops.getByText('주행 모드').nextElementSibling).toHaveTextContent('해당 없음');
+    expect(ops.getByText('앱 상태').nextElementSibling).toHaveTextContent('미확인');
+  });
+
+  it('shows no badge beside the title of a VM without a role', async () => {
+    fixture();
+    const unassigned = {
+      ...vms[0]!,
+      vm_id: '44444444-4444-4444-8444-444444444444',
+      name: 'spare',
+      role: null,
+    };
+    vms.push(unassigned);
+    try {
+      renderPage(`/dashboard/vms/${unassigned.vm_id}`);
+      const title = await screen.findByRole('heading', { level: 1, name: 'spare' });
+      expect(title.parentElement!.children).toHaveLength(1);
+      expect(screen.getByText('역할 미지정 · Zephyr')).toBeInTheDocument();
+    } finally {
+      vms.pop();
+    }
+  });
+
   it('shows Zephyr thread pages, heap, RX rate, reserved IP and only its own app reports', async () => {
     const fetch = fixture();
     renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
-    expect(await screen.findByRole('columnheader', { name: '스레드 ID' })).toBeInTheDocument();
-    const cpuTable = screen.getByRole('columnheader', { name: '스레드 ID' }).closest('table')!;
+    const cpuTable = (await screen.findByText('telemetry')).closest('table')!;
+    expect(within(cpuTable).getByRole('columnheader', { name: 'ID' })).toBeInTheDocument();
+    expect(within(cpuTable).getByText('telemetry').nextElementSibling).toHaveTextContent('1');
     expect(within(cpuTable).getByText('telemetry')).toBeInTheDocument();
     expect(within(cpuTable).queryByText('8.00 KiB')).not.toBeInTheDocument();
     expect(screen.queryByRole('table', { name: '스레드 스택 스냅샷' })).not.toBeInTheDocument();
     expect(screen.queryByText('스레드 스택 스냅샷')).not.toBeInTheDocument();
-    expect(screen.getByText(/페이지 1\/2 수신/)).toBeInTheDocument();
-    expect(screen.getByText(/대기 · 준비 미충족 · awaiting_input/)).toBeInTheDocument();
+    // 페이지 누락은 이상 경고라 주의 색, 계측 구간 문구는 화면에서 뺐다
+    expect(screen.getByText(/페이지 1\/2 수신/)).toHaveAttribute('data-warn', 'true');
+    expect(screen.queryByText(/계측 구간/)).not.toBeInTheDocument();
+    // 모르는 사유 코드는 원문 그대로 (title 도 원문)
+    expect(screen.getByTitle('awaiting_input')).toHaveTextContent(/^awaiting_input$/);
+    expect(screen.getByTitle('awaiting_input').closest('strong')).toHaveTextContent(
+      /^drive · 대기 · 준비 미충족 · awaiting_input$/,
+    );
     expect(screen.queryByText(/실행 중 · 계산 준비 확인/)).not.toBeInTheDocument();
     expect(screen.getByText('192.168.77.2')).toBeInTheDocument();
     expect(await screen.findByText('KiB/s')).toBeInTheDocument();
     expect(screen.getByText('2.0')).toBeInTheDocument();
-    expect(screen.getByText('0.5')).toBeInTheDocument();
-    expect(await screen.findByText('수집 중')).toBeInTheDocument();
-    expect(screen.getByText('12000 ms')).toBeInTheDocument();
+    // 커널 힙은 Memory 탭과 같은 현재값의 용량 대비 % + 사용 / 전체 · 여유
+    // 이름 옆 같은 줄에 현재 값과 보조 문구, 그래프 라벨에 "· 최근 5분" 없음
+    const heap = within(screen.getByText('커널 힙').closest('section')!);
+    expect(screen.getByRole('heading', { name: 'CPU·메모리 추이 · 최근 5분' })).toBeInTheDocument();
+    for (const old of ['CPU · 최근 5분', '커널 힙 · 최근 5분', '최근 5분 · 실제 수신 데이터'])
+      expect(screen.queryByText(old)).not.toBeInTheDocument();
+    expect(heap.getByText('5분 전')).toBeInTheDocument();
+    expect(heap.getByText('50.0')).toBeInTheDocument();
+    expect(heap.getByText('0.50 KiB / 1.00 KiB · 여유 0.50 KiB')).toBeInTheDocument();
+    // 수집기는 운영 상태 카드 아래 한 줄 요약. 시각은 모두 상대 시간
+    const ops = screen.getByRole('heading', { name: '운영 상태' }).closest('section')!;
+    const collector = within(within(ops).getByRole('region', { name: '텔레메트리 수집기 상태' }));
+    expect(collector.getByText('수집기')).toBeInTheDocument();
+    expect(await collector.findByText('수집 중')).toBeInTheDocument();
+    expect(collector.getByText('수집 중')).toHaveAttribute('data-tone', 'ok');
+    // 둘째 줄: 정수 초·분 또는 "방금" (소수점 없음)
+    const when = String.raw`(방금|\d+초 전|\d+분 전|\d+시간 \d+분 전)`;
+    expect(
+      collector.getByText(new RegExp(`^heartbeat ${when} · 마지막 성공 ${when} · 실패 2회$`)),
+    ).toBeInTheDocument();
+    expect(collector.queryByText(/\d\.\d초/)).not.toBeInTheDocument();
+    expect(collector.queryByText(/오후|오전|12000 ms|참고/)).not.toBeInTheDocument();
+    // 숫자·ID·버전은 고정폭, 한글 문구 값은 일반 글꼴
+    expect(screen.getByText(VM_IDS.autonomous)).toHaveAttribute('data-mono', 'true');
+    expect(screen.getByText('주 구동 VM', { selector: 'span' })).not.toHaveAttribute('data-mono');
+    expect(screen.getByText('192.168.77.2')).toHaveAttribute('data-mono', 'true');
+    expect(within(ops).getByText('실행 중').closest('strong')).not.toHaveAttribute('data-mono');
+    const config = screen.getByRole('heading', { name: 'VM 구성' }).closest('section')!;
+    expect(within(config).queryByRole('region', { name: '텔레메트리 수집기 상태' })).not.toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url.endsWith('/processes'))).toBe(false);
+  });
+
+  it('shows the fresh heartbeat in place of a missing lifecycle with its source noted', async () => {
+    fixture();
+    const missing = structuredClone(drive);
+    missing.vm_apps![VM_IDS.manual]!.drive = {
+      lifecycle: null,
+      lifecycle_source: { status: 'unknown', age_ms: null },
+      heartbeat: { state: 'standby' },
+      heartbeat_source: { status: 'fresh', age_ms: 100 },
+    };
+    useDrive.mockReturnValue({ drive: missing, socket: 'open' });
+    renderPage(`/dashboard/vms/${VM_IDS.manual}`);
+    const ops = within((await screen.findByRole('heading', { name: '운영 상태' })).closest('section')!);
+    const value = ops.getByText('앱 상태').nextElementSibling!;
+    expect(value).toHaveTextContent(/^drive · 대기heartbeat 기준 · 단계 미수신$/);
+    expect(ops.getByText('heartbeat 기준 · 단계 미수신')).toBeInTheDocument();
+  });
+
+  it('labels each app line in Korean and shows the reason in Korean with the raw code as title', async () => {
+    fixture();
+    const labelled = structuredClone(drive);
+    const report = (reason: string) => ({
+      lifecycle: { phase: 'WAITING' as const, readiness: 'NOT_READY' as const, reason },
+      lifecycle_source: { status: 'fresh' as const, age_ms: 100 },
+      heartbeat: null,
+      heartbeat_source: { status: 'unknown' as const, age_ms: null },
+    });
+    labelled.vm_apps![VM_IDS.autonomous] = {
+      autonomous: report('STATE_PREPARING'),
+      manual: report('RESOURCE_RETAINED'),
+    };
+    useDrive.mockReturnValue({ drive: labelled, socket: 'open' });
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const ops = within((await screen.findByRole('heading', { name: '운영 상태' })).closest('section')!);
+    const lines = ops.getByText('앱 상태').parentElement!.querySelectorAll('strong[data-app]');
+    expect([...lines].map((line) => line.textContent)).toEqual([
+      '자율주행 · 대기 · 준비 미충족 · 상태 준비 중',
+      '수동주행 · 대기 · 준비 미충족 · 자원 회수 대기',
+    ]);
+    expect(ops.getByText('상태 준비 중')).toHaveAttribute('title', 'STATE_PREPARING');
+    expect(ops.getByText('자원 회수 대기')).toHaveAttribute('title', 'RESOURCE_RETAINED');
+  });
+
+  // 접힌 표 영역은 상태와 관계없이 같은 틀(표 머리 + VISIBLE_ROWS 행 = 11행 최소 높이) 안에 그린다
+  const frameOf = (inside: Element) => inside.closest('[data-state]')!;
+  const expectFrame = (frame: Element, state: string) => {
+    expect(frame).toHaveAttribute('data-state', state);
+    expect((frame as HTMLElement).style.getPropertyValue('--table-rows')).toBe('11');
+  };
+
+  it.each([
+    ['loading', () => new Promise<Response>(() => {}), '스레드 정보를 불러오는 중…'],
+    ['error', async () => Response.json({}, { status: 500 }), '스레드 정보를 불러오지 못했습니다.'],
+    [
+      'empty',
+      async () => Response.json({ vm_id: VM_IDS.autonomous, received_at: null, items: [] }),
+      '스레드 보고 없음',
+    ],
+  ] as const)('keeps the thread table area height while %s', async (state, reply, message) => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) =>
+      url.endsWith(`/vms/${VM_IDS.autonomous}/threads`) ? reply() : original(url),
+    );
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const text = await screen.findByText(message);
+    expectFrame(frameOf(text), state);
+    // 상태 줄 자리는 비어 있어도 표 영역 위에 그대로 있다
+    expect(frameOf(text).previousElementSibling?.tagName).toBe('P');
+  });
+
+  it.each([
+    ['few rows', 3, 'ok'],
+    ['ten or more rows', 12, 'ok'],
+    ['no rows', 0, 'empty'],
+  ] as const)('keeps the same thread table frame with %s', async (_label, count, state) => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) =>
+      url.endsWith(`/vms/${VM_IDS.autonomous}/threads`)
+        ? Response.json({
+            vm_id: VM_IDS.autonomous,
+            window_ms: 1000,
+            received_at: received,
+            stale: false,
+            threads_status: 'ok',
+            parts_received: 1,
+            part_count: 1,
+            complete: true,
+            conflicting_pages: false,
+            items: Array.from({ length: count }, (_, i) => ({
+              thread_id: String(i + 1),
+              thread_name: `worker_${i + 1}`,
+              name_truncated: false,
+              cpu_percent: i,
+              unavailable_reason: null,
+            })),
+          })
+        : original(url),
+    );
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const status = await screen.findByText(`CPU 높은 순 · ${count}개`);
+    const frame = status.parentElement!.nextElementSibling!;
+    expectFrame(frame, state);
+    expect(frame.querySelector('table')).not.toBeNull();
+    // 상태 줄(개수·경고)은 표 영역 밖 위쪽
+    expect(frame.contains(status)).toBe(false);
+    expect(within(frame as HTMLElement).getAllByRole('row')).toHaveLength(
+      // 표 머리 + 보이는 행 (행이 없으면 "표시할 스레드 없음" 한 줄)
+      count === 0 ? 2 : Math.min(count, 10) + 1,
+    );
+  });
+
+  it.each([
+    ['loading', () => new Promise<Response>(() => {}), '불러오는 중…'],
+    ['error', async () => Response.json({}, { status: 500 }), '프로세스 정보를 불러오지 못했습니다.'],
+  ] as const)('keeps the Linux process table area height while %s', async (state, reply, message) => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) =>
+      url.endsWith(`/vms/${VM_IDS.interaction}/processes`) ? reply() : original(url),
+    );
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const text = await screen.findByText(message);
+    expectFrame(frameOf(text), state);
+  });
+
+  it('keeps the same Linux process table frame with few rows', async () => {
+    fixture();
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const status = await screen.findByText('CPU 높은 순 · 1개');
+    expectFrame(status.parentElement!.nextElementSibling!, 'ok');
+  });
+
+  it('sorts threads by CPU, shows ten rows first and expands the rest', async () => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) => {
+      if (!url.endsWith(`/vms/${VM_IDS.autonomous}/threads`)) return original(url);
+      return Response.json({
+        vm_id: VM_IDS.autonomous,
+        window_ms: 1000,
+        received_at: received,
+        stale: false,
+        threads_status: 'ok',
+        parts_received: 1,
+        part_count: 1,
+        complete: true,
+        conflicting_pages: false,
+        items: [
+          ...Array.from({ length: 12 }, (_, i) => ({
+            thread_id: String(i + 1),
+            thread_name: `worker_${i + 1}`,
+            name_truncated: false,
+            cpu_percent: i === 3 ? null : i * 9,
+            unavailable_reason: null,
+          })),
+          // Zephyr idle 스레드는 목록·개수·더 보기에서 빠지고 상태 줄에 "유휴 N%"
+          {
+            thread_id: '20',
+            thread_name: 'idle',
+            name_truncated: false,
+            cpu_percent: 99.5,
+            unavailable_reason: null,
+          },
+        ],
+      });
+    });
+    renderPage(`/dashboard/vms/${VM_IDS.autonomous}`);
+    const table = (await screen.findByText('worker_12')).closest('table')!;
+    // [이름 + 작은 회색 ID] [CPU %] [짧은 CPU 막대] (막대 열 제목은 비움)
+    expect(
+      within(table)
+        .getAllByRole('columnheader')
+        .map((th) => th.textContent),
+    ).toEqual(['이름', 'ID', 'CPU %']);
+    const rows = () => within(table).getAllByRole('row').slice(1);
+    const names = () => rows().map((row) => row.querySelector('td')!.firstChild!.textContent);
+    expect(names()).toHaveLength(10);
+    expect(names()[0]).toBe('worker_12');
+    // ID 는 이름 뒤가 아니라 별도 열 (가운데 정렬)
+    expect(rows()[0]!.querySelectorAll('td')[1]).toHaveTextContent('12');
+    expect(rows()[0]!.querySelectorAll('td')[1]).toHaveAttribute('data-id', 'true');
+    expect(rows()[0]!.querySelector('td')).toHaveTextContent(/^worker_12$/);
+    // 상태 줄: 계측 구간·유휴는 빼고 "CPU 높은 순 · N개"만 (이상 경고는 이상할 때만)
+    expect(screen.queryByText(/유휴/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/계측 구간/)).not.toBeInTheDocument();
+    expect(screen.getByText('CPU 높은 순 · 12개')).toBeInTheDocument();
+    expect(within(table).queryByText('idle')).not.toBeInTheDocument();
+    // 막대 색: Memory 탭과 같은 80% 주의, 95% 위험
+    const level = (index: number) => rows()[index]!.querySelector('[data-level]')!.getAttribute('data-level');
+    expect([level(0), level(1), level(2), level(3)]).toEqual(['fault', 'warn', 'warn', 'ok']);
+    expect(rows()[0]!.querySelectorAll('td')[2]).toHaveTextContent('99.0');
+    expect(rows()[0]!.querySelectorAll('td')[3]!.querySelector('[data-level]')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '2개 더 보기' }));
+    expect(names()).toHaveLength(12);
+    // 값이 없는 스레드는 맨 뒤
+    expect(names().at(-1)).toBe('worker_4');
+    fireEvent.click(screen.getByRole('button', { name: '접기' }));
+    expect(names()).toHaveLength(10);
+  });
+
+  it('sorts Linux processes by CPU with right-aligned number columns', async () => {
+    const fetch = fixture();
+    const original = fetch.getMockImplementation()!;
+    fetch.mockImplementation(async (url: string) => {
+      if (!url.endsWith(`/vms/${VM_IDS.interaction}/processes`)) return original(url);
+      return Response.json({
+        vm_id: VM_IDS.interaction,
+        observed_at: received,
+        stale: false,
+        items: [
+          { pid: 1, name: 'systemd', cpu_percent: 0.2, rss_bytes: 1048576 },
+          { pid: 412, name: 'interaction', cpu_percent: 4.2, rss_bytes: 2097152 },
+          { pid: 388, name: 'xenova-agent', cpu_percent: 1.1, rss_bytes: null },
+        ],
+      });
+    });
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const table = (await screen.findByRole('columnheader', { name: '메모리 (RSS)' })).closest('table')!;
+    const rows = within(table).getAllByRole('row').slice(1);
+    // [이름 + 작은 회색 PID] [CPU 막대] [CPU %] [메모리 RSS]
+    expect(rows.map((row) => row.querySelector('td')!.firstChild!.textContent)).toEqual([
+      'interaction',
+      'xenova-agent',
+      'systemd',
+    ]);
+    expect(rows[0]!.querySelector('td')).toHaveTextContent(/^interaction$/);
+    const cells = rows[0]!.querySelectorAll('td');
+    expect(cells[1]).toHaveAttribute('data-id', 'true');
+    expect(cells[1]).toHaveTextContent('412');
+    expect(cells[2]).toHaveAttribute('data-num', 'true');
+    expect(cells[2]).toHaveTextContent('4.2');
+    expect(cells[3]!.querySelector('[data-level]')).toHaveAttribute('data-level', 'ok');
+    expect(
+      within(table)
+        .getAllByRole('columnheader')
+        .map((th) => th.textContent),
+    ).toEqual(['이름', 'PID', 'CPU %', '메모리 (RSS)']);
+    expect(cells[4]).toHaveTextContent('2.0 MiB');
+    expect(screen.queryByRole('button', { name: /더 보기/ })).not.toBeInTheDocument();
   });
 
   it('defers stack diagnostics display while preserving CPU rows', async () => {
@@ -551,7 +940,7 @@ describe('VM telemetry dashboard', () => {
     const status = within(screen.getByRole('region', { name: '텔레메트리 수집기 상태' }));
     expect(await status.findByText('관측 만료')).toBeInTheDocument();
     expect(status.queryByText('수집 중')).not.toBeInTheDocument();
-    expect(status.getByText('2')).toBeInTheDocument();
+    expect(status.getByText(/실패 2회/)).toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url.endsWith('/threads'))).toBe(false);
   });
 

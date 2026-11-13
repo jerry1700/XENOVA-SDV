@@ -1,0 +1,10 @@
+{
+  "margin": 0.002,
+  "tracking_guard": 0.0025,
+  "primitive_duration": 0.3,
+  "primitive_speed": 0.25,
+  "tape_width_m": 0.012,
+  "tape_overhang_m": 0.006,
+  "narrow_lane_speed_mps": 0.22,
+  "avoid_policy": 2
+}

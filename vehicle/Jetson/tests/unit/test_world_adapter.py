@@ -123,6 +123,20 @@ class WorldAdapterTests(unittest.TestCase):
                                static_retained=retained, expired=expired)
         self.assertEqual(filtered.payload, built.payload)
 
+    def test_boundary_proofs_encode_live_permitted_occupied_cells_only(self):
+        import numpy as np
+        original = snapshot()
+        arrays = original['arrays']
+        arrays['permission'][2, 1] = True
+        arrays['boundary_free4'] = np.full((3, 3), 0x81fe, dtype=np.uint16)
+        packet = build_world(original, template(), source=source(), preferred_road=preferred()).message()
+        self.assertEqual(packet.boundary_cell_free4_le, struct.pack('<HHHH', 3, 0x81fe, 7, 0x81fe))
+        retained, expired = np.zeros((3, 3), dtype=bool), np.zeros((3, 3), dtype=bool)
+        retained[1, 0], expired[2, 1] = True, True
+        packet = build_world(original, template(), source=source(), preferred_road=preferred(),
+                             static_retained=retained, expired=expired).message()
+        self.assertFalse(packet.HasField('boundary_cell_free4_le'))
+
     def test_legacy_exact_grid_does_not_invent_permission_or_new_features(self):
         instant = replace(source(), captured_us=(1_000_005, 1_000_005))
         built = build_world(snapshot(), template(0), source=instant)

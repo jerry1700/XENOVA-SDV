@@ -96,6 +96,23 @@ class DepthEvidenceTests(unittest.TestCase):
         self.assertFalse(unknown.metric_qualified)
         self.assertTrue(all(not ray.qualified for ray in unknown.patches))
 
+    def test_deferred_rays_keep_original_bounds_and_pixel_selection(self):
+        import numpy as np
+        p = profile(100)
+        stamp = FrameStamp('synthetic', 'right', 7, 'simulation-clock', (100, 100), 100)
+        depth = np.full((100, 100), 1000, dtype=np.uint16)
+        depth[::3, ::2] = 500
+        depth[::4, ::5] = 0
+        options = dict(stamp=stamp, profile=p, input_kind='SYNTHETIC', config=DepthConfig(max_patches=48))
+        eager = analyze_depth(depth, p.right, p.plane, **options)
+        hit_only, preparation = analyze_depth(depth, p.right, p.plane, defer_patches=True, **options).take_ray_inputs()
+        self.assertEqual(hit_only.patches, ())
+        self.assertEqual(tuple(hit_only.hit_boxes), tuple(eager.hit_boxes))
+        self.assertEqual(hit_only.floor_count, eager.floor_count)
+        deferred = preparation.materialize(hit_only)
+        self.assertEqual(tuple(deferred.patches), tuple(eager.patches))
+        self.assertEqual(deferred.omitted_patch_count, eager.omitted_patch_count)
+
     def test_invalid_depth_across_blocks_preserves_unknown_without_clearance(self):
         import numpy as np
         p = profile(100)

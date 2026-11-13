@@ -16,7 +16,8 @@ import test_depth_evidence as depths
 import raw_binding_fixtures as raw_fixture
 from xenova_vehicle.mapping.lane_catalog import LaneCatalog,LaneSource
 from xenova_vehicle.mapping.registration import RegistrationProfile
-from xenova_vehicle.mapping.road_basis import RoadBasis,POINT
+from xenova_vehicle.mapping.road_basis import RoadBasis,POINT,_join_publication_chords
+from xenova_vehicle.transport.world_adapter import lane_model_from_road
 from xenova_vehicle.perception.inputs import FrameStamp
 from xenova_vehicle.perception.calibration import CalibrationProfile
 from xenova_vehicle.runtime.map_checkpoint import CheckpointPages
@@ -112,6 +113,27 @@ def scoped_catalog():
 
 
 class RoadBasisTests(unittest.TestCase):
+    def test_connected_lane_keeps_both_observed_ends_and_bounds_the_seam(self):
+        catalog = lanes.owner()
+        model = update(catalog, points=((.1,0.),(.42,0.)))
+        original = model.road.hypotheses[0]
+        prior = replace(original, station_s=(0.,.32), boundary_normal_bounds_m=(.02,.02,.02),
+                        outer_chord_bounds_m=(.06,.06))
+        shapes = ('divider','left_outer','right_outer','left_center','right_center')
+        current = replace(prior, **{name:tuple((x+.2,y+.005) for x,y in getattr(prior,name))
+                                    for name in shapes})
+        joined = _join_publication_chords(prior, current)
+        self.assertEqual(len(joined.divider), 3)
+        self.assertEqual(joined.divider[0], prior.divider[0])
+        self.assertEqual(joined.divider[-1], current.divider[-1])
+        self.assertGreater(joined.station_s[-1], .51)
+        self.assertGreaterEqual(joined.outer_chord_bounds_m[0], .065)
+        road = replace(model.road, hypotheses=(joined,))
+        wire = lane_model_from_road(road, lane_ids=model.lane_ids, model_revision=model.model_revision,
+                                    lane_revisions=model.lane_revisions, crossing=b'\0\0')
+        self.assertEqual(len(wire.divider), 3)
+        self.assertEqual([lane.lane_id for lane in wire.lanes], list(model.lane_ids))
+
     def test_current_d_issued_prefix_float32_and_append_keep_original_id_bytes_and_time(self):
         catalog=lanes.owner();model=update(catalog,points=((.1,0.),(1.1,0.)))
         owner=RoadBasis();first=consume(owner,catalog,model)

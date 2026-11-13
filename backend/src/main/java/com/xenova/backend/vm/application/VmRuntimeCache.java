@@ -12,9 +12,8 @@ import java.util.concurrent.locks.ReentrantLock;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Component;
 
-// The last dom0-manager VM list. Every list call crosses Tailscale to the board and took 2.7-4.4s
-// (S15P31E110-344), so screens read this snapshot and one background loop keeps it current.
-// Disabled, every read goes to dom0-manager as before.
+// The last dom0-manager VM list. The public VM list refreshes it on demand; point reads and completed
+// operations can reuse or update that snapshot without starting a background refresh loop.
 @Component
 @EnableConfigurationProperties(VmRuntimeCacheProperties.class)
 public class VmRuntimeCache {

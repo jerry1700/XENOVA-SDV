@@ -7,7 +7,7 @@ import math
 from types import SimpleNamespace
 import unittest
 
-from xenova_vehicle.oak.calibration_snapshot import snapshot_factory
+from xenova_vehicle.oak.calibration_snapshot import full_sensor_rgb_geometry, snapshot_factory
 from xenova_vehicle.perception.calibration import (CameraModel, CalibrationProfile, IDENTITY,
     Plane, extrinsic_cm_to_m, synthetic_calibration)
 from xenova_vehicle.perception.geometry import (capture_hull, capture_interval, depth_point,
@@ -16,6 +16,16 @@ from xenova_vehicle.perception.geometry import (capture_hull, capture_interval, 
 
 
 class MetricGeometryTests(unittest.TestCase):
+    def test_full_sensor_letterbox_preserves_center_and_projects_the_same_ray(self):
+        k = [[2957.,0.,1919.5],[0.,2958.,1079.5],[0.,0.,1.]]
+        geometry = full_sensor_rgb_geometry((k,3840,2160))
+        self.assertEqual(geometry['roi'],(77,0,563,360))
+        active = geometry['k']
+        self.assertAlmostEqual(active[0][2],319.5)
+        self.assertAlmostEqual(active[1][2],179.5)
+        self.assertAlmostEqual(active[0][0],2957.*486/4208)
+        self.assertAlmostEqual(active[1][1],2958.*360/3120)
+
     def test_bundle_roundtrip_and_component_provenance_are_immutable(self):
         original = synthetic_calibration()
         decoded = CalibrationProfile.from_dict(json.loads(json.dumps(original.to_dict())))

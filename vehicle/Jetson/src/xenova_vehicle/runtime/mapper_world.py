@@ -19,7 +19,7 @@ from ..perception.pipeline import PerceptionResult
 from ..storage.contracts import StorageContext, json_bytes
 from ..transport.sensor_samples import SensorSamples, FrozenSensorSamples, VehicleEvidence
 from ..transport.world_adapter import (WorldBuildError, WorldSource, build_world,
-    lane_model_from_road, _f32, _f32_up)
+    lane_publication, lane_window_publication, _f32, _f32_up)
 
 
 class _NotReady(Exception):
@@ -132,22 +132,12 @@ def _current(draft, state, basis, context, source, calibration, sensors, vehicle
           and snapshot['clock_id'] == source['clock_epoch'] and draft.pipeline.grid is not None
           and snapshot['frame_id'] == draft.pipeline.grid.frame_id
           and snapshot['revision'] == draft.pipeline.grid.revision)
-    stamp = frame.observation.rgb.stamp
-    _need(result.tape is not None and stamp.key == result.summary.get('rgb_source_key')
-          and result.tape.source_key == stamp.key)
-    model = state.view.lane
-    association = state.lane.current_association
-    _need(model is not None and state.view.lane_status in ('NEW', 'UNIQUE')
-          and state.lane.context == context and state.lane.latest is model
-          and association is not None and association.status in ('NEW', 'UNIQUE')
-          and association.source is model.source and association.catalog_revision+1 == model.model_revision
-          and state.lane.revision == model.model_revision)
-    _need(model.source.stamp == stamp and model.source.input_kind == 'LIVE' and model.source.qualified
+    model = state.road_basis.publication_model(state.lane)
+    _need(model is not None and state.lane.context == context and state.road_basis_material is None)
+    _need(model.source.input_kind == 'LIVE'
           and model.source.domain == (calibration.sha256, context.map_epoch, snapshot['frame_id'], context.odom_epoch)
-          and model.original_context_sha256 == context.sha256 and model.road.source_key == stamp.key
-          and model.source.map_revision == snapshot['revision']
-          and all(identity < state.lane.durable_hwm for identity in model.lane_ids))
-    _need(state.view.road_basis is basis and basis.status == 'READY' and basis.latest_lane_source is model.source
+          and model.source.map_revision <= snapshot['revision'])
+    _need(basis.status == 'READY' and basis.latest_lane_source is model.source
           and basis.lane_ids == model.lane_ids and basis.latest_model_revision == model.model_revision
           and state.road_basis.snapshot() == basis and 2 <= len(basis.points) <= 64)
     capture = frame.observation.capture_interval
@@ -157,14 +147,13 @@ def _current(draft, state, basis, context, source, calibration, sensors, vehicle
           and capture[1] <= lease.pi_interval_to_j(frame.pi_interval, now_j_us=now)[1])
     alignment = draft.pipeline._alignment
     _need(type(alignment) is MapOdomAlignment and alignment.has_metadata and alignment.valid_at(now)
-          and result.summary.get('alignment_metadata') == alignment.fields()
-          and alignment.registration_revision == model.source.registration_revision)
+          and result.summary.get('alignment_metadata') == alignment.fields())
     return result, snapshot, model, capture, alignment
 
 
 def build_mapping_world(draft, catalog_state, basis, *, context, source, calibration,
                         sensors, current_vehicle, clock_lease, sequence, completed_j_us, published_j_us,
-                        scene_draft=None,hazard_draft=None,atlas_owner=None,tof_overlay=None,sensor_snapshot=None):
+                        stopping=None,scene_draft=None,hazard_draft=None,atlas_owner=None,tof_overlay=None,sensor_snapshot=None):
     """원 채택 후보를 build_world에 전달한다. None은 원 자료/기한/표현의 NOT_READY다.
 
     sensors는 원 admission의 frozen read-view 또는 기존 owner다. 외부 source 교체 여부와
@@ -183,6 +172,10 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
     try:
         result, snapshot, model, capture, alignment = _current(draft, catalog_state, basis, context, source,
             calibration, sensors, current_vehicle, clock_lease, published_j_us)
+        # Use the newest expiry calculation for the original observations in the grid.
+        # Keep the observation clock independent of the road's capture provenance.
+        if stopping is not None:
+            snapshot = draft.pipeline.grid.snapshot(published_j_us,clock_id=snapshot['clock_id'])
         retained=None
         if scene_draft is not None:
             from .retained_world import project_retained_grid
@@ -191,12 +184,43 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
             if retained is not None:snapshot=retained.snapshot
         snapshot_us = result.summary['now_us']
         _need(capture[1] <= snapshot_us <= completed_j_us <= published_j_us)
-        mapped = alignment.apply(PoseEstimate(current_vehicle.pose_sample,
-            current_vehicle.j_interval, current_vehicle.j_interval)).sample
+        if stopping is not None or retained is not None:
+            snapshot_us = published_j_us
+        raw_capture = draft.inputs.pose
+        mapped_capture = result.mapped_odometry
+        _need(type(mapped_capture) is PoseEstimate and mapped_capture.captured_us == capture
+              and mapped_capture.sample.context == raw_capture.sample.context)
+        vehicle_odom = PoseEstimate(current_vehicle.pose_sample,current_vehicle.j_interval,current_vehicle.j_interval)
+        propagation = draft.pipeline._propagation_anchor
+        if mapped_capture == alignment.apply(raw_capture):
+            mapped = alignment.apply(vehicle_odom).sample
+        elif propagation is not None and mapped_capture == propagation.apply(raw_capture):
+            mapped = propagation.apply(vehicle_odom).sample
+        else:
+            # A corrected capture need not match either rigid transform. Move that
+            # exact pose only by the relative odometry to the wire sample.
+            capture_anchor = MapOdomAlignment.from_match(raw_capture,mapped_capture,
+                observed_j_interval=capture,registration_revision=alignment.registration_revision,
+                valid_for_us=alignment.valid_for_us,position_drift_mps=alignment.position_drift_mps,
+                yaw_drift_rps=alignment.yaw_drift_rps)
+            mapped = capture_anchor.project_neighbor(vehicle_odom).sample
         from xenova_drive_world import schema
         spec = snapshot['spec']
         upper, lower, grid_error = _domain(spec, len(basis.points))
-        mask = _preferred(spec, model.road)
+        association = catalog_state.lane.current_association
+        current_geometry = (catalog_state.view.lane is model and catalog_state.view.lane_status in ('NEW','UNIQUE')
+            and catalog_state.view.road_basis == basis
+            and model.source.stamp == draft.frame.observation.rgb.stamp
+            and association is not None and association.source is model.source
+            and association.status in ('NEW','UNIQUE'))
+        if stopping is None:
+            _need(current_geometry and catalog_state.view.road_basis is basis)
+            publication_road, publication_lane = lane_publication(basis, model)
+        else:
+            publication_road, publication_lane = lane_window_publication(
+                draft.pipeline,basis,model,mapped,stopping,sum(capture)//2,current_geometry=current_geometry)
+        mask = _preferred(spec, publication_road)
+        completed_j_us = max(completed_j_us,snapshot_us)
         value = schema.WorldSnapshot(major=1, minor=2, required_features=11, sequence=sequence,
             vehicle=source['vehicle'], mapper_boot=source['mapper_boot'], mapper_instance=source['mapper_instance'],
             map_epoch=context.map_epoch, frame_epoch=context.frame_epoch, odom_epoch=context.odom_epoch,
@@ -211,8 +235,7 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         for point in basis.points: value.reference.add(x=point[0], y=point[1])
         for point in upper: value.left_boundary.add(x=point[0], y=point[1])
         for point in lower: value.right_boundary.add(x=point[0], y=point[1])
-        value.lane_model.CopyFrom(lane_model_from_road(model.road, lane_ids=model.lane_ids,
-            model_revision=model.model_revision, lane_revisions=model.lane_revisions, crossing=model.crossing))
+        value.lane_model.CopyFrom(publication_lane)
         interval = alignment.observed_j_interval
         # 원 anchor 오차를 빼서 좁히지 않는다. Pi가 원 drift를 추가하는 보수성도 유지한다.
         value.localization.CopyFrom(schema.MapLocalization(registration_revision=alignment.registration_revision,
@@ -233,14 +256,13 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         if tof_overlay is not None:
             snapshot, static = tof_overlay.apply(snapshot, sensor_snapshot=sensor_snapshot,
                 alignment=alignment, snapshot_us=snapshot_us, now_us=published_j_us, static_retained=static)
-        built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         inventory = catalog_state.view.parking
         if inventory is not None:
             _need(inventory.context == context and inventory.input_kind == 'LIVE'
                   and inventory.source_clock == snapshot['clock_id'])
             # 원 publication 후보의 geometry/age/UNKNOWN/cap을 다시 산출하지 않는다.
-            value = inventory.apply(built.message())
-            built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
+            value = inventory.apply_to_template(value)
+        built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         _need(b''.join(struct.pack('<ff', p.x, p.y) for p in built.message().reference) == basis.points_f32)
         return built
     except (_NotReady, ValueError, KeyError, OverflowError):

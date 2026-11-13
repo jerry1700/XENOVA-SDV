@@ -96,7 +96,7 @@ class MapCheckpointTests(unittest.TestCase):
 
     def process(self):
         import numpy as np
-        graph=SimpleNamespace(status='UNKNOWN',strips=(),reasons=(),work={})
+        graph=TapeGraph((),status='UNKNOWN',complete=False)
         road=SimpleNamespace(status='UNKNOWN',hypotheses=(),reasons=(),semantic_scored=0)
         with patch('xenova_vehicle.perception.depth.analyze_depth',return_value=self.depth), \
                 patch('xenova_vehicle.perception.pipeline.extract_tape',return_value=graph), \

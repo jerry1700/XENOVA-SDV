@@ -2,7 +2,8 @@
 Description=Xenova guest display data for the display domU (Plan A; Plan B also relays frames)
 Wants=xenova-display-feed.service
 Requires=xenova-bridge.service
-After=xenova-bridge.service xenova-display-feed.service
+Requisite=xenova-first-boot.service
+After=xenova-first-boot.service xenova-bridge.service xenova-display-feed.service
 ConditionPathExists=/etc/xenova/guest-display.json
 ConditionPathExists=/etc/xenova/display.env
 StartLimitIntervalSec=120

@@ -1,4 +1,6 @@
 """dom0 Display 설정에 Interaction VM의 현재 주소를 안전하게 반영한다."""
+from contextlib import contextmanager
+import fcntl
 import ipaddress
 import json
 import os
@@ -38,7 +40,7 @@ def _address(value):
     return str(address)
 
 
-def _load(path, *, owner_uid, private):
+def _load(path, *, owner_uid, private, allow_list=False):
     path = Path(path)
     info = path.lstat()
     mode = stat.S_IMODE(info.st_mode)
@@ -49,7 +51,7 @@ def _load(path, *, owner_uid, private):
         value = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError(f'invalid Display configuration: {path.name}') from error
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) and not (allow_list and isinstance(value, list)):
         raise ValueError(f'invalid Display configuration: {path.name}')
     return value, mode
 
@@ -127,89 +129,179 @@ def _record_by_id(records, instance_id):
     return matches[0]
 
 
-def _interaction_record(records):
-    matches = [record for record in records.values()
-               if record.get('guest_kind') == 'linux'
-               and record.get('template_id') == 'debian-13-arm64']
-    if len(matches) != 1:
-        raise ValueError('Display binding requires exactly one Debian Interaction VM')
+def _interaction_record(records, identity):
+    matches = [row for row in records.values() if row.get('uuid') == identity]
+    if (len(matches) != 1 or matches[0].get('guest_kind', 'linux') != 'linux'
+            or matches[0].get('template_id', 'debian-13-arm64' if matches[0].get('template') == 'debian-13-20261015' else None) != 'debian-13-arm64'):
+        raise ValueError('selected Interaction VM must be a registered Debian display VM')
     return matches[0]
 
 
 def _binding_target(path, owner_uid):
     path = Path(path)
     if not path.exists() and not path.is_symlink():
-        if not path.parent.is_dir():
-            raise ValueError('Display binding parent is unavailable')
         return None
-    info = path.lstat()
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_nlink != 1
-            or stat.S_IMODE(info.st_mode) & 0o022):
-        raise ValueError('unsafe Display configuration: display-bindings.json')
-    try:
-        value = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        value = None
+    value, _ = _load(path, owner_uid=owner_uid, private=False, allow_list=True)
+    if isinstance(value, list):
+        value = {'schema_version': 1, 'scope': 'configured', 'bindings': value}
+    rows = value.get('bindings')
+    roles = {'primary_drive': 'zephyr', 'backup_drive': 'zephyr', 'interaction': 'debian'}
+    if (value.get('schema_version') != 1 or value.get('scope') not in ('deployment', 'configured')
+            or not isinstance(rows, list) or len(rows) != 3
+            or any(not isinstance(row, dict) for row in rows)
+            or {row.get('role') for row in rows} != set(roles)):
+        raise ValueError('invalid Display deployment bindings; explicit repair required')
+    identities = [_identity({'uuid': row.get('vm_id')}) for row in rows]
+    if len(set(identities)) != 3 or any(row.get('expected_os') != roles[row['role']] for row in rows):
+        raise ValueError('invalid Display role identity or OS')
     return value
 
 
-def sync_bindings(records, *, bindings_path=BINDINGS_PATH, owner_uid=0):
-    """현재 등록된 세 VM UUID를 deployment Display binding으로 게시한다."""
-    if not isinstance(records, dict):
-        raise ValueError('Display binding requires the registered VM map')
-    primary = _record_by_id(records, 'zephyr-drive-a')
-    backup = _record_by_id(records, 'zephyr-drive-b')
-    interaction = _interaction_record(records)
-    bindings = {
-        'schema_version': 1,
-        'scope': 'deployment',
-        'bindings': [
-            {'vm_id': _identity(primary), 'role': 'primary_drive', 'expected_os': 'zephyr',
-             'app_ids': ['autonomous', 'manual'], 'app_topic_scope': 'vm_scoped',
-             'report_profile': 'warm-drive-1', 'agent_supported': False},
-            {'vm_id': _identity(backup), 'role': 'backup_drive', 'expected_os': 'zephyr',
-             'app_ids': ['autonomous', 'manual'], 'app_topic_scope': 'vm_scoped',
-             'report_profile': 'warm-drive-1', 'agent_supported': False},
-            {'vm_id': _identity(interaction), 'role': 'interaction', 'expected_os': 'debian',
-             'app_id': 'interaction', 'agent_supported': True},
-        ],
-    }
-    path = Path(bindings_path)
-    previous = _binding_target(path, owner_uid)
-    if previous == bindings:
-        return {'state': 'unchanged', 'path': str(path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}
-    atomic_write(path, json.dumps(bindings, indent=2) + '\n', mode=0o644)
-    return {'state': 'updated', 'path': str(path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}
+@contextmanager
+def configuration_lock(path, owner_uid=0):
+    """표시 설정만 무대기 직렬화한다. VM 관리/admission 잠금은 사용하지 않는다."""
+    parent = Path(path).parent
+    info = parent.stat()
+    if (parent.is_symlink() or parent.resolve() != parent or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != owner_uid or info.st_mode & 0o022):
+        raise ValueError('Display configuration parent is unsafe')
+    fd = os.open(parent / '.display-config.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError('Display configuration lock is unsafe')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _entry(path, value, mode):
+    path = Path(path)
+    old = path.read_bytes() if path.exists() else None
+    return path, (json.dumps(value, indent=2) + '\n').encode(), mode, old
+
+
+def _publish(entries):
+    """전체 검증 뒤 게시한다. 쓰기 실패는 자기 변경만 되돌리며 전원 단절의 다중 파일 원자성을 주장하지 않는다."""
+    changed = []
+    for path, _, _, old in entries:
+        if (path.read_bytes() if path.exists() else None) != old:
+            raise ValueError('Display configuration changed before publication')
+    try:
+        for path, content, mode, old in entries:
+            if content == old:
+                continue
+            changed.append((path, content, mode, old))
+            atomic_write(path, content.decode("utf-8"), mode=mode)
+    except OSError as error:
+        rollback_failed = False
+        for path, content, mode, old in reversed(changed):
+            try:
+                current = path.read_bytes() if path.exists() else None
+                if current == old:
+                    continue
+                if current != content:
+                    rollback_failed = True
+                elif old is None:
+                    path.unlink()
+                    from xenova_runtime import sync_directory
+                    sync_directory(path.parent)
+                else:
+                    atomic_write(path, old.decode("utf-8"), mode=mode)
+            except OSError:
+                rollback_failed = True
+        if rollback_failed:
+            raise OSError('Display configuration publication/rollback incomplete; inspect before activation') from error
+        raise
+    return [path.name for path, _, _, _ in changed]
+
+
+def _project(records, bindings, *, runtime_path, mobile_path, bindings_path, owner_uid, execute=True):
+    rows = {row['role']: row for row in bindings['bindings']}
+    for role in ('primary_drive', 'backup_drive'):
+        matches = [r for r in records.values() if r.get('uuid') == rows[role]['vm_id']]
+        if len(matches) != 1 or matches[0].get('guest_kind') != 'zephyr':
+            raise ValueError('selected Display drive role is not registered')
+    interaction = _interaction_record(records, rows['interaction']['vm_id'])
+    origin = f"http://{_address(interaction.get('ipv4'))}:8086"
+    entries = []
+    for path, private, transform in ((Path(runtime_path), False, _runtime), (Path(mobile_path), True, _mobile)):
+        if path.exists() or path.is_symlink():
+            value, mode = _load(path, owner_uid=owner_uid, private=private)
+            entries.append(_entry(path, transform(value, origin), mode))
+    # 역할과 모든 UI 입력을 확인한 뒤 bindings를 마지막에 게시한다.
+    _binding_target(bindings_path, owner_uid)
+    entries.append(_entry(bindings_path, bindings, 0o644))
+    changed = (_publish(entries) if execute else
+               [path.name for path, content, _, old in entries if content != old])
+    ui_changed = [name for name in changed if name != Path(bindings_path).name]
+    return {'ui': {'state': 'updated' if ui_changed else ('unchanged' if len(entries) > 1 else 'not-configured'),
+                   'ui_origin': origin, 'page': COMBINED_PAGE, 'changed': ui_changed},
+            'bindings': {'state': 'updated' if Path(bindings_path).name in changed else 'unchanged',
+                         'path': str(bindings_path), 'vm_ids': [row['vm_id'] for row in bindings['bindings']]}}
+
+
+def sync_bindings(records, *, bindings_path=BINDINGS_PATH, owner_uid=0, interaction_vm_id=None):
+    """factory의 명시 UUID 또는 기존 선택만 사용한다. 템플릿으로 역할을 추측하지 않는다."""
+    with configuration_lock(bindings_path, owner_uid):
+        previous = _binding_target(bindings_path, owner_uid)
+        if previous is not None:
+            bindings = previous
+        else:
+            if interaction_vm_id is None:
+                raise ValueError('explicit initial Interaction VM UUID required')
+            primary = _record_by_id(records, 'zephyr-drive-a')
+            backup = _record_by_id(records, 'zephyr-drive-b')
+            interaction = _interaction_record(records, str(UUID(interaction_vm_id)))
+            bindings = {'schema_version': 1, 'scope': 'deployment', 'bindings': [
+                {'vm_id': _identity(primary), 'role': 'primary_drive', 'expected_os': 'zephyr',
+                 'app_ids': ['autonomous', 'manual'], 'app_topic_scope': 'vm_scoped',
+                 'report_profile': 'warm-drive-1', 'agent_supported': False},
+                {'vm_id': _identity(backup), 'role': 'backup_drive', 'expected_os': 'zephyr',
+                 'app_ids': ['autonomous', 'manual'], 'app_topic_scope': 'vm_scoped',
+                 'report_profile': 'warm-drive-1', 'agent_supported': False},
+                {'vm_id': _identity(interaction), 'role': 'interaction', 'expected_os': 'debian',
+                 'app_id': 'interaction', 'agent_supported': True}]}
+        return _project(records, bindings, runtime_path=Path(bindings_path).parent/'display-runtime.json',
+                        mobile_path=Path(bindings_path).parent/'display-mobile.json',
+                        bindings_path=bindings_path, owner_uid=owner_uid)['bindings']
+
+
+def select_interaction(records, identity, expected_identity, *, runtime_path=RUNTIME_PATH,
+                       mobile_path=MOBILE_PATH, bindings_path=BINDINGS_PATH, owner_uid=0, execute=False):
+    """현재 선택 UUID를 조건으로 화면 담당만 명시 교체한다. VM이나 출력 권한은 조작하지 않는다."""
+    identity, expected_identity = str(UUID(identity)), str(UUID(expected_identity))
+    with configuration_lock(bindings_path, owner_uid):
+        previous = _binding_target(bindings_path, owner_uid)
+        if previous is None:
+            raise ValueError('initial Display bindings required; no implicit role assignment')
+        current = next(row['vm_id'] for row in previous['bindings'] if row['role'] == 'interaction')
+        if current not in (expected_identity, identity):
+            raise ValueError('Interaction selection changed; read current bindings before retrying')
+        _interaction_record(records, identity)
+        updated = {**previous, 'bindings': [({**row, 'vm_id': identity} if row['role'] == 'interaction' else row)
+                                            for row in previous['bindings']]}
+        if not execute:
+            _project(records, updated, runtime_path=runtime_path, mobile_path=mobile_path,
+                     bindings_path=bindings_path, owner_uid=owner_uid, execute=False)
+            return {'plan': True, 'previous_vm_id': current, 'interaction_vm_id': identity}
+        return _project(records, updated, runtime_path=runtime_path, mobile_path=mobile_path,
+                        bindings_path=bindings_path, owner_uid=owner_uid)
 
 
 def sync_after_registration(records, registered, *, runtime_path=RUNTIME_PATH,
-                            mobile_path=MOBILE_PATH, bindings_path=BINDINGS_PATH,
-                            owner_uid=0):
-    """영구 등록이 끝난 뒤 가능한 Display projection만 갱신한다.
-
-    세 역할이 아직 모두 등록되지 않은 최초 설치 중에는 bindings를 만들지 않는다.
-    잘못되거나 중복된 역할은 pending으로 숨기지 않고 sync_bindings가 거부한다.
-    """
-    if not isinstance(registered, dict):
-        raise ValueError('Display sync requires the registered VM')
-    interaction = (registered.get('guest_kind') == 'linux'
-                   and registered.get('template_id') == 'debian-13-arm64')
-    ui = (sync_interaction_ui(registered.get('ipv4'), runtime_path=runtime_path,
-                              mobile_path=mobile_path, owner_uid=owner_uid)
-          if interaction else {'state': 'not-requested'})
-
-    drive_a = [record for key, record in records.items()
-               if key == 'zephyr-drive-a' or record.get('id') == 'zephyr-drive-a']
-    drive_b = [record for key, record in records.items()
-               if key == 'zephyr-drive-b' or record.get('id') == 'zephyr-drive-b']
-    interactions = [record for record in records.values()
-                    if record.get('guest_kind') == 'linux'
-                    and record.get('template_id') == 'debian-13-arm64']
-    if not drive_a or not drive_b or not interactions:
-        bindings = {'state': 'pending', 'reason': 'three-display-roles-not-registered'}
-    else:
-        bindings = sync_bindings(records, bindings_path=bindings_path, owner_uid=owner_uid)
-    return {'ui': ui, 'bindings': bindings}
+                            mobile_path=MOBILE_PATH, bindings_path=BINDINGS_PATH, owner_uid=0):
+    """등록만으로 역할을 바꾸지 않는다. 선택된 같은 UUID의 투영만 동기화한다."""
+    with configuration_lock(bindings_path, owner_uid):
+        previous = _binding_target(bindings_path, owner_uid)
+        if previous is None:
+            return {'ui': {'state': 'not-requested'},
+                    'bindings': {'state': 'pending', 'reason': 'explicit-display-roles-not-configured'}}
+        if registered.get('uuid') not in {row['vm_id'] for row in previous['bindings']}:
+            return {'ui': {'state': 'not-requested'}, 'bindings': {'state': 'unchanged'}}
+        return _project(records, previous, runtime_path=runtime_path, mobile_path=mobile_path,
+                        bindings_path=bindings_path, owner_uid=owner_uid)
 
 
 def _systemctl(arguments, *, run):

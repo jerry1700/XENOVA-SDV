@@ -97,6 +97,7 @@ def test_idle_empty_and_ready_empty_are_distinct_and_hint_is_not_renewed(owned_p
 def test_owner_wait_has_single_use_readable_hint_idle_no_spin_stop_and_close(owned_port,monkeypatch):
     sink,master,now=owned_port;reads=[];waits=[];read=sink._read_owned
     initial=threading.Event();receive=threading.Event();after_ready_idle=threading.Event()
+    idle_wait = threading.Event()
     def measured(ready):
         reads.append(ready)
         value=read(ready)
@@ -109,22 +110,26 @@ def test_owner_wait_has_single_use_readable_hint_idle_no_spin_stop_and_close(own
     monkeypatch.setattr(sink._serial,'read',no_public_read)
     wait=OutputOwner._wait_io
     def waited(owner,delay):
-        waits.append(delay);return wait(owner,delay)
+        waits.append(delay)
+        if delay is None:
+            idle_wait.set()
+        return wait(owner,delay)
     monkeypatch.setattr(OutputOwner,'_wait_io',waited)
     owner=OutputOwner(sink,command_timeout_s=.1,clock=lambda:now[0])
     try:
         assert initial.wait(1)
         os.write(master,hello_ack(sink.pi_session,str(uuid4())))
-        assert receive.wait(1) and after_ready_idle.wait(1)
+        assert receive.wait(1) and idle_wait.wait(1)
         assert sink.ready and owner.first_failure is None
         # One initial poll and at most one poll per existing wait. No second
         # readiness call/read loop exists inside the owned receive helper.
-        assert len(reads)<=len(waits)+1 and all(delay>0 for delay in waits)
+        assert reads == [False, True]
+        assert len(reads)<=len(waits)+1 and all(delay is None or delay>0 for delay in waits)
         submission=owner.submit_stop(StopFrame(42,0,1),now[0])
         assert submission.event.wait(1)
         receipt=submission.outcome();assert isinstance(receipt.frame,StopFrame)
         assert parse_command(bytes.fromhex(receipt.metadata['wire_hex']))[-1]==receipt.frame
-        assert reads[0] is False and True in reads and reads[-1] is False
+        assert after_ready_idle.wait(1) and reads[-1] is False
         fds=owner._wake_read,owner._wake_write
     finally:owner.close()
     assert not owner.thread.is_alive() and not sink._serial.is_open

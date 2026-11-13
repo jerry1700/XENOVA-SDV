@@ -32,6 +32,8 @@ class DisplayGuestAccountTest(unittest.TestCase):
         (self.web / "assets").mkdir(parents=True)
         (self.web / "index.html").write_text('<div id="root"></div>')
         (self.web / "assets/index-test.js").write_text('const route="/display/mobile";')
+        (self.web / "assets/interaction-theme-Test_1.mp3").write_bytes(b"ID3fixture")
+        (self.web / "favicon.png").write_bytes(b"png")
         self.enabled = []
         self.owned = []
 
@@ -80,7 +82,8 @@ class DisplayGuestAccountTest(unittest.TestCase):
         self.assertEqual((installed_web / "index.html").read_text(), '<div id="root"></div>')
         self.assertEqual(result["web"]["root"], "/opt/xenova/display-web")
         self.assertEqual(result["web"]["revision"], "abcdef1")
-        self.assertEqual(set(result["web"]["files"]), {"index.html", "assets/index-test.js"})
+        self.assertEqual(set(result["web"]["files"]), {"index.html", "favicon.png", "assets/index-test.js",
+                                                       "assets/interaction-theme-Test_1.mp3"})
         self.assertRegex(result["web"]["tree_sha256"], r"^[0-9a-f]{64}$")
         config = self.root / "etc/xenova/guest-display-domu.json"
         self.assertEqual(json.loads(config.read_text()), {
@@ -174,6 +177,24 @@ class DisplayGuestAccountTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "index.html"):
             display_guest.install_web_assets(self.root, self.web.resolve(), "abcdef1")
 
+    def test_web_assets_reject_files_the_guest_app_cannot_serve(self):
+        # 1.0.7 회귀: public/audio/*.mp3는 이미지에 들어갔지만 guest app이 404를 냈다.
+        (self.web / "audio").mkdir()
+        (self.web / "audio/interaction-theme.mp3").write_bytes(b"ID3fixture")
+        with self.assertRaisesRegex(ValueError, "not servable by the guest app: audio/interaction-theme.mp3"):
+            display_guest.install_web_assets(self.root, self.web.resolve(), "abcdef1")
+        self.assertFalse((self.root / "opt/xenova/display-web").exists())
+        (self.web / "audio/interaction-theme.mp3").unlink()
+        (self.web / "audio").rmdir()
+        (self.web / "assets/README.txt").write_text("notes")
+        with self.assertRaisesRegex(ValueError, "assets/README.txt"):
+            display_guest.install_web_assets(self.root, self.web.resolve(), "abcdef1")
+
+    def test_web_asset_rule_is_read_from_the_installed_guest_app(self):
+        pattern = display_guest.guest_app_asset_pattern()
+        self.assertTrue(pattern.fullmatch("/assets/interaction-theme-BL9Fpv_x.mp3"))
+        self.assertIsNone(pattern.fullmatch("/audio/interaction-theme.mp3"))
+
     def test_installed_guest_app_serves_screen_assets_and_dom0_data(self):
         display_guest.prepare(self.root, display_guest.POLICY,
                               web_assets=self.web.resolve(), web_revision="abcdef1",
@@ -228,6 +249,10 @@ class DisplayGuestAccountTest(unittest.TestCase):
                 asset = connection.getresponse()
                 self.assertEqual(asset.status, 200)
                 self.assertIn(b'/display/mobile', asset.read())
+                connection.request("GET", "/assets/interaction-theme-Test_1.mp3")
+                audio = connection.getresponse()
+                self.assertEqual((audio.status, audio.getheader("Content-Type"), audio.read()),
+                                 (200, "audio/mpeg", b"ID3fixture"))
                 connection.request("GET", "/api/v1/display/presentation")
                 data = connection.getresponse()
                 self.assertEqual(data.status, 200)

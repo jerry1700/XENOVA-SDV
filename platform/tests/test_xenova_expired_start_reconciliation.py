@@ -92,6 +92,79 @@ class ExpiredStartTest(unittest.TestCase):
         self.f.fails(self.replay(), 'RECONCILE_REQUIRED')
         self.assertEqual((self.run_path.read_bytes(), self.path.read_bytes()), before)
 
+    def test_new_start_automatically_closes_its_expired_blocker(self):
+        self.fail_submission = False
+        started = self.f.call('start', key='new-after-expiration')
+        self.f.ok(started)
+        original = json.loads(self.path.read_text())
+        self.unchanged_fields(original)
+        self.assertEqual(original['phase'], 'failed')
+        self.assertEqual(original['reconciliation']['original_error'], self.original['error'])
+        self.assertEqual(original['reconciliation']['physical_commands'], 0)
+        self.assertEqual(len(self.f.physical('create')), 1)
+        self.assertNotEqual(started['operation_id'], original['operation_id'])
+
+    def test_absent_reboot_owner_is_closed_without_replacing_newer_running_intent(self):
+        self.fail_submission = False
+        self.f.start(key='owned-first-start')
+        command = self.p.command
+        def failed_reboot(argv, **kwargs):
+            if argv[:1] == [guest.sys.executable] and 'reboot' in argv:
+                raise PlatformError('original reboot helper timed out')
+            return command(argv, **kwargs)
+
+        with patch.object(self.p, 'command', side_effect=failed_reboot):
+            reboot = self.f.fails(self.f.call('reboot', key='old-reboot'), 'RECONCILE_REQUIRED')
+        path = self.p.data/'control-requests'/(reboot['operation_id']+'.json')
+        original = json.loads(path.read_text())
+        scope = self.p.execution().run_record(self.r)['process_scope']
+        self.f.start(key='start-observing-old-incarnation')
+        intent = self.p.execution().intent(self.r)
+        self.f.ticks = original['deadline_monotonic_ms']/1000 + 1
+        self.f.xen.rows.clear()
+        spec = self.f.spec('start-if-absent')
+        before = len(self.f.physical('create'))
+        # Older recovery recorded a second uncertain attempt at the prior-owner guard.
+        from xenova_recovery import Recovery
+        legacy = Recovery(self.f.m)
+        legacy_id = foundation.uuid4()
+        legacy_spec = {**spec, 'recovery_attempt_id':legacy_id,
+                       'deadline_monotonic_ms':original['deadline_monotonic_ms']}
+        legacy_op_id = foundation.uuid4()
+        cause = {'code':'RECONCILE_REQUIRED', 'message':execution.EARLIER_LAUNCH,
+                 'retryable':False, 'details':{}}
+        legacy_error = {**cause, 'details':{'failed_phase':'launching', 'cause':cause}}
+        legacy.save({'schema_version':'1.0', 'operation_id':legacy_op_id,
+                     'recovery_attempt_id':legacy_id, 'request':legacy_spec,
+                     'request_hash':execution.fingerprint(legacy_spec), 'host_boot_id':self.f.host,
+                     'cpu_policy':original['cpu_policy'], 'accepted_monotonic_ms':1000,
+                     'error':legacy_error, 'result':None}, 'uncertain')
+
+        with patch.object(guest, 'check_reboot_quiescent',
+                          side_effect=execution.ExecutionError('RECONCILE_REQUIRED', 'helper still present')):
+            self.f.fails(self.f.recover(spec), 'RECONCILE_REQUIRED')
+        self.assertEqual(json.loads(path.read_text()), original)
+        self.assertEqual(len(self.f.physical('create')), before)
+        spec = self.f.spec('start-if-absent')
+        with patch.object(guest, 'check_reboot_quiescent') as process_check:
+            self.f.ok(self.f.recover(spec))
+        self.assertEqual(process_check.call_args.args[2]['process_scope'], scope)
+        settled = json.loads(path.read_text())
+        self.assertEqual(settled['phase'], 'failed')
+        self.assertEqual(settled['operation_id'], original['operation_id'])
+        self.assertEqual(settled['request'], original['request'])
+        self.assertEqual(settled['deadline_monotonic_ms'], original['deadline_monotonic_ms'])
+        self.assertEqual(settled['reconciliation']['outcome'], 'expired_absent_reboot')
+        self.assertEqual(settled['reconciliation']['original_error'], original['error'])
+        closed = legacy.read_attempt(legacy_id)
+        self.assertEqual(closed['phase'], 'failed')
+        self.assertEqual(closed['operation_id'], legacy_op_id)
+        self.assertEqual(closed['reconciliation']['outcome'], 'not_submitted')
+        self.assertEqual(closed['reconciliation']['original_error'], legacy_error)
+        self.assertEqual(self.p.execution().intent(self.r), intent)
+        self.assertEqual(len(self.f.physical('create')), before+1)
+        self.assertEqual(self.f.physical('destroy'), [])
+
     def test_live_scope_is_not_killed_or_closed(self):
         self.scope_state, self.scope_active = 'loaded', 'active'
         before = self.run_path.read_bytes(), self.path.read_bytes()

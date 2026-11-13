@@ -29,8 +29,8 @@
 
 ## 부팅 진행·지연·실패 표시
 
-화면을 사용할 수 있게 된 뒤 `xenova-boot-status.service`가 systemd와 현재 부팅의
-보조 진행 기록을 읽어 로그인 전 안내문을 갱신한다. VM을 시작·정지하거나 준비 여부를
+부팅 중 `xenova-boot-status.service`가 systemd와 현재 부팅의
+보조 진행 기록을 읽어 상태와 실패 이력을 저장한다. VM을 시작·정지하거나 준비 여부를
 판정하는 서비스가 아니다. 표시기 없이도 기존 부팅과 로그인이 진행된다. 커널·PID1 정지나 표시기 실행 전 문제를
 이 서비스가 관측할 수 있다고 가정하지 않는다.
 
@@ -72,33 +72,26 @@ dom0 Linux의 `console=hvc0`는 Xen PV 콘솔 경로이며 Xen의 `console=dtuar
 정상 U-Boot 경로는 `/chosen` 전체를 출력하지 않는다. `xenova_debug=1`일 때만
 Xen·dom0의 bootargs 두 속성을 출력하며 firmware 난수 seed는 덤프하지 않는다.
 
-HDMI의 텍스트 VT는 기존 `getty@tty1`과 agetty가 소유한다. 표시기는 VT를 직접 열거나
-전환하지 않고 `/run/issue.d/90-xenova.issue`와 agetty의 reload trigger만 갱신한다.
-agetty는 입력 전의 로그인 안내문만 다시 읽고, 사용자 이름의 첫 문자를 읽으면 갱신을
-멈춘다. 암호 입력·로그인 셸에 별도 출력을 주입하지 않는다. 키 입력을 기다리는
-새 부팅 장벽도 없다. SSH 명령 출력과 셸 초기화는 변경하지 않는다.
+HDMI 텍스트 로그인은 `getty@tty1`, 시리얼 케이블 로그인은 `serial-getty@hvc0`가
+담당한다. 각 콘솔의 agetty가 시작할 때 기존 XENOVA 배너와 로그인 프롬프트를 표시한다.
+부팅 상태 서비스는 로그인 안내를 다시 그리지 않는다. Xen 이미지는 dom0에 노출되지
+않는 `ttyS0`용 getty 자동 시작 링크를 제거한다.
 
-초기 VT의 한글 폰트 지원을 전제하지 않으므로 로그인 전 안내는 ASCII다. 상세 명령은
-UTF-8 표시 이름을 보존한다. 한글 렌더러가 없는 VT에서 실제 한글 모양을 그리는
-기능을 추가한 것은 아니다. hvc0의 기존 agetty에도 같은 평문 안내가 표시될 수 있다.
-표시기는 ANSI 재출력·강제 VT 전환·PAM·계정·mount namespace를 변경하지 않는다.
-
-별도로 설치한 kmscon이나 그래픽 키오스크는 자신의 화면을 계속 소유한다. 이 표시기는
-그 화면을 덮거나 전환하지 않는다. 해당 렌더러에서 issue를 읽지 않으면 자동 안내가
-보이지 않으며, 기존 로그인·SSH에서 아래 명령으로 조회한다. 실제 HDMI 인계 수락은
-설치된 renderer·getty 구성과 물리 화면을 함께 확인해야 한다.
-
-고정 getty는 sysinit 뒤에 시작한다. 따라서 그 이전 저장소 준비가 오래 걸리면 보조
-진행 기록은 쌓여도 HDMI에는 getty 시작 후에 표시된다. 이 구간의 실시간 HDMI 진행은
-현재 지원 범위가 아니며 hvc0의 기본 오류 경로를 사용한다. 표시기를 일찍 실행하는 것과
-화면 renderer가 일찍 준비되는 것은 별개다.
+부팅 진행과 실패 이력은 로그인 후 아래 명령으로 조회한다. 상세 명령은 UTF-8 표시
+이름을 보존하며, ASCII가 필요한 터미널에서는 `--ascii`를 쓸 수 있다. 그래픽 키오스크는
+자신의 화면을 계속 소유한다.
 
 `systemd.show_status=true`는 간결한 unit 시작·종료 상태 전체를, `error`는 실패 상태를
 표시한다. `auto`는 평소 조용히 있다가 상당한 부팅 지연이 생기면 표시를 켠다.
 현재 기본값은 `error`를 유지하며 이 선택은 journal 수집 수준과 다르다.
-의미의 근거는 [systemd 문서](https://www.freedesktop.org/software/systemd/man/latest/systemd.html#systemd.show_status)와
-[agetty 구현](https://github.com/util-linux/util-linux/blob/v2.41.5/term-utils/agetty.c)의
-입력 전 issue 갱신 경계다.
+의미의 근거는 [systemd 문서](https://www.freedesktop.org/software/systemd/man/latest/systemd.html#systemd.show_status)다.
+
+### 재부팅 뒤 dom0 저널 확인
+
+Pi 4 이미지는 `/var/log/journal`을 dom0 rootfs의 `/var/log-persistent/journal`에
+연결한 뒤 기존 `systemd-journal-flush.service`로 초기 로그를 옮긴다.
+저널 보관 상한은 64MiB, 파일 단위 상한은 8MiB다. 다음 부팅에서
+`journalctl -b -1`로 이전 부팅을 확인한다.
 
 ### 자세히 확인하기
 
@@ -125,15 +118,11 @@ unit 실행의 성공을 현재 것으로 사용하지 않는다. `/run/xenova/b
 둘 다 관리 원장이나 영구 보관소가 아니다. 진행 게시 실패는 기존 필수 journal·결과
 저장·JSON stdout을 바꾸지 않는다. 원인 문자열 전체나 인증 설정은 화면에 싣지 않는다.
 
-표시 서비스는 5초 간격으로 최대 600초 동안 관측하고, 상태 변화에 안내문을 갱신한다.
-지연의 경과시간만 바뀌면 최대 30초 간격으로 갱신한다. 종료 뒤에도 마지막 안내는
-남지만 현재 상태의 보장이 아니므로 상세 명령으로 다시 읽는다. 실패 요약을 남기기
-위해 로그인이나 정상 VM을 막지 않는다. 표시용 데이터가 불완전하면 그 한계를 표시한다.
+상태 서비스는 5초 간격으로 최대 600초 동안 관측한다. 종료 뒤에도 마지막 보조 상태는
+남고, 현재 상태는 상세 명령으로 다시 읽는다. 데이터가 불완전하면 그 한계를 표시한다.
 
-표시만 중지하려면 `systemctl disable --now xenova-boot-status.service`를 사용한다.
-기존 VM·부팅 unit·getty에는 중지 의존성이 없다. 안내 파일까지 없애려면 표시기를
-중지한 뒤 **표시기 소유 파일** `/run/issue.d/90-xenova.issue`만 제거하고
-`agetty --reload`를 실행한다. `/etc/issue`나 기존 로그인 설정은 건드리지 않는다.
+자동 관측을 중지하려면 `systemctl disable --now xenova-boot-status.service`를 사용한다.
+기존 VM·부팅 unit·getty는 독립적으로 실행된다.
 
 
 배포 파일·의존성·설정 공급·내부 reader/writer 교체와 Gateway의 비활성 unit은 [배포 준비](deployment-readiness.md)를 따른다.

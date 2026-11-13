@@ -8,6 +8,7 @@ from dataclasses import replace
 import io
 import json
 import struct
+import socket
 from contextlib import redirect_stderr
 from types import SimpleNamespace
 import unittest
@@ -15,7 +16,7 @@ import unittest
 from xenova_drive_world import schema, encode, decode
 from xenova_drive_world.mapper_clock import (ClockPolicy, MapperClockOwner, MapperClockError,
     build_probe, candidate_body, parse_candidate, plan_json, parse_plan, restore_returned_probe)
-from xenova_gateway.mapper_uplink import UplinkProfile, GatewayMapperUplink, frame, unframe
+from xenova_gateway.mapper_uplink import UplinkProfile, GatewayMapperUplink, frame, unframe, _Link
 from xenova_gateway.config import parse
 
 
@@ -68,6 +69,21 @@ def header(kind='SOURCE_VEHICLE'):
 
 
 class MapperUplinkTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(socket, 'SOCK_SEQPACKET'), 'POSIX seqpacket required')
+    def test_local_receive_checks_time_after_read_without_extending_original_expiry(self):
+        left,right=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+        self.addCleanup(left.close);self.addCleanup(right.close)
+        link=_Link(left,(uid(1),uid(4),uid(20),uid(21)))
+        original=header();right.send(frame(original,b'payload'))
+        # 회차가 시작한 뒤 상대가 발급한 정상 메시지는 미래 발급 오류가 아니다.
+        self.assertEqual(link.receive(999999,clock=lambda:1000001),[(original,b'payload')])
+        expired=dict(original,message_sequence='2');right.send(frame(expired,b'old'))
+        self.assertEqual(link.receive(1000001,clock=lambda:1200000),[])
+        future=dict(original,message_sequence='3',issued_pi_us='1200001',expires_pi_us='1300000')
+        right.send(frame(future,b'future'))
+        with self.assertRaisesRegex(ValueError,'J_LOCAL_FUTURE'):
+            link.receive(1200000,clock=lambda:1200000)
+
     def test_two_consistent_probes_expand_offset_and_preserve_prior_trust_on_next_probe(self):
         clock = owner()
         first, _, _ = exchange(clock, 1000000)

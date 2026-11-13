@@ -291,7 +291,8 @@ class MapperMapping:
             map_frame_id='odom:'+self._context.odom_epoch,body=self.calibration.body,
             method_manifest_sha256=self.profile.sha256,input_kind='LIVE',calibration_profile=self.calibration,
             parking_aisles=self.profile.parking_aisles,aisle_lane_indices=self._roles,crossing=self._crossing,
-            lane_profile=self.profile.pipeline.registration,clock_us=self._completion_clock)
+            lane_profile=self.profile.pipeline.registration,road_geometry_limits=self.profile.pipeline.road_limits,
+            clock_us=self._completion_clock)
         scope=scope.with_parking_method(catalogs._accepted.parking.method)
         collector.rebind_scope(scope)
         if self._complete is not None:scope=catalogs.restore_complete(self._complete,current_scope=scope,now_us=now_us);collector.rebind_scope(scope)
@@ -550,21 +551,36 @@ class MapperMapping:
                     capture=sha256(canonical(draft.frame.observation.rgb.stamp.key)).hexdigest()
                     root=collector._reference_geometry.get(capture,collector._rgb_refs.get(capture))
                     if root is None:raise MappingNotReady('actual original RGB provenance missing')
+                    temporal_root=None
+                    temporal=result.mapped_road
+                    if (temporal is not None and result.summary.get('localization_qualified') is True
+                            and self._crossing is not None and temporal.within(self.profile.pipeline.road_limits)):
+                        temporal_root=collector.temporal_lane_root(temporal)
+                    parking_root=None
+                    if result.parking_tape_history and result.summary.get('localization_qualified') is True:
+                        key=draft.frame.observation.rgb.stamp.key
+                        parking_root=collector.temporal_rgb_root(key,frozenset((key, *(k for k,_ in result.parking_tape_history))))
                     evidence=EvidenceTable(tuple(collector._records[key] for key in sorted(collector._records)),
                         tuple(collector._contexts[key] for key in sorted(collector._contexts)))
-                    pose=draft.inputs.pose
-                    if result.registration is not None and result.registration.status=='BOUNDED':
+                    pose=result.mapped_odometry
+                    if pose is None:
+                        pose=draft.inputs.pose
+                    if result.mapped_odometry is None and result.registration is not None and result.registration.status=='BOUNDED':
                         fit=result.registration;pose=replace(pose,sample=replace(pose.sample,x=fit.representative[0],
                             y=fit.representative[1],yaw=fit.representative[2],position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
-                    elif draft.pipeline._alignment is not None:pose=draft.pipeline._alignment.apply(pose)
+                    elif result.mapped_odometry is None and draft.pipeline._alignment is not None:
+                        _,pose=draft.pipeline._propagate_odometry(pose)
                     if list((pose.sample.x,pose.sample.y,pose.sample.yaw))!=result.summary.get('mapped_pose'):
                         raise MappingNotReady('catalog pose differs from actual mapped result')
                     grid=draft.pipeline.grid;spec=grid.spec;x,y=spec.origin_xy
+                    alignment=draft.pipeline._alignment
                     catalog=self.catalogs.prepare(draft.original_job,result,context=draft.context,stamp=draft.frame.observation.rgb.stamp,
-                        capture_prior=pose,registration_revision=0 if draft.pipeline.reference is None else draft.pipeline.reference.revision,
+                        capture_prior=pose,registration_revision=0 if alignment is None or not alignment.has_metadata
+                            else alignment.registration_revision,
                         prior_qualified=result.summary.get('localization_qualified') is True,
                         metric_evidence=self.catalogs.metric_from_frame(draft.frame),lane_provenance_ids=(root,root),
-                        base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m))
+                        base_evidence=evidence,now_us=now_us,roi_bounds=(x,y,x+spec.width*spec.resolution_m,y+spec.height*spec.resolution_m),
+                        temporal_provenance_id=temporal_root,parking_provenance_id=parking_root)
                     if self._atlas is not None:
                         atlas=self._atlas.prepare_frame(grid,collector._atlas_proof)
         except AtlasResource:ready=False;reason='ATLAS_RESOURCE'

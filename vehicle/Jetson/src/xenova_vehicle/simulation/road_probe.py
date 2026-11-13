@@ -78,7 +78,7 @@ def road_error_diagnostics(graph, profile, result):
         step = max(b-a for a, b in zip(hypothesis.station_s, hypothesis.station_s[1:]))
         terms = dict(chain_tube_max_m=max(chain.error for chain in used),
             station_error_m=profile.station_error_m,
-            missing_outer_prior_m=(profile.lane_width_max_m-profile.lane_width_min_m)/2
+            missing_outer_prior_m=profile.missing_outer_width_error_m
                 if any(chain is None for chain in roles) else 0.,
             heading_width_pad_m=maximum_width*math.sin(yaw),
             curvature_station_pad_m=profile.max_curvature_1pm*step*step/8)

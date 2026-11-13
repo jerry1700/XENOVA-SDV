@@ -4,11 +4,12 @@
 representative/bound로만 변환을 교체하고, 상관된 오차를 표본 수로 나누지 않는다.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 
 from .odometry import PoseEstimate
 from .registration import transform_point, wrap_yaw
+from .wheel_motion import relative_wheel_bounds, wheel_path_length_bound
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class MapOdomAlignment:
     valid_for_us: int | None = None
     position_drift_mps: float | None = None
     yaw_drift_rps: float | None = None
+    _matched_poses: tuple[PoseEstimate, PoseEstimate] | None = field(
+        init=False, default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if (type(self.pose) is not tuple or len(self.pose)!=3 or type(self.context) is not tuple or len(self.context)!=4
@@ -84,28 +87,99 @@ class MapOdomAlignment:
         rotated=transform_point((raw.x,raw.y),(0.,0.,yaw))
         angle_error=min(math.pi,goal.yaw_error_rad+raw.yaw_error_rad)
         error=goal.position_error_m+raw.position_error_m+2*math.hypot(raw.x,raw.y)*math.sin(angle_error/2)
-        return cls((goal.x-rotated[0],goal.y-rotated[1],yaw),error,angle_error,raw.context,
+        alignment = cls((goal.x-rotated[0],goal.y-rotated[1],yaw),error,angle_error,raw.context,
             observed_j_interval,registration_revision,valid_for_us,position_drift_mps,yaw_drift_rps)
+        object.__setattr__(alignment, '_matched_poses', (odom, fitted))
+        return alignment
 
-    def apply(self, odom):
+    def apply(self, odom, *, yaw_drift_rad=None):
         if type(odom) is not PoseEstimate or odom.sample.context!=self.context:
             raise ValueError('alignment cannot cross odom epoch/calibration/clock/origin')
-        raw=odom.sample
-        transform_angle=self.yaw_error_rad;position_drift=0.
+        elapsed_us=0
         if self.has_metadata:
             _interval(odom.captured_us)
             if odom.captured_us[1]<self.observed_j_interval[1]:raise ValueError('alignment cannot apply to an older original capture')
-            seconds=math.nextafter((odom.captured_us[1]-self.observed_j_interval[0])/1_000_000,math.inf)
-            position_drift=math.nextafter(self.position_drift_mps*seconds,math.inf) if self.position_drift_mps else 0.
-            yaw_drift=math.nextafter(self.yaw_drift_rps*seconds,math.inf) if self.yaw_drift_rps else 0.
+            elapsed_us=odom.captured_us[1]-self.observed_j_interval[0]
+        if yaw_drift_rad is not None:
+            return self._project(odom,elapsed_us,yaw_drift_rad=yaw_drift_rad)
+        return self._project(odom,elapsed_us)
+
+    def project_history(self, odom):
+        """첫 정합 전 선 관측을 원 시각과 오차로 지도에 옮긴다."""
+        if (type(odom) is not PoseEstimate or odom.sample.context!=self.context
+                or not self.has_metadata or self._matched_poses is None):
+            raise ValueError('historical observation requires its original matched odom context')
+        _interval(odom.captured_us)
+        if odom.captured_us[1]>self.observed_j_interval[0]:
+            raise ValueError('historical observation overlaps the alignment capture')
+        return self._project(odom,self.observed_j_interval[1]-odom.captured_us[0])
+
+    def project_neighbor(self, odom):
+        """Carry a fitted capture pose to a nearby raw sample, including overlapping intervals."""
+        if (type(odom) is not PoseEstimate or odom.sample.context!=self.context
+                or not self.has_metadata or self._matched_poses is None):
+            raise ValueError('neighbor projection requires an original matched odom context')
+        _interval(odom.captured_us)
+        lo,hi = self.observed_j_interval
+        start,end = odom.captured_us
+        return self._project(odom,max(abs(end-lo),abs(hi-start)))
+
+    @classmethod
+    def project_startup(cls, initial, odom, *, position_drift_mps, yaw_drift_rps):
+        """Propagate from the first odometry capture before a visual match exists."""
+        if initial.sample.context != odom.sample.context or odom.captured_us[1] < initial.captured_us[1]:
+            raise ValueError('startup projection requires the original odometry context and time order')
+        return cls.from_match(initial, initial)._project(odom, odom.captured_us[1] - initial.captured_us[0],
+            drift_rates=(position_drift_mps, yaw_drift_rps))
+
+    def _project(self, odom, elapsed_us, *, yaw_drift_rad=None, drift_rates=None):
+        raw=odom.sample
+        if self._matched_poses is not None:
+            original, fitted = self._matched_poses
+            if odom == original and fitted.captured_us == odom.captured_us:
+                return replace(odom,sample=fitted.sample,wheel_capture=None)
+        transform_angle=self.yaw_error_rad;position_drift=yaw_drift=0.
+        # Before the first visual anchor, the upstream pose budget can omit
+        # encoder quantization. Retain the wheel bound when it is wider.
+        combine_wheel_bound = max if drift_rates is not None else min
+        if self.has_metadata:
+            drift_rates = self.position_drift_mps, self.yaw_drift_rps
+        if drift_rates is not None:
+            seconds=math.nextafter(elapsed_us/1_000_000,math.inf)
+            position_rate, yaw_rate = drift_rates
+            position_drift=math.nextafter(position_rate*seconds,math.inf) if position_rate else 0.
+            yaw_drift=math.nextafter(yaw_rate*seconds,math.inf) if yaw_rate else 0.
+            if yaw_drift_rad is not None:
+                yaw_drift = yaw_drift_rad
             transform_angle=math.nextafter(transform_angle+yaw_drift,math.inf)
+        path_length = (wheel_path_length_bound(original,odom)
+            if self._matched_poses is not None and yaw_drift else None)
+        # 고정 방향 오차는 변위에, 이동 중 누적된 방향 오차는 주행 길이에 적용한다.
+        fixed_angle = transform_angle if path_length is None else self.yaw_error_rad
         x,y=transform_point((raw.x,raw.y),self.pose)
-        rotation=2*math.hypot(raw.x,raw.y)*math.sin(min(math.pi,transform_angle)/2)
+        rotation_scale=2*math.sin(min(math.pi,fixed_angle)/2)
+        rotation=math.hypot(raw.x,raw.y)*rotation_scale
         error=self.position_error_m+raw.position_error_m+rotation+position_drift
         angle=transform_angle+raw.yaw_error_rad
-        if angle>math.pi and not self.has_metadata:
+        if self._matched_poses is not None:
+            start, goal = original.sample, fitted.sample
+            distance = math.hypot(raw.x-start.x, raw.y-start.y)
+            # map 기준점 오차는 한 번 포함하고, yaw 오차는 기준점 이후 변위에 적용한다.
+            relative_error = (goal.position_error_m + start.position_error_m + raw.position_error_m
+                              + distance*rotation_scale + position_drift)
+            error = min(error, relative_error)
+            wheel_bounds = relative_wheel_bounds(original,odom)
+            if wheel_bounds is not None:
+                position, yaw = wheel_bounds
+                anchor_angle = goal.yaw_error_rad + (yaw_drift if path_length is None else 0.)
+                anchor_rotation = 2*math.sin(min(math.pi,anchor_angle)/2)
+                error = combine_wheel_bound(error,goal.position_error_m+position+distance*anchor_rotation+position_drift)
+                angle = combine_wheel_bound(angle,goal.yaw_error_rad+yaw+yaw_drift)
+        if path_length is not None:
+            error += 2*path_length*math.sin(min(math.pi,yaw_drift)/2)
+        if angle>math.pi and drift_rates is None:
             raise ValueError('alignment no longer bounds a usable heading')
-        if self.has_metadata:
+        if drift_rates is not None:
             error=math.nextafter(error,math.inf);angle=min(math.pi,math.nextafter(angle,math.inf))
         sample=replace(raw,x=x,y=y,yaw=wrap_yaw(raw.yaw+self.pose[2]),position_error_m=error,yaw_error_rad=angle)
         return PoseEstimate(sample,odom.captured_us,odom.bracket_us)

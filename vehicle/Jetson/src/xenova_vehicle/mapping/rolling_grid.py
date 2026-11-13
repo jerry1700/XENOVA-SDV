@@ -200,4 +200,6 @@ def reframe_grid(grid, new_window, live_tiles):
     grid.spec = target.spec
     for name in _ARRAYS: setattr(grid, name, getattr(target, name))
     grid.hit_view = target.hit_view
+    # 이 증거는 현재 ROI의 live capture에만 붙으며 보존 타일로 옮기지 않는다.
+    grid.boundary_free4 = target.boundary_free4
     grid.rolling_window = new_window

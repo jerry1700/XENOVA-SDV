@@ -8,8 +8,9 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 import json
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 import test_mapper_runtime_profile as runtime_fixture
@@ -69,6 +70,26 @@ class MapperProcessorMappingTests(unittest.TestCase):
         item=self.fixture.item(number,snapshot=snapshot)
         result=json.loads(self.processor.geometry(item,None,checkpoint))['latest']
         return item,result
+
+    def test_odometry_continuation_keeps_hazard_candidate_without_preparing_stale_scene(self):
+        processor=self.processor
+        processor._config=SimpleNamespace(survey=object())
+        processor._mapping_draft=SimpleNamespace(ready=True,result=SimpleNamespace(summary={
+            'rgb_updated':True,'localization_status':'ODOMETRY_CONTINUED',
+        }))
+        processor._scene=Mock()
+        hazard=SimpleNamespace(ready=True,revision=1)
+        processor._hazard=Mock()
+        processor._hazard.prepare.return_value=hazard
+
+        candidate=processor._prepare_frame_state(sensors=None)
+
+        self.assertEqual(candidate.sequence,processor._frame_sequence+1)
+        self.assertIs(candidate.hazard,hazard)
+        self.assertIsNone(candidate.scene)
+        self.assertEqual(processor._scene_status,'WAIT_VISUAL_REGISTRATION')
+        processor._scene.hazard.assert_called_once_with(hazard.revision,now_j_us=self.fixture.now)
+        processor._scene.prepare_frame.assert_not_called()
 
     def test_context_material_wait_diagnostic_then_actual_observer_and_cheap_final_adoption(self):
         processor=self.processor;original=processor._accepted

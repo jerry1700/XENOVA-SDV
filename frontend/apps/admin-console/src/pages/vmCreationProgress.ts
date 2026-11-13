@@ -6,8 +6,8 @@ export const VM_CREATION_LEAVE_MESSAGE =
 
 const LAST_DURATION_KEY = 'xenova.vm-create.last-duration-ms';
 const PENDING_CREATIONS_KEY = 'xenova.vm-create.pending';
-/** 백엔드 생성 요청 타임아웃(command-timeout 15m)보다 1분 길게 둔다 */
-export const PENDING_CREATION_TTL_MS = 16 * 60 * 1000;
+/** 백엔드 생성 요청 타임아웃(command-timeout 20m)보다 1분 길게 둔다 */
+export const PENDING_CREATION_TTL_MS = 21 * 60 * 1000;
 
 export type PendingVmCreation = {
   name: string;

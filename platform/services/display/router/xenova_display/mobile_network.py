@@ -1,4 +1,5 @@
 """Resolve a verified USB interface without assigning IPs or changing routes."""
+import contextlib
 from dataclasses import dataclass
 import ipaddress
 import json
@@ -34,7 +35,8 @@ class Endpoint:
     def origin(self): return f"http://{self.host}"
 
 
-def resolve(config, *, sysfs=Path("/sys/class/net"), run=subprocess.run):
+def resolve(config, *, sysfs=Path("/sys/class/net"), run=subprocess.run,
+            leases=Path("/run/systemd/netif/leases")):
     if (not isinstance(config, dict) or set(config) - {"ui_origin"} != {"schema_version", "usb_interface", "phone_ipv4", "port"}
             or type(config["schema_version"]) is not int or config["schema_version"] != 1):
         raise ValueError("invalid mobile config")
@@ -57,17 +59,46 @@ def resolve(config, *, sysfs=Path("/sys/class/net"), run=subprocess.run):
     ifindex = rows[0].get("ifindex")
     if type(ifindex) is not int or ifindex <= 0:
         raise ValueError("USB link index required")
-    matches = []
+    links = []
     for value in rows[0].get("addr_info", []):
         if value.get("family") != "inet" or value.get("scope") != "global":
             continue
         address = private_ip(value["local"])
-        network = ipaddress.IPv4Network(f"{address}/{value['prefixlen']}", strict=False)
-        if address != phone and phone in network and phone not in (network.network_address, network.broadcast_address):
-            matches.append(str(address))
+        links.append((address, ipaddress.IPv4Network(f"{address}/{value['prefixlen']}", strict=False)))
+    matches = [(address, phone) for address, network in links if on_link(phone, address, network)]
+    if not matches and links:
+        # The phone picks its tethering subnet itself and may change it (seen 2026-11-12:
+        # 10.117.188.0/24 one day, 10.58.23.0/24 the next). The configured address then no
+        # longer fits. The phone is the DHCP server/router of this link, so use the address it
+        # gave in this link's DHCP lease (the board installs no route through the phone).
+        # Read-only, same USB device and one-address checks as above.
+        matches = [(address, server) for server in lease_servers(leases / str(ifindex))
+                   for address, network in links if on_link(server, address, network)]
     if len(matches) != 1:
         raise ValueError("one USB address on the verified phone subnet required")
-    return Endpoint(interface, matches[0], str(phone), port, ifindex)
+    address, phone = matches[0]
+    return Endpoint(interface, str(address), str(phone), port, ifindex)
+
+
+def on_link(phone, address, network):
+    return phone != address and phone in network and phone not in (network.network_address, network.broadcast_address)
+
+
+def lease_servers(path):
+    """The DHCP server/router addresses in systemd-networkd's lease for this link (the phone)."""
+    try:
+        if path.stat().st_size > 65536:
+            raise ValueError("lease file too large")
+        text = path.read_text()
+    except FileNotFoundError:
+        return []
+    servers = set()
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key in ("SERVER_ADDRESS", "ROUTER") and value:
+            with contextlib.suppress(ValueError):
+                servers.add(private_ip(value.split()[0]))
+    return sorted(servers)
 
 
 def bind(endpoint, *, socket_factory=socket.socket):

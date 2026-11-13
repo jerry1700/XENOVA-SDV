@@ -17,7 +17,9 @@ int dl_direction_get(bool manual,xenova_drive_DirectionGateWitness *,uint64_t no
 int dl_mission_get(xenova_drive_MissionGrant *,uint64_t now_pi_us);
 int dl_mission_for_local(xenova_drive_MissionGrant *,uint64_t now_pi_us);
 int dl_budget_submit(const xenova_drive_MissionBudgetRequest *,const uint8_t canonical_request_sha256[32]);
-int dl_budget_take(xenova_drive_MissionBudgetRequest *,xenova_drive_MissionBudgetReply *);
+/* Dequeue the reply and read its current grant under one lock. A zeroed grant
+ * means no grant is current. BUSY leaves the original reply pending. */
+int dl_budget_take(xenova_drive_MissionBudgetReply *,xenova_drive_MissionGrant *,uint64_t now_pi_us);
 /* One immutable original request/result. These ports never grant phase output. */
 int dl_episode_submit(const xenova_drive_EpisodeRequest *,const uint8_t request_sha256[32]);
 int dl_episode_take(xenova_drive_EpisodeRequest *,xenova_drive_EpisodeReceipt *);

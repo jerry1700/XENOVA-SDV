@@ -13,40 +13,158 @@ bool db_limits_valid(const struct db_limits *l){
   isfinite(l->pass_margin_m)&&l->pass_margin_m>=0&&isfinite(l->heading_rad)&&l->heading_rad>0&&
   isfinite(l->steering_rad)&&l->steering_rad>0&&(l->policy==DB_RETURN_HOME||l->policy==DB_KEEP_TARGET);
 }
-static bool station(const struct tr_basis *b,dw_point p,float bound,float *value){
- if(!b||!b->bound||b->count<2)return false;
- float best=FLT_MAX,selected=0,arc=0;bool ambiguous=false;
- for(unsigned i=1;i<b->count;i++){
-  dw_point a=b->points[i-1],z=b->points[i];float dx=z.x-a.x,dy=z.y-a.y,len=hypotf(dx,dy);
-  if(!isfinite(len)||len<1e-6f)return false;
-  float t=fmaxf(0,fminf(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(len*len)));
-  float d=hypotf(p.x-a.x-t*dx,p.y-a.y-t*dy),s=arc+t*len;
-  if(d+bound<best){best=d;selected=s;ambiguous=false;}
-  else if(fabsf(d-best)<=bound&&fabsf(s-selected)>2*bound+1e-4f)ambiguous=true;
-  arc+=len;
- }
- if(ambiguous||!isfinite(best))return false;
- *value=selected;return true;
-}
-bool db_station_bounds(const struct tr_basis *b,dw_pose pose,float pad,const struct lp_config *c,float *lo,float *hi){
- if(!c||!lo||!hi||!dw_pose_finite(pose)||!isfinite(pad)||pad<0)return false;
- *lo=FLT_MAX;*hi=-FLT_MAX;
- float cs=cosf(pose.yaw),sn=sinf(pose.yaw);
- for(unsigned i=0;i<4;i++){
-  float x=(i&1?c->front:-c->rear),y=(i&2?c->half_width:-c->half_width),s;
-  dw_point p={pose.x+cs*x-sn*y,pose.y+sn*x+cs*y};
-  if(!station(b,p,pad,&s))return false;
-  *lo=fminf(*lo,s-pad-c->margin);*hi=fmaxf(*hi,s+pad+c->margin);
+struct station_basis {const dw_point *points;unsigned segments;float arc[TR_BASIS_POINTS+1],period;};
+
+static float cross(float ax,float ay,float bx,float by){return ax*by-ay*bx;}
+static bool seam_clear(const dw_point *points,unsigned count,float dx,float dy){
+ dw_point a=points[count-1];
+ for(unsigned i=1;i+2<count;i++){
+  dw_point p=points[i],q=points[i+1];
+  if(fmaxf(p.x,q.x)<fminf(a.x,points[0].x)||fminf(p.x,q.x)>fmaxf(a.x,points[0].x)||
+     fmaxf(p.y,q.y)<fminf(a.y,points[0].y)||fminf(p.y,q.y)>fmaxf(a.y,points[0].y))continue;
+  float u=cross(dx,dy,p.x-a.x,p.y-a.y),v=cross(dx,dy,q.x-a.x,q.y-a.y);
+  float s=cross(q.x-p.x,q.y-p.y,a.x-p.x,a.y-p.y);
+  float t=cross(q.x-p.x,q.y-p.y,points[0].x-p.x,points[0].y-p.y);
+  if(((u<=0&&v>=0)||(u>=0&&v<=0))&&((s<=0&&t>=0)||(s>=0&&t<=0)))return false;
  }
  return true;
 }
-bool db_station_point(const struct tr_basis *b,dw_point p,float pad,float *out){return station(b,p,pad,out);}
+
+static bool station_basis(struct station_basis *out,const struct tr_basis *b,unsigned count){
+ if(!b||!b->bound||count<2||count>b->count||count>TR_BASIS_POINTS)return false;
+ const dw_point *points=b->points;
+ *out=(struct station_basis){.points=points,.segments=count-1};
+ for(unsigned i=1;i<count;i++){
+  float len=hypotf(points[i].x-points[i-1].x,points[i].y-points[i-1].y);
+  if(!isfinite(len)||len<1e-6f)return false;
+  out->arc[i]=out->arc[i-1]+len;
+ }
+ /* An open wire reference can sample a loop without repeating its first
+  * point. Join only a gap no larger than the adjacent samples, with both
+  * end directions continuing through it. This is station geometry only. */
+ dw_point first=points[0],next=points[1],last=points[count-1],prior=points[count-2];
+ float dx=first.x-last.x,dy=first.y-last.y,gap=hypotf(dx,dy);
+ float lead=out->arc[1],tail=hypotf(last.x-prior.x,last.y-prior.y);
+ if(count>=5&&gap>=1e-6f&&gap<=fminf(lead,tail)+1e-5f&&
+    dx*(next.x-first.x)+dy*(next.y-first.y)>.70710678f*gap*lead&&
+    dx*(last.x-prior.x)+dy*(last.y-prior.y)>.70710678f*gap*tail&&seam_clear(points,count,dx,dy)){
+  out->segments=count;out->period=out->arc[count]=out->arc[count-1]+gap;
+ }
+ return true;
+}
+
+static float station_shift(float value,float anchor,float period){
+ if(period<=0||!isfinite(anchor)||anchor==-FLT_MAX)return 0;
+ float delta=anchor-value;
+ if(fabsf(delta)<=period*.5f)return 0;
+ return period*roundf(delta/period);
+}
+
+/* Keep the full interval of adjacent candidates, including across the seam.
+ * Disconnected candidates still indicate an ambiguous branch. */
+static bool station(const struct station_basis *b,dw_point p,float pad,float begin,float end,float *lo,float *hi){
+ float distances[TR_BASIS_POINTS],stations[TR_BASIS_POINTS],best=FLT_MAX;
+ bool local=end<FLT_MAX;
+ float middle=local?.5f*(begin+end):0,half_period=.5f*b->period;
+ unsigned nearest=0;
+ for(unsigned i=0;i<b->segments;i++){
+  dw_point a=b->points[i],z=b->points[i+1==b->segments&&b->period>0?0:i+1];
+  float dx=z.x-a.x,dy=z.y-a.y,len=hypotf(dx,dy);
+  float arc=b->arc[i];
+  distances[i]=INFINITY;
+  /* Only the local body window can straddle the seam, by at most one turn. */
+  if(local&&b->period>0){
+   float segment_middle=arc+.5f*len;
+   if(segment_middle-middle>half_period)arc-=b->period;
+   else if(middle-segment_middle>half_period)arc+=b->period;
+  }
+  float low=local?fmaxf(0,(begin-arc)/len):0,high=local?fminf(1,(end-arc)/len):1;
+  if(low<=high){
+   float t=fmaxf(low,fminf(high,((p.x-a.x)*dx+(p.y-a.y)*dy)/(len*len)));
+   distances[i]=hypotf(p.x-a.x-t*dx,p.y-a.y-t*dy);stations[i]=arc+t*len;
+   if(distances[i]<best){best=distances[i];nearest=i;}
+  }
+ }
+ if(best==FLT_MAX)return false;
+ float limit=best+2*pad,lower=FLT_MAX,upper=-FLT_MAX;
+ bool previous=b->period>0&&distances[b->segments-1]<=limit;
+ unsigned groups=0;
+ for(unsigned i=0;i<b->segments;i++){
+  bool matched=distances[i]<=limit;
+  if(matched){
+   if(!previous&&++groups>1)return false;
+   float s=stations[i]+(!local?station_shift(stations[i],stations[nearest],b->period):0);
+   lower=fminf(lower,s);upper=fmaxf(upper,s);
+  }
+  previous=matched;
+ }
+ /* A projection clipped by the artificial body search window proves nothing. */
+ if(groups!=1||(local&&((b->period>0||begin>0)&&lower<=begin+1e-5f))||
+    (local&&(b->period>0||end<b->arc[b->segments])&&upper>=end-1e-5f))return false;
+ *lo=lower;*hi=upper;return true;
+}
+bool db_station_bounds_near(const struct tr_basis *b,unsigned count,dw_pose pose,float pad,const struct lp_config *c,
+ float anchor,bool before,float *lo,float *hi){
+ if(!c||!lo||!hi||!dw_pose_finite(pose)||!isfinite(pad)||pad<0)return false;
+ struct station_basis axis;if(!station_basis(&axis,b,count))return false;
+ float anchor_lo,anchor_hi;
+ if(!station(&axis,(dw_point){pose.x,pose.y},pad,0,FLT_MAX,&anchor_lo,&anchor_hi))return false;
+ /* Put all four corners in the rear axle's local station window. */
+ float reach=2*(hypotf(fmaxf(c->front,c->rear),c->half_width)+pad);
+ float begin=anchor_lo-reach,end=anchor_hi+reach;
+ if(axis.period>0){if(end-begin>=axis.period*.5f)return false;}
+ else begin=fmaxf(0,begin);
+ *lo=FLT_MAX;*hi=-FLT_MAX;
+ float cs=cosf(pose.yaw),sn=sinf(pose.yaw);
+ for(unsigned i=0;i<4;i++){
+  float x=(i&1?c->front:-c->rear),y=(i&2?c->half_width:-c->half_width),lower,upper;
+  dw_point p={pose.x+cs*x-sn*y,pose.y+sn*x+cs*y};
+  if(!station(&axis,p,pad,begin,end,&lower,&upper))return false;
+  *lo=fminf(*lo,lower-pad-c->margin);*hi=fmaxf(*hi,upper+pad+c->margin);
+ }
+ float shift=station_shift(*lo,anchor,axis.period);
+ /* A newly observed blocker can be more than half a lap ahead. Anchor the
+  * initial vehicle station on its approach so that it cannot count as passed. */
+ if(before&&axis.period>0&&*lo+shift>anchor)shift-=axis.period;
+ *lo+=shift;*hi+=shift;
+ return true;
+}
+bool db_station_bounds(const struct tr_basis *b,dw_pose pose,float pad,const struct lp_config *c,float *lo,float *hi){
+ return db_station_bounds_near(b,b?b->count:0,pose,pad,c,NAN,false,lo,hi);
+}
+bool db_station_point(const struct tr_basis *b,dw_point p,float pad,float *out){
+ struct station_basis axis;float lo,hi;
+ if(!out||!isfinite(pad)||pad<0||!station_basis(&axis,b,b?b->count:0)||
+    !station(&axis,p,pad,0,FLT_MAX,&lo,&hi))return false;
+ *out=.5f*(lo+hi);return true;
+}
+bool db_blocker_locate(const struct tr_basis *basis,struct db_blocker *blocker,float pad){
+ struct station_basis axis;if(!isfinite(pad)||pad<0||!station_basis(&axis,basis,basis?basis->count:0))return false;
+ float anchor=NAN;
+ if(axis.period>0){
+  dw_point center={.5f*(blocker->lower.x+blocker->upper.x),.5f*(blocker->lower.y+blocker->upper.y)};
+  float lo,hi;if(!station(&axis,center,pad,0,FLT_MAX,&lo,&hi))return false;
+  anchor=.5f*(lo+hi);
+  if(isfinite(blocker->station_upper)&&blocker->station_lower<blocker->station_upper)
+   anchor+=station_shift(anchor,blocker->station_upper,axis.period);
+ }
+ float lower=FLT_MAX,upper=-FLT_MAX;
+ for(unsigned i=0;i<4;i++){
+  dw_point corner={i&1?blocker->upper.x:blocker->lower.x,i&2?blocker->upper.y:blocker->lower.y};
+  float lo,hi;
+  if(!station(&axis,corner,pad,0,FLT_MAX,&lo,&hi))return false;
+  float shift=station_shift(.5f*(lo+hi),anchor,axis.period);
+  lower=fminf(lower,lo+shift-pad);upper=fmaxf(upper,hi+shift+pad);
+ }
+ if(axis.period>0&&upper-lower>=axis.period*.5f)return false;
+ blocker->station_lower=lower;blocker->station_upper=upper;
+ return true;
+}
 bool db_blocker_observe(const dw_world *w,const struct tr_intent *task,dw_pose pose,float horizon,
  const struct lp_config *c,struct db_blocker *out){
  if(!w||!task||!c||!out||!isfinite(horizon)||horizon<=0||!w->has_drivable_permission||
     w->drivable_permission.size<((size_t)w->width*w->height+7)/8)return false;
  memset(out,0,sizeof(*out));out->lower=(dw_point){FLT_MAX,FLT_MAX};out->upper=(dw_point){-FLT_MAX,-FLT_MAX};
- out->station_lower=FLT_MAX;out->station_upper=-FLT_MAX;
  struct lp_road_state start;if(lp_task_project(w,task,pose,&start)!=LP_PATH_FOUND)return false;
  float cell=w->resolution_m,half=cell*.707106782f;
  for(unsigned y=0;y<w->height;y++)for(unsigned x=0;x<w->width;x++){
@@ -57,12 +175,13 @@ bool db_blocker_observe(const dw_world *w,const struct tr_intent *task,dw_pose p
   if(!occupied&&!denied)continue;
   dw_pose p=dw_compose(w->origin,(dw_pose){(x+.5f)*cell,(y+.5f)*cell,0});struct lp_road_state road;
   if(lp_task_project(w,task,p,&road)!=LP_PATH_FOUND)return false;
+  /* The nearest projection can clamp to an observed endpoint. The signed
+   * lateral offset alone would also accept cells far past that endpoint. */
   if(road.arc+half<start.arc-c->rear||road.arc-half>start.arc+horizon||
-     fabsf(road.offset)>c->half_width+c->margin+c->tracking_guard+task->vehicle_pad+half)continue;
+     hypotf(p.x-road.pose.x,p.y-road.pose.y)>c->half_width+c->margin+c->tracking_guard+task->vehicle_pad+half)continue;
   if(!occupied){out->unknown=true;continue;}
   out->present=true;out->lower.x=fminf(out->lower.x,p.x-half);out->lower.y=fminf(out->lower.y,p.y-half);
   out->upper.x=fmaxf(out->upper.x,p.x+half);out->upper.y=fmaxf(out->upper.y,p.y+half);
-  out->station_lower=fminf(out->station_lower,road.arc-half);out->station_upper=fmaxf(out->station_upper,road.arc+half);
  }
  if(out->present){strcpy(out->map,w->map_epoch);out->observation_sequence=w->observation_seq;}
  return true;
@@ -83,7 +202,8 @@ bool db_episode_phase(struct db_episode *e,enum db_phase phase,dw_pose goal,uint
  uint64_t cap=now>UINT64_MAX-l->phase_us?UINT64_MAX:now+l->phase_us;
  e->phase_deadline_pi_us=cap<e->deadline_pi_us?cap:e->deadline_pi_us;e->phase_goal=goal;
  e->last_progress_pi_us=0;e->waited_us=e->wait_started_pi_us=0;e->waiting_stop=false;e->settle_since_pi_us=0;
- e->progress_lower=-FLT_MAX;e->remaining_upper=FLT_MAX;return true;
+ /* Keep the station branch across phase changes and seed the new goal range on the next sample. */
+ e->remaining_upper=FLT_MAX;return true;
 }
 bool db_episode_begin(struct db_episode *e,const uint8_t id[16],uint32_t home,uint32_t target,
  const struct tr_basis *basis,const struct db_blocker *blocker,dw_pose goal,uint64_t now,
@@ -92,6 +212,7 @@ bool db_episode_begin(struct db_episode *e,const uint8_t id[16],uint32_t home,ui
     blocker->unknown||!facts_current(f,now)||!db_limits_valid(l)||now>INT64_MAX-l->episode_us)return false;
  memset(e,0,sizeof(*e));e->active=true;memcpy(e->id,id,16);e->revision=1;e->home_lane_id=home;e->target_lane_id=target;
  e->policy=l->policy;e->basis=*basis;e->blocker=*blocker;e->started_pi_us=now;e->deadline_pi_us=now+l->episode_us;
+ e->progress_lower=-FLT_MAX;
  e->meter_start_ticks=f->meter_ticks;e->meter_revision=f->meter_revision;e->metres_per_tick=f->metres_per_tick;
  memcpy(e->meter_epoch,f->meter_epoch,16);
  strcpy(e->pi_session,f->pi_session);strcpy(e->device_session,f->device_session);strcpy(e->odom_epoch,f->odom_epoch);
@@ -125,10 +246,13 @@ enum db_reason db_episode_step(struct db_episode *e,const dw_world *w,dw_pose po
  if(e->waiting_stop){e->waited_us+=now-e->wait_started_pi_us;e->waiting_stop=false;}
  float radius=hypotf(fmaxf(c->front,c->rear)+c->margin,c->half_width+c->margin);
  float pad=vehicle->position_error_m+radius*vehicle->heading_error_rad,lo,hi;
- if(!db_station_bounds(&e->basis,pose,pad,c,&lo,&hi)){db_episode_hold(e,DB_GEOMETRY);return DB_GEOMETRY;}
+ float station_anchor=e->progress_lower==-FLT_MAX?e->blocker.station_upper:e->progress_lower;
+ if(!db_station_bounds_near(&e->basis,e->basis.count,pose,pad,c,station_anchor,false,&lo,&hi)){
+  db_episode_hold(e,DB_GEOMETRY);return DB_GEOMETRY;
+ }
  float remaining=hypotf(pose.x-e->phase_goal.x,pose.y-e->phase_goal.y)+pad;
  bool fresh=vehicle->sequence>e->last_vehicle_sequence;
- if(e->progress_lower==-FLT_MAX){e->progress_lower=lo;e->remaining_upper=remaining;}
+ if(e->remaining_upper==FLT_MAX){e->progress_lower=lo;e->remaining_upper=remaining;}
  else if(fresh&&(lo>=e->progress_lower+l->progress_m||remaining+l->progress_m<=e->remaining_upper)){
   e->progress_lower=fmaxf(e->progress_lower,lo);e->remaining_upper=fminf(e->remaining_upper,remaining);
   e->last_progress_pi_us=now;e->waited_us=0;

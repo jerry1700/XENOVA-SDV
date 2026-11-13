@@ -128,10 +128,11 @@ static unsigned prep_diag_count,prep_diag_seen;
 static void prep_diagnostic(unsigned phase,int rc,int returned,int why,const struct prep_observation *v){
  if(!phase||phase>16||prep_diag_count>=16||(prep_diag_seen&(1U<<(phase-1))))return;
  prep_diag_seen|=1U<<(phase-1);unsigned index=++prep_diag_count;
- unsigned flags=(engine.episode_transition?1U:0U)|(engine.behavior_failed?2U:0U)|
+ enum de_episode_handoff handoff=engine.episode_handoff;
+ unsigned flags=(handoff!=DE_EPISODE_IDLE?1U:0U)|(engine.behavior_failed?2U:0U)|
   (atomic_load(&engine.facts_current)?4U:0U)|(engine.facts.valid?8U:0U)|(engine.facts.meter_valid?16U:0U)|
   (engine.planning?32U:0U)|(engine.plan_finalized?64U:0U)|(engine.plan_valid?128U:0U)|
-  (engine.episode_receipt_pending?256U:0U);
+  (handoff==DE_EPISODE_AWAITING_RECEIPT?256U:0U);
  LOG_INF("XD_PREP_DIAG n=%u cap=16 phase=%u rc=%d ret=%d why=%d p=%u path=%u proof=%u rev=%llu seq=%llu pi=%llu guest=%llu until=%llu flags=%u factsE=%llu factsVehicle=%llu episode=%u localPhase=%u",
   index,phase,rc,returned,why,v->present|((phase>=2&&phase<=5)?64U:0U),v->path,v->proof,(unsigned long long)v->rev,
   (unsigned long long)v->seq,(unsigned long long)v->pi,(unsigned long long)v->guest,(unsigned long long)v->until,
@@ -186,12 +187,16 @@ static void input_preflight(const struct dl_clock *mapping,uint64_t now,uint64_t
  preflight_last_result=-EAGAIN;
  uint32_t generation=0;
  planner_operation_available=!dl_operation_status(&planner_operation,now);
- if(k_mutex_lock(&app_metadata,K_NO_WAIT)){preflight_revoke();return;}
+ if(!mapping->acknowledged||!mapping->probe_sequence||!mapping->confirmed_guest_us||
+    now>=mapping->expires_pi||guest<mapping->confirmed_guest_us||guest>INT64_MAX-100000){preflight_revoke();return;}
+ /* A skipped turn cannot renew the published report. The link owner still
+  * applies its original expiry and context fences. */
+ if(k_mutex_lock(&app_metadata,K_NO_WAIT)){preflight_last_result=-EBUSY;return;}
  bool identity=current_generation&&app_instance[0]&&!strcmp(app_instance,mapping->app_instance);
  generation=current_generation;k_mutex_unlock(&app_metadata);
- if(!identity||!mapping->acknowledged||!mapping->probe_sequence||!mapping->confirmed_guest_us||
-    guest<mapping->confirmed_guest_us||guest>INT64_MAX-100000){preflight_revoke();return;}
+ if(!identity){preflight_revoke();return;}
  preflight_last_result=de_input_current(&engine,now,&preflight_current);
+ if(preflight_last_result==DE_BUSY)return;
  if(preflight_last_result!=DE_OK){preflight_revoke();return;}
  bool cached=atomic_load(&preflight_geometry_valid)&&preflight_current.map_generation==preflight_inputs.map_generation&&
   preflight_current.scene_generation==preflight_inputs.scene_generation&&preflight_current.vehicle.sequence==preflight_inputs.vehicle.sequence&&
@@ -200,16 +205,17 @@ static void input_preflight(const struct dl_clock *mapping,uint64_t now,uint64_t
   preflight_current.vehicle.position_error_m<=preflight_inputs.geometry_position_bound_m&&
   preflight_current.vehicle.heading_error_rad<=preflight_inputs.geometry_heading_bound_rad;
  if(!cached){
-  /* A readiness report never spends the deadline of an already-running plan
-   * or apply. One idle body check is capped at1ms, independently of report E. */
-  if(engine.planning||engine.apply_pending){preflight_revoke();return;}
+  /* Replace a report in the same turn when the new body check succeeds.
+   * If the inputs changed and we cannot verify them now, withdraw it. */
+  if(engine.planning||engine.apply_pending){preflight_last_result=-EBUSY;preflight_revoke();return;}
+  /* One idle body check is capped at 1ms. */
   struct lp_budget budget={guest+1000,clock_us,cancelled,NULL,NULL};
   preflight_geometry_checks++;
   preflight_last_result=de_input_preflight(&engine,now,budget,&preflight_inputs);
   if(preflight_last_result!=DE_OK){preflight_revoke();return;}
   atomic_store(&preflight_geometry_valid,true);
  }
- bool same_report=atomic_load(&preflight_report_accepted)&&preflight_report.control_generation==generation&&
+ bool same_report=cached&&atomic_load(&preflight_report_accepted)&&preflight_report.control_generation==generation&&
     preflight_report_map_generation==preflight_inputs.map_generation&&
     preflight_report.vehicle_sequence==preflight_inputs.vehicle.sequence&&preflight_report.source.world_sequence==preflight_inputs.source.world_sequence&&
     preflight_report.clock_probe_sequence==mapping->probe_sequence&&!memcmp(preflight_report.clock_reply_sha256.bytes,mapping->reply_sha256,32);
@@ -228,18 +234,19 @@ static void input_preflight(const struct dl_clock *mapping,uint64_t now,uint64_t
  /* An unchanged original input E cannot be renewed by another clock read.
   * Keep that exact report until new input exists or its own expiry withdraws. */
  if(same_report&&now<preflight_report.valid_until_pi_us&&end<=preflight_report.valid_until_pi_us){preflight_last_result=0;return;}
- memset(&preflight_report,0,sizeof(preflight_report));
- preflight_report.major=1;preflight_report.source=preflight_inputs.source;
- preflight_report.vehicle_sequence=preflight_inputs.vehicle.sequence;preflight_report.control_generation=generation;
- preflight_report.checked_guest_us=checked;preflight_report.valid_until_pi_us=end;
- preflight_report.clock_probe_sequence=mapping->probe_sequence;preflight_report.clock_reply_sha256.size=32;
- memcpy(preflight_report.clock_reply_sha256.bytes,mapping->reply_sha256,32);
- preflight_last_result=dl_auto_preflight_set(&preflight_report);
- /* Report/P4 admission can change while the same body witness still encloses
-  * the current inputs. The next loop rechecks all cache keys and original E;
-  * a failed report alone is not evidence of a changed physical footprint. */
+ xenova_drive_AutoInputPreflight candidate={0};
+ candidate.major=1;candidate.source=preflight_inputs.source;
+ candidate.vehicle_sequence=preflight_inputs.vehicle.sequence;candidate.control_generation=generation;
+ candidate.checked_guest_us=checked;candidate.valid_until_pi_us=end;
+ candidate.clock_probe_sequence=mapping->probe_sequence;candidate.clock_reply_sha256.size=32;
+ memcpy(candidate.clock_reply_sha256.bytes,mapping->reply_sha256,32);
+ preflight_last_result=dl_auto_preflight_set(&candidate);
+ if(preflight_last_result==-EBUSY&&cached)return;
  if(preflight_last_result)preflight_report_revoke();
- else{preflight_report_map_generation=preflight_inputs.map_generation;atomic_store(&preflight_report_accepted,true);}
+ else{
+  preflight_report=candidate;preflight_report_map_generation=preflight_inputs.map_generation;
+  atomic_store(&preflight_report_accepted,true);
+ }
 }
 static bool prepared_key_current(const xenova_drive_MissionGrant *grant){
  if(k_mutex_lock(&app_metadata,K_NO_WAIT))return false;
@@ -259,9 +266,22 @@ static int64_t valid_until(const struct dl_clock *clock,const dw_vehicle *vehicl
 }
 static int mission_profile(bool *required){
  struct dw_handle handle;const struct dw_snapshot *map;
- if(dw_acquire(&engine.maps,&handle,&map))return -EAGAIN;
+ enum dw_result result=dw_acquire(&engine.maps,&handle,&map);
+ if(result)return result==DW_BUSY?-EBUSY:-EAGAIN;
  *required=(map->world.required_features&DW_LANE_MODEL)!=0;
  return dw_release(&engine.maps,handle)?-EAGAIN:0;
+}
+static int planner_refresh_mission(uint64_t now){
+ xenova_drive_MissionGrant mission;
+ bool required=false;
+ int rc=mission_profile(&required);
+ if(!rc&&required)rc=dl_mission_get(&mission,now);
+ /* A failed try-lock supplies no evidence that the last grant was revoked. */
+ if(rc==-EBUSY)return rc;
+ const xenova_drive_MissionGrant *current=!rc&&required?&mission:NULL;
+ (void)de_mission(&engine,current,now);
+ prepared_revalidate(current);
+ return 0;
 }
 static const char *qualified(const void *unused,struct xm_span input,int64_t age){
  ARG_UNUSED(unused);ARG_UNUSED(input);ARG_UNUSED(age);
@@ -621,7 +641,7 @@ static uint64_t request_deadline(const struct dl_clock *clock,uint64_t completed
 static void behavior_io(const struct dl_clock *clock,uint64_t now,uint64_t guest){
  /* Bind the real phase event to the proof reserved before the engine turn.
   * A concurrent P4 promotion/search cannot map birth with a later G0. */
- if(engine.episode.active&&engine.episode_transition&&engine.phase_began_guest_us){
+ if(engine.episode.active&&engine.episode_handoff!=DE_EPISODE_IDLE&&engine.phase_began_guest_us){
   bool birth=engine.episode_state.core.state!=2||memcmp(engine.episode_state.core.episode_id.bytes,engine.episode.id,16);
   (void)dl_episode_event_clock(birth?engine.episode_began_guest_us:0,engine.phase_began_guest_us,&registration_event_clock);
  }
@@ -652,9 +672,9 @@ static void behavior_io(const struct dl_clock *clock,uint64_t now,uint64_t guest
   k_mutex_unlock(&app_metadata);
  }
  if(registered)dl_snapshot_request();
- if(!dl_budget_take(&budget_request,&budget_reply)){
-  xenova_drive_MissionGrant grant;
-  if(!dl_mission_get(&grant,now))(void)de_mission(&engine,&grant,now);
+ xenova_drive_MissionGrant grant;
+ if(!dl_budget_take(&budget_reply,&grant,now)){
+  if(!grant.major||de_mission(&engine,&grant,now)!=DE_OK)(void)de_mission(&engine,NULL,now);
   if(de_budget_reply(&engine,&budget_reply,now)==DE_OK)dl_snapshot_request();
  }
  if(de_budget_request(&engine,&budget_request)&&de_registration_state(&engine,&registration_state)){
@@ -688,25 +708,25 @@ static struct planner_turn planner_turn={.slot=-1};
 static int planner_step(void){
  const dw_state *copy=planner_turn.copy;int slot=planner_turn.slot;bool applying=false;
   struct dl_clock mapping;uint64_t now,guest;PREP_LOCAL;
-#if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
   int mapping_rc=dl_clock_get(&mapping,&now),guest_rc=0;
   if(!mapping_rc){PREP_VALUE(1,pi,now);guest_rc=clock_us(NULL,&guest);}
-  if(mapping_rc||guest_rc){preflight_revoke();planner_operation_available=false;PREP_DIAG(1,mapping_rc?mapping_rc:guest_rc,0,0);return 2;}
-#else
-  if(dl_clock_get(&mapping,&now)||clock_us(NULL,&guest)){preflight_revoke();planner_operation_available=false;return 2;}
-#endif
+  if(mapping_rc||guest_rc){
+   if(mapping_rc!=-EBUSY){preflight_revoke();planner_operation_available=false;}
+   PREP_DIAG(1,mapping_rc?mapping_rc:guest_rc,0,0);return 2;
+  }
   PREP_VALUE(2,guest,guest);PREP_DIAG(16,0,0,0);
   input_preflight(&mapping,now,guest);
   /* No plan/apply exists yet: start its own clock after readiness work. An
    * already-running job retains engine.budget/apply_budget without renewal. */
-  if(!engine.planning&&!engine.apply_pending&&(dl_clock_get(&mapping,&now)||clock_us(NULL,&guest))){
-   preflight_revoke();return 2;
+  if(!engine.planning&&!engine.apply_pending){
+   mapping_rc=dl_clock_get(&mapping,&now);
+   if(mapping_rc||clock_us(NULL,&guest)){
+    if(mapping_rc!=-EBUSY)preflight_revoke();
+    return 2;
+   }
   }
-  behavior_io(&mapping,now,guest);
-  xenova_drive_MissionGrant mission;bool required;
-  if(mission_profile(&required)||!required||dl_mission_get(&mission,now)){
-   (void)de_mission(&engine,NULL,now);prepared_revalidate(NULL);
-  }else{(void)de_mission(&engine,&mission,now);prepared_revalidate(&mission);}
+   if(planner_refresh_mission(now)==-EBUSY)return 1;
+   behavior_io(&mapping,now,guest);
   if(engine.planning){
    enum de_result rc=de_plan_slice(&engine,4,now);
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
@@ -731,9 +751,14 @@ static int planner_step(void){
     if(applying)drive_planner_health_admitted(&planner_health,engine.apply_budget.deadline_us);
     if(!applying){if(rc!=DE_BUSY)planner_completed();if(rc==DE_OK)(void)prepare_current(copy);else if(rejected(rc))reject_state(copy,rc);dl_state_release(slot);slot=-1;copy=NULL;}
    }else{
+    /* During WAIT/COUNTDOWN the operation needs current input readiness.
+     * A speculative search without a mission can starve that body check.
+     * A standby StateCopy is still handled by the branch above. */
+    if(planner_operation_available&&!engine.has_grant&&
+       (planner_operation.vehicle_phase==2||planner_operation.vehicle_phase==3))return 1;
     /* Reserve before any engine work can create a phase or be preempted by
      * newer I/O. This numeric proof is not a mission/output grant. */
-    if(engine.behavior_enabled&&engine.local_owner&&(!engine.episode.active||!engine.episode_transition)&&dl_episode_event_prepare())return 1;
+    if(engine.behavior_enabled&&engine.local_owner&&(!engine.episode.active||engine.episode_handoff==DE_EPISODE_IDLE)&&dl_episode_event_prepare())return 1;
     struct lp_budget budget={guest+lp_selected_config.planner_budget_us,clock_us,cancelled,NULL,NULL};
     drive_planner_health_begin(&planner_health,budget.deadline_us);
     enum de_result started=de_plan_start(&engine,now,budget);

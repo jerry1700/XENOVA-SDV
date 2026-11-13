@@ -8,7 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from unittest.mock import patch
 
 from first_install_fixture import ROOT, FILES
@@ -187,15 +187,115 @@ class ManagementTest(unittest.TestCase):
             self.assertEqual(after[key],before[key])
         self.assertEqual(after['first_error']['code'],'DEADLINE_EXCEEDED')
 
+    def test_recovery_intents_hold_only_a_verified_incomplete_registration(self):
+        healthy = self.create()
+        pending = {**self.spec, 'vm_id':'550e8400-e29b-41d4-a716-446655440001',
+                   'name':'pending', 'ipv4':'192.168.77.31'}
+        with patch.object(self.m,'_save_tomb',side_effect=OSError('fixture storage failure')):
+            failed = self.call('create',pending,key='pending-create')
+        self.assertEqual(failed['error']['code'],'RECOVERY_REQUIRED')
+        original_id = failed['operation_id']
+        path = self.data/'operations'/(original_id+'.json')
+        original = path.read_bytes()
+        op = json.loads(original)
+        self.assertEqual((op['status'], op['phase']), ('RECOVERY_REQUIRED', 'published'))
+        self.assertFalse((self.data/'tombstones'/(pending['vm_id']+'.json')).exists())
+        public = self.m.call('intents')
+        self.assertEqual(public['error']['code'], 'TARGET_CHANGED')
+        recovery = self.m.call('recovery-intents')
+        self.assertTrue(recovery['ok'], recovery)
+        rows = {row['vm_id']:row for row in recovery['data']['vms']}
+        self.assertTrue(rows[healthy]['intent_applicable'])
+        self.assertNotIn('registration_pending', rows[healthy])
+        row = rows[pending['vm_id']]
+        self.assertTrue(row['registration_pending'])
+        self.assertEqual((row['desired_state'], row['intent_revision'], row['intent_applicable']),
+                         ('unknown', None, False))
+        self.assertEqual(path.read_bytes(), original)
+
+        # A mismatched origin still invalidates the snapshot.
+        path.write_text(json.dumps({**op, 'initial_spec':{**op['initial_spec'], 'name':'other'}}))
+        self.assertEqual(self.m.call('recovery-intents')['error']['code'], 'TARGET_CHANGED')
+        path.write_bytes(original)
+        self.m.checkpoint = lambda *args: None
+        replay = self.call('create', pending, key='pending-create')
+        self.assertTrue(replay['ok'], replay)
+        self.assertEqual(replay['operation_id'], original_id)
+        self.assertEqual(self.copies, 2)
+        self.assertTrue(self.m.call('intents')['ok'])
+        self.assertFalse(any('registration_pending' in row for row in
+                             self.m.call('recovery-intents')['data']['vms']))
+
+    def test_initial_registration_wait_releases_common_lock_and_other_vm_can_stop(self):
+        from xenova_execution import short_lock
+        from xenova_runtime import operation_lock
+
+        healthy = self.create()
+        pending = {**self.spec, 'vm_id':'550e8400-e29b-41d4-a716-446655440001',
+                   'name':'pending', 'ipv4':'192.168.77.31'}
+        now=[1000.0];holder=[];seen=[]
+        self.p.clock=lambda:now[0]
+        def checkpoint(phase,op):
+            if phase=='published' and not holder:
+                lock=short_lock(self.run,'admission');lock.__enter__()
+                holder.append(lock)
+        def sleep(delay):
+            now[0]+=delay
+            with operation_lock(self.run):pass
+            self.assertTrue(self.m.fork().call('intents',{'vm_id':healthy})['ok'])
+            holder[0].__exit__(None,None,None);holder[0]=None
+            stopped=self.m.fork().call('stop',{'vm_id':healthy},execute=True,idempotency_key='independent-stop')
+            self.assertTrue(stopped['ok'],stopped)
+            seen.append(stopped['operation_id'])
+        self.m.checkpoint=checkpoint;self.p.sleep=sleep
+        try:
+            result=self.m.call('create',pending,execute=True,idempotency_key='initial-admission',budget_ms=6000)
+        finally:
+            if holder and holder[0] is not None:holder[0].__exit__(None,None,None)
+        self.assertTrue(result['ok'],result)
+        self.assertEqual((len(seen),self.copies),(1,2))
+        intent=json.loads((self.data/'control'/(pending['vm_id']+'.json')).read_text())
+        self.assertEqual(intent['accepted_operation_id'],result['operation_id'])
+
+    def test_initial_registration_wait_expiry_keeps_public_assets_and_origin(self):
+        from xenova_execution import short_lock
+
+        now=[1000.0];holder=[]
+        self.p.clock=lambda:now[0]
+        self.p.sleep=lambda delay:now.__setitem__(0,now[0]+delay)
+        def checkpoint(phase,op):
+            if phase=='published' and not holder:
+                lock=short_lock(self.run,'admission');lock.__enter__()
+                holder.append(lock)
+        self.m.checkpoint=checkpoint
+        try:
+            with patch.object(self.p,'prepare_dhcp',side_effect=AssertionError('no DHCP after admission expiry')):
+                failed=self.m.call('create',self.spec,execute=True,idempotency_key='initial-expiry',budget_ms=6000)
+        finally:
+            for lock in holder:lock.__exit__(None,None,None)
+        self.assertEqual(failed['error']['code'],'DEADLINE_EXCEEDED')
+        path=self.data/'operations'/(failed['operation_id']+'.json')
+        original=path.read_bytes();op=json.loads(original)
+        self.assertEqual((op['phase'],op['status']),('published','RECOVERY_REQUIRED'))
+        self.assertTrue((self.data/'instances'/self.key/'root.raw').exists())
+        self.assertFalse((self.data/'tombstones'/(self.spec['vm_id']+'.json')).exists())
+        self.assertFalse((self.data/'control'/(self.spec['vm_id']+'.json')).exists())
+        rows=self.m.call('recovery-intents')['data']['vms']
+        self.assertTrue(rows[0]['registration_pending'])
+        self.assertEqual(path.read_bytes(),original)
+        self.assertEqual(self.copies,1)
+
     def test_registration_wait_rechecks_host_operation_lifecycle_and_configuration(self):
+        import itertools
         import xenova_execution as execution
-        for boundary in ('host','operation','lifecycle','configuration'):
-            with self.subTest(boundary=boundary):
+        for stage,boundary in itertools.product(('published','dhcp-applied'),
+                                                ('host','operation','lifecycle','configuration')):
+            with self.subTest(stage=stage,boundary=boundary):
                 f=ManagementTest('runTest');f.setUp();holder=[];original=[];now=[1000.0]
                 try:
                     f.p.clock=lambda:now[0]
                     def checkpoint(phase,op):
-                        if phase=='dhcp-applied':
+                        if phase==stage:
                             original.append(json.loads(json.dumps(op)))
                             lock=execution.short_lock(f.p.runtime,'admission');lock.__enter__();holder.append(lock)
                     def changed(delay):
@@ -205,9 +305,11 @@ class ManagementTest(unittest.TestCase):
                             path=(f.data/'operations'/(original[0]['operation_id']+'.json') if boundary=='operation'
                                   else f.data/'tombstones'/(f.spec['vm_id']+'.json') if boundary=='lifecycle'
                                   else f.data/'instances'/f.key/'instance.json')
-                            value=json.loads(path.read_text())
+                            value=(json.loads(path.read_text()) if path.exists() else
+                                   f.m._state(f.spec['vm_id'],f.p.records(validate_assets=False)))
                             field={'operation':'phase','lifecycle':'generation','configuration':'memory_mib'}[boundary]
                             value[field]='external-change' if boundary=='operation' else value[field]+1
+                            path.parent.mkdir(parents=True,exist_ok=True)
                             path.write_text(json.dumps(value))  # external writer fixture under its own admission
                         holder.pop().__exit__(None,None,None)
                     f.m.checkpoint=checkpoint;f.p.sleep=changed
@@ -432,6 +534,47 @@ class ManagementTest(unittest.TestCase):
             result=self.call(action,{'vm_id':identity})
             self.assertTrue(result['ok'],result)
 
+    def test_restore_admission_contention_retries_same_move_and_finishes_registration(self):
+        identity = self.create()
+        spec = {'vm_id': identity}
+        target = self.data / 'instances' / self.key
+        inode = (target / 'root.raw').stat().st_ino
+        self.assertTrue(self.call('retire', spec)['ok'])
+        key = 'restore-after-admission-contention'
+        observed = []
+
+        with ExitStack() as holder:
+            def hold_before_move(phase, op):
+                if phase == 'moving' and op['action'] == 'restore' and not observed:
+                    holder.enter_context(management.short_lock(self.run, 'admission'))
+                    observed.append(op['operation_id'])
+
+            with patch.object(self.m, 'checkpoint', hold_before_move):
+                blocked = self.call('restore', spec, key=key)
+            self.assertEqual(blocked['error']['code'], 'OPERATION_IN_PROGRESS')
+            self.assertEqual(blocked['operation_id'], observed[0])
+            self.assertFalse(target.exists())
+            self.assertEqual(self.state(identity)['lifecycle'], 'RETIRED')
+
+        def contend_after_move(phase, op):
+            if phase == 'moved' and op['action'] == 'restore':
+                self.assertTrue(target.is_dir())
+                with self.assertRaises(management.ExecutionError) as busy:
+                    with management.short_lock(self.run, 'admission'):
+                        pass
+                self.assertEqual(busy.exception.error['code'], 'OPERATION_IN_PROGRESS')
+
+        with patch.object(self.m, 'checkpoint', contend_after_move):
+            result = self.call('restore', spec, key=key)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['operation_id'], blocked['operation_id'])
+        self.assertEqual(self.state(identity)['generation'], 2)
+        self.assertEqual((target / 'root.raw').stat().st_ino, inode)
+        for action in ('list', 'recovery-intents'):
+            response = self.m.call(action)
+            self.assertTrue(response['ok'], response)
+            self.assertEqual(response['data']['vms'][0]['lifecycle'], 'REGISTERED')
+
     def test_running_vm_cannot_retire_and_identity_mismatch_is_not_a_stopped_vm(self):
         identity=self.create();r=json.loads((self.data/f'instances/{self.key}/instance.json').read_text())
         self.xen.rows=[domain(r,self.data/f'instances/{self.key}/root.raw')]
@@ -516,12 +659,20 @@ class ManagementTest(unittest.TestCase):
         import xenova_execution as execution
         holder=[];waits=[];sleep=self.p.sleep
         save_tomb=self.m._save_tomb
+        def at_publish(phase,op):
+            if phase=='published':
+                lock=execution.short_lock(self.run,'admission');lock.__enter__();holder.append(lock)
+        self.m.checkpoint=at_publish
         def saved(*args,**kwargs):
             result=save_tomb(*args,**kwargs)
             lock=execution.short_lock(self.p.runtime,'admission');lock.__enter__();holder.append(lock)
             return result
         def release(delay):
             waits.append(delay)
+            pending=self.m.fork().call('recovery-intents')
+            self.assertTrue(pending['ok'],pending)
+            self.assertTrue(pending['data']['vms'][0]['registration_pending'])
+            self.assertEqual(pending['data']['vms'][0]['guest_kind'],'zephyr')
             if holder:holder.pop().__exit__(None,None,None)
             sleep(delay)
         self.p.sleep=release
@@ -530,7 +681,7 @@ class ManagementTest(unittest.TestCase):
         finally:
             if holder:holder.pop().__exit__(None,None,None)
         self.assertTrue(result['ok'],result)
-        self.assertEqual(len(waits),1)
+        self.assertEqual(len(waits),2)
         r=result['data']['configuration']
         self.assertEqual(r['board_shutdown_policy'],'refuse');self.assertFalse(r['autostart'])
         self.assertNotIn('ipv4',r);self.assertFalse((self.data/('instances/'+management.internal_name(spec['vm_id'])+'/root.raw')).exists())

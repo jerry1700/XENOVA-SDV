@@ -72,6 +72,21 @@ export interface VmListResponse {
   observed_at: string;
 }
 
+/** POST /api/v1/vms/synchronizations — 보드 등록 목록 ↔ DB VM 테이블 등록 동기화 결과 */
+export interface VmSynchronizationResult {
+  /** 보드에 등록된 VM 수 */
+  discovered: number;
+  registered: number;
+  updated: number;
+  unchanged: number;
+  conflicts: number;
+  incomplete: number;
+  /** DB 에는 있는데 이번에 보드에 없던 VM (연속으로 없으면 retired) */
+  missing_from_board: number;
+  retired: number;
+  results: { vm_id: string; action: string; reason: string | null }[];
+}
+
 /** §5 POST /api/v1/vms 요청 (§9 입력값 규칙) */
 export interface CreateVmRequest {
   /** 1~63자, 앞뒤 공백·제어문자 금지 */
@@ -113,6 +128,8 @@ export interface VmResources {
   memory_mib: number;
   pcpu_count: number;
   vcpu_pinning: VcpuPinning[];
+  /** dom0와 공유 VM이 사용할 수 있는 pCPU 집합. 전용 VM은 선택할 수 없다. */
+  shared_pcpus: number[];
   /** 서버가 전용으로 검증한 코어만 강조한다. 이름이나 OS로 전용 여부를 추론하지 않는다. */
   exclusive_pcpus: number[];
   pcpus: PcpuStatus[];
@@ -125,16 +142,27 @@ export interface UpdateVcpuPinningRequest {
   mappings: VcpuPinning[];
 }
 
-export interface UpdateMemoryRequest {
+export interface UpdateVmResourcesRequest {
+  vcpus: number;
   memory_mib: number;
 }
 
+/** Mock 핀닝 계약의 기존 개별 필드 타입. */
 export interface UpdateVcpusRequest {
   vcpus: number;
 }
 
-export type VmResourceUpdate =
-  { kind: 'memory'; body: UpdateMemoryRequest } | { kind: 'vcpus'; body: UpdateVcpusRequest };
+export interface UpdateMemoryRequest {
+  memory_mib: number;
+}
+
+export interface VmResourceUpdateResult {
+  vm_id: string;
+  operation_id: string | null;
+  before: { vcpus: number; memory_mib: number };
+  after: { vcpus: number; memory_mib: number };
+  applies_on_next_start: boolean;
+}
 
 /** POST /api/v1/vms/{id}/stress/cpu — workers 1~4, duration_s 1~120 */
 export interface CpuStressRequest {
@@ -467,4 +495,36 @@ export interface RouteRequest {
   vm_id: string | null;
   view: DisplayView;
   expected_revision: number;
+}
+
+// ---- USB 휴대폰 화면 연결 (REST-38·REST-39, docs/contracts/phone-link-v1.md) ----
+
+export type PhoneRelayState = 'listening' | 'waiting_link' | 'starting' | 'stopped' | 'failed' | 'unknown';
+
+export interface PhoneLinkStatus {
+  /** 보드에 휴대폰 중계 설정이 있음 */
+  configured: boolean;
+  relay: PhoneRelayState;
+  /** 휴대폰 브라우저에서 열 주소. relay 가 listening 일 때만 */
+  url: string | null;
+  usb: {
+    interface: string;
+    present: boolean;
+    /** 보드 쪽 주소(주소/접두어) */
+    ipv4: string[];
+    /** 휴대폰 주소 */
+    gateway: string | null;
+  };
+  configured_phone_ipv4: string | null;
+  /** 휴대폰이 테더링 대역을 바꿔 중계가 시작하지 못함. 판단할 수 없으면 null */
+  subnet_mismatch: boolean | null;
+  /** 번호 값은 없다 */
+  pairing: { active: boolean; expires_at: string | null };
+  observed_at: string;
+}
+
+/** 새 연결번호. 화면 상태에만 두고 저장·로그·URL 에 넣지 않는다 */
+export interface PhonePairingCode {
+  code: string;
+  expires_at: string;
 }

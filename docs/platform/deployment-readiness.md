@@ -117,7 +117,7 @@ OS 공통 정적 CPU 배치는 이전 검증 범위를 유지한다. 기존 full
 | 명시 world 설치 | `/usr/sbin/xenova-world-install`; root private 입력만 읽고 현재 등록/정지/소유 guard 뒤 world 부분 적용. broker/VM 생성 없음 |
 | 등록 조회·선택 통지 | 하위 projection/hook와 dom0-manager route/sender를 같은 제공 후보로 설치. 비활성 `/usr/share/xenova/spring-registration.env.example`; FastAPI 전용 root 0600 설정은 운영/Spring 담당 공급. 옛 직접 sender/CLI 제거. [설치 절차](#registration-api) |
 | 실제 drive template | `package-xenova-drive-template.py --build-root ... --output NEW`가 현재 소스와 실제 ARM BUILD_RECEIPT·payload를 대조해 새 immutable envelope 생성. `default-templates.lock.json`·defaults·assembly example이 실제 hash 선택. lab 차량 프로필이며 실제 차량 승인값 아님 |
-| Linux template/seed | Ubuntu 1.0.5·Debian 1.0.6 준비 입력은 현재 Agent·공용 MQTT 소스와 설치 receipt를 포함한다. seed는 현재 guest_identity helper를 사용하고 host UUID 계획 뒤 private env를 공급한다. 실제 선택은 기본 lock과 검증한 template manifest를 따른다 |
+| Linux template/seed | Ubuntu 1.0.5·Debian 1.0.8 준비 입력은 현재 Agent·공용 MQTT 소스와 설치 receipt를 포함한다. seed는 현재 guest_identity helper를 사용하고 host UUID 계획 뒤 private env를 공급한다. 실제 선택은 기본 lock과 검증한 template manifest를 따른다 |
 
 고정 Yocto Python 3.14의 `ssl.py`/`_ssl`은 `python3-io`, HTTP client는 `python3-netclient`,
 urllib.parse/threading 등은 해당 manifest의 core/dependency로 확인한다. 미존재 `python3-ssl`은 사용하지 않는다.
@@ -216,6 +216,20 @@ env example의 선택 입력이다. 파일/차량/시간 승인값은 설치 담
 | MQTT·네트워크 / 플랫폼·계정 운영 | 기존 `xenova-mqtt-broker` 계정/ACL 세대, 보호된 env의 credential. API token과 broker 계정은 별도 | 익명·`#` ACL·전역 raw 수집·bridge 추가로 우회하지 않음. broker 준비와 각 제품 인증/수신은 별도 |
 | Worker·Agent / 제품 담당 | 기존 unit 환경/override와 runtime 경로, Agent별 identity·필수 앱 제공물 | `/run`의 host 재부팅 보존 한계·episode 정책을 영속 이관/SQLite/새 상수로 바꾸지 않음 |
 | 콘솔·진단 / 플랫폼·각 제품 | 기존 optional recorder·trace와 공개 CLI/PTY, 각 제품 logging 설정 | 선택 진단과 필수 원장·Authority·receipt를 분리. 인증/console lease·필수 프로토콜/원 PTY를 보존 |
+
+### 지원 VM 생성 실패의 기본 유한 자동 수습
+
+`xenova-platform`은 `xenova_creation_auto.py`와 설정 형식 예시
+`/usr/share/xenova/creation-reconcile-policy.json.example`을 설치한다. 신규 Debian·Ubuntu·Zephyr 생성은
+enable 파일 없이 `bounded-1-plus-1`로 등록한다. 기존 trial 설정도 지원하며 잘못된 설정은 수락 전 거절한다.
+최초 1회·조건 변화 시 추가 최대 1회만 허용한다. Linux의 원 cleanup 예산과 Zephyr의 기존 명시 수습
+호출 예산/원 budget 중 작은 값을 원장에 고정한다. 생성 기한·운영 정책·E4 예산을 늘리지 않는다.
+기존 기록 변환·부팅 때 일괄 정리·새 daemon은 추가하지 않았다. Linux/Zephyr의 기존 준비 I/O 슬롯을
+각각 재사용하며, 사용 중이거나 신원/저장 효과가 미확정인 자산은 계속 보존한다.
+Manager·creation·automatic helper·preparation은 같은 하위 후보로 설치해야 한다. 기존 외부 HTTP 소비자의
+동시 교체나 내부 journal 버전 지정은 요구하지 않는다. 최종 rootfs의 creation/automatic 모듈 바이트 검사와
+G1 하위 런타임 인계 목록에 포함했다. 현재 로컬 근거와 ARM/RPM·보드 미수행 범위는
+[자동 수습 검증](../verification/automatic-private-reconciliation-20261110.md)을 따른다.
 
 ### 보드별 Recovery Worker와 factory Gateway 설정
 
@@ -351,3 +365,25 @@ paired binding은 기존 `${libexecdir}/xenova-domain-identities-native`를 재�
 새 필수 공개 옵션·journal 버전 선택·운영 예산은 추가하지 않았다.
 실제 import·설치 파일 hash·서비스 복구는 [시연 범위 검증](../verification/recovery-scenario-closure-20261030.md#recovery-demo-20261107)에 기록한다.
 이는 정규 RPM·전체 이미지 재빌드, 이미지/factory 기본 firmware 변경, 주행 종단 수락의 증거가 아니다.
+
+
+<a id="display-first-install"></a>
+## 표시 역할·첫 설치 자격·연결 검사
+
+새 `guest_display` Debian factory의 first-boot는 토큰을 준비하고 원 hash를 설치 진행에 고정한 뒤
+기존 private root 공급자로 전달한다. 기존 observer 계정의 read-only export, 별도 loopback feed 토큰,
+relay 데이터 설정과 identity plan의 초기 세 역할을 준비한다. 공용 이미지/템플릿에는 보드 비밀을 넣지 않는다.
+완료된 설치에서는 토큰·역할을 초기화하지 않는다. 기존 보드 갱신 시 현재 토큰·env·binding을 보존한다.
+
+배포 묶음은 `xenova-platform`의 display_setup/sync·first_boot·wrapper·check unit과
+`xenova-display`의 relay/feed unit·기존 Python 모듈이다. `assemble.platform_root_ok`는 실제 파일·
+enable·소스 일치를 검사한다. 보드 활성 설정/토큰이 든 공용 이미지는 거절한다. 설치 후 check는
+VM autostart를 막지 않고 한 번 실행하며 조기 부팅/연결 실패는 unconfirmed로 남긴다.
+기존 보드에서 새 package를 설치했다고 첫 설치 공급을 다시 실행하거나 비밀을 회전하지 않는다.
+
+일반 생성으로 Interaction 역할을 자동 바꾸지 않는다. `xenova-display-setup show`, 조건부
+`select --vm-id NEW --expected-vm-id OLD [--execute]`, `check [--live]`를 사용한다.
+서비스 재시작 실패 뒤에는 같은 선택의 `--execute --restart`, 연결 재확인은 `check --live --record`다.
+상세 [설치·실패 처리](../../platform/services/display/router/deploy/guest-display/README.md#표시-담당-선택과-설치-확인)와
+[로컬 검증](../verification/display-installation-closure-20261111.md)을 따른다. EDID/실화면·방화벽·
+실보드 재부팅·새 이미지/SD의 수락은 별도이며 로컬 HTTP 시험으로 완료를 주장하지 않는다.

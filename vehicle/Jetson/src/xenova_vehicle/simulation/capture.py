@@ -135,8 +135,9 @@ def _ground_raster(scene):
         j = (i + 1) % len(center)
         cv2.fillPoly(raster, [pixels((left[i], left[j], right[j], right[i]))], (35, 35, 35))
     thickness = max(1, round(.025 / resolution))
+    road_edges = np.zeros((height, width), np.uint8)
     for edge in (left, right):
-        cv2.polylines(raster, [pixels(edge)], True, (245, 245, 245), thickness)
+        cv2.polylines(road_edges, [pixels(edge)], True, 1, thickness)
     # 누적 arc의 ON 구간과 교차한 부분만 칠한다. raster/선 두께의 끝점 양자화는 남는다.
     station = 0.0
     for a, b in zip(center, np.roll(center, -1, axis=0)):
@@ -154,7 +155,13 @@ def _ground_raster(scene):
     paved = np.zeros((height, width), np.uint8)
     for polygon in layout['paved_areas']:
         cv2.fillPoly(paved, [pixels(polygon)], 1)
-    raster[cv2.dilate(paved, np.ones((3, 3), np.uint8)) > 0] = (35, 35, 35)
+    opening = cv2.dilate(paved, np.ones((3, 3), np.uint8)) != 0
+    raster[opening] = (35, 35, 35)
+    # 직접 맞닿은 칸은 도로 경계 테이프를 공유한다. 별도 연결 마당의 개구부는 유지한다.
+    bay_edges = np.zeros_like(paved)
+    for bay in layout.get('parking_slots', ()):
+        cv2.polylines(bay_edges, [pixels(bay['outline'])], True, 1, thickness + 2)
+    raster[(road_edges != 0) & (~opening | (bay_edges != 0))] = (245, 245, 245)
     for line in layout['paint_lines']:
         cv2.polylines(raster, [pixels(line)], False, (245, 245, 245), thickness)
     cv2.line(raster, tuple(pixels(left[0])), tuple(pixels(right[0])), (245, 245, 245), thickness)
@@ -208,6 +215,11 @@ class SyntheticCamera:
                 return self._last_input
             if snapshot.sequence < self._last.sequence or snapshot.sim_time_us <= self._last.sim_time_us:
                 raise ValueError('synthetic sequence/time regressed or repeated without the original capture ID')
+        if (self._last is not None and snapshot.epoch==self._last.epoch and snapshot.pose==self._last.pose
+                and snapshot.scene.sha256==self._last.scene.sha256
+                and not (self.effects.noise_std_mm or self.effects.noise_mm_per_m2 or self.effects.dropout_fraction)):
+            # 고정 장면·자세의 결정적 pixel만 재사용한다. 새 원 sample 시각·순번은 그대로 발급한다.
+            return self._owned_input(snapshot,self._last_input.rgb.payload,self._last_input.depth.payload)
         if self._ray_cache is None:
             self._ray_cache = tuple(_rays(camera) for camera in (self.calibration.rgb, self.calibration.right))
         if self._raster_cache is None or self._raster_cache[0] != snapshot.scene.sha256:
@@ -252,13 +264,16 @@ class SyntheticCamera:
         for u0, v0, u1, v1 in self.effects.hole_rects:
             valid[v0:v1, u0:u1] = False
         depth = np.where(valid, measured, 0).astype('<u2').tobytes()
+        return self._owned_input(snapshot,_nv12(image),depth)
+
+    def _owned_input(self,snapshot,rgb,depth):
         source = 'sim:' + snapshot.epoch + ':' + self.effects.sha256[:16]
         clock = 'simulation:' + snapshot.epoch
         def stamp(stream):
             return FrameStamp(source, stream, snapshot.sequence, clock,
                               (snapshot.sim_time_us, snapshot.sim_time_us), snapshot.sim_time_us)
         result = PerceptionInput('SYNTHETIC', self.calibration.sha256,
-            ImageFrame(stamp('rgb_video'), 640, 360, 'NV12', _nv12(image), 0),
+            ImageFrame(stamp('rgb_video'), 640, 360, 'NV12', rgb, 0),
             ImageFrame(stamp('depth_right'), 640, 480, 'RAW16_LE', depth, 0))
         self._last, self._last_input = snapshot, result
         return result

@@ -129,6 +129,8 @@ class MapperRetainedWorldTests(unittest.TestCase):
         if revision:
             self.pipeline._alignment=MapOdomAlignment.from_match(inputs.pose,fitted,observed_j_interval=capture,
                 registration_revision=revision,valid_for_us=100_000,position_drift_mps=.001,yaw_drift_rps=.001)
+            if self.pipeline._propagation_anchor is None:
+                self.pipeline._propagation_anchor=self.pipeline._alignment
             point=(fitted.sample.x,fitted.sample.y,fitted.sample.yaw)
             fit=RegistrationResult('BOUNDED',point,.002,.002,
                 (PoseBox((point[0]-.001,point[0]+.001),(point[1]-.001,point[1]+.001),(point[2]-.001,point[2]+.001)),),
@@ -145,7 +147,7 @@ class MapperRetainedWorldTests(unittest.TestCase):
             alignment_metadata=None if not revision else self.pipeline._alignment.fields(),reference_revision=revision,
             mapped_pose=list((inputs.pose.sample.x,inputs.pose.sample.y,inputs.pose.sample.yaw) if not revision else fit.representative))
         result=PerceptionResult(summary,TapeGraph((),source_key=stamp.key),road,None,fit,
-            self.pipeline.grid.snapshot(at,clock_id=stamp.clock_id),None)
+            self.pipeline.grid.snapshot(at,clock_id=stamp.clock_id),None,mapped_odometry=fitted if revision else None)
         return MappingFrameDraft(item,context,self.pipeline,self.collector,inputs,frame,None,0,True,'READY',result=result)
 
     def grant(self):

@@ -27,6 +27,8 @@ int dl_manual_clock_get(struct dl_clock *out,uint64_t *now){
  strcpy(out->trust.odom_epoch,fixture_sid);strcpy(out->gateway,fixture_vm);*now=1000000;return 0;
 }
 int dl_clock_get(struct dl_clock *out,uint64_t *now){return dl_manual_clock_get(out,now);}
+static int fixture_mission_error=-EAGAIN;
+int dl_mission_get(xenova_drive_MissionGrant *out,uint64_t now){(void)out;(void)now;return fixture_mission_error;}
 /* Serializer fixtures carry no actual owned path. Local-grant admission is
  * exercised through the persistent actual input bridge, never synthesized here. */
 int dl_mission_for_local(xenova_drive_MissionGrant *out,uint64_t now){(void)out;(void)now;return -EAGAIN;}
@@ -38,6 +40,32 @@ static uint64_t context_u64(const char *text){
 }
 int main(int argc,char **argv){
  assert(argc==2||argc==3||argc==15);struct drive_completion work={.sequence=41,.end_us=1000000};
+ if(!strcmp(argv[1],"mission-contention")){
+  de_init(&engine,&lp_selected_config,&lp_selected_assets);
+  engine.maps.authorized=true;
+  struct dw_handle handle;struct dw_snapshot *snapshot;
+  assert(dw_reserve(&engine.maps,&handle,&snapshot)==DW_OK);
+  memset(snapshot,0,sizeof(*snapshot));
+  snapshot->world.required_features=DW_LANE_MODEL;
+  assert(dw_publish(&engine.maps,handle)==DW_OK);
+  engine.has_grant=true;engine.planning=true;engine.planning_has_grant=true;
+  engine.current=0;engine.paths[0].path.execution.present=true;engine.paths[0].path.execution.mission.kind=2;
+  engine.search_reason=LP_SEARCHING;engine.budget.deadline_us=1100000;
+  prepared_mission_present=prepared_valid=true;
+  uint32_t requested=engine.requested;
+  assert(!atomic_flag_test_and_set(&engine.maps.lock));
+  assert(planner_refresh_mission(1000000)==-EBUSY);
+  atomic_flag_clear(&engine.maps.lock);
+  fixture_mission_error=-EBUSY;
+  assert(planner_refresh_mission(1000001)==-EBUSY);
+  assert(engine.has_grant&&prepared_valid&&!engine.path_invalidated&&engine.search_reason==LP_SEARCHING);
+  assert(engine.requested==requested&&engine.budget.deadline_us==1100000);
+  fixture_mission_error=-EAGAIN;
+  assert(planner_refresh_mission(1000002)==0);
+  assert(!engine.has_grant&&!prepared_valid&&engine.path_invalidated&&engine.search_reason==LP_CANCELLED);
+  assert(engine.requested==requested+1);
+  return 0;
+ }
  if(!strcmp(argv[1],"request-window")){
   assert(argc==3);unsigned variant=(unsigned)context_u64(argv[2]);assert(variant<8);
   struct dl_clock mapping={.acknowledged=true,.lower=10000,.upper=30000,.expires_pi=2000000};
@@ -165,6 +193,10 @@ def command_probe(tmp_path_factory):
     result=subprocess.run(command,capture_output=True,text=True,timeout=120)
     assert result.returncode==0,result.stderr
     return binary
+
+
+def test_mission_lookup_contention_preserves_running_plan_and_prepared_path(command_probe):
+    subprocess.run([str(command_probe),'mission-contention'],check=True,timeout=30)
 
 
 @pytest.mark.parametrize('case',['original','stop','phase'])

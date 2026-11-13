@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 PREFIX = "xenova/v1"
 
@@ -108,8 +109,7 @@ _APP = re.compile(rf"^{PREFIX}/apps/([^/]+)/events$")
 _VM_APP = re.compile(rf"^{PREFIX}/vms/([^/]+)/apps/([^/]+)/events$")
 
 
-def parse(topic: str) -> TopicInfo:
-    """토픽에서 vm_id·app_id 를 꺼낸다. 계약 밖 토픽이면 빈 TopicInfo."""
+def _parse(topic: str) -> TopicInfo:
     if match := _VM_APP.match(topic):
         return TopicInfo(vm_id=match.group(1), app_id=match.group(2))
     if match := _VM.match(topic):
@@ -119,8 +119,7 @@ def parse(topic: str) -> TopicInfo:
     return TopicInfo()
 
 
-def matches(subscription: str, topic: str) -> bool:
-    """MQTT 와일드카드(`+`, `#`) 구독이 토픽에 맞는지."""
+def _matches(subscription: str, topic: str) -> bool:
     sub_parts = subscription.split("/")
     topic_parts = topic.split("/")
     for index, part in enumerate(sub_parts):
@@ -131,3 +130,25 @@ def matches(subscription: str, topic: str) -> bool:
         if part != "+" and part != topic_parts[index]:
             return False
     return len(sub_parts) == len(topic_parts)
+
+
+# 반복 수신되는 짧은 토픽의 순수 해석 결과만 제한적으로 보관한다.
+# 구독 목록, 바인딩과 메시지 신선도는 호출자가 매번 확인한다.
+_CACHE_CHARS = 256
+_parse_short = lru_cache(maxsize=128)(_parse)
+_match_short = lru_cache(maxsize=128)(_matches)
+
+
+def parse(topic: str) -> TopicInfo:
+    """토픽에서 vm_id·app_id 를 꺼낸다. 계약 밖 토픽이면 빈 TopicInfo."""
+    if type(topic) is str and len(topic) <= _CACHE_CHARS:
+        return _parse_short(topic)
+    return _parse(topic)
+
+
+def matches(subscription: str, topic: str) -> bool:
+    """MQTT 와일드카드(`+`, `#`) 구독이 토픽에 맞는지."""
+    if (type(subscription) is str and type(topic) is str
+            and len(subscription) <= _CACHE_CHARS and len(topic) <= _CACHE_CHARS):
+        return _match_short(subscription, topic)
+    return _matches(subscription, topic)

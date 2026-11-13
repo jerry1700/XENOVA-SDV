@@ -441,14 +441,16 @@ class XenovaClient:
                 except ValueError:
                     log.warning('state message rejected: invalid complete state')
                     return
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            log.warning("버림 %s: PAYLOAD_INVALID JSON 아님", msg.topic)
+        except env.EnvelopeError as error:
+            log.warning("버림 %s: %s", msg.topic, error)
             return
         except RecursionError:
             log.warning('버림 %s: PAYLOAD_INVALID JSON nesting limit',msg.topic)
             return
-        except env.EnvelopeError as error:
-            log.warning("버림 %s: %s", msg.topic, error)
+        except ValueError:
+            # UnicodeDecodeError·JSONDecodeError 와, 4300 자리를 넘는 정수에서 json.loads 가 내는 ValueError.
+            # paho 는 콜백 예외를 다시 던져 네트워크 스레드를 끝내므로 남이 보낸 바이트로는 여기를 벗어나면 안 된다
+            log.warning("버림 %s: PAYLOAD_INVALID JSON 아님", msg.topic)
             return
         if len(msg.payload) > policy.for_message(envelope["type"],envelope.get('payload')).max_bytes:
             log.warning("버림 %s: PAYLOAD_TOO_LARGE %s %d bytes", msg.topic, envelope["type"], len(msg.payload))

@@ -1,6 +1,7 @@
 """유한 world/state 계약의 형식·기하 검증. 권위·시계·센서 수락을 발급하지 않는다."""
 import math
 from functools import lru_cache
+from struct import iter_unpack
 from uuid import UUID
 from google.protobuf.message import DecodeError
 from . import world_pb2 as schema
@@ -34,7 +35,7 @@ _REPEATED_CAPS={'DriveState.path':512,'DriveState.segments':3,'LaneModel.lanes':
     'LaneGeometry.centerline':32,'LaneModel.divider':32,'WorldSnapshot.parking_slots':8,
     'ParkingSlot.corners':4,'MissionExecution.selected_slot_polygon':4,
     'TaskReferenceState.basis_prefix':64,'EpisodeCore.blocker':8}
-_MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneModel':1408,
+_MESSAGE_CAPS={'WorldSnapshot':32768,'DriveState':32768,'DriveLink':32768,'LaneModel':1424,
     'ParkingSlot':256,'MapLocalization':96,'SceneAdmissionRef':96,'ParkingSetMeta':64,
     'MissionGrant':1024,'MissionBudgetRequest':512,'MissionBudgetReply':1536,
     'MapperClockProbe':1024,'MapperClockReply':1024,'SurveySummary':288,'SceneGrant':1024,
@@ -58,7 +59,7 @@ def _bytes_bound(field):
     return {'occupancy':(4096,False),'cell_flags':(4096,False),'age_le32':(16384,False),
         'point_state':(32,False),'crossing':(31,False),'divider_state':(32,False),
         'distance_mm_le':(2,True),'status':(1,True),'quality':(1,True),
-        'drivable_permission':(512,False)}.get(name,(MAX_BYTES,False))
+        'drivable_permission':(512,False),'boundary_cell_free4_le':(512,False)}.get(name,(MAX_BYTES,False))
 
 def _repeated(field):
     # 6.x deprecates label access; 3.20 remains the fixed generator/test reader.
@@ -69,8 +70,9 @@ def _finite(message):
     cap=_MESSAGE_CAPS.get(message.DESCRIPTOR.name,MAX_BYTES)
     if message.ByteSize()>cap:raise ValueError('message size cap '+message.DESCRIPTOR.name)
     for field,value in message.ListFields():
-        values=value if _repeated(field) else (value,)
-        if _repeated(field) and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
+        repeated=_repeated(field)
+        values=value if repeated else (value,)
+        if repeated and len(value)>_REPEATED_CAPS.get(field.containing_type.name+'.'+field.name,64):
             raise ValueError('repeated field cap '+field.name)
         if field.type in (field.TYPE_FLOAT,field.TYPE_DOUBLE):
             if not all(math.isfinite(item) for item in values):raise ValueError('nonfinite field '+field.name)
@@ -79,7 +81,9 @@ def _finite(message):
         elif field.type==field.TYPE_STRING:
             limit=64 if field.name in _STR64 else 36
             for item in values:
-                if not item or len(item.encode('utf-8'))>limit or any(ord(c)<33 or ord(c)>126 for c in item):raise ValueError('bounded identifier '+field.name)
+                # ASCII 33..126은 문자 수=byte 수다. 같은 범위를 C 문자열 검사로 검산한다.
+                if (not 0<len(item)<=limit or not item.isascii() or not item.isprintable() or ' ' in item):
+                    raise ValueError('bounded identifier '+field.name)
         elif field.type==field.TYPE_BYTES:
             limit,exact=_bytes_bound(field)
             if any(len(item)>limit or exact and len(item)!=limit for item in values):raise ValueError('bounded bytes '+field.name)
@@ -160,6 +164,9 @@ def _lane_model(model):
     _positive(model,'revision')
     _nonnegative(model,'divider_position_bound_m','divider_heading_bound_rad')
     n=len(model.divider)
+    directional = model.HasField('divider_normal_position_bound_m')
+    if directional:
+        _nonnegative(model, 'divider_normal_position_bound_m')
     if len(model.crossing)!=n-1 or len(model.divider_state)!=n or any(v>1 for v in model.crossing+model.divider_state):
         raise ValueError('divider state/crossing')
     divider=[_xy(p) for p in model.divider]
@@ -171,6 +178,11 @@ def _lane_model(model):
     for lane in model.lanes:
         _positive(lane,'revision')
         _nonnegative(lane,'position_bound_m','heading_bound_rad')
+        if (lane.HasField('outer_normal_position_bound_m') != directional
+                or lane.HasField('outer_chord_delta_bound_m') != directional):
+            raise ValueError('incomplete directional lane bounds')
+        if directional:
+            _nonnegative(lane, 'outer_normal_position_bound_m', 'outer_chord_delta_bound_m')
         if lane.travel_direction!=1 or len(lane.centerline)!=n or len(lane.point_state)!=n or any(v>1 for v in lane.point_state):
             raise ValueError('lane stations/state/direction')
         center=[_xy(p) for p in lane.centerline]
@@ -188,8 +200,9 @@ def _lane_model(model):
                 delta=(divider[i][0]-divider[i-1][0],divider[i][1]-divider[i-1][1])
                 if (p[0]-center[i-1][0])*delta[0]+(p[1]-center[i-1][1])*delta[1]<=0:
                     raise ValueError('lane station order')
-                error=2*lane.position_bound_m+model.divider_position_bound_m
-                if math.hypot(outer[i][0]-outer[i-1][0],outer[i][1]-outer[i-1][1])<=2*error:
+                limit = (lane.outer_chord_delta_bound_m if directional
+                         else 2 * (2 * lane.position_bound_m + model.divider_position_bound_m))
+                if math.hypot(outer[i][0]-outer[i-1][0],outer[i][1]-outer[i-1][1]) <= limit:
                     raise ValueError('unbounded reconstructed lane heading')
         sides.append(sign)
     if sides[0]==sides[1]:raise ValueError('lanes must straddle divider')
@@ -340,6 +353,15 @@ def _validate_one(message):
         if any(v>100 and v!=255 for v in message.occupancy) or any(v&~allowed for v in message.cell_flags):raise ValueError('cell encoding')
         if message.required_features&ROAD_PRIORITY and not any(v&CELL_ROAD for v in message.cell_flags):raise ValueError('missing preferred road')
         new=message.required_features in (11,15,27,31)
+        if message.HasField('boundary_cell_free4_le'):
+            records=message.boundary_cell_free4_le
+            if not new or not records or len(records)%4 or len(records)>512:
+                raise ValueError('boundary cell refinement records')
+            previous=-1
+            for cell,mask in iter_unpack('<HH',records):
+                if not previous<cell<n or not 0<mask<65535 or not 70<=message.occupancy[cell]<=100:
+                    raise ValueError('boundary cell refinement record')
+                previous=cell
         if not new and any(flags&2 for flags in message.cell_flags):
             raise ValueError('legacy world supports live-only cells')
         if new and message.minor!=2:raise ValueError('world minor2 required')
@@ -409,6 +431,10 @@ def _validate_one(message):
     elif name=='LaneGeometry':
         _positive(message,'lane_id','adjacent_lane_id','revision')
         _nonnegative(message,'position_bound_m','heading_bound_rad')
+        if message.HasField('outer_normal_position_bound_m') != message.HasField('outer_chord_delta_bound_m'):
+            raise ValueError('incomplete directional lane bounds')
+        if message.HasField('outer_normal_position_bound_m'):
+            _nonnegative(message, 'outer_normal_position_bound_m', 'outer_chord_delta_bound_m')
         if (message.travel_direction!=1 or not 2<=len(message.centerline)<=32
                 or len(message.point_state)!=len(message.centerline) or any(value>1 for value in message.point_state)):
             raise ValueError('lane station/state/direction')
@@ -662,6 +688,16 @@ class PreparedClock(bytes):
 
 def decode(data,message_type=schema.WorldSnapshot):
     if not isinstance(data,bytes) or len(data)>MAX_BYTES:raise ValueError('bounded bytes required')
+    if message_type is schema.VehicleSample and type(data) is bytes and len(data)<=1024:
+        # 정지 창에서 반복되는 원 wire의 정적 검산만 재사용한다. mutable message나
+        # 현재 출처/나이/정지 수락은 저장하지 않으며 반환 객체는 매번 새로 만든다.
+        value=message_type()
+        value.ParseFromString(_validated_vehicle_wire(data))
+        return value
+    return _decode_original(data,message_type)
+
+
+def _decode_original(data,message_type):
     _audit(data,message_type.DESCRIPTOR)
     value=message_type()
     try:value.ParseFromString(data)
@@ -670,6 +706,13 @@ def decode(data,message_type=schema.WorldSnapshot):
     # retain them in a duplicate-copy fingerprint or relay unexamined bytes.
     value.DiscardUnknownFields()
     return validate(value)
+
+
+@lru_cache(maxsize=128)
+def _validated_vehicle_wire(data):
+    # 입력·출력 각 최대 1KiB, 성공한 immutable bytes만 보유한다. 예외는 저장되지 않는다.
+    if type(data) is not bytes or len(data)>1024:raise ValueError('bounded original Vehicle bytes required')
+    return _decode_original(data,schema.VehicleSample).SerializeToString(deterministic=True)
 
 
 def _audit(data,descriptor,depth=0):

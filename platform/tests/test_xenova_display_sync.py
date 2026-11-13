@@ -30,6 +30,8 @@ class DisplaySyncTest(unittest.TestCase):
                          'edid_sha256': EDID, 'x': 0, 'y': 0,
                          'width': 1920, 'height': 1080, 'page': '/display/mobile'}]}))
         self.runtime.chmod(0o644)
+        # 설정 파일을 지우는 테스트도 있으므로 소유자는 파일이 있을 때 한 번만 읽어 둔다.
+        self.owner_uid = self.runtime.stat().st_uid
         self.mobile.write_text(json.dumps({
             'schema_version': 1, 'usb_interface': 'usb0',
             'phone_ipv4': '10.104.83.148', 'port': 8084}))
@@ -37,7 +39,7 @@ class DisplaySyncTest(unittest.TestCase):
 
     def sync(self, address='192.168.77.6'):
         return display.sync_interaction_ui(address, runtime_path=self.runtime,
-                    mobile_path=self.mobile, owner_uid=self.runtime.stat().st_uid)
+                    mobile_path=self.mobile, owner_uid=self.owner_uid)
 
     def test_updates_only_dynamic_origin_and_combined_page(self):
         result = self.sync()
@@ -93,12 +95,12 @@ class DisplayBindingsTest(unittest.TestCase):
             'zephyr-drive-a': {'id': 'zephyr-drive-a', 'uuid': PRIMARY, 'guest_kind': 'zephyr'},
             'zephyr-drive-b': {'id': 'zephyr-drive-b', 'uuid': BACKUP, 'guest_kind': 'zephyr'},
             'vm-interaction': {'id': 'vm-interaction', 'uuid': INTERACTION,
-                'guest_kind': 'linux', 'template_id': 'debian-13-arm64'},
+                'guest_kind': 'linux', 'template_id': 'debian-13-arm64', 'ipv4': '192.168.77.6'},
         }
 
     def sync(self, records=None):
         return display.sync_bindings(records or self.records, bindings_path=self.path,
-                                     owner_uid=self.path.parent.stat().st_uid)
+                                     owner_uid=self.path.parent.stat().st_uid, interaction_vm_id=INTERACTION)
 
     def test_publishes_three_current_deployment_bindings(self):
         result = self.sync()
@@ -121,19 +123,24 @@ class DisplayBindingsTest(unittest.TestCase):
         self.sync()
         replacement = '44444444-4444-4444-8444-444444444444'
         self.records['vm-interaction']['uuid'] = replacement
-        self.assertEqual(self.sync()['state'], 'updated')
+        result = display.select_interaction(self.records, replacement, INTERACTION,
+            bindings_path=self.path, runtime_path=self.path.parent/'absent-runtime',
+            mobile_path=self.path.parent/'absent-mobile', owner_uid=self.path.parent.stat().st_uid, execute=True)
+        self.assertEqual(result['bindings']['state'], 'updated')
         value = json.loads(self.path.read_text())
         self.assertEqual(value['bindings'][2]['vm_id'], replacement)
 
     def test_requires_all_three_unambiguous_registered_roles(self):
         for missing in ('zephyr-drive-a', 'zephyr-drive-b', 'vm-interaction'):
             records = {key: value for key, value in self.records.items() if key != missing}
-            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, 'requires exactly one'):
+            with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, 'requires exactly one|registered Debian'):
                 self.sync(records)
         duplicate = {**self.records, 'another-interaction': {
             'id': 'another-interaction', 'uuid': '55555555-5555-4555-8555-555555555555',
             'guest_kind': 'linux', 'template_id': 'debian-13-arm64'}}
-        with self.assertRaisesRegex(ValueError, 'exactly one Debian'):
+        self.assertEqual(self.sync(duplicate)['state'], 'updated')
+        duplicate['another-interaction']['uuid'] = INTERACTION
+        with self.assertRaisesRegex(ValueError, 'registered Debian'):
             self.sync(duplicate)
 
     def test_rejects_invalid_identity_and_unsafe_existing_target(self):
@@ -146,6 +153,7 @@ class DisplayBindingsTest(unittest.TestCase):
             self.sync()
 
     def test_registration_updates_ui_and_bindings_when_all_roles_exist(self):
+        self.sync()
         runtime = self.path.parent / 'display-runtime.json'
         mobile = self.path.parent / 'display-mobile.json'
         runtime.write_text(json.dumps({
@@ -160,7 +168,7 @@ class DisplayBindingsTest(unittest.TestCase):
             runtime_path=runtime, mobile_path=mobile, bindings_path=self.path,
             owner_uid=runtime.stat().st_uid)
         self.assertEqual(result['ui']['state'], 'updated')
-        self.assertEqual(result['bindings']['state'], 'updated')
+        self.assertEqual(result['bindings']['state'], 'unchanged')
         self.assertEqual(json.loads(runtime.read_text())['ui_origin'], 'http://192.168.77.6:8086')
 
     def test_registration_waits_for_missing_roles_without_writing_binding(self):
@@ -170,7 +178,7 @@ class DisplayBindingsTest(unittest.TestCase):
             runtime_path=self.path.parent/'missing-runtime.json',
             mobile_path=self.path.parent/'missing-mobile.json', bindings_path=self.path,
             owner_uid=self.path.parent.stat().st_uid)
-        self.assertEqual(result['ui']['state'], 'not-configured')
+        self.assertEqual(result['ui']['state'], 'not-requested')
         self.assertEqual(result['bindings']['state'], 'pending')
         self.assertFalse(self.path.exists())
 
@@ -259,8 +267,13 @@ class DisplayRegistrationFlowTest(unittest.TestCase):
                     'guest_kind': 'linux', 'template_id': 'debian-13-arm64',
                     'ipv4': '192.168.77.9'},
             }
+            previous_id = '55555555-5555-4555-8555-555555555555'
+            records['existing-interaction'] = {**records['new-interaction'], 'id': 'existing-interaction',
+                'uuid': previous_id, 'ipv4': '192.168.77.6'}
+            display.sync_bindings(records, bindings_path=bindings, interaction_vm_id=previous_id,
+                                  owner_uid=root.stat().st_uid)
             interaction = records['new-interaction']
-            sync = display.sync_after_registration(records, interaction,
+            sync = display.select_interaction(records, INTERACTION, previous_id, execute=True,
                 runtime_path=runtime, mobile_path=mobile, bindings_path=bindings,
                 owner_uid=root.stat().st_uid)
 

@@ -130,7 +130,25 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
 
-선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": [0]}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 통로별 index는 관측 divider 방향의 왼쪽 차로0·오른쪽 차로1이며 `parking_aisles`와 같은 순서/개수다. 실제 lane ID는 D의 원 내구 예약 뒤 결박하므로 이 정책을 쓸 때 각 aisle의 `approach_lane_id`는0이어야 한다. 생략/null은 미설정이며 자동 횡단·주차 역할을 추정하지 않는다. 이 설정은 FREE/기하/센서 자격이나 추진 승인을 대신하지 않는다.
+흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
+
+바닥 투영 마스크에서 양쪽에 흰선이 검출된 틈은 빈 구간이 약 1.41cm(1cm 격자의 대각선 한 셀) 이하이고 그 안의 모든 셀이 시야 안에 있으며 가려지지 않았을 때 선 조각 추출 전에 메운다. 대각선 셀 길이도 실제 거리로 계산한다.
+
+실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 개발용 `mapper-profile.json`에 기록한다. 이 프로필은 R45 재생 결과를 바탕으로 `pipeline.registration.max_position_error_m`에 `0.065`m를 적용한다. 같은 개발 시험에 기존 mapper 프로필을 재사용할 때도 세 값을 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
+
+R45 실측 코스 설정은 폭 21cm·길이 38cm·축간거리 18cm·카메라 높이 14cm를 사용한다. 같은 설정에서 Jetson의 차체 보정과 Pi C 주행 프로필을 생성한다. 앞뒤 차체 돌출이 대칭이라고 가정한 개발 프로필에서 후륜축부터 앞단은 28cm, 뒤단은 10cm다.
+
+`pipeline.registration`의 오차 한도는 차량 위치·방향 판정에 쓰인다. `pipeline.road_geometry_limits`의 `max_position_error_m`·`max_yaw_error_rad`는 지도 차로 형상과 주차 접근 차로를 채택할 때 쓰인다. 항목을 생략한 기존 프로필은 이전과 같은 값을 사용하고 체크포인트 식별자도 유지한다.
+
+`pipeline.visual_registration`에서 단일 영상 보정의 이동·회전 허용치와 누적 지도 정합을 시도하는 조건을 조정할 수 있다. 기본값은 각각 1cm·0.01rad, 재방문 검사 시점은 위치 또는 방향 오차 상한의 65%다. 누적 지도 정합은 최대 1,024개 셀까지 사용하며, 모든 정합 후보는 `pipeline.registration`의 프레임당 셀·거리 비교 예산을 공유한다.
+
+이 생성기의 `--position-drift-mps`와 `--yaw-drift-rps`는 가상 입력에 실제로 주입한 오차에 맞춰 개발용 위치·방향 상한을 지정한다. 실차 mapper는 실측 보정값을 사용한다.
+
+`pipeline.road.missing_outer_width_bounds_m`는 가려진 도로 바깥 경계를 추정할 차로 폭 범위(m)다. 폼보드 코스의 초기값은 `[0.26, 0.31]`로, 명목 폭은 0.285m다. 이 항목이 없던 schema1 파일도 원본 바이트를 유지하며 이 초기값을 쓴다. `lane_width_min_m`·`lane_width_max_m`은 영상에 보인 경계 간격을 검사하는 범위다. 실측 코스 프로필 생성기는 코스의 차로 폭과 허용 편차로 두 범위를 함께 계산한다. 인지 요약의 `current_lane`은 지도에 연결한 차로 중심과 원 관측 키·시각을 제공한다. `MAPPED`는 현재 위치에서 앞서 관측한 지도 조각을 사용한다는 뜻이고, `HELD`는 마지막 차로 정보를 보존하는 상태다.
+
+선택 항목 `catalog_policy`는 `{"crossing_allowed": true, "aisle_lane_indices": []}` 형태다. 횡단 허용은 설치 도로의 명시 규칙이며 관측한 divider segment에만 적용한다. 미리 정한 `parking_aisles`가 있다면 같은 순서로 왼쪽 차로 0·오른쪽 차로 1을 지정하고, 각 통로의 `approach_lane_id`는 0으로 둔다. 실제 ID는 카탈로그가 차로를 채택할 때 결정한다. `catalog_policy`를 생략하면 횡단 정책이 없어 주행용 차로를 발행하지 않는다.
+
+`parking_aisles`와 `aisle_lane_indices`를 빈 목록으로 두면 누적 흰선에서 입구 후보를 찾고, 주행용으로 채택된 차로의 바깥 경계와 연결한다. 현재 영상에서 입구와 주차칸 경계가 확인되면 기존 `WorldSnapshot.parking_slots`에 넣는다. 깊이로 칸 전체의 빈 공간이 확인되기 전에는 점유를 `UNKNOWN`으로 둔다. 깊이 처리에서는 현재 정지에 필요한 셀을 먼저 확인한다. 최종 접근·주차 경로와 차량 통과 여부는 Pi가 판단한다.
 
 선택 항목 `survey`는 `SurveyProfile`의 12개 필드를 모두 명시한다. 원 coverage profile SHA·필수 센서 mask·셀 용량·정지 관측 창과 간격·이동/회전 오차·pose 간격·anchor 오차·관측 최대 나이·입력 종류를 설정하며 `input_kind`는 `LIVE`만 허용한다. 생략/null이면 조사 기능을 만들지 않는다. 설정만으로 Scene을 승인하지 않으며 실제 Pi grant, 원 시계·정합·정지 창·FREE 증거와 D commit을 별도로 대조한다.
 
@@ -168,6 +186,8 @@ capture 준비는 실제 RGB/depth 30쌍, NN 준비는 M의 fresh parser 결과 
 
 `profiles/oak-rgb-depth-bench.example.json`을 저장소 밖에 복사하고 `device_mxid`를 실제 승인 장치 ID로 바꾼다. 예시의 `REPLACE_WITH_OAK_MXID`는 실행 시 거절한다. 프로필은 `schema_version=1`, `profile_id=oak-rgb-depth-bench-v1`, `nn_requirement=ABSENT`, `jpeg_enabled=false`인 수집 벤치 전용이다. NN 모델이나 JPEG encoder를 적재하는 운영 그래프와 구분한다.
 
+`rgb_sensor_mode: "full"`은 IMX214 센서 전체를 읽고 OAK 안에서 ISP 축소와 좌우 여백을 적용해 RGB NV12 640×360을 만든다. `"1080p"` 또는 키 생략은 기존 16:9 센서 모드를 선택한다. `full`의 수집 결과에는 EEPROM에서 변환한 RGB 내부 파라미터와 영상 영역 후보가 담긴다. 실물 지도 투영에는 해당 모드에서 확인한 보정값을 사용하고 좌우 여백을 유효 영상에서 제외한다.
+
 Jetson의 전용 환경에서 다음과 같이 실행한다. 출력 경로는 새 디렉터리여야 하며 기존 디렉터리는 비어 있어도 덮어쓰지 않는다.
 
 ```bash
@@ -197,7 +217,7 @@ bench-001/
 
 ## YOLOP·RGB·native depth 장치 벤치
 
-`yolop-bench`는 같은 CAM_A video에서 RGB NV12와 BGR letterbox→YOLOP를 만들고, native RIGHT depth도 함께 수신한다. 모델은 [고정 자산 명세](assets/yolop-320x320.md)의 로컬 blob만 사용한다. 자산 검사·원 기동 기한·Device owner·단일 graph 시작을 유지하며 부팅 중 다운로드하지 않는다.
+`yolop-bench`는 같은 CAM_A RGB 출력에서 RGB NV12와 320×320 BGR letterbox→YOLOP를 만들고, native RIGHT depth도 함께 수신한다. 모델은 [고정 자산 명세](assets/yolop-320x320.md)의 로컬 blob만 사용한다. 자산 검사·원 기동 기한·Device owner·단일 graph 시작을 유지하며 부팅 중 다운로드하지 않는다.
 
 `profiles/oak-yolop-rgb-depth-bench.example.json`을 저장소 밖에 복사하고 승인 MXID와 자산 디렉터리·manifest 경로를 채운다. 상대 경로는 profile 파일 기준이다. no-JPEG/REQUIRED 벤치 전용이며 기존 ABSENT 수집 profile과 섞지 않는다.
 

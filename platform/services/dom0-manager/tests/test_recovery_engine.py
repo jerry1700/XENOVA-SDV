@@ -12,7 +12,7 @@ from fake_gateway import FakeGateway
 
 from dom0_manager.errors import DriverError, DriverTimeout, InvalidState, NotSupportedByPlatform, PlatformUnavailable, VMNotFound
 from dom0_manager.models import VmState
-from dom0_manager.recovery.engine import RecoveryEngine
+from dom0_manager.recovery.engine import RecoveryEngine, UNRESOLVED_ATTEMPT
 from dom0_manager.recovery.events import EventLog
 from dom0_manager.recovery.model import FailureReason, HealthState, Judgment, VmHealth
 from dom0_manager.recovery.policy import RecoveryPolicy
@@ -258,6 +258,74 @@ def test_response_loss_queries_journal_and_finishes_without_resending(tmp_path):
     w.advance(5)
     w.tick()
     assert len(w.platform.recover_calls()) == 1 and record.status == RecoveryStatus.COMPLETED and record.execution_id == "exec-journal"
+
+
+@pytest.mark.parametrize("guest_kind", ["linux", "zephyr"])
+def test_confirmation_replays_original_attempt_through_health_recovery(tmp_path, guest_kind):
+    w = make(tmp_path)
+    w.platform.views[VM] = view(present=False)
+    w.platform.results = [
+        PlatformUnavailable("Xen state unknown", platform_code="OBSERVATION_UNAVAILABLE"),
+        DriverTimeout("confirmation deadline", platform_code="DEADLINE_EXCEEDED"),
+        {"attempt": {}, "original_result": {"execution_id": "exec-confirmed"}},
+    ]
+    w.engine.on_judgment(judgment(reason=FailureReason.DOMAIN_ABSENT, kind=guest_kind))
+    w.tick()
+    record = w.record()
+    spec = dict(record.request)
+    w.platform.journal[spec["recovery_attempt_id"]] = {"phase": "uncertain"}
+    w.watcher.set(VM, HealthState.HEALTHY)
+    w.advance(115)
+    w.engine.collect(observations_available=False)
+    assert record.status == RecoveryStatus.EXECUTING and record.replay and record.attempt == 1
+    assert len(w.platform.recover_calls()) == 2
+    w.advance(5)
+    w.tick()
+    assert record.status == RecoveryStatus.COMPLETED and record.execution_id == "exec-confirmed"
+    assert [call[1] for call in w.platform.recover_calls()] == [spec] * 3
+    assert [event["type"] for event in w.events] == ["recovery.started", "recovery.completed"]
+
+
+def test_missing_journal_during_unavailable_observation_does_not_submit(tmp_path):
+    w = make(tmp_path)
+    w.platform.results = [DriverTimeout("manager call timed out")]
+    w.engine.on_judgment(judgment())
+    w.tick()
+    w.advance(5)
+    w.engine.collect(observations_available=False)
+    assert w.platform.calls[-1][0] == "attempt" and len(w.platform.recover_calls()) == 1
+    assert w.record().status == RecoveryStatus.EXECUTING and w.record().replay
+
+
+@pytest.mark.parametrize("code", ["DEADLINE_EXCEEDED", "TARGET_CHANGED"])
+def test_original_journal_lookup_error_is_not_an_attempt_outcome(tmp_path, monkeypatch, code):
+    w = make(tmp_path, policy=RecoveryPolicy(escalate_to_force=True))
+    w.platform.results = [DriverTimeout("response lost")]
+    record = w.engine.on_judgment(judgment())
+    w.tick()
+    spec = dict(record.request)
+    attempt = record.recovery_attempt_id
+    error = DriverTimeout("journal deadline", platform_code=code) if code == "DEADLINE_EXCEEDED" else InvalidState("journal changed", platform_code=code)
+
+    def unavailable(attempt_id):
+        assert attempt_id == attempt
+        raise error
+
+    w.watcher.set(VM, HealthState.STOPPED, desired="stopped")
+    with monkeypatch.context() as patch:
+        patch.setattr(w.platform, "attempt", unavailable)
+        w.advance(5)
+        w.tick()
+    assert record.status == RecoveryStatus.EXECUTING and record.replay and record.cancel_requested
+    assert record.last_error["platform_code"] == code and record.graceful_failed_execution_id is None
+    assert record.request == spec and len(w.platform.recover_calls()) == 1
+
+    w.platform.journal[str(attempt)] = {"phase": "completed", "result": {"execution_id": "confirmed-new"}}
+    w.advance(5)
+    w.tick()
+    assert record.status == RecoveryStatus.COMPLETED and record.execution_id == "confirmed-new"
+    assert [e["type"] for e in w.events] == ["recovery.started", "recovery.completed"]
+    assert len(w.platform.recover_calls()) == 1
 
 
 def test_failures_back_off_and_stop_after_max_attempts_with_new_attempt_ids(tmp_path):
@@ -543,6 +611,89 @@ def saved_executing(attempt_id=UUID(int=55)):
                           request=spec, mode="graceful-restart", attempt_started_monotonic=950.0)
 
 
+def saved_unresolved(kind="linux"):
+    record = saved_executing()
+    record.guest_kind = kind
+    record.status = RecoveryStatus.FAILED
+    record.final = True
+    record.closed_monotonic = 1260.0
+    record.last_error = {"code": "RECONCILE_REQUIRED", "platform_code": None, "message": UNRESOLVED_ATTEMPT}
+    return record
+
+
+@pytest.mark.parametrize("kind", ["linux", "zephyr"])
+def test_closed_unresolved_attempt_can_be_confirmed_without_another_terminal_event(tmp_path, monkeypatch, kind):
+    saved = saved_unresolved(kind)
+    path = tmp_path / "recoveries.json"
+    store = RecoveryStore(path)
+    assert store.save({REC: saved})
+    w = make(tmp_path)
+    w.advance(270)
+    w.watcher.set(VM, HealthState.HEALTHY)
+    spec = saved.request
+    aid = str(saved.recovery_attempt_id)
+    journal = {"phase": "uncertain", "request": spec, "recovery_attempt_id": aid}
+    w.platform.journal[aid] = journal
+    checked = []
+
+    def confirm(request, *, execute):
+        assert request == spec and execute
+        assert RecoveryStore(path).load()[REC].status == RecoveryStatus.FAILED
+        checked.append(request)
+        if len(checked) == 1:
+            raise DriverTimeout("Xen list timed out again", platform_code="DEADLINE_EXCEEDED")
+        result = {"execution_id": "confirmed-new", "observation": {"domid": 6}}
+        return {"attempt": {**journal, "phase": "completed", "result": result},
+                "original_result": result, "current_observation": result["observation"]}
+
+    monkeypatch.setattr(w.platform, "recover_once", confirm)
+    w.tick()
+    assert w.record().status == RecoveryStatus.FAILED
+    w.advance(5)
+    w.tick()
+    w.advance(30)
+    w.tick()
+    assert checked == [spec, spec]
+    row = RecoveryStore(path).load()[REC]
+    assert row.status == RecoveryStatus.COMPLETED and row.execution_id == "confirmed-new"
+    assert row.request == spec and row.recovery_attempt_id == saved.recovery_attempt_id and row.attempt == 1
+    assert row.last_error == saved.last_error and w.events == []
+
+
+@pytest.mark.parametrize("phase", [None, "accepted", "removed", "stopping", "failed", "wrong_request"])
+def test_closed_unresolved_attempt_never_replays_without_a_matching_launch_journal(tmp_path, phase):
+    saved = saved_unresolved()
+    assert RecoveryStore(tmp_path / "recoveries.json").save({REC: saved})
+    w = make(tmp_path)
+    w.advance(270)
+    w.watcher.set(VM, HealthState.HEALTHY)
+    aid = str(saved.recovery_attempt_id)
+    if phase is not None:
+        spec = saved.request if phase != "wrong_request" else {**saved.request, "expected_intent_revision": 5}
+        w.platform.journal[aid] = {"phase": phase if phase != "wrong_request" else "uncertain",
+                                   "request": spec, "recovery_attempt_id": aid}
+    w.tick()
+    assert w.platform.calls == [("attempt", saved.recovery_attempt_id)]
+    assert w.record().status == RecoveryStatus.FAILED and w.events == []
+
+
+@pytest.mark.parametrize("matches", [False, True])
+def test_closed_attempt_with_completed_journal_must_match_the_live_execution(tmp_path, matches):
+    saved = saved_unresolved()
+    assert RecoveryStore(tmp_path / "recoveries.json").save({REC: saved})
+    w = make(tmp_path)
+    w.advance(270)
+    w.watcher.set(VM, HealthState.HEALTHY)
+    aid = str(saved.recovery_attempt_id)
+    w.platform.journal[aid] = {"phase": "completed", "request": saved.request, "recovery_attempt_id": aid,
+                               "result": {"execution_id": "confirmed-new"}}
+    w.platform.views[VM] = {**view(), "execution_id": "confirmed-new" if matches else "different-execution"}
+    w.tick()
+    assert w.platform.calls == [("attempt", saved.recovery_attempt_id), ("get", VM)]
+    assert w.record().status == (RecoveryStatus.COMPLETED if matches else RecoveryStatus.FAILED)
+    assert w.events == []
+
+
 def test_worker_restart_restores_open_recovery_and_consults_journal_before_resending(tmp_path):
     store = RecoveryStore(tmp_path / "recoveries.json")
     store.save({REC: saved_executing()})
@@ -640,6 +791,113 @@ def test_transient_view_failure_before_the_first_attempt_waits_for_the_retry_int
     w.advance(3)
     w.tick()
     assert record.status == RecoveryStatus.COMPLETED and len(w.platform.recover_calls()) == 1
+
+
+@pytest.mark.parametrize("kind", ["linux", "zephyr"])
+@pytest.mark.parametrize("error", [
+    DriverTimeout("guest operation deadline exceeded", platform_code="DEADLINE_EXCEEDED"),
+    InvalidState("target changed during lookup", platform_code="TARGET_CHANGED"),
+])
+def test_pre_submit_lookup_error_survives_restart_without_blocking_other_vms(tmp_path, kind, error):
+    outbox = EventLog(tmp_path / "recovery-events.jsonl")
+    w = make(tmp_path, outbox=outbox)
+    w.platform.views[VM] = error
+    w.engine.on_judgment(judgment(kind=kind, reason=FailureReason.DOMAIN_ABSENT))
+    w.tick()
+
+    restarted = make(tmp_path, outbox=outbox, id_start=500)
+    assert not restarted.store.history_lost
+    record = restarted.engine.open_for(VM)
+    assert record.recovery_id == REC and record.attempt == 0 and record.status == RecoveryStatus.DETECTED
+    assert record.last_error == {"code": error.platform_code, "platform_code": error.platform_code, "message": error.message}
+    assert record.pending_events == [] and outbox.events() == [] and w.platform.recover_calls() == []
+
+    restarted.platform.views[VM2] = view(VM2, present=False)
+    other = restarted.engine.on_judgment(judgment(vm_id=VM2, recovery_id=UUID(int=2)))
+    restarted.tick()
+    assert other.status == RecoveryStatus.COMPLETED and record.status == RecoveryStatus.DETECTED
+    assert restarted.platform.calls[0] == ("get", VM2)  # VM 은 아직 조회 재시도 시각 전이다
+
+    restarted.platform.views[VM] = view(present=False)
+    restarted.advance(5)
+    restarted.tick()
+    assert record.status == RecoveryStatus.COMPLETED and record.attempt == 1
+    events = [e for e in outbox.events() if e["recovery_id"] == str(REC)]
+    assert [e["type"] for e in events] == ["recovery.started", "recovery.completed"]
+    assert all(e["attempt"] == 1 and e["mode"] == "start-if-absent" for e in events)
+
+
+def test_next_attempt_lookup_timeout_preserves_the_previous_attempt_and_its_events(tmp_path):
+    outbox = EventLog(tmp_path / "recovery-events.jsonl")
+    policy = RecoveryPolicy(escalate_to_force=True)
+    w = make(tmp_path, policy=policy, outbox=outbox)
+    w.platform.results = [DriverError("xl failed", platform_code="XEN_EXECUTION_FAILED")]
+    record = w.engine.on_judgment(judgment())
+    w.tick()
+    first_spec = dict(record.request)
+    previous_events = outbox.events()
+    assert [e["type"] for e in previous_events] == ["recovery.started", "recovery.failed"]
+
+    w.watcher.failing(VM, FailureReason.HEARTBEAT_LOST)
+    w.platform.views[VM] = DriverTimeout("lookup timed out", platform_code="DEADLINE_EXCEEDED")
+    w.advance(5)
+    w.tick()
+    assert len(w.platform.recover_calls()) == 1
+    assert outbox.events() == previous_events
+
+    restarted = make(tmp_path, policy=policy, outbox=outbox, id_start=500)
+    record = restarted.engine.open_for(VM)
+    assert not restarted.store.history_lost
+    assert record.status == RecoveryStatus.BACKOFF and record.attempt == 1 and record.attempt_closed
+    assert record.request == first_spec and record.graceful_failed_execution_id is None
+    assert record.last_error["platform_code"] == "DEADLINE_EXCEEDED"
+    assert record.due_monotonic == 1010.0
+
+    restarted.watcher.failing(VM, FailureReason.HEARTBEAT_LOST)
+    restarted.advance(10)
+    restarted.tick()
+    (_, second_spec, _), = restarted.platform.recover_calls()
+    assert second_spec["mode"] == "graceful-restart"
+    assert second_spec["recovery_attempt_id"] != first_spec["recovery_attempt_id"]
+    assert record.status == RecoveryStatus.COMPLETED and record.attempt == 2
+    assert terminal_per_attempt(outbox.events()) == {first_spec["recovery_attempt_id"]: (1, 1), second_spec["recovery_attempt_id"]: (1, 1)}
+
+
+def test_permanent_lookup_error_after_failed_attempt_closes_without_a_second_failure_event(tmp_path):
+    outbox = EventLog(tmp_path / "recovery-events.jsonl")
+    w = make(tmp_path, outbox=outbox)
+    w.platform.results = [DriverError("xl failed", platform_code="XEN_EXECUTION_FAILED")]
+    record = w.engine.on_judgment(judgment())
+    w.tick()
+    events = outbox.events()
+    w.platform.views[VM] = InvalidState("operator must reconcile", platform_code="RECONCILE_REQUIRED")
+    w.advance(5)
+    w.tick()
+
+    restarted = make(tmp_path, outbox=outbox, id_start=500)
+    assert not restarted.store.history_lost
+    assert record.status == restarted.record().status == RecoveryStatus.FAILED
+    assert restarted.record().last_error["platform_code"] == "RECONCILE_REQUIRED"
+    assert outbox.events() == events and len(w.platform.recover_calls()) == 1
+
+
+def test_invalid_started_event_is_rejected_before_saving_or_submitting(tmp_path, monkeypatch):
+    outbox = EventLog(tmp_path / "recovery-events.jsonl")
+    w = make(tmp_path, outbox=outbox)
+    record = w.engine.on_judgment(judgment())
+    with monkeypatch.context() as patch:
+        patch.setattr(w.engine, "_iso", lambda _: "invalid timestamp")
+        w.tick()
+
+    assert w.platform.recover_calls() == [] and outbox.events() == []
+    saved = RecoveryStore(w.store.path).load()[REC]
+    assert saved.status == RecoveryStatus.DETECTED and saved.pending_events == []
+    assert record.attempt == 0 and record.request is None
+
+    w.advance(5)
+    w.tick()
+    assert record.status == RecoveryStatus.COMPLETED and len(w.platform.recover_calls()) == 1
+    assert [e["type"] for e in outbox.events()] == ["recovery.started", "recovery.completed"]
 
 
 # ---- 상태 전이와 이벤트 outbox 의 일관성 ----

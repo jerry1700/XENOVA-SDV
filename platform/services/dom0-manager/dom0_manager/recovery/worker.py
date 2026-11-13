@@ -64,7 +64,7 @@ class RecoveryWorker:
             log.warning("observation skipped: %s %s", exc.code, exc.message)
             if self._engine is not None:
                 self._engine.observation_unavailable()
-                self._engine.collect(self._clock())  # 판정은 못 해도 끝난 복구 시도의 결과는 회수한다
+                self._engine.collect(self._clock(), observations_available=False)
                 if self._rejoin is not None:self._rejoin.completed(self._engine.completed_executions())
             self._report(None)
             return []

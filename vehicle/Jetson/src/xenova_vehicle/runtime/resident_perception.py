@@ -25,7 +25,8 @@ class ResidentPerception:
         profile=(PipelineProfile(tape=TapeProfile(cell_m=.01,x_max_m=1.5,y_min_m=-.8,y_max_m=.8),
             depth=DepthConfig(max_patches=0,max_hit_boxes=1024)) if pipeline_profile is None else pipeline_profile)
         self.calibration,self.binding=calibration,binding
-        self.pipeline=PerceptionPipeline(calibration,profile,targets=targets,rolling_policy=rolling_policy)
+        self.pipeline=PerceptionPipeline(calibration,profile,targets=targets,rolling_policy=rolling_policy,
+                                        parking_entrance_diagnostics=pipeline_profile is not None)
         self.latest_summary=None
         self.processed=0
 

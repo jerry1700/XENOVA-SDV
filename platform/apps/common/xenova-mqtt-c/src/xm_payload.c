@@ -85,6 +85,43 @@ int xm_auto_delay_result_json(char *out,size_t n,const struct xm_auto_delay_comm
 	rc|=xm_put(out,n,&pos,"}");return rc?-ENOSPC:(int)pos;
 }
 
+int xm_vm_crash_command_parse(struct xm_span payload,struct xm_vm_crash_command *out)
+{
+	static const char *const keys[]={"command_id","operation_id","expected_boot_id","expires_at","action","parameters"};
+	struct xm_json j;char expires[40],action[16];
+	if(!out||parse_object(&j,payload))return -EINVAL;
+	memset(out,0,sizeof(*out));
+	if(!command_object(&j,0,NULL,0))return -EINVAL;
+	if(j.tok[0].size<5||j.tok[0].size>6||
+	   command_text(&j,0,"command_id",out->command_id,sizeof(out->command_id),false)||
+	   command_text(&j,0,"operation_id",out->operation_id,sizeof(out->operation_id),true)||
+	   command_text(&j,0,"expected_boot_id",out->expected_boot_id,sizeof(out->expected_boot_id),false)||
+	   command_text(&j,0,"expires_at",expires,sizeof(expires),false)||
+	   command_text(&j,0,"action",action,sizeof(action),false)||strcmp(action,"vm_crash"))return -EINVAL;
+	if(!command_object(&j,0,keys,sizeof(keys)/sizeof(keys[0])))return -EINVAL;
+	int parameters=xm_json_get(&j,0,"parameters");
+	if(!xm_json_is_object(&j,parameters)||j.tok[parameters].size!=0||
+	   !command_object(&j,parameters,NULL,0))return -ERANGE;
+	return 0;
+}
+
+int xm_vm_crash_result_json(char *out,size_t n,const struct xm_vm_crash_command *c,
+			    const char *status,const char *error)
+{
+	if(!out||!c||!status)return -EINVAL;
+	size_t pos=0;int rc=0;
+	rc|=xm_put(out,n,&pos,"{\"command_id\":");rc|=xm_put_json_string(out,n,&pos,c->command_id);
+	rc|=xm_put(out,n,&pos,",\"operation_id\":");rc|=c->operation_id[0]?xm_put_json_string(out,n,&pos,c->operation_id):xm_put(out,n,&pos,"null");
+	rc|=xm_put(out,n,&pos,",\"status\":");rc|=xm_put_json_string(out,n,&pos,status);
+	rc|=xm_put(out,n,&pos,",\"started_at\":null,\"finished_at\":null,\"duration_ms\":null,\"result\":");
+	if(error)rc|=xm_put(out,n,&pos,"null");
+	else rc|=xm_put(out,n,&pos,"{\"action\":\"vm_crash\"}");
+	rc|=xm_put(out,n,&pos,",\"error\":");
+	if(error){rc|=xm_put(out,n,&pos,"{\"code\":");rc|=xm_put_json_string(out,n,&pos,error);rc|=xm_put(out,n,&pos,",\"message\":");rc|=xm_put_json_string(out,n,&pos,error);rc|=xm_put(out,n,&pos,"}");}
+	else rc|=xm_put(out,n,&pos,"null");
+	rc|=xm_put(out,n,&pos,"}");return rc?-ENOSPC:(int)pos;
+}
+
 int xm_drive_command_json(char *out, size_t n, uint32_t generation, float v_mps, float steer_rad)
 {
 	size_t pos = 0;

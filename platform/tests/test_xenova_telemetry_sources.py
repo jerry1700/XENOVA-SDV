@@ -67,7 +67,9 @@ class SourcesTest(unittest.TestCase):
                  patch.object(support.C,'CDLL',return_value=SimpleNamespace(adjtimex=read_timex)), \
                  patch.object(support.time,'monotonic_ns',side_effect=[0,1000001]), \
                  patch.object(support.time,'time_ns',return_value=1767225600000000000):
-                if status or state:
+                if status == 0x40:
+                    with self.assertRaises(support.ClockSyncPending):support.clock_sample()
+                elif status or state:
                     with self.assertRaises(ValueError):support.clock_sample()
                 else:
                     sample=support.clock_sample()

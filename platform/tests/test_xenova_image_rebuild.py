@@ -85,6 +85,11 @@ class ImageRebuildContractTest(unittest.TestCase):
         self.assertFalse(any(g.startswith("topic write xenova/v2/") for g in grants))
         self.assertIn("topic write xenova/v1/apps/manual/input", grants)
 
+    def test_gateway_can_publish_manual_input_for_neutral_preparation(self):
+        rules = broker.policy(ROOT / "platform/deploy/mosquitto/etc/policy.json")
+        grants = broker.grants(broker.acl(broker.default_accounts(rules), rules))["gateway"]
+        self.assertIn("topic write xenova/v1/apps/manual/input", grants)
+
     def test_current_drive_catalog_routes_to_rtos_without_requiring_legacy_aliases(self):
         catalog = json.loads((ROOT / "platform/guests/default-templates.lock.json").read_text())
         with tempfile.TemporaryDirectory() as tmp:

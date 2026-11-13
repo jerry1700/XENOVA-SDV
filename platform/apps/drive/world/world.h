@@ -23,11 +23,16 @@
 #define DW_ROUTE 64u
 #define DW_STATE_KNOWN_FEATURES (DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION|DW_ROUTE)
 #define DW_CELL_ROAD 8u
+#define DW_BOUNDARY_FREE4_BYTES 512u
 typedef xenova_drive_Pose dw_pose;
 typedef xenova_drive_Point dw_point;
 typedef xenova_drive_WorldSnapshot dw_world;
 typedef xenova_drive_VehicleSample dw_vehicle;
 typedef xenova_drive_DriveState dw_state;
+
+static inline uint16_t dw_grid_le16(const uint8_t *value){
+ return (uint16_t)((uint16_t)value[0]|(uint16_t)value[1]<<8);
+}
 
 enum dw_result { DW_OK, DW_BUSY, DW_TOO_LARGE, DW_DECODE, DW_VERSION, DW_SOURCE,
  DW_ARRAY, DW_GEOMETRY, DW_TIME, DW_CONFIGURATION, DW_STALE, DW_NO_REFERENCE,

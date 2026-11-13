@@ -74,7 +74,7 @@ class AtlasCheckpointTests(unittest.TestCase):
         for index,value in grid.hit_view.items():codes.reshape(-1)[index]=lookup[value]
         # 변경 전 fixed serializer의 필드 조립이다. encoding helper는 바꾸지 않는다.
         expected=dict(profile='mapper-pipeline-state-1',storage_context=f.context.fields,
-            calibration_id=pipeline.calibration.sha256,pipeline_profile_sha256=sha256(canonical(asdict(pipeline.profile))).hexdigest(),
+            calibration_id=pipeline.calibration.sha256,pipeline_profile_sha256=sha256(canonical(pipeline.profile.identity_fields())).hexdigest(),
             clock_id=grid.clock_id,kind=grid.kind,frame_id=grid.frame_id,spec=asdict(grid.spec),
             free_ttl_us=grid.free_ttl_us,occupied_ttl_us=grid.occupied_ttl_us,independent_view_m=grid.independent_view_m,
             revision=grid.revision,applied_hits=grid.applied_hits,applied_free=grid.applied_free,arrays=arrays,

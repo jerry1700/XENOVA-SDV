@@ -7,7 +7,7 @@ actor/thread/요청 UUID를 만들지 않으며 LIVE/Scene 경계를 넓히지 �
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from threading import get_ident
 
 from .mapper_catalogs import CatalogNotReady
@@ -161,9 +161,12 @@ class PcMapperCore:
             return _development_stopping(grid,pose,snapshot,config.stopping,at_us,current_sensors=current_sensors)
         draft=None;world=None;world_lease=None;reasons=[]
         try:
+            catalogs = self.storage.catalogs
+            parking_clearance = () if catalogs is None else catalogs.parking_clearance_targets(self.clock())
             result=core.process(frame.observation,pose=inputs.pose,now_us=self.clock(),completed_clock=self.clock,
                 checkpoint=checkpoint,motion_qualified=config.motion_qualified,needed_region_factory=needed,
-                cycle_bound_us=config.stopping.cycle_bound_us,completion_bound_us=config.stopping.completion_bound_us,**args)
+                cycle_bound_us=config.stopping.cycle_bound_us,completion_bound_us=config.stopping.completion_bound_us,
+                parking_clearance=parking_clearance,**args)
             refresh();now=self.clock()
             if checkpoint is not None:checkpoint('PC_CATALOG_PREPARE')
             if result.summary.get('rgb_updated') is not True:reasons.append('DUPLICATE_RGB')
@@ -173,14 +176,24 @@ class PcMapperCore:
                     and alignment.has_metadata and alignment.valid_at(now)
                     and result.summary.get('quarantined') is False
                     and result.summary.get('input_odom_origin')=='SYNTHETIC_ODOMETRY')
-                mapped=alignment.apply(inputs.pose) if qualified else inputs.pose
+                mapped=inputs.pose
+                if qualified:
+                    if result.registration is not None and result.registration.status=='BOUNDED':
+                        fit=result.registration
+                        x,y,yaw=fit.representative
+                        mapped=replace(inputs.pose,sample=replace(inputs.pose.sample,x=x,y=y,yaw=yaw,
+                            position_error_m=fit.position_error_m,yaw_error_rad=fit.yaw_error_rad))
+                    else:
+                        _,mapped=core._propagate_odometry(inputs.pose)
                 spec=core.grid.spec;low=spec.bounds(0,0);high=spec.bounds(spec.width-1,spec.height-1)
                 try:
                     if current_provider is not None:refresh()
                     draft=self.storage.prepare_frame(frame,snapshot,result,current_pc_view=current_pc_view,
                         capture_prior=mapped,registration_revision=0 if alignment is None else alignment.registration_revision,
                         prior_qualified=qualified,now_us=self.clock(),roi_bounds=(low[0],low[1],high[2],high[3]),current_sensors=current_sensors)
-                    view=draft.catalog.view;model=view.lane;basis=view.road_basis
+                    view=draft.catalog.view;state=draft.catalog.state
+                    model=state.road_basis.publication_model(state.lane)
+                    basis=state.road_basis.snapshot()
                     reasons.extend(view.reasons)
                     if model is None:
                         association=draft.catalog.state.lane.current_association
@@ -193,7 +206,8 @@ class PcMapperCore:
                         self._world_sequence+=1
                         world=build_development_world(core,model,basis,snapshot,inputs,context=self.context,
                             calibration=self.calibration,source_bytes=self._source_bytes,
-                            sequence=self._world_sequence,now_us=self.clock(),current_sensors=current_sensors,pc_owner_token=self._pc_owner_token)
+                            sequence=self._world_sequence,now_us=self.clock(),current_sensors=current_sensors,
+                            pc_owner_token=self._pc_owner_token,parking=view.parking,stopping=config.stopping)
                         world_lease=current_sensors.clock_lease
                 except (PcStorageNotReady,CatalogNotReady,DevelopmentMappingNotReady,WorldBuildError) as error:
                     reasons.append(str(error))

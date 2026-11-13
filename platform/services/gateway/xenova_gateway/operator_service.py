@@ -417,12 +417,17 @@ class OperatorService:
             if self._proposal('startup',changes,'startup',self.now+10_000_000,started):self.started=True
         # Volatile result retention is exactly ring8; durable rows are queried
         # from their one owner rather than duplicated indefinitely in actor RAM.
-        saved={row['key'] for row in self._rows()}
-        for key,row in tuple(self.pending.items()):
-            if row['terminal'] and (key in saved or row['request']['action'] in VOLATILE and key not in self.sources.input_results):
+        saved = None
+        for key, row in tuple(self.pending.items()):
+            if not row['terminal']:
+                continue
+            if saved is None:
+                saved = {row['key'] for row in self._rows()}
+            if (key in saved or
+                    (row['request']['action'] in VOLATILE and key not in self.sources.input_results)):
                 del self.pending[key];self.runner.authority.operator_reservations.pop(key,None)
                 self._effects.pop(key,None);self.scene_requests.pop(key,None)
-            elif row['terminal'] and self.now//1000>=row['retain_until_ms']:
+            elif self.now//1000>=row['retain_until_ms']:
                 self.ram_floor=max(self.ram_floor,request_key(key)[1]);del self.pending[key]
                 self.runner.authority.operator_reservations.pop(key,None)
         self.runner.authority.operator_ram_floor=max(self.ram_floor,self.sources.retired_ms)
@@ -430,7 +435,7 @@ class OperatorService:
         self.keyboard.tick()
         device=getattr(self.runner._sink,'device',None)
         config=getattr(getattr(device,'odometry',None),'config',None)
-        self.missions.observe_vehicle(self.runner.device_view().get('vehicle_sample'),
+        self.missions.observe_vehicle(self.runner.vehicle_sample(),
             getattr(config,'metres_per_tick',None),self.now)
         self._mission_tick()
         self.episodes.tick()
@@ -541,7 +546,7 @@ class OperatorService:
                 interval=self.clocks.interval((vm,reference['execution_id'],reference['agent_instance_id']),
                     int(command['clock_probe_sequence']),int(command['completed_guest_us']),now,m.generation)
                 raw=self.runner.drive_link.vehicle_history.get(int(command['vehicle_sequence']))
-                current=self.runner.device_view().get('vehicle_sample')
+                current=self.runner.vehicle_sample()
                 sample=None if raw is None else decode(raw,schema.VehicleSample)
                 registered=sample is not None and sample.quality==3 and current is not None and all(
                     getattr(sample,k)==current.get(k) for k in ('host_boot','device_session','odom_epoch','pi_session','calibration'))
@@ -561,7 +566,7 @@ class OperatorService:
         provider=self.runner.drive_link
         raw=None if provider is None else provider.vehicle_history.get(int(command['vehicle_sequence']))
         if raw is None:return None
-        sample=decode(raw,schema.VehicleSample);current=self.runner.device_view().get('vehicle_sample')
+        sample=decode(raw,schema.VehicleSample);current=self.runner.vehicle_sample()
         maximum=getattr(self.runner._sink,'_vehicle_maximum_age_us',None)
         if (current is None or maximum is None or sample.quality!=3 or any(getattr(sample,k)!=current.get(k)
                 for k in ('host_boot','device_session','odom_epoch','pi_session','calibration'))):return None
@@ -659,7 +664,7 @@ class OperatorService:
             self._proposal('mission-binding:'+current['id'],{'current_mission':rebound},'mission_binding',self.now+10_000_000,
                 lambda ok,unknown:self.missions.publish() if ok else None)
 
-    def direction_witness(self,vm,role):
+    def direction_witness(self,vm,role,*,view=None):
         device=getattr(self.runner._sink,'device',None)
         producer=getattr(device,'direction_witness',None)
         if producer is None:return None
@@ -668,6 +673,7 @@ class OperatorService:
         from xenova_mqtt.drive_binding import app_instance
         peer=(vm,binding['execution_id'],app_instance(binding,role))
         if not any(value.peer==peer and self.now<value.expires for value in self.clocks.confirmed.values()):return None
-        return producer(vm,role,self.runner.machine,self.now,self.sources if role=='manual' else None)
+        arguments=(vm,role,self.runner.machine,self.now,self.sources if role=='manual' else None)
+        return producer(*arguments) if view is None else producer(*arguments,view=view)
 
     def close(self):self._stop('SHUTDOWN');self.worker.close()

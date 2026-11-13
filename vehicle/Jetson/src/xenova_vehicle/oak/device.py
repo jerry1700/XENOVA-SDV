@@ -68,14 +68,30 @@ class _DeviceLock:
             self.fd = None
 
 
-def _pipeline(dai, fps: int, *, graph_extension=None):
+def _pipeline(dai, fps: int, *, rgb_sensor_mode="1080p", graph_extension=None):
     pipeline = dai.Pipeline()
     color = pipeline.create(dai.node.ColorCamera)
     color.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-    color.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    color.setIspScale(1, 3)
-    color.setVideoSize(640, 360)
     color.setFps(fps)
+    resolution = dai.ColorCameraProperties.SensorResolution
+    if rgb_sensor_mode == "full":
+        color.setResolution(resolution.THE_13_MP)
+        color.setIspScale(1, 4)
+        # 13MP 전체 ISP 출력을 사용한다. ColorCamera.video는 센서를 자를 수 있다.
+        resize = pipeline.create(dai.node.ImageManip)
+        resize.initialConfig.setResizeThumbnail(640, 360, 0, 0, 0)
+        resize.initialConfig.setFrameType(dai.ImgFrame.Type.NV12)
+        resize.setMaxOutputFrameSize(640 * 360 * 3 // 2)
+        resize.setNumFramesPool(3)
+        resize.inputImage.setQueueSize(1)
+        resize.inputImage.setBlocking(False)
+        color.isp.link(resize.inputImage)
+        rgb = resize.out
+    else:
+        color.setResolution(resolution.THE_1080_P)
+        color.setIspScale(1, 3)
+        color.setVideoSize(640, 360)
+        rgb = color.video
     left = pipeline.create(dai.node.MonoCamera)
     right = pipeline.create(dai.node.MonoCamera)
     for camera, socket in ((left, dai.CameraBoardSocket.CAM_B),
@@ -116,14 +132,14 @@ def _pipeline(dai, fps: int, *, graph_extension=None):
     stereo.initialConfig.set(config)
     left.out.link(stereo.left)
     right.out.link(stereo.right)
-    for stream, output in (("rgb_video", color.video), ("depth_right", stereo.depth)):
+    for stream, output in (("rgb_video", rgb), ("depth_right", stereo.depth)):
         xout = pipeline.create(dai.node.XLinkOut)
         xout.setStreamName(stream)
         xout.input.setQueueSize(1)
         xout.input.setBlocking(False)
         output.link(xout.input)
     if graph_extension is not None:
-        graph_extension(pipeline, color, stereo)
+        graph_extension(pipeline, rgb, stereo)
     return pipeline
 
 
@@ -158,7 +174,7 @@ class OakSource:
         self._started = False
 
     def _build_pipeline(self, dai):
-        return _pipeline(dai, self.profile.fps)
+        return _pipeline(dai, self.profile.fps, rgb_sensor_mode=self.profile.rgb_sensor_mode)
 
     def _queue_sizes(self) -> dict[str, int]:
         return {"rgb_video": 8, "depth_right": 8}
@@ -201,7 +217,7 @@ class OakSource:
             raise ValueError("invalid raw EEPROM length")
         from .calibration_snapshot import snapshot_factory
         factory=snapshot_factory(calibration,dai,eeprom_raw=raw,device_id=self._device.getMxId(),
-                                 graph_profile=graph,sensors=sensors)
+                                 graph_profile=graph,sensors=sensors,rgb_sensor_mode=self.profile.rgb_sensor_mode)
         on_stage("PIPELINE_START")
         if self._device.startPipeline(pipeline) is not True:
             raise RuntimeError("startPipeline did not confirm success")
@@ -259,15 +275,18 @@ class OakSource:
         raw = message.getRaw()
         spec = raw.fb
         row_bytes = 640 if rgb else 1280
+        expected_bytes = 640 * 360 * 3 // 2 if rgb else 640 * 480 * 2
+        # RVC2 ImageManip NV12의 p2Offset은 SDK 2.29에서 frame 밖 주소를 남긴다.
+        # 이 graph의 출력은 packed NV12로 검증한다. 유효 범위 안의 다른 offset은 거절한다.
+        manip_offset = rgb and self.profile.rgb_sensor_mode == "full" and spec.p2Offset >= expected_bytes
         # NV12는 두 plane, RAW16은 한 plane이다. 실물 SDK의 미사용 offset은0이 아니다.
         # 사용하지 않는 plane 값을 포인터/길이로 해석하지 않고 실제 plane과 bytes만 검증한다.
         if (spec.stride not in (0, row_bytes) or spec.p1Offset != 0
-                or (rgb and spec.p2Offset not in (0, 640 * 360))):
+                or (rgb and not manip_offset and spec.p2Offset not in (0, 640 * 360))):
             raise ValueError(f"unsupported OAK {stream} stride/active plane offsets: "
                              f"stride={spec.stride}, p1={spec.p1Offset}"
                              + (f", p2={spec.p2Offset}" if rgb else ""))
         data = memoryview(message.getData())
-        expected_bytes = 640 * 360 * 3 // 2 if rgb else 640 * 480 * 2
         if (data.ndim != 1 or data.itemsize != 1 or not data.c_contiguous
                 or data.nbytes != expected_bytes):
             raise ValueError("OAK raw payload is not a contiguous byte plane")

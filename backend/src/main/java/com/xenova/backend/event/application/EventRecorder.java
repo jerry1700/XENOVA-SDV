@@ -73,6 +73,14 @@ public class EventRecorder {
         record(EventType.VM_DELETED, EventSeverity.INFO, vmId, null, payload);
     }
 
+    // source tells a delete seen on the board (a platform tool removed the registration) apart from one Spring asked for.
+    public void vmDeleted(String vmId, String name, String source) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("name", name);
+        payload.put("source", source);
+        record(EventType.VM_DELETED, EventSeverity.INFO, vmId, null, payload);
+    }
+
     // from is null when the previous state was not looked up (e.g. a stop request).
     public void vmStateChanged(String vmId, VmState from, VmState to, String cause) {
         Map<String, Object> payload = new LinkedHashMap<>();

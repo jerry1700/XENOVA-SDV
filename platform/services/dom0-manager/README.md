@@ -1,5 +1,17 @@
 # dom0-manager
 
+## 템플릿 카탈로그 조회
+
+`platform` 드라이버의 `GET /api/v1/templates`는 보드 `/srv/xenova/catalog`에 공개된 템플릿을 버전별로 전부 반환합니다.
+하위 `xenova-vm templates`를 그대로 옮기며 최신 버전 선택·표시 이름은 하지 않습니다(Spring 몫).
+응답 필드는 `template_id`, `template_version`, `guest_kind`, `default_resources`, `resource_limits`, `capabilities`이고
+보드 내부 경로·해시(`directory`, `asset_directory`, `manifest_sha256` 등)는 뺍니다. mock·xen 드라이버는 501입니다.
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $DOM0_SERVICE_TOKEN" \
+  http://127.0.0.1:8081/api/v1/templates
+```
+
 ## 등록 목록과 단건 통지
 
 `platform` 드라이버의 `GET /api/v1/vm-registrations`는 실행 여부와 무관한 REGISTERED 목록을 여덟 필드 배열로 반환합니다.
@@ -161,6 +173,8 @@ curl -i -X POST localhost:8081/api/v1/vms/11111111-1111-4111-8111-111111111111/s
 | `XENOVA_INSTANCE_ROOT` | `/srv/xenova/instances` | 인스턴스 루트 (xen 모드의 등록 확인용. platform 모드는 Manager의 data 경로를 씀) |
 | `XENOVA_RESPONSE_RESERVE` | `0.5` | 요청 예산(`X-Request-Budget-Ms`)이 있을 때 하위 호출에 넘기기 전에 응답 몫으로 남길 초. 실측 전 임시값, 0 이상 |
 | `XENOVA_MOCK_SAMPLES` | `0` | Mock 샘플 VM 3종 미리 생성 |
+| `XENOVA_PHONE_RUNTIME_DIR` | `/run/xenova-display-mobile` | USB 휴대폰 화면 중계의 런타임 폴더(`endpoint.json`·`pairing-code`). `GET/POST /api/v1/display/phone-link`(계약 4.13)가 읽는다 |
+| `XENOVA_PHONE_CONFIG` | `/etc/xenova/display-mobile.json` | 같은 중계의 설정(`usb_interface`·`phone_ipv4`). 없으면 `configured: false` |
 | `XENOVA_LOG_LEVEL` | `INFO` | |
 
 ## 구조
@@ -204,15 +218,18 @@ tests/
 | `health()` | O | `xl info` 응답과 registry 저장소(`instances/`) 존재 → `/healthz` 503 판정. Manager 를 거치지 않아 조회 한도 안에 끝남 |
 | `reboot(vm_id)` / `request_reboot(vm_id, key)` | platform·mock | 실행 중인 도메인을 같은 디스크로 새 실행으로 재시작(S15P31E110-208). 제공하지 않는 드라이버는 501 |
 | `cpu_layout(vm_id?)` | platform | 정책 CPU 배치와 실제 Xen hard affinity(S15P31E110-353). 제공하지 않는 드라이버는 501 |
+| `update_cpu_policy(request, key)` | platform | 배치가 바뀌는 VM을 정지한 뒤 전체 CPU 정책을 revision 조건부로 교체. 최초 설정이나 호스트 배치 변경은 전체 정지. 제공하지 않는 드라이버는 501 |
 | `collect_stats()` | platform·xen·mock | xentop 원시값(S15P31E110-112) |
 
-실행 중 vCPU 핀·스케줄러 가중치·메모리 변경은 플랫폼이 지원하지 않아 드라이버에 없습니다(`docs/platform/cli-manager-spec.md` CPU 배치 절). CPU 배치는 플랫폼 CPU 정책이 시작·재부팅·복구 때 적용·검증합니다.
+CPU 정책은 한 VM의 모든 vCPU에 같은 pCPU 마스크를 지정합니다. 영향받는 VM의 새 마스크는 다음
+기동 때 적용·검증합니다. 최초 설정이나 호스트 배치 변경에는 전체 정지와 호스트 준비가 필요합니다.
+스케줄러 가중치와 실행 중인 VM의 vCPU 핀·메모리 변경은 지원하지 않습니다.
 
 `Provisioner`는 `ensure_instance(vm_id, template_id, template_version, name=, vcpus=, memory_mib=) / instance_exists / delete_instance` 와 `update_resources(vm_id, vcpus=, memory_mib=, key=)` 입니다. platform 모드에서는 플랫폼 `create`(등록 + 디스크)·`retire`(숨김 보관)·`update-resources`(정지 Linux 의 등록 설정 변경)로 구현되며, dom0-manager 안에 디스크 생성기는 없습니다. xen 모드는 조회 전용이라 `ensure_instance`가 501이고 `update_resources` 도 501입니다. mock 은 등록의 자원값과 키별 원 결과를 메모리에 둡니다.
 
 `DELETE /api/v1/vms/{vm_id}`는 v1.1 의미입니다. 실행 중이면 409 `InvalidState`, 등록이 없으면 404, 정지된 VM은 숨김 보관(retire)으로 204. 강제 종료는 하지 않습니다.
 
-`POST /api/v1/vms`로 같은 `vm_id`가 다시 오면 등록된 명세와 비교합니다. 템플릿 ID·버전은 최초 명세와, vcpus·memory_mib 는 지금 등록 설정(자원 변경 반영)과 비교합니다. 같으면 디스크를 재사용해 다시 띄우고(재시작), 다르면 409 `VMExists`입니다(계약 4.2 불변조건).
+`POST /api/v1/vms`로 같은 `vm_id`가 다시 오면 실행 여부와 관계없이 등록 명세를 확인합니다. 템플릿 ID·버전은 최초 명세 또는 factory의 등록 메타데이터에서, vcpus·memory_mib는 현재 등록 설정에서 읽습니다. 같은 명세의 정지 VM은 디스크를 재사용해 시작하고 실행 도메인이 있으면 409 `VMExists`를 반환합니다. 다른 명세 또는 원 생성 키 충돌은 409 `VMSpecConflict`입니다.
 
 상태 매핑은 계약 3.2장을 따릅니다. `b`(blocked)는 I/O 대기 중인 정상 상태이고, 플래그가 없는 `------`도 running으로 봅니다. 그 외 모르는 문자는 조용히 running으로 넘기지 않고 `DriverError`를 냅니다.
 
@@ -241,6 +258,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 | `POST /vms/{id}/stop` | `stop` (`force=false`, 플랫폼이 최대 90초 대기). 시한 초과는 504. `Idempotency-Key` 가 있으면 아래 "정지 요청 추적" |
 | `POST /vms/{id}/reboot` | `reboot` (`force=false`, 플랫폼이 새 실행까지 최대 90초 대기). 신규 재부팅은 키 유무와 관계없이 먼저 등록(없으면 404)·실행 중(아니면 409)을 확인한다. 키 있으면 같은 키의 원 작업을 먼저 조회해 있으면 재전달로 보고 상태 확인 없이 보낸다(작업 상태 `action: reboot`). 명령 제출 뒤 새 실행 미확인은 503(`RECONCILE_REQUIRED`). 꺼진 VM·비협력 Zephyr 거절은 플랫폼이 `ARTIFACT_INVALID` 문구로만 알려 그 두 문구만 409·501 로 바꾼다(계약 4.10) |
 | `GET /cpu-layout`, `GET /vms/{id}/cpu-layout` | `cpu-layout` (`vm_id?`, `timeout_ms` 기본 5000). 조회 전용. 하위는 `budget_ms` 를 받지 않아 요청 예산은 `timeout_ms` 로만 줄이고, 플랫폼이 operation lock 을 기다리지 않으므로 요청별 Manager(fork)로 부른다. 응답은 공개 필드만 고정 모델로 형식·의미값(presence·allocation·issue code·예약 형식)까지 검증해 옮긴다. 어긋나거나 한 VM 조회가 그 VM 하나가 아니면 503. 관측 중 바뀜(`TARGET_CHANGED`)은 409 가 아니라 503(계약 4.11) |
+| `PUT /cpu-policy` | 전체 `expected_policy_revision`·`shared_pcpus`·`placements`를 `cpu-policy-set`(`execute=true`, `Idempotency-Key`)으로 전달한다. VM별 placement는 `shared` 또는 `exclusive`이며 모든 vCPU에 같은 pCPU 집합을 적용한다. 정지가 필요한 VM이 실행 중이거나 revision·키가 충돌하면 409, 구버전 Manager는 501. `host_preparation_required=true`이면 재기동 전 호스트 준비가 필요하다. |
 | `GET /vms/{id}/control-operations?request_key=` | `control-operation` (`vm_id`, `idempotency_key`, `timeout_ms` 기본 5000). 읽기만 한다. stop·reboot(force 없음) 기록만 돌려준다 |
 | `PUT /vms/{id}/resources` | `control-operation`·`operation`(키로 원 작업 조회, `vm_id` 없이) → 원 작업이 있으면 원 요청을, 없으면 `get` 의 generation·`configuration_sha256` 으로 만든 요청을 `update-resources`(`execute=true`, `idempotency_key`=요청 키)로. 하위는 `budget_ms` 를 받지 않는다. 아래 "자원 변경" |
 | `DELETE /vms/{id}` | 실행 중 409 → 정지 후 `retire`(숨김 보관) |
@@ -309,7 +327,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 
 | 입력 | 어디서 | 얼마나 자주 |
 | --- | --- | --- |
-| 의도 (`desired_state`, `intent_applicable`, `intent_revision`, `lifecycle`, `guest_kind`) | 플랫폼 `Manager intents` (S15P31E110-336) | 매 주기 읽습니다. 저장된 의도·등록만 읽고 Xen·공통 잠금을 쓰지 않습니다. **판정 직전에는 그 VM 만 `get`으로 재확인**합니다. 읽기에 실패하면 마지막으로 읽은 등록은 건강 보고 대상으로만 남기고(보관·삭제로 해석해 retained 를 지우지 않음) 오래된 의도로는 아무것도 판정하지 않습니다: crashed·absent 를 포함한 판정을 보류하고 건강은 `OBSERVATION_UNAVAILABLE`, 열린 복구 episode 도 닫지 않습니다. 다시 읽히면 자동으로 재개합니다. `intents` 를 모르는 옛 Manager(`INVALID_SPEC`)면 경고 뒤 `list`(플랫폼 잠금 + VM 마다 Xen 관측)를 `XENOVA_RECOVERY_INTENT_REFRESH`(기본 60초)마다 읽습니다 |
+| 의도 (`desired_state`, `intent_applicable`, `intent_revision`, `lifecycle`, `guest_kind`) | 플랫폼 내부 `Manager recovery-intents`, 옛 Manager는 `intents` (S15P31E110-336) | 매 주기 읽습니다. 저장된 의도·등록만 읽고 Xen·공통 잠금을 쓰지 않습니다. **판정 직전에는 그 VM 만 `get`으로 재확인**합니다. 읽기에 실패하면 마지막으로 읽은 등록은 건강 보고 대상으로만 남기고(보관·삭제로 해석해 retained 를 지우지 않음) 오래된 의도로는 아무것도 판정하지 않습니다: crashed·absent 를 포함한 판정을 보류하고 건강은 `OBSERVATION_UNAVAILABLE`, 열린 복구 episode 도 닫지 않습니다. 다시 읽히면 자동으로 재개합니다. `intents` 를 모르는 옛 Manager(`INVALID_SPEC`)면 경고 뒤 `list`(플랫폼 잠금 + VM 마다 Xen 관측)를 `XENOVA_RECOVERY_INTENT_REFRESH`(기본 60초)마다 읽습니다 |
 | Xen 실행 상태 (도메인 유무·상태·domid) | `xl list -v` (잠금 없음, 주기마다 한 번) | 매 주기(5초) |
 | 생존 신호 | dom0 Mosquitto `xenova/v1/vms/+/heartbeat`(agent.heartbeat, Linux)와 `xenova/v1/apps/+/events` 중 `app.heartbeat`(Zephyr 주행 VM, 시나리오 D8) | 구독. 수신 단조 시각만 쓰고 `sent_at` 은 쓰지 않음. retain 플래그가 켜진 수신(구독 직후 브로커가 주는 옛 값)은 무시. agent.heartbeat 는 type·빈 payload·토픽-봉투 vm_id 일치, app.heartbeat 는 type·`state` 허용값·`uptime_s`(0 이상 유한)·app_id 일치를 검사해 맞는 것만 기록 |
 | Zephyr 앱 대상 여부 | 템플릿 카탈로그 capability `app_heartbeat`(Manager `templates`, 의도와 같이 캐시). `true` 앱 펌웨어, `false` starter(Xen 상태만). JSON boolean 만 믿고, 문자열 `"false"` 같은 값이면 그 템플릿의 VM 은 대상 여부 불명(OBSERVATION_UNAVAILABLE) | 선언이 없는 템플릿은 신호를 한 번 받은 뒤 armed 로 다루고, armed 는 `XENOVA_RECOVERY_STATE_DIR/armed.json`(`{"version":1,"armed":{vm_id: app_id},"history_lost":bool,"agent_delivered":[vm_id]}`) 에 남겨 Worker 재시작 뒤에도 유지. 플랫폼 카탈로그는 기존·네트워크 Starter에 `false`를 노출합니다. `true` 선언은 감시 대상이라는 뜻이고, 손실 판정은 아래 "VM 별 수신 이력"이 있어야 합니다 |
@@ -339,6 +357,12 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 장애 한 건(episode)에 판정(`Judgment`)은 하나입니다(계약 2.5 의 `recovery_id`). 사유가 바뀌어도(HEARTBEAT_LOST → DOMAIN_ABSENT) 다시 내지 않고 건강 스냅샷에만 반영합니다. UNKNOWN 동안은 episode 가 유지되므로 복구 재시작(도메인 사라짐 → 새 domid → 첫 신호) 중에도 같은 episode 입니다. OK 가 되면(신호 재개, 의도 변경) 닫히고 다음 장애는 새 `recovery_id` 입니다. 복구 정책(125)은 episode 가 닫힐 때까지 같은 `recovery_id` 로 재시도하고 현재 상태는 `Watcher.health()`·`open_recovery()` 로 봅니다. 관측에 실패한 주기(플랫폼 잠금 충돌 503, xl 오류)는 판정하지 않고 건너뜁니다.
 
 건강 스냅샷은 VM 마다 `xenova/v1/recovery/health/{vm_id}`(type `vm.health`, QoS 1, retained)에 `{vm_id, ok, state, desired_state, xen_state, heartbeat_age_s, reason, manager_seq}` 로 내용이 바뀔 때만 냅니다. `state` 는 `HEALTHY`(신호 신선, `ok: true` 는 이때만) / `STARTING`(실행 중이지만 이번 부팅의 신호 전, 유예 중이라도 건강하다고 하지 않음) / `UNHEALTHY`(사유 있음, paused·stopping, 신호 끊김) / `STOPPED`(도메인 없고 의도가 running 아님) / `OBSERVATION_UNAVAILABLE`(구독 미승인 또는 승인 뒤 수신 증거 없음, armed 기록 손상·capability 값 오류로 대상 여부 불명, Worker 종료) 입니다. 내용이 같아도 `XENOVA_RECOVERY_HEALTH_REFRESH`(기본 15초)마다 다시 내고 payload 의 `lease_s`(3주기, 기본 45초)를 함께 보냅니다. **받는 쪽은 마지막 수신 뒤 `lease_s` 가 지나면 관측 불가로 봅니다.** retained 만 믿으면 Worker 가 죽어도 며칠 전 HEALTHY 가 현재로 읽히기 때문입니다. 구독 직후 브로커가 주는 retained 값(retain 플래그, 공용 클라이언트 `Message.retained`)은 임시값이라 `ok` 를 믿지 않고, Worker 가 다시 낸 실시간 값을 받은 뒤 확정합니다. 브로커는 retained 가 저장된 지 얼마나 됐는지 알려주지 않기 때문입니다. 끊긴 동안은 발행하지 않고(큐에 쌓지 않음), paho 가 반환값으로 알리는 실패도 실패로 다룹니다. `manager_seq` 는 내용이 바뀔 때만 오르고 재발행에서는 `heartbeat_age_s` 만 갱신됩니다. VM 이 등록에서 사라지면 빈 payload 로 retained 를 지우고(PUBACK 확인, 실패하면 플랫폼 관측 실패와 무관하게 다음 주기 재시도), Worker 가 정상 종료할 때는 남은 VM 전부를 `OBSERVATION_UNAVAILABLE` 로 바꿔 두며 PUBACK 까지 확인합니다(전체 5초 한도, 못 받으면 경고). `vms/{vm_id}/` 아래 토픽은 봉투 `vm_id` 와 토픽이 같아야 해서(MQTT 계약 2장) VM 이 아닌 발행자는 쓸 수 없어 복구 이벤트(MQTT-12)와 같은 `recovery/` 가지를 씁니다(MQTT-13, 계약 11.1).
+
+원 생성 기록과 신원이 일치하는 등록 미완료 VM은 내부 조회에 남겨두고, 해당 VM만
+`registration_pending=true → intent_known=false`로 판정을 보류합니다. 정상 VM의 판정은
+계속합니다. 이 표식은 등록 해제나 중지 요청을 뜻하지 않으며 기존 건강·복구 기록을 지우지
+않습니다. 원장 누락·신원 불일치·저장 실패는 전체 조회 실패 보호를 유지합니다.
+이 조회를 지원하지 않는 설치본은 기존 `intents`로 전환합니다.
 
 설정은 `XENOVA_RECOVERY_INTERVAL`(5), `XENOVA_RECOVERY_STATE_DIR`(/run/xenova/recovery), `XENOVA_RECOVERY_INTENT_REFRESH`(60), `XENOVA_RECOVERY_HEALTH_REFRESH`(15), `XENOVA_RECOVERY_HEARTBEAT_LOST`(30), `XENOVA_RECOVERY_APP_HEARTBEAT_LOST`(15), `XENOVA_RECOVERY_BOOT_GRACE`(90), `XENOVA_RECOVERY_ZEPHYR_BOOT_GRACE`(30), `XENOVA_RECOVERY_ABSENT_GRACE`(60), `XENOVA_RECOVERY_AGENT_SOLE_PUBLISHER`·`XENOVA_RECOVERY_APP_SOLE_PUBLISHER`(hold|trust, 기본 hold), `XENOVA_RECOVERY_AGENT_PEER_FRESH`(15)·`XENOVA_RECOVERY_APP_PEER_FRESH`(5), `XENOVA_RECOVERY_BROKER_HOST/PORT/USERNAME/PASSWORD`(127.0.0.1:1883, 계정 `dom0-server`), `XENOVA_RECOVERY_LOG_LEVEL` 이며, 플랫폼·xl 은 dom0-manager 와 같은 `XENOVA_*`(`XENOVA_DRIVER=platform` 필수)입니다. 단 HTTP 전용 값(`XENOVA_HOST`·`XENOVA_PORT`·`XENOVA_SERVICE_TOKEN`·`XENOVA_CONSOLE_ENABLED`·`XENOVA_CONSOLE_LOCK_DIR`)은 읽지 않으므로, 같은 env 파일에서 콘솔을 켜도 Worker 는 콘솔 검증(토큰 필수·로컬 dom0)에 걸리지 않습니다.
 
@@ -542,7 +566,8 @@ python -m pytest
 | `InvalidArgument` | 400 | 입력 검증, nil UUID(Domain-0) 대상 호출, 플랫폼 `INVALID_SPEC`·템플릿 없음 |
 | `VMNotFound` | 404 | 도메인 없음(단건), 등록 없음(삭제) |
 | `OperationNotFound` | 404 | 요청 키로 원 제어 작업을 찾지 못함(조회). 검색 부재이며 미수락 증거가 아님 |
-| `VMExists` | 409 | 같은 vm_id가 떠 있음, 다른 명세로 재생성, 이름·멱등성 충돌 |
+| `VMExists` | 409 | 같은 명세의 VM 실행이 이미 있음 또는 생성 외 기존 작업의 키 충돌 |
+| `VMSpecConflict` | 409 | 같은 UUID에 다른 명세가 등록되어 있거나 원 생성 작업과 충돌 |
 | `InvalidState` | 409 | 실행 중 삭제, `VM_NOT_STOPPED`·IP 충돌 등 |
 | `InsufficientResources` | 507 | vcpus·memory_mib 부족, 플랫폼 Linux IP 풀 고갈(`ipv4`), 보드 저장소 부족 |
 | `NotSupported` | 501 | 드라이버·플랫폼이 제공하지 않는 동작. xen 모드의 생성·정지·삭제 명령 |

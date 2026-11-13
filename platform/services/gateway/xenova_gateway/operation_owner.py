@@ -136,7 +136,7 @@ class OperationOwner:
             maximum=getattr(getattr(getattr(self.r._sink,'odometry',None),'config',None),'maximum_sample_age_us',None)
         if maximum is None:return False
         end=min(end,vehicle.pi_sample_us-vehicle.clock_error_us+maximum)
-        current=self.r.device_view().get('vehicle_sample')
+        current=self.r.vehicle_sample()
         if (body.control_generation!=m.generation or lease.digest!=body.clock_reply_sha256
                 or body.checked_guest_us<lease.p4 or body.valid_until_pi_us>end
                 or not now<body.valid_until_pi_us or current is None or vehicle.quality!=3
@@ -186,7 +186,7 @@ class OperationOwner:
         if not self.supported(peer) or report is None:return False,'PREFLIGHT_UNAVAILABLE',now,None
         body=report['body']
         if report['generation']!=m.generation or now>=body.valid_until_pi_us:return False,'PREFLIGHT_EXPIRED',now,peer
-        trust=self.r.drive_link.trust;current=self.r.device_view().get('vehicle_sample')
+        trust=self.r.drive_link.trust;current=self.r.vehicle_sample()
         if (trust is None or now>=trust.expires_pi_us or current is None or body.source.odom_epoch!=current.get('odom_epoch')
                 or any(getattr(body.source,k)!=getattr(trust,k) for k in
                     ('vehicle','mapper_boot','mapper_instance','map_epoch','frame_epoch','clock_epoch','configuration','calibration'))
@@ -505,7 +505,8 @@ class OperationOwner:
         if not self.enabled or self.current() is None:return None
         capability=self.r.mapper_operation_capability(self.o.now,self.r.drive_link.trust)
         if capability is None:return None
-        value=self.current();m=self.r.machine;sample=self.r.device_view().get('vehicle_sample');facts=self.r.control_facts()
+        value=self.current();m=self.r.machine;view=self.r.device_view()
+        sample=view.get('vehicle_sample');facts=self.r.control_facts(view=view)
         if sample is None or facts is None:return None
         wait=bool(value['phase']=='WAIT' and self.o.hold and self.o.stationary()
             and facts.HasField('stop') and facts.stop.state==3 and facts.stop.control_generation==m.generation)

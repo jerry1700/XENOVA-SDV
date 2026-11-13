@@ -33,7 +33,8 @@ int64_t k_uptime_get(void){uint64_t now;xdiag_clock_us(&now);return (int64_t)(no
 int xd_context_get(struct xt_bootstrap *out){*out=bridge_boot;return 0;}
 bool xd_stopping(void){return false;}
 bool drive_task_stopping(enum drive_task task){(void)task;return false;}
-int k_mutex_lock(struct k_mutex *m,int wait){(void)m;(void)wait;return 0;}
+static bool app_metadata_busy;
+int k_mutex_lock(struct k_mutex *m,int wait){(void)wait;return app_metadata_busy&&m==&app_metadata?-EBUSY:0;}
 void k_mutex_unlock(struct k_mutex *m){(void)m;}
 void k_sleep(int64_t delay){(void)delay;}
 void k_yield(void){}
@@ -116,7 +117,7 @@ static int publication_policy(const char *argument){
  measured.registry_revision++;bool other_registry=completed_episode_same(&path,&measured,342);measured.registry_revision--;
  measured.core_sha256[0]^=1;bool other_progress_core=completed_episode_same(&path,&measured,342);measured.core_sha256[0]^=1;
  bool baseline=phase_snapshot_registered(&path);
- engine.planning=engine.apply_pending=engine.episode_transition=engine.episode_request_ready=engine.episode_receipt_pending=true;
+ engine.planning=engine.apply_pending=true;engine.episode_handoff=DE_EPISODE_AWAITING_RECEIPT;
  bool unrelated=phase_snapshot_registered(&path);
  engine.episode_status.accepted_core_sha256.bytes[0]^=1;
  bool wrong_core=phase_snapshot_registered(&path);
@@ -145,14 +146,15 @@ static int publication_policy(const char *argument){
  printf("PUBLICATION_POLICY {\"baseline\":%d,\"unrelated_candidate\":%d,\"wrong_core\":%d,\"wrong_ref\":%d,\"wrong_id\":%d,\"wrong_receipt_ref\":%d,\"wrong_path\":%d,\"wrong_plan\":%d,\"future_ack\":%d,\"failed\":%d,\"cache_rc\":%d,\"old_cache_retained\":%d,\"new_id_preserved\":%d,\"measured_progress\":%d,\"old_progress\":%d,\"other_registry\":%d,\"other_progress_core\":%d}\n",
   baseline,unrelated,wrong_core,wrong_ref,wrong_id,wrong_receipt_ref,wrong_path,wrong_plan,future_ack,failed,cache_rc,phase_snapshot_valid,!strcmp(accepted_id,engine.phase_state_message_id),
   measured_progress,old_progress,other_registry,other_progress_core);
- engine.planning=engine.apply_pending=engine.episode_transition=engine.episode_request_ready=engine.episode_receipt_pending=false;
+ engine.planning=engine.apply_pending=false;engine.episode_handoff=DE_EPISODE_IDLE;
  return 0;
 }
 static void observe_step(void){
  static unsigned count;if((!engine.episode.active&&engine.episode_state.core.state!=2)||count>=8)return;count++;
  const struct lp_path *p=engine.current>=0?&engine.paths[engine.current].path:NULL;
  fprintf(stderr,"B09_STEP n=%u cap=8 planning=%d finalized=%d valid=%d pending=%d transition=%d failed=%d current=%d currentgen=%u planninggen=%u planning_anchor_pi=%llu path_episode=%u phase=%u facts_current=%d factsE=%llu completion=%llu completiongen=%u exported=%llu fixed_id=%s cache_valid=%d cache_id=%s\n",
-  count,engine.planning,engine.plan_finalized,engine.plan_valid,engine.episode_receipt_pending,engine.episode_transition,engine.behavior_failed,
+  count,engine.planning,engine.plan_finalized,engine.plan_valid,engine.episode_handoff==DE_EPISODE_AWAITING_RECEIPT,
+  engine.episode_handoff!=DE_EPISODE_IDLE,engine.behavior_failed,
   engine.current,engine.current>=0?engine.paths[engine.current].generation:0,engine.planning_path.generation,(unsigned long long)engine.planning_vehicle_pi_us,
   p&&p->has_episode?p->episode.core.state:0,engine.episode.phase,(int)atomic_load(&engine.facts_current),
   (unsigned long long)engine.facts.expires_pi_us,(unsigned long long)completion.sequence,completion.path_generation,
@@ -230,6 +232,19 @@ int main(void){
    for(unsigned k=0;k<count;k++){b08_input_map_step();(void)planner_step();b08_input_step();}
    observe_step();
   }else if(!strcmp(bridge_line,"io")){b08_input_map_step();b08_input_step();}
+  else if(!strcmp(bridge_line,"preflight-busy")){
+   struct dl_clock mapping;uint64_t now,guest;
+   rc=dl_clock_get(&mapping,&now);if(!rc)rc=clock_us(NULL,&guest);
+   if(!rc){
+    uint64_t original_check=preflight_report.checked_guest_us,original_end=preflight_report.valid_until_pi_us;
+    if(!atomic_load(&preflight_report_accepted)||!atomic_load(&preflight_geometry_valid)||original_end<=now)rc=-ESTALE;
+    else{
+     app_metadata_busy=true;input_preflight(&mapping,now,guest);app_metadata_busy=false;
+     if(preflight_last_result!=-EBUSY||!atomic_load(&preflight_report_accepted)||!atomic_load(&preflight_geometry_valid)||
+        preflight_report.checked_guest_us!=original_check||preflight_report.valid_until_pi_us!=original_end)rc=-EINVAL;
+    }
+   }
+  }
   else if(!strcmp(bridge_line,"event-clock")){
    char *second=argument?strchr(argument,' '):NULL;struct dl_clock original={0};
    if(!second)rc=-EINVAL;
@@ -253,7 +268,8 @@ int main(void){
     "\"last_reason\":%d,\"last_reason_name\":\"%s\",\"search_reason\":%d,\"search_reason_name\":\"%s\",\"has_grant\":%d,\"facts_current\":%d,\"episode_state\":%u,"
     "\"preflight_last_rc\":%d,\"preflight_attempt_checked\":%llu,\"preflight_attempt_e\":%llu,\"preflight_vehicle_sequence\":%llu,\"operation_status_available\":%d,"
     "\"preflight_geometry_checks\":%llu,\"preflight_geometry_cached\":%d,\"path_invalidated\":%d,\"prepared_operation_present\":%d}\n",
-    engine.behavior_enabled,engine.planning,(int)atomic_load(&prepared_valid),engine.episode.phase,engine.parking.phase,engine.episode_request_ready||engine.episode_receipt_pending,
+    engine.behavior_enabled,engine.planning,(int)atomic_load(&prepared_valid),engine.episode.phase,engine.parking.phase,
+    engine.episode_handoff==DE_EPISODE_REQUEST_READY||engine.episode_handoff==DE_EPISODE_AWAITING_RECEIPT,
     engine.episode.reason,(unsigned)sizeof(engine),(unsigned)sizeof(dw_state),(unsigned)sizeof(xenova_drive_ClockReply),
     mapped,mapping.acknowledged,(unsigned long long)mapping.probe_sequence,(unsigned long long)mapping.expires_guest,(unsigned long long)pi_now,
     engine.maps.current,(unsigned long long)engine.maps.published,engine.receive_awaiting,atomic_load(&engine.last_world_result),atomic_load(&engine.requested),
