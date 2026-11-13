@@ -17,6 +17,12 @@ describe('errorText — 화면에 보일 오류 문구', () => {
     }
   });
 
+  it('같은 VM 에 다른 작업이 진행 중이면 다시 시도 안내 (QA 1-B2)', () => {
+    expect(errorText(new ApiError(409, { code: 'VM_OPERATION_IN_PROGRESS', message: 'x' }))).toBe(
+      '이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도해 주세요.',
+    );
+  });
+
   it('서버 원문은 쓰지 않는다 (보드 영어 문구가 그대로 나가던 문제)', () => {
     const error = new ApiError(409, {
       code: 'INVALID_VM_STATE',
