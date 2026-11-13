@@ -119,7 +119,7 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 <a id="demo-commands"></a>
 ### 3.2 데모 명령 (MQTT-04·05)
 
-격리·자동 복구 시연용 명령이다. Linux의 `stress`·`agent_exit`는 에이전트 설정 `XENOVA_AGENT_DEMO_COMMANDS=1`일 때만 실행한다. Zephyr drive-v1은 같은 VM command 토픽에서 `auto_delay`를 실행한다. CPU 사용률과 주행 deadline 장애 시연은 AUTO 스레드가 busy wait하는 `auto_delay`로 수행한다.
+격리·자동 복구 시연용 명령이다. Linux의 `stress`·`agent_exit`는 에이전트 설정 `XENOVA_AGENT_DEMO_COMMANDS=1`일 때만 실행한다. 배포 유닛(`xenova-agent.service`)이 이 값을 항상 1로 두므로, 그 유닛으로 만든 템플릿 이미지에서는 기본으로 켜져 있다(2026-11-14). Zephyr drive-v1은 같은 VM command 토픽에서 `auto_delay`를 실행한다. CPU 사용률과 주행 deadline 장애 시연은 AUTO 스레드가 busy wait하는 `auto_delay`로 수행한다.
 
 **명령 (MQTT-04)**: 봉투는 2장 예외(`boot_id`·`agent_instance_id`·`seq` 없음)이고 `vm_id` 는 대상 VM, `type` 은 `agent.command` 다. 에이전트는 command 토픽에 온 다른 type 은 실행하지 않고 버린다. payload:
 
