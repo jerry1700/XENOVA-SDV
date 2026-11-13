@@ -78,8 +78,10 @@ def ensure(data, record, *, gid=None, rules=None, reload=None, deadline=None, cl
         username='telemetry-'+identity if channel=='telemetry' else identity
         secret=value['secrets'][username]
         if channel=='agent':
+            # 개발 이미지의 MQTT-04 명령을 명시적으로 허용한다. Agent 자체 기본값은 유지한다.
             content=(f'XENOVA_AGENT_VM_ID={identity}\nXENOVA_AGENT_BROKER_HOST=192.168.77.1\n'
-                     f'XENOVA_AGENT_BROKER_PORT=1883\nXENOVA_AGENT_BROKER_USERNAME={username}\n'
+                     f'XENOVA_AGENT_BROKER_PORT=1883\nXENOVA_AGENT_DEMO_COMMANDS=1\n'
+                     f'XENOVA_AGENT_BROKER_USERNAME={username}\n'
                      f'XENOVA_AGENT_BROKER_PASSWORD={secret}\n')
             put(destination/'agent.env',content)
         else:

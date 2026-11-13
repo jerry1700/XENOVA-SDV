@@ -325,6 +325,13 @@ done
 
 이 경로에서 새 rootfs에 `python3-paho-mqtt`를 설치하고, 저장소의 기존 Agent installer를 호출한다. Python import·Agent enable·설치 영수증·커널/부트 자산을 검사한 번들이 게시된다. `template.json`의 `guest_agent`와 `/etc/xenova/agent-install.json`에 패키지 버전과 실제 소스·deb 해시가 기록된다.
 
+Linux VM의 private 자격 공급 단계는 `/etc/xenova/agent.env`에
+`XENOVA_AGENT_DEMO_COMMANDS=1`도 기록한다. 이 개발 이미지에서는 기존 MQTT-04
+`stress`·`agent_exit` 명령을 허용한다. Agent 프로그램의 기본값은 꺼짐이며,
+중립 Linux 템플릿에는 VM별 자격이나 이 env를 미리 넣지 않는다.
+일반 생성과 최초 설치 모두 UUID가 확정된 뒤 공급하며, 완료된 기존 설치의
+재부팅만으로 env를 다시 쓰거나 자격을 회전하지 않는다.
+
 ### A/B 공통 Zephyr 주행 firmware
 
 두 VM에는 같은 공통 firmware를 선택한다. AUTO/MANUAL은 firmware 내부 모드이고,

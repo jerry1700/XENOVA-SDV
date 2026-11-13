@@ -160,6 +160,8 @@ class ProvisioningTest(unittest.TestCase):
         env=dict(line.split('=',1) for line in (root/'etc/xenova/agent.env').read_text().splitlines())
         settings=AgentSettings.from_env(env,instance_id_path=root/'etc/xenova/instance-id')
         self.assertEqual(settings.vm_id,A);self.assertEqual(settings.username,A)
+        self.assertTrue(settings.demo_commands)
+        self.assertEqual(env['XENOVA_AGENT_DEMO_COMMANDS'],'1')
         self.assertTrue(settings.password==self.value()['secrets'][A]);self.assertTrue(settings.telemetry_enabled)
         self.assertEqual(result['guest_application'],'private-root-configured')
         self.assertEqual(result['authentication'],'unobserved')
@@ -172,6 +174,7 @@ class ProvisioningTest(unittest.TestCase):
         provision.apply_linux(self.data,self.record,root,factory=True,gid=0,rules=self.rules)
         with patch.object(guest_identity.os,'sync'):guest_identity.ensure(root,command=lambda *a,**k:None)
         self.assertEqual((root/'etc/xenova/instance-id').read_text().strip(),A)
+        self.assertIn(b'XENOVA_AGENT_DEMO_COMMANDS=1\n',(root/'etc/xenova/agent.env').read_bytes())
         original=(root/'etc/xenova/agent.env').read_bytes()
         with patch.object(guest_identity.os,'sync'):guest_identity.ensure(root,command=lambda *a,**k:None)
         self.assertEqual((root/'etc/xenova/agent.env').read_bytes(),original)
@@ -242,6 +245,7 @@ class ProvisioningHooksTest(unittest.TestCase):
                 with c.linux_boundaries(),patch.object(preparation,'prepare_instance',rootfs),patch.object(provision,'apply_linux',supplied),patch.object(ownership,'check_output',external):
                     result=c.m.call('create',c.spec,execute=True)
                 self.assertTrue(result['ok'],result);self.assertEqual(captured[0].vm_id,c.spec['vm_id'])
+                self.assertTrue(captured[0].demo_commands)
                 before=provision.credential_file(c.f.data,c.spec['vm_id'],'agent').read_bytes()
                 with patch.object(provision,'ensure',side_effect=AssertionError('completed replay resupplied')):
                     replay=c.m.fork().call('create',{k:v for k,v in c.spec.items() if k not in ('vcpus','memory_mib')},execute=True)
