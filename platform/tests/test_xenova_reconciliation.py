@@ -422,6 +422,36 @@ class RecoveryReconciliationTest(unittest.TestCase):
         self.assertEqual(self.path(spec).read_bytes(), before)
         self.assertEqual(self.physical(), commands)
 
+    def test_recovery_blocked_by_previous_launch_finishes_without_owning_a_launch(self):
+        self.f.start()
+        run_path = self.p.runtime/'executions'/(self.r['uuid']+'.json')
+        run = self.p.execution().run_record(self.r)
+        self.p.execution().write(run_path, {**run, 'phase':'launching'})
+        self.f.xen.rows.clear()
+        spec = self.f.spec('start-if-absent')
+        original_run, commands = run_path.read_bytes(), self.physical()
+        blocked = self.f.fails(self.f.recover(spec), 'RECONCILE_REQUIRED')
+        attempt = json.loads(self.path(spec).read_text())
+        self.assertEqual(attempt['phase'], 'failed')
+        self.assertEqual(attempt['operation_id'], blocked['operation_id'])
+        self.assertEqual(attempt['error']['details']['failed_phase'], 'removed')
+        self.assertEqual(run_path.read_bytes(), original_run)
+        self.assertEqual(self.physical(), commands)
+
+    def test_fresh_recovery_automatically_closes_expired_owned_attempt(self):
+        spec, _, _, _ = self.expired_owned_launch(uncertain=True)
+        original, commands = json.loads(self.path(spec).read_text()), self.physical()
+        fresh = self.f.spec('start-if-absent')
+        self.f.ok(self.f.recover(fresh))
+        settled = json.loads(self.path(spec).read_text())
+        self.assertEqual(settled['phase'], 'failed')
+        self.assertEqual(settled['operation_id'], original['operation_id'])
+        self.assertEqual(settled['request'], original['request'])
+        self.assertEqual(settled['reconciliation']['original_error'], original['error'])
+        self.assertEqual(settled['reconciliation']['physical_commands'], 0)
+        self.assertEqual(len(self.physical()), len(commands)+1)
+        self.assertEqual(self.physical()[-1][:2], ['xl', 'create'])
+
     def expired_owned_launch(self, *, uncertain=False):
         """실제 원 수락/run을 남기고 systemd·Xen 실행만 기존 외부 경계로 대역한다."""
         import xenova_guest_process as guest
@@ -606,8 +636,13 @@ class RecoveryReconciliationTest(unittest.TestCase):
                             other.f.fails(other.reconcile(spec, True), 'RECONCILE_REQUIRED')
                         self.assertEqual(fired, [stage])
                         self.assertEqual(other.physical(), commands)
-                        # 부재만 보고 새 start를 허용하지 않고 원 종결 확인을 먼저 회수한다.
-                        other.f.fails(other.f.recover(other.f.spec('start-if-absent')), 'RECONCILE_REQUIRED')
+                        # 필수 저장이 계속 실패하면 자동 종결도 새 launch를 허용하지 않는다.
+                        def unavailable(path, text, *args):
+                            if Path(path) == run_path:
+                                raise OSError(errno.EIO, 'execution record remains unwritable')
+                            return write(path, text, *args)
+                        with patch.object(execution, 'atomic_write', side_effect=unavailable):
+                            other.f.fails(other.f.recover(other.f.spec('start-if-absent')), 'RECONCILE_REQUIRED')
                         done = other.f.ok(other.reconcile(spec, True))['attempt']
                         self.assertEqual(done['phase'], 'failed')
                         self.assertEqual(done['request'], spec)
@@ -629,6 +664,24 @@ class RecoveryReconciliationTest(unittest.TestCase):
         self.assertEqual(json.loads(run_path.read_text())['phase'], 'uncertain')
         self.p.execution_checkpoint = lambda *args:None
         self.f.ok(self.reconcile(spec, True))
+        closed = json.loads(run_path.read_text())
+        self.assertEqual(closed['phase'], 'stopped')
+        self.assertEqual(closed['execution_id'], run['execution_id'])
+        self.assertEqual(self.physical(), commands)
+
+    def test_replayed_recovery_finishes_interrupted_automatic_settlement(self):
+        spec, run_path, run, _ = self.expired_owned_launch()
+        commands = self.physical()
+        def interrupted(phase, value):
+            if phase == 'recovery-failed':
+                raise foundation.Interrupted()
+        self.p.execution_checkpoint = interrupted
+        with self.assertRaises(foundation.Interrupted):
+            self.f.recover(spec)
+        self.assertEqual(json.loads(self.path(spec).read_text())['phase'], 'failed')
+        self.assertEqual(json.loads(run_path.read_text())['phase'], 'uncertain')
+        self.p.execution_checkpoint = lambda *args: None
+        self.f.fails(self.f.recover(spec), 'DEADLINE_EXCEEDED')
         closed = json.loads(run_path.read_text())
         self.assertEqual(closed['phase'], 'stopped')
         self.assertEqual(closed['execution_id'], run['execution_id'])

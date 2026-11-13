@@ -100,6 +100,28 @@ def cleanup(platform, record, launch, deadline, *, observe_only=False):
         raise PlatformError('domain appeared during scope cleanup; reconciliation required')
 
 
+def check_reboot_quiescent(platform, record, launch, deadline):
+    """구형 reboot 명령은 재사용 scope 밖에서 실행될 수 있다."""
+    from xenova_execution import refuse
+    domid = str(launch['reboot_from']['domid']).encode()
+    script = os.fsencode(Path(__file__).name)
+    vm_id = record['uuid'].encode()
+    for path in Path('/proc').iterdir():
+        if platform.clock() >= deadline:
+            refuse('DEADLINE_EXCEEDED', 'reboot process observation budget expired')
+        if not path.name.isdigit():
+            continue
+        try:
+            argv = (path/'cmdline').read_bytes().rstrip(b'\0').split(b'\0')
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        xl_reboot = os.path.basename(argv[0]) == b'xl' and argv[1:3] == [b'reboot', domid]
+        helper_reboot = (any(os.path.basename(arg) == script for arg in argv[:4])
+                         and b'reboot' in argv and b'--vm-id' in argv and vm_id in argv)
+        if xl_reboot or helper_reboot:
+            refuse('RECONCILE_REQUIRED', 'original reboot helper may still be active')
+
+
 def arm_parent_death(expected_parent):
     """fork된 daemon에는 상속되지 않는 Linux PDEATHSIG를 명령 프로세스에만 설정한다."""
     if type(expected_parent) is not int or expected_parent <= 1:

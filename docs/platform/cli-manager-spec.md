@@ -569,6 +569,12 @@ lifecycle·실행 owner·구성·CPU 문맥이 같고, 원 기한 만료 뒤 Xen
 별도의 명시 요청이다. scope가 살아 있거나 근거가 없고, 실행/의도/구성이 바뀌었거나 저장이 미확정이면
 기존 보호를 유지한다. `control-operation` 조회 자체는 이 종결을 수행하지 않는다.
 
+새 `start` 또는 복구 실행을 요청하면, 도메인이 없는 대상에서 기존 실행을 막는 만료 기록을 같은 근거로 먼저
+종결할 수 있다. Linux의 협조형 `reboot`는 이전 성공 기록이 원 Xen 실행과 재사용 scope를 연결하고,
+해당 scope와 reboot helper가 종료됐을 때만 종결한다. 이후의 `start`가 원 Xen 실행을 그대로 관측해
+다음 의도 revision을 만들었다면 그 의도를 보존한다. 종결 기록에는 원 오류·작업 ID·기한을 남기며,
+새 Xen 실행은 현재 요청의 별도 검증을 거친다.
+
 **Manager 매핑:** `start / {vm_id}`.
 
 [명령어 색인으로](#command-index)
@@ -1231,7 +1237,9 @@ CPU 재배치나 새 attempt·operation·실행 신원·물리 deadline 발급�
 만료한 미결합 launch의 종결에는 두 번의 현재 부재 관측, 원 host·의도·등록·CPU 정책과
 원 operation/run의 재검증, 정확한 VM/execution scope의 observe-only 무잔존 확인이 모두 필요하다.
 이 명령이 남은 domain이나 helper를 정지시키지는 않는다. 미확정 runtime 표지→원 attempt 실패→
-runtime stopped 순서로 필수 저장하고, 중간 중단은 같은 원 attempt의 명시 재호출로 회수한다.
+runtime stopped 순서로 필수 저장한다. 중간 중단은 같은 원 attempt의 명시 재호출로 회수할 수 있다.
+새 복구 실행과 원 복구의 재전달도 실행 잠금 안에서 같은 종결을 시도한다. 이전 실행 보호에 걸려
+제출 전에 거절된 것으로 확인되는 구형 복구 원장도 원 오류를 보존해 `failed/not_submitted`로 종결한다.
 제출 뒤 실패를 `launch_aborted_before_submit`로 꾸미거나 원 기한·hash를 바꾸지 않는다.
 단일 저장 실패 때는 같은 실행의 미확정 표지를 복원한다. 복원 저장도 실패하면 두 원인을 구분한
 `RECONCILE_REQUIRED`이며, 저장소가 회복된 뒤 원 결과를 다시 확인해야 한다.
