@@ -274,31 +274,35 @@ public class Dom0ManagerClient implements VmControlPort {
                     "VM 제어 서비스의 오류 응답을 해석할 수 없습니다.");
         }
 
-        if (StringUtils.hasText(error.detail())) {
-            log.warn("dom0-manager error: code={}, detail={}", error.code(), error.detail());
-        }
+        // The board's own wording (English, with internal ids) goes to the log only; the API returns Korean text per code.
+        log.warn("dom0-manager error: status={}, code={}, platform_code={}, message={}, detail={}",
+                response.getStatusCode().value(), error.code(), error.platformCode(), error.message(), error.detail());
         throw mapError(error, response.getStatusCode().value());
     }
 
     private ApiException mapError(Dom0ErrorResponse error, int upstreamStatus) {
-        String message = StringUtils.hasText(error.message())
-                ? error.message()
-                : "VM 제어 요청을 처리하지 못했습니다.";
         return switch (error.code() == null ? "" : error.code()) {
-            case "VMNotFound" -> new ApiException(HttpStatus.NOT_FOUND, "VM_NOT_FOUND", message);
-            case "VMExists" -> new ApiException(HttpStatus.CONFLICT, "VM_ALREADY_EXISTS", message);
+            case "VMNotFound" -> new ApiException(
+                    HttpStatus.NOT_FOUND, "VM_NOT_FOUND", "보드에서 VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.");
+            // Usually turned into success by VmService (a retried create of the same VM); shown only if it is not.
+            case "VMExists" -> new ApiException(
+                    HttpStatus.CONFLICT, "VM_ALREADY_EXISTS", "보드에 같은 VM이 이미 있습니다.");
             // The board already uses this platform (domain) name for a different vm_id. Unlike VMExists it is never
             // our own earlier launch, so it must not be read as success: it is the same public code as a Spring-side
             // name clash.
             case "VMNameConflict" -> new ApiException(
                     HttpStatus.CONFLICT, "VM_NAME_CONFLICT", "보드에 같은 이름의 VM이 이미 있습니다. 다른 이름을 사용하세요.");
-            case "InvalidState" -> new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", message);
-            case "InvalidArgument" -> new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", message);
-            case "OperationNotFound" -> new ApiException(HttpStatus.NOT_FOUND, "OPERATION_NOT_FOUND", message);
+            case "InvalidState" -> new ApiException(
+                    HttpStatus.CONFLICT, "INVALID_VM_STATE", invalidStateMessage(error.platformCode()));
+            case "InvalidArgument" -> new ApiException(
+                    HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", invalidArgumentMessage(error.platformCode()));
+            case "OperationNotFound" -> new ApiException(
+                    HttpStatus.NOT_FOUND, "OPERATION_NOT_FOUND", "보드에서 요청한 작업 기록을 찾을 수 없습니다.");
             // Passed on as 507 like dom0-manager: retrying the same request cannot succeed until resources free up.
             case "InsufficientResources" -> new ApiException(
                     HttpStatus.INSUFFICIENT_STORAGE, "INSUFFICIENT_RESOURCES", insufficientResourceMessage(error));
-            case "DriverError" -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "VM_DRIVER_ERROR", message);
+            case "DriverError" -> new ApiException(
+                    HttpStatus.INTERNAL_SERVER_ERROR, "VM_DRIVER_ERROR", "보드에서 VM 작업을 처리하지 못했습니다. 잠시 후 다시 시도하세요.");
             // The driver or platform does not offer this operation yet (e.g. caller-chosen vm_id before P2 supports it).
             case "NotSupported" -> new ApiException(
                     HttpStatus.NOT_IMPLEMENTED, "VM_CONTROL_NOT_SUPPORTED", "보드가 아직 지원하지 않는 작업입니다.");
@@ -333,6 +337,30 @@ public class Dom0ManagerClient implements VmControlPort {
                 HttpStatus.BAD_GATEWAY,
                 "VM_CONTROL_BAD_RESPONSE",
                 "VM 제어 서비스와의 연결 설정이 올바르지 않습니다.");
+    }
+
+    // platform_code says why the board refused (contract 8.1 mapping table). Errors dom0-manager raises itself carry
+    // none; the caller that knows the operation (e.g. VmService.destroy) can replace the generic text.
+    private static String invalidStateMessage(String platformCode) {
+        return switch (platformCode == null ? "" : platformCode) {
+            case "VM_NOT_STOPPED" -> "VM을 정지한 뒤 다시 시도하세요.";
+            case "VM_NOT_RUNNING" -> "실행 중인 VM에서만 할 수 있는 작업입니다.";
+            case "HOST_QUIESCING" -> "보드가 종료 중이라 새 작업을 받을 수 없습니다.";
+            case "BOOT_ADMISSION_REQUIRED" -> "보드의 VM 실행 정책이 확정되지 않아 지금은 시작할 수 없습니다.";
+            case "TARGET_CHANGED", "INTENT_MISMATCH" -> "그사이 VM 상태가 바뀌었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.";
+            case "ASSET_IN_USE" -> "VM 디스크를 다른 작업이 사용 중입니다. 잠시 후 다시 시도하세요.";
+            case "VM_PURGED" -> "이미 완전히 삭제된 VM입니다.";
+            default -> "지금 VM 상태에서는 할 수 없는 작업입니다. VM 상태를 확인한 뒤 다시 시도하세요.";
+        };
+    }
+
+    private static String invalidArgumentMessage(String platformCode) {
+        return switch (platformCode == null ? "" : platformCode) {
+            case "TEMPLATE_NOT_FOUND", "TEMPLATE_VERSION_NOT_FOUND" ->
+                    "보드에 해당 템플릿 버전이 없습니다. 템플릿을 다시 선택하세요.";
+            case "RESOURCE_UNSUPPORTED" -> "이 템플릿이 허용하지 않는 vCPU·메모리 값입니다.";
+            default -> "보드가 요청 값을 받아들이지 않았습니다. 입력값을 확인하세요.";
+        };
     }
 
     // dom0-manager's message is English and names internal fields, so the user sees which resource ran out instead.

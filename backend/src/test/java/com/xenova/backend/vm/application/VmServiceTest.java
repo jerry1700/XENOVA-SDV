@@ -537,6 +537,33 @@ class VmServiceTest {
     }
 
     @Test
+    void deletingARunningVmSaysToStopItFirst() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        org.mockito.Mockito.doThrow(new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", "지금 VM 상태에서는…"))
+                .when(vmControlPort).destroy("vm-1");
+
+        assertThatThrownBy(() -> service.destroy("vm-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("INVALID_VM_STATE");
+                    assertThat(exception.getMessage()).isEqualTo("실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.");
+                });
+    }
+
+    @Test
+    void rebootingAVmThatIsNotRunningExplainsWhatToDoInstead() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.requestReboot("vm-1", "reboot-1"))
+                .thenThrow(new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", "지금 VM 상태에서는…"));
+
+        assertThatThrownBy(() -> service.reboot("vm-1", "reboot-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getCode()).isEqualTo("INVALID_VM_STATE");
+                    assertThat(exception.getMessage()).startsWith("실행 중인 VM만 재부팅할 수 있습니다.");
+                });
+    }
+
+    @Test
     void destroyOfAVmTheBoardNoLongerRegistersRetiresTheRow() {
         VmRecord record = record("vm-1", "web-test");
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
