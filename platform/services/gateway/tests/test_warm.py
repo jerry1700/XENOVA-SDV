@@ -95,6 +95,18 @@ def test_one_vm_world_unavailable_prefers_other_current_auto(tmp_path):
     assert not w.m.untrusted and not w.auth.value.get('distrusted')
 
 
+def test_five_local_input_unavailable_results_fail_over_and_preserve_auto(tmp_path):
+    w=WarmWorld(tmp_path/'authority');w.arm();generation=w.m.generation
+    w.failures[A,'autonomous']='INPUT_UNAVAILABLE'
+    w.tick(.08)
+    assert w.m.active_vm==A and w.m.mode is Mode.AUTO and w.m.generation==generation
+    w.tick(.02)
+    assert w.m.active_vm==B and w.m.mode is Mode.AUTO and w.m.generation==generation+1
+    assert isinstance(w.actions[0],ForwardStop) and not w.m.output_permitted
+    w.tick(.1)
+    assert w.m.active_vm==B and w.m.mode is Mode.AUTO and w.m.output_permitted
+
+
 def test_both_world_inputs_unavailable_stop_then_manual_needs_explicit_resume(tmp_path):
     w=WarmWorld(tmp_path/'authority');w.arm();executions=dict(w.executions)
     for vm in (A,B):w.failures[vm,'autonomous']='WORLD_UNAVAILABLE'
