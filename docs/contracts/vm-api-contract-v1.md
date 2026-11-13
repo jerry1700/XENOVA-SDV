@@ -51,7 +51,7 @@ POST `/api/v1/vm-registrations/{vm_id}/notify`를 제공한다. GET은 실행과
 | 생성과 시작 | `create`는 정지 인스턴스 등록, `start`는 별도 동작 | POST가 자산 준비·재사용과 도메인 시작을 연결하는 계약 |
 | 목록·상세 | 정지한 등록 VM도 조회. 템플릿·현재 설정·수명주기와 Xen 관측을 구분 | Xen 도메인만 반환. Spring이 자기 레코드와 조합 |
 | `ipv4` | 예약한 내부 주소. 부팅·DHCP 획득 증거가 아님 | HTTP VM 객체에는 없음. Spring 공개 `ipv4`는 에이전트 보고 값 |
-| 생성 재시도 | 같은 UUID·최초 명세는 같은 작업. 다른 최초 명세는 충돌. RETIRED/PURGED를 create로 되살리지 않음 | 실행 도메인이 있으면 `409 VMExists`; Spring의 성공 변환과 별개 |
+| 생성 재시도 | 같은 UUID·최초 명세는 같은 작업. 다른 최초 명세는 충돌. RETIRED/PURGED를 create로 되살리지 않음 | 같은 명세의 실행 도메인은 `409 VMExists`. 다른 명세는 `409 VMSpecConflict` |
 | 보관·복원·삭제 | `retire` / `restore` / `purge`와 작업 키·세대 보호 | DELETE는 보관. restore/purge의 HTTP 전달 규약은 별도 연결 필요 |
 
 현재 HTTP 서비스의 Xen 조회 드라이버와 공통 Manager를 호출하는 명령 어댑터는 구분합니다.
@@ -313,7 +313,7 @@ API 문서 경로(`/docs`·`/redoc`·`/openapi.json`)는 **기본으로 열지 �
 
 - 해당 `vm_id`의 디스크가 존재하면 **재사용**하고, 존재하지 않으면 `template_id`·`template_version`으로 새로 생성한다.
 - 디스크 경로는 `vm_id`에서 파생한다.
-- Xen에 같은 `vm_id`의 도메인이 이미 있으면 명세와 관계없이 `409 VMExists`로 거부한다. 실행 중인 도메인에 대해서는 dom0-manager가 명세를 비교하지 않으며, 동일 명세 재요청을 성공으로 바꾸는 것은 Spring이다(10.1절).
+- Xen에 같은 `vm_id`의 도메인이 이미 있으면 dom0-manager가 등록 명세를 확인한다. 일치하는 재요청은 `409 VMExists`이고 Spring이 기존 실행 결과를 회수한다(10.1절). 명세가 다르면 `409 VMSpecConflict`다.
 - Linux IP는 Spring이 전달하지 않는다. 플랫폼이 전역 잠금 안에서 IP 풀과 registry를 확인해 빈 주소를 자동 할당한다.
 - 플랫폼 `create`에는 Spring 발급 `vm_id`, 요청의 표시 이름 `name`, 템플릿 ID·버전, vcpus·memory_mib를 보낸다. 내부 실행 이름(`vm-<hex>`)·MAC·IP는 플랫폼이 발급하고, IP가 바닥나면 플랫폼 `IP_POOL_EXHAUSTED`를 `507 InsufficientResources`(`resource.name=ipv4`)로 낸다. 플랫폼 `INVALID_SPEC`은 `400 InvalidArgument`다.
 - 플랫폼 `VM_NAME_CONFLICT`(발급한 내부 실행 이름·UUID 예약·MAC 등이 **다른 VM** 과 겹침)는 `409 VMNameConflict`다. 같은 VM 이 이미 있다는 `VMExists` 와 다르며 **생성 성공이 아니다**(2026-11-06). Spring 은 `409 VM_NAME_CONFLICT` 로 전달한다(8.2).
@@ -327,9 +327,10 @@ API 문서 경로(`/docs`·`/redoc`·`/openapi.json`)는 **기본으로 열지 �
 명시와 양방향으로 같은 요청으로 본다(최초 비기본 명시값 포함). 현재 설정/default로 원 값을
 다시 고르지 않는다. 실제 차이·무효 입력·기존 IP/대상 비교는 유지한다. 저장 형식은 하위가
 처리하고 호출자에게 journal 버전/파일 해석/변환을 요구하지 않는다. HTTP/화면의 선택적 생략
-지원은 아직 별도 담당 확장이다. 실행 중 VM의 기존 409와 등록 후 start 의미는 바꾸지 않는다.
+지원은 아직 별도 담당 확장이다. 실행 중 VM의 일치 요청은 기존 409이고, 등록 완료 뒤에 start를 수행한다.
 
-- 도메인이 없고 등록된 디스크만 있을 때(재시작)는 요청 명세가 기록된 명세와 다르면 `409 VMExists`로 거부한다(1.4절 "다른 최초 명세는 충돌"). 템플릿 ID·버전은 최초 명세와, `vcpus`·`memory_mib` 는 지금 등록 설정(4.12 변경 반영)과 비교한다. 같은 명세면 `201`로 재시작한다.
+- 도메인이 없고 등록된 디스크만 있을 때(재시작)는 요청 명세가 다르면 `409 VMSpecConflict`다. 템플릿 ID·버전은 최초 명세와 비교하며, 최초 명세가 없는 factory VM은 등록에 기록된 템플릿을 사용한다. 구형 등록에 없는 필드는 비교할 수 없다. `vcpus`·`memory_mib`는 현재 등록 설정(4.12 변경 반영)과 비교한다. 표시 이름은 등록을 재사용할 때 변경하지 않는다. 같은 명세면 `201`로 재시작한다.
+- 아직 등록되지 않았더라도 원 생성 작업과 충돌하면 `409 VMSpecConflict`로 반환하고 `platform_code=IDEMPOTENCY_CONFLICT`를 보존한다.
 
 `start` 엔드포인트는 두지 않습니다. 꺼진 VM의 재시작은 같은 `vm_id`로 이 엔드포인트를 재호출하는 방식이며, 디스크가 보존되어 있으므로 데이터는 유지됩니다.
 
@@ -673,6 +674,7 @@ retire는 복구 가능성을 위해 디스크를 보존하고, 실제 공간 �
 
 플랫폼이 제어 요청을 수락(완료 포함)했다고 하면서 유효한 원 작업 ID 를 주지 않으면 `503 PlatformUnavailable` 이다. 조회(4.8)한 원 기록은 정확히 "이 VM·이 키의 graceful stop·reboot" 이어야 한다: 작업 ID 가 유효하고 봉투의 값과 같음, 기록과 요청의 `vm_id` 가 조회 VM, 요청이 `stop`·`reboot`(force 없음), `idempotency_key` 가 조회 키, 단계가 알려진 값. 하나라도 어긋나면 하위 버전 불일치·기록 손상으로 보고 `503` 이다. 추적할 수 없거나 다른 작업인 기록을 `200`·`202` 로 꾸미지 않는다.
 | `409` | `VMExists` | `vm_id` 충돌(같은 VM 이 이미 있음). 자원 변경(4.12)에서는 같은 `Idempotency-Key` 가 다른 요청의 원 작업 |
+| `409` | `VMSpecConflict` | 같은 UUID의 기존 등록 또는 원 생성 작업과 명세가 충돌 |
 | `409` | `VMNameConflict` | 플랫폼 `VM_NAME_CONFLICT`: 생성 중 내부 실행 이름·UUID 예약·MAC 등이 다른 VM 과 겹침. 같은 VM 이 아니므로 생성 성공으로 바꾸지 않는다 (2026-11-06) |
 | `507` | `InsufficientResources` | 가용 자원 부족. `resource.name`: `memory_mib`, `vcpus`, `ipv4`(플랫폼 Linux IP 풀 고갈, `IP_POOL_EXHAUSTED`) |
 | `401` | `Unauthorized` | Bearer 서비스 토큰 없음·불일치 (`/healthz` 포함) |
@@ -716,14 +718,14 @@ retire는 복구 가능성을 위해 디스크를 보존하고, 실제 공간 �
 | `OPERATION_IN_PROGRESS`, `STORAGE_UNAVAILABLE`, `RECOVERY_REQUIRED`, `CLEANUP_INCOMPLETE` | `503 PlatformUnavailable` | 기존 매핑 |
 | `INSUFFICIENT_STORAGE`, `IP_POOL_EXHAUSTED` | `507 InsufficientResources` | 기존 매핑 (`ipv4`는 `resource.name`) |
 | `VM_NAME_CONFLICT` | `409 VMNameConflict` | 다른 VM 과 내부 이름·UUID 예약·MAC 충돌. 2026-11-06 전에는 `409 VMExists` 였다 |
-| `IDEMPOTENCY_CONFLICT` | `409 VMExists` | 같은 키가 다른 요청의 원 작업 |
+| `IDEMPOTENCY_CONFLICT` | 생성 `409 VMSpecConflict`, 그 밖에는 기존 `409 VMExists` | 같은 키가 다른 요청의 원 작업 |
 | 그 밖의 코드 | `500 DriverError` | `platform_code` 보존 |
 
 정지 대기 만료는 플랫폼에 아직 전용 코드가 없어 `XEN_EXECUTION_FAILED`(복구 기반 제어 경로) 또는 `ARTIFACT_INVALID`(일반 오류 포장)에 메시지(`deadline`, `timed out`)로만 실린다. dom0-manager는 이 두 코드에 한해 메시지로 시한 초과를 가려 `504 DriverTimeout`으로 내며, 플랫폼이 `DEADLINE_EXCEEDED`를 내면 이 예외는 제거한다(플랫폼 파트에 요청).
 
 FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환하므로 `400 InvalidArgument`로 정규화합니다. 예외 핸들러 교체만으로는 부족하며, **생성 스키마에서 422 응답 정의와 `HTTPValidationError` 모델까지 제거**해야 OpenAPI 차이 검사가 통과합니다.
 
-`VMExists`는 생성에서 `vm_id` 충돌(같은 VM 이 이미 있음) 단일 의미입니다. 플랫폼이 발급한 식별이 다른 VM 과 겹친 경우는 `VMExists` 가 아니라 `VMNameConflict` 입니다. 정지된 등록 VM에 다른 생성 명세가 와도 `409 VMExists`입니다(4.2절). 자원 변경(4.12)에서는 같은 키가 다른 요청의 원 작업이라는 뜻입니다. dom0-manager는 표시 이름을 모르므로 이름 중복은 Spring이 판정합니다.
+생성의 `VMExists`는 같은 VM의 실행 도메인이 이미 있음을 뜻합니다. `VMSpecConflict`는 같은 UUID의 명세 충돌, `VMNameConflict`는 다른 VM과의 식별 충돌입니다. 자원 변경(4.12)의 `VMExists`는 같은 키가 다른 요청의 원 작업이라는 뜻입니다. 표시 이름 중복은 Spring이 판정합니다.
 
 ### 8.2 Spring
 
@@ -753,6 +755,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 |---|---|
 | `404 VMNotFound` | 단건 조회에서는 오류가 아니라 "도메인 없음"(`stopped`)으로 처리. 그 밖에는 `404 VM_NOT_FOUND` |
 | `409 VMExists` | 생성·시작에서는 성공으로 처리(10.1절). 그 밖에는 `409 VM_ALREADY_EXISTS` |
+| `409 VMSpecConflict` | 현재 Spring 매핑이 없어 `502 VM_CONTROL_BAD_RESPONSE`로 반환. 명세 충돌을 공개 `409`로 전달하는 Spring 연결은 후속 작업 |
 | `409 VMNameConflict` | `409 VM_NAME_CONFLICT`. 생성·시작에서도 **성공으로 처리하지 않는다**(같은 VM 이 아님) |
 | `409 InvalidState` | `409 INVALID_VM_STATE` |
 | `400 InvalidArgument` | `400 INVALID_ARGUMENT` |
@@ -817,7 +820,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 
 ### 10.1 `504` 이후 처리
 
-명령이 `504`로 종료되면 프론트가 `GET`으로 상태를 확인합니다. 그 뒤 동일 `vm_id`에 동일 명세의 요청이 재도달하고 dom0-manager가 `409 VMExists`를 반환하면, **Spring은 이를 성공으로 변환해 응답합니다.** 명세가 다르면 `409`를 그대로 전달합니다.
+명령이 `504`로 종료되면 프론트가 `GET`으로 상태를 확인합니다. 그 뒤 동일 `vm_id`에 동일 명세의 요청이 재도달하고 dom0-manager가 `409 VMExists`를 반환하면, **Spring은 이를 성공으로 변환해 응답합니다.** dom0-manager의 `VMSpecConflict`는 8.2절의 현재 Spring 오류 변환을 따릅니다.
 
 ---
 

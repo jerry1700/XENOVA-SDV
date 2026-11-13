@@ -58,8 +58,9 @@ from ..errors import (
     VMExists,
     VMNameConflict,
     VMNotFound,
+    VMSpecConflict,
 )
-from ..models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, ResourceUpdate, UpdateCpuPolicyRequest,
+from ..models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, UpdateCpuPolicyRequest,
                       VmResources, VmState)
 from .base import CreateSpec, Domain, Driver, HostInfo, InstancePaths, Provisioner, StatsSample
 from .xentop import Xentop, collect_stats
@@ -890,6 +891,8 @@ class PlatformProvisioner(Provisioner):
                 return None
             raise_for_envelope(envelope, context=f"get {vm_id}")
         view = (envelope.get("data") or {}).get("vm")
+        if view and _uuid(view.get("vm_id")) != vm_id:
+            raise PlatformUnavailable(f"platform returned a different registration for vm {vm_id}")
         return view if view and view.get("lifecycle") == "REGISTERED" else None
 
     def _paths(self, view: dict[str, Any]) -> InstancePaths:
@@ -914,25 +917,35 @@ class PlatformProvisioner(Provisioner):
         initial = existing.get("initial_spec") or {}
         configuration = existing.get("configuration") or {}
         recorded = {
-            "template_id": initial.get("template_id"),
-            "template_version": initial.get("template_version"),
+            "template_id": initial.get("template_id") or configuration.get("template_id") or existing.get("template_id"),
+            "template_version": initial.get("template_version") or configuration.get("template_version") or existing.get("template_version"),
             "vcpus": configuration.get("vcpus", initial.get("vcpus")),
             "memory_mib": configuration.get("memory_mib", initial.get("memory_mib")),
         }
         requested = {"template_id": template_id, "template_version": template_version, "vcpus": vcpus, "memory_mib": memory_mib}
-        # 공장 기본 VM 처럼 initial_spec 이 없는 옛 등록은 템플릿을 비교할 수 없어 자원만 비교한다
+        # 등록에도 값이 없는 구형 자산은 확인 가능한 필드만 비교한다.
         return [k for k, v in recorded.items() if v is not None and str(v) != str(requested[k])]
+
+    def check_existing_spec(self, request: CreateVmRequest) -> None:
+        existing = self._registration(request.vm_id)
+        if existing is None:
+            raise InvalidState(f"registration for domain {request.vm_id} changed during create; read the VM again")
+        self._require_matching_spec(existing, request.vm_id, request.template_id, request.template_version,
+                                    request.vcpus, request.memory_mib)
+
+    def _require_matching_spec(
+        self, existing: dict[str, Any], vm_id: UUID, template_id: str, template_version: str, vcpus: int, memory_mib: int
+    ) -> None:
+        mismatch = self._spec_mismatch(existing, template_id, template_version, vcpus, memory_mib)
+        if mismatch:
+            raise VMSpecConflict(f"vm {vm_id} is registered with a different spec ({', '.join(mismatch)})")
 
     def ensure_instance(
         self, vm_id: UUID, template_id: str, template_version: str, *, name: str, vcpus: int, memory_mib: int
     ) -> InstancePaths:
         existing = self._registration(vm_id)
         if existing is not None:
-            mismatch = self._spec_mismatch(existing, template_id, template_version, vcpus, memory_mib)
-            if mismatch:
-                raise VMExists(
-                    f"vm {vm_id} is registered with a different spec ({', '.join(mismatch)}); same vm_id must keep the same spec"
-                )
+            self._require_matching_spec(existing, vm_id, template_id, template_version, vcpus, memory_mib)
             return self._paths(existing)
 
         spec: dict[str, Any] = {
@@ -948,6 +961,12 @@ class PlatformProvisioner(Provisioner):
         # 미해결(S15P31E110-334): create 에는 아직 하위 budget_ms 를 넘기지 않는다(_BUDGET_ACTIONS 주석). 지금은 앞의 잠금·조회에서
         # 요청 예산을 다 썼을 때 등록을 제출하지 않는 것만 지킨다
         envelope = call_with_budget(self.manager, "create", spec, execute=True, idempotency_key=f"create-{vm_id}")
+        error = envelope.get("error") or {}
+        if not envelope.get("ok") and error.get("code") == "IDEMPOTENCY_CONFLICT":
+            raise VMSpecConflict(
+                f"vm {vm_id} conflicts with the original creation request", platform_code="IDEMPOTENCY_CONFLICT",
+                retryable=error.get("retryable") if isinstance(error.get("retryable"), bool) else None,
+            )
         data = raise_for_envelope(envelope, context=f"create {name}")
         view = (data.get("vm") or data.get("current") or data.get("original_result") or {}) if isinstance(data, dict) else {}
         if not (view.get("configuration") or {}).get("id"):

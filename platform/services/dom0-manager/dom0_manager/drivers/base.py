@@ -24,7 +24,7 @@ from typing import ClassVar
 from uuid import UUID
 
 from ..errors import NotSupportedByPlatform, VMNotFound
-from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, ResourceUpdate, StatsSource, UnavailableReason,
+from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, StatsSource, UnavailableReason,
                       UpdateCpuPolicyRequest, Vm, VmState, VmStats)
 
 
@@ -211,6 +211,9 @@ class Provisioner(ABC):
 
     @abstractmethod
     def instance_exists(self, vm_id: UUID) -> bool: ...
+
+    def check_existing_spec(self, request: CreateVmRequest) -> None:
+        """비교 가능한 등록 명세가 있으면 실행 중인 VM의 생성 재전달을 검증한다."""
 
     @abstractmethod
     def delete_instance(self, vm_id: UUID) -> None:

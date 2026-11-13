@@ -293,8 +293,9 @@ def test_restart_reuses_registration(client, manager):
 
 
 def test_create_running_vm_is_409(client, manager):
-    manager.register(VM_A, running=True)
-    assert client.post("/api/v1/vms", json=create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0")).status_code == 409
+    manager.register(VM_A, running=True, memory_mib=256)
+    response = client.post("/api/v1/vms", json=create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0"))
+    assert (response.status_code, response.json()["code"]) == (409, "VMExists")
 
 
 def test_platform_assigns_ip_without_dom0_manager_hint(client, manager):
@@ -336,7 +337,7 @@ def test_restart_with_different_spec_is_409(client, manager):
         body = create_body(VM_A, template_id=TEMPLATE["template_id"], template_version="1.0.0") | change
         different = client.post("/api/v1/vms", json=body)
         assert different.status_code == 409, change
-        assert different.json()["code"] == "VMExists"
+        assert different.json()["code"] == "VMSpecConflict"
 
 
 def test_error_bodies_carry_distinct_codes(client, manager):
@@ -607,6 +608,6 @@ def test_create_name_conflict_is_409_vm_name_conflict_not_vm_exists(client, mana
     assert (body["code"], body["platform_code"]) == ("VMNameConflict", "VM_NAME_CONFLICT")
     assert "start" not in [c[0] for c in manager.calls]  # 충돌한 등록을 시작하지 않는다
 
-    manager.register(VM_B, running=True)  # 같은 VM 이 이미 실행 중인 것만 VMExists 다
+    manager.register(VM_B, running=True, memory_mib=256)
     again = client.post("/api/v1/vms", json=create_body(VM_B, template_id=TEMPLATE["template_id"], template_version="1.0.0"))
     assert (again.status_code, again.json()["code"]) == (409, "VMExists")

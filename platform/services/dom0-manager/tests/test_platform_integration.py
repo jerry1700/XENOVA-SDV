@@ -52,6 +52,7 @@ UBUNTU = UUID("aaaa0000-1111-4222-8333-123456789abc")  # record('ubuntu-dev') �
 DEBIAN = UUID("bbbb0000-1111-4222-8333-123456789abc")
 NEW_VM = UUID("cccc0000-1111-4222-8333-123456789abc")  # Spring 이 발급했다고 가정하는 UUID
 TEMPLATE_ID, TEMPLATE_VERSION = "ubuntu-24.04-arm64", "1.0.0"
+DEBIAN_TEMPLATE_ID = "debian-13-arm64"
 
 
 def _publish_template(data: Path) -> None:
@@ -318,9 +319,11 @@ def test_delete_does_not_report_success_if_completed_archive_is_missing(client, 
 
 def test_real_manager_restart_registered_vm(client, board):
     """등록만 된 VM 에 POST /vms 가 오면 create 없이 start 만 한다 (디스크 재사용)."""
-    body = {"vm_id": str(DEBIAN), "name": "다시 요청한 표시 이름", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
     debian = board.records["debian-dev"]
-    body.update(vcpus=debian["vcpus"], memory_mib=debian["memory_mib"])
+    body = restart_body(debian["vcpus"], debian["memory_mib"])
+    wrong_template = client.post("/api/v1/vms", json={**body, "template_id": TEMPLATE_ID})
+    assert (wrong_template.status_code, wrong_template.json()["code"]) == (409, "VMSpecConflict")
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
     restarted = client.post("/api/v1/vms", json=body)
     assert restarted.status_code == 201, restarted.text
     assert restarted.json()["vm_id"] == str(DEBIAN)
@@ -362,6 +365,46 @@ def test_create_retransmission_does_not_rename_existing_instance(client, board):
     assert current["configuration"]["display_name"] == body["name"]
     assert current["initial_spec"] == initial
     assert (directory / "root.raw").stat().st_ino == disk_inode
+
+
+def test_create_conflicts_are_distinct_from_running_replay(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "create-spec-conflict", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    original, = (board.data / "operations").glob("*.json")
+    registered = original.read_bytes()
+    physical_calls = len([call for call in board.xen.calls if call[:2] == ["xl", "create"]])
+    conflicts = {"template_id": "debian-13-arm64", "template_version": "1.0.1", "vcpus": 2, "memory_mib": 768}
+
+    for field, value in conflicts.items():
+        response = client.post("/api/v1/vms", json={**body, field: value})
+        assert (response.status_code, response.json()["code"]) == (409, "VMSpecConflict")
+        assert field in response.json()["message"]
+    replay = client.post("/api/v1/vms", json={**body, "name": "다른 표시 이름"})
+    assert (replay.status_code, replay.json()["code"]) == (409, "VMExists")
+
+    assert client.post(f"/api/v1/vms/{NEW_VM}/stop").status_code == 204
+    conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
+    assert (conflict.status_code, conflict.json()["code"]) == (409, "VMSpecConflict")
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == physical_calls
+    assert original.read_bytes() == registered
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+
+
+def test_create_conflict_uses_original_unregistered_request(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "incomplete-create", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    with patch.object(board.manager, "preparer", side_effect=OSError("fixture interrupted before workspace")):
+        assert client.post("/api/v1/vms", json=body).status_code == 503
+    original, = (board.data / "operations").glob("*.json")
+    before = original.read_bytes()
+    conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
+    assert conflict.status_code == 409
+    assert (conflict.json()["code"], conflict.json()["platform_code"]) == ("VMSpecConflict", "IDEMPOTENCY_CONFLICT")
+    assert list((board.data / "operations").glob("*.json")) == [original]
+    assert original.read_bytes() == before
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+    assert client.post("/api/v1/vms", json=body).status_code == 201
 
 
 # ---- 정지 요청 추적 (S15P31E110-305): 실제 Manager.fork·budget_ms·control-operation ----
@@ -438,8 +481,7 @@ def test_real_reboot_of_a_vm_that_is_not_running_is_409_with_or_without_a_key(cl
 
 def test_real_keyed_reboot_starts_a_new_execution_and_replays_without_repeating(client, board):
     debian = board.records["debian-dev"]  # 플랫폼이 시작한(관리하는) 실행에서 재부팅한다
-    body = {"vm_id": str(DEBIAN), "name": "debian", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
-            "vcpus": debian["vcpus"], "memory_mib": debian["memory_mib"]}
+    body = restart_body(debian["vcpus"], debian["memory_mib"])
     assert client.post("/api/v1/vms", json=body).status_code == 201
     before = board.manager.call("get", {"vm_id": str(DEBIAN)})["data"]["vm"]
     assert before["execution_id"]
@@ -474,7 +516,7 @@ def resize(client, vm_id, key, vcpus, memory_mib, **headers):
 
 
 def restart_body(vcpus, memory_mib):
-    return {"vm_id": str(DEBIAN), "name": "debian", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
+    return {"vm_id": str(DEBIAN), "name": "debian", "template_id": DEBIAN_TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
             "vcpus": vcpus, "memory_mib": memory_mib}
 
 
@@ -511,7 +553,7 @@ def test_real_resource_update_replays_refuses_other_keys_and_restarts_with_the_n
     assert current["configuration_sha256"] == after["configuration_sha256"]
 
     old = client.post("/api/v1/vms", json=restart_body(debian["vcpus"], debian["memory_mib"]))
-    assert (old.status_code, old.json()["code"]) == (409, "VMExists")
+    assert (old.status_code, old.json()["code"]) == (409, "VMSpecConflict")
     restarted = client.post("/api/v1/vms", json=restart_body(2, 768))
     assert restarted.status_code == 201, restarted.text
     assert (restarted.json()["vcpus"], restarted.json()["memory_mib"]) == (2, 768)

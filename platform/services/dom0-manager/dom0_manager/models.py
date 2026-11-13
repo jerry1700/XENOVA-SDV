@@ -103,6 +103,7 @@ class ErrorCode(str, Enum):
     InvalidArgument = "InvalidArgument"
     VMNotFound = "VMNotFound"
     VMExists = "VMExists"  # 409 같은 vm_id 의 VM 이 이미 있음(생성 재전달) 또는 같은 키가 다른 요청의 원 작업
+    VMSpecConflict = "VMSpecConflict"
     VMNameConflict = "VMNameConflict"  # 409 플랫폼 VM_NAME_CONFLICT: 다른 VM 과 내부 이름·UUID 예약·MAC 이 겹침. 생성 성공이 아니다
     InsufficientResources = "InsufficientResources"
     InvalidState = "InvalidState"  # 현재 생명주기에서 수행할 수 없음 (실행 중 VM 의 DELETE, 플랫폼 VM_NOT_STOPPED 등)

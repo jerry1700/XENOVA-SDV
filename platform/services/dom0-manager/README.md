@@ -228,7 +228,7 @@ CPU 정책은 한 VM의 모든 vCPU에 같은 pCPU 마스크를 지정합니다.
 
 `DELETE /api/v1/vms/{vm_id}`는 v1.1 의미입니다. 실행 중이면 409 `InvalidState`, 등록이 없으면 404, 정지된 VM은 숨김 보관(retire)으로 204. 강제 종료는 하지 않습니다.
 
-`POST /api/v1/vms`로 같은 `vm_id`가 다시 오면 등록된 명세와 비교합니다. 템플릿 ID·버전은 최초 명세와, vcpus·memory_mib 는 지금 등록 설정(자원 변경 반영)과 비교합니다. 같으면 디스크를 재사용해 다시 띄우고(재시작), 다르면 409 `VMExists`입니다(계약 4.2 불변조건).
+`POST /api/v1/vms`로 같은 `vm_id`가 다시 오면 실행 여부와 관계없이 등록 명세를 확인합니다. 템플릿 ID·버전은 최초 명세 또는 factory의 등록 메타데이터에서, vcpus·memory_mib는 현재 등록 설정에서 읽습니다. 같은 명세의 정지 VM은 디스크를 재사용해 시작하고 실행 도메인이 있으면 409 `VMExists`를 반환합니다. 다른 명세 또는 원 생성 키 충돌은 409 `VMSpecConflict`입니다.
 
 상태 매핑은 계약 3.2장을 따릅니다. `b`(blocked)는 I/O 대기 중인 정상 상태이고, 플래그가 없는 `------`도 running으로 봅니다. 그 외 모르는 문자는 조용히 running으로 넘기지 않고 `DriverError`를 냅니다.
 
@@ -565,7 +565,8 @@ python -m pytest
 | `InvalidArgument` | 400 | 입력 검증, nil UUID(Domain-0) 대상 호출, 플랫폼 `INVALID_SPEC`·템플릿 없음 |
 | `VMNotFound` | 404 | 도메인 없음(단건), 등록 없음(삭제) |
 | `OperationNotFound` | 404 | 요청 키로 원 제어 작업을 찾지 못함(조회). 검색 부재이며 미수락 증거가 아님 |
-| `VMExists` | 409 | 같은 vm_id가 떠 있음, 다른 명세로 재생성, 이름·멱등성 충돌 |
+| `VMExists` | 409 | 같은 명세의 VM 실행이 이미 있음 또는 생성 외 기존 작업의 키 충돌 |
+| `VMSpecConflict` | 409 | 같은 UUID에 다른 명세가 등록되어 있거나 원 생성 작업과 충돌 |
 | `InvalidState` | 409 | 실행 중 삭제, `VM_NOT_STOPPED`·IP 충돌 등 |
 | `InsufficientResources` | 507 | vcpus·memory_mib 부족, 플랫폼 Linux IP 풀 고갈(`ipv4`), 보드 저장소 부족 |
 | `NotSupported` | 501 | 드라이버·플랫폼이 제공하지 않는 동작. xen 모드의 생성·정지·삭제 명령 |

@@ -72,6 +72,13 @@ class VMExists(Dom0ManagerError):
     code = "VMExists"
 
 
+class VMSpecConflict(Dom0ManagerError):
+    """요청한 생성 명세가 같은 UUID의 기존 등록 또는 원 생성 작업과 충돌한다."""
+
+    status_code = 409
+    code = "VMSpecConflict"
+
+
 class VMNameConflict(Dom0ManagerError):
     """같은 VM 이 아니라 플랫폼이 고른 식별(내부 실행 이름·UUID 예약·MAC 등)이 다른 VM 과 겹침 (409).
 
