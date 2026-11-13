@@ -112,6 +112,12 @@ def validate(topic: str, envelope: Any) -> None:
     if envelope.get("schema_version") != SCHEMA_VERSION:
         raise EnvelopeError("SCHEMA_VERSION_UNSUPPORTED", repr(envelope.get("schema_version")))
 
+    # 식별자는 dict 키·집합 조회에 쓰인다. 문자열이 아니면(list 등) 뒤에서 TypeError 가 콜백 밖으로 나간다
+    for name in ("type", "vm_id", "source_id", "app_id"):
+        value = envelope.get(name)
+        if value is not None and not isinstance(value, str):
+            raise EnvelopeError("PAYLOAD_INVALID", f"{name} 가 문자열이 아니다")
+
     required = ["message_id", "type", "sent_at"]
     if envelope.get("type") not in _COMMAND_TYPES:
         required += ["boot_id", "agent_instance_id"]
