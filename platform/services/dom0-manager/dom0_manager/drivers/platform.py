@@ -612,6 +612,14 @@ class PlatformDriver(Driver):
         data = raise_for_envelope(call_with_budget(self._request_manager(), "registrations", spec), context="registrations")
         return data["registration" if vm_id is not None else "registrations"]
 
+    def templates(self) -> list[dict[str, Any]]:
+        """보드 카탈로그(/srv/xenova/catalog)에 공개된 템플릿을 버전별로 전부 돌려준다. 고르거나 바꾸지 않는다.
+
+        하위 templates 는 spec timeout_ms 를 받지 않는다(_TIMEOUT_ACTIONS 밖). 기한은 요청 예산(budget_ms)으로만 준다.
+        """
+        data = raise_for_envelope(call_with_budget(self._request_manager(), "templates"), context="templates")
+        return list(data.get("templates") or [])
+
     def _views(self, lifecycle: str = "REGISTERED") -> list[dict[str, Any]]:
         # 조회 한도를 하위에 명시한다. 요청 예산이 더 짧으면 call_with_budget 이 그 값으로 줄인다
         spec = {"lifecycle": lifecycle, "timeout_ms": self._read_timeout_ms}
