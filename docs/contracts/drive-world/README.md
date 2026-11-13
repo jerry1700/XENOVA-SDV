@@ -60,6 +60,10 @@ Pi 제어·차량 상태 연결까지 막는 전역 readiness gate가 아니다.
   flag bit는 valid=1/static-retained=2/expired=4, age는 cell별 little-endian uint32 ms다.
   unknown/만료/무효 셀은 통행 가능으로 바꾸지 않는다. 보관 셀의 오래된 원 age와 새 관측의
   live age는 다르다. 재발행만으로 observation sequence나 원 관측 시각을 새로 만들지 않는다.
+- Jetson은 현재 위치와 이어지는 누적 차로에서 차체 뒤쪽과 전방 제동 여유가 필요한 구간을
+  선택한다. 같은 map epoch의 차로 ID와 reference prefix를 유지한다. 원래 관측한 차로 범위가
+  더 짧으면 있는 범위만 표현한다. 셀의 원 관측 시각으로 발행 직전 유효성을 판정한다.
+  기본 Jetson 격자에서 FREE는 0.5초, OCCUPIED는 5초가 지나면 UNKNOWN이다.
 - mapper boot/instance·map/frame/odom/clock epoch와 vehicle/configuration/calibration/primitive
   문맥은 신뢰 프로필과 대조한다. `primitive`는 생성 asset SHA-256이다. 이름만 맞는
   다른 곡선·차량 모델을 받아들이지 않는다. 새 출처는 신뢰 설정의 명시 갱신이 필요하다.

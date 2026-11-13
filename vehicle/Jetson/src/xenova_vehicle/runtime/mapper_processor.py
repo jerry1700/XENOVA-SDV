@@ -587,13 +587,14 @@ class ResidentMapperProcessor:
         from xenova_drive_world import decode,schema
         from .mapper_world import build_mapping_world
         from .mapper_publication import PublicationReport
-        state=draft.catalog_draft.state;basis=state.view.road_basis
+        state=draft.catalog_draft.state;basis=state.road_basis.snapshot()
         completed=self.clock();published=self.clock()
         from .tof_obstacles import TofObstacleOverlay
         if not hasattr(self,'_tof_obstacles'):self._tof_obstacles=TofObstacleOverlay()
         built=build_mapping_world(draft,state,basis,context=draft.context,source=inputs.source,
             calibration=draft.pipeline.calibration,sensors=sensors.sensors,current_vehicle=inputs.vehicle,
             clock_lease=lease,sequence=self._frame_sequence+1,completed_j_us=completed,published_j_us=published,
+            stopping=self._config.stopping,
             scene_draft=None if frame_state is None else frame_state.scene,
             hazard_draft=None if frame_state is None else frame_state.hazard,atlas_owner=self._mapping._atlas,
             tof_overlay=self._tof_obstacles,sensor_snapshot=sensors)

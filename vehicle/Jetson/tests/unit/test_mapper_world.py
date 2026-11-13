@@ -27,6 +27,8 @@ from xenova_vehicle.runtime.mapper_catalogs import CatalogDraft, CatalogView, Ma
 from xenova_vehicle.runtime.mapper_compute import MapperInput
 from xenova_vehicle.runtime.mapper_mapping import MappingFrameDraft
 from xenova_vehicle.runtime.mapper_world import build_mapping_world
+from xenova_vehicle.runtime.mapper_profile import StoppingLimits
+from xenova_vehicle.perception.temporal_road import RoadLink
 from xenova_vehicle.runtime.parking_bridge import ParkingBridge, ParkingPublication
 from xenova_vehicle.runtime.resident_samples import CaptureSample
 from xenova_vehicle.runtime.scene import SceneEvidenceScope
@@ -169,6 +171,28 @@ class MapperWorldTests(unittest.TestCase):
         self.assertGreaterEqual(value.left_boundary[-1].x, x0+value.width*value.resolution_m)
         self.assertGreaterEqual(value.left_boundary[0].y, y0+value.height*value.resolution_m)
         self.assertNotAlmostEqual(value.left_boundary[0].y, self.model.road.hypotheses[0].left_outer[0][1])
+
+    def test_current_pose_publishes_prior_lanes_and_does_not_refresh_cell_age(self):
+        from xenova_vehicle.mapping.local_map import FREE, OCCUPIED
+        self.grid.state[0,0],self.grid.state[0,1] = FREE,OCCUPIED
+        self.grid.time_known[0,:2] = True
+        self.grid.observed_us[0,0] = self.now-self.grid.free_ttl_us
+        self.grid.observed_us[0,1] = self.now-30_000
+        points = lambda x: ((x,.3),(x,0.),(x,-.3))
+        self.pipeline._temporal_road._store(tuple(
+            RoadLink(points(a),points(b),.001,frozenset(),(frozenset(),)*3,False,.002)
+            for a,b in ((-.5,0.),(0.,.5),(.5,1.))))
+        state = replace(self.state,view=replace(self.state.view,lane_status='UNKNOWN',lane=None,
+            road_basis=replace(self.basis,status='WAIT_CURRENT')))
+        result = replace(self.draft.result,tape=None,road=None)
+        draft = replace(self.draft,result=result,catalog_draft=replace(self.draft.catalog_draft,state=state))
+        value = self.build(draft=draft,state=state,stopping=StoppingLimits(.5,1.,10_000,50_000,30_000,.005)).message()
+        self.assertEqual(value.observation_seq,71)
+        self.assertEqual(tuple(l.lane_id for l in value.lane_model.lanes),(101,102))
+        self.assertLess(value.lane_model.divider[0].x,-.2)
+        self.assertGreaterEqual(value.lane_model.divider[-1].x,.5)
+        self.assertEqual(list(value.occupancy[:2]),[255,100])
+        self.assertEqual(struct.unpack_from('<II',value.age_le32),(500,30))
 
     def test_corrected_capture_is_carried_to_the_original_vehicle_sample(self):
         raw = self.inputs.pose.sample

@@ -25,6 +25,8 @@ from ..storage.records import CatalogRecord, CheckpointPayload, LoadedCheckpoint
 
 _RECORD = struct.Struct('<5sBIQ32s32s32s')
 _SHAPES = ('divider', 'left_center', 'right_center', 'left_outer', 'right_outer')
+_BOUND_FIELDS = ('boundary_normal_bounds_m', 'outer_chord_bounds_m')
+_OPTIONAL_GEOMETRY_FIELDS = (*_BOUND_FIELDS, 'boundary_observations')
 _MAP_IDENTITY = PoseBox((0., 0.), (0., 0.), (0., 0.))
 
 
@@ -34,8 +36,12 @@ def _tree(value):
 
 def _road_fields(road):
     h = replace(road.hypotheses[0], semantic_support=None, semantic_source=None)
+    hypothesis = asdict(h)
+    for name in _OPTIONAL_GEOMETRY_FIELDS:
+        if hypothesis[name] is None:
+            del hypothesis[name]
     return dict(status=road.status, complete=road.complete, reasons=road.reasons, source_key=road.source_key,
-        calibration_qualified=road.calibration_qualified, hypothesis=asdict(h))
+        calibration_qualified=road.calibration_qualified, hypothesis=hypothesis)
 
 
 def _road_from(fields):
@@ -98,6 +104,26 @@ def _geometry(road, source, crossing):
     for value in (h.error_m, h.yaw_error_rad):
         if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 10:
             raise ValueError('finite original geometry bounds required')
+    if any(getattr(h, name) is not None for name in _BOUND_FIELDS):
+        for name, count in zip(_BOUND_FIELDS, (3, 2)):
+            bounds = getattr(h, name)
+            if (type(bounds) is not tuple or len(bounds) != count or any(
+                    type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in bounds)):
+                raise ValueError('complete boundary and chord bounds required')
+        if n != 2:
+            raise ValueError('correlated boundary bounds require one original chord')
+    evidence = h.boundary_observations
+    if evidence is not None:
+        if (h.outer_chord_bounds_m is None or any(h.inferred) or type(evidence) is not tuple
+                or len(evidence) != 3 or any(type(role) is not tuple or not 1 <= len(role) <= 64
+                for role in evidence)):
+            raise ValueError('three observed chord boundaries required')
+        for role in evidence:
+            for key, strip in role:
+                if (type(key) is not tuple or len(key) != 4 or key[:-1] != source.stamp.key[:-1]
+                        or type(key[-1]) is not int or not 0 <= key[-1] <= source.stamp.sequence
+                        or type(strip) is not int or not 0 <= strip < 32):
+                    raise ValueError('invalid original lane marking')
     return True
 
 
@@ -213,6 +239,55 @@ def _position_error(prior, position_radius_m):
     return box_radius if position_radius_m is None else min(box_radius, position_radius_m)
 
 
+def _shared_boundary_overlap(current, old, *, minimum_overlap, max_lateral, max_angle):
+    """같은 원 RGB의 두 실선으로 지지된 진행 방향 겹침을 확인한다."""
+    if current.boundary_observations is None or old.boundary_observations is None:
+        return False
+    # 공통 map 배치 상한은 이 관측의 대응 판단에 중복 가산하지 않는다.
+    # 실선의 관측 ID를 역할별로 확인해 한 차로 옆이나 역방향과의 혼동을 막는다.
+    if not all(set(current.boundary_observations[i]) & set(old.boundary_observations[i]) for i in (0, 2)):
+        return False
+    return _boundary_overlap(current, old, minimum_overlap=minimum_overlap,
+                             max_lateral=max_lateral, max_angle=max_angle)
+
+
+def _boundary_overlap(current, old, *, minimum_overlap, max_lateral, max_angle):
+    if len(current.divider) != 2 or len(old.divider) != 2:
+        return False
+    for name in ('left_outer', 'divider', 'right_outer'):
+        a, b = getattr(old, name)
+        c, d = getattr(current, name)
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        length = math.hypot(dx, dy)
+        if length <= 1e-9:
+            return False
+        ux, uy = dx/length, dy/length
+        if math.dist(c,d) <= 1e-9:
+            return False
+        uc, vc = (c[0]-a[0])*ux+(c[1]-a[1])*uy, (c[1]-a[1])*ux-(c[0]-a[0])*uy
+        ud, vd = (d[0]-a[0])*ux+(d[1]-a[1])*uy, (d[1]-a[1])*ux-(d[0]-a[0])*uy
+        lo, hi = max(0., uc), min(length, ud)
+        if hi-lo < minimum_overlap or abs(math.atan2(vd-vc,ud-uc)) > max_angle:
+            return False
+        if max(abs(vc+(vd-vc)*(s-uc)/(ud-uc)) for s in (lo,hi)) > max_lateral:
+            return False
+    return True
+
+
+def _reobserved_boundary_overlap(current, old, *, minimum_overlap, max_lateral, max_angle):
+    """별도 촬영에서도 두 실선의 대응이 인접 차로와 혼동되지 않는지 확인한다."""
+    for shape in (current, old):
+        if (shape.boundary_observations is None or shape.boundary_normal_bounds_m is None
+                or any(shape.inferred) or not all(len(shape.boundary_observations[i]) >= 2 for i in (0, 2))):
+            return False
+    minimum_width = min(w[0] for shape in (current, old) for w in shape.width_intervals_m)
+    if any(a+b+2*max_lateral >= minimum_width
+           for a,b in zip(current.boundary_normal_bounds_m, old.boundary_normal_bounds_m)):
+        return False
+    return _boundary_overlap(current, old, minimum_overlap=minimum_overlap,
+                             max_lateral=max_lateral, max_angle=max_angle)
+
+
 def _common_points(road, model, prior, capture, position_radius_m):
     """옛 FOV 끝 밖의 미관측 연장을 배제 근거로 쓰지 않는 공통 범위다."""
     current, old = road.hypotheses[0], model.road.hypotheses[0]
@@ -291,15 +366,18 @@ class LaneCatalog:
 
     def observe_mapped(self, candidate, source, *, prior_qualified, crossing, profile=RegistrationProfile(),
                        geometry_limits=None):
-        """누적 점의 pose 오차는 이미 MAP 형상에 포함되어 있다."""
+        """MAP 배치 오차는 출력에 보존하고, 국소 형상 채택 기준은 별도로 적용한다."""
         if (type(candidate) is not MappedRoad or source.stamp.key not in candidate.sources
                 or len(candidate.sources) < 2):
             raise ValueError('current and historical RGB geometry required')
         return self._observe(candidate.road, source, _MAP_IDENTITY, prior_qualified, crossing, profile, 0., geometry_limits,
-                             geometry_sources=tuple(sorted(candidate.sources)))
+                             geometry_sources=tuple(sorted(candidate.sources)), shape_bounds=candidate.shape_bounds,
+                             heading_estimate_rad=candidate.heading_estimate_rad,
+                             position_estimate_m=candidate.position_estimate_m)
 
     def _observe(self, road, source, prior, prior_qualified, crossing, profile, position_radius_m,
-                 geometry_limits, geometry_sources=()):
+                 geometry_limits, geometry_sources=(), shape_bounds=None, heading_estimate_rad=None,
+                 position_estimate_m=None):
         self._source(source)
         if type(prior) is not PoseBox or type(profile) is not RegistrationProfile or type(prior_qualified) is not bool or profile.outlier_components:
             raise ValueError('joint actual prior and no-outlier bounded profile required')
@@ -312,10 +390,28 @@ class LaneCatalog:
             raise ValueError('original finite position radius required')
         valid = _geometry(road, source, crossing)
         if type(crossing) is not bytes: raise ValueError('declared crossing bytes required')
+        if valid and road.hypotheses[0].boundary_observations is not None:
+            evidence = road.hypotheses[0].boundary_observations
+            if geometry_sources and any(key not in geometry_sources for role in evidence for key, _ in role):
+                raise ValueError('lane marking source outside the current geometry evidence')
         geometry = _road_fields(road) if valid else (road.status, road.complete, len(road.hypotheses))
         identity = (asdict(source),geometry,crossing.hex())
         if geometry_sources:
             identity += (geometry_sources,)
+        if valid and shape_bounds is not None:
+            h = road.hypotheses[0]
+            if (len(shape_bounds) != 2 or any(not math.isfinite(value) or not 0 <= value <= mapped
+                   for value,mapped in zip(shape_bounds,(h.error_m,h.yaw_error_rad)))):
+                raise ValueError('local geometry bound exceeds the corresponding map bound')
+            identity += (shape_bounds,)
+        if valid and heading_estimate_rad is not None:
+            if not math.isfinite(heading_estimate_rad) or heading_estimate_rad < 0:
+                raise ValueError('finite nonnegative lane heading estimate required')
+            identity += (heading_estimate_rad,)
+        if valid and position_estimate_m is not None:
+            if not math.isfinite(position_estimate_m) or position_estimate_m < 0:
+                raise ValueError('finite original position estimate required')
+            identity += (('position_estimate_m', position_estimate_m),)
         key = sha256(canonical(identity)).hexdigest()
         if valid: road = _road_from(json_bytes(canonical(geometry), 65536))
         def result(status, **kw):
@@ -334,7 +430,36 @@ class LaneCatalog:
                 or source.stamp.captured_us is None or self._restored_at is not None and source.stamp.captured_us[0] <= self._restored_at):
             return result('UNKNOWN', reasons=('ORIGINAL_GEOMETRY_OR_PRIOR_UNAVAILABLE',))
         h = road.hypotheses[0]; matches = []; unresolved = False; cells = tests = 0
+        shape_error, shape_yaw = (h.error_m,h.yaw_error_rad) if shape_bounds is None else shape_bounds
+        if position_estimate_m is not None:
+            shape_error = position_estimate_m
+        if heading_estimate_rad is not None:
+            shape_yaw = heading_estimate_rad
+        if geometry_sources and road.reasons == ('REOBSERVED_MAP_TAPE',):
+            # 같은 지도 구간을 현재 RGB로 재확인했다. 같은 좌표·상한·횡단 규칙이
+            # 카탈로그에 있을 때만 원 차로 ID를 이어간다.
+            reused = tuple(model.lane_ids for model in self._models.values() if model.crossing == crossing
+                and all(getattr(model.road.hypotheses[0],name) == getattr(h,name)
+                        for name in (*_SHAPES,'inferred','error_m','yaw_error_rad','width_intervals_m',*_BOUND_FIELDS)))
+            if len(reused) > 1:
+                return result('AMBIGUOUS', matches=reused, checked_lanes=2*len(self._models))
+            if reused:
+                if shape_error > geometry_limits.max_position_error_m or shape_yaw > geometry_limits.max_yaw_error_rad:
+                    return result('UNKNOWN', reasons=('GEOMETRY_ENVELOPE_TOO_WIDE',))
+                return result('UNIQUE', pose=_MAP_IDENTITY.center, matches=reused,
+                              checked_lanes=2*len(self._models))
         for model in self._models.values():
+            old = model.road.hypotheses[0]
+            if (geometry_sources and len(crossing) == 1 and model.crossing == crossing
+                    and (_shared_boundary_overlap(h, old,
+                        minimum_overlap=2*geometry_limits.max_position_error_m,
+                        max_lateral=geometry_limits.max_position_error_m,
+                        max_angle=2*geometry_limits.max_yaw_error_rad)
+                        or _reobserved_boundary_overlap(h, old,
+                            minimum_overlap=max(.15,2*geometry_limits.max_position_error_m),
+                            max_lateral=.025,max_angle=.10))):
+                matches.append((model.lane_ids, None))
+                continue
             points, segments = _common_points(road, model, prior, source.sha256, position_radius_m)
             if not points: unresolved = True; continue
             if cells >= profile.max_cells or tests >= profile.max_distance_tests:
@@ -350,14 +475,17 @@ class LaneCatalog:
         if len(matches) > 1: return result('AMBIGUOUS', matches=tuple(ids for ids, _ in matches), checked_lanes=checked)
         if matches:
             ids, fit = matches[0]
-            if fit.status != 'BOUNDED' or not fit.complete: return result('UNKNOWN', matches=(ids,), checked_lanes=checked)
-            pose, position, yaw = fit.representative, fit.position_error_m, fit.yaw_error_rad
+            if fit is None:
+                pose, position, yaw = prior.center, 0., 0.
+            else:
+                if fit.status != 'BOUNDED' or not fit.complete: return result('UNKNOWN', matches=(ids,), checked_lanes=checked)
+                pose, position, yaw = fit.representative, fit.position_error_m, fit.yaw_error_rad
         else:
             pose, position, yaw = prior.center, _position_error(prior, position_radius_m), prior.widths[2] / 2
             ids = ()
         radius = max(math.hypot(*p) for p in h.divider + h.left_outer + h.right_outer)
-        if (h.error_m + position + 2 * radius * math.sin(yaw / 2) > geometry_limits.max_position_error_m
-                or h.yaw_error_rad + yaw > geometry_limits.max_yaw_error_rad):
+        if (shape_error + position + 2 * radius * math.sin(yaw / 2) > geometry_limits.max_position_error_m
+                or shape_yaw + yaw > geometry_limits.max_yaw_error_rad):
             return result('UNKNOWN', checked_lanes=checked, reasons=('GEOMETRY_ENVELOPE_TOO_WIDE',))
         return result('UNIQUE' if ids else 'NEW', pose=pose, position_error_m=position,
             yaw_error_rad=yaw, matches=(ids,) if ids else (), checked_lanes=checked)
@@ -426,7 +554,18 @@ class LaneCatalog:
             revisions = tuple(uint(r+1, positive=True) for r in old.lane_revisions)
         h = association.road.hypotheses[0]; radius = max(math.hypot(*p) for name in _SHAPES for p in getattr(h, name))
         shapes = {name: tuple(transform_point(p, association.pose) for p in getattr(h, name)) for name in _SHAPES}
-        mapped = replace(h, **shapes, error_m=h.error_m+association.position_error_m+2*radius*math.sin(association.yaw_error_rad/2),
+        angle = 2 * math.sin(association.yaw_error_rad / 2)
+        placement = association.position_error_m + radius * angle
+        normal, chord = h.boundary_normal_bounds_m, h.outer_chord_bounds_m
+        if normal is not None:
+            # 새 정합의 회전 오차가 있으면 원 횡방향 값에 없던 종방향
+            # 오차도 새 경계의 법선에 투영될 수 있다.
+            normal = tuple((h.error_m if angle else bound) + placement for bound in normal)
+            chord = tuple(bound + math.dist(*getattr(h, name)) * angle
+                          for bound, name in zip(chord, ('left_outer', 'right_outer')))
+        mapped = replace(h, **shapes,
+            error_m=h.error_m+association.position_error_m+2*radius*math.sin(association.yaw_error_rad/2),
+            boundary_normal_bounds_m=normal, outer_chord_bounds_m=chord,
             yaw_error_rad=h.yaw_error_rad+association.yaw_error_rad, semantic_support=None, semantic_source=None)
         road = replace(association.road, hypotheses=(mapped,), work={})
         revision = uint(self.revision+1, positive=True)

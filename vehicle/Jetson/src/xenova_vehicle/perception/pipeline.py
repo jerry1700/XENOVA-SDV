@@ -1124,6 +1124,8 @@ class PerceptionPipeline:
             current_lane=(dict(status=lane_status) if self._current_lane is None
                           else self._current_lane.summary(lane_status, lane_section)),
             temporal_road_revision=self._temporal_road.revision,
+            temporal_road_status=('NO_CURRENT_OBSERVATION' if geometry_pose is None else
+                                  self._temporal_road.road_candidate_status),
             parking_entrances=entrance_summary(self._temporal_road.parking_branches, parking_entrances),
             parking_approach_fit=(None if approach_fit is None else dict(
                 longitudinal_bound_m=approach_fit.longitudinal_bound_m,
@@ -1167,7 +1169,7 @@ class PerceptionPipeline:
                 snapshot=(ended-free_done)//1000,total=(ended-started)//1000))
         if diagnostics is not None: summary['diagnostic_timings']=diagnostics.snapshot()
         return PerceptionResult(summary,self._last_tape,self._last_road,evidence,registration,snapshot,
-                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.source_keys,
+                                self._last_rgb,self._last_neural,mapped_road,self._temporal_road.evidence_keys,
                                 pose,None if yaw_bias is None else yaw_bias.summary(),parking_entrances,parking_history,
                                 self._temporal_road.parking_source_keys)
 

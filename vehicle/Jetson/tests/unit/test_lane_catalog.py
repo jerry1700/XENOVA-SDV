@@ -14,8 +14,10 @@ import test_world_adapter as world_fixture
 from test_parking_catalog import publication_context
 from xenova_vehicle.mapping.lane_catalog import LaneCatalog, LaneSource, LaneModelCandidates
 from xenova_vehicle.mapping.registration import PoseBox, RegistrationProfile
+from xenova_vehicle.mapping.road_basis import RoadBasis
 from xenova_vehicle.perception.inputs import FrameStamp
 from xenova_vehicle.perception.road import RoadGeometryLimits
+from xenova_vehicle.perception.temporal_road import MappedRoad
 from xenova_vehicle.storage.contracts import (StorageJob, CatalogHeadSnapshot, CommitReceipt,
     LoadRequest, canonical, json_bytes)
 from xenova_vehicle.storage.mapper_state import encode_mapper_state
@@ -64,6 +66,96 @@ def test_new_lane_uses_original_circular_position_error():
     tighter = catalog.observe(road, source, prior, position_radius_m=.03,
         geometry_limits=RoadGeometryLimits(.04,.05), **args)
     assert tighter.reasons == ('GEOMETRY_ENVELOPE_TOO_WIDE',)
+
+
+def test_local_mapped_shape_gate_preserves_placement_bound_for_the_stored_model():
+    catalog = owner()
+    road,source = observed(catalog,2)
+    shape = replace(road.hypotheses[0],error_m=.085,yaw_error_rad=.06)
+    road = replace(road,hypotheses=(shape,))
+    candidate = MappedRoad(road,frozenset((source.stamp.key,(*source.stamp.key[:-1],1))),(.07,.055),.04,.006)
+    limits = RoadGeometryLimits(.065,.05)
+    args = dict(crossing=b'\0',geometry_limits=limits)
+    assert catalog.observe_mapped(candidate,source,prior_qualified=False,**args).status == 'UNKNOWN'
+    assert catalog.observe_mapped(replace(candidate,heading_estimate_rad=None),source,
+        prior_qualified=True,**args).reasons == ('GEOMETRY_ENVELOPE_TOO_WIDE',)
+    assert catalog.observe_mapped(replace(candidate,position_estimate_m=None),source,
+        prior_qualified=True,**args).reasons == ('GEOMETRY_ENVELOPE_TOO_WIDE',)
+    proof = catalog.observe_mapped(candidate,source,prior_qualified=True,**args)
+    assert proof.status == 'NEW'
+    need,job,payload,receipt = reserve(catalog,proof)
+    catalog.apply_committed_range(need,job,payload,receipt,
+        current_context_sha256=catalog.context.sha256,now_us=1_100_100)
+    model = catalog.update(proof,provenance_ids=(101,102))
+    assert model.road.hypotheses[0].error_m == shape.error_m
+    assert model.road.hypotheses[0].yaw_error_rad == shape.yaw_error_rad
+    basis = RoadBasis()
+    initial = basis.observe(catalog,model,current_stamp=source.stamp,resolution_m=.05,
+                            now_us=source.stamp.available_us,max_age_us=500_000)
+    assert initial.status == 'READY'
+
+    _,current = observed(catalog,3)
+    reobserved = replace(candidate,road=replace(road,source_key=current.stamp.key,
+        reasons=('REOBSERVED_MAP_TAPE',)),sources=candidate.sources|{current.stamp.key})
+    reuse = catalog.observe_mapped(reobserved,current,prior_qualified=True,**args)
+    assert reuse.status == 'UNIQUE' and reuse.matches == (model.lane_ids,)
+    repeated = catalog.update(reuse,provenance_ids=(103,104))
+    current_basis = basis.observe(catalog,repeated,current_stamp=current.stamp,resolution_m=.05,
+                                  now_us=current.stamp.available_us,max_age_us=500_000)
+    assert current_basis.status == 'READY'
+    assert current_basis.points_f32 == initial.points_f32
+    assert current_basis.reference_revision == initial.reference_revision
+
+
+def test_shared_outer_paint_extends_short_lane_without_matching_the_next_lane():
+    from xenova_vehicle.mapping.lane_catalog import _shared_boundary_overlap
+
+    catalog = owner()
+    road,source = observed(catalog,2)
+    h = road.hypotheses[0]
+    sources = (source.stamp.key,(*source.stamp.key[:-1],1))
+    evidence = tuple(((sources[1],role),) for role in range(3))
+    original = replace(h,station_s=(0.,.24),error_m=.085,yaw_error_rad=.10,
+        **{name:tuple((x,y) for x,(_,y) in zip((0.,.24),getattr(h,name))) for name in
+           ('divider','left_outer','right_outer','left_center','right_center')},
+        boundary_normal_bounds_m=(.08,)*3,outer_chord_bounds_m=(.11,)*2,
+        boundary_observations=evidence)
+    first = MappedRoad(replace(road,hypotheses=(original,)),frozenset(sources),(.04,.10),.02,.006)
+    limits = RoadGeometryLimits(.065,.05)
+    proof = catalog.observe_mapped(first,source,prior_qualified=True,crossing=b'\1',geometry_limits=limits)
+    assert proof.status == 'NEW'
+    need,job,payload,receipt = reserve(catalog,proof)
+    catalog.apply_committed_range(need,job,payload,receipt,current_context_sha256=catalog.context.sha256,now_us=1_100_100)
+    model = catalog.update(proof,provenance_ids=(101,102))
+    basis = RoadBasis()
+    previous = basis.observe(catalog,model,current_stamp=source.stamp,resolution_m=.05,
+                             now_us=source.stamp.available_us,max_age_us=500_000)
+
+    next_road,next_source = observed(catalog,3)
+    fields = ('divider','left_outer','right_outer','left_center','right_center')
+    shifted = replace(original,**{name:tuple((x+.04,y) for x,y in getattr(original,name)) for name in fields})
+    neighbor = replace(shifted,**{name:tuple((x,y+.285) for x,y in getattr(shifted,name)) for name in fields})
+    assert not _shared_boundary_overlap(neighbor,original,minimum_overlap=.13,max_lateral=.065,max_angle=.10)
+    new = replace(first,road=replace(next_road,hypotheses=(shifted,)),sources=frozenset((*sources,next_source.stamp.key)))
+    proof = catalog.observe_mapped(new,next_source,prior_qualified=True,crossing=b'\1',geometry_limits=limits)
+    assert proof.status == 'UNIQUE' and proof.matches == (model.lane_ids,)
+    extension = catalog.update(proof,provenance_ids=(103,104))
+    current = basis.observe(catalog,extension,current_stamp=next_source.stamp,resolution_m=.05,
+                            now_us=next_source.stamp.available_us,max_age_us=500_000)
+    assert current.status == 'READY' and current.reference_revision == previous.reference_revision+1
+    assert current.points_f32.startswith(previous.points_f32)
+    assert current.points[-1][0] > previous.points[-1][0]
+
+    short_road,short_source = observed(catalog,4)
+    short = replace(new,road=replace(short_road,hypotheses=(original,)),
+                    sources=new.sources|{short_source.stamp.key})
+    proof = catalog.observe_mapped(short,short_source,prior_qualified=True,crossing=b'\1',geometry_limits=limits)
+    assert proof.status == 'UNIQUE' and proof.matches == (model.lane_ids,)
+    shorter = catalog.update(proof,provenance_ids=(105,106))
+    retained = basis.observe(catalog,shorter,current_stamp=short_source.stamp,resolution_m=.05,
+                             now_us=short_source.stamp.available_us,max_age_us=500_000)
+    assert retained.status == 'READY'
+    assert (retained.points_f32,retained.reference_revision) == (current.points_f32,current.reference_revision)
 
 
 def reserve(catalog, association, *, hwm=1, count=64):

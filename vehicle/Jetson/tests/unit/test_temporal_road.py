@@ -11,9 +11,10 @@ from xenova_vehicle.mapping.wheel_motion import WheelCapture, WheelMotionProfile
 from xenova_vehicle.perception.inputs import FrameStamp
 from xenova_vehicle.perception.parking_approach import refit_approach
 from xenova_vehicle.perception.parking_entrance import EntranceSpan
-from xenova_vehicle.perception.road import RoadProfile
+from xenova_vehicle.perception.road import RoadGeometryLimits, RoadProfile
+from xenova_vehicle.perception.road_refit import _MarkingChord, _boundary_bounds, _heading_estimate, _position_estimate, fit_road_window
 from xenova_vehicle.perception.tape import TapeGraph, TapeProfile, TapeStrip
-from xenova_vehicle.perception.temporal_road import RoadLink, TemporalRoadMap, _project_strips
+from xenova_vehicle.perception.temporal_road import RoadLink, TemporalRoadMap, _bounded_candidates, _project_strips, _reobserve_run
 
 
 def observe(owner, sequence, x, dashed, *, lane_width=.285, extra_outer=False, error=.012):
@@ -73,6 +74,128 @@ def test_mapped_candidate_preserves_actual_sources_and_bounds():
     assert len(h.divider) == len(h.left_center) == len(h.right_center)
     assert h.error_m > .006 and h.yaw_error_rad > .001
     assert not any(h.inferred)
+
+
+def test_reuses_bounded_map_run_with_two_current_markings_and_original_sources():
+    profile = RoadProfile()
+    limits = RoadGeometryLimits(.065,.05)
+    first = ('camera','rgb','clock',1)
+    second = (*first[:-1],2)
+    current = (*first[:-1],50)
+    width = profile.missing_outer_width_m
+    stations = tuple(tuple((x,y) for y in (width,0.,-width)) for x in (.30,.35,.40,.45,.50,.55))
+    observations = tuple(frozenset(((first,i),(second,i))) for i in range(3))
+    links = tuple(RoadLink(a,b,.018,frozenset((first,second)),observations,False,.24,
+                           heading_estimate_rad=.02)
+                  for a,b in zip(stations,stations[1:]))
+    over_limit = replace(links[-1], error_m=.12)
+    initial, run = next(_bounded_candidates((*links[:-1],over_limit),second,profile,limits,{first,second}))
+    assert initial.road.hypotheses[0].station_s[-1] == pytest.approx(.20)
+
+    sample = PoseSample('map','clock','calibration',5_000_000,0.,0.,0.,.003,.001)
+    pose = PoseEstimate(sample,(5_000_000,)*2,(5_000_000,)*2)
+    outer_tape = tuple(TapeStrip(i, ((.25,y),(.60,y)), (.01,.02), .003,'FOV_clip','FOV_clip')
+                       for i,y in enumerate((width,-width)))
+    strips = _project_strips(outer_tape,pose,current)
+    reused = _reobserve_run(run,strips,pose,profile,limits)
+    assert reused.sources == {first,second,current}
+    assert reused.road.source_key == current
+    assert reused.road.hypotheses[0].divider == initial.road.hypotheses[0].divider
+    assert reused.road.hypotheses[0].error_m == initial.road.hypotheses[0].error_m
+    assert reused.road.hypotheses[0].yaw_error_rad == .24
+    assert reused.heading_estimate_rad == .02
+    assert not replace(reused,heading_estimate_rad=None).within(limits)
+    assert _reobserve_run(run,strips[:1],pose,profile,limits) is None
+    middle = replace(outer_tape[0],points_xy=((.25,width/2),(.60,width/2)),error_m=.14)
+    ambiguous = _project_strips((middle,outer_tape[1]),pose,current)
+    assert _reobserve_run(run,ambiguous,pose,profile,limits) is None
+
+
+def test_heading_estimate_removes_shared_shift_and_uses_distinct_rgb_frames():
+    keys = tuple(('camera','rgb','clock',seq) for seq in (1,2,3,4))
+    chords = tuple(_MarkingChord(key,0,(0.,.4),(offset,offset+.4*math.tan(angle)),
+        angle,(0.,.4),(),None)
+        for key,offset,angle in zip(keys,(0.,.07,-.05,.03),(.01,.01,.03,.03)))
+    error,sources = _heading_estimate(chords,0.,.4,.02,frozenset(keys),dashed=False)
+    assert error == pytest.approx(.01,abs=1e-6)
+    assert sources == frozenset(keys)
+    assert _heading_estimate(chords,0.,.4,.02,frozenset(keys[:3]),dashed=False) is None
+
+
+def test_position_estimate_counts_each_rgb_once_and_keeps_shared_shift():
+    keys = tuple(('camera','rgb','clock',seq) for seq in range(4))
+    chords = tuple(_MarkingChord(key,0,(0.,.4),(offset,offset),0.,(0.,.4),(),None)
+                   for key,offset in zip(keys,(.01,.01,.03,.03)))
+    error,sources = _position_estimate(chords+chords[:1]*10,0.,.4,(0.,0.),frozenset(keys),dashed=False)
+    assert error == pytest.approx(math.sqrt((.01**2+.03**2)/2))
+    assert sources == frozenset(keys)
+    assert _position_estimate(chords,0.,.4,(0.,0.),frozenset(keys[:3]),dashed=False) is None
+
+
+def test_boundary_chord_excludes_shared_translation_but_keeps_rotation():
+    stations = tuple(tuple((x,y) for y in (.285,0.,-.285)) for x in (.25,.49))
+    anchor = PoseSample('map','clock','calibration',1,0.,0.,0.,.02,0.)
+    normal,chord = _boundary_bounds(stations,(.01,.02,.01),anchor,.005)
+    assert normal == pytest.approx((.035,.045,.035))
+    assert chord == pytest.approx((.03,.03))
+    moved,relative = _boundary_bounds(stations,(.01,.02,.01),replace(anchor,position_error_m=.20),.005)
+    assert moved == pytest.approx(tuple(bound+.18 for bound in normal))
+    assert relative == chord
+    turned,relative = _boundary_bounds(stations,(.01,.02,.01),replace(anchor,yaw_error_rad=.10),.005)
+    assert turned[1] == pytest.approx(normal[1]+.49*math.sin(.10))
+    assert relative == pytest.approx((.03+.48*math.sin(.05),)*2)
+
+
+def test_refits_lane_direction_from_overlapping_markings_across_captures():
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    keys = tuple(('camera','rgb','clock',sequence) for sequence in (1,2,3))
+    sample = PoseSample('map','clock','calibration',5_000_000,0.,0.,0.,.001,.001)
+    pose = PoseEstimate(sample,(5_000_000,)*2,(5_000_000,)*2)
+    strips = []
+    for key,(a,b) in zip(keys,((.22,.48),(.37,.65),(.41,.72))):
+        pieces = tuple(TapeStrip(i,tuple((a+(b-a)*n/10,y) for n in range(11)),(.01,.02),.006,
+            'FOV_clip','FOV_clip',point_error_xy=((.004,.002),)*11,segment_error_xy=((.004,.002),)*10)
+            for i,y in enumerate((width,-width)))
+        strips.extend(_project_strips(pieces,pose,key))
+    start,end = (tuple((x,y) for y in (width,0.,-width)) for x in (.43,.47))
+    fit = fit_road_window(strips,start,end,profile,sample,keys[-1],{},max_sources=11)
+    assert fit is not None
+    assert fit.sources == set(keys)
+    assert not fit.observations[1]
+    assert fit.stations[0][1][1] == pytest.approx(0.)
+    assert fit.position_m < .04 and fit.heading_worst_case_rad < .04
+    assert fit.heading_estimate_rad is None
+    assert fit_road_window(strips[2:],start,end,profile,sample,keys[-1],{},max_sources=11) is None
+    wrong_roles = {(strip.source,strip.identity):{1} for strip in strips if strip.identity == 1}
+    assert fit_road_window(strips,start,end,profile,sample,keys[-1],wrong_roles,max_sources=11) is None
+
+
+def test_refit_uses_separate_short_dash_observations_and_preserves_map_placement_error():
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    keys = tuple(('camera','rgb','clock',sequence) for sequence in (1,2,3))
+    sample = PoseSample('map','clock','calibration',1_000_000,0.,0.,0.,.035,.024)
+    local_pose = PoseEstimate(replace(sample,position_error_m=0.,yaw_error_rad=0.),
+                              (1_000_000,)*2,(1_000_000,)*2)
+    strips = []
+    for key,centers in zip(keys,((.27,.39),(.50,.61),(.72,))):
+        edges = tuple(TapeStrip(i,((.23,y),(.77,y)),(.01,.02),.003,'FOV_clip','FOV_clip',
+            point_error_xy=((.003,.002),)*2,segment_error_xy=((.003,.002),))
+            for i,y in enumerate((width,-width)))
+        dashes = tuple(TapeStrip(i,((x-.022,.011),(x+.022,.011)),(.01,.02),.003,
+            'observed_paint_end','observed_paint_end',point_error_xy=((.003,.002),)*2,
+            segment_error_xy=((.003,.002),)) for i,x in enumerate(centers,2))
+        strips.extend(_project_strips(edges+dashes,local_pose,key))
+    start,end = (tuple((x,y) for y in (width,0.,-width)) for x in (.48,.52))
+    fit = fit_road_window(strips,start,end,profile,sample,keys[-1],{},max_sources=11)
+    assert fit is not None and fit.divider_interpolated
+    assert {key for key,_ in fit.observations[1]} == set(keys)
+    assert all(station[1][1] == pytest.approx(.011) for station in fit.stations)
+    assert fit.position_m < .04
+    assert fit.placement_m > sample.position_error_m and fit.placement_rad == sample.yaw_error_rad
+    if_disabled = fit_road_window(strips,start,end,replace(profile,allow_dashed=False),sample,keys[-1],{},max_sources=11)
+    assert if_disabled is not None and not if_disabled.observations[1]
 
 
 def test_parking_approach_uses_real_boundaries_and_keeps_range_error_along_the_road():

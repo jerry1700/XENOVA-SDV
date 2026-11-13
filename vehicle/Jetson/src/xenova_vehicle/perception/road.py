@@ -98,6 +98,10 @@ class LaneHypothesis:
     heading_reference: str = 'bounded_observed_polyline'
     semantic_support: object = None
     semantic_source: tuple | None = None
+    # 각 경계의 최대 횡방향 오차와 각 outer의 연속 station 간 최대 벡터 오차다.
+    boundary_normal_bounds_m: tuple[float, float, float] | None = None
+    outer_chord_bounds_m: tuple[float, float] | None = None
+    boundary_observations: tuple | None = None
 
     def descriptor(self):
         return asdict(self)
