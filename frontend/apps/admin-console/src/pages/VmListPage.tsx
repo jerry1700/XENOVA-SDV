@@ -5,7 +5,16 @@ import { ApiError } from '../api/client';
 import { useSynchronizeVms, useVms, type VmAction } from '../api/queries';
 import type { Vm, VmSynchronizationResult } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
-import { canStartVm, canStopVm, STATE_HEALTH, STATE_LABEL, VM_ACTION_LABEL } from '../format';
+import {
+  canDeleteVm,
+  canStartVm,
+  canStopVm,
+  DELETE_BLOCKED_HINT,
+  DELETE_CONFIRM_TEXT,
+  STATE_HEALTH,
+  STATE_LABEL,
+  VM_ACTION_LABEL,
+} from '../format';
 import styles from './pages.module.css';
 import { VmOperationNotice } from './VmOperationProgress';
 import { useVmOperationProgress } from './useVmOperationProgress';
@@ -226,7 +235,8 @@ export function VmListPage() {
                     size="sm"
                     variant="danger"
                     onClick={() => setDeleting(vm)}
-                    disabled={controlsDisabled}
+                    disabled={!canDeleteVm(vm.state) || controlsDisabled}
+                    title={canDeleteVm(vm.state) ? undefined : DELETE_BLOCKED_HINT}
                   >
                     삭제
                   </Button>
@@ -263,10 +273,7 @@ export function VmListPage() {
             <span aria-hidden="true">!</span>
             <div>
               <strong>‘{deleting.name}’ VM을 삭제하시겠습니까?</strong>
-              <p>
-                VM을 종료하고 연결된 디스크를 삭제합니다.
-                <span className={styles.deleteIrreversible}>이 작업은 되돌릴 수 없습니다.</span>
-              </p>
+              <p>{DELETE_CONFIRM_TEXT}</p>
             </div>
           </div>
         )}

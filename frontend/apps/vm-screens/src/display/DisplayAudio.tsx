@@ -13,8 +13,16 @@ export interface DisplayAudioController {
   position: number;
   /** 곡 길이 (초). 아직 모르면 null */
   duration: number | null;
+  /** play() 응답을 기다리는 중: 이 동안 버튼을 잠근다 (연타로 play 를 pause 가 끊지 않게) */
+  starting: boolean;
   toggle: () => Promise<void>;
 }
+
+/**
+ * play() 거절 중 pause()·새 load 가 끊은 것(AbortError)은 실패가 아니다. 상태는 pause 이벤트가 정한다.
+ * 그 밖(자동재생 차단 NotAllowedError 등)은 사용자가 직접 눌러 시작해야 한다.
+ */
+const interrupted = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
 
 const labelOf = (state: PlaybackState) => {
   switch (state) {
@@ -49,6 +57,9 @@ export function useDisplayAudio(): DisplayAudioController {
   const [state, setState] = useState<PlaybackState>('loading');
   const [position, setPosition] = useState(0);
   const [duration, setDuration] = useState<number | null>(null);
+  const [starting, setStarting] = useState(false);
+  // 같은 틱 안의 두 번째 터치도 막는다 (state 는 다음 렌더에야 바뀐다)
+  const startingRef = useRef(false);
 
   useEffect(() => {
     const source = import.meta.env.VITE_DISPLAY_AUDIO_SRC || MUSIC.src;
@@ -75,7 +86,9 @@ export function useDisplayAudio(): DisplayAudioController {
     audio.load();
 
     if (import.meta.env.VITE_DISPLAY_AUDIO_AUTOPLAY === '1') {
-      void audio.play().catch(() => setState('blocked'));
+      void audio.play().catch((error: unknown) => {
+        if (!interrupted(error)) setState('blocked');
+      });
     }
 
     return () => {
@@ -93,19 +106,24 @@ export function useDisplayAudio(): DisplayAudioController {
 
   const toggle = async () => {
     const audio = audioRef.current;
-    if (!audio || state === 'unavailable') return;
+    if (!audio || state === 'unavailable' || startingRef.current) return;
     if (!audio.paused) {
       audio.pause();
       return;
     }
+    startingRef.current = true;
+    setStarting(true);
     try {
       await audio.play();
-    } catch {
-      setState('blocked');
+    } catch (error) {
+      if (!interrupted(error)) setState('blocked');
+    } finally {
+      startingRef.current = false;
+      if (audioRef.current === audio) setStarting(false);
     }
   };
 
-  return { state, position, duration, toggle };
+  return { state, position, duration, starting, toggle };
 }
 
 /** 파형 진행 바 막대 수와 높이 (0~1, 고정 무늬 — 실제 음원 분석값이 아님) */
@@ -119,7 +137,7 @@ const BARS = Array.from(
  * 파형 모양 진행 바(보기 전용, 진행된 막대만 강조색) · 현재 시각/길이
  */
 export function DisplayAudioControl({ controller }: { controller: DisplayAudioController }) {
-  const { state, position, duration } = controller;
+  const { state, position, duration, starting } = controller;
   const playing = state === 'playing';
   const unavailable = state === 'unavailable';
   const ratio = duration ? Math.min(1, Math.max(0, position / duration)) : 0;
@@ -141,7 +159,8 @@ export function DisplayAudioControl({ controller }: { controller: DisplayAudioCo
           type="button"
           className={styles.toggle}
           onClick={() => void controller.toggle()}
-          disabled={unavailable}
+          disabled={unavailable || starting}
+          aria-busy={starting}
           aria-label={playing ? '음악 일시정지' : '음악 재생'}
         >
           {playing ? (

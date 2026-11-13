@@ -5,7 +5,17 @@ import { ApiError } from '../api/client';
 import { useVm, useVms, type VmAction } from '../api/queries';
 import type { Vm } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
-import { AGENT_LABEL, canStartVm, canStopVm, STATE_HEALTH, STATE_LABEL, VM_ACTION_LABEL } from '../format';
+import {
+  AGENT_LABEL,
+  canDeleteVm,
+  canStartVm,
+  canStopVm,
+  DELETE_BLOCKED_HINT,
+  DELETE_CONFIRM_TEXT,
+  STATE_HEALTH,
+  STATE_LABEL,
+  VM_ACTION_LABEL,
+} from '../format';
 import styles from './pages.module.css';
 import { ResourceAdjustmentPanel } from './ResourceAdjustmentPanel';
 import { VmOperationNotice } from './VmOperationProgress';
@@ -191,9 +201,15 @@ export function ControlVmDetailPage() {
             <div>
               <span>DANGER ZONE</span>
               <h2 id="danger-zone-title">VM 삭제</h2>
-              <p>VM을 종료하고 연결된 디스크를 삭제합니다. 삭제한 VM은 복구할 수 없습니다.</p>
+              <p>{DELETE_CONFIRM_TEXT}</p>
+              {!canDeleteVm(vm.data.state) && <p role="note">{DELETE_BLOCKED_HINT}</p>}
             </div>
-            <Button variant="danger" onClick={() => setDeleteOpen(true)} disabled={operationPending}>
+            <Button
+              variant="danger"
+              onClick={() => setDeleteOpen(true)}
+              disabled={!canDeleteVm(vm.data.state) || operationPending}
+              title={canDeleteVm(vm.data.state) ? undefined : DELETE_BLOCKED_HINT}
+            >
               VM 삭제
             </Button>
           </section>
@@ -226,10 +242,7 @@ export function ControlVmDetailPage() {
             <span aria-hidden="true">!</span>
             <div>
               <strong>‘{vm.data.name}’ VM을 삭제하시겠습니까?</strong>
-              <p>
-                VM을 종료하고 연결된 디스크를 삭제합니다.
-                <span className={styles.deleteIrreversible}>이 작업은 되돌릴 수 없습니다.</span>
-              </p>
+              <p>{DELETE_CONFIRM_TEXT}</p>
             </div>
           </div>
         )}

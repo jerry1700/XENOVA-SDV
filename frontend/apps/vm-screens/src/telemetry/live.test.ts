@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { seconds } from '../components/format';
 import {
   advanceOdometer,
   applyDriveState,
@@ -132,6 +133,14 @@ describe('applyEvent', () => {
       0,
     );
     expect(t.events[0]?.text).toBe('자율주행 장애 (command_timeout)');
+  });
+
+  it('occurred_at 이 깨졌으면 받은 시각으로 두고 "NaN초 전" 이 나오지 않는다', () => {
+    const t = applyEvent(emptyTelemetry(0), { ...event, event_id: 'evt-3', occurred_at: 'not-a-date' }, 5000);
+    expect(t.events[0]?.at).toBe(5000);
+    expect(seconds(7000 - t.events[0]!.at)).toBe('2초');
+    expect(seconds(Number.NaN)).toBe('0초');
+    expect(seconds(-500)).toBe('0초');
   });
 });
 

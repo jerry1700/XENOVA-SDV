@@ -68,17 +68,47 @@ export interface SocketOptions {
   onConnection: (state: Connection) => void;
 }
 
-const RETRY_MS = 2000;
+export const RETRY_MS = 2000;
+/** 인증 실패가 이어질 때 재시도 간격의 상한 */
+export const MAX_AUTH_RETRY_MS = 30_000;
 
-/** 끊기면 2초 뒤 다시 붙는다. 반환값을 부르면 닫고 멈춘다 */
+/**
+ * 다시 붙기까지 기다릴 시간. 인증 실패(토큰 없음·4401)가 연달아 n 번이면 2·4·8·16·30초…로 늘린다
+ * (refresh·login 을 2초마다 부르지 않게). 그 밖의 끊김은 2초 그대로
+ */
+export function retryDelay(authFailures: number): number {
+  if (authFailures <= 0) return RETRY_MS;
+  return Math.min(MAX_AUTH_RETRY_MS, RETRY_MS * 2 ** (authFailures - 1));
+}
+
+/** 텍스트 프레임 해석. JSON 이 아니거나 type 이 없으면 null (버린다) */
+export function parseFrame(data: unknown): ({ type: string } & Record<string, unknown>) | null {
+  if (typeof data !== 'string') return null;
+  let frame: unknown;
+  try {
+    frame = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  return typeof frame === 'object' &&
+    frame !== null &&
+    !Array.isArray(frame) &&
+    typeof (frame as { type?: unknown }).type === 'string'
+    ? (frame as { type: string } & Record<string, unknown>)
+    : null;
+}
+
+/** 끊기면 다시 붙는다 (간격은 retryDelay). 반환값을 부르면 닫고 멈춘다 */
 export function openSocket(options: SocketOptions): () => void {
   let socket: WebSocket | null = null;
   let timer: number | undefined;
   let stopped = false;
   let fresh = false;
+  // 연달아 인증에 실패한 횟수 (인증되면 0)
+  let authFailures = 0;
 
   const retry = () => {
-    if (!stopped) timer = window.setTimeout(connect, RETRY_MS);
+    if (!stopped) timer = window.setTimeout(connect, retryDelay(authFailures));
   };
 
   async function connect() {
@@ -89,6 +119,7 @@ export function openSocket(options: SocketOptions): () => void {
     if (!accessToken) {
       options.onConnection('unauthorized');
       fresh = true;
+      authFailures += 1;
       retry();
       return;
     }
@@ -97,8 +128,11 @@ export function openSocket(options: SocketOptions): () => void {
     const send = (frame: unknown) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(frame));
     ws.onopen = () => send({ type: 'auth', access_token: accessToken });
     ws.onmessage = (message) => {
-      const frame = JSON.parse(String(message.data)) as { type: string } & Record<string, unknown>;
+      // 깨진 프레임 하나로 핸들러가 예외를 던지지 않게 버린다
+      const frame = parseFrame(message.data);
+      if (!frame) return;
       if (frame.type === 'authenticated') {
+        authFailures = 0;
         options.onConnection('live');
         options.afterAuth?.(send);
         return;
@@ -109,6 +143,7 @@ export function openSocket(options: SocketOptions): () => void {
       if (socket === ws) socket = null;
       if (stopped) return;
       fresh = event.code === UNAUTHORIZED;
+      if (fresh) authFailures += 1;
       options.onConnection(fresh ? 'unauthorized' : 'offline');
       retry();
     };
