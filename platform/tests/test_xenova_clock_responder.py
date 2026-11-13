@@ -7,6 +7,7 @@ import errno
 import importlib.util
 import io
 import json
+from pathlib import Path
 import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -23,6 +24,9 @@ from xenova_execution import ExecutionError
 import xenova_management as management
 import xenova_telemetry_support as support
 import xenova_vm as vm
+
+
+clock_sample = support.clock_sample
 
 
 def wire(value):
@@ -161,23 +165,113 @@ class ClockResponderTest(unittest.TestCase):
         self.assertTrue(self.store.ends[-1][1])
         self.assertNotIn(self.response_path, self.store.values)
 
+    def run_clock_command(self, expected_rc=0):
+        output, diagnostic = io.StringIO(), io.StringIO()
+        with (patch.object(support.os, 'geteuid', return_value=0),
+              redirect_stdout(output), redirect_stderr(diagnostic)):
+            result = support.main(['clock-once'])
+        self.assertEqual(result, expected_rc, diagnostic.getvalue())
+        if expected_rc == 0:
+            self.assertEqual(diagnostic.getvalue(), '')
+            return json.loads(output.getvalue())
+        self.assertEqual(output.getvalue(), '')
+        return json.loads(diagnostic.getvalue())
+
+    def test_pending_clock_sync_then_commit_for_the_same_request(self):
+        status = 0x0040  # STA_UNSYNC before the network supplies a usable time source
+
+        def adjtimex(pointer):
+            pointer._obj.status = status
+            return 5 if status else 0
+
+        self.sample.side_effect = clock_sample
+        with (patch.object(support.os, 'uname', return_value=SimpleNamespace(machine='aarch64')),
+              patch.object(Path, 'read_text', autospec=True, side_effect=self.clocksource_read),
+              patch.object(support.C, 'CDLL', return_value=SimpleNamespace(adjtimex=adjtimex))):
+            waiting = self.run_clock_command()
+            self.assertEqual((waiting['responses'], waiting['status'], waiting['reason']),
+                             (0, 'waiting', 'CLOCK_SYNC_PENDING'))
+            self.assert_aborted()
+            self.assertEqual(self.store.writes, [])
+            self.assertEqual(self.store.values[self.request_path], wire(self.request))
+            status = 0  # NTP synchronized after connectivity was restored
+            self.assertEqual(self.run_clock_command(), {'responses': 1})
+            self.assertFalse(self.store.ends[-1][1])
+            reply = json.loads(self.store.values[self.response_path])
+            self.assertEqual(reply['source'], 'dom0_adjtimex')
+            self.assertEqual(reply['nonce'], self.request['nonce'])
+            self.assertEqual(reply['execution_id'], self.context['execution_id'])
+            self.assertEqual(reply['host_boot_id'], self.context['host_boot_id'])
+            self.assertEqual(self.run_clock_command(), {'responses': 0})
+        self.assertEqual(len(self.store.writes), 1)
+
+    def test_clock_fault_and_syscall_error_are_not_pending_sync(self):
+        self.sample.side_effect = clock_sample
+        for state, status, maxerror, expected in (
+                (-1, 0x0040, 0, 'OSError'), (5, 0x1040, 0, 'ValueError'),
+                (5, 0, 0, 'ValueError'), (0, 0, 10_000_001, 'ValueError')):
+            with self.subTest(state=state, status=status, maxerror=maxerror):
+                def adjtimex(pointer):
+                    pointer._obj.status = status
+                    pointer._obj.maxerror = maxerror
+                    return state
+
+                with (patch.object(support.os, 'uname', return_value=SimpleNamespace(machine='aarch64')),
+                      patch.object(Path, 'read_text', autospec=True, side_effect=self.clocksource_read),
+                      patch.object(support.C, 'CDLL', return_value=SimpleNamespace(adjtimex=adjtimex)),
+                      patch.object(support.C, 'get_errno', return_value=errno.EIO)):
+                    failure = self.run_clock_command(expected_rc=1)
+                self.assertEqual(failure['error'], expected)
+                self.assertEqual(failure['errno'], errno.EIO if state < 0 else None)
+                self.assert_aborted()
+        self.assertEqual(self.store.writes, [])
+
+    @staticmethod
+    def clocksource_read(path, original=Path.read_text):
+        if path == Path('/sys/devices/system/clocksource/clocksource0/current_clocksource'):
+            return 'arch_sys_counter\n'
+        return original(path)
+
+    def test_shutdown_after_staging_response_aborts_and_skips(self):
+        execution = self.f.p.execution()
+        write = self.store.lib.xs_write
+
+        def stage_then_quiesce(*args):
+            written = write(*args)
+            execution.quiesce('reboot-board')
+            return written
+
+        self.store.lib.xs_write = stage_then_quiesce
+        skipped = self.run_clock_command()
+        self.assertEqual((skipped['responses'], skipped['status'], skipped['reason']),
+                         (0, 'skipped', 'HOST_QUIESCING'))
+        self.assert_aborted()
+        self.assertEqual(self.store.closed, 1)
+        self.assertEqual(len(self.store.writes), 1)
+        self.assertEqual(self.store.staged, {})
+
+    def test_invalid_request_still_fails_at_the_command_boundary(self):
+        self.store.values[self.request_path] = wire({**self.request, 'nonce': True})
+        self.assertEqual(self.run_clock_command(expected_rc=1)['error'], 'ValueError')
+        self.assert_idle()
+
     def test_absent_or_empty_request_skips_xen_and_transaction(self):
         for raw in (None, b''):
             with self.subTest(raw=raw):
                 self.store.values[self.request_path] = raw
-                self.assertEqual(support.clock_once(), 0)
+                self.assertEqual(support.clock_once(), {'responses': 0})
                 self.assert_idle()
         self.assertTrue(all(tx == 0 for tx, _ in self.store.reads))
 
     def test_completed_response_with_zero_uncertainty_skips_xen_and_write(self):
         self.store.values[self.response_path] = wire(self.answer())
-        self.assertEqual(support.clock_once(), 0)
+        self.assertEqual(support.clock_once(), {'responses': 0})
         self.assert_idle()
 
     def test_stopped_zephyr_keeps_the_original_binding_fallback_classification(self):
         with patch.object(vm.os, 'sync'):
             self.f.ok(self.manager.call('stop', {'vm_id': self.vm_id, 'force': True}, execute=True))
-        self.assertEqual(support.clock_once(), 0)
+        self.assertEqual(support.clock_once(), {'responses': 0})
         self.assertEqual(self.observed.call_count, 1)
         self.assertEqual(self.sample.call_count, 0)
         self.assertEqual(self.store.writes, [])
@@ -186,7 +280,7 @@ class ClockResponderTest(unittest.TestCase):
     def test_absent_domain_skips_response_after_actual_binding_observation(self):
         self.f.xen.rows = [row for row in self.f.xen.rows
                            if row['config']['c_info']['uuid'] != self.vm_id]
-        self.assertEqual(support.clock_once(), 0)
+        self.assertEqual(support.clock_once(), {'responses': 0})
         self.assertEqual(self.observed.call_count, 1)
         self.assertEqual(self.sample.call_count, 0)
         self.assertEqual(self.store.writes, [])
@@ -199,7 +293,7 @@ class ClockResponderTest(unittest.TestCase):
         execution.write(self.f.p.runtime / 'executions' / (self.vm_id + '.json'), run)
         self.f.xen.rows = [row for row in self.f.xen.rows
                            if row['config']['c_info']['uuid'] != self.vm_id]
-        self.assertEqual(support.clock_once(), 0)
+        self.assertEqual(support.clock_once(), {'responses': 0})
         self.assertEqual(self.observed.call_count, 1)
         self.assertEqual(self.sample.call_count, 0)
         self.assertEqual(self.store.writes, [])
@@ -219,19 +313,19 @@ class ClockResponderTest(unittest.TestCase):
         self.assertEqual(self.store.reads, [])
 
     def test_pending_request_observes_once_and_new_nonce_recovers(self):
-        self.assertEqual(support.clock_once(), 1)
+        self.assertEqual(support.clock_once(), {'responses': 1})
         self.assertEqual(self.observed.call_count, 1)
         calls = self.f.xen.calls[self.commands_before:]
         self.assertEqual(calls.count(['xl', 'list', '-v']), 2)
         self.assertEqual(sum(call[:2] == ['xenova-domain-identity', '--domid'] for call in calls), 2)
         self.assertEqual(json.loads(self.store.values[self.response_path])['nonce'], '123')
-        self.assertEqual(support.clock_once(), 0)
+        self.assertEqual(support.clock_once(), {'responses': 0})
         self.assertEqual(self.observed.call_count, 1)
 
         self.f.ticks += 10
         self.request['nonce'] = '10123'
         self.store.values[self.request_path] = wire(self.request)
-        self.assertEqual(support.clock_once(), 1)
+        self.assertEqual(support.clock_once(), {'responses': 1})
         self.assertEqual(self.observed.call_count, 2)
         self.assertEqual(json.loads(self.store.values[self.response_path])['nonce'], '10123')
 
@@ -251,7 +345,7 @@ class ClockResponderTest(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.store.values[self.response_path] = wire(self.answer(**changes))
                 before = self.observed.call_count
-                self.assertEqual(support.clock_once(), 1)
+                self.assertEqual(support.clock_once(), {'responses': 1})
                 self.assertEqual(self.observed.call_count, before + 1)
 
     def test_malformed_request_is_refused_before_observation(self):
@@ -322,7 +416,7 @@ class ClockResponderTest(unittest.TestCase):
                 self.store.values.pop(self.response_path, None)
                 self.store.on_begin = lambda value=replacement: self.store.values.__setitem__(self.request_path, value)
                 before = self.observed.call_count
-                self.assertEqual(support.clock_once(), 1)
+                self.assertEqual(support.clock_once(), {'responses': 1})
                 self.assertEqual(self.observed.call_count, before + 1)
                 response = json.loads(self.store.values[self.response_path])
                 self.assertEqual(response['nonce'], self.request['nonce'])
@@ -348,7 +442,7 @@ class ClockResponderTest(unittest.TestCase):
 
     def test_response_completed_during_observation_is_not_rewritten(self):
         self.store.on_begin = lambda: self.store.values.__setitem__(self.response_path, wire(self.answer()))
-        self.assertEqual(support.clock_once(), 0)
+        self.assertEqual(support.clock_once(), {'responses': 0})
         self.assertEqual(self.observed.call_count, 1)
         self.assertEqual(self.sample.call_count, 0)
         self.assertEqual(self.store.writes, [])
