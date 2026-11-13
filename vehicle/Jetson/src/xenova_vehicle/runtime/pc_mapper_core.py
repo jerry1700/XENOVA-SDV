@@ -191,7 +191,9 @@ class PcMapperCore:
                     draft=self.storage.prepare_frame(frame,snapshot,result,current_pc_view=current_pc_view,
                         capture_prior=mapped,registration_revision=0 if alignment is None else alignment.registration_revision,
                         prior_qualified=qualified,now_us=self.clock(),roi_bounds=(low[0],low[1],high[2],high[3]),current_sensors=current_sensors)
-                    view=draft.catalog.view;model=view.lane;basis=view.road_basis
+                    view=draft.catalog.view;state=draft.catalog.state
+                    model=state.road_basis.publication_model(state.lane)
+                    basis=state.road_basis.snapshot()
                     reasons.extend(view.reasons)
                     if model is None:
                         association=draft.catalog.state.lane.current_association
@@ -205,7 +207,7 @@ class PcMapperCore:
                         world=build_development_world(core,model,basis,snapshot,inputs,context=self.context,
                             calibration=self.calibration,source_bytes=self._source_bytes,
                             sequence=self._world_sequence,now_us=self.clock(),current_sensors=current_sensors,
-                            pc_owner_token=self._pc_owner_token,parking=view.parking)
+                            pc_owner_token=self._pc_owner_token,parking=view.parking,stopping=config.stopping)
                         world_lease=current_sensors.clock_lease
                 except (PcStorageNotReady,CatalogNotReady,DevelopmentMappingNotReady,WorldBuildError) as error:
                     reasons.append(str(error))

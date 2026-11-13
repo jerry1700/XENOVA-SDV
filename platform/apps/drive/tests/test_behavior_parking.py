@@ -98,7 +98,7 @@ def parking_writer(library, tmp_path_factory):
         'cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-fsanitize=undefined',
         *[f'-I{directory}' for directory in (HOME/'planner', world, world/'generated', world/'nanopb')],
         *[f'-Wl,--wrap={symbol}' for symbol in (
-            'dw_acquire', 'dw_source_valid', 'dw_release', 'dw_current_pose', 'lp_validate_path',
+            'dw_acquire', 'dw_source_valid', 'dw_release', 'dw_current_pose', 'lp_validate_path_prepared',
         )],
         str(HOME/'tests/parking_writer_probe.c'), library._name, '-lm', '-o', str(executable),
     ], check=True, capture_output=True, text=True)
@@ -259,6 +259,18 @@ def test_episode_corners_keep_the_local_station_interval(library):
     assert library.probe_episode_station(0, bounds) == 1
     assert bounds[0] <= 0 and bounds[1] >= .39
     assert library.probe_episode_station(1, bounds) == 0
+
+
+def test_episode_station_stays_continuous_across_a_sampled_loop_seam(library):
+    library.probe_episode_seam.argtypes = [C.c_int, C.POINTER(C.c_float)]
+    bounds = (C.c_float * 6)()
+    assert library.probe_episode_seam(0, bounds) == 1
+    before, before_end, after, after_end, blocker, blocker_end = bounds
+    assert 11.8 < before < 12.0 < before_end < 12.3
+    assert .08 < after - before < .12 and .10 < after_end - before_end < .12
+    assert blocker < 12.0 < blocker_end and .13 < blocker_end - blocker < .22
+    assert library.probe_episode_seam(1, bounds) == 1
+    assert bounds[1] < 11.1 and bounds[3] < 11.1
 
 
 def test_occupied_cell_far_past_lane_end_is_not_a_blocker(library):

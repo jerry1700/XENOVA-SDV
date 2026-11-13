@@ -10,6 +10,26 @@ static dw_vehicle feedback;
 static bool contend,source_busy;
 static uint64_t checked_deadline,guest;
 
+static void published_path_during_pass_planning(void){
+ de_init(&engine,&lp_selected_config,&lp_selected_assets);
+ struct lp_path *path=&engine.paths[0].path;
+ path->execution.mission.kind=1;
+ path->has_episode=true;path->episode.core.state=2;path->episode.core.phase=DB_CHANGE_OUT;
+ path->episode.core.target_lane_id=2;
+ path->task=(struct tr_intent){true,false,2,2,1,0};
+ engine.episode_handoff=DE_EPISODE_PASS_PLANNING;
+ assert(!episode_transition_blocks_path(&engine,path));
+ engine.path_invalidated=true;
+ assert(episode_transition_blocks_path(&engine,path));
+ engine.path_invalidated=false;
+ path->task.changing=true;
+ assert(episode_transition_blocks_path(&engine,path));
+ path->task.changing=false;engine.episode_handoff=DE_EPISODE_REQUEST_READY;
+ assert(episode_transition_blocks_path(&engine,path));
+ engine.episode_handoff=DE_EPISODE_AWAITING_RECEIPT;
+ assert(episode_transition_blocks_path(&engine,path));
+}
+
 static int fixture_clock(void *unused,uint64_t *out){
  (void)unused;*out=guest;return 0;
 }
@@ -29,20 +49,23 @@ enum dw_result __wrap_dw_current_pose(const dw_world *world,struct dw_odometry *
  (void)now;(void)age;assert(world==&snapshot.world&&odom==&engine.odometry);
  *pose=feedback.odom_pose;if(vehicle)*vehicle=feedback;return DW_OK;
 }
-enum lp_result __wrap_lp_validate_path(const struct lp_path *path,const dw_world *world,
- const struct lp_config *config,struct lp_metrics *metrics,const struct lp_budget *budget){
- (void)config;(void)metrics;
+enum lp_result __wrap_lp_validate_path_prepared(const struct lp_path *path,const dw_world *world,
+ const struct lp_config *config,struct lp_metrics *metrics,const struct lp_budget *budget,struct lp_tracking_geometry *geometry){
+ (void)metrics;
  assert(path->count>=2&&world==&snapshot.world);
  checked_deadline=budget->deadline_us;
  if(guest>=checked_deadline)return LP_DEADLINE;
+ if(!lp_prepare_tracking(path,config,geometry))return LP_INPUT;
  if(contend)assert(take(&engine));
  return LP_PATH_FOUND;
 }
 
 static void writer_contention(void){
+ published_path_during_pass_planning();
  de_init(&engine,&lp_selected_config,&lp_selected_assets);
  struct lp_path *source=&engine.parking.best_maneuver;
- source->count=2;source->points[1].pose.x=.2f;
+ source->count=2;
+ source->points[1].pose.x=lp_selected_config.primitive_speed*lp_selected_config.primitive_duration/(LP_PRIMITIVE_SAMPLES-1);
  engine.budget.deadline_us=200;
  assert(parking_publish(&engine,source,100,true,false)==DE_OK);
  assert(engine.current==0&&engine.path_revision==1);

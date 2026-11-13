@@ -29,7 +29,8 @@ from ..runtime.raw_binding import RawBinding
 from ..storage.contracts import StorageContext, StorageJob, canonical, json_bytes
 from ..storage.records import ContextRecord, EvidenceTable, CheckpointPayload, ProvenanceRecord, PROVENANCE
 from ..storage.repository import PersistenceStore
-from ..transport.world_adapter import WorldSource, WorldBuildError, build_world, lane_model_from_road, _f32, _f32_up
+from ..transport.world_adapter import (WorldSource, WorldBuildError, build_world, lane_publication,
+                                      lane_window_publication, _f32, _f32_up)
 from .motion_profile import DevelopmentMotionProfile
 from .wall_sensor import MAX_CAPTURE_LIFETIME_US
 
@@ -96,7 +97,8 @@ class DevelopmentMappingCandidate:
 
 
 def build_development_world(pipeline,model,basis,snapshot,inputs,*,context,calibration,
-                            source_bytes,sequence,now_us,current_sensors=None,pc_owner_token=None,parking=None):
+                            source_bytes,sequence,now_us,current_sensors=None,pc_owner_token=None,parking=None,
+                            stopping=None):
     """원 SYNTHETIC 계산/센서·카탈로그로 ordinary World 후보만 만든다.
 
     Store/actor/clock/ID를 소유하지 않는다. source는 원 admitted snapshot과 같아야 하며
@@ -147,11 +149,11 @@ def build_development_world(pipeline,model,basis,snapshot,inputs,*,context,calib
     now = now_us; alignment = pipeline._alignment
     if alignment is None or not alignment.has_metadata or not alignment.valid_at(now): raise DevelopmentMappingNotReady('LOCALIZATION_EXPIRED')
     lane_source=model.source
+    current_geometry = lane_source.stamp.key==snapshot.source_key
     if (lane_source.input_kind!='SYNTHETIC' or not lane_source.qualified
-            or lane_source.stamp.key!=snapshot.source_key or lane_source.calibration_id!=calibration.sha256
+            or (stopping is None and not current_geometry) or lane_source.calibration_id!=calibration.sha256
             or lane_source.map_epoch!=context.map_epoch or lane_source.odom_epoch!=context.odom_epoch
-            or lane_source.frame_id!=pipeline.grid.frame_id or lane_source.map_revision!=pipeline.grid.revision
-            or lane_source.registration_revision!=alignment.registration_revision
+            or lane_source.frame_id!=pipeline.grid.frame_id or lane_source.map_revision>pipeline.grid.revision
             or basis.lane_ids!=model.lane_ids or basis.latest_model_revision!=model.model_revision
             or basis.latest_lane_source!=lane_source):
         raise DevelopmentMappingNotReady('CURRENT_DEVELOPMENT_CATALOG_DOMAIN_REQUIRED')
@@ -159,13 +161,18 @@ def build_development_world(pipeline,model,basis,snapshot,inputs,*,context,calib
     lease.j_interval_to_pi((now, now), now_j_us=now)
     view = pipeline.grid.snapshot(now, clock_id=snapshot.capture_stamp.clock_id)
     spec = view['spec']
-    try:
-        upper, lower, grid_error = _domain(spec, len(basis.points))
-        preferred = _preferred(spec, model.road)
-    except _NotReady as error:
-        raise DevelopmentMappingNotReady('WORLD_DOMAIN_OR_ROAD_NOT_REPRESENTABLE') from error
     mapped = alignment.apply(PoseEstimate(vehicle.pose_sample, vehicle.j_interval, vehicle.j_interval)).sample
     capture = snapshot.capture_stamp.captured_us
+    try:
+        upper, lower, grid_error = _domain(spec, len(basis.points))
+        if stopping is None:
+            publication_road, publication_lane = lane_publication(basis,model)
+        else:
+            publication_road, publication_lane = lane_window_publication(
+                pipeline,basis,model,mapped,stopping,sum(capture)//2,current_geometry=current_geometry)
+        preferred = _preferred(spec, publication_road)
+    except _NotReady as error:
+        raise DevelopmentMappingNotReady('WORLD_DOMAIN_OR_ROAD_NOT_REPRESENTABLE') from error
     value = schema.WorldSnapshot(major=1, minor=2, required_features=11, sequence=sequence,
         **{k: source[k] for k in ('vehicle', 'mapper_boot', 'mapper_instance', 'clock_epoch', 'map_epoch',
             'frame_epoch', 'odom_epoch', 'configuration', 'calibration', 'primitive')},
@@ -177,8 +184,7 @@ def build_development_world(pipeline,model,basis,snapshot,inputs,*,context,calib
     for point in basis.points: value.reference.add(x=point[0], y=point[1])
     for point in upper: value.left_boundary.add(x=point[0], y=point[1])
     for point in lower: value.right_boundary.add(x=point[0], y=point[1])
-    value.lane_model.CopyFrom(lane_model_from_road(model.road, lane_ids=model.lane_ids,
-        model_revision=model.model_revision, lane_revisions=model.lane_revisions, crossing=model.crossing))
+    value.lane_model.CopyFrom(publication_lane)
     interval = alignment.observed_j_interval
     try: heading = _heading_bound(basis, model.road)
     except _NotReady as error: raise DevelopmentMappingNotReady('UNBOUNDED_REFERENCE_HEADING') from error
@@ -466,26 +472,32 @@ class DevelopmentMapping:
                 0 if alignment is None else alignment.registration_revision,
                 result.summary.get('geometric_model_qualified') is True and qualified, 'SYNTHETIC')
             road = result.road
-            if road is None: raise DevelopmentMappingNotReady('ROAD_UNAVAILABLE')
             if self._crossing is None: raise DevelopmentMappingNotReady('CROSSING_POLICY_UNCONFIGURED')
-            crossing = self._crossing(road, observation.rgb.stamp) if callable(self._crossing) else self._crossing
-            association = lane.observe(road, source, mapped.prior, prior_qualified=qualified,
-                crossing=crossing, profile=config.pipeline.registration,
-                position_radius_m=mapped.sample.position_error_m)
-            if association.status == 'NEW' and lane.available_ids < 2:
-                job = self._job(snapshot); head = self.store.catalog_heads(job, current_context_sha256=self.context.sha256)
-                need = lane.allocation_need(association, head, job, reservation_nonce=str(uuid4()), now_us=self.clock())
-                hwm = tuple(need.reservation.end_exclusive if k == 'LANE' else
-                    next(v for kind, v, _ in head.heads if kind == k) for k in ('LANE', 'SLOT'))
-                payload = CheckpointPayload.build(job, evidence=EvidenceTable(reservations=(need.reservation,),
-                    catalog_highwaters=hwm), intent='CATALOG_RESERVATION')
-                lane_receipt = self._commit(job, payload)
-                lane.apply_committed_range(need, job, payload, lane_receipt,
-                    current_context_sha256=self.context.sha256, now_us=self.clock())
-            model = lane.update(association, provenance_ids=(record.provenance_id, record.provenance_id))
-            if model is None: raise DevelopmentMappingNotReady('LANE_' + association.status + ':' + ','.join(association.reasons))
-            reference = basis.observe(lane, model, current_stamp=observation.rgb.stamp, resolution_m=grid.spec.resolution_m,
-                now_us=self.clock(), max_age_us=snapshot.expires_us - observation.capture_interval[0])
+            model = association = None
+            if road is not None:
+                crossing = self._crossing(road, observation.rgb.stamp) if callable(self._crossing) else self._crossing
+                association = lane.observe(road, source, mapped.prior, prior_qualified=qualified,
+                    crossing=crossing, profile=config.pipeline.registration,
+                    position_radius_m=mapped.sample.position_error_m)
+                if association.status == 'NEW' and lane.available_ids < 2:
+                    job = self._job(snapshot); head = self.store.catalog_heads(job, current_context_sha256=self.context.sha256)
+                    need = lane.allocation_need(association, head, job, reservation_nonce=str(uuid4()), now_us=self.clock())
+                    hwm = tuple(need.reservation.end_exclusive if k == 'LANE' else
+                        next(v for kind, v, _ in head.heads if kind == k) for k in ('LANE', 'SLOT'))
+                    payload = CheckpointPayload.build(job, evidence=EvidenceTable(reservations=(need.reservation,),
+                        catalog_highwaters=hwm), intent='CATALOG_RESERVATION')
+                    lane_receipt = self._commit(job, payload)
+                    lane.apply_committed_range(need, job, payload, lane_receipt,
+                        current_context_sha256=self.context.sha256, now_us=self.clock())
+                model = lane.update(association, provenance_ids=(record.provenance_id, record.provenance_id))
+                if model is not None:
+                    basis.observe(lane,model,current_stamp=observation.rgb.stamp,resolution_m=grid.spec.resolution_m,
+                        now_us=self.clock(),max_age_us=snapshot.expires_us-observation.capture_interval[0])
+            model = basis.publication_model(lane)
+            if model is None:
+                raise DevelopmentMappingNotReady('ROAD_UNAVAILABLE' if association is None
+                    else 'LANE_' + association.status + ':' + ','.join(association.reasons))
+            reference = basis.snapshot()
             if reference.status != 'READY': raise DevelopmentMappingNotReady('BASIS_' + reference.status + ':' + str(reference.reason))
             world = self._world(core, result, model, reference, snapshot, inputs)
         except (DevelopmentMappingNotReady, WorldBuildError) as error:
@@ -500,7 +512,8 @@ class DevelopmentMapping:
     def _world(self, core, result, model, basis, snapshot, inputs):
         self._world_sequence += 1
         return build_development_world(core,model,basis,snapshot,inputs,context=self.context,
-            calibration=self.calibration,source_bytes=self._source,sequence=self._world_sequence,now_us=self.clock())
+            calibration=self.calibration,source_bytes=self._source,sequence=self._world_sequence,now_us=self.clock(),
+            stopping=self.profile.stopping)
 
     def accepted(self, candidate, *, current_source_context_bytes, fence_revision):
         """원 frame E/currentness를 마지막 확인한다. World의 실제 발행/현재 권한은 별도다."""

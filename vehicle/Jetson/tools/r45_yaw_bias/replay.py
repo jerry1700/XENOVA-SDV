@@ -3,6 +3,7 @@
 from dataclasses import replace
 import json
 import math
+from pathlib import Path
 import socket
 from uuid import UUID
 
@@ -14,8 +15,11 @@ from xenova_drive_world.mapper_clock import ClockPolicy, restore_returned_probe
 from xenova_gateway import feedback, feedback3
 from xenova_gateway.odometry import OdometryConfig, VehicleOdometry
 from xenova_vehicle.mapping.local_map import OCCUPIED, GridSpec
+from xenova_vehicle.mapping.free_schedule import stopping_region
+from xenova_vehicle.mapping.map_lattice import GridWindow, RollingPolicy
 from xenova_vehicle.mapping.odometry import PoseBuffer
 from xenova_vehicle.mapping.registration import transform_point, wrap_yaw
+from xenova_vehicle.mapping.rolling_grid import configure_grid, pack_live_tiles, reframe_grid
 from xenova_vehicle.mapping.wheel_motion import WheelMotionProfile
 from xenova_vehicle.oak.calibration_snapshot import full_sensor_rgb_geometry
 from xenova_vehicle.perception.calibration import CalibrationProfile
@@ -30,9 +34,8 @@ from xenova_vehicle.transport.sensor_samples import SensorContext, SensorSamples
 DRIVE_STEP_US = 20_000
 CAMERA_EVERY_STEPS = 10
 CAPTURE_START_US = 97 * 250_000
-CAMERA_HEIGHT_M = .14
-BODY_LENGTH_M = .38
-BODY_WIDTH_M = .21
+MEASURED_GEOMETRY = (Path(__file__).resolve().parents[4]
+                     / 'platform/apps/simulator/tools/jetson-course-measured.json')
 
 
 class EncoderReplay:
@@ -45,6 +48,7 @@ class EncoderReplay:
         self.sent, self.accepted, self.probes = 0, 0, 0
         odometry = dict(profile['odometry'])
         odometry['maximum_speed_mps'] = wheel_speed_limit_mps
+        odometry['wheelbase_m'] = calibration.body.wheelbase
         self.odom = VehicleOdometry(OdometryConfig(
             vehicle='rc-sim-01', calibration=bundle, **odometry,
             **{name: encoder[name] for name in ('metres_per_tick', 'metres_per_tick_upper',
@@ -223,8 +227,13 @@ def _cone_metrics(expected, observations, last):
         for identity,hits in observations.items()}
 
 
-def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_bias=False, map_local_origin=False):
-    """Feed only RGB, depth and encoder samples into the unchanged mapping entry point."""
+def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_bias=False, map_local_origin=False,
+        localization_overrides=None, ground_drift_mps=(0., 0.), certify_free=False):
+    """Feed RGB, depth and encoder samples into the mapping entry point.
+
+    Ground drift displaces the rendered vehicle relative to the recorded wheel path
+    in scene coordinates. It is passed to rendering and scoring only.
+    """
     cv2.setNumThreads(1)
     mapper = MapperProfile.from_bytes((profiles/'mapper-profile.json').read_bytes())
     calibration = CalibrationProfile.from_dict(json.loads((profiles/'perception-calibration.json').read_bytes()))
@@ -232,22 +241,23 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
         raise ValueError('mapper and calibration disagree')
     eeprom = dict(json.loads(rgb_eeprom.read_bytes())['cameraData'])[0]
     geometry = full_sensor_rgb_geometry((eeprom['intrinsicMatrix'],eeprom['width'],eeprom['height']))
+    measured = json.loads(MEASURED_GEOMETRY.read_bytes())
     fields = calibration.to_dict()
-    height_delta = CAMERA_HEIGHT_M - calibration.rgb.translation[2]
+    height_delta = measured['camera_height_m'] - calibration.rgb.translation[2]
     for sensor in ('rgb','right'):
         translation = list(fields[sensor]['translation'])
         translation[2] += height_delta
         fields[sensor]['translation'] = translation
-    body = fields['body']
-    length_delta = BODY_LENGTH_M - body['length']
-    body.update(length=BODY_LENGTH_M,width=BODY_WIDTH_M,
-        front=body['front']+length_delta/2,rear=body['rear']+length_delta/2)
+    length, width, wheelbase = (measured[k] for k in ('vehicle_length_m','vehicle_width_m','wheelbase_m'))
+    fields['body'].update(length=length,width=width,wheelbase=wheelbase,
+        front=(length+wheelbase)/2,rear=(length-wheelbase)/2)
     fields['rgb'].update(k=geometry['k'],roi=geometry['roi'])
     calibration = CalibrationProfile.from_dict(fields)
     scene_fields = Scene(scene_path.read_bytes()).fields
     layout = scene_fields['track']['layout']
-    layout['camera']['height_m'] = CAMERA_HEIGHT_M
-    layout['vehicle'].update(length_m=BODY_LENGTH_M,width_m=BODY_WIDTH_M)
+    layout['camera']['height_m'] = measured['camera_height_m']
+    layout['vehicle'].update(length_m=length,width_m=width,wheelbase_m=wheelbase,
+        min_turn_radius_m=wheelbase/math.tan(math.radians(measured['max_steer_deg'])))
     scene = Scene(canonical(scene_fields))
     camera = SyntheticCamera(calibration)
     # Use the existing operational localization gate on development-generated samples.
@@ -260,6 +270,9 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
         # Fixed test canvas only. Camera rendering and post-run scoring own the scene coordinates.
         x0,y0,x1,y1 = -3.,-3.,3.,3.
     spec = GridSpec(math.ceil((x1-x0)/cell),math.ceil((y1-y0)/cell),cell,(x0,y0))
+    score_spec = spec
+    if certify_free:
+        spec = GridSpec(64, 64, cell, (-32*cell, -32*cell))
     road = mapper.pipeline.road
     half_width = track['lane_width_m']/2
     if not math.isclose(half_width,.285):
@@ -269,15 +282,47 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
     profile = replace(mapper.pipeline,grid=spec,road=road,tape=replace(mapper.pipeline.tape,x_max_m=1.5))
     core = PerceptionPipeline(live_calibration,profile,targets=mapper.targets,
                               estimate_yaw_bias=estimate_yaw_bias)
-    encoder = make_encoder(live_calibration,[pose for _,pose in route])
+    tiles = {}
+    rolling = RollingPolicy(16, 10)
+
+    def reframe(pipeline, pose):
+        grid = pipeline.grid
+        old = grid.rolling_window
+        if old is None:
+            old = GridWindow.from_spec(grid.spec)
+            configure_grid(grid, old)
+        new = rolling.window_for(old, (pose.sample.x, pose.sample.y), pose.sample.yaw)
+        if old == new:
+            return False
+        tiles.update(pack_live_tiles(grid, tiles))
+        reframe_grid(grid, new, tiles)
+        return True
+
+    def needed(grid, pose, now):
+        if pose is None or not encoder.sensor.current_vehicle(encoder.sensor.latest_vehicle, now):
+            return None
+        limits = mapper.stopping
+        return stopping_region(grid.spec, encoder.sensor.latest_vehicle, pose, live_calibration,
+            admission=encoder.sensor,frame_id=grid.frame_id,now_us=now,max_speed_mps=limits.max_speed_mps,
+            min_braking_mps2=limits.min_braking_mps2,reaction_latency_us=limits.reaction_latency_us,
+            cycle_bound_us=limits.cycle_bound_us,completion_bound_us=limits.completion_bound_us,
+            body_error_m=limits.body_error_m)
     policy = mapper.localization
+    if policy is None:
+        raise ValueError('replay requires an explicit localization policy')
+    if localization_overrides:
+        policy = replace(policy, **localization_overrides)
+    encoder = make_encoder(live_calibration,[pose for _,pose in route])
     origin = route[0][1] if map_local_origin else None
-    expected = _cone_cells(track,spec,origin)
+    expected = _cone_cells(track,score_spec,origin)
     occupied_by_cone = {identity:[] for identity in expected}
     frames = []
     try:
         for index,(elapsed_us,truth) in enumerate(route):
             at = CAPTURE_START_US + elapsed_us
+            seconds = elapsed_us/1e6
+            truth = (truth[0]+seconds*ground_drift_mps[0],
+                     truth[1]+seconds*ground_drift_mps[1],truth[2])
             encoder.advance(index,at)
             observation = camera.capture(SceneSnapshot(str(UUID(int=1)),96+index,at,truth,scene))
             observation,pose = encoder.observe(observation)
@@ -285,18 +330,26 @@ def run(route, scene_path, profiles, rgb_eeprom, make_encoder, *, estimate_yaw_b
                 pose=pose,motion_qualified=True,completed_clock=lambda:at,
                 localization_valid_for_us=policy.registration_valid_for_us,
                 localization_position_drift_mps=policy.position_drift_mps,
-                localization_yaw_drift_rps=policy.yaw_drift_rps)
+                localization_yaw_drift_rps=policy.yaw_drift_rps,
+                **(dict(needed_region_factory=needed, roi_reframe=reframe) if certify_free else {}))
             summary = result.summary
-            seconds = elapsed_us/1e6
             if origin is not None:
                 x,y = transform_point((truth[0]-origin[0],truth[1]-origin[1]),(0.,0.,-origin[2]))
                 truth = x,y,wrap_yaw(truth[2]-origin[2])
             frames.append(dict(elapsed_s=seconds,truth=truth,mapped=summary['mapped_pose'],
                 status=summary['localization_status'],position_error_m=summary['mapped_position_error_m'],
                 yaw_error_rad=summary['mapped_yaw_error_rad'],qualified=summary['localization_qualified'],
-                yaw_bias=result.yaw_bias))
+                yaw_bias=result.yaw_bias, **(dict(free_schedule=summary['free_schedule'],
+                    free_cells=summary['free_cells_applied'], free_certificates=summary['free_certificates'],
+                    temporal_free=summary['free_temporal_status']) if certify_free else {})))
             snapshot = core.grid.snapshot(at,clock_id=core.grid.clock_id)
             occupied = set(np.flatnonzero(snapshot['arrays']['state']==OCCUPIED).tolist())
+            if certify_free:
+                grid = snapshot['spec']
+                col_offset, row_offset = (round((a-b)/cell) for a,b in zip(grid.origin_xy,score_spec.origin_xy))
+                occupied = {(i//grid.width+row_offset)*score_spec.width+i%grid.width+col_offset for i in occupied
+                            if 0 <= i//grid.width+row_offset < score_spec.height
+                            and 0 <= i%grid.width+col_offset < score_spec.width}
             for identity,cells in expected.items():
                 hits = cells & occupied
                 if hits:

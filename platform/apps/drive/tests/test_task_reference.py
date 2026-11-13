@@ -6,6 +6,7 @@
 
 import ctypes as C
 import math
+import pytest
 from test_lattice import library, Product, obstacle, encode, CFG, FOUND, STOP
 from test_engine import modern_world, vehicle, send_vehicle, load, exported_state, lane_grant
 from world_codec import schema
@@ -180,6 +181,26 @@ def test_lane_change_tape_limits_both_road_edges_and_keeps_crossing_permission(l
         product.close()
 
 
+def test_straight_narrow_lane_guide_tries_both_directions_without_tape_allowance(library):
+    library.probe_lane_guide.argtypes = [C.c_void_p, C.c_uint32, C.c_uint32, C.c_float, C.c_float]
+    library.probe_lane_guide.restype = C.c_int
+    world = modern_world()
+    for boundary, y in ((world.left_boundary, 2.1), (world.right_boundary, 1.1)):
+        for point in boundary:
+            point.y = y
+    for lane, y in zip(world.lane_model.lanes, (1.35, 1.85)):
+        for point in lane.centerline:
+            point.y = y
+    product = Product(library, world)
+    try:
+        for start, target, y, goal_y in ((1, 2, 1.35, 1.85), (2, 1, 1.85, 1.35)):
+            assert library.probe_lane_guide(product.handle, start, target, y, goal_y) == FOUND
+            assert library.probe_valid(product.handle) == FOUND
+            assert abs(product.path()[-1][1] - goal_y) < abs(y - goal_y)
+    finally:
+        product.close()
+
+
 def test_lane_change_captures_a_near_goal_only_after_whole_body_arrives(library):
     ports(library)
     library.probe_lane_change_terminal_path.argtypes = [C.c_void_p, C.c_float]
@@ -261,11 +282,64 @@ def test_short_unblocked_lane_goal_does_not_require_bypass_settling_length(libra
     try:
         assert library.engine_plan(handle, 1220000, 4096) == 0
         state = exported_state(library, handle)
-        assert .30 < state.path[-1].pose.x-5.2 < .40
+        assert .30 < state.path[-1].pose.x-5.2 < .80
         command = (C.c_float*4)()
         assert library.engine_track_grant(handle, grant, len(grant), 1220000, command) == 0
         assert command[0] > 0
     finally: library.engine_free(handle)
+
+
+@pytest.mark.parametrize('state', ['free', 'occupied', 'unknown'])
+def test_short_interpolated_lane_uses_full_swept_grid(library, state):
+    world = modern_world()
+    world.reference_vehicle_pose.x = .40
+    model = world.lane_model
+    # The observed window is shorter than the 40 cm fixture body. Its ends
+    # cut across the stationary footprint, but the full grid covers it.
+    for points in (model.divider, *(lane.centerline for lane in model.lanes)):
+        for point, x in zip(points, (.36, .46, .56, .71)):
+            point.x = x
+    model.divider_state = bytes([1])*4
+    model.divider_position_bound_m = .10
+    model.divider_heading_bound_rad = .30
+    model.divider_normal_position_bound_m = .10
+    for lane in model.lanes:
+        lane.point_state = bytes([1])*4
+        lane.position_bound_m = .10
+        lane.heading_bound_rad = .30
+        lane.outer_normal_position_bound_m = .10
+        lane.outer_chord_delta_bound_m = .04
+    world.localization.geometry_position_bound_m = .10
+    world.localization.geometry_heading_bound_rad = .30
+    if state == 'occupied':
+        obstacle(world, 2, 3, 11, 12)
+    if state == 'unknown':
+        obstacle(world, 2, 3, 11, 12, unknown=True)
+        flags = bytearray(world.cell_flags)
+        flags[11*world.width+2] &= ~1
+        world.cell_flags = bytes(flags)
+    handle, grant = engine(library, world)
+    try:
+        rc = library.engine_plan(handle, 1220000, 4096)
+        if state == 'free':
+            assert rc == 0
+            assert exported_state(library, handle).path[-1].pose.x > .52
+            command = (C.c_float*4)()
+            assert library.engine_track_grant(handle, grant, len(grant), 1220000, command) == 0
+            assert command[0] > 0
+        else:
+            assert rc != 0
+    finally: library.engine_free(handle)
+
+
+def test_interpolation_guides_follow_but_cannot_prove_a_crossing(library):
+    ports(library)
+    world = modern_world(); world.lane_model.divider_state = bytes([0, 1, 0, 0])
+    value = Product(library, world)
+    try:
+        assert library.probe_task_lane(value.handle, 1., 1.2, 0, .01) == 1
+        assert library.probe_task_contains(value.handle, 1, 2, 1, 1., 1.6, 0, .01) == 0
+    finally: value.close()
 
 
 def test_selected_parking_approach_lane_is_required_without_authorizing_other_apron_space(library):

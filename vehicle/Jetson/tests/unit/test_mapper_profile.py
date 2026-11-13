@@ -11,6 +11,7 @@ from xenova_vehicle.perception.pipeline import PipelineProfile
 from xenova_vehicle.perception.free_space import TargetClass
 from xenova_vehicle.perception.parking import ParkingAisle
 from xenova_vehicle.perception.tof import TofLeaf
+from xenova_vehicle.perception.visual_registration import VisualRegistrationPolicy
 
 
 def calibration(*, leaf=None):
@@ -86,6 +87,25 @@ class MapperProfileTests(unittest.TestCase):
         self.assertNotIn('missing_outer_width_bounds_m', restored.to_dict()['pipeline']['road'])
         self.assertAlmostEqual(restored.pipeline.road.missing_outer_width_m, .285)
         self.assertAlmostEqual(restored.pipeline.road.missing_outer_width_error_m, .025)
+
+    def test_visual_policy_and_mapped_road_limits_are_optional_and_independent(self):
+        value = profile_fields()
+        fields = value['pipeline']
+        del fields['road_geometry_limits'], fields['visual_registration']
+        legacy = MapperProfile(value)
+        self.assertEqual(legacy.pipeline.identity_fields(), fields)
+        self.assertEqual(legacy.pipeline.road_limits.max_yaw_error_rad, legacy.pipeline.registration.max_yaw_error_rad)
+
+        fields['road_geometry_limits'] = dict(max_position_error_m=.04,max_yaw_error_rad=.03)
+        fields['visual_registration'] = asdict(VisualRegistrationPolicy(revisit_min_age_us=2_000_000))
+        profile = MapperProfile.from_bytes(MapperProfile(value).canonical_bytes)
+        self.assertEqual(profile.pipeline.road_limits.max_position_error_m,.04)
+        self.assertEqual(profile.pipeline.registration.max_position_error_m,.05)
+        self.assertEqual(profile.pipeline.road_limits.max_yaw_error_rad,.03)
+        self.assertEqual(profile.pipeline.visual_registration.revisit_min_age_us,2_000_000)
+        fields['visual_registration']['revisit_max_cells'] = 4097
+        with self.assertRaises(MapperProfileError):
+            MapperProfile(value)
 
     def test_original_work_age_shape_and_stopping_bounds_are_enforced(self):
         changes=(('pipeline','free_ttl_us',500001),('pipeline','max_observation_age_us',500001),

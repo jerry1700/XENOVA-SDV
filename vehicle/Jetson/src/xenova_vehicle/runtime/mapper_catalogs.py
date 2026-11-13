@@ -25,6 +25,7 @@ from ..perception.inputs import FrameStamp
 from ..perception.parking import ParkingAisle, ParkingProfile, VALID
 from ..perception.parking_entrance import parking_aisles as observed_parking_aisles, parking_slot_tape
 from ..perception.pipeline import PerceptionResult
+from ..perception.road import RoadGeometryLimits
 from ..storage.contracts import (StorageContext, StorageJob, CatalogHeadSnapshot, CommitReceipt,
     ProvenanceRange, LoadRequest, canonical, json_bytes, uint)
 from ..storage.port import CheckpointRequest
@@ -159,7 +160,7 @@ class MapperCatalogs:
     """
     def __init__(self, context, *, mailbox, clock_id, map_frame_id, body,
             method_manifest_sha256, input_kind, calibration_profile=None, parking_aisles=(),
-            aisle_lane_indices=None, crossing=None, lane_profile=RegistrationProfile(),
+            aisle_lane_indices=None, crossing=None, lane_profile=RegistrationProfile(), road_geometry_limits=None,
             parking_profile=ParkingProfile(), association_profile=AssociationProfile(), clock_us=None,
             parking_geometry_interval_us=None):
         if type(context) is not StorageContext or type(mailbox) is not MapperStorageMailbox or mailbox.context_sha256 != context.sha256:
@@ -169,6 +170,10 @@ class MapperCatalogs:
         self._completion_clock=clock_us
         if type(body) is not BodyModel or type(lane_profile) is not RegistrationProfile:
             raise ValueError('explicit body/registration policy required')
+        if road_geometry_limits is None:
+            road_geometry_limits = RoadGeometryLimits(lane_profile.max_position_error_m, lane_profile.max_yaw_error_rad)
+        elif type(road_geometry_limits) is not RoadGeometryLimits:
+            raise ValueError('typed road geometry limits required')
         if (type(parking_aisles) is not tuple or len(parking_aisles) > 4
                 or any(type(a) is not ParkingAisle for a in parking_aisles)):
             raise ValueError('at most four declared parking aisles required')
@@ -191,6 +196,7 @@ class MapperCatalogs:
         self._queued = self._head = self._delivery = self._terminal = None
         self._submitted = False
         self._crossing, self._lane_profile = crossing, lane_profile
+        self._road_limits = road_geometry_limits
         self._aisles, self._roles = parking_aisles, aisle_lane_indices
 
     def _owner(self):
@@ -304,7 +310,7 @@ class MapperCatalogs:
         temporal = result.mapped_road
         if temporal_provenance_id is not None:
             uint(temporal_provenance_id, positive=True)
-            if temporal is None or not temporal.within(self._lane_profile):
+            if temporal is None or not temporal.within(self._road_limits):
                 raise ValueError('provenance requires actual bounded mapped road')
             parent_roots.add(temporal_provenance_id)
         if parking_provenance_id is not None:
@@ -321,7 +327,7 @@ class MapperCatalogs:
                 raise ValueError('lane provenance is not the original full RGB capture')
         if self._crossing is None:
             lane_status = 'UNCONFIGURED'; reasons.append('CROSSING_POLICY_UNCONFIGURED')
-        elif temporal is not None and not temporal.within(self._lane_profile):
+        elif temporal is not None and not temporal.within(self._road_limits):
             lane_status = 'UNKNOWN'; reasons.append('GEOMETRY_ENVELOPE_TOO_WIDE')
         elif temporal is not None and temporal_provenance_id is None:
             lane_status = 'UNKNOWN'; reasons.append('TEMPORAL_RGB_PROVENANCE_UNAVAILABLE')
@@ -338,7 +344,7 @@ class MapperCatalogs:
             if temporal is None:
                 proof = state.lane.observe(road, source, capture_prior,
                     prior_qualified=prior_qualified, crossing=crossing, profile=self._lane_profile,
-                    position_radius_m=position_radius_m)
+                    position_radius_m=position_radius_m, geometry_limits=self._road_limits)
             else:
                 record = by_id[temporal_provenance_id]
                 if (PROVENANCE.unpack(record.payload)[2] != 4 or len(record.parents) < 2
@@ -346,7 +352,7 @@ class MapperCatalogs:
                         or record.pi_lower > metric_evidence.pi_interval[0] or record.pi_upper < metric_evidence.pi_interval[1]):
                     raise ValueError('original temporal RGB closure required')
                 proof = state.lane.observe_mapped(temporal, source, prior_qualified=prior_qualified,
-                    crossing=crossing, profile=self._lane_profile)
+                    crossing=crossing, profile=self._lane_profile, geometry_limits=self._road_limits)
                 lane_provenance_ids = (temporal_provenance_id,)*2
             lane_status = 'AMBIGUOUS' if road.complete and road.status == 'AMBIGUOUS' else proof.status
             lane_model = state.lane.update(proof, provenance_ids=lane_provenance_ids)

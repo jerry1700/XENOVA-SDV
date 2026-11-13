@@ -179,45 +179,44 @@ class YawBias:
         return moving, timing, wheel_angle
 
     def project(self, alignment, raw, profile):
-        """Use the residual interval only with a continuous raw wheel path and fresh evidence."""
-        legacy = alignment.apply(raw)
+        """Propagate the heading rate along the wheel path, even before the first bias estimate."""
+        self.applied, self.applied_rate = False, None
         limit = alignment.yaw_drift_rps
-        if not limit or self.interval is None or self.updates < 2 or alignment._matched_poses is None:
-            return legacy
-        age_us = raw.sample.at_us-self.updated_us
-        if age_us < 0:
-            return legacy
+        if not limit or alignment._matched_poses is None:
+            return alignment.apply(raw)
         start, _ = alignment._matched_poses
         steps = self._steps(start, raw)
-        if not steps or not any(travel>0 for _,_,_,travel in steps):
-            return legacy
-        fresh = age_us <= _MAX_AGE_US
-        if fresh:
-            width = _RATE_WALK*age_us/1e6
-            lo, hi = max(-limit,self.interval[0]-width), min(limit,self.interval[1]+width)
-            centered = (lo+hi)/2
-            estimate = self.rate if abs(self.rate) >= math.sqrt(self.variance+width**2) else centered
-        else:
-            # An old rate estimate cannot move the pose. The wheel path still allows
-            # propagation with the full configured interval around zero.
-            centered = estimate = 0.
+        if not steps:
+            return alignment.apply(raw)
+        age_us = 0 if self.updated_us is None else raw.sample.at_us-self.updated_us
+        fresh = (self.updated_us is not None and self.interval is not None
+                 and self.updates >= 2 and 0 <= age_us <= _MAX_AGE_US)
         observed = self.interval if fresh else (-limit,limit)
         history = tuple(self._rate_history(start,steps,limit,fresh))
+        nominal = self._project_rate(alignment,raw,start,history,observed,max(0,age_us)/1e6,0.)
+        if not fresh or not any(travel>0 for _,_,_,travel in steps):
+            return nominal
+        width = _RATE_WALK*age_us/1e6
+        lo, hi = max(-limit,self.interval[0]-width), min(limit,self.interval[1]+width)
+        centered = (lo+hi)/2
+        estimate = self.rate if abs(self.rate) >= math.sqrt(self.variance+width**2) else centered
         def bound_score(candidate):
             pose = candidate.sample
             return max(pose.position_error_m/max(profile.max_position_error_m,1e-12),
                        pose.yaw_error_rad/max(profile.max_yaw_error_rad,1e-12))
-        candidates = [(legacy,None)]
-        legacy_score = bound_score(legacy)
+        candidates = [(nominal,None)]
+        nominal_score = bound_score(nominal)
         # Try a damped correction before giving up the signed estimate entirely.
         for rate in dict.fromkeys((estimate,(estimate+centered)/2,centered)):
+            if not rate:
+                continue
             projected = self._project_rate(alignment,raw,start,history,observed,age_us/1e6,rate)
-            if (math.hypot(projected.sample.x-legacy.sample.x,projected.sample.y-legacy.sample.y)
-                    <= legacy.sample.position_error_m+projected.sample.position_error_m
-                    and abs(wrap_yaw(projected.sample.yaw-legacy.sample.yaw))
-                    <= legacy.sample.yaw_error_rad+projected.sample.yaw_error_rad):
+            if (math.hypot(projected.sample.x-nominal.sample.x,projected.sample.y-nominal.sample.y)
+                    <= nominal.sample.position_error_m+projected.sample.position_error_m
+                    and abs(wrap_yaw(projected.sample.yaw-nominal.sample.yaw))
+                    <= nominal.sample.yaw_error_rad+projected.sample.yaw_error_rad):
                 candidates.append((projected,rate))
-                if rate != centered and bound_score(projected) <= min(1.,legacy_score):
+                if rate != centered and bound_score(projected) <= min(1.,nominal_score):
                     self.applied_rate,self.applied = rate,True
                     return projected
         # If the point estimate costs more than the existing budget, the interval
@@ -228,7 +227,7 @@ class YawBias:
 
     def _rate_history(self,start,steps,limit,fresh):
         """Expand the measured rate interval over the wall time of each wheel step."""
-        offset = (start.sample.at_us-self.updated_us)/1e6
+        offset = (start.sample.at_us-self.updated_us)/1e6 if fresh else 0.
         for dx,dy,dt,travel in steps:
             end_offset = offset+dt
             lo,hi = -limit,limit

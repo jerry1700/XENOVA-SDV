@@ -173,7 +173,7 @@ class FreeScheduler:
 
     def plan(self, *, context_key, needed_mask, support, permission, state, observed_us, time_known,
              now_us, capture_lower_us, max_cells, max_ray_tests, cycle_bound_us, completion_bound_us,
-             free_ttl_us=500_000, preferred_surrounding=()):
+             free_ttl_us=500_000, preferred_surrounding=(), visible_mask=None):
         """원 live grid만 읽는다. retained mask는 받지 않으며 UNKNOWN/실패도 원 시도 예산을 쓴다.
 
         cycle/completion은 caller의 명시 상한이다. capacity_ok도 그 상한 아래의 필요조건일
@@ -202,6 +202,10 @@ class FreeScheduler:
         if defined and (type(needed_mask) is not np.ndarray or needed_mask.dtype != np.bool_ or needed_mask.shape != shape):
             raise ValueError('required corridor must be an explicit whole-cell bool mask')
         needed = np.zeros(count, dtype=bool) if not defined else needed_mask.reshape(-1)
+        if visible_mask is not None and (type(visible_mask) is not np.ndarray or visible_mask.dtype != np.bool_
+                or visible_mask.shape != shape):
+            raise ValueError('visible priority requires an exact same-shape bool mask')
+        visible = None if visible_mask is None else visible_mask.reshape(-1)
         previous = np.frombuffer(self._previous_needed, dtype=np.bool_)
         eligible = (support & permission).reshape(-1)
         states, observed = state.reshape(-1), observed_us.reshape(-1)
@@ -230,8 +234,12 @@ class FreeScheduler:
             third.sort(key=lambda i: (i-self._surround_cursor)%count)
         # 같은 정렬 순서의 실제 시도 prefix만 만든다. 전체 due 분모와 cursor는
         # 아래 원 mask에서 그대로 계산하며 미선택 셀의 증거는 만들지 않는다.
-        ordered = ((index, priority) for priority, group in
-            (('REQUIRED_EXPIRING', first), ('REQUIRED_NEW_OR_UNPROVEN', second), ('SURROUNDING', third)) for index in group)
+        groups = (('REQUIRED_EXPIRING', first), ('REQUIRED_NEW_OR_UNPROVEN', second), ('SURROUNDING', third))
+        if visible is None:
+            ordered = ((index, priority) for priority, group in groups for index in group)
+        else:
+            ordered = ((index, priority) for in_view in (True,False) for priority, group in groups
+                       for index in group if bool(visible[index]) == in_view)
         selected = tuple(islice(ordered, cells)) if rays else ()
         self._cursor_before=(self._required_cursor,self._surround_cursor,self._previous_needed)
         required_selected = [index for index, _ in selected if needed[index]]

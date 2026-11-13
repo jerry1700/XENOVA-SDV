@@ -103,14 +103,37 @@ def wheel_progress(profile, previous, old_pose, current, pose, *, max_speed, max
     return WheelProgress((*current.source, current.sequence, current.device_us), current, profile)
 
 
-def relative_wheel_bounds(start, end):
-    """start 차체 좌표로 본 end의 위치·방향 오차. 증거가 끊기면 None을 반환한다."""
+def _continuous_captures(start, end):
     first, last = start.wheel_capture, end.wheel_capture
     if first is None or last is None or start.sample.context != end.sample.context:
         return None
     a, b = first.progress, last.progress
     if a.segment != b.segment or a.profile != b.profile:
         return None
+    return first,last
+
+
+def wheel_path_length_bound(start, end):
+    """같은 휠 구간의 이동 길이 상한. 중간 자세가 휘발된 경우에도 prefix로 계산한다."""
+    captures = _continuous_captures(start,end)
+    if captures is None:
+        return None
+    first,last = captures
+    a,b = first.progress,last.progress
+    model = a.profile
+    nominal = abs(b.travel_m-a.travel_m)
+    calibration = model.distance_error_ratio*abs(b.wheel_travel_m-a.wheel_travel_m)/2
+    quantization = model.metres_per_tick_upper*abs(b.observation.sequence-a.observation.sequence)
+    return nominal+calibration+quantization+first.position_pad_m+last.position_pad_m
+
+
+def relative_wheel_bounds(start, end):
+    """start 차체 좌표로 본 end의 위치·방향 오차. 증거가 끊기면 None을 반환한다."""
+    captures = _continuous_captures(start,end)
+    if captures is None:
+        return None
+    first,last = captures
+    a,b = first.progress,last.progress
     steps = abs(a.observation.sequence - b.observation.sequence)
     travel = abs(a.travel_m - b.travel_m)
     wheel_travel = abs(a.wheel_travel_m - b.wheel_travel_m)

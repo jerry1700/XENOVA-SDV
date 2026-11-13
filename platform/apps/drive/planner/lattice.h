@@ -26,7 +26,7 @@ struct lp_config {
  primitive_speed,primitive_duration,pose_age_us,live_age_us,cell_age_ms,
  deviation_cost,curvature_cost,switch_cost,plan_horizon,heuristic_weight,heading_weight,tracking_guard,goal_straight_m;
  float max_reverse_velocity;
- /* Zero tape allowance leaves the standard lane follower selected. */
+ /* Tape controls boundary geometry. Zero narrow-lane speed disables its speed cap. */
  float lane_tape_half_width_m,lane_tape_overhang_m,narrow_lane_speed_mps;
  float avoid_travel_m,avoid_progress_m,avoid_pass_margin_m,avoid_heading_rad,avoid_steering_rad;
  float parking_goal_distance,parking_goal_heading,parking_seed_inward_m,parking_yaw_seed_rad,min_control_speed;
@@ -41,10 +41,13 @@ struct lp_primitive_point { float x,y,yaw,steer; };
 struct lp_assets { const char *id,*sha256; float resolution,wheelbase,max_steer,steer_rate,speed,duration;
  struct lp_primitive_point motion[LP_STEERS][LP_STEERS][LP_PRIMITIVE_SAMPLES]; };
 struct lp_collision_index { const dw_world *world;uint64_t sequence,rows[64],shoulder[64];float cell_age_ms,live_age_us;bool lane_pair_simple;
- float road_allowance;dw_point road_with_allowance[2*TR_BASIS_POINTS]; };
+ uint64_t refined[64];
+ float road_allowance;dw_point road_with_allowance[2*TR_BASIS_POINTS];
+ float lane_allowance;bool lane_edges_ready;struct tr_lane_edges lane_edges[2]; };
 struct lp_budget { uint64_t deadline_us; int (*clock)(void *,uint64_t *); bool (*cancelled)(void *);void *context;
  const struct lp_collision_index *collision_index; };
 struct lp_metrics { uint64_t expanded,primitives,footprints,cells,road_checks,cancel_checks,clock_checks;
+ uint64_t subcells;
  unsigned nodes_high_water,open_high_water,index_probes_max; };
 struct lp_node { dw_pose pose;float steer,g,f,road_cost;int16_t qx,qy;uint8_t heading,steering,closed,cusps;int8_t gear;bool deviated;
  int parent,heap;uint8_t edge; };
@@ -79,7 +82,7 @@ struct lp_search {
 struct lp_road_state {dw_pose pose;float arc,offset,curvature,length;};
 /* Geometry of one immutable path, owned by its published slot. Each segment
  * starts at arc zero. Live map and vehicle checks remain in the tracker. */
-struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3];};
+struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3],sweep_pad[LP_PATH];};
 struct lp_parking_cache {struct tr_parking_geometry geometry;bool ready;};
 struct lp_tracker { size_t index;float last_velocity,last_steer;uint64_t completed;
  uint64_t path_token,last_pi_us,gate_revision;unsigned segment;float progress;bool initialized; };
@@ -117,22 +120,38 @@ enum lp_result lp_start_exit(struct lp_search *,const dw_world *,dw_pose,float,
  const struct tr_intent *,const struct tr_basis *,const struct lp_config *,const struct lp_assets *,struct lp_budget);
 enum lp_result lp_task_obstructed(const dw_world *,const struct tr_intent *,dw_pose,dw_pose,
  const struct lp_config *,struct lp_budget,struct lp_metrics *,bool *);
+float lp_terminal_clearance(const struct lp_config *);
+float lp_lookahead_distance(const struct lp_config *,float speed);
+float lp_stopping_distance(const struct lp_config *,float speed);
+/* Try a forward lane-guided path whose body fits the observed road. The caller
+ * retains the existing path admission and may run the lattice on NOT_FOUND.
+ * curve_blocker selects a continuous merge for avoidance on a bend. */
+enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,float,dw_pose,
+ const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *,
+ struct lp_tracking_geometry *,bool curve_blocker);
 /* Build once per immutable map/configuration; 64 rows, no global cache. */
-/* Try a forward same-lane path whose body fits the observed bend. The caller
- * retains the existing path admission and may run the lattice on NOT_FOUND. */
-enum lp_result lp_lane_guide(struct lp_search *,struct lp_path *,const dw_world *,dw_pose,float,dw_pose,
- const struct lp_config *,struct lp_budget,const struct tr_intent *,const struct tr_basis *,struct lp_metrics *);
 void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp_config *);
 /* Maximum expansions per slice; collision and cancellation checks are also
  * bounded inside each primitive/footprint. SEARCHING is not completed progress. */
 enum lp_result lp_advance(struct lp_search *,unsigned,struct lp_path *);
 enum lp_result lp_footprint(const dw_world *,dw_pose,float,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
 enum lp_result lp_validate_path(const struct lp_path *,const dw_world *,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
+enum lp_result lp_validate_path_prepared(const struct lp_path *,const dw_world *,const struct lp_config *,
+ struct lp_metrics *,const struct lp_budget *,struct lp_tracking_geometry *);
+/* Recheck a published path against a new map using its slot's validated geometry. */
+enum lp_result lp_recheck_path(const struct lp_path *,const struct lp_tracking_geometry *,const dw_world *,
+ const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
+/* Check the untravelled suffix, including the edge that contains progress. */
+enum lp_result lp_recheck_suffix(const struct lp_path *,const struct lp_tracking_geometry *,const dw_world *,
+ const struct lp_config *,struct lp_metrics *,const struct lp_budget *,const struct lp_tracker *);
+/* Roll the actual terminal pose and steering toward the lane on the current map. */
+enum lp_result lp_continue_lane(const struct lp_path *,const dw_world *,const struct lp_config *,
+ struct lp_metrics *,const struct lp_budget *,bool bend);
 enum lp_result lp_clearance_lower(const struct lp_path *,const dw_world *,const struct lp_config *,float,
  struct lp_metrics *,const struct lp_budget *,float *);
 enum lp_result lp_track(struct lp_tracker *,const struct lp_path *,const dw_world *,dw_pose,const dw_vehicle *,
  const struct lp_config *,float dt,struct lp_command *,struct lp_metrics *,const struct lp_budget *);
-bool lp_prepare_tracking(const struct lp_path *,struct lp_tracking_geometry *);
+bool lp_prepare_tracking(const struct lp_path *,const struct lp_config *,struct lp_tracking_geometry *);
 /* Only use geometry prepared for this exact path. Reset the optional parking
  * cache whenever the leased map or path generation changes. */
 enum lp_result lp_track_prepared(struct lp_tracker *,const struct lp_path *,const struct lp_tracking_geometry *,

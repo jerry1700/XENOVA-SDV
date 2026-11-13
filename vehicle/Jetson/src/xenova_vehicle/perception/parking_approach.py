@@ -1,13 +1,11 @@
 """주차 입구 주변의 원 흰선으로 두 차로의 짧은 지도 구간을 다시 맞춘다."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import math
 from statistics import median
 
 from .road import LaneHypothesis, RoadResult
-from .road_normals import heading_error
-from ..mapping.registration import transform_point, wrap_yaw
-from ..mapping.wheel_motion import relative_wheel_bounds
+from .road_normals import axis_error, heading_error, wheel_aligned_strips
 
 
 _WINDOW_M = .46
@@ -41,17 +39,7 @@ class _Point:
     source: tuple
 
     def axis_bound(self, direction, error):
-        return _axis_bound(self.raw, error, self.rotation-direction, self.position_error, self.yaw_error)
-
-
-def _axis_bound(raw, error, angle, position_error, yaw_error):
-    c, s = math.cos(angle), math.sin(angle)
-    x, y = raw
-    parallel, transverse = c*x-s*y, s*x+c*y
-    along_error = abs(c)*error[0]+abs(s)*error[1]
-    across_error = abs(s)*error[0]+abs(c)*error[1]
-    return (along_error + position_error + (abs(parallel)+along_error)*(1-math.cos(yaw_error))
-            + (abs(transverse)+across_error)*math.sin(min(math.pi/2, yaw_error)))
+        return axis_error(self.raw, error, self.rotation-direction, self.position_error, self.yaw_error)
 
 
 def _point(raw, mapped, camera_error, path_error, pose, origin, heading, source, *, vertex_bounds):
@@ -61,8 +49,8 @@ def _point(raw, mapped, camera_error, path_error, pose, origin, heading, source,
     yaw = min(math.pi, pose.yaw_error_rad)
     rotation = pose.yaw-heading
     error = camera_error if vertex_bounds else tuple(map(max, camera_error, path_error))
-    du = _axis_bound(raw, error, rotation, pose.position_error_m, yaw)
-    dv = _axis_bound(raw, error, rotation-math.pi/2, pose.position_error_m, yaw)
+    du = axis_error(raw, error, rotation, pose.position_error_m, yaw)
+    dv = axis_error(raw, error, rotation-math.pi/2, pose.position_error_m, yaw)
     return _Point(u,v,du,dv,raw,camera_error,path_error,rotation,pose.position_error_m,yaw,source)
 
 
@@ -190,38 +178,6 @@ def _basis(span):
     if side*(-s*span.outward[0]+c*span.outward[1]) < 0:
         heading += math.pi
     return origin,heading
-
-
-def _wheel_aligned_strips(strips, source_key):
-    """Place raw tape in one nominal map frame with only relative pose error."""
-    reference = next((s for s in strips if s.source == source_key and s.capture_pose is not None
-                      and s.capture_pose.wheel_capture is not None and s.mapped_pose is not None),None)
-    if reference is None:
-        return (),None
-    capture, anchor = reference.capture_pose,reference.mapped_pose.sample
-    raw_anchor = capture.sample
-    rotation = wrap_yaw(anchor.yaw-raw_anchor.yaw)
-    poses = {source_key:replace(reference.mapped_pose,sample=replace(anchor,position_error_m=0.,yaw_error_rad=0.))}
-    aligned = []
-    for strip in strips:
-        if strip.source[:-1] != source_key[:-1] or strip.capture_pose is None:
-            continue
-        if strip.source not in poses:
-            bounds = relative_wheel_bounds(capture,strip.capture_pose)
-            if bounds is None:
-                poses[strip.source] = None
-            else:
-                raw = strip.capture_pose.sample
-                x,y = transform_point((raw.x-raw_anchor.x,raw.y-raw_anchor.y),(anchor.x,anchor.y,rotation))
-                sample = replace(raw,x=x,y=y,yaw=wrap_yaw(raw.yaw+rotation),
-                                 position_error_m=bounds[0],yaw_error_rad=bounds[1])
-                poses[strip.source] = replace(strip.capture_pose,sample=sample)
-        pose = poses[strip.source]
-        if pose is not None:
-            nominal = pose.sample.x,pose.sample.y,pose.sample.yaw
-            aligned.append(replace(strip,mapped_pose=pose,points=tuple(
-                transform_point(point,nominal) for point in strip.original.points_xy)))
-    return tuple(aligned),anchor
 
 
 def _edge_samples(rows, stations=()):
@@ -357,7 +313,7 @@ def _common_heading(chords):
 
 
 def _staggered_fit(span, strips, source_key, profile):
-    aligned,anchor_pose = _wheel_aligned_strips(strips,source_key)
+    aligned,anchor_pose = wheel_aligned_strips(strips,source_key)
     if anchor_pose is None or len({s.source for s in aligned}) < 2:
         return None
     origin,heading = _basis(span)
