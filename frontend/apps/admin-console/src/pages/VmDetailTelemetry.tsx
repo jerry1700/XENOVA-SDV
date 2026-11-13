@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type CSSProperties, type ReactNode } from 'react';
 import { useMetrics, useProcesses, useThreads } from '../api/queries';
 import type { MetricSample, ProcessInfo, ThreadsResponse, Vm } from '../api/types';
 import { buildCpuChartScale } from '../domain/cpuChart';
@@ -225,6 +225,33 @@ function CpuCells({ value, reason }: { value: number | null; reason?: string | n
   );
 }
 
+/**
+ * 프로세스·스레드 표 영역. 위 상태 줄(한 줄 고정)과 표 영역(접힌 상태 최소 높이 = 표 머리 + VISIBLE_ROWS 행)으로 나눠,
+ * 불러오는 중·오류·보고 없음·행 부족·정상 모두 같은 높이. "N개 더 보기"로 펼칠 때만 늘어난다.
+ */
+function TableFrame({
+  state,
+  status,
+  children,
+}: {
+  state: 'loading' | 'error' | 'empty' | 'ok';
+  status?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <p className={styles.detailTableStatus}>{status}</p>
+      <div
+        className={styles.detailTableFrame}
+        data-state={state}
+        style={{ '--table-rows': VISIBLE_ROWS + 1 } as CSSProperties}
+      >
+        {children}
+      </div>
+    </>
+  );
+}
+
 /** 막대 열 제목은 비워 둔다 (숫자 열 "CPU %" 가 이 값을 설명) */
 const BAR_HEADER = <th className={styles.detailBarCell} aria-hidden="true" />;
 
@@ -232,12 +259,19 @@ function Processes({ vmId }: { vmId: string }) {
   const processes = useProcesses(vmId, true);
   const items = byCpu<ProcessInfo>(processes.data?.items ?? []);
   const visible = useVisibleRows(items);
-  if (processes.isPending) return <p className={styles.dim}>불러오는 중…</p>;
+  if (processes.isPending)
+    return (
+      <TableFrame state="loading">
+        <p className={styles.dim}>불러오는 중…</p>
+      </TableFrame>
+    );
   if (processes.isError)
     return (
-      <p role="alert" className={styles.error}>
-        프로세스 정보를 불러오지 못했습니다.
-      </p>
+      <TableFrame state="error">
+        <p role="alert" className={styles.error}>
+          프로세스 정보를 불러오지 못했습니다.
+        </p>
+      </TableFrame>
     );
   const collection = processes.data?.process_collection;
   const collectionLabel = collection
@@ -251,60 +285,68 @@ function Processes({ vmId }: { vmId: string }) {
     : null;
   return (
     <>
-      <p className={styles.detailTableStatus}>
-        {processes.data?.stale && processes.data.observed_at && (
-          <span data-warn="true">마지막 프로세스 보고가 오래되었습니다.</span>
-        )}
-        {/* 수집 상태는 정상(수집 완료)이 아닐 때만. 일부 수집·읽기 실패·잘림은 주의 색 */}
-        {collection && collection.status !== 'ok' && collectionLabel && (
-          <span
-            data-warn={collection.status === 'partial' || collection.status === 'read_failed' || undefined}
-          >
-            {collectionLabel}
-          </span>
-        )}
-        {collection?.truncated && <span data-warn="true">상위 목록 일부만 보고됨</span>}
-        <span>CPU 높은 순 · {items.length}개</span>
-      </p>
-      <table className={styles.detailTable} data-kind="process">
-        <colgroup>
-          <col className={styles.detailNameCol} />
-          <col className={styles.detailIdCol} />
-          <col className={styles.detailValueCol} />
-          <col className={styles.detailBarCol} />
-          <col className={styles.detailRssCol} />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>이름</th>
-            <th data-id="true">PID</th>
-            <th data-num="true" data-cpu="true">
-              CPU %
-            </th>
-            {BAR_HEADER}
-            <th data-num="true">메모리 (RSS)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {visible.rows.map((p) => (
-            <tr key={p.pid}>
-              <td title={p.name}>{p.name}</td>
-              <td data-id="true">{p.pid}</td>
-              <CpuCells value={p.cpu_percent} />
-              <td data-num="true">{p.rss_bytes == null ? '—' : `${(p.rss_bytes / MIB).toFixed(1)} MiB`}</td>
-            </tr>
-          ))}
-          {items.length === 0 && (
+      <TableFrame
+        state={items.length === 0 ? 'empty' : 'ok'}
+        status={
+          <>
+            <span>CPU 높은 순 · {items.length}개</span>
+            {processes.data?.stale && processes.data.observed_at && (
+              <span data-warn="true">마지막 프로세스 보고가 오래되었습니다.</span>
+            )}
+            {/* 수집 상태는 정상(수집 완료)이 아닐 때만. 일부 수집·읽기 실패·잘림은 주의 색 */}
+            {collection && collection.status !== 'ok' && collectionLabel && (
+              <span
+                data-warn={
+                  collection.status === 'partial' || collection.status === 'read_failed' || undefined
+                }
+              >
+                {collectionLabel}
+              </span>
+            )}
+            {collection?.truncated && <span data-warn="true">상위 목록 일부만 보고됨</span>}
+          </>
+        }
+      >
+        <table className={styles.detailTable} data-kind="process">
+          <colgroup>
+            <col className={styles.detailNameCol} />
+            <col className={styles.detailIdCol} />
+            <col className={styles.detailValueCol} />
+            <col className={styles.detailBarCol} />
+            <col className={styles.detailRssCol} />
+          </colgroup>
+          <thead>
             <tr>
-              <td colSpan={5} className={styles.dim}>
-                {collection?.status === 'ok'
-                  ? '이 표본에 표시할 프로세스 없음'
-                  : (collectionLabel ?? '프로세스 보고 없음')}
-              </td>
+              <th>이름</th>
+              <th data-id="true">PID</th>
+              <th data-num="true" data-cpu="true">
+                CPU %
+              </th>
+              {BAR_HEADER}
+              <th data-num="true">메모리 (RSS)</th>
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {visible.rows.map((p) => (
+              <tr key={p.pid}>
+                <td title={p.name}>{p.name}</td>
+                <td data-id="true">{p.pid}</td>
+                <CpuCells value={p.cpu_percent} />
+                <td data-num="true">{p.rss_bytes == null ? '—' : `${(p.rss_bytes / MIB).toFixed(1)} MiB`}</td>
+              </tr>
+            ))}
+            {items.length === 0 && (
+              <tr>
+                <td colSpan={5} className={styles.dim}>
+                  {collection?.status === 'ok'
+                    ? '이 표본에 표시할 프로세스 없음'
+                    : (collectionLabel ?? '프로세스 보고 없음')}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </TableFrame>
       {visible.toggle}
     </>
   );
@@ -319,72 +361,90 @@ function Threads({ vmId }: { vmId: string }) {
     all.filter((thread) => !IDLE_THREAD_NAME.test(thread.thread_name)),
   );
   const visible = useVisibleRows(items);
-  if (query.isPending) return <p className={styles.dim}>스레드 정보를 불러오는 중…</p>;
+  if (query.isPending)
+    return (
+      <TableFrame state="loading">
+        <p className={styles.dim}>스레드 정보를 불러오는 중…</p>
+      </TableFrame>
+    );
   if (query.isError)
     return (
-      <p role="alert" className={styles.error}>
-        스레드 정보를 불러오지 못했습니다.
-      </p>
+      <TableFrame state="error">
+        <p role="alert" className={styles.error}>
+          스레드 정보를 불러오지 못했습니다.
+        </p>
+      </TableFrame>
     );
-  if (!report?.received_at || report.vm_id !== vmId) return <p className={styles.dim}>스레드 보고 없음</p>;
+  if (!report?.received_at || report.vm_id !== vmId)
+    return (
+      <TableFrame state="empty">
+        <p className={styles.dim}>스레드 보고 없음</p>
+      </TableFrame>
+    );
   return (
     <>
-      <p className={styles.detailTableStatus}>
-        {report.stale && <span data-warn="true">마지막 스레드 보고가 오래되었습니다.</span>}
-        {/* 이상할 때만 주의 색으로: 페이지 충돌·누락, 수집 잘림 등 */}
-        {report.conflicting_pages ? (
-          <span data-warn="true">페이지 충돌</span>
-        ) : (
-          !report.complete && (
-            <span data-warn="true">
-              페이지 {report.parts_received}/{report.part_count ?? '—'} 수신
-            </span>
-          )
-        )}
-        {report.threads_status && report.threads_status !== 'ok' && (
-          <span data-warn="true">
-            {report.threads_status === 'truncated' ? '일부 스레드만 수집됨' : report.threads_status}
-          </span>
-        )}
-        <span>CPU 높은 순 · {items.length}개</span>
-      </p>
-      <table className={styles.detailTable} data-kind="thread">
-        <colgroup>
-          <col className={styles.detailNameCol} />
-          <col className={styles.detailIdCol} />
-          <col className={styles.detailValueCol} />
-          <col className={styles.detailBarCol} />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>이름</th>
-            <th data-id="true">ID</th>
-            <th data-num="true" data-cpu="true">
-              CPU %
-            </th>
-            {BAR_HEADER}
-          </tr>
-        </thead>
-        <tbody>
-          {visible.rows.map((thread) => (
-            <tr key={thread.thread_id}>
-              <td title={`${thread.thread_name || '—'}${thread.name_truncated ? ' (잘림)' : ''}`}>
-                {thread.thread_name || '—'}
-                {thread.name_truncated ? ' (잘림)' : ''}
-              </td>
-              <td data-id="true">{thread.thread_id}</td>
-              <CpuCells value={thread.cpu_percent} reason={thread.unavailable_reason} />
-            </tr>
-          ))}
-          {items.length === 0 && (
+      <TableFrame
+        state={items.length === 0 ? 'empty' : 'ok'}
+        status={
+          <>
+            <span>CPU 높은 순 · {items.length}개</span>
+            {report.stale && <span data-warn="true">마지막 스레드 보고가 오래되었습니다.</span>}
+            {/* 이상할 때만 주의 색으로: 페이지 충돌·누락, 수집 잘림 등 */}
+            {report.conflicting_pages ? (
+              <span data-warn="true">페이지 충돌</span>
+            ) : (
+              !report.complete && (
+                <span data-warn="true">
+                  페이지 {report.parts_received}/{report.part_count ?? '—'} 수신
+                </span>
+              )
+            )}
+            {report.threads_status && report.threads_status !== 'ok' && (
+              <span data-warn="true">
+                {report.threads_status === 'truncated' ? '일부 스레드만 수집됨' : report.threads_status}
+              </span>
+            )}
+          </>
+        }
+      >
+        <table className={styles.detailTable} data-kind="thread">
+          <colgroup>
+            <col className={styles.detailNameCol} />
+            <col className={styles.detailIdCol} />
+            <col className={styles.detailValueCol} />
+            <col className={styles.detailBarCol} />
+          </colgroup>
+          <thead>
             <tr>
-              <td colSpan={4} className={styles.dim}>
-                이 표본에 표시할 스레드 없음
-              </td>
+              <th>이름</th>
+              <th data-id="true">ID</th>
+              <th data-num="true" data-cpu="true">
+                CPU %
+              </th>
+              {BAR_HEADER}
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {visible.rows.map((thread) => (
+              <tr key={thread.thread_id}>
+                <td title={`${thread.thread_name || '—'}${thread.name_truncated ? ' (잘림)' : ''}`}>
+                  {thread.thread_name || '—'}
+                  {thread.name_truncated ? ' (잘림)' : ''}
+                </td>
+                <td data-id="true">{thread.thread_id}</td>
+                <CpuCells value={thread.cpu_percent} reason={thread.unavailable_reason} />
+              </tr>
+            ))}
+            {items.length === 0 && (
+              <tr>
+                <td colSpan={4} className={styles.dim}>
+                  이 표본에 표시할 스레드 없음
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </TableFrame>
       {visible.toggle}
     </>
   );

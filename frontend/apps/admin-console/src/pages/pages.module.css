@@ -650,18 +650,6 @@ button.chip:hover:not(.chipOn) {
   height: 100%;
   background: var(--accent, var(--x-primary));
 }
-.eventRow {
-  display: grid;
-  grid-template-columns: 110px 90px 110px 130px 1fr;
-  gap: var(--x-space-3);
-  align-items: start;
-  padding: var(--x-space-3);
-  border-bottom: 1px solid var(--x-border);
-  font-size: var(--x-text-sm);
-}
-.eventRow:hover {
-  background: var(--x-surface-2);
-}
 .sev {
   display: inline-block;
   padding: 1px 6px;
@@ -1153,15 +1141,35 @@ button.chip:hover:not(.chipOn) {
   background: var(--vm-accent);
   content: '';
 }
-.vmCard[href]:hover,
-.vmCard[href]:focus-visible {
+.vmCard[data-linked] {
+  cursor: pointer;
+}
+.vmCard[data-linked]:hover,
+.vmCard[data-linked]:has(.vmCardTitleLink:focus-visible) {
   border-color: color-mix(in srgb, var(--vm-accent) 62%, var(--x-border));
   box-shadow: 0 18px 38px rgb(2 7 14 / 34%);
   transform: translateY(-3px);
 }
-.vmCard[href]:focus-visible {
+/* 키보드 초점은 제목 링크가 받고, 테두리는 카드 전체에 그린다 (예전 카드 링크와 같은 모양) */
+.vmCard[data-linked]:has(.vmCardTitleLink:focus-visible) {
   outline: 2px solid var(--x-primary);
   outline-offset: 3px;
+}
+.vmCardTitleLink {
+  color: inherit;
+  text-decoration: none;
+}
+.vmCardTitleLink:focus-visible {
+  outline: none;
+}
+.vmCardEventLink {
+  color: inherit;
+  text-decoration: none;
+}
+.vmCardEventLink:hover,
+.vmCardEventLink:focus-visible {
+  color: var(--x-text);
+  text-decoration: underline;
 }
 .vmCardMissing {
   opacity: 0.72;
@@ -1929,16 +1937,41 @@ button.chip:hover:not(.chipOn) {
   color: var(--x-recovering);
 }
 /* ---- S15P31E110-438 VM 상세 프로세스·스레드 표: Memory 탭 막대 행 모양 (공용 .table 과 별개) ---- */
+/* 표 위 상태 줄: 한 줄 높이 고정 (경고가 늘어도 표 영역이 밀리지 않게, 넘치면 잘리고 개수는 맨 앞) */
 .detailTableStatus {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--x-space-1) var(--x-space-3);
+  flex-wrap: nowrap;
+  gap: var(--x-space-3);
+  height: var(--x-space-4);
   margin: 0 0 var(--x-space-2);
+  overflow: hidden;
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
+  line-height: var(--x-space-4);
+  white-space: nowrap;
+}
+.detailTableStatus > span {
+  flex: none;
 }
 .detailTableStatus [data-warn] {
   color: var(--x-recovering);
+}
+/* 표 영역: 행 높이를 변수로 고정하고, 접힌 상태 최소 높이 = (표 머리 + VISIBLE_ROWS) 행.
+   --table-rows 는 컴포넌트가 VISIBLE_ROWS + 1 로 넘긴다. 불러오는 중·오류·보고 없음 문구는 이 안 위쪽에 */
+.detailTableFrame {
+  --table-row-h: calc(var(--x-space-2) * 2 + var(--x-space-5));
+  min-height: calc(var(--table-rows) * (var(--table-row-h) + 1px));
+}
+.detailTableFrame > p {
+  margin: 0;
+  padding: var(--x-space-2) 0;
+}
+.detailTableFrame .detailTable tr {
+  height: var(--table-row-h);
+}
+.detailTableFrame .detailTable th,
+.detailTableFrame .detailTable td {
+  line-height: var(--x-space-5);
 }
 /* [이름] [ID·PID] [CPU %] [짧은 CPU 막대] ([메모리 RSS]) — 고정 열 폭(table-layout: fixed)이라 값 길이에 따라 열이 흔들리지 않는다.
    열을 왼쪽에 모아 한 줄이 한 덩어리로 읽히게, 남는 폭은 오른쪽 */
@@ -2038,10 +2071,9 @@ button.chip:hover:not(.chipOn) {
 }
 .detailEventRow {
   display: grid;
-  grid-template-columns:
-    calc(var(--x-space-6) * 2 + var(--x-space-3)) calc(var(--x-space-6) * 3 + var(--x-space-4))
-    minmax(0, 1fr);
-  gap: var(--x-space-4);
+  /* 시각 | 상태(경고·오류 글자) | 내용 (종류·보조 글은 title 툴팁) */
+  grid-template-columns: calc(var(--x-space-6) * 2 + var(--x-space-3)) var(--x-space-6) minmax(0, 1fr);
+  gap: var(--x-space-3);
   align-items: baseline;
   padding: var(--x-space-2) 0;
   border-bottom: 1px solid var(--x-border);
@@ -2054,43 +2086,168 @@ button.chip:hover:not(.chipOn) {
   font-family: var(--x-font-mono);
   font-variant-numeric: tabular-nums;
 }
-/* 점 + 종류는 블록으로 두어 행의 글자 기준선(baseline)에 맞추고, 점은 글자 가운데 높이(vertical-align: middle)에 */
-.detailEventRow > .statusDot {
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-}
-.detailEventRow > .statusDot > i {
-  position: relative;
-  /* middle 은 영문 x-height 기준이라 한글 글자 가운데보다 약 2px 낮다 (헤드리스 Chrome 실측) → 반 칸 올린다 */
-  top: calc(var(--x-space-1) / -2);
-  display: inline-block;
-  margin-right: var(--x-space-2);
-  vertical-align: middle;
-}
-/* 심각도 점: 정보 = 기본 강조색, 경고·오류 = 상태 색 */
-.detailEventRow > .statusDot[data-tone='info'] > i {
-  background: var(--x-primary);
-}
-.detailEventRow > .statusDot[data-tone='error'] > i {
-  background: var(--x-fault);
-}
 .detailEventText {
   overflow: hidden;
   min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.detailEventText small {
-  margin-left: var(--x-space-2);
+/* 이벤트 화면: 시각 | 상태 | 대상 | 내용, 시각은 밀리초까지 (S15P31E110-462) */
+.detailEventRow[data-target] {
+  grid-template-columns:
+    calc(var(--x-space-6) * 3 + var(--x-space-3)) var(--x-space-6) calc(var(--x-space-6) * 4)
+    minmax(0, 1fr);
+}
+/* 열 제목 줄: 작은 회색, 행과 같은 grid */
+.detailEventRow[data-head] {
+  padding-top: 0;
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
 }
-.detailEventText code {
-  margin-left: var(--x-space-2);
-  color: var(--x-text-muted);
-  font-family: var(--x-font-mono);
+/* 상태: 경고·오류만 작은 색 글자, 정보는 빈 칸 */
+.eventSeverity {
   font-size: var(--x-text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.eventSeverity[data-tone='warning'] {
+  color: var(--x-recovering);
+}
+.eventSeverity[data-tone='error'] {
+  color: var(--x-fault);
+}
+/* 좁은 폭: 내용 열이 0 으로 줄어 안 보이지 않게 내용을 다음 줄 전체 폭으로 (말줄임, 전체는 title) */
+@media (max-width: 720px) {
+  .detailEventRow[data-target] {
+    grid-template-columns:
+      calc(var(--x-space-6) * 3 + var(--x-space-3)) var(--x-space-6)
+      minmax(0, 1fr);
+    row-gap: var(--x-space-1);
+  }
+  .detailEventRow[data-target] > .detailEventText,
+  .detailEventRow[data-target] > span:last-child {
+    grid-column: 1 / -1;
+  }
+}
+.eventTarget {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.eventTarget > i,
+.eventChip > i {
+  position: relative;
+  top: calc(var(--x-space-1) / -2);
+  display: inline-block;
+  width: var(--x-space-2);
+  height: var(--x-space-2);
+  margin-right: var(--x-space-2);
+  border-radius: 50%;
+  /* VM 역할색은 --dot 으로 받는다 (없으면 회색) */
+  background: var(--dot, var(--x-text-muted));
+  vertical-align: middle;
+}
+.eventDay {
+  margin: 0;
+  padding: var(--x-space-3) 0 var(--x-space-1);
+  border-bottom: 1px solid var(--x-border);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.eventDay:first-child {
+  padding-top: 0;
+}
+/* 필터 세 줄: 라벨 열 너비·칩 높이·간격 통일, 일반 글꼴 */
+.eventFilters {
+  display: grid;
+  grid-template-columns: calc(var(--x-space-6) * 2) minmax(0, 1fr);
+  gap: var(--x-space-1) var(--x-space-3);
+  align-items: center;
+}
+.eventFilters > span {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.eventFilters > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--x-space-1);
+}
+/* 선택 안 된 칩은 글자만(흐리게), 선택된 칩만 옅은 채움 박스 */
+.eventChip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--x-space-6);
+  padding: 0 var(--x-space-2);
+  border: 0;
+  border-radius: var(--x-radius-sm);
+  background: transparent;
+  color: var(--x-text-muted);
+  font: inherit;
+  font-size: var(--x-text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.eventChip > i {
+  top: 0;
+}
+.eventChip:hover {
+  color: var(--x-text);
+}
+.eventChip:focus-visible {
+  outline: 2px solid var(--x-primary);
+  outline-offset: 1px;
+}
+.eventChip[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--x-primary) 16%, transparent);
+  color: var(--x-text);
+}
+.eventChip > i[data-tone='info'] {
+  background: var(--x-primary);
+}
+.eventChip > i[data-tone='warning'] {
+  background: var(--x-recovering);
+}
+.eventChip > i[data-tone='error'] {
+  background: var(--x-fault);
+}
+/* 요약 타일: VM 상세 타일처럼 작은 회색 라벨, 중간 크기 값, 작은 단위·보조 줄 */
+.eventTiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--x-space-2);
+}
+.eventTiles > div {
+  display: grid;
+  align-content: start;
+  gap: var(--x-space-1);
+  min-width: 0;
+  padding: var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-2);
+}
+.eventTiles > div > span,
+.eventTiles > div > small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+.eventTiles > div > strong {
+  font-size: var(--x-text-lg);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.eventTiles > div > strong small {
+  margin-left: var(--x-space-1);
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+@media (max-width: 720px) {
+  .eventTiles {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 800px) {
   .vmDetailGrid,
@@ -2364,6 +2521,10 @@ button.chip:hover:not(.chipOn) {
 }
 .controlSummaryItem[data-tone='ok'] strong {
   color: var(--x-ok);
+}
+.controlSummaryItem small {
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
 }
 .controlGrid {
   display: grid;
@@ -4350,6 +4511,15 @@ button.chip:hover:not(.chipOn) {
   height: 100%;
   border-radius: inherit;
   background: var(--vm-accent);
+}
+.memUsageDetail {
+  grid-column: 1 / -1;
+  margin: 0;
+  overflow: hidden;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .memUsageNotice {
   grid-column: 1 / -1;

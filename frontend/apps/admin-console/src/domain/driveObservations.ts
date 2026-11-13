@@ -1,4 +1,5 @@
 import type { DriveSource, DriveState, SocketState } from '../api/drive';
+import { appLabel, appReasonLabel } from './appLabels';
 import { ago } from './roles';
 
 const PHASES = {
@@ -33,13 +34,21 @@ export function vmAppObservations(vmId: string, drive: DriveState | null, socket
       const heartbeatLabel = heartbeat
         ? HEARTBEAT[heartbeat.state]
         : unavailable(report.heartbeat_source.status);
+      const stage = lifecycle ? `${phaseLabel} · ${READINESS[lifecycle.readiness]}` : phaseLabel;
+      const reason = lifecycle?.reason ?? null;
+      const reasonLabel = reason ? appReasonLabel(reason) : null;
       return {
         appId,
+        appLabel: appLabel(appId),
         phaseLabel,
         heartbeatLabel,
-        state: lifecycle
-          ? [phaseLabel, READINESS[lifecycle.readiness], lifecycle.reason].filter(Boolean).join(' · ')
-          : phaseLabel,
+        /** 단계 · 준비 상태 (사유 제외) */
+        stage,
+        /** NOT_READY 사유 원문 코드 (없으면 null) */
+        reason,
+        /** 사유 한글 (모르는 코드는 원문) */
+        reasonLabel,
+        state: reasonLabel ? `${stage} · ${reasonLabel}` : stage,
         heartbeat: heartbeat ? `${heartbeatLabel} · ${ago(report.heartbeat_source.age_ms)}` : heartbeatLabel,
       };
     }),
@@ -51,8 +60,12 @@ export function vmAppObservations(vmId: string, drive: DriveState | null, socket
         const heartbeatLabel = fresh ? HEARTBEAT[fresh] : age != null && age > 3000 ? '관측 만료' : '미수신';
         return {
           appId,
+          appLabel: appLabel(appId),
           phaseLabel: '미수신',
           heartbeatLabel,
+          stage: '미수신',
+          reason: null,
+          reasonLabel: null,
           state: '미수신',
           heartbeat: fresh ? `${heartbeatLabel} · ${ago(age)}` : heartbeatLabel,
         };

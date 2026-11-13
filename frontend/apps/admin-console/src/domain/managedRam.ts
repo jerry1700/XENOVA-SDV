@@ -38,6 +38,10 @@ export interface ManagedRamSummary {
   totalBytes: string | null;
   committedBytes: string | null;
   freeBytes: string | null;
+  /** memory.firmware.mapped_bytes (image 포함). 구성 표시용 */
+  mappedBytes: string | null;
+  /** memory.firmware.static_data_bytes (image). 구성 표시용 */
+  imageBytes: string | null;
   /** ROUND_HALF_UP, 소수 세 자리의 정확한 십진값. */
   percent: string | null;
   sourceStatus: Record<string, { status: string | null; reason: string | null; sourceRc: number | null }>;
@@ -64,6 +68,8 @@ const unknown = (reason: string, status: ManagedRamSummary['status'] = 'unknown'
   totalBytes: null,
   committedBytes: null,
   freeBytes: null,
+  mappedBytes: null,
+  imageBytes: null,
   percent: null,
   sourceStatus: {},
 });
@@ -171,6 +177,8 @@ export function managedRamSummary(sample: MetricSample): ManagedRamSummary {
     totalBytes: total.toString(),
     committedBytes: committed.toString(),
     freeBytes: free.toString(),
+    mappedBytes: mapped.toString(),
+    imageBytes: image.toString(),
     percent: `${thousandths / 1000n}.${(thousandths % 1000n).toString().padStart(3, '0')}`,
     sourceStatus,
   };
@@ -324,4 +332,42 @@ export function buildManagedRamSeries(
       current: unknown('RAM_RECEIPT_EXPIRED'),
     };
   return { ...view, recentObservation: latest.summary, current: latest.summary };
+}
+
+export type ManagedRamPartKey = 'static' | 'image' | 'pages';
+
+export const MANAGED_RAM_PART_LABEL: Record<ManagedRamPartKey, string> = {
+  static: '정적 데이터',
+  image: '펌웨어 이미지',
+  pages: '할당 페이지',
+};
+
+/**
+ * 사용 중 RAM 의 겹치지 않는 구성 (여유 free 제외). 합 + free = total.
+ * 정적 데이터 = image(static_data), 펌웨어 이미지 = mapped − image, 할당 페이지 = committed − mapped.
+ * 검증을 통과한 요약(status ok)만 쓰고, 0 바이트 구성은 빼고 큰 순서로 돌려준다. 쓸 수 없으면 null.
+ */
+export function managedRamParts(
+  summary: ManagedRamSummary,
+): { key: ManagedRamPartKey; bytes: bigint }[] | null {
+  if (summary.status !== 'ok') return null;
+  const values = [summary.imageBytes, summary.mappedBytes, summary.committedBytes].map((value) => u64(value));
+  if (values.some((value) => value == null)) return null;
+  const [image, mapped, committed] = values as [bigint, bigint, bigint];
+  if (image > mapped || mapped > committed) return null;
+  const parts: { key: ManagedRamPartKey; bytes: bigint }[] = [
+    { key: 'static', bytes: image },
+    { key: 'image', bytes: mapped - image },
+    { key: 'pages', bytes: committed - mapped },
+  ];
+  return parts
+    .filter((part) => part.bytes > 0n)
+    .sort((a, b) => (a.bytes > b.bytes ? -1 : a.bytes < b.bytes ? 1 : 0));
+}
+
+/** 구성 크기: 1 MiB 이상이면 MiB, 그 아래는 KiB (소수 한 자리, 반올림) */
+export function formatManagedRamPart(bytes: bigint): string {
+  const [unit, divisor] = bytes >= 1_048_576n ? ['MiB', 1_048_576n] : ['KiB', 1024n];
+  const tenths = (bytes * 10n + divisor / 2n) / divisor;
+  return `${(tenths / 10n).toLocaleString('ko-KR')}.${tenths % 10n} ${unit}`;
 }
