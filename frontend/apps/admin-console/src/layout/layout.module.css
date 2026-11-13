@@ -201,3 +201,25 @@
   color: var(--x-text-muted);
   font-size: var(--x-text-sm);
 }
+
+/* 라우트 오류 화면 (RouteError) */
+.routeError {
+  margin: 48px auto;
+  max-width: 560px;
+  padding: 32px;
+  border: 1px solid var(--x-border, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  text-align: center;
+}
+
+.routeError h2 {
+  margin: 0 0 8px;
+}
+
+.routeError div {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  align-items: center;
+  margin-top: 20px;
+}

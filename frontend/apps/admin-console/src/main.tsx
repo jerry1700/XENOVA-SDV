@@ -9,6 +9,7 @@ import { RequireAuth } from './auth';
 import { ConsoleLayout } from './layout/ConsoleLayout';
 import { DashboardLayout } from './layout/DashboardLayout';
 import { KeepQueryRedirect } from './layout/KeepQueryRedirect';
+import { RouteError } from './layout/RouteError';
 import { ConsolePage } from './pages/ConsolePage';
 import { ControlVmDetailPage } from './pages/ControlVmDetailPage';
 import { DashboardPage, LegacyDashboardPage } from './pages/DashboardPage';
@@ -39,54 +40,66 @@ const queryClient = new QueryClient({
 });
 
 const router = createBrowserRouter([
-  { path: '/login', element: <LoginPage /> },
-  { path: '/signup', element: <SignupPage /> },
   {
-    element: (
-      <RequireAuth>
-        <ConsoleLayout />
-      </RequireAuth>
-    ),
+    // 레이아웃 밖(로그인·레이아웃 자체)의 오류 — 기본 "Unexpected Application Error!" 대신 (QA 2-1)
+    errorElement: <RouteError />,
     children: [
-      { path: '/', element: <Navigate to="/dashboard/overview" replace /> },
+      { path: '/login', element: <LoginPage /> },
+      { path: '/signup', element: <SignupPage /> },
       {
-        path: '/dashboard',
-        element: <DashboardLayout />,
+        element: (
+          <RequireAuth>
+            <ConsoleLayout />
+          </RequireAuth>
+        ),
         children: [
-          { index: true, element: <Navigate to="/dashboard/overview" replace /> },
-          { path: 'overview', element: <DashboardPage /> },
-          { path: 'cpu', element: <ResourcesPage view="cpu" /> },
-          { path: 'memory', element: <ResourcesPage view="memory" /> },
-          { path: 'network', element: <ResourcesPage view="network" /> },
-          { path: 'console', element: <ConsolePage /> },
-          { path: 'events', element: <EventsPage /> },
+          {
+            // 화면 하나의 오류는 메뉴(ConsoleLayout)를 남긴 채 이 자리에 안내한다
+            errorElement: <RouteError />,
+            children: [
+              { path: '/', element: <Navigate to="/dashboard/overview" replace /> },
+              {
+                path: '/dashboard',
+                element: <DashboardLayout />,
+                children: [
+                  { index: true, element: <Navigate to="/dashboard/overview" replace /> },
+                  { path: 'overview', element: <DashboardPage /> },
+                  { path: 'cpu', element: <ResourcesPage view="cpu" /> },
+                  { path: 'memory', element: <ResourcesPage view="memory" /> },
+                  { path: 'network', element: <ResourcesPage view="network" /> },
+                  { path: 'console', element: <ConsolePage /> },
+                  { path: 'events', element: <EventsPage /> },
+                ],
+              },
+              { path: '/dashboard/vms/:vmId', element: <VmDetailPage /> },
+              { path: '/vision', element: <VisionPage /> },
+              { path: '/control', element: <VmListPage /> },
+              { path: '/control/vms/new', element: <VmCreatePage /> },
+              { path: '/control/vms/:vmId', element: <ControlVmDetailPage /> },
+              { path: '/simulator', element: <DemoPage /> },
+              { path: '/simulator/stress', element: <SimulatorStressLab /> },
+              // 실차가 안 될 때 쓰는 예비 대시보드 (주·백업 VM 카드 + 시뮬레이터). 메뉴에는 없다
+              { path: '/legacy/dashboard', element: <LegacyDashboardPage /> },
+
+              // 기존 북마크와 외부 링크를 깨지 않도록 새 정보구조로 보낸다.
+              { path: '/vms', element: <Navigate to="/control" replace /> },
+              { path: '/vms/new', element: <Navigate to="/control/vms/new" replace /> },
+              { path: '/vms/:vmId', element: <VmDetailPage /> },
+              { path: '/resources', element: <Navigate to="/dashboard/cpu" replace /> },
+              { path: '/demo', element: <Navigate to="/simulator" replace /> },
+              { path: '/console', element: <Navigate to="/dashboard/console" replace /> },
+              { path: '/events', element: <KeepQueryRedirect to="/dashboard/events" /> },
+              { path: '/phone-link', element: <PhoneLinkPage /> },
+              { path: '/components', element: <ShowcasePage /> },
+            ],
+          },
         ],
       },
-      { path: '/dashboard/vms/:vmId', element: <VmDetailPage /> },
-      { path: '/vision', element: <VisionPage /> },
-      { path: '/control', element: <VmListPage /> },
-      { path: '/control/vms/new', element: <VmCreatePage /> },
-      { path: '/control/vms/:vmId', element: <ControlVmDetailPage /> },
-      { path: '/simulator', element: <DemoPage /> },
-      { path: '/simulator/stress', element: <SimulatorStressLab /> },
-      // 실차가 안 될 때 쓰는 예비 대시보드 (주·백업 VM 카드 + 시뮬레이터). 메뉴에는 없다
-      { path: '/legacy/dashboard', element: <LegacyDashboardPage /> },
-
-      // 기존 북마크와 외부 링크를 깨지 않도록 새 정보구조로 보낸다.
-      { path: '/vms', element: <Navigate to="/control" replace /> },
-      { path: '/vms/new', element: <Navigate to="/control/vms/new" replace /> },
-      { path: '/vms/:vmId', element: <VmDetailPage /> },
-      { path: '/resources', element: <Navigate to="/dashboard/cpu" replace /> },
-      { path: '/demo', element: <Navigate to="/simulator" replace /> },
-      { path: '/console', element: <Navigate to="/dashboard/console" replace /> },
-      { path: '/events', element: <KeepQueryRedirect to="/dashboard/events" /> },
-      { path: '/phone-link', element: <PhoneLinkPage /> },
-      { path: '/components', element: <ShowcasePage /> },
+      // 디자인 확인은 로그인 없이도 볼 수 있게
+      { path: '/components-public', element: <ShowcasePage /> },
+      { path: '*', element: <Navigate to="/dashboard/overview" replace /> },
     ],
   },
-  // 디자인 확인은 로그인 없이도 볼 수 있게
-  { path: '/components-public', element: <ShowcasePage /> },
-  { path: '*', element: <Navigate to="/dashboard/overview" replace /> },
 ]);
 
 async function start() {
