@@ -660,7 +660,6 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
  e->planning_map=h;e->planning_snapshot=map;e->planning=true;e->plan_finalized=false;
  e->planning_grant=e->grant;e->planning_has_grant=(map->world.required_features&DW_LANE_MODEL)&&e->has_grant&&e->grant.kind;
  e->paths[e->planning_path.slot].scene_generation=scene_generation;
- e->started=request;e->budget=budget;e->plans++;
  e->planning_vehicle_pi_us=vehicle.pi_sample_us;
  float steering=vehicle.has_measured_steering_rad?vehicle.measured_steering_rad:
                  vehicle.has_estimated_steering_rad?vehicle.estimated_steering_rad:NAN;
@@ -674,11 +673,34 @@ enum de_result de_plan_start(struct drive_engine *e,uint64_t now,struct lp_budge
    e->search_reason=lp_lane_guide(&e->search,path,&map->world,pose,steering,vehicle.velocity_mps,goal,
     e->config,budget,&task,&e->basis,&prefix,&slot->tracking_geometry,bend);
    slot->tracking_prepared=slot->lane_guide=e->search_reason==LP_PATH_FOUND;
+   /* Retry the guide on the next map while the current merge can still
+    * advance and stop safely. Reserve the lattice for a needed replacement. */
+   if(e->search_reason==LP_NOT_FOUND&&task.changing&&e->episode.active&&e->episode_handoff==DE_EPISODE_IDLE){
+    enum lp_result checked=LP_NOT_FOUND;
+    enum de_result retained=merge_guide_current(e,map,scene_generation,&task,pose,&vehicle,&budget,&checked);
+    if(retained==DE_OK||retained==DE_BUSY){
+     enum dw_result source=retained==DE_OK?dw_source_valid(&e->maps,h):DW_BUSY;
+     if(!source)source=dw_scene_generation(&e->maps,scene_generation,now,NULL);
+     discard_path(e,e->planning_path);
+     (void)dw_release(&e->maps,h);
+     e->planning=false;e->planning_snapshot=NULL;
+     if(e->stopping)return e->last_reason=DE_CANCELLED;
+     if(source)return e->last_reason=source==DW_BUSY?DE_BUSY:DE_CHANGED;
+     if(!e->has_grant||!grant_same(&e->grant,&e->planning_grant))return e->last_reason=DE_CHANGED;
+     e->started=request;e->path_invalidated=false;
+     e->search_reason=LP_PATH_FOUND;e->search.metrics=prefix;e->search.used=0;
+     search_memory_publish(e);
+     return e->last_reason=DE_OK;
+    }
+    if(checked==LP_DEADLINE||checked==LP_CLOCK||checked==LP_CANCELLED||checked==LP_WORK_BUDGET)
+     e->search_reason=checked;
+   }
   }
   if(e->search_reason==LP_NOT_FOUND)
    e->search_reason=lp_start_task(&e->search,&map->world,pose,steering,goal,e->config,e->assets,budget,&task,&e->basis,&prefix);
   else{e->search.metrics=prefix;e->search.used=0;}
  }else e->search_reason=lp_start_local(&e->search,&map->world,pose,steering,goal,e->config,e->assets,budget,e->maneuver_direction);
+ e->started=request;e->plans++;
  search_memory_publish(e);
  return e->last_reason=DE_OK;
 }
