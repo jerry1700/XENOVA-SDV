@@ -8,12 +8,14 @@ import { agentErrorText, commandStateText } from '../api/errorText';
 import {
   useCommandStatus,
   useEvents,
+  usePerceptionFaultOperation,
   useStartActiveDriveAutoDelay,
   useStartAutoInputUnavailable,
+  useStartPerceptionBlock,
   useStartVmCrash,
   useVms,
 } from '../api/queries';
-import type { Vm } from '../api/types';
+import type { PerceptionFaultOperation, Vm } from '../api/types';
 import { MODE_HEALTH, MODE_LABEL, ROLES } from '../domain/roles';
 import { STATE_HEALTH, STATE_LABEL } from '../format';
 import { useDrive } from '../layout/DriveContext';
@@ -24,7 +26,7 @@ const SCENARIOS: { id: ScenarioId; label: string; title: string; ready: boolean 
   { id: 'vm-crash', label: '시연 1', title: '주행 VM 장애', ready: true },
   { id: 'delay', label: '시연 2', title: '연산 지연 반복', ready: true },
   { id: 'empty-result', label: '시연 3', title: 'AUTO 입력 처리 장애', ready: true },
-  { id: 'jetson-loss', label: '시연 4', title: 'Jetson 통신 단절', ready: false },
+  { id: 'jetson-loss', label: '시연 4', title: 'Jetson 인지 송신 단절', ready: true },
 ];
 
 interface Run {
@@ -50,6 +52,12 @@ export function failureText(error: unknown): string {
   )
     return '배포된 백엔드에 장애 시연 API가 아직 없습니다.';
   return error instanceof Error ? error.message : '요청이 실패했습니다.';
+}
+
+export function perceptionFaultErrorText(error: unknown): string {
+  if (error instanceof ApiError && (error.status === 404 || error.status === 405))
+    return '배포된 백엔드에 Jetson 인지 단절 시연 API가 아직 없습니다.';
+  return error instanceof Error ? error.message : 'Jetson 인지 단절 요청이 실패했습니다.';
 }
 
 export function DemoPage() {
@@ -87,8 +95,12 @@ export function DemoPage() {
       {scenario.ready ? (
         scenario.id === 'vm-crash' ? (
           <VmCrashScenario />
-        ) : (
+        ) : scenario.id === 'delay' ? (
           <DelayScenario />
+        ) : scenario.id === 'empty-result' ? (
+          <AutoInputUnavailableScenario />
+        ) : (
+          <JetsonLossScenario />
         )
       ) : (
         <Card title={`${scenario.label} · ${scenario.title}`}>
@@ -224,7 +236,13 @@ function DelayScenario() {
                 done={commandAccepted}
                 failed={commandFailed}
                 title="연산 지연 명령 수락"
-                detail={command.data?.message ?? 'Zephyr 명령 응답 대기 중'}
+                detail={
+                  command.data
+                    ? commandFailed
+                      ? agentErrorText(commandErrorCode(command.data))
+                      : commandStateText(command.data.status)
+                    : 'Zephyr 명령 응답 대기 중'
+                }
               />
               <ProgressStep
                 done={delayRunning}
@@ -534,6 +552,204 @@ function AutoInputUnavailableScenario() {
   );
 }
 
+function JetsonLossScenario() {
+  const { drive, socket } = useDrive();
+  const vms = useVms();
+  const start = useStartPerceptionBlock();
+  const [duration, setDuration] = useState(50);
+  const [run, setRun] = useState<PerceptionFaultOperation | null>(null);
+  const operation = usePerceptionFaultOperation(run?.operation_id ?? null);
+  const current = operation.data ?? run;
+  const control = drive?.control ?? null;
+  const perception = drive?.perception ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
+  );
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const durationValid = Number.isInteger(duration) && duration >= 1 && duration <= 120;
+  const perceptionReady = perception?.valid === true && perception.received_ago_ms < 200;
+  const inProgress = Boolean(current && !['ENDED', 'REJECTED', 'UNKNOWN', 'FAILED'].includes(current.status));
+  const operationFailed =
+    current?.status === 'REJECTED' || current?.status === 'UNKNOWN' || current?.status === 'FAILED';
+  const applied = current?.status === 'APPLIED' || current?.status === 'ENDED';
+  const ended = current?.status === 'ENDED';
+  const sawLoss = Boolean(run && (perception?.valid === false || ended));
+  const sameActive = Boolean(run?.active_vm_id && activeId === run.active_vm_id);
+  const manual = control?.mode === 'MANUAL';
+  const bothInputsUnavailable = Boolean(
+    run &&
+    drivingVms.length >= 2 &&
+    drivingVms.every((vm) => {
+      const reason = drive?.vm_apps?.[vm.vm_id]?.autonomous?.lifecycle?.reason ?? '';
+      return reason.includes('WORLD_UNAVAILABLE') || reason.includes('INPUT_UNAVAILABLE');
+    }),
+  );
+  const recovered = Boolean(ended && sawLoss && perceptionReady);
+
+  const unavailableReason =
+    socket !== 'open'
+      ? '주행 상태 연결이 끊겨 있습니다.'
+      : control?.mode !== 'AUTO'
+        ? '자율주행 중일 때만 시연을 시작할 수 있습니다.'
+        : !activeVm
+          ? '현재 활성 주행 VM을 확인할 수 없습니다.'
+          : !perceptionReady
+            ? 'Jetson 인지 결과가 정상 수신 중이 아닙니다.'
+            : !durationValid
+              ? '장애 지속 시간은 1~120초여야 합니다.'
+              : null;
+
+  const begin = () => {
+    if (unavailableReason || start.isPending) return;
+    setRun(null);
+    start.mutate(duration, { onSuccess: setRun });
+  };
+
+  return (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 4</span>
+          <h2>Jetson 인지 송신 단절과 수동 전환</h2>
+          <p>
+            Jetson 계산은 유지한 채 World 송신만 끊고, 두 주행 VM의 공통 입력 소실과 MANUAL 전환을 확인합니다.
+          </p>
+        </div>
+        <div className={styles.scenarioAction}>
+          <label>
+            <span>장애 지속 시간</span>
+            <span className={styles.memoryInputGroup}>
+              <input
+                aria-label="장애 지속 시간"
+                type="number"
+                min={1}
+                max={120}
+                step={1}
+                value={duration}
+                disabled={inProgress || start.isPending}
+                aria-invalid={!durationValid}
+                onChange={(event) => setDuration(Number(event.target.value))}
+              />
+              <span>초</span>
+            </span>
+          </label>
+          <Button
+            variant="danger"
+            disabled={Boolean(unavailableReason) || inProgress || start.isPending}
+            onClick={begin}
+          >
+            {start.isPending
+              ? 'Jetson 상태 확인 중…'
+              : ended || operationFailed
+                ? '시연 다시 시작'
+                : '시연 시작'}
+          </Button>
+        </div>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {start.isError && (
+        <p className={styles.scenarioWarning} role="alert">
+          {perceptionFaultErrorText(start.error)}
+        </p>
+      )}
+      <div className={styles.scenarioSummary}>
+        <Summary label="현재 활성 VM" value={activeVm?.name ?? '미확인'} mono={activeId?.slice(0, 8)} />
+        <Summary
+          label="주행 모드"
+          value={control?.mode ? MODE_LABEL[control.mode] : '미확인'}
+          health={control?.mode === 'AUTO' ? 'ok' : control?.mode === 'MANUAL' ? 'recovering' : 'fault'}
+        />
+        <Summary
+          label="Jetson 인지 입력"
+          value={perceptionReady ? `${perception?.hz ?? 0} Hz · 정상` : sawLoss ? '송신 단절' : '미확인'}
+          health={perceptionReady ? 'ok' : 'fault'}
+        />
+      </div>
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            <p>시연을 시작하면 Jetson 명령 적용부터 수동 전환, 인지 송신 복구까지 표시됩니다.</p>
+          </div>
+        ) : (
+          <div>
+            <div className={styles.runMeta}>
+              <span>
+                시작 active VM <b>{run.active_vm_id?.slice(0, 8) ?? '미확인'}</b>
+              </span>
+              <span className={styles.mono}>{run.command_id.slice(0, 8)}</span>
+              <time>{new Date(run.submitted_at).toLocaleTimeString('ko-KR')}</time>
+            </div>
+            <ol className={styles.scenarioProgress}>
+              <ProgressStep
+                done={Boolean(current && current.status !== 'QUERYING')}
+                failed={operationFailed}
+                title="Jetson 제어 window 확인"
+                detail={
+                  current?.status === 'QUERYING'
+                    ? 'Jetson STATUS 응답 대기 중'
+                    : (current?.reason ?? '현재 서비스와 window를 확인했습니다.')
+                }
+              />
+              <ProgressStep
+                done={applied}
+                failed={operationFailed}
+                title="인지 결과 송신 차단 적용"
+                detail={
+                  applied
+                    ? `World 송신을 ${run.duration_s}초 동안 차단했습니다.`
+                    : 'BLOCK 적용 결과를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={sawLoss}
+                title="두 주행 VM의 공통 인지 입력 소실"
+                detail={
+                  bothInputsUnavailable
+                    ? '두 VM 모두 입력 없음 상태를 보고했습니다.'
+                    : sawLoss
+                      ? '인지 입력 만료를 확인했고 VM 상태 보고를 기다립니다.'
+                      : '인지 결과 만료를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={manual}
+                title="AUTO에서 MANUAL로 안전 전환"
+                detail={
+                  manual
+                    ? '자동 복귀하지 않고 명시적인 수동 입력을 기다립니다.'
+                    : `현재 모드: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`
+                }
+              />
+              <ProgressStep
+                done={sameActive && manual}
+                failed={Boolean(run.active_vm_id && activeId && !sameActive)}
+                title="기존 active VM 유지"
+                detail={
+                  sameActive
+                    ? '공통 입력 장애이므로 VM 미러링을 수행하지 않았습니다.'
+                    : 'active_vm_id를 확인하는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={recovered}
+                title="Jetson 인지 송신 복구"
+                detail={
+                  recovered
+                    ? '새 인지 결과 수신이 재개됐으며 주행 모드는 MANUAL로 유지됩니다.'
+                    : ended
+                      ? '차단은 종료됐고 새 인지 결과를 기다립니다.'
+                      : '설정한 지속 시간이 끝나기를 기다립니다.'
+                }
+              />
+            </ol>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
 
 function VmCrashScenario() {
   const vms = useVms();

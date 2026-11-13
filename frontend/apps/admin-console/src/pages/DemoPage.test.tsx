@@ -3,15 +3,28 @@ import { ToastProvider } from '@xenova/ui';
 import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api/client';
-import { DemoPage, failureText } from './DemoPage';
+import { DemoPage, failureText, perceptionFaultErrorText } from './DemoPage';
 
 const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const inputFault = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const inputStatus = vi.hoisted(() => ({ data: undefined as unknown }));
 const autoDelay = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
-const driveState = vi.hoisted(() => ({ activeId: 'vm-a', mode: 'AUTO' as string, age: 100 }));
+const driveState = vi.hoisted(() => ({
+  activeId: 'vm-a',
+  mode: 'AUTO' as string,
+  activeApp: 'autonomous' as string,
+  age: 100,
+  inputReason: null as string | null,
+}));
 /** 명령 상태 조회 결과 (기본: 응답 전) */
 const commandStatus = vi.hoisted(() => ({ data: undefined as unknown }));
+const perceptionBlock = vi.hoisted(() => ({
+  mutate: vi.fn(),
+  isPending: false,
+  isError: false,
+  error: null,
+}));
+const perceptionOperation = vi.hoisted(() => ({ data: undefined as unknown }));
 
 vi.mock('../api/queries', () => ({
   useVms: () => ({
@@ -39,14 +52,36 @@ vi.mock('../api/queries', () => ({
   useStartAutoInputUnavailable: () => inputFault,
   useCommandStatus: (vmId: string) => (vmId === 'vm-a' && inputStatus.data ? inputStatus : commandStatus),
   useEvents: () => ({ data: { items: [] } }),
+  useStartPerceptionBlock: () => perceptionBlock,
+  usePerceptionFaultOperation: () => perceptionOperation,
 }));
 vi.mock('../layout/DriveContext', () => ({
   useDrive: () => ({
     drive: {
       control: {
         mode: driveState.mode,
+        active_app: driveState.activeApp,
         active_vm_id: driveState.activeId,
         received_ago_ms: driveState.age,
+      },
+      perception: { valid: true, received_ago_ms: 20, hz: 15 },
+      vm_apps: {
+        'vm-a': {
+          autonomous: {
+            lifecycle: {
+              phase: 'EXECUTING',
+              readiness: driveState.inputReason ? 'NOT_READY' : 'READY',
+              reason: driveState.inputReason,
+            },
+            lifecycle_source: { status: 'fresh', age_ms: 10 },
+          },
+        },
+        'vm-b': {
+          autonomous: {
+            lifecycle: { phase: 'WAITING', readiness: 'QUALIFIED', reason: null },
+            lifecycle_source: { status: 'fresh', age_ms: 10 },
+          },
+        },
       },
     },
     socket: 'open',
@@ -66,17 +101,36 @@ function show() {
 describe('장애 시연 1', () => {
   beforeEach(() => {
     vmCrash.mutate.mockReset();
+    perceptionBlock.mutate.mockReset();
     commandStatus.data = undefined;
     autoDelay.mutate.mockClear();
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
+    driveState.activeApp = 'autonomous';
     driveState.age = 100;
+    driveState.inputReason = null;
     HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
       this.open = true;
     };
     HTMLDialogElement.prototype.close ??= function (this: HTMLDialogElement) {
       this.open = false;
     };
+  });
+
+  it('시연 4에서 장애 시간을 정하고 Jetson 인지 차단 API를 호출한다', () => {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 4/ }));
+    expect(screen.getByText('Jetson 인지 송신 단절과 수동 전환')).toBeInTheDocument();
+    expect(screen.getByText('15 Hz · 정상')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('장애 지속 시간'), { target: { value: '30' } });
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    expect(perceptionBlock.mutate).toHaveBeenCalledWith(30, expect.any(Object));
+  });
+
+  it('시연 4 API가 배포되지 않았으면 전용 안내를 표시한다', () => {
+    expect(
+      perceptionFaultErrorText(new ApiError(405, { code: 'METHOD_NOT_ALLOWED', message: '지원하지 않음' })),
+    ).toBe('배포된 백엔드에 Jetson 인지 단절 시연 API가 아직 없습니다.');
   });
 
   it('네 시연 책갈피와 기존 부하 테스트 메뉴를 표시한다', () => {

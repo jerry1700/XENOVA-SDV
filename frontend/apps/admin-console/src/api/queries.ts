@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { ApiError, request, requestWithStatus, setSession } from './client';
 import type {
   CreateVmRequest,
+  AutoInputUnavailableCommand,
+  AutoInputUnavailableRequest,
   AgentExitCommand,
   AppExitCommand,
   AppExitRequest,
@@ -18,6 +20,7 @@ import type {
   MetricHistoryResponse,
   PhoneLinkStatus,
   PhonePairingCode,
+  PerceptionFaultOperation,
   ProcessesResponse,
   RouteRequest,
   SignupRequest,
@@ -52,6 +55,7 @@ export const keys = {
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
   phoneLink: ['display', 'phone-link'] as const,
+  perceptionFault: (id: string) => ['drive', 'faults', 'perception-block', id] as const,
 };
 
 /**
@@ -213,7 +217,6 @@ export function useStartAutoInputUnavailable(vmId: string) {
   });
 }
 
-
 export function useStartAgentExit(vmId: string) {
   return useMutation({
     mutationFn: () =>
@@ -252,6 +255,34 @@ export function useStartDomainKill(vmId: string) {
         method: 'POST',
       }),
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+export function useStartPerceptionBlock() {
+  return useMutation({
+    mutationFn: (durationS: number) =>
+      request<PerceptionFaultOperation>('/api/v1/drive/faults/perception-block', {
+        method: 'POST',
+        body: { duration_s: durationS },
+      }),
+  });
+}
+
+export function usePerceptionFaultOperation(operationId: string | null) {
+  return useQuery({
+    queryKey: keys.perceptionFault(operationId ?? ''),
+    queryFn: ({ signal }) =>
+      request<PerceptionFaultOperation>(
+        `/api/v1/drive/faults/perception-block/${encodeURIComponent(operationId!)}`,
+        { signal },
+      ),
+    enabled: Boolean(operationId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'ENDED' || status === 'REJECTED' || status === 'UNKNOWN' || status === 'FAILED'
+        ? false
+        : 500;
+    },
   });
 }
 

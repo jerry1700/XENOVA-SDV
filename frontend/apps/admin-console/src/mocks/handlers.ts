@@ -9,6 +9,7 @@
 import { delay, http, HttpResponse, type JsonBodyType } from 'msw';
 import {
   VM_CPU_PERCENT_METRIC,
+  type AutoInputUnavailableRequest,
   type CpuStressRequest,
   type AutoDelayRequest,
   type CommandState,

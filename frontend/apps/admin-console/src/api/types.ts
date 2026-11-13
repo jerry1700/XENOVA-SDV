@@ -519,6 +519,21 @@ export interface TelemetryHeartbeatResponse {
   age_ms: number | null;
 }
 
+export type PerceptionFaultStatus =
+  'QUERYING' | 'COMMAND_SENT' | 'APPLIED' | 'ENDED' | 'REJECTED' | 'UNKNOWN' | 'FAILED';
+
+export interface PerceptionFaultOperation {
+  operation_id: string;
+  command_id: string;
+  duration_s: number;
+  status: PerceptionFaultStatus;
+  reason: string | null;
+  active_vm_id: string | null;
+  mode_before: string | null;
+  submitted_at: string;
+  updated_at: string;
+}
+
 // ---- 화면 배치 (노션 API 명세 REST-23·REST-24, 백엔드 -129) ----
 
 export type DisplayView = 'split' | 'os-face';
