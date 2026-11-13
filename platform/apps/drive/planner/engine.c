@@ -291,7 +291,7 @@ static enum de_result task_prepare(struct drive_engine *e,const dw_world *w,dw_p
  if(!tr_basis_accept(&e->basis,w))return DE_REFERENCE;
  float radius=hypotf(fmaxf(e->config->front,e->config->rear)+e->config->margin,e->config->half_width+e->config->margin);
  float pad=vehicle->position_error_m+radius*vehicle->heading_error_rad;
- uint32_t actual=tr_unique_lane(w,pose,pad+e->config->tracking_guard,e->config);
+ uint32_t actual=tr_unique_lane(w,pose,pad+e->config->tracking_guard,e->config,budget.collision_index);
  *task=e->task;
  if(!task->active){if(!actual)return DE_POSE;*task=(struct tr_intent){true,false,actual,actual,actual,pad};}
  task->vehicle_pad=pad;
@@ -1320,7 +1320,7 @@ static enum de_result behavior_prepare(struct drive_engine *e,const dw_world *w,
   if(reason){e->behavior_failed=true;e->path_invalidated=true;return DE_STATE;}
   uint32_t arrival=e->episode.phase==DB_CHANGE_OUT?e->episode.target_lane_id:
                    e->episode.phase==DB_REJOIN?e->episode.home_lane_id:0;
-  bool contained=arrival&&tr_unique_lane(w,pose,task->vehicle_pad+e->config->tracking_guard,e->config)==arrival;
+  bool contained=arrival&&tr_unique_lane(w,pose,task->vehicle_pad+e->config->tracking_guard,e->config,e->budget.collision_index)==arrival;
   if(e->episode.phase==DB_CHANGE_OUT&&lane_settled(e,w,task,pose,v,e->episode.target_lane_id,contained,now)){
    task->changing=false;task->from_lane_id=task->selected_lane_id=e->episode.target_lane_id;
    dw_pose phase_goal;

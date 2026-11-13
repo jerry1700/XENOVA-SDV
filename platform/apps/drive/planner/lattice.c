@@ -222,7 +222,7 @@ void lp_bind_current_grant(struct lp_path *p,const xenova_drive_MissionGrant *g)
 void lp_index_build(struct lp_collision_index *index,const dw_world *w,const struct lp_config *c) {
  memset(index,0,sizeof(*index));index->world=w;index->sequence=w->sequence;
  index->cell_age_ms=c->cell_age_ms;index->live_age_us=c->live_age_us;
- index->lane_pair_simple=tr_lane_pair_simple(w);
+ tr_index_lanes(index,w,c);
  if(w->left_boundary_count>=2&&w->left_boundary_count<=TR_BASIS_POINTS&&
     w->left_boundary_count==w->right_boundary_count){
   index->road_allowance=lp_lane_boundary_allowance_m(c);
@@ -615,7 +615,12 @@ static enum lp_result obstruction(const dw_world *w,const struct tr_intent *task
  struct lp_road_state goal,const struct lp_config *c,struct lp_budget budget,struct lp_metrics *metrics,bool *blocked_out){
  const dw_point *points;unsigned count;if(!reference(w,task,&points,&count))return LP_INPUT;
  *blocked_out=false;
- uint64_t any=0;for(unsigned y=0;y<w->height;y++)any|=budget.collision_index->rows[y];
+ bool any=false;
+ if(budget.collision_index){
+  for(unsigned y=0;y<w->height&&!any;y++)any=budget.collision_index->rows[y]!=0;
+ }else{
+  for(size_t at=0;at<(size_t)w->width*w->height&&!any;at++)any=blocked(w,at,c);
+ }
  if(!any)return LP_PATH_FOUND;
  struct lp_road_state start;enum lp_result rc=lp_task_project(w,task,pose,&start);
  if(rc!=LP_PATH_FOUND)return rc;
@@ -637,8 +642,6 @@ static enum lp_result obstruction(const dw_world *w,const struct tr_intent *task
 enum lp_result lp_task_obstructed(const dw_world *w,const struct tr_intent *task,dw_pose pose,dw_pose goal,
  const struct lp_config *c,struct lp_budget budget,struct lp_metrics *metrics,bool *out){
  struct lp_road_state target;enum lp_result rc=lp_task_project(w,task,goal,&target);if(rc!=LP_PATH_FOUND)return rc;
- struct lp_collision_index index;
- if(!budget.collision_index){lp_index_build(&index,w,c);budget.collision_index=&index;}
  return obstruction(w,task,pose,target,c,budget,metrics,out);
 }
 static enum lp_result reference_obstruction(struct lp_search *s,struct lp_road_state goal){
@@ -737,17 +740,21 @@ enum lp_result lp_start_task(struct lp_search *s,const dw_world *w,dw_pose pose,
  return start(s,w,pose,steer,goal,c,a,budget,0,true,task,basis,prefix,false,1,1,0,NULL,NULL);
 }
 
-static bool narrow_lane(const dw_world *w,const struct tr_intent *task,const struct lp_config *c,struct tr_view *view){
+static bool narrow_lane(const dw_world *w,const struct tr_intent *task,const struct lp_config *c,
+ const struct lp_collision_index *index,struct tr_view *view){
  /* Use the arrival lane's width. Footprint still checks the full change corridor. */
  struct tr_intent selected=*task;
  selected.changing=false;selected.from_lane_id=selected.selected_lane_id;
- if(!task->active||!tr_open(w,&selected,view))return false;
+ if(!task->active||!tr_open_indexed(w,&selected,index,view))return false;
+ float threshold=c->half_width+c->margin+c->tracking_guard+c->resolution;
+ if(view->index&&view->index->lane_edges_ready)
+  return view->index->lane_edges[view->selected-w->lane_model.lanes].min_half_width<threshold;
  float half=FLT_MAX;
  for(unsigned i=0;i<view->count;i++){
   dw_point a=view->points[i],b=w->lane_model.divider[i];
   half=fminf(half,hypotf(a.x-b.x,a.y-b.y));
  }
- return half<c->half_width+c->margin+c->tracking_guard+c->resolution;
+ return half<threshold;
 }
 
 struct lane_guide {
@@ -807,7 +814,7 @@ static bool make_lane_guide(const struct tr_view *view,const struct lp_config *c
 static enum lp_result guide_terminal(struct lp_search *s,float clearance){
  const struct lp_config *c=s->config;
  struct tr_view view;
- if(!narrow_lane(s->world,&s->task,c,&view))return LP_COLLISION;
+ if(!narrow_lane(s->world,&s->task,c,s->budget.collision_index,&view))return LP_COLLISION;
  struct lp_road_state start,goal;
  if(lp_task_project(s->world,&s->task,s->start,&start)!=LP_PATH_FOUND||
     lp_task_project(s->world,&s->task,s->goal,&goal)!=LP_PATH_FOUND)return LP_COLLISION;
@@ -875,7 +882,7 @@ enum lp_result lp_lane_guide(struct lp_search *s,struct lp_path *path,const dw_w
  float steer,float speed,dw_pose nominal,const struct lp_config *c,struct lp_budget budget,const struct tr_intent *task,
  const struct tr_basis *basis,struct lp_metrics *metrics){
  struct tr_view view;
- if(!narrow_lane(w,task,c,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
+ if(!narrow_lane(w,task,c,budget.collision_index,&view)||!dw_pose_finite(start_pose)||!isfinite(steer)||
     fabsf(steer)>c->max_steer||!isfinite(speed))return LP_NOT_FOUND;
  struct lane_guide guide;
  if(!make_lane_guide(&view,c,&guide))return LP_NOT_FOUND;
@@ -1290,7 +1297,7 @@ static enum lp_result project(const dw_world *w,dw_pose pose,float current_veloc
  if(current_velocity*velocity<0)return LP_INPUT;
  float maximum=fmaxf(c->max_velocity,c->max_reverse_velocity);
  struct tr_view view;
- bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||narrow_lane(w,task,c,&view));
+ bool tight=task&&!(space&&space->exiting)&&((space&&space->parking)||narrow_lane(w,task,c,b->collision_index,&view));
  float interval=fminf(tight?.01f:.025f,c->resolution/(4*fmaxf(maximum,.01f)));
  float time=0,v=current_velocity,delta=current_steer;*known=0;
  float horizon=c->reaction_s+fmaxf(fabsf(v),fabsf(velocity))/c->max_brake+.1f;
@@ -1531,7 +1538,7 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
  }
  if(path->direction){
   if(path->has_episode&&path->episode.core.state==2)out->maneuver_phase=path->episode.core.phase==4?2:path->episode.core.phase<5?1:0;
-  else if(path->task.active)out->maneuver_phase=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==path->task.selected_lane_id?2:1;
+  else if(path->task.active)out->maneuver_phase=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c,b->collision_index)==path->task.selected_lane_id?2:1;
   else out->maneuver_phase=path->phase;
  }
  const struct tr_parking_geometry *parking=NULL;
@@ -1558,8 +1565,8 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
   (parking_cusp||(space_terminal(w,&path->space,&live_task,pose,uncertainty,c)&&space_terminal(w,&path->space,&live_task,stopped,final_pad,c)));
  /* Goal proximity is insufficient while the body still straddles the divider. */
  if(captured&&live_task.changing)
-  captured=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c)==live_task.selected_lane_id&&
-   tr_unique_lane(w,stopped,final_pad+c->tracking_guard,c)==live_task.selected_lane_id;
+  captured=tr_unique_lane(w,pose,uncertainty+c->tracking_guard,c,b->collision_index)==live_task.selected_lane_id&&
+   tr_unique_lane(w,stopped,final_pad+c->tracking_guard,c,b->collision_index)==live_task.selected_lane_id;
  /* Only the last selected parking segment has a region terminal. Its actual
   * correspondence must be in the same movement window; a clipped projection
   * cannot turn a teleport or an earlier cusp into completed progress. */
@@ -1593,7 +1600,7 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
  bool ordinary_episode=!path->has_episode||path->episode.core.state==1;
  bool avoidance_episode=path->has_episode&&path->episode.core.state==2;
  bool narrow=gear>0&&((!path->direction&&ordinary_episode)||avoidance_episode||live_task.changing)&&
-  !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,&narrow_view);
+  !path->space.parking&&!path->space.exiting&&!path->has_route&&narrow_lane(w,&live_task,c,b->collision_index,&narrow_view);
  if(narrow||parking_entry){
   dw_pose reference_pose=carrot(path,geometry,segment,tracker->progress);
   dw_pose error=dw_compose(dw_inverse(reference_pose),pose);

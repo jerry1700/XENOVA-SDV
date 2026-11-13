@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "pb_encode.h"
 #include "pb_decode.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -340,10 +341,17 @@ int engine_force_node_limit(void *pointer,uint64_t now){
 }
 /* 새 내부 차로 소비 경계의 actual C 시험 ABI다. 운영 wire나 임무 발급이 아니다. */
 uint32_t probe_task_lane(void *pointer,float x,float y,float yaw,float error){
- struct probe *p=pointer;return tr_unique_lane(&p->snapshot.world,(dw_pose){x,y,yaw},error,&p->config);
+ struct probe *p=pointer;
+ const dw_world *w=&p->snapshot.world;
+ dw_pose pose={x,y,yaw};
+ uint32_t direct=tr_unique_lane(w,pose,error,&p->config,NULL);
+ lp_index_build(&p->search.collision_index,w,&p->config);
+ uint32_t indexed=tr_unique_lane(w,pose,error,&p->config,&p->search.collision_index);
+ return direct==indexed?direct:UINT32_MAX;
 }
 void probe_task_tape(void *pointer,float half_width){
- ((struct probe *)pointer)->config.lane_tape_half_width_m=half_width;
+ struct probe *p=pointer;p->config.lane_tape_half_width_m=half_width;
+ lp_index_build(&p->collision_index,&p->snapshot.world,&p->config);
 }
 int probe_lane_guide(void *pointer,uint32_t from,uint32_t to,float y,float goal_y){
  struct probe *p=pointer;const dw_world *w=&p->snapshot.world;
@@ -357,7 +365,11 @@ int probe_lane_guide(void *pointer,uint32_t from,uint32_t to,float y,float goal_
 }
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;
- return tr_open(&p->snapshot.world,&task,&view)&&tr_contains(&view,(dw_pose){x,y,yaw},error,&p->config);
+ const dw_world *world=&p->snapshot.world;dw_pose pose={x,y,yaw};
+ bool indexed=tr_open_indexed(world,&task,&p->collision_index,&view)&&tr_contains(&view,pose,error,&p->config);
+ bool original=tr_open(world,&task,&view)&&tr_contains(&view,pose,error,&p->config);
+ assert(indexed==original);
+ return indexed;
 }
 int probe_lane_change_terminal_path(void *pointer,float y){
  struct probe *p=pointer;

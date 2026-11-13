@@ -14,7 +14,7 @@ static const xenova_drive_LaneGeometry *lane(const dw_world *w,uint32_t id){
  }
  return found;
 }
-static bool lane_view(const dw_world *w,const struct tr_intent *intent,struct tr_view *out){
+static bool lane_view(const dw_world *w,const struct tr_intent *intent,const struct lp_collision_index *index,struct tr_view *out){
  if(!w||!intent||!out||!intent->active||!(w->required_features&DW_LANE_MODEL)||!w->has_lane_model||
     w->lane_model.lanes_count!=2||w->lane_model.divider_count<2||w->lane_model.divider_count>32||
     !isfinite(intent->vehicle_pad)||intent->vehicle_pad<0)return false;
@@ -25,31 +25,29 @@ static bool lane_view(const dw_world *w,const struct tr_intent *intent,struct tr
     w->lane_model.crossing.size!=n-1||w->lane_model.divider_state.size!=n||
     (intent->changing?(to==from||to->adjacent_lane_id!=from->lane_id||from->adjacent_lane_id!=to->lane_id):to!=from))return false;
  /* 이 첫 실행 profile은 관측한 공동 station만 사용한다. 추정 끝을 경계 승인으로 쓰지 않는다. */
- for(unsigned i=0;i<n;i++)if(to->point_state.bytes[i]||from->point_state.bytes[i]||w->lane_model.divider_state.bytes[i])return false;
- *out=(struct tr_view){w,to,from,to->centerline,n,NULL};return true;
+ if(!index||!index->lane_edges_ready)
+  for(unsigned i=0;i<n;i++)if(to->point_state.bytes[i]||from->point_state.bytes[i]||w->lane_model.divider_state.bytes[i])return false;
+ *out=(struct tr_view){w,to,from,to->centerline,n,index};return true;
 }
 bool tr_open_indexed(const dw_world *w,const struct tr_intent *intent,const struct lp_collision_index *index,struct tr_view *out){
- if(!lane_view(w,intent,out))return false;
- bool cached=index&&index->world==w&&index->sequence==w->sequence;
- if(cached)out->index=index;
- return !intent->changing||(cached?index->lane_pair_simple:corridor_simple(out));
+ bool cached=w&&index&&index->world==w&&index->sequence==w->sequence;
+ if(!lane_view(w,intent,cached?index:NULL,out))return false;
+ return !intent->changing||(cached&&index->lane_edges_ready?index->lane_pair_simple:corridor_simple(out));
 }
 bool tr_open(const dw_world *w,const struct tr_intent *intent,struct tr_view *out){
  return tr_open_indexed(w,intent,NULL,out);
 }
 bool tr_centerline(const dw_world *w,const struct tr_intent *intent,const dw_point **points,unsigned *count){
- struct tr_view view;if(!lane_view(w,intent,&view))return false;
+ struct tr_view view;if(!lane_view(w,intent,NULL,&view))return false;
  *points=view.points;*count=view.count;return true;
-}
-bool tr_lane_pair_simple(const dw_world *w){
- if(!w->has_lane_model||w->lane_model.lanes_count!=2)return false;
- uint32_t from=w->lane_model.lanes[0].lane_id,to=w->lane_model.lanes[1].lane_id;
- struct tr_intent intent={true,true,to,from,from,0};
- struct tr_view view;
- return lane_view(w,&intent,&view)&&corridor_simple(&view);
 }
 static dw_point vertex(const struct tr_view *v,unsigned i){
  unsigned n=v->count;const xenova_drive_LaneModel *m=&v->world->lane_model;
+ if(v->index&&v->index->lane_edges_ready){
+  if(i<n)return v->index->lane_edges[v->selected-m->lanes].outer[i];
+  unsigned j=2*n-1-i;
+  return v->selected==v->from?m->divider[j]:v->index->lane_edges[v->from-m->lanes].outer[j];
+ }
  if(i<n){dw_point c=v->selected->centerline[i],d=m->divider[i];return (dw_point){2*c.x-d.x,2*c.y-d.y};}
  unsigned j=2*n-1-i;dw_point d=m->divider[j];
  if(v->selected==v->from)return d;
@@ -61,6 +59,10 @@ static dw_point tape_vertex(const struct tr_view *v,unsigned i,float tape){
  bool changing=v->selected!=v->from;
  /* A lane change may use both outer tapes within the observed corridor. */
  if(tape>0&&(!changing||(j>0&&j+1<n))){
+  if(v->index&&v->index->lane_edges_ready&&v->index->lane_allowance==tape){
+   const struct tr_lane_edges *edges=&v->index->lane_edges[(i<n?v->selected:v->from)-v->world->lane_model.lanes];
+   return i<n||changing?edges->outer_tape[j]:edges->divider_tape[j];
+  }
   dw_point a=(i<n?v->selected:v->from)->centerline[j],b=v->world->lane_model.divider[j];
   float x=a.x-b.x,y=a.y-b.y,length=hypotf(x,y);
   if(length>1e-6f){float scale=(i<n||changing?tape:-tape)/length;point.x+=scale*x;point.y+=scale*y;}
@@ -117,12 +119,12 @@ bool tr_contains(const struct tr_view *v,dw_pose pose,float extra,const struct l
  }
  return true;
 }
-uint32_t tr_unique_lane(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c){
+uint32_t tr_unique_lane(const dw_world *w,dw_pose pose,float extra,const struct lp_config *c,const struct lp_collision_index *index){
  if(!w||!w->has_lane_model||w->lane_model.lanes_count!=2)return 0;
  uint32_t selected=0;
  for(unsigned i=0;i<2;i++){
   uint32_t id=w->lane_model.lanes[i].lane_id;struct tr_intent intent={true,false,id,id,id,0};struct tr_view view;
-  if(tr_open(w,&intent,&view)&&tr_contains(&view,pose,extra,c)){if(selected)return 0;selected=id;}
+  if(tr_open_indexed(w,&intent,index,&view)&&tr_contains(&view,pose,extra,c)){if(selected)return 0;selected=id;}
  }
  return selected;
 }
@@ -147,6 +149,33 @@ static bool corridor_simple(const struct tr_view *v){
   }
  }
  return true;
+}
+void tr_index_lanes(struct lp_collision_index *index,const dw_world *w,const struct lp_config *c){
+ const xenova_drive_LaneModel *model=&w->lane_model;
+ if(!w->has_lane_model||model->lanes_count!=2)return;
+ struct tr_view views[2];
+ for(unsigned i=0;i<2;i++){
+  uint32_t id=model->lanes[i].lane_id;
+  const struct tr_intent task={true,false,id,id,id,0};
+  if(!lane_view(w,&task,NULL,&views[i])||views[i].selected!=&model->lanes[i])return;
+ }
+ index->lane_allowance=lp_lane_boundary_allowance_m(c);
+ for(unsigned i=0;i<2;i++){
+  const struct tr_view *view=&views[i];
+  struct tr_lane_edges *edges=&index->lane_edges[i];
+  edges->min_half_width=INFINITY;
+  for(unsigned j=0;j<view->count;j++){
+   dw_point center=view->points[j],divider=model->divider[j];
+   edges->min_half_width=fminf(edges->min_half_width,hypotf(center.x-divider.x,center.y-divider.y));
+   edges->outer[j]=vertex(view,j);
+   edges->outer_tape[j]=tape_vertex(view,j,index->lane_allowance);
+   edges->divider_tape[j]=tape_vertex(view,2*view->count-1-j,index->lane_allowance);
+  }
+ }
+ index->lane_edges_ready=true;
+ const struct tr_intent change={true,true,model->lanes[1].lane_id,model->lanes[0].lane_id,model->lanes[0].lane_id,0};
+ struct tr_view view;
+ if(lane_view(w,&change,index,&view))index->lane_pair_simple=corridor_simple(&view);
 }
 static bool open_basis(const dw_world *w){
  if(w->reference_count<2||w->reference_count>TR_BASIS_POINTS||!w->reference_revision||!dw_pose_finite(w->origin))return false;
