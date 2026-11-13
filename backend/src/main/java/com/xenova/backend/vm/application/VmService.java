@@ -5,19 +5,27 @@ import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
 import com.xenova.backend.template.application.TemplateCatalog;
+import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.template.domain.VmTemplate;
 import com.xenova.backend.vm.domain.CreateVmCommand;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlPort;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResourceView;
+import com.xenova.backend.vm.domain.VmResources;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Comparator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -79,7 +87,7 @@ public class VmService {
         return combine(runtimeCache.read());
     }
 
-    // Always asks dom0-manager; the state check uses it so the cache is refreshed by one caller.
+    // Always asks dom0-manager; the on-demand VM synchronization uses it.
     public List<Vm> listLive() {
         return combine(runtimeCache.refresh()).vms();
     }
@@ -93,10 +101,18 @@ public class VmService {
         Map<String, VmRuntime> runtimes = snapshot.runtimes();
         List<Vm> vms = vmRecordRepository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED)
                 .stream()
+                .sorted(LIST_ORDER)
                 .map(record -> Vm.of(record, runtimes.get(record.getVmId())))
                 .toList();
         return new VmList(vms, snapshot.observedAt());
     }
+
+    // Screens show VMs in this order whatever filled the table: primary, backup, interaction, then VMs without a role,
+    // drive (Zephyr) guests before Linux among those. The stable sort keeps creation order within each group, so a VM
+    // the board registry sync discovered (created_at = discovery time) does not jump ahead of the drive VMs.
+    private static final Comparator<VmRecord> LIST_ORDER = Comparator
+            .comparingInt((VmRecord record) -> record.getRole() == null ? VmRole.values().length : record.getRole().ordinal())
+            .thenComparingInt(record -> record.getGuestKind() == GuestKind.ZEPHYR ? 0 : 1);
 
     // The role is a console label only: no dom0-manager call, no event, and the VM keeps running as it is.
     public Vm updateRole(String vmId, VmRole role) {
@@ -153,7 +169,7 @@ public class VmService {
             throw exception;
         }
         eventRecorder.vmCreated(record);
-        // vm.created already tells the story; the state is only remembered so polling does not repeat it.
+        // vm.created already tells the story; the state is only remembered so a later sync does not repeat it.
         stateTracker.remember(record.getVmId(), vm.state());
         return vm;
     }
@@ -200,24 +216,276 @@ public class VmService {
         return vmControlPort.findControlOperation(vmId, validatedKey);
     }
 
+    public VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey) {
+        String validatedKey = validateRequestKey(requestKey);
+        VmRecord record = findRecord(vmId);
+        if (record.getGuestKind() != GuestKind.LINUX) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "RESOURCE_UPDATE_UNSUPPORTED",
+                    "자원 변경은 Linux VM만 지원합니다.");
+        }
+        VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
+        if (memoryMib < template.minMemoryMib()) {
+            throw new ApiException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "VALIDATION_ERROR",
+                    "memory_mib는 이 템플릿의 최소값(" + template.minMemoryMib() + ") 이상이어야 합니다.");
+        }
+
+        return underOperation(vmId, () -> {
+            VmResourceUpdate result = vmControlPort.updateResources(vmId, vcpus, memoryMib, validatedKey);
+            validateResourceUpdateResponse(vmId, vcpus, memoryMib, result);
+            record.changeResources(result.after().vcpus(), result.after().memoryMib());
+            vmRecordRepository.save(record);
+            runtimeCache.remove(vmId);
+            return result;
+        });
+    }
+
+    public VmResourceView resources(String vmId) {
+        VmRecord record = findRecord(vmId);
+        CpuLayout layout = requireConfiguredCpuLayout(vmControlPort.cpuLayout());
+        CpuLayout.VmCpuLayout vmLayout = findVmLayout(layout, vmId);
+        return resourceView(record, layout, requireUniformAffinity(vmLayout), exclusivePcpus(layout));
+    }
+
+    public VmResourceView updateVcpuPinning(
+            String vmId, List<CpuLayout.VcpuAffinity> mappings, String requestKey) {
+        String validatedKey = validateRequestKey(requestKey);
+        VmRecord record = findRecord(vmId);
+        List<Integer> requestedMask = validatePinningMappings(record, mappings);
+        CpuLayout layout = requireConfiguredCpuLayout(vmControlPort.cpuLayout());
+        CpuLayout.VmCpuLayout target = findVmLayout(layout, vmId);
+        if (target.allocation() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "VM의 CPU 배치 정책이 없습니다.");
+        }
+        if (layout.host() == null || layout.host().onlinePcpus() == null
+                || !layout.host().onlinePcpus().containsAll(requestedMask)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "RESOURCE_UNSUPPORTED", "온라인 상태인 pCPU만 선택할 수 있습니다.");
+        }
+        List<Integer> shared = layout.host().desiredDom0Pcpus();
+        if (shared == null || shared.isEmpty()) {
+            throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "공유 CPU 정책이 설정되지 않았습니다.");
+        }
+        if ("shared".equals(target.allocation()) && !shared.containsAll(requestedMask)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "RESOURCE_UNSUPPORTED", "공유 VM은 공유 pCPU 집합 안에서만 배치할 수 있습니다.");
+        }
+        if ("exclusive".equals(target.allocation())) {
+            Set<Integer> unavailable = new java.util.HashSet<>(shared);
+            if (layout.reservations() != null) {
+                layout.reservations().stream()
+                        .filter(reservation -> !vmId.equals(reservation.vmId()))
+                        .filter(reservation -> reservation.pcpus() != null)
+                        .forEach(reservation -> unavailable.addAll(reservation.pcpus()));
+            }
+            List<Integer> conflicts = requestedMask.stream().filter(unavailable::contains).toList();
+            if (!conflicts.isEmpty()) {
+                throw new ApiException(
+                        HttpStatus.CONFLICT,
+                        "CPU_PLACEMENT_CONFLICT",
+                        "선택한 pCPU " + conflicts + "는 dom0 공유 영역이거나 다른 VM이 전용으로 사용 중입니다.");
+            }
+        }
+
+        List<CpuPolicyUpdate.CpuPlacement> placements = new ArrayList<>();
+        for (CpuLayout.VmCpuLayout item : layout.vms()) {
+            if (item.allocation() == null) {
+                continue;
+            }
+            List<Integer> mask = item.vmId().equals(vmId) ? requestedMask : uniformMask(item);
+            placements.add(new CpuPolicyUpdate.CpuPlacement(item.vmId(), item.allocation(), mask));
+        }
+        placements.sort(Comparator.comparing(CpuPolicyUpdate.CpuPlacement::vmId));
+        CpuPolicyUpdate update = vmControlPort.updateCpuPolicy(
+                new CpuPolicyUpdate.Request(layout.policyRevision(), sortedUnique(shared), placements), validatedKey);
+        validateCpuPolicyResponse(update, vmId, target.allocation(), requestedMask, layout.policyRevision());
+
+        List<CpuLayout.VcpuAffinity> applied = new ArrayList<>();
+        for (int vcpu = 0; vcpu < record.getVcpus(); vcpu++) {
+            applied.add(new CpuLayout.VcpuAffinity(vcpu, requestedMask));
+        }
+        List<Integer> exclusive = update.policy().placements().stream()
+                .filter(placement -> "exclusive".equals(placement.mode()))
+                .flatMap(placement -> placement.pcpus().stream())
+                .distinct().sorted().toList();
+        return resourceView(record, layout, applied, exclusive);
+    }
+
+    private CpuLayout requireConfiguredCpuLayout(CpuLayout layout) {
+        if (layout == null || !layout.configured() || layout.policyRevision() == null
+                || layout.host() == null || layout.host().desiredDom0Pcpus() == null || layout.vms() == null) {
+            throw new ApiException(HttpStatus.CONFLICT, "CPU_POLICY_NOT_CONFIGURED", "CPU 배치 정책이 설정되지 않았습니다.");
+        }
+        return layout;
+    }
+
+    private CpuLayout.VmCpuLayout findVmLayout(CpuLayout layout, String vmId) {
+        return layout.vms().stream()
+                .filter(item -> vmId.equals(item.vmId()))
+                .findFirst()
+                .orElseThrow(() -> new ApiException(
+                        HttpStatus.BAD_GATEWAY, "VM_CONTROL_BAD_RESPONSE", "VM의 CPU 배치 정보를 찾을 수 없습니다."));
+    }
+
+    private List<Integer> validatePinningMappings(VmRecord record, List<CpuLayout.VcpuAffinity> mappings) {
+        if (mappings == null || mappings.size() != record.getVcpus()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "모든 vCPU의 매핑을 하나씩 보내야 합니다.");
+        }
+        List<CpuLayout.VcpuAffinity> sorted = mappings.stream()
+                .sorted(Comparator.comparingInt(CpuLayout.VcpuAffinity::vcpu)).toList();
+        List<Integer> common = null;
+        for (int index = 0; index < sorted.size(); index++) {
+            CpuLayout.VcpuAffinity mapping = sorted.get(index);
+            if (mapping.vcpu() != index || mapping.pcpus() == null || mapping.pcpus().isEmpty()) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "vCPU 번호와 pCPU 매핑이 올바르지 않습니다.");
+            }
+            List<Integer> mask = sortedUnique(mapping.pcpus());
+            if (mask.size() != mapping.pcpus().size() || mask.stream().anyMatch(cpu -> cpu < 0 || cpu > 3)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "pCPU는 중복 없이 0~3 범위로 지정해야 합니다.");
+            }
+            if (common == null) {
+                common = mask;
+            } else if (!common.equals(mask)) {
+                throw new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "RESOURCE_UNSUPPORTED",
+                        "현재 플랫폼은 한 VM의 모든 vCPU에 동일한 pCPU 집합만 적용할 수 있습니다.");
+            }
+        }
+        return common;
+    }
+
+    private List<CpuLayout.VcpuAffinity> requireUniformAffinity(CpuLayout.VmCpuLayout layout) {
+        if (layout.desiredHardAffinity() == null || layout.desiredHardAffinity().size() != layout.vcpus()) {
+            throw malformedCpuLayout();
+        }
+        List<CpuLayout.VcpuAffinity> sorted = layout.desiredHardAffinity().stream()
+                .sorted(Comparator.comparingInt(CpuLayout.VcpuAffinity::vcpu)).toList();
+        List<Integer> mask = null;
+        for (int index = 0; index < sorted.size(); index++) {
+            CpuLayout.VcpuAffinity item = sorted.get(index);
+            List<Integer> current = item.pcpus() == null ? List.of() : sortedUnique(item.pcpus());
+            if (item.vcpu() != index || current.isEmpty() || (mask != null && !mask.equals(current))) {
+                throw malformedCpuLayout();
+            }
+            mask = current;
+        }
+        List<Integer> finalMask = mask;
+        return sorted.stream().map(item -> new CpuLayout.VcpuAffinity(item.vcpu(), finalMask)).toList();
+    }
+
+    private List<Integer> uniformMask(CpuLayout.VmCpuLayout layout) {
+        List<CpuLayout.VcpuAffinity> affinities = requireUniformAffinity(layout);
+        return affinities.getFirst().pcpus();
+    }
+
+    private ApiException malformedCpuLayout() {
+        return new ApiException(
+                HttpStatus.BAD_GATEWAY, "VM_CONTROL_BAD_RESPONSE", "플랫폼의 CPU 배치 정보가 올바르지 않습니다.");
+    }
+
+    private List<Integer> exclusivePcpus(CpuLayout layout) {
+        if (layout.reservations() == null) {
+            return List.of();
+        }
+        return layout.reservations().stream().flatMap(item -> item.pcpus().stream()).distinct().sorted().toList();
+    }
+
+    private VmResourceView resourceView(
+            VmRecord record,
+            CpuLayout layout,
+            List<CpuLayout.VcpuAffinity> pinning,
+            List<Integer> exclusive) {
+        VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
+        boolean fixed = record.getGuestKind() == GuestKind.ZEPHYR;
+        int pcpuCount = layout.host().maxCpuId() + 1;
+        List<VmResourceView.PcpuStatus> statuses = new ArrayList<>();
+        for (int pcpu = 0; pcpu < pcpuCount; pcpu++) {
+            statuses.add(new VmResourceView.PcpuStatus(pcpu, null));
+        }
+        return new VmResourceView(
+                record.getVmId(), record.getVcpus(), record.getMemoryMib(), pcpuCount, pinning,
+                List.copyOf(layout.host().desiredDom0Pcpus()), exclusive, statuses,
+                new VmResourceView.ResourceLimits(
+                        fixed ? record.getVcpus() : 1,
+                        fixed ? record.getVcpus() : 4,
+                        fixed ? record.getMemoryMib() : template.minMemoryMib(),
+                        fixed ? record.getMemoryMib() : 1024,
+                        fixed ? 1 : 128),
+                clock.instant());
+    }
+
+    private static List<Integer> sortedUnique(List<Integer> values) {
+        return values.stream().distinct().sorted().toList();
+    }
+
+    private void validateCpuPolicyResponse(
+            CpuPolicyUpdate update,
+            String vmId,
+            String mode,
+            List<Integer> mask,
+            int previousRevision) {
+        if (update == null || update.policy() == null || !update.hostPreparationRequired()
+                || update.policy().policyRevision() != previousRevision + 1
+                || update.policy().placements() == null) {
+            throw malformedCpuLayout();
+        }
+        CpuPolicyUpdate.CpuPlacement target = update.policy().placements().stream()
+                .filter(item -> vmId.equals(item.vmId())).findFirst().orElse(null);
+        if (target == null || !mode.equals(target.mode()) || !mask.equals(sortedUnique(target.pcpus()))) {
+            throw malformedCpuLayout();
+        }
+    }
+
+    private static void validateResourceUpdateResponse(
+            String vmId, int vcpus, int memoryMib, VmResourceUpdate result) {
+        VmResources after = result == null ? null : result.after();
+        if (result == null || !vmId.equals(result.vmId()) || after == null
+                || after.vcpus() != vcpus || after.memoryMib() != memoryMib
+                || !result.appliesOnNextStart()) {
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY,
+                    "VM_CONTROL_BAD_RESPONSE",
+                    "VM 제어 서비스가 올바른 자원 변경 결과를 반환하지 않았습니다.");
+        }
+    }
+
     // The platform retires the disk instead of deleting it. Keep the specification and vm_id for a future restore,
     // but hide the retired VM from the current v1 list/get/start/stop surface.
+    // dom0-manager answers 404 VMNotFound only when the board has no registration for the VM (contract v1.1):
+    // it was already retired or removed with a platform tool, so the delete is complete and the row is retired too.
     public void destroy(String vmId) {
         VmRecord record = findRecord(vmId);
-        underOperation(vmId, () -> {
-            vmControlPort.destroy(vmId);
+        boolean alreadyGone = underOperation(vmId, () -> {
+            boolean gone = false;
+            try {
+                vmControlPort.destroy(vmId);
+            } catch (ApiException exception) {
+                if (!"VM_NOT_FOUND".equals(exception.getCode())) {
+                    throw exception;
+                }
+                gone = true;
+            }
             runtimeCache.remove(vmId);
             record.retire();
             vmRecordRepository.save(record);
             stateTracker.forget(vmId);
-            return null;
+            return gone;
         });
-        eventRecorder.vmDeleted(vmId, record.getName());
+        if (alreadyGone) {
+            eventRecorder.vmDeleted(vmId, record.getName(), "platform");
+        } else {
+            eventRecorder.vmDeleted(vmId, record.getName());
+        }
         // Only after dom0-manager confirmed the delete. Failures are logged there and never fail the delete.
         inventoryCleaner.vmDeleted(vmId);
     }
 
-    // Marks the VM busy so the periodic state check does not report this operation's
+    // Marks the VM busy so an overlapping on-demand state sync does not report this operation's
     // intermediate states as detected changes.
     private <T> T underOperation(String vmId, Supplier<T> operation) {
         stateTracker.beginOperation(vmId);

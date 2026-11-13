@@ -9,7 +9,7 @@ import { MockBoardSwitch } from './MockBoardSwitch';
 import { ResumeNotice } from './ResumeNotice';
 import styles from './layout.module.css';
 
-/** 관리자 웹 공통 틀: 핵심 업무 4개 영역과 계정 동작. */
+/** 관리자 웹 공통 틀: 핵심 업무 4개 영역, 차량 화면(Screens)과 계정 동작. */
 export function ConsoleLayout() {
   const session = useSession();
   const logout = useLogout();
@@ -34,6 +34,7 @@ export function ConsoleLayout() {
             <NavLink to="/vision">Vision</NavLink>
             <NavLink to="/control">VM Control</NavLink>
             <NavLink to="/simulator">Simulator</NavLink>
+            <NavLink to="/phone-link">휴대폰 연결</NavLink>
           </>
         }
         actions={

@@ -15,6 +15,7 @@ export function MemoryUsageSummary({
   freeTitle,
   expired = false,
   notice = null,
+  detail = null,
 }: {
   /** 섹션 접근 이름 (예: "autonomous 메모리 사용률"). 막대 이름도 같다 */
   ariaLabel: string;
@@ -28,6 +29,8 @@ export function MemoryUsageSummary({
   freeTitle?: string;
   expired?: boolean;
   notice?: string | null;
+  /** 막대 아래 작은 회색 보조 줄 (Zephyr 사용 중 구성 등) */
+  detail?: string | null;
 }) {
   const clamped = percent == null ? null : Math.max(0, Math.min(100, percent));
   const text = percent == null ? '—' : `${percent.toFixed(1)}%`;
@@ -56,6 +59,7 @@ export function MemoryUsageSummary({
       >
         <i style={{ width: `${clamped ?? 0}%` }} />
       </div>
+      {detail && <p className={styles.memUsageDetail}>{detail}</p>}
       {notice && (
         <p className={styles.memUsageNotice} data-tone="warn">
           {notice}

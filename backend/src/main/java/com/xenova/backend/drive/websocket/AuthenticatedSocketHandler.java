@@ -112,7 +112,15 @@ public abstract class AuthenticatedSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        clients.remove(session.getId());
+        Client client = clients.remove(session.getId());
+        if (client != null) {
+            onClosed(client);
+        }
+    }
+
+    // Runs exactly once per client, whichever side ends the connection: the peer (afterConnectionClosed) or
+    // this server (close(): expired token, oversized frame, failed auth). Subclasses release what the client held.
+    protected void onClosed(Client client) {
     }
 
     protected Map<String, Object> frame(String type, String requestId) {
@@ -140,7 +148,9 @@ public abstract class AuthenticatedSocketHandler extends TextWebSocketHandler {
     }
 
     protected void close(Client client, CloseStatus status) {
-        clients.remove(client.session.getId());
+        if (clients.remove(client.session.getId()) != null) {
+            onClosed(client);
+        }
         try {
             client.session.close(status);
         } catch (IOException exception) {

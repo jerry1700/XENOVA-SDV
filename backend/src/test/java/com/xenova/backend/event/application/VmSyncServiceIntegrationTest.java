@@ -1,6 +1,7 @@
 package com.xenova.backend.event.application;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
@@ -34,7 +35,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 
 @SpringBootTest
 @AutoConfigureMockMvc
-class VmStateWatcherIntegrationTest {
+class VmSyncServiceIntegrationTest {
 
     private static final String CREDENTIALS = """
             {"username":"vm-state-watcher-user","nickname":"VM 상태 테스트","password":"password123!"}
@@ -59,7 +60,7 @@ class VmStateWatcherIntegrationTest {
     private ReportedVmStateRepository reportedVmStateRepository;
 
     @Autowired
-    private VmStateWatcher watcher;
+    private VmSyncService syncService;
 
     private String accessToken;
 
@@ -88,8 +89,8 @@ class VmStateWatcherIntegrationTest {
         String vmId = createVm("watch-crash-01");
         when(vmControlPort.list()).thenReturn(List.of(new VmRuntime(vmId, VmState.CRASHED, 1, 256)));
 
-        watcher.check();
-        watcher.check();
+        syncService.sync();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -105,7 +106,7 @@ class VmStateWatcherIntegrationTest {
         String vmId = createVm("watch-off-01");
         when(vmControlPort.list()).thenReturn(List.of());
 
-        watcher.check();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -122,7 +123,7 @@ class VmStateWatcherIntegrationTest {
         mockMvc.perform(authorized(post("/api/v1/vms/" + vmId + "/stop"))).andExpect(status().isOk());
         when(vmControlPort.list()).thenReturn(List.of());
 
-        watcher.check();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -135,11 +136,11 @@ class VmStateWatcherIntegrationTest {
         // As after a server restart: the last reported state is unknown.
         reportedVmStateRepository.deleteAll();
         when(vmControlPort.list()).thenReturn(List.of(new VmRuntime(vmId, VmState.CRASHED, 1, 256)));
-        watcher.check();
+        syncService.sync();
         assertThat(stateChanges(vmId)).isEmpty();
 
         when(vmControlPort.list()).thenReturn(List.of(new VmRuntime(vmId, VmState.RUNNING, 1, 256)));
-        watcher.check();
+        syncService.sync();
 
         JsonNode changes = stateChanges(vmId);
         assertThat(changes).hasSize(1);
@@ -148,19 +149,21 @@ class VmStateWatcherIntegrationTest {
     }
 
     @Test
-    void nothingIsRecordedWhenDom0ManagerIsUnreachable() throws Exception {
+    void failureIsPropagatedWithoutRecordingWhenDom0ManagerIsUnreachable() throws Exception {
         String vmId = createVm("watch-down-01");
         when(vmControlPort.list()).thenThrow(new ApiException(
                 HttpStatus.SERVICE_UNAVAILABLE, "VM_CONTROL_UNAVAILABLE", "VM 제어 서비스에 연결할 수 없습니다."));
 
-        watcher.check();
+        assertThatThrownBy(syncService::sync)
+                .isInstanceOf(ApiException.class)
+                .hasMessage("VM 제어 서비스에 연결할 수 없습니다.");
 
         assertThat(stateChanges(vmId)).isEmpty();
     }
 
     private String createVm(String name) throws Exception {
         String body = """
-                {"name":"%s","template_id":"debian-13-arm64","template_version":"1.0.6","vcpus":1,"memory_mib":256}
+                {"name":"%s","template_id":"debian-13-arm64","template_version":"1.0.8","vcpus":1,"memory_mib":256}
                 """.formatted(name);
         String response = mockMvc.perform(authorized(post("/api/v1/vms"))
                         .contentType(MediaType.APPLICATION_JSON)

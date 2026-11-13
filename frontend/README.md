@@ -45,8 +45,8 @@ docker run --rm -p 8080:8080 xenova-admin-console
 docker run --rm -p 8081:8080 xenova-vm-screens
 ```
 
-두 이미지는 Nginx에서 SPA 경로 새로고침을 지원하고 `/healthz`로 상태를 확인합니다. 관리 콘솔의
-모니터 링크 주소는 이미지 빌드 시 `--build-arg VITE_SCREENS_ORIGIN=...`으로 지정할 수 있습니다.
+두 이미지는 Nginx에서 SPA 경로 새로고침을 지원하고 `/healthz`로 상태를 확인합니다.
+(관리 콘솔은 모니터 화면 링크를 더 두지 않아 `VITE_SCREENS_ORIGIN` 빌드 인자를 쓰지 않습니다.)
 API·WebSocket 프록시와 운영 도메인은 배포 Nginx 설정에서 연결합니다.
 
 - 콘솔 환경변수는 `apps/admin-console/.env.example` 을 `.env.local` 로 복사해 바꿉니다 (`VITE_BACKEND_ORIGIN`, `VITE_API_BASE_URL`, `VITE_MOCK`).
@@ -56,17 +56,18 @@ API·WebSocket 프록시와 운영 도메인은 배포 Nginx 설정에서 연결
 
 관리자 웹은 **VM Dashboard · Vision · VM Control · Simulator** 네 영역으로 구성합니다. 주행 상태는 전역 띠로 반복하지 않고 Dashboard Overview와 Simulator 안에서 맥락에 맞게 보여 줍니다.
 
-| 경로                                                 | 화면                              | 데이터                              |
-| ---------------------------------------------------- | --------------------------------- | ----------------------------------- |
-| `/login`                                             | 로그인                            | auth                                |
-| `/dashboard/overview`                                | VM 3대 통합 현황                  | drive state, vms, events            |
-| `/dashboard/cpu`, `/dashboard/memory`                | CPU·Memory 자원 현황              | vms, metrics                        |
-| `/dashboard/console`                                 | VM별 웹 콘솔                      | WS `/ws/v1/vms/{id}/console`        |
-| `/dashboard/vms/:vmId`                               | Overview에서 진입하는 VM 상세     | vms, metrics, processes, 콘솔 WS-03 |
-| `/vision`                                            | Jetson 카메라·인지 현황           | 후속 이슈 -306                      |
-| `/control`, `/control/vms/new`, `/control/vms/:vmId` | VM 목록·생성·생명주기 제어        | vms, templates                      |
-| `/simulator`                                         | 실차 전 시뮬레이터·장애/복구 시연 | drive state, input, display route   |
-| `/events`, `/screens`, `/components`                 | 기존 보조·개발 화면               | events 또는 —                       |
+| 경로                                                 | 화면                                      | 데이터                              |
+| ---------------------------------------------------- | ----------------------------------------- | ----------------------------------- |
+| `/login`                                             | 로그인                                    | auth                                |
+| `/dashboard/overview`                                | VM 3대 통합 현황                          | drive state, vms, events            |
+| `/dashboard/cpu`, `/dashboard/memory`                | CPU·Memory 자원 현황                      | vms, metrics                        |
+| `/dashboard/console`                                 | VM별 웹 콘솔                              | WS `/ws/v1/vms/{id}/console`        |
+| `/dashboard/vms/:vmId`                               | Overview에서 진입하는 VM 상세             | vms, metrics, processes, 콘솔 WS-03 |
+| `/vision`                                            | Jetson 카메라·인지 현황                   | 후속 이슈 -306                      |
+| `/control`, `/control/vms/new`, `/control/vms/:vmId` | VM 목록·생성·생명주기 제어                | vms, templates                      |
+| `/simulator`                                         | 실차 전 시뮬레이터·장애/복구 시연         | drive state, input, display route   |
+| `/phone-link`                                        | 휴대폰 화면 연결(접속 주소·연결번호 발급) | REST-38·REST-39 phone-link          |
+| `/events`, `/components`                             | 기존 보조·개발 화면                       | events 또는 —                       |
 
 기존 `/vms`, `/resources`, `/demo`, `/console` 주소는 북마크 호환을 위해 새 주소로 이동시킵니다.
 
@@ -199,17 +200,18 @@ cd apps/admin-console && VITE_MOCK=true npx vite --port 5173            # VITE_M
 cd apps/vm-screens && npm run preview:monitors     # 가짜 수집기 8082 + vite 5174
 ```
 
-| 주소                                     | 화면                                                                                           |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `http://localhost:5174/display/combined` | 모니터 2대를 합친 차량 화면: 출발 전 차 외관 → 출발하면 왼쪽 3D 주행 · 오른쪽 내비 (회사 → 집) |
-| `http://localhost:5174/display/mobile`   | 휴대폰 화면                                                                                    |
+| 주소                                     | 화면                                                                                                  |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `http://localhost:5174/display/combined` | 모니터 2대를 합친 차량 화면: 출발 전 차 외관 → 출발하면 왼쪽 3D 주행 · 오른쪽 내비 (Jetson 시험 코스) |
+| `http://localhost:5174/display/mobile`   | 휴대폰 화면                                                                                           |
 
 옛 모니터 화면(`/display/monitor-1` 계기판·`/display/monitor-2` 인포테인먼트)은 지웠다. 두 주소는 쿼리스트링을 그대로 들고 `/display/combined` 로 넘어간다.
 
 - 테마: 07~19시 밝게, 그 밖에는 어둡게. `?theme=light|dark` 로 고정
-- 가짜 수집기 조작: `http://127.0.0.1:8082/scenario/<cycle|cruise|safe-stop|auto-ready|failover-done|manual|feed-down>`, 경로 위 지점으로 건너뛰기 `/jump/<지도 m>` (전체 3,820 m)
-- 지도·경로·사거리·차로 수는 `src/display/cityMap.ts` 하나에서 정한다 (가짜 수집기도 같은 파일을 읽는다)
-- 차량·Zephyr·주변 값(`state.vehicle` `drive_apps` `drive_limits` `trip` `road` `world`)은 **제안 필드**다. 실제 dom0 수집기는 아직 보내지 않으므로 보드에서는 "수신 대기"로 보인다
+- 시연 시나리오 (`cycle`, 한 바퀴): 출발선에서 정차 → ① 콘 A·B 회피 (VM1 자율) → ② 수동 전환 후 자동 복귀 → ③ VM1 장애 (안전 정지 → VM2 승계 준비 → VM2 자율) → ④ P1 주차 → 10초 뒤 처음부터
+- 가짜 수집기 조작: `http://127.0.0.1:8082/scenario/<cycle|cruise|safe-stop|auto-ready|failover-done|manual|feed-down>`, 시연 경로 위 지점으로 건너뛰기 `/jump/<경로 m>` (전체 8.9 m, VM1 장애 5.92 m · 주차 진입 7.82 m), `/restart`·`/park`·`/go`
+- 코스 형상·시연 경로는 `src/display/course.ts` 하나에서 정한다 (가짜 수집기도 같은 파일을 읽는다). 형상은 시뮬레이터 `tools/generate_jetson_tracks.py` 의 `jetson-demo`(R60cm) 와 같은 식이고, 차량 치수·회피·주차 경로는 **실측 전 도식**이다
+- 차량·Zephyr·코스 값(`state.vehicle` `drive_apps` `drive_limits` `trip` `course`)은 **제안 필드**다. 실제 dom0 수집기는 아직 보내지 않으므로 보드에서는 "수신 대기"로 보인다 (`course` 가 없으면 지도에 차를 그리지 않는다)
 
 ## 규칙
 

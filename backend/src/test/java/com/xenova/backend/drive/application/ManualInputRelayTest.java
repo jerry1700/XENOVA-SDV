@@ -135,7 +135,7 @@ class ManualInputRelayTest {
 
     @Test
     void repeatKeepsItsPaceWhileTheSharedSchedulerIsBlocked() throws InterruptedException {
-        // Spring's default @Scheduled pool has one thread; VmStateWatcher blocks it during a slow dom0-manager call.
+        // Spring's default @Scheduled pool has one thread; unrelated slow scheduled work must not block this relay.
         ThreadPoolTaskScheduler shared = new ThreadPoolTaskScheduler();
         shared.setPoolSize(1);
         shared.initialize();
