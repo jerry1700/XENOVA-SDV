@@ -471,6 +471,129 @@ def test_xen_start_failure_is_separate_from_successful_registration(client, boar
     assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
 
 
+def test_create_replay_after_dhcp_deadline_hits_http_preflight_before_manager_resume(client, board):
+    """Pending registration is hidden by GET. The lower Manager can still finish the original."""
+    from contextlib import ExitStack
+
+    from xenova_execution import short_lock
+
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    body = {"vm_id": str(NEW_VM), "name": "registration-deadline", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    with ExitStack() as held:
+        def expire(phase, _):
+            if phase == "dhcp-applied":
+                held.enter_context(short_lock(board.run, "admission"))
+                now[0] = 3800.
+
+        with patch.object(board.manager, "checkpoint", expire):
+            failed = client.post("/api/v1/vms", json=body)
+    assert failed.status_code == 504, failed.text
+    context = failed.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"]) == ("create", "registration", True)
+    journal = board.data / "operations" / f"{context['operation_id']}.json"
+    original = json.loads(journal.read_text())
+    assert original["phase"] == "dhcp-applied"
+    assert original["error"]["code"] == "DEADLINE_EXCEEDED"
+    disk = board.data / "instances" / original["assigned"]["internal_name"] / "root.raw"
+    inode = disk.stat().st_ino
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+    lookup = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "create"})
+    assert lookup.json()["status"] == "uncertain"
+    original_bytes = journal.read_bytes()
+    with patch.object(board.manager, "preparer", side_effect=AssertionError("must reuse published disk")), \
+            patch.object(board.manager, "_prepare_dhcp", wraps=board.manager._prepare_dhcp) as dhcp:
+        replay = client.post("/api/v1/vms", json=body)
+        assert (replay.status_code, replay.json()["platform_code"]) == (409, "TARGET_CHANGED")
+        assert journal.read_bytes() == original_bytes
+        settled = board.manager.call("create", body, execute=True)
+        assert settled["ok"] and settled["operation_id"] == original["operation_id"], settled
+        dhcp.assert_not_called()
+    recovered = client.post("/api/v1/vms", json=body)
+    assert recovered.status_code == 201, recovered.text
+    finished = json.loads(journal.read_text())
+    assert finished["status"] == "SUCCEEDED" and finished["first_error"] == original["error"]
+    assert finished["creation"] == original["creation"]
+    assert finished["assigned"] == original["assigned"]
+    assert disk.stat().st_ino == inode
+    assert len(list((board.data / "operations").glob("*.json"))) == 1
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
+def test_create_start_timeout_preserves_registration_and_never_launches_over_a_live_domain(client, board):
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    body = {"vm_id": str(NEW_VM), "name": "start-deadline", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+
+    def timeout_after_create(argv, *args, **kwargs):
+        result = board.xen(argv, *args, **kwargs)
+        if argv[:2] == ["xl", "create"]:
+            now[0] += 91.
+        return result
+
+    board.platform.command = timeout_after_create
+    failed = client.post("/api/v1/vms", json=body)
+    assert failed.status_code == 503, failed.text
+    context = failed.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == (
+        "start", "start_confirmation", True, "uncertain",
+    )
+    assert failed.json()["platform_code"] == "RECONCILE_REQUIRED"
+    asset, = (board.data / "operations").glob("*.json")
+    record = json.loads(asset.read_text())
+    assert record["status"] == "SUCCEEDED"
+    before = asset.read_bytes()
+    start = board.data / "control-requests" / f"{context['operation_id']}.json"
+    start_before = start.read_bytes()
+    lookup = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "start"})
+    assert lookup.json()["status"] == "uncertain"
+    disk = board.data / "instances" / record["assigned"]["internal_name"] / "root.raw"
+    inode = disk.stat().st_ino
+    replay = client.post("/api/v1/vms", json=body)
+    assert replay.status_code == 409 and replay.json()["code"] == "VMExists", replay.text
+    assert asset.read_bytes() == before and start.read_bytes() == start_before
+    assert disk.stat().st_ino == inode
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
+def test_create_http_budget_can_expire_after_registration_before_xen_start(board):
+    from dom0_manager import budget
+
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    real_budget = budget.start
+    body = {"vm_id": str(NEW_VM), "name": "start-not-submitted", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    with make_client(board) as client, patch.object(
+        budget, "start", side_effect=lambda ms, **kwargs: real_budget(ms, clock=lambda: now[0], **kwargs),
+    ):
+        def expire(phase, _):
+            if phase == "complete":
+                now[0] += 11.
+
+        with patch.object(board.manager, "checkpoint", expire):
+            failed = client.post("/api/v1/vms", json=body, headers={"X-Request-Budget-Ms": "10000"})
+        assert failed.status_code == 504, failed.text
+        context = failed.json()["context"]
+        # The create adapter tries a follow-up get before it reaches the start
+        # budget guard. A completed registration can therefore look unknown here.
+        assert (context["action"], context["stage"], context["accepted"], context["operation_id"]) == (
+            "create", "registration", None, None,
+        )
+        assert not list((board.data / "control-requests").glob("*.json"))
+        assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+        journal, = (board.data / "operations").glob("*.json")
+        original = journal.read_bytes()
+        assert json.loads(original)["status"] == "SUCCEEDED"
+        with patch.object(board.manager, "preparer", side_effect=AssertionError("registered disk must not be copied again")):
+            recovered = client.post("/api/v1/vms", json=body, headers={"X-Request-Budget-Ms": "10000"})
+        assert recovered.status_code == 201, recovered.text
+    assert journal.read_bytes() == original
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
 # ---- 정지 요청 추적 (S15P31E110-305): 실제 Manager.fork·budget_ms·control-operation ----
 
 
