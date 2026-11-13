@@ -36,7 +36,13 @@ export function LoginPage() {
     <div className={styles.center}>
       <section
         className={styles.pageHead}
-        style={{ width: 420, flexDirection: 'column', alignItems: 'stretch', padding: 40 }}
+        // 좁은 휴대폰(360px)에서도 넘치지 않게 폭은 최대 420px, 안쪽 여백도 폭에 맞춰 줄인다
+        style={{
+          width: 'min(420px, 100%)',
+          flexDirection: 'column',
+          alignItems: 'stretch',
+          padding: 'clamp(20px, 8vw, 40px)',
+        }}
       >
         <div style={{ textAlign: 'center' }}>
           <img src={logo} alt="Xenova" style={{ height: 44, width: 'auto', margin: '0 auto 12px' }} />

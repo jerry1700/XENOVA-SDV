@@ -25,12 +25,24 @@
 .user {
   display: flex;
   align-items: center;
+  min-width: 0;
+  max-width: min(40vw, 260px);
   gap: var(--x-space-2);
   padding: 4px 10px;
   border-radius: var(--x-radius-sm);
   background: var(--x-surface-2);
   font-family: var(--x-font-mono);
   font-size: var(--x-text-sm);
+}
+/* 닉네임이 길면 말줄임 (전체는 title) */
+.userName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avatar {
+  flex: none;
 }
 .avatar {
   display: grid;
@@ -173,6 +185,9 @@
 
 /* 실시간 조회 실패 알림 (LiveDataAlert) — 콘솔 모든 화면 위 */
 .liveAlert {
+  /* 서버가 보낸 공백 없는 긴 오류 문구도 화면 안에서 줄바꿈 */
+  min-width: 0;
+  overflow-wrap: anywhere;
   margin-bottom: var(--x-space-4);
   padding: var(--x-space-3) var(--x-space-4);
   border: 1px solid var(--x-fault);

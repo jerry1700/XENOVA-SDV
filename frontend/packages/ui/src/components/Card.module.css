@@ -17,6 +17,8 @@
   background: color-mix(in srgb, var(--x-surface-2) 34%, transparent);
 }
 .title {
+  /* 긴 제목(공백 없는 VM 이름 등)이 머리줄을 밀어 카드 밖으로 넘치지 않게 */
+  min-width: 0;
   margin: 0;
   font-size: var(--x-text-md);
   font-weight: 700;

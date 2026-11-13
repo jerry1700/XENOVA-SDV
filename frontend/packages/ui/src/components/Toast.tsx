@@ -14,15 +14,20 @@ interface ToastApi {
 
 const ToastContext = createContext<ToastApi | null>(null);
 
+/** 한 번에 보이는 토스트 수. 넘치면 오래된 것부터 정리한다 (오류가 몰려도 화면을 덮지 않게) */
+const MAX_TOASTS = 3;
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(1);
 
   const show = useCallback<ToastApi['show']>((text, tone = 'info', durationMs = 3000) => {
     const id = nextId.current++;
-    setItems((current) => [...current, { id, tone, text }]);
+    setItems((current) => [...current, { id, tone, text }].slice(-MAX_TOASTS));
     window.setTimeout(() => setItems((current) => current.filter((item) => item.id !== id)), durationMs);
   }, []);
+
+  const close = (id: number) => setItems((current) => current.filter((item) => item.id !== id));
 
   const api = useMemo(() => ({ show }), [show]);
 
@@ -32,7 +37,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div className={styles.stack} aria-live="polite">
         {items.map((item) => (
           <div key={item.id} className={[styles.toast, styles[item.tone]].join(' ')}>
-            {item.text}
+            {/* 긴 문구는 약 6줄까지, 넘치면 이 안에서 스크롤 */}
+            <div className={styles.text}>{item.text}</div>
+            <button
+              type="button"
+              className={styles.close}
+              aria-label="알림 닫기"
+              onClick={() => close(item.id)}
+            >
+              ×
+            </button>
           </div>
         ))}
       </div>
