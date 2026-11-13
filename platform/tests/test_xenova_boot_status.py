@@ -207,7 +207,7 @@ class BootStatusTest(unittest.TestCase):
         self.rows['xenova-vms.service'].update(ActiveState='activating',SubState='start')
         self.progress('autostart',phase='execution-start-and-verification',vms=[])
         basic=status.render(self.read());details=status.render(self.read(),details=True)
-        self.assertTrue(basic.startswith('Xenova startup\n'))
+        self.assertTrue(basic.startswith('XENOVA startup\n'))
         self.assertIn('CPU policy: prepared for this boot',basic)
         self.assertIn('Registration: existing installation',basic)
         self.assertNotIn('invocation',basic)

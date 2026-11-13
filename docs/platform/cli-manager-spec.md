@@ -2945,7 +2945,7 @@ xenova-boot-status --json
 
 **정상 응답**
 
-기본 평문은 `Xenova startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
+기본 평문은 `XENOVA startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
 진행 중인 서비스는 `[START]`, 아직 미시작인 서비스는 `[WAIT; reason unconfirmed]`로 묶어 표시한다.
 `--details`의 `COMPLETE/PROGRESS/WAITING/DELAYED/DEFERRED/FAILED/UNKNOWN/UNAVAILABLE`은
 같은 snapshot의 표시 상태다. 지연·실패·미확정은 기본 출력에도 남는다.
@@ -4107,7 +4107,7 @@ boot allowed는 boolean이며 해당 host·세대·revision에만 유효하다. 
 
 현재 Network Starter 종료 구현은 refuse 값만으로 별도 veto 분기를 만들지 않는다. force-allowed는 timeout 후 자동 force로 승격하는 정책이 아니다. 명시 --force는 Linux를 포함한 전체 대상에 적용된다.
 
-shutdown-all은 guest를 정리하고 gate를 닫아 둔다. poweroff/reboot-board는 추가로 미등록 실행 도메인·잔여 실행·신원 변경을 검사한 뒤 VM/종료/DHCP 서비스 정리 → /srv 데이터 unmount → host 전원 동작을 진행한다. 실제 제거가 확인되지 않으면 후속 host 종료를 진행하지 않는다. 사용자 stopped 의도를 모든 VM에 일괄 생성하지 않는다.
+shutdown-all은 guest를 정리하고 gate를 닫아 둔다. poweroff/reboot-board는 추가로 미등록 실행 도메인·잔여 실행·신원 변경을 검사한 뒤 UTC 제공·콘솔 증거 수집 타이머를 먼저 멈춘다. 이어 실행 중인 수집 작업과 VM/종료/DHCP 서비스를 정리하고, /srv 데이터 unmount 성공 뒤 host 전원 동작을 요청한다. 실제 제거나 마운트 해제가 확인되지 않으면 후속 host 종료를 진행하지 않는다. 사용자 stopped 의도를 모든 VM에 일괄 생성하지 않는다.
 
 종료 결과는 action, attempt_id, stopped, already_stopped, forced, graceful_shutdown_requested, instances, board_shutdown, global_force, observation을 제공한다. observation에는 samples/changed_pairs/recent_changes, VM별 결과에는 method/stage/xen_state/error 등이 있다. shutdown-requested가 있으면 단순 host-resume을 허용하지 않는다.
 

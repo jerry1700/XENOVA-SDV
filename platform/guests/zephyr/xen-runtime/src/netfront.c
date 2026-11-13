@@ -326,9 +326,11 @@ static int start_inner(void) {
  if(!admit())return -ECANCELED;
  monitor_started=true;
  if(!k_thread_create(&monitor,monitor_stack,K_THREAD_STACK_SIZEOF(monitor_stack),state_loop,NULL,NULL,NULL,CONFIG_XENOVA_NETFRONT_THREAD_PRIORITY,0,K_NO_WAIT)){monitor_started=false;return -ENOMEM;}
+ (void)k_thread_name_set(&monitor,"xen-netfront-mon");
  if(!admit())return -ECANCELED;
  worker_started=true;
  if(!k_thread_create(&worker,worker_stack,K_THREAD_STACK_SIZEOF(worker_stack),loop,NULL,NULL,NULL,CONFIG_XENOVA_NETFRONT_THREAD_PRIORITY,0,K_NO_WAIT)){worker_started=false;return -ENOMEM;}
+ (void)k_thread_name_set(&worker,"xen-netfront");
  if(!admit())return -ECANCELED;
  startup_stage="interface-up";interface_possible=true;
  rc=net_if_up(iface);if(rc&&rc!=-EALREADY)return rc;
