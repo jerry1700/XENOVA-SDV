@@ -386,6 +386,16 @@ def _uuid(value: Any) -> UUID | None:
         return None
 
 
+def _pending_registration(envelope: dict[str, Any], vm_id: UUID) -> bool:
+    """생성 경로만 하위에서 확인한 DHCP 적용 후 원 등록 단계로 진입할 수 있다."""
+    error = envelope.get("error") or {}
+    details = error.get("details")
+    evidence = details.get("pending_registration") if isinstance(details, dict) else None
+    return (envelope.get("ok") is False and error.get("code") == "TARGET_CHANGED"
+            and isinstance(evidence, dict) and evidence.get("vm_id") == str(vm_id)
+            and _uuid(evidence.get("operation_id")) is not None)
+
+
 def _int(value: Any) -> int | None:
     return value if type(value) is int else None
 
@@ -739,9 +749,12 @@ class PlatformDriver(Driver):
         data = raise_for_envelope(call_with_budget(self.manager, "list", spec), context="list")
         return list(data.get("vms") or [])
 
-    def _view(self, vm_id: UUID) -> dict[str, Any]:
+    def _view(self, vm_id: UUID, *, for_create: bool = False) -> dict[str, Any]:
         spec = {"vm_id": str(vm_id), "timeout_ms": self._read_timeout_ms}
-        data = raise_for_envelope(call_with_budget(self.manager, "get", spec), context=f"get {vm_id}")
+        envelope = call_with_budget(self.manager, "get", spec)
+        if for_create and _pending_registration(envelope, vm_id):
+            raise VMNotFound(f"domain {vm_id} is absent with original registration pending")
+        data = raise_for_envelope(envelope, context=f"get {vm_id}")
         view = data.get("vm")
         if not view:
             raise VMNotFound(f"vm {vm_id} not registered")
@@ -763,6 +776,12 @@ class PlatformDriver(Driver):
         except VMNotFound:
             return False
         return True
+
+    def has_domain_for_create(self, vm_id: UUID) -> bool:
+        try:
+            return view_to_domain(self._view(vm_id, for_create=True)) is not None
+        except VMNotFound:
+            return False
 
     def registration(self, vm_id: UUID) -> dict[str, Any] | None:
         """등록 정보(view). 미등록이면 None. Provisioner 가 쓴다."""
@@ -1062,10 +1081,11 @@ class PlatformProvisioner(Provisioner):
 
     # ---- 조회 ----
 
-    def _registration(self, vm_id: UUID) -> dict[str, Any] | None:
+    def _registration(self, vm_id: UUID, *, for_create: bool = False) -> dict[str, Any] | None:
         envelope = call_with_budget(self.manager, "get", {"vm_id": str(vm_id)})
         if not envelope.get("ok"):
-            if (envelope.get("error") or {}).get("code") == "VM_NOT_FOUND":
+            if ((envelope.get("error") or {}).get("code") == "VM_NOT_FOUND"
+                    or for_create and _pending_registration(envelope, vm_id)):
                 return None
             raise_for_envelope(envelope, context=f"get {vm_id}")
         view = (envelope.get("data") or {}).get("vm")
@@ -1121,7 +1141,7 @@ class PlatformProvisioner(Provisioner):
     def ensure_instance(
         self, vm_id: UUID, template_id: str, template_version: str, *, name: str, vcpus: int, memory_mib: int
     ) -> InstancePaths:
-        existing = self._registration(vm_id)
+        existing = self._registration(vm_id, for_create=True)
         if existing is not None:
             self._require_matching_spec(existing, vm_id, template_id, template_version, vcpus, memory_mib)
             return self._paths(existing)

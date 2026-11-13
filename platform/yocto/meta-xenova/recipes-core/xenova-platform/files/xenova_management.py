@@ -66,6 +66,10 @@ def internal_name(identity):
     return 'vm-' + identity.replace('-', '')
 
 
+def _create_key(identity):
+    return 'create:' + identity
+
+
 def digest(value):
     return hashlib.sha256(canonical(value).encode('utf-8')).hexdigest()
 
@@ -136,7 +140,7 @@ class ReadContext:
         except FileNotFoundError:return None
         return self.m._read(path)
 
-    def validate_one(self, identity):
+    def validate_one(self, identity, *, domain_absent=False):
         """해당 VM을 대조하고 이 호출에서 읽은 파일 근거를 반환한다.
 
         반환값은 현재 호출의 잠금 범위 안에서만 재사용한다. 외부 helper나 전체
@@ -157,13 +161,14 @@ class ReadContext:
         if directory is not None:
             current_record=self.optional(directory/'instance.json')
             if current_record!=record:raise ReadChanged()
+        pending_registration=None
         creation=record.get('creation_operation_id')
         if creation and state['lifecycle']=='REGISTERED':
             op=self.optional(self.m.data/'operations'/(creation+'.json'))
             if not op or op.get('vm_id')!=identity:raise ReadChanged()
             if op.get('status')!='SUCCEEDED':
                 template=op.get('template')
-                if (self.action!='recovery-intents' or op.get('action')!='create'
+                if (op.get('action')!='create'
                         or op.get('operation_id')!=creation or op.get('initial_spec')!=record.get('creation_spec')
                         or not isinstance(template,dict)
                         or template.get('manifest_sha256')!=record.get('template_manifest_sha256')
@@ -171,13 +176,30 @@ class ReadContext:
                         or op.get('status') not in ('RUNNING','RECOVERY_REQUIRED')
                         or op.get('phase') not in ('preparing','published','dhcp-pending','dhcp-applied')):
                     raise ReadChanged()
-                self.pending_creations.add(identity)
+                # 생성 호출자는 이 근거로 원 요청을 다시 제출한다. 조회 자체는 계속 미확정이다.
+                if self.action=='get' and domain_absent and op['phase']=='dhcp-applied':
+                    if (not current_tomb or current_tomb.get('last_operation_id')!=creation
+                            or current_tomb.get('generation')!=0
+                            or current_tomb.get('record')!=record
+                            or op.get('idempotency_key')!=_create_key(identity)):
+                        raise ReadChanged()
+                    pending_registration={'vm_id':identity,'operation_id':creation}
+                elif self.action=='recovery-intents':
+                    self.pending_creations.add(identity)
+                else:
+                    raise ReadChanged()
         current=None
         if self.action!='registrations':
             current=(read_intent(self.m.data,identity) if self.e is None else
                      self.e.observation_inputs(record,self.lifecycles[identity]))
             if current!=self.inputs[identity]:raise ReadChanged()
         self.check()
+        if pending_registration is not None:
+            intent=current['intent']
+            if intent is not None and (intent.get('source')!='create'
+                    or intent.get('accepted_operation_id')!=creation or intent.get('desired_state')!='stopped'):
+                raise ReadChanged()
+            raise ReadChanged(details={'pending_registration':pending_registration})
         return current_record,current_tomb,current
 
     def validate(self):
@@ -1312,6 +1334,8 @@ class Manager:
                 fail('IP_CONFLICT', 'recorded IP conflicts with another current reservation/lease')
         target = self.data / 'instances' / op.get('assigned', {}).get('internal_name', op['initial_spec']['name'])
         if not target.exists() and not target.is_symlink():
+            if dhcp_applied:
+                fail('RECOVERY_REQUIRED', 'published instance missing after recorded DHCP application')
             workspace = self.data / op['owned_workspace']
             resume=workspace.exists() or workspace.is_symlink()
             private_zephyr=(op['template']['guest_kind']=='zephyr'
@@ -1349,7 +1373,9 @@ class Manager:
                 if op['template']['guest_kind']!='linux':
                     raise
                 self._preparation_failed(error,op)
-        self._save_op(op, 'published')
+        # 이미 적용한 DHCP 단계는 등록 마감이 다시 지연돼도 되돌리지 않는다.
+        if not dhcp_applied:
+            self._save_op(op, 'published')
         record = self._read(target / 'instance.json')
         if (record['uuid'] != op['vm_id'] or record.get('creation_operation_id') != op['operation_id']
                 or record.get('creation_spec') != op['initial_spec']
@@ -1419,16 +1445,15 @@ class Manager:
             if error.error['code']!='OPERATION_IN_PROGRESS' or error.error['details'].get('lock')!='admission':raise
             if not context or 'output_stack' not in context:raise
             return self._defer_registration(op,tomb,context,dhcp_applied)
-        if vm.has_network(record):
-            if not dhcp_applied:
-                if record['guest_kind']=='linux':
-                    # DHCP 재제출은 결과 조회가 아닌 외부 효과다. 원 생성 기한 밖에서 반복하지 않는다.
-                    with creation.work(self,op,context) as end:
-                        self._save_op(op, 'dhcp-pending')
-                        with tool_output():self._prepare_dhcp(context,deadline=end)
-                else:
+        if vm.has_network(record) and not dhcp_applied:
+            if record['guest_kind']=='linux':
+                # DHCP 재제출은 결과 조회가 아닌 외부 효과다. 원 생성 기한 밖에서 반복하지 않는다.
+                with creation.work(self,op,context) as end:
                     self._save_op(op, 'dhcp-pending')
-                    with tool_output():self._prepare_dhcp(context)
+                    with tool_output():self._prepare_dhcp(context,deadline=end)
+            else:
+                self._save_op(op, 'dhcp-pending')
+                with tool_output():self._prepare_dhcp(context)
             self._save_op(op, 'dhcp-applied')
         return self._finish(op, tomb, context)
 
@@ -1947,7 +1972,7 @@ class Manager:
             result = self.p.cpu().prepare(records, cpu_deadline, execute=execute, restore=spec.get('restore',False), context=context)
         elif action in MUTATIONS:
             result=self._mutate(action,spec,execute,
-                                'create:'+spec['vm_id'] if action=='create' else idempotency_key,
+                                _create_key(spec['vm_id']) if action=='create' else idempotency_key,
                                 records,context)
         elif action in ('recover_once', 'recovery-reconcile'):
             from xenova_recovery import Recovery

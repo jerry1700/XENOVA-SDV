@@ -32,8 +32,8 @@ class ExecutionError(PlatformError):
 
 class ReadChanged(ExecutionError):
     """요청 안에서 한 번만 새 관측 회차로 재확인할 수 있는 메타데이터 변경."""
-    def __init__(self):
-        super().__init__('TARGET_CHANGED','read configuration or execution changed during observation')
+    def __init__(self, *, details=None):
+        super().__init__('TARGET_CHANGED','read configuration or execution changed during observation',details=details)
 
 
 def refuse(code, message, **kwargs):
@@ -926,8 +926,6 @@ class Execution:
         path = self._path(self.runtime, "observations", record["uuid"])
         with short_lock(self.runtime, "observation-"+record["uuid"], deadline=deadline,
                         clock=self.p.clock, sleep=self.p.sleep):
-            if _read_context is not None:
-                _read_context.validate_one(record['uuid'])
             previous = self.read(path)
             last = previous.get("last_success") if previous and previous.get("host_boot_id") == self.host else None
             revision = previous["observation_revision"] if last else 0
@@ -941,6 +939,8 @@ class Execution:
                 if newer and (not last or not same_read_execution(last['value'], observation)
                               or previous.get('last_error') is not None):
                     raise ReadChanged()
+            if _read_context is not None:
+                _read_context.validate_one(record['uuid'], domain_absent=row is None)
             # A delayed read does not publish a new revision. Scheduler-only
             # differences may be returned with its original clock, not a
             # fabricated revision newer than the already-published sample.

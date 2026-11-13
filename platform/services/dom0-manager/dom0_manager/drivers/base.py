@@ -140,6 +140,9 @@ class Driver(ABC):
     def has_domain(self, vm_id: UUID) -> bool:
         return any(d.vm_id == vm_id for d in self.list_domains())
 
+    def has_domain_for_create(self, vm_id: UUID) -> bool:
+        return self.has_domain(vm_id)
+
     @abstractmethod
     def create(self, spec: CreateSpec) -> Domain:
         """도메인을 만들어 실행 상태로 둔다. 이미 있으면 VMExists."""

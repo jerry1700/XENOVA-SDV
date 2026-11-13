@@ -471,11 +471,14 @@ def test_xen_start_failure_is_separate_from_successful_registration(client, boar
     assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
 
 
-def test_create_replay_after_dhcp_deadline_hits_http_preflight_before_manager_resume(client, board):
-    """Pending registration is hidden by GET. The lower Manager can still finish the original."""
+@pytest.mark.parametrize("condition", ["normal", "start-budget-expired", "new-stop-intent"])
+def test_create_replay_after_dhcp_deadline_finishes_original_registration(client, board, condition):
+    """The same HTTP request can finish registration before a distinct start."""
     from contextlib import ExitStack
 
     from xenova_execution import short_lock
+
+    from dom0_manager import budget
 
     now = [100.]
     board.platform.clock = lambda: now[0]
@@ -496,27 +499,88 @@ def test_create_replay_after_dhcp_deadline_hits_http_preflight_before_manager_re
     original = json.loads(journal.read_text())
     assert original["phase"] == "dhcp-applied"
     assert original["error"]["code"] == "DEADLINE_EXCEEDED"
+    assert now[0] * 1000 >= original["creation"]["deadline_monotonic_ms"]
     disk = board.data / "instances" / original["assigned"]["internal_name"] / "root.raw"
     inode = disk.stat().st_ino
+    credential = board.data / "provisioning" / str(NEW_VM) / "agent.env"
+    credential.parent.mkdir(parents=True, mode=0o700)
+    credential.write_bytes(b"fixture private supply\n")
+    credential.chmod(0o600)
+    supply_before = credential.read_bytes()
+    supply_stat = credential.stat()
     assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
     lookup = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "create"})
     assert lookup.json()["status"] == "uncertain"
     original_bytes = journal.read_bytes()
-    with patch.object(board.manager, "preparer", side_effect=AssertionError("must reuse published disk")), \
-            patch.object(board.manager, "_prepare_dhcp", wraps=board.manager._prepare_dhcp) as dhcp:
-        replay = client.post("/api/v1/vms", json=body)
-        assert (replay.status_code, replay.json()["platform_code"]) == (409, "TARGET_CHANGED")
+    pending = client.get(f"/api/v1/vms/{NEW_VM}")
+    assert (pending.status_code, pending.json()["platform_code"]) == (409, "TARGET_CHANGED")
+    assert "pending_registration" not in pending.text
+    unmanaged = domain(board.records[original["assigned"]["internal_name"]], disk, 91)
+    board.xen.rows.append(unmanaged)
+    try:
+        refused = client.post("/api/v1/vms", json=body)
+        assert (refused.status_code, refused.json()["platform_code"]) == (409, "TARGET_CHANGED")
         assert journal.read_bytes() == original_bytes
-        settled = board.manager.call("create", body, execute=True)
-        assert settled["ok"] and settled["operation_id"] == original["operation_id"], settled
-        dhcp.assert_not_called()
-    recovered = client.post("/api/v1/vms", json=body)
-    assert recovered.status_code == 201, recovered.text
+    finally:
+        board.xen.rows.remove(unmanaged)
+    conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
+    assert (conflict.status_code, conflict.json()["code"]) == (409, "VMSpecConflict"), conflict.text
+    assert journal.read_bytes() == original_bytes
+
+    if condition == "new-stop-intent":
+        record = board.records[original["assigned"]["internal_name"]]
+        execution = board.platform.execution()
+        execution.accept(record, {"vm_id": str(NEW_VM), "action": "stop", "force": False},
+                         key="fixture-new-stop", deadline=now[0] + 10.)
+        intent = execution.intent(record)
+        refused = client.post("/api/v1/vms", json=body)
+        assert (refused.status_code, refused.json()["platform_code"]) == (409, "TARGET_CHANGED")
+        assert execution.intent(record) == intent and intent["desired_state"] == "stopped"
+        assert journal.read_bytes() == original_bytes
+        assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+        return
+
+    real_budget = budget.start
+    save_tomb = board.manager._save_tomb
+    with patch.object(board.manager, "preparer", side_effect=AssertionError("must reuse published disk")), \
+            patch.object(board.manager, "_prepare_dhcp", side_effect=AssertionError("must reuse applied DHCP")), \
+            patch.object(budget, "start", side_effect=lambda ms, **kwargs: real_budget(ms, clock=lambda: now[0], **kwargs)):
+        headers = {"X-Request-Budget-Ms": "10000"}
+        with ExitStack() as held:
+            def stall_registration(*args, **kwargs):
+                held.enter_context(short_lock(board.run, "admission"))
+                now[0] += 3601.  # The lower create call keeps its own policy budget.
+                return save_tomb(*args, **kwargs)
+
+            with patch.object(board.manager, "_save_tomb", side_effect=stall_registration):
+                delayed = client.post("/api/v1/vms", json=body, headers=headers)
+        assert delayed.status_code == 504, delayed.text
+        assert delayed.json()["context"]["operation_id"] == original["operation_id"]
+        assert journal.read_bytes() == original_bytes
+
+        def expire_before_start(phase, _):
+            if phase == "complete":
+                now[0] += 11.
+
+        if condition == "start-budget-expired":
+            with patch.object(board.manager, "checkpoint", expire_before_start):
+                registration_only = client.post("/api/v1/vms", json=body, headers=headers)
+            assert registration_only.status_code == 504, registration_only.text
+            assert json.loads(journal.read_text())["status"] == "SUCCEEDED"
+            assert not list((board.data / "control-requests").glob("*.json"))
+            assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+        recovered = client.post("/api/v1/vms", json=body, headers=headers)
+        assert recovered.status_code == 201, recovered.text
+
+        completed = client.get(f"/api/v1/vms/{NEW_VM}/operations/{original['operation_id']}", params={"action": "create"})
+        assert completed.json()["status"] == "completed"
     finished = json.loads(journal.read_text())
     assert finished["status"] == "SUCCEEDED" and finished["first_error"] == original["error"]
     assert finished["creation"] == original["creation"]
     assert finished["assigned"] == original["assigned"]
     assert disk.stat().st_ino == inode
+    assert credential.read_bytes() == supply_before
+    assert (credential.stat().st_ino, credential.stat().st_mtime_ns) == (supply_stat.st_ino, supply_stat.st_mtime_ns)
     assert len(list((board.data / "operations").glob("*.json"))) == 1
     assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
 

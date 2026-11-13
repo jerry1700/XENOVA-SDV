@@ -115,7 +115,7 @@ class VmService:
         with _failure_context("create", "preflight", before_submission=True):
             reject_dom0(request.vm_id)
         with _failure_context("create", "preflight", before_submission=True), self._vm_lock(request.vm_id):
-            if self._driver.has_domain(request.vm_id):
+            if self._driver.has_domain_for_create(request.vm_id):
                 self._provisioner.check_existing_spec(request)
                 raise VMExists(f"domain {request.vm_id} already exists")
             with self._resource_guard():
