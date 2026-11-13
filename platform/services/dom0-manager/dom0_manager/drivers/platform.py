@@ -677,6 +677,14 @@ class PlatformDriver(Driver):
     def destroy(self, vm_id: UUID) -> None:
         self._stop(vm_id, force=True)
 
+    def kill(self, vm_id: UUID) -> None:
+        """장애 주입: 플랫폼 stop(의도를 stopped 로 기록)을 거치지 않고 xl destroy 로 도메인만 없앤다.
+        등록·의도는 그대로라 복구 워커가 DOMAIN_ABSENT 로 다시 띄운다."""
+        if self._xl is None:
+            raise NotSupportedByPlatform("platform driver has no xl runner for kill")
+        domain = self.get_domain(vm_id)  # 도메인이 없으면 VMNotFound
+        self._xl.destroy(str(domain.domid))
+
     def _stop(self, vm_id: UUID, *, force: bool) -> None:
         envelope = call_with_budget(self.manager, "stop", {"vm_id": str(vm_id), "force": force})
         if not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "VM_NOT_FOUND":

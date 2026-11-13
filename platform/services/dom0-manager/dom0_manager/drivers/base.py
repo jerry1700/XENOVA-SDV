@@ -153,6 +153,11 @@ class Driver(ABC):
     def destroy(self, vm_id: UUID) -> None:
         """강제 종료. 디스크는 건드리지 않는다(디스크 삭제는 Provisioner). 멱등."""
 
+    def kill(self, vm_id: UUID) -> None:
+        """장애 주입: 도메인만 즉시 없앤다. destroy 와 달리 등록·의도(desired=running)를 바꾸지 않아 복구 워커가
+        DOMAIN_ABSENT 로 판정해 다시 띄운다. 도메인이 없으면 VMNotFound. 지원하지 않는 드라이버는 NotSupportedByPlatform."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not support kill")
+
     def request_stop(self, vm_id: UUID, *, key: str) -> ControlOperation | None:
         """키 있는 정지(S15P31E110-305). tracks_control_operations 인 드라이버만 구현한다. 등록이 없으면 None."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track control operations")

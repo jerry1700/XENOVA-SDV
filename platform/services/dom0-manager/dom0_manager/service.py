@@ -201,6 +201,17 @@ class VmService:
             return False
         return True
 
+    def kill(self, vm_id: UUID) -> None:
+        """장애 주입 강제 종료. 등록이 없으면 404, 도메인이 없으면 409. 등록·의도·디스크는 그대로 둔다."""
+        reject_dom0(vm_id)
+        with self._vm_lock(vm_id):
+            if not self._provisioner.instance_exists(vm_id):
+                raise VMNotFound(f"instance {vm_id} not registered")
+            try:
+                self._driver.kill(vm_id)
+            except VMNotFound:
+                raise InvalidState(f"vm {vm_id} has no running domain to kill") from None
+
     def delete(self, vm_id: UUID) -> None:
         """계약 v1.1: 실행 중이면 409, 등록이 없으면 404, 정지된 VM 은 숨김 보관(retire). 강제 종료는 하지 않는다."""
         reject_dom0(vm_id)

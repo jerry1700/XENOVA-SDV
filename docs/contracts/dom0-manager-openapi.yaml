@@ -330,6 +330,39 @@ paths:
           $ref: '#/components/responses/PlatformUnavailable'
         '504':
           $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/kill:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    post:
+      tags: [VMs]
+      operationId: killVm
+      summary: "장애 주입: 도메인 즉시 소멸 (등록·의도 유지 → 복구 워커가 다시 띄움)"
+      description: >-
+        시연·검증용 장애 주입이다. xl destroy 로 도메인만 즉시 없애고 등록·디스크·의도(desired=running)는 바꾸지 않는다.
+        그래서 정지(stop, 의도를 stopped 로 기록)와 달리 복구 워커가 DOMAIN_ABSENT(60초 유예) 로 판정해 다시 띄운다.
+        도메인이 없으면 409, 등록이 없으면 404, Domain-0 은 400. 키·재전달 추적은 없다(한 번 누르면 한 번 소멸).
+      x-driver-timeout-seconds: 90
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '204':
+          description: 도메인을 없앴다. 등록·의도·디스크는 그대로
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
   /api/v1/vms/{vm_id}/stop:
     parameters:
       - $ref: '#/components/parameters/VmId'
