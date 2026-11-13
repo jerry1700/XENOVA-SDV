@@ -105,7 +105,8 @@ class FakeXen:
             if self.fail_create:
                 raise vm.PlatformError('injected xl create failure')
             key = Path(args[2]).stem
-            self.rows.append(domain(self.records[key], self.base / 'instances' / key / 'root.raw', len(self.rows) + 1))
+            domid = max((r['domid'] for r in self.rows), default=0) + 1
+            self.rows.append(domain(self.records[key], self.base / 'instances' / key / 'root.raw', domid))
         if args[:2] in (['xl', 'shutdown'], ['xl', 'reboot'], ['xl', 'destroy']):
             target = args[2]
             rows = [r for r in self.rows if str(r['domid']) == target or r['config']['c_info']['name'] == target]

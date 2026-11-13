@@ -11,11 +11,13 @@ from unittest.mock import patch
 import test_xenova_recovery_foundation as foundation
 import test_xenova_network_zephyr as network
 from test_xenova_management import Interrupted
+from test_xenova_platform import fixture, record
 from first_install_contract import uuid4
 import xenova_vm as vm
 import xenova_zephyr as zephyr
-from xenova_cpu import factory_activation
+from xenova_cpu import factory_activation, placements
 from xenova_execution import ExecutionError, fingerprint
+from xenova_preparation import AssetLease, request_output
 from xenova_runtime import operation_lock
 
 
@@ -100,6 +102,20 @@ class CPUTest(unittest.TestCase):
 
     def activate(self):
         self.ok(self.policy());self.ok(self.prepare())
+
+    def change_placement(self, target, revision, mode, cores):
+        policy = self.p.cpu().policy()
+        entries = [v for v in placements(policy) if v['vm_id'] != target['uuid']]
+        return {'expected_policy_revision':revision, 'shared_pcpus':policy['shared_pcpus'],
+                'placements':entries + [{'vm_id':target['uuid'], 'mode':mode, 'pcpus':cores}]}
+
+    def live(self, target):
+        result = self.ok(self.layout(vm_id=target['uuid']))
+        self.assertTrue(result['host']['ready'], result)
+        row, = result['vms']
+        self.assertTrue(row['affinity_matches'], row)
+        self.assertIsNotNone(row['execution_id'])
+        return row
 
     def test_policy_validation_uses_manager_entry_deadline_after_registry_delay(self):
         original=self.p.records
@@ -253,10 +269,142 @@ class CPUTest(unittest.TestCase):
 
     def test_policy_change_refuses_running_or_uncertain_launch(self):
         self.activate();self.ok(self.control(self.linux))
-        self.fails(self.policy(self.spec(1,True),key='swap'),'VM_NOT_STOPPED')
+        spec = self.change_placement(self.linux, 1, 'shared', [3])
+        response = self.fails(self.policy(spec,key='narrow'),'VM_NOT_STOPPED')
+        self.assertEqual(response['error']['details']['vm_ids'], [self.linux['uuid']])
         self.ok(self.control(self.linux,'stop'))
         self.p.execution().prepare_launch(self.linux)
-        self.fails(self.policy(self.spec(1,True),key='swap'),'RECONCILE_REQUIRED')
+        self.fails(self.policy(spec,key='narrow'),'RECONCILE_REQUIRED')
+
+    def test_guest_only_cpu_updates_apply_across_os_and_leave_other_executions_running(self):
+        # The normal create fixture supplies Ubuntu. Add a registered Debian instance.
+        debian = record('debian-dev')
+        directory = fixture(self.p.data, debian)
+        with (directory/'root.raw').open('r+b') as disk:
+            disk.seek(1080)
+            disk.write(b'\x53\xef')
+        self.p.execution().initialize(debian, 'stopped', 'create')
+        self.xen.records[debian['id']] = debian
+        self.vm_id = self.zid
+        self.ok(network.NetworkPlatformTest.transition(self, network.NetworkPlatformTest.spec(self)))
+        self.activate()
+        guests = [self.linux, debian, self.z, self.z2]
+        for guest in guests:
+            self.ok(self.control(guest))
+        receipt = self.p.cpu().receipt_path.read_bytes()
+        first_pin_count = len([c for c in self.xen.calls if c[:2] == ['xl','vcpu-pin']])
+        for revision, target, cores, recovery_target in (
+                (1, self.linux, [3], self.z), (2, debian, [0], self.linux), (3, self.z, [0, 3], debian)):
+            with self.subTest(target=target['name']):
+                others = [guest for guest in guests if guest != target]
+                running = [self.live(guest) for guest in others]
+                old_contexts = [self.p.cpu().context(guest) for guest in others]
+                self.ok(self.control(target,'stop'))
+                spec = self.change_placement(target, revision, 'shared', cores)
+                key = 'guest-pin-'+str(revision)
+                self.assertFalse(self.ok(self.policy(spec,execute=False,key=key))['host_preparation_required'])
+                self.assertFalse(self.ok(self.policy(spec,key=key))['host_preparation_required'])
+                self.assertEqual(self.p.cpu().receipt_path.read_bytes(), receipt)
+                self.assertFalse(self.ok(self.policy(spec,key=key))['host_preparation_required'])
+                self.ok(self.control(target))
+                row = self.live(target)
+                self.assertEqual(row['observed']['hard_affinity'],
+                                 [{'vcpu':v, 'pcpus':cores} for v in range(target['vcpus'])])
+                self.assertEqual([self.live(guest) for guest in others], running)
+                self.assertEqual([self.p.cpu().context(guest) for guest in others], old_contexts)
+                previous = running[others.index(recovery_target)]
+                self.vm_id = recovery_target['uuid']
+                attempt = foundation.FoundationTest.spec(self)
+                with patch.object(vm.os,'sync'):
+                    self.ok(self.m.call('recover_once',attempt,execute=True))
+                recovered = self.live(recovery_target)
+                self.assertNotEqual(recovered['execution_id'], previous['execution_id'])
+                self.assertEqual(recovered['observed']['hard_affinity'], previous['observed']['hard_affinity'])
+        self.assertEqual(len([c for c in self.xen.calls if c[:2] == ['xl','vcpu-pin']]), first_pin_count)
+
+    def test_scoped_publication_retry_retains_receipt_and_original_result(self):
+        self.activate()
+        self.ok(self.control(self.z))
+        running = self.live(self.z)
+        receipt = self.p.cpu().receipt_path.read_bytes()
+        for revision, phase, core in ((1, 'cpu-policy-prepared', 3), (2, 'cpu-policy-published', 0)):
+            spec = self.change_placement(self.linux, revision, 'shared', [core])
+            key = 'change-'+str(revision)
+            foundation.FoundationTest.checkpoint(self, phase)
+            with self.assertRaises(Interrupted):
+                self.policy(spec,key=key)
+            self.assertFalse(self.ok(self.layout())['host']['ready'])
+            self.fails(self.control(self.z2),'RECONCILE_REQUIRED')
+            self.p.execution_checkpoint = lambda *args: None
+            result = self.policy(spec,key=key)
+            self.assertTrue(result['replayed'])
+            self.assertFalse(self.ok(result)['host_preparation_required'])
+            self.assertEqual(result['data']['policy']['policy_revision'], revision+1)
+            self.assertEqual(self.live(self.z), running)
+            self.assertEqual(self.p.cpu().receipt_path.read_bytes(), receipt)
+        self.ok(self.control(self.linux))
+
+    def test_guest_only_change_does_not_invalidate_unfinished_recovery_of_another_vm(self):
+        self.activate()
+        self.ok(self.control(self.linux))
+        self.vm_id = self.linux['uuid']
+        attempt = foundation.FoundationTest.spec(self)
+        foundation.FoundationTest.checkpoint(self, 'recovery-removed')
+        with self.assertRaises(Interrupted), patch.object(vm.os,'sync'):
+            self.m.call('recover_once',attempt,execute=True)
+        self.p.execution_checkpoint = lambda *args: None
+        self.fails(self.policy(self.change_placement(self.linux,1,'shared',[3]),key='affected'),
+                   'RECONCILE_REQUIRED')
+        spec = self.change_placement(self.z, 1, 'shared', [3])
+        self.assertFalse(self.ok(self.policy(spec,key='unrelated'))['host_preparation_required'])
+        shutdowns = len([c for c in self.xen.calls if c[:2] == ['xl','shutdown']])
+        with patch.object(vm.os,'sync'):
+            recovered = self.ok(self.m.call('recover_once',attempt,execute=True))
+        self.assertEqual(recovered['attempt']['cpu_policy']['policy_revision'], 1)
+        self.assertEqual(len([c for c in self.xen.calls if c[:2] == ['xl','shutdown']]), shutdowns)
+        self.live(self.linux)
+
+    def test_scoped_change_checks_target_ownership_and_real_host_layout(self):
+        self.activate()
+        self.ok(self.control(self.z))
+        spec = self.change_placement(self.linux, 1, 'shared', [3])
+        policy = self.p.cpu().policy_path.read_bytes()
+        with request_output(), AssetLease(self.p, self.linux['uuid'], 'update-resources', 'asset-target'):
+            self.fails(self.policy(spec,key='narrow'),'OPERATION_IN_PROGRESS')
+        running = self.live(self.z)
+        domid = running['observed']['domid']
+        self.affinities[domid][0]['pcpus'] = [0,1]
+        self.fails(self.policy(spec,key='narrow'),'CPU_APPLY_INCOMPLETE')
+        self.affinities[domid][0]['pcpus'] = [1]
+        self.affinities[0][0]['pcpus'] = [0]
+        self.fails(self.policy(spec,key='narrow'),'CPU_NOT_READY')
+        self.assertEqual(self.p.cpu().policy_path.read_bytes(), policy)
+        self.affinities[0][0]['pcpus'] = [0,3]
+        with request_output(), AssetLease(self.p, self.z2['uuid'], 'firmware-transition', 'asset-unrelated'):
+            self.assertFalse(self.ok(self.policy(spec,key='narrow'))['host_preparation_required'])
+        self.assertEqual(self.live(self.z), running)
+
+    def test_only_changed_exclusive_owners_must_stop_but_host_change_requires_all(self):
+        self.activate()
+        for guest in (self.linux, self.z, self.z2):
+            self.ok(self.control(guest))
+        linux = self.live(self.linux)
+        swap = self.spec(1,True)
+        for stopped, remaining in ((None, [self.zid, self.z2['uuid']]), (self.z, [self.z2['uuid']])):
+            if stopped:
+                self.ok(self.m.call('stop',{'vm_id':stopped['uuid'],'force':True},execute=True))
+            result = self.fails(self.policy(swap,key='swap'),'VM_NOT_STOPPED')
+            self.assertCountEqual(result['error']['details']['vm_ids'], remaining)
+        self.ok(self.m.call('stop',{'vm_id':self.z2['uuid'],'force':True},execute=True))
+        self.assertFalse(self.ok(self.policy(swap,key='swap'))['host_preparation_required'])
+        self.assertEqual(self.live(self.linux), linux)
+        change_host = self.spec(2,True) | {'shared_pcpus':[0]}
+        self.fails(self.policy(change_host,key='host'),'VM_NOT_STOPPED')
+        self.ok(self.control(self.linux,'stop'))
+        self.assertTrue(self.ok(self.policy(change_host,key='host'))['host_preparation_required'])
+        self.assertFalse(self.ok(self.layout())['host']['ready'])
+        self.ok(self.prepare())
+        self.assertTrue(self.ok(self.layout())['host']['ready'])
 
     def test_cpu_query_lock_is_bounded_and_has_null_operation(self):
         with operation_lock(self.p.runtime):self.fails(self.layout(),'OPERATION_IN_PROGRESS')
@@ -336,7 +484,7 @@ class CPUTest(unittest.TestCase):
     def test_incomplete_control_and_recovery_guard_cpu_policy_change(self):
         self.activate()
         self.p.execution().accept(self.linux,{'vm_id':self.linux['uuid'],'action':'stop','force':False},'unfinished-stop')
-        self.fails(self.policy(self.spec(1,True),key='swap'),'RECONCILE_REQUIRED')
+        self.fails(self.policy(self.change_placement(self.linux,1,'shared',[3]),key='narrow'),'RECONCILE_REQUIRED')
 
     def test_stop_shutdown_remain_usable_when_cpu_readiness_is_lost(self):
         self.activate();self.ok(self.control(self.linux))

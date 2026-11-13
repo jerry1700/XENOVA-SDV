@@ -205,11 +205,12 @@ tests/
 | `health()` | O | `xl info` 응답과 registry 저장소(`instances/`) 존재 → `/healthz` 503 판정. Manager 를 거치지 않아 조회 한도 안에 끝남 |
 | `reboot(vm_id)` / `request_reboot(vm_id, key)` | platform·mock | 실행 중인 도메인을 같은 디스크로 새 실행으로 재시작(S15P31E110-208). 제공하지 않는 드라이버는 501 |
 | `cpu_layout(vm_id?)` | platform | 정책 CPU 배치와 실제 Xen hard affinity(S15P31E110-353). 제공하지 않는 드라이버는 501 |
-| `update_cpu_policy(request, key)` | platform | 모든 정지 VM의 전체 CPU 정책을 revision 조건부로 교체. 제공하지 않는 드라이버는 501 |
+| `update_cpu_policy(request, key)` | platform | 배치가 바뀌는 VM을 정지한 뒤 전체 CPU 정책을 revision 조건부로 교체. 최초 설정이나 호스트 배치 변경은 전체 정지. 제공하지 않는 드라이버는 501 |
 | `collect_stats()` | platform·xen·mock | xentop 원시값(S15P31E110-112) |
 
-실행 중 vCPU 핀·스케줄러 가중치·메모리 변경은 지원하지 않습니다. CPU 정책 변경은 모든 관리 VM이 정지한 상태에서만 가능하고,
-한 VM의 모든 vCPU에 같은 pCPU 마스크를 적용합니다. 정책 게시 뒤 host prepare가 완료돼야 시작·재부팅·복구 때 적용·검증됩니다.
+CPU 정책은 한 VM의 모든 vCPU에 같은 pCPU 마스크를 지정합니다. 영향받는 VM의 새 마스크는 다음
+기동 때 적용·검증합니다. 최초 설정이나 호스트 배치 변경에는 전체 정지와 호스트 준비가 필요합니다.
+스케줄러 가중치와 실행 중인 VM의 vCPU 핀·메모리 변경은 지원하지 않습니다.
 
 `Provisioner`는 `ensure_instance(vm_id, template_id, template_version, name=, vcpus=, memory_mib=) / instance_exists / delete_instance` 와 `update_resources(vm_id, vcpus=, memory_mib=, key=)` 입니다. platform 모드에서는 플랫폼 `create`(등록 + 디스크)·`retire`(숨김 보관)·`update-resources`(정지 Linux 의 등록 설정 변경)로 구현되며, dom0-manager 안에 디스크 생성기는 없습니다. xen 모드는 조회 전용이라 `ensure_instance`가 501이고 `update_resources` 도 501입니다. mock 은 등록의 자원값과 키별 원 결과를 메모리에 둡니다.
 
@@ -244,7 +245,7 @@ XENOVA_DRIVER=platform XENOVA_PLATFORM_LIB=/usr/lib/xenova XENOVA_SERVICE_TOKEN=
 | `POST /vms/{id}/stop` | `stop` (`force=false`, 플랫폼이 최대 90초 대기). 시한 초과는 504. `Idempotency-Key` 가 있으면 아래 "정지 요청 추적" |
 | `POST /vms/{id}/reboot` | `reboot` (`force=false`, 플랫폼이 새 실행까지 최대 90초 대기). 신규 재부팅은 키 유무와 관계없이 먼저 등록(없으면 404)·실행 중(아니면 409)을 확인한다. 키 있으면 같은 키의 원 작업을 먼저 조회해 있으면 재전달로 보고 상태 확인 없이 보낸다(작업 상태 `action: reboot`). 명령 제출 뒤 새 실행 미확인은 503(`RECONCILE_REQUIRED`). 꺼진 VM·비협력 Zephyr 거절은 플랫폼이 `ARTIFACT_INVALID` 문구로만 알려 그 두 문구만 409·501 로 바꾼다(계약 4.10) |
 | `GET /cpu-layout`, `GET /vms/{id}/cpu-layout` | `cpu-layout` (`vm_id?`, `timeout_ms` 기본 5000). 조회 전용. 하위는 `budget_ms` 를 받지 않아 요청 예산은 `timeout_ms` 로만 줄이고, 플랫폼이 operation lock 을 기다리지 않으므로 요청별 Manager(fork)로 부른다. 응답은 공개 필드만 고정 모델로 형식·의미값(presence·allocation·issue code·예약 형식)까지 검증해 옮긴다. 어긋나거나 한 VM 조회가 그 VM 하나가 아니면 503. 관측 중 바뀜(`TARGET_CHANGED`)은 409 가 아니라 503(계약 4.11) |
-| `PUT /cpu-policy` | 전체 `expected_policy_revision`·`shared_pcpus`·`placements`를 `cpu-policy-set`(`execute=true`, `Idempotency-Key`)으로 전달한다. VM별 placement는 `shared` 또는 `exclusive`이며 모든 vCPU에 같은 pCPU 집합을 적용한다. 실행 중 VM·revision 변경·키 충돌은 409, 구버전 Manager는 501. 성공 뒤 `host_preparation_required=true` |
+| `PUT /cpu-policy` | 전체 `expected_policy_revision`·`shared_pcpus`·`placements`를 `cpu-policy-set`(`execute=true`, `Idempotency-Key`)으로 전달한다. VM별 placement는 `shared` 또는 `exclusive`이며 모든 vCPU에 같은 pCPU 집합을 적용한다. 정지가 필요한 VM이 실행 중이거나 revision·키가 충돌하면 409, 구버전 Manager는 501. `host_preparation_required=true`이면 재기동 전 호스트 준비가 필요하다. |
 | `GET /vms/{id}/control-operations?request_key=` | `control-operation` (`vm_id`, `idempotency_key`, `timeout_ms` 기본 5000). 읽기만 한다. stop·reboot(force 없음) 기록만 돌려준다 |
 | `PUT /vms/{id}/resources` | `control-operation`·`operation`(키로 원 작업 조회, `vm_id` 없이) → 원 작업이 있으면 원 요청을, 없으면 `get` 의 generation·`configuration_sha256` 으로 만든 요청을 `update-resources`(`execute=true`, `idempotency_key`=요청 키)로. 하위는 `budget_ms` 를 받지 않는다. 아래 "자원 변경" |
 | `DELETE /vms/{id}` | 실행 중 409 → 정지 후 `retire`(숨김 보관) |
