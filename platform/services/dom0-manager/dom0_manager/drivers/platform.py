@@ -59,7 +59,8 @@ from ..errors import (
     VMNameConflict,
     VMNotFound,
 )
-from ..models import ControlOperation, ControlStatus, CpuLayout, ResourceUpdate, VmResources, VmState
+from ..models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, ResourceUpdate, UpdateCpuPolicyRequest,
+                      VmResources, VmState)
 from .base import CreateSpec, Domain, Driver, HostInfo, InstancePaths, Provisioner, StatsSample
 from .xentop import Xentop, collect_stats
 from .xl import Xl
@@ -766,6 +767,25 @@ class PlatformDriver(Driver):
             raise PlatformUnavailable(f"{context}: platform returned CPU layout for {[str(vm.vm_id) for vm in layout.vms]}, not this VM",
                                       detail="single-VM cpu-layout must contain exactly the requested VM")
         return layout
+
+    def update_cpu_policy(self, request: UpdateCpuPolicyRequest, *, key: str) -> CpuPolicyUpdate:
+        """HTTP 전체 정책 요청을 플랫폼의 내구 cpu-policy-set 작업에 그대로 연결한다."""
+        spec = request.model_dump(mode="json")
+        envelope = call_with_budget(self.manager, "cpu-policy-set", spec, execute=True, idempotency_key=key)
+        if not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "INVALID_SPEC":
+            # HTTP 모델이 core 명세를 모두 선검사한다. 남는 INVALID_SPEC은 이 action을 모르는 구버전 Manager다.
+            error = envelope.get("error") or {}
+            raise NotSupportedByPlatform("platform manager does not support cpu-policy-set",
+                                         detail=f"INVALID_SPEC: {error.get('message')}", platform_code="INVALID_SPEC")
+        data = raise_for_envelope(envelope, context="cpu-policy-set")
+        if not isinstance(data, dict):
+            raise PlatformUnavailable("cpu-policy-set: platform returned no result")
+        # 완료 작업 재전달은 historical/current_policy를 더하고 host flag를 생략할 수 있다.
+        normalized = {"policy": data.get("policy"), "host_preparation_required": data.get("host_preparation_required", True)}
+        try:
+            return CpuPolicyUpdate.model_validate_json(json.dumps(normalized), strict=True)
+        except (TypeError, ValueError) as exc:
+            raise PlatformUnavailable("cpu-policy-set: platform returned a malformed CPU policy", detail=str(exc)[:300]) from exc
 
     # ---- 호스트 ----
 

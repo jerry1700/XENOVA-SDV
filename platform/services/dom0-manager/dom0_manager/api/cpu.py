@@ -2,12 +2,12 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 
-from ..models import CpuLayout, Error
+from ..models import CpuLayout, CpuPolicyUpdate, Error, UpdateCpuPolicyRequest
 from ..service import VmService
 from . import get_service
-from .vms import _COMMAND_ERRS
+from .vms import _COMMAND_ERRS, _request_key
 
 router = APIRouter(tags=["Resources"])
 
@@ -27,3 +27,18 @@ def get_cpu_layout(service: VmService = Depends(get_service)) -> CpuLayout:
             response_model=CpuLayout, responses={400: {"model": Error}, 404: {"model": Error}, **_COMMAND_ERRS})
 def get_vm_cpu_layout(vm_id: UUID, service: VmService = Depends(get_service)) -> CpuLayout:
     return service.cpu_layout(vm_id)
+
+
+@router.put(
+    "/cpu-policy", operation_id="updateCpuPolicy", summary="전체 VM CPU 핀닝 정책 변경",
+    description=("모든 관리 VM이 정지한 상태에서 전체 정책을 교체한다. 한 VM의 모든 vCPU에는 같은 pCPU 마스크가 적용된다. "
+                 "성공 뒤 host_preparation_required가 true이므로 cpu-host-prepare가 완료돼야 다시 VM을 시작할 수 있다."),
+    response_model=CpuPolicyUpdate,
+    responses={400: {"model": Error}, 404: {"model": Error}, 409: {"model": Error}, **_COMMAND_ERRS},
+)
+def update_cpu_policy(
+    request: UpdateCpuPolicyRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    service: VmService = Depends(get_service),
+) -> CpuPolicyUpdate:
+    return service.update_cpu_policy(request, _request_key(idempotency_key, "Idempotency-Key"))

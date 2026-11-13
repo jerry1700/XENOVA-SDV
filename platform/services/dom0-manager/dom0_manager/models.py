@@ -469,3 +469,70 @@ class CpuLayout(_CpuModel):
     reservations: list[CpuReservation]
     vms: list[VmCpuLayout] = Field(description="전체 조회면 등록된 모든 VM, 한 VM 조회면 그 VM 하나")
     issues: list[CpuIssue]
+
+
+class CpuPlacement(BaseModel):
+    """한 VM의 모든 vCPU에 동일하게 적용할 물리 CPU 집합."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm_id: UUID
+    mode: Literal["shared", "exclusive"]
+    pcpus: list[int] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _valid_pcpus(self):
+        if any(type(cpu) is not int or not 0 <= cpu < 4 for cpu in self.pcpus):
+            raise ValueError("pcpus must contain Raspberry Pi 4 CPU numbers 0..3")
+        if len(set(self.pcpus)) != len(self.pcpus):
+            raise ValueError("pcpus must not contain duplicates")
+        self.pcpus.sort()
+        return self
+
+
+class UpdateCpuPolicyRequest(BaseModel):
+    """전체 CPU 정책 교체 요청. expected revision으로 잃어버린 갱신을 막는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_policy_revision: int | None = Field(ge=1)
+    shared_pcpus: list[int] = Field(min_length=1)
+    placements: list[CpuPlacement]
+
+    @model_validator(mode="after")
+    def _valid_policy(self):
+        if any(type(cpu) is not int or not 0 <= cpu < 4 for cpu in self.shared_pcpus):
+            raise ValueError("shared_pcpus must contain Raspberry Pi 4 CPU numbers 0..3")
+        if len(set(self.shared_pcpus)) != len(self.shared_pcpus):
+            raise ValueError("shared_pcpus must not contain duplicates")
+        self.shared_pcpus.sort()
+        identities: set[UUID] = set()
+        exclusive: set[int] = set()
+        shared = set(self.shared_pcpus)
+        for placement in self.placements:
+            if placement.vm_id.int == 0 or placement.vm_id in identities:
+                raise ValueError("placements must contain unique non-nil VM UUIDs")
+            identities.add(placement.vm_id)
+            mask = set(placement.pcpus)
+            if placement.mode == "shared" and not mask <= shared:
+                raise ValueError("shared placement pcpus must be a subset of shared_pcpus")
+            if placement.mode == "exclusive":
+                if mask & (shared | exclusive):
+                    raise ValueError("exclusive placement pcpus must not overlap shared or exclusive pcpus")
+                exclusive |= mask
+        self.placements.sort(key=lambda placement: str(placement.vm_id))
+        return self
+
+
+class CpuPolicy(_CpuModel):
+    schema_version: Literal["2.0"]
+    operation_id: UUID
+    policy_revision: int = Field(ge=1)
+    pool_name: str
+    shared_pcpus: list[int]
+    placements: list[CpuPlacement]
+
+
+class CpuPolicyUpdate(_CpuModel):
+    policy: CpuPolicy
+    host_preparation_required: bool = True

@@ -27,7 +27,8 @@ from . import budget as request_budget
 from .config import Settings
 from .drivers.base import CreateSpec, Domain, Driver, Provisioner, StatsSample
 from .errors import InsufficientResources, InvalidArgument, InvalidState, OperationNotFound, VMExists, VMNotFound
-from .models import ControlOperation, ControlStatus, CpuLayout, CreateVmRequest, ResourceUpdate, UpdateResourcesRequest, VmState
+from .models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate,
+                     UpdateCpuPolicyRequest, UpdateResourcesRequest, VmState)
 
 
 DOM0_UUID = UUID(int=0)  # xl list -v 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
@@ -173,6 +174,11 @@ class VmService:
         if vm_id is not None:
             reject_dom0(vm_id)
         return self._driver.cpu_layout(vm_id)
+
+    def update_cpu_policy(self, request: UpdateCpuPolicyRequest, key: str) -> CpuPolicyUpdate:
+        """전체 CPU 정책을 원자적으로 교체한다. 플랫폼이 모든 게스트 정지 여부와 revision을 다시 검증한다."""
+        request_budget.ensure("changing CPU policy")
+        return self._driver.update_cpu_policy(request, key=key)
 
     def _require_running(self, vm_id: UUID) -> None:
         """재부팅 전제: 등록이 있고(없으면 404) 도메인이 running 이다(꺼짐·paused·crashed·stopping 은 409). 하위 reboot 는 도메인
