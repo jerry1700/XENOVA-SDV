@@ -16,7 +16,7 @@
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
 | 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu 1.0.5·Debian 1.0.8, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
+| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 및 공통 drive warm-lattice-lab의 현재 배포 버전과 manifest. Network Starter는 과거 지원 입력으로 유지 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
@@ -316,10 +316,15 @@ v = json.loads((r/"platform/guests/sources.lock.json").read_text())[sys.argv[1]]
 print(Path(os.environ["CACHE"])/"downloads"/v["url"].rsplit("/", 1)[1])
 PY
 )"
+  extra=()
+  if [[ "$sid" == debian-* ]]; then
+    extra=(--display-web-assets "$RUN/display-web-input/display-web"
+           --display-web-revision "$DISPLAY_WEB_REVISION")
+  fi
   run "prepare-$sid" sudo unshare --mount --propagation private \
     python3 -B "$REPO/platform/scripts/prepare-xenova-guests.py" \
     --execute template --source "$sid" --input "$input" \
-    --output "$RELEASE_ROOT/linux/$sid/$version"
+    --output "$RELEASE_ROOT/linux/$sid/$version" "${extra[@]}"
 done
 ```
 
@@ -341,9 +346,10 @@ run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
   --zephyr-source "$ZEPHYR_SOURCE" --tools "$ZEPHYR_TOOLS" \
   --output "$RUN/drive-build" --execute
 
+read -r -p "기존 게시본과 다른 새 주행 버전 (예: 1.0.9): " DRIVE_VERSION
 run drive-template-package python3 -B \
   "$REPO/platform/scripts/package-xenova-drive-template.py" \
-  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version 1.0.8
+  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version "$DRIVE_VERSION"
 ```
 
 포장 도구는 현재 source fingerprint·ARM payload·실제 앱 profile과
@@ -425,17 +431,19 @@ broker 주소·password·VM UUID를 공유 firmware에 넣지 않는다.
 
 ### 실제 manifest로 기본 선택 확정
 
-새 게시본을 준비한 실행에서는 실제 manifest와 배포 버전을 읽어 기본 lock·factory 버전을 맞춘다.
+새 게시본을 준비한 실행에서는 게시할 때 지정한 `DRIVE_VERSION`과 실제 manifest에서
+기본 lock·factory 버전·조립 예제를 맞춘다.
 
 ```bash
-run select-templates python3 -B - <<'PY'
-import hashlib, json, os
+run select-templates python3 -B - "$DRIVE_VERSION" <<'PY'
+import hashlib, json, os, sys
 from pathlib import Path
 repo = Path(os.environ["REPO"])
 release = Path(os.environ["RELEASE_ROOT"])
 path = repo/"platform/guests/default-templates.lock.json"
 lock = json.loads(path.read_text())
 versions = {}
+selected = {}
 for entry in lock["templates"]:
     if entry["guest_kind"] == "linux":
         recipe = json.loads((repo/"platform/guests/linux"/entry["id"]/"recipe.json").read_text())
@@ -443,23 +451,37 @@ for entry in lock["templates"]:
         directory = Path("linux")/entry["id"]/version
         manifest = release/directory/"template.json"
     else:
-        directory = Path(entry["directory"])
+        version = sys.argv[1]
+        directory = Path("zephyr")/entry["id"]/version
         manifest = release/directory/"firmware.json"
         meta = json.loads(manifest.read_text())
         assert meta["id"] == entry["id"] and meta["template_id"] == entry["template_id"]
         assert meta["source"]["app"] == "xenova-drive" and meta["source"]["drive_profile"] == "warm-lattice-lab"
-        version = meta["template_version"]
+        assert meta["template_version"] == version
     entry.update(version=version, directory=str(directory),
                  manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest())
     versions[entry["template_id"]] = version
+    selected[entry["template_id"]] = entry
 path.write_text(json.dumps(lock, indent=2)+"\n")
 path = repo/"platform/yocto/meta-xenova/recipes-core/xenova-platform/files/defaults.json"
 defaults = json.loads(path.read_text())
 for record in defaults["instances"]+defaults["firmware_instances"]:
     record["template_version"] = versions[record["template_id"]]
 path.write_text(json.dumps(defaults, indent=2)+"\n")
+path = repo/"platform/first-install/example.config.json"
+example = json.loads(path.read_text())
+for row in example["linux_templates"]:
+    entry = selected[row["template_id"]]
+    row.update(template_dir="/absolute/xenova-template-releases/"+entry["directory"],
+               template_version=entry["version"], template_manifest_sha256=entry["manifest_sha256"])
+zephyr = next(entry for entry in selected.values() if entry["guest_kind"] == "zephyr")
+example["rtos_templates"] = [{
+    "template_dir": "/absolute/xenova-template-releases/"+zephyr["directory"],
+    "template_manifest_sha256": zephyr["manifest_sha256"],
+}]
+path.write_text(json.dumps(example, indent=2)+"\n")
 PY
-git diff -- platform/guests/default-templates.lock.json \
+git diff -- platform/guests/default-templates.lock.json platform/first-install/example.config.json \
   platform/yocto/meta-xenova/recipes-core/xenova-platform/files/defaults.json
 ```
 
@@ -1234,7 +1256,7 @@ MQTT·앱 준비는 Network Starter와 해당 앱의 별도 수락 근거로 기
 
 ## 2026-11-04 앱 메모리 제공물: 수동 버퍼와 RAM 요약
 
-선택 주행 프로필의 로컬 제공 및 다음 이미지 기본 선택 버전은 `1.0.8`이다. `build-xenova-drive-app.py`의
+2026-11-04 제공한 주행 프로필의 버전은 `1.0.8`이다. 현재 기본 선택은 템플릿 lock을 따른다. `build-xenova-drive-app.py`의
 `--app drive --profile warm-lattice-lab`과 `package-xenova-drive-template.py --version 1.0.8`을
 사용하며 출력은 기존 release와 다른 새 디렉터리로 지정한다. 기존 source receipt 검증을 유지한다.
 
