@@ -147,4 +147,16 @@ describe('휴대폰 연결 안내 문구', () => {
     ).toContain('USB 케이블');
     expect(phoneLinkHint({ ...listening, relay: 'waiting_link' })).toContain('테더링을 껐다 켜');
   });
+
+  it('모르는 중계 상태값이어도 카드 본문을 보이고 배지는 중립 "상태 알 수 없음" (S15P31E110-473)', () => {
+    show({ ...listening, relay: 'rebooting' as PhoneLinkStatus['relay'] });
+    render(<PhoneLinkCard />);
+    const badge = screen.getByText('상태 알 수 없음').closest('[role="status"]')!;
+    // 장애(빨강)가 아닌 중립(회색) 배지 — StatusBadge 의 health 클래스
+    expect(badge.className).toMatch(/stopped/);
+    expect(badge.className).not.toMatch(/fault/);
+    // 본문(주소·복사·보드 주소)이 비지 않는다
+    expect(screen.getByText(listening.url!)).toBeInTheDocument();
+    expect(screen.getByText('10.117.188.25/24')).toBeInTheDocument();
+  });
 });

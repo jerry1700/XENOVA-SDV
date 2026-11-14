@@ -6,6 +6,7 @@ import {
   finishVmCreation,
   formatVmCreationTime,
   isVmCreationPending,
+  matchesVmCreation,
   PENDING_CREATION_TTL_MS,
   readLastVmCreationDuration,
   saveLastVmCreationDuration,
@@ -54,6 +55,8 @@ describe('VM 생성 진행 상태', () => {
 
   it('목록에서 기록만 된 VM은 생성 중, 실행된 VM은 완료로 구분한다', () => {
     const creations = [{ name: 'create-test', startedAt: 1_000 }];
+    // 이 탭이 보낸 생성만 카드를 잠근다 (S15P31E110-473)
+    startVmCreation('create-test', 1_000);
     expect(isVmCreationPending({ vm_id: 'vm-1', name: 'create-test', state: 'stopped' }, creations)).toBe(
       true,
     );
@@ -67,6 +70,7 @@ describe('VM 생성 진행 상태', () => {
 
   it('요청 전부터 같은 이름으로 있던 VM은 생성 중으로 표시하지 않는다', () => {
     const creations = [{ name: 'create-test', startedAt: 1_000, excludedVmIds: ['vm-existing'] }];
+    startVmCreation('create-test', 1_000, ['vm-existing']);
     expect(
       isVmCreationPending({ vm_id: 'vm-existing', name: 'create-test', state: 'stopped' }, creations),
     ).toBe(false);
@@ -106,5 +110,61 @@ describe('VM 생성 진행 상태', () => {
       window.dispatchEvent(new StorageEvent('storage', { key: PENDING_KEY, newValue: '[]' }));
     });
     expect(result.current).toEqual([]);
+  });
+});
+
+describe('생성 기록과 VM 맞추기 — DB 기준 이름 (S15P31E110-473)', () => {
+  it('대소문자·악센트만 다른 이름도 같은 생성으로 본다 (서버가 같은 VM 으로 찾으므로)', () => {
+    const creation = { name: 'Drive-VM', startedAt: 0 };
+    expect(matchesVmCreation({ vm_id: 'vm-1', name: 'drive-vm' }, creation)).toBe(true);
+    expect(matchesVmCreation({ vm_id: 'vm-1', name: 'drivé-vm' }, creation)).toBe(true);
+    expect(matchesVmCreation({ vm_id: 'vm-1', name: 'drive-vm-2' }, creation)).toBe(false);
+    // 요청 전부터 있던 VM 은 여전히 제외
+    expect(
+      matchesVmCreation({ vm_id: 'vm-1', name: 'drive-vm' }, { ...creation, excludedVmIds: ['vm-1'] }),
+    ).toBe(false);
+  });
+});
+
+describe('이 탭이 보내지 않은 생성 기록 (S15P31E110-473)', () => {
+  const orphan = { name: 'from-other-tab', startedAt: Date.now() };
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+  afterEach(() => {
+    vi.resetModules();
+    localStorage.clear();
+  });
+
+  it('새로고침 전(저장소에만 있던) 기록은 이 탭 소유가 아니라 카드를 잠그지 않고, 기록을 지울 수 있다', async () => {
+    localStorage.setItem(PENDING_KEY, JSON.stringify([orphan]));
+    vi.resetModules();
+    const progress = await import('./vmCreationProgress');
+    const { result } = renderHook(() => progress.usePendingVmCreations());
+    expect(result.current).toEqual([orphan]);
+    expect(progress.isOwnedVmCreation(result.current[0]!)).toBe(false);
+    expect(
+      progress.isVmCreationPending(
+        { vm_id: 'vm-1', name: 'from-other-tab', state: 'stopped' },
+        result.current,
+      ),
+    ).toBe(false);
+
+    act(() => progress.clearVmCreation(result.current[0]!));
+    expect(result.current).toEqual([]);
+    expect(localStorage.getItem(PENDING_KEY)).toBe('[]');
+  });
+
+  it('이 탭에서 시작한 기록은 소유이고 카드를 잠근다', async () => {
+    vi.resetModules();
+    const progress = await import('./vmCreationProgress');
+    progress.startVmCreation('mine', Date.now());
+    const { result } = renderHook(() => progress.usePendingVmCreations());
+    expect(progress.isOwnedVmCreation(result.current[0]!)).toBe(true);
+    expect(
+      progress.isVmCreationPending({ vm_id: 'vm-1', name: 'mine', state: 'stopped' }, result.current),
+    ).toBe(true);
+    progress.finishVmCreation('mine');
   });
 });

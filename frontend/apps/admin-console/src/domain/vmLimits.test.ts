@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_MEMORY_MIN_MIB, memoryMinMib, memoryProblem, vcpusProblem, vmNameProblem } from './vmLimits';
+import {
+  DEFAULT_MEMORY_MIN_MIB,
+  memoryMinMib,
+  memoryProblem,
+  sameVmName,
+  vcpusProblem,
+  vmNameKey,
+  vmNameProblem,
+} from './vmLimits';
 
 describe('VM 메모리·vCPU 규칙 (생성·조정 공용)', () => {
   it('메모리는 템플릿 최소값~1024 MiB, 16 MiB 단위', () => {
@@ -41,5 +49,36 @@ describe('VM 메모리·vCPU 규칙 (생성·조정 공용)', () => {
     for (const bad of [0, 5, 1.5, Number.NaN]) {
       expect(vcpusProblem(bad)).toBe('vCPU는 1~4개 사이 정수로 입력해 주세요.');
     }
+  });
+});
+
+describe('VM 이름 비교 — DB(utf8mb4_0900_ai_ci) 기준 (S15P31E110-473)', () => {
+  it('대소문자를 무시한다', () => {
+    expect(sameVmName('Drive-VM', 'drive-vm')).toBe(true);
+    expect(sameVmName('DEBIAN-DEV', 'debian-dev')).toBe(true);
+    expect(sameVmName('drive-vm', 'drive_vm')).toBe(false);
+  });
+
+  it('악센트를 무시한다 (é = e)', () => {
+    expect(sameVmName('café', 'cafe')).toBe(true);
+    expect(sameVmName('Crème-VM', 'creme-vm')).toBe(true);
+    expect(sameVmName('naïve', 'naive')).toBe(true);
+  });
+
+  it('한글은 같은 글자끼리만 같다', () => {
+    expect(sameVmName('주행-가상머신', '주행-가상머신')).toBe(true);
+    expect(sameVmName('주행', '주차')).toBe(false);
+    expect(sameVmName('주행', '주행2')).toBe(false);
+  });
+
+  it('이모지 이름: 같은 이모지는 같고 다른 이모지는 다르다', () => {
+    expect(sameVmName('🚗car', '🚗CAR')).toBe(true);
+    expect(sameVmName('🚗', '🚕')).toBe(false);
+  });
+
+  it('앞뒤 공백은 지우지 않는다 — 공백 규칙은 기존대로 vmNameProblem 이 막는다', () => {
+    expect(sameVmName(' drive', 'drive')).toBe(false);
+    expect(vmNameKey('drive ')).toBe('drive ');
+    expect(vmNameProblem(' drive')).toBe('VM 이름 앞뒤에는 공백을 넣을 수 없습니다.');
   });
 });

@@ -7,6 +7,7 @@ import { useCreateVm, useTemplates, useVms } from '../api/queries';
 import type { Template } from '../api/types';
 import { loadVmList } from '../api/vmListCache';
 import {
+  sameVmName,
   MEMORY_MAX_MIB,
   MEMORY_STEP_MIB,
   memoryMinMib,
@@ -55,8 +56,19 @@ export function VmCreatePage() {
   const zephyr = template?.guest_kind === 'zephyr';
   const spec = zephyr ? ZEPHYR_PROFILE : { vcpus, memory_mib: memory };
   const vms = useVms();
+  /**
+   * 응답 시간이 초과된 생성의 이름 (S15P31E110-473). 서버는 레코드를 남기고 생성을 이어 가므로 그 이름의 VM 이
+   * 목록에 생겨도 내 생성이다. 화면 상태로만 기억한다 — 새로고침하면 잊고, 그때는 목록에서 확인하도록 안내한다
+   */
+  const [timedOutName, setTimedOutName] = useState<string | null>(null);
+  /** 이번 요청이 시간 초과된 생성을 같은 이름으로 다시 보낸 것인가 (200 이면 "이어서 마쳤습니다") */
+  const [resuming, setResuming] = useState(false);
+  const isTimedOutName = (candidate: string) => timedOutName !== null && sameVmName(candidate, timedOutName);
   // 같은 이름이 있으면 서버는 409(사양 다름) 또는 200(같은 사양 = 기존 VM 시작)이라 새 VM 이 생기지 않는다 (QA 1-F2)
-  const duplicateName = name.length > 0 && (vms.data?.items ?? []).some((vm) => vm.name === name);
+  // 비교는 DB 기준(대소문자·악센트 무시) — 서버는 Drive-VM 요청에 drive-vm 을 찾는다. 시간 초과된 내 생성은 빼고 본다
+  const duplicateName =
+    name.length > 0 &&
+    (vms.data?.items ?? []).some((vm) => sameVmName(vm.name, name) && !isTimedOutName(vm.name));
   /** 서버 422 errors[] 를 입력칸별 한글 이유로 바꾼 것. 그 칸을 고치면 지운다 */
   const [serverReasons, setServerReasons] = useState<FieldReasons>({});
   /** 한 번도 입력하지 않은 빈 이름에는 이유를 띄우지 않는다 */
@@ -108,8 +120,11 @@ export function VmCreatePage() {
     const startedAt = Date.now();
     setCreationStartedAt(startedAt);
     setNow(startedAt);
-    // 같은 이름의 VM이 이미 있으면 409(사양 불일치) 또는 200(같은 사양 재시도)이므로 새로 생성되는 VM이 아니다
-    startVmCreation(name, startedAt, existingVmIdsNamed(name));
+    const retry = isTimedOutName(name);
+    setResuming(retry);
+    // 같은 이름의 VM이 이미 있으면 409(사양 불일치) 또는 200(같은 사양 재시도)이므로 새로 생성되는 VM이 아니다.
+    // 시간 초과된 내 생성을 다시 보내는 것이면 그 VM 은 이번 생성의 결과다
+    startVmCreation(name, startedAt, retry ? [] : existingVmIdsNamed(name));
     void create
       .mutateAsync({
         name,
@@ -126,6 +141,8 @@ export function VmCreatePage() {
       })
       .catch((failure: unknown) => {
         finishVmCreation(name);
+        if (mounted.current && failure instanceof ApiError && isCreationTimeout(failure))
+          setTimedOutName(name);
         // 서버가 입력칸 규칙으로 거절했으면(422 errors[]) 입력 단계로 돌아가 해당 칸 아래에 이유를 보인다
         const reasons = fieldReasonsOf(failure, memoryMinMib(template.min_memory_mib));
         if (!reasons || !mounted.current) return;
@@ -137,7 +154,10 @@ export function VmCreatePage() {
   };
 
   const error = create.error instanceof ApiError ? create.error : null;
-  const timedOut = error !== null && isCreationTimeout(error);
+  /** 시간 초과 뒤 다시 보냈는데 서버가 아직 그 생성을 붙잡고 있음 (nginx 15분 < 백엔드 20분 사이) */
+  const stillCreating = resuming && error?.code === 'VM_OPERATION_IN_PROGRESS';
+  const timedOut = error !== null && (isCreationTimeout(error) || stillCreating);
+  const resumedExisting = resuming && create.data?.created === false;
   const goToList = () => navigate('/control');
 
   return (
@@ -419,7 +439,11 @@ export function VmCreatePage() {
                   </span>
                 </div>
               </div>
+              {stillCreating && (
+                <p role="alert">보드에서 생성이 아직 진행 중입니다. 잠시 후 목록에서 확인해 주세요.</p>
+              )}
               <p>목록에 VM이 없거나 시작되지 않았다면 같은 이름·사양으로 다시 생성하면 이어서 복구됩니다.</p>
+              <p>이 화면을 새로고침하면 이 안내가 사라집니다. 그때는 VM 목록에서 상태를 확인해 주세요.</p>
               <div className={styles.createTimeoutActions}>
                 <Button variant="secondary" size="sm" onClick={goToList}>
                   VM 목록에서 확인
@@ -482,7 +506,7 @@ export function VmCreatePage() {
 
       <Modal
         open={create.data !== undefined}
-        title={create.data?.created === false ? '기존 VM 시작' : 'VM 생성 완료'}
+        title={create.data?.created === false && !resumedExisting ? '기존 VM 시작' : 'VM 생성 완료'}
         onClose={goToList}
         footer={<Button onClick={goToList}>VM 목록으로</Button>}
       >
@@ -494,7 +518,9 @@ export function VmCreatePage() {
               <p>
                 {create.data.created
                   ? '새 VM이 성공적으로 생성되었습니다.'
-                  : '같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'}
+                  : resumedExisting
+                    ? '앞서 시간이 초과된 생성을 이어서 마쳤습니다.'
+                    : '같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'}
               </p>
             </div>
             <dl className={styles.createSuccessMeta}>
@@ -573,5 +599,5 @@ function isCreationTimeout(error: ApiError): boolean {
 
 /** 이 탭이 마지막으로 받은 VM 목록에서 같은 이름의 VM. 목록이 없으면 비워 두고 응답으로 정리한다 */
 function existingVmIdsNamed(name: string): string[] {
-  return (loadVmList()?.data.items ?? []).filter((vm) => vm.name === name).map((vm) => vm.vm_id);
+  return (loadVmList()?.data.items ?? []).filter((vm) => sameVmName(vm.name, name)).map((vm) => vm.vm_id);
 }

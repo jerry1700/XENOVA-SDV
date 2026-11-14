@@ -16,6 +16,12 @@ const RELAY: Record<PhoneRelayState, { health: Health; label: string }> = {
   unknown: { health: 'fault', label: '상태 알 수 없음' },
 };
 
+/**
+ * 화면이 모르는 중계 상태(플랫폼이 새 값을 추가했는데 콘솔이 아직 모름). 카드 본문은 그대로 보이고
+ * 배지는 장애가 아닌 중립(회색)으로 둔다 (S15P31E110-473)
+ */
+const UNKNOWN_RELAY: { health: Health; label: string } = { health: 'stopped', label: '상태 알 수 없음' };
+
 function errorMessage(error: unknown): string {
   return errorText(error);
 }
@@ -69,7 +75,7 @@ export function PhoneLinkCard() {
     }
   }
 
-  const relay = data ? RELAY[data.relay] : null;
+  const relay = data ? (RELAY[data.relay] ?? UNKNOWN_RELAY) : null;
   const hint = data ? phoneLinkHint(data) : null;
 
   return (

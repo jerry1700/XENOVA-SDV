@@ -3321,6 +3321,11 @@ button.chip:hover:not(.chipOn) {
   border-radius: 12px;
   background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
 }
+.pendingCreationSummary[data-unknown='true'] {
+  /* 결과를 모르는 기록은 진행 중(파랑)이 아니라 확인 필요(중립) */
+  border-color: var(--x-border);
+  background: var(--x-surface-2);
+}
 .pendingCreationSummary > div {
   display: grid;
   gap: 3px;

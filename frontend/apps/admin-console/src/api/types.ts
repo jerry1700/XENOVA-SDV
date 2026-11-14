@@ -83,7 +83,7 @@ export interface VmSynchronizationResult {
 }
 
 export interface VmSynchronizationItem {
-  vm_id: string;
+  vm_id: string | null;
   /** 보드 VM 은 보드의 이름, 정리된 VM 은 정리 전 이름. 보드가 이름을 주지 않으면 null */
   name: string | null;
   action:
