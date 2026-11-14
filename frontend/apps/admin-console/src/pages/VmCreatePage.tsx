@@ -2,7 +2,8 @@ import { Button, Card, Modal } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useBlocker, useNavigate } from 'react-router';
 import { ApiError } from '../api/client';
-import { useCreateVm, useTemplates } from '../api/queries';
+import { errorText } from '../api/errorText';
+import { useCreateVm, useTemplates, useVms } from '../api/queries';
 import type { Template } from '../api/types';
 import { loadVmList } from '../api/vmListCache';
 import styles from './pages.module.css';
@@ -27,13 +28,6 @@ const MAX_MEMORY = 1024;
 const MEMORY_STEP = 64;
 const ZEPHYR_PROFILE = { vcpus: 1, memory_mib: 16 };
 
-const ERROR_HINT: Record<string, string> = {
-  VM_NAME_CONFLICT: '같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.',
-  INSUFFICIENT_RESOURCES: '사용 가능한 CPU 또는 메모리가 부족합니다. 할당량을 조정해 주세요.',
-  VALIDATION_ERROR: '입력한 VM 정보와 자원 값을 다시 확인해 주세요.',
-  TEMPLATE_NOT_FOUND: '선택한 템플릿을 찾을 수 없습니다. 템플릿을 다시 선택해 주세요.',
-};
-
 export function VmCreatePage() {
   const templates = useTemplates();
   const create = useCreateVm();
@@ -50,7 +44,10 @@ export function VmCreatePage() {
   const leaveBlocker = useBlocker(create.isPending);
   const zephyr = template?.guest_kind === 'zephyr';
   const spec = zephyr ? ZEPHYR_PROFILE : { vcpus, memory_mib: memory };
-  const nameOk = name.length >= 1 && name.length <= 63 && name.trim() === name;
+  const vms = useVms();
+  // 같은 이름이 있으면 서버는 409(사양 다름) 또는 200(같은 사양 = 기존 VM 시작)이라 새 VM 이 생기지 않는다 (QA 1-F2)
+  const duplicateName = name.length > 0 && (vms.data?.items ?? []).some((vm) => vm.name === name);
+  const nameOk = name.length >= 1 && name.length <= 63 && name.trim() === name && !duplicateName;
   const resourcesOk =
     template !== null &&
     Number.isInteger(spec.vcpus) &&
@@ -158,7 +155,16 @@ export function VmCreatePage() {
           </div>
 
           {templates.isPending && <div className={styles.statePanel}>템플릿을 불러오는 중입니다…</div>}
-          {templates.error && <div className={styles.statePanel}>템플릿을 불러오지 못했습니다.</div>}
+          {templates.error && (
+            <div className={styles.statePanel} role="alert">
+              {templateLoadMessage(templates.error)}
+            </div>
+          )}
+          {templates.data && templates.data.length === 0 && (
+            <div className={styles.statePanel}>
+              보드에 공개된 템플릿이 없습니다. 보드에 템플릿 이미지가 설치됐는지 확인해 주세요.
+            </div>
+          )}
           <div className={styles.templateGrid}>
             {(templates.data ?? []).map((item, index) => {
               const selected =
@@ -221,7 +227,13 @@ export function VmCreatePage() {
                   onChange={(event) => setName(event.target.value)}
                   placeholder="예: drive-vm-a"
                   aria-invalid={name.length > 0 && !nameOk}
+                  aria-describedby={duplicateName ? 'vm-name-duplicate' : undefined}
                 />
+                {duplicateName && (
+                  <small id="vm-name-duplicate" role="alert">
+                    같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.
+                  </small>
+                )}
 
                 {zephyr ? (
                   <div className={styles.fixedProfile}>
@@ -364,8 +376,7 @@ export function VmCreatePage() {
 
           {create.error && !timedOut && (
             <div className={styles.createError} role="alert">
-              <strong>{error ? `${error.message} (${error.code})` : String(create.error)}</strong>
-              {error && ERROR_HINT[error.code] && <span>{ERROR_HINT[error.code]}</span>}
+              <strong title={error?.code}>{errorText(create.error, 'VM을 생성하지 못했습니다.')}</strong>
             </div>
           )}
 
@@ -417,7 +428,7 @@ export function VmCreatePage() {
 
       <Modal
         open={create.data !== undefined}
-        title="VM 생성 완료"
+        title={create.data?.created === false ? '기존 VM 시작' : 'VM 생성 완료'}
         onClose={goToList}
         footer={<Button onClick={goToList}>VM 목록으로</Button>}
       >
@@ -425,8 +436,12 @@ export function VmCreatePage() {
           <div className={styles.createSuccess}>
             <span aria-hidden="true">✓</span>
             <div>
-              <strong>‘{create.data.name}’</strong>
-              <p>새 VM이 성공적으로 생성되었습니다.</p>
+              <strong>‘{create.data.vm.name}’</strong>
+              <p>
+                {create.data.created
+                  ? '새 VM이 성공적으로 생성되었습니다.'
+                  : '같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'}
+              </p>
             </div>
             <dl className={styles.createSuccessMeta}>
               <div>
@@ -464,6 +479,14 @@ export function VmCreatePage() {
       </Modal>
     </div>
   );
+}
+
+/** 템플릿 버전은 보드 카탈로그에서 읽는다. 보드에 한 번도 닿지 못하면 백엔드가 dom0-manager 오류를 그대로 준다 */
+function templateLoadMessage(error: unknown): string {
+  if (error instanceof ApiError && error.code.startsWith('VM_CONTROL_')) {
+    return '보드에 연결할 수 없어 템플릿을 불러오지 못했습니다. 보드 상태를 확인한 뒤 다시 시도해 주세요.';
+  }
+  return '템플릿을 불러오지 못했습니다.';
 }
 
 /** 백엔드는 dom0-manager 응답을 command-timeout(20m)까지 기다린 뒤 504 VM_CONTROL_TIMEOUT으로 끝낸다 */

@@ -27,6 +27,36 @@
   line-height: 1.45;
   animation: toastIn 0.2s ease-out;
 }
+.text {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 약 6줄 (line-height 1.45), 넘치면 토스트 안에서 스크롤 */
+  max-height: calc(1.45em * 6);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.close {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  align-self: flex-start;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--x-text-muted);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.close:hover,
+.close:focus-visible {
+  background: color-mix(in srgb, var(--x-text) 10%, transparent);
+  color: var(--x-text);
+}
 .toast::before {
   display: grid;
   width: 26px;

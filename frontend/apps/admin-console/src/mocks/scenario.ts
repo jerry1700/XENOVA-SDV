@@ -542,7 +542,7 @@ export function forceKill(target: Target) {
  * VM 이 내려갔을 때 (강제 종료 = crashed → 복구 서비스가 다시 띄움, VM 화면 [정지] = stopped → 운영자가 [시작]할 때까지).
  * 주행 앱이면 명령이 끊겨 게이트웨이 판정대로 넘긴다 (계약 §5.2).
  */
-function takeDown(target: Target, vmState: 'crashed' | 'stopped') {
+function takeDown(target: Target, vmState: 'crashed' | 'stopped' | 'running') {
   const a = store.apps[target];
   if (!a.alive || a.vmState !== 'running') return emit();
   a.alive = false;
@@ -571,6 +571,24 @@ function takeDown(target: Target, vmState: 'crashed' | 'stopped') {
 }
 
 const targetOf = (vmId: string) => TARGETS.find((t) => vmOf(t) === vmId);
+
+/** 장애 주입 [자율주행 앱 종료] (faults/app-exit) — VM 은 실행 중 그대로, 앱만 명령·생존 신호를 멈춘다.
+ * 실제로는 생존 신호가 15초 끊겨 복구 서비스가 VM 을 다시 띄운다 — mock 은 강제 종료와 같은 시간 뒤 살아난다 */
+export function exitApp(vmId: string): boolean {
+  const target = targetOf(vmId);
+  if (!target || !store.apps[target].alive) return false;
+  push(event('demo.command.sent', 'INFO', vmId, { command: 'app_exit', requested_by: 'operator' }));
+  takeDown(target, 'running');
+  return true;
+}
+
+/** 장애 주입 [VM 강제 종료] (faults/domain-kill) — crashed 로 내려가고 복구 서비스가 다시 띄운다 */
+export function killDomain(vmId: string): boolean {
+  const target = targetOf(vmId);
+  if (!target || !store.apps[target].alive) return false;
+  forceKill(target);
+  return true;
+}
 
 /** VM 화면 [정지] (REST VM 동작 stop) — 주행 앱이면 강제 종료처럼 인계되지만 복구 서비스가 다시 띄우지 않는다 */
 export function stopVm(vmId: string) {

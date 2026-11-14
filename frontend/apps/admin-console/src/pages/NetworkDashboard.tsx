@@ -70,6 +70,7 @@ export function NetworkDashboard({
       </header>
 
       {pending && <div className={styles.statePanel}>VM 정보를 불러오는 중입니다…</div>}
+      {!pending && items?.length === 0 && <div className={styles.statePanel}>등록된 VM이 없습니다.</div>}
       <LiveDataAlert />
 
       <div className={styles.memoryVmGrid}>

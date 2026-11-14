@@ -125,7 +125,7 @@ export function ConsolePanel({
       <section aria-label={`${consoleName} 콘솔`} className={styles.panel}>
         <div className={styles.toolbar}>
           <div className={styles.identity}>
-            <strong>{consoleName}</strong>
+            <strong title={consoleName}>{consoleName}</strong>
             {authority && (
               <span className={styles.authority} data-authority={authority.toLowerCase()}>
                 {authority}

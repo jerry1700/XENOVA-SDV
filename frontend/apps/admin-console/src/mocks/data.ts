@@ -2,15 +2,17 @@
  * mock 데이터. RC카 시나리오의 VM 3대(자율주행·수동주행 Zephyr, 네비게이션 Debian) + 템플릿.
  * 모양은 api/types.ts (VM 관리 API 계약 v1 §2.2 §2.3 §3.3) 그대로.
  */
+import { SHARED_ACCOUNT } from '../api/client';
 import type { Template, Vm } from '../api/types';
 
+/** 콘솔이 자동 로그인하는 공용 계정과 같다 (api/client.ts SHARED_ACCOUNT) */
 export const MOCK_USER = {
   user_id: '00000000-0000-4000-8000-000000000001',
-  username: 'admin',
-  nickname: '관리자',
+  username: SHARED_ACCOUNT.username,
+  nickname: '공용 콘솔',
 };
-/** 로그인 mock 비밀번호. 실제 계정이 아니다 */
-export const MOCK_PASSWORD = '1234';
+/** 로그인 mock 비밀번호. 공용 계정 기본값과 같다 */
+export const MOCK_PASSWORD = SHARED_ACCOUNT.password;
 
 // VM 관리 API 계약 v1 §2.3 예시와 같은 템플릿 3종 (Ubuntu 24.04 · Debian 13 · Zephyr)
 export const TEMPLATES: Template[] = [

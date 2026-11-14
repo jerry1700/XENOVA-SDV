@@ -24,9 +24,18 @@ const createMutation = vi.hoisted(() => ({
   reset: vi.fn(),
 }));
 
+const templatesQuery = vi.hoisted(() => ({
+  data: undefined as unknown,
+  error: null as unknown,
+  isPending: false,
+}));
+
+const listedVms = vi.hoisted(() => ({ items: [] as { vm_id: string; name: string; state: string }[] }));
+
 vi.mock('../api/queries', () => ({
   useCreateVm: () => createMutation,
-  useTemplates: () => ({ data: [LINUX_TEMPLATE], error: null, isPending: false }),
+  useVms: () => ({ data: { items: listedVms.items }, error: null, isPending: false }),
+  useTemplates: () => templatesQuery,
 }));
 
 beforeAll(() => {
@@ -45,6 +54,10 @@ beforeEach(() => {
   createMutation.error = null;
   createMutation.isPending = false;
   createMutation.mutateAsync.mockReset();
+  templatesQuery.data = [LINUX_TEMPLATE];
+  templatesQuery.error = null;
+  templatesQuery.isPending = false;
+  listedVms.items = [];
 });
 
 afterEach(() => {
@@ -146,6 +159,24 @@ describe('VM 생성 중 기록 정리', () => {
     expect(pendingNames()).toEqual([]);
   });
 
+  it('생성 실패는 한글 문구만 보이고 서버 원문·(코드)를 붙이지 않는다 (코드는 title 에만)', () => {
+    createMutation.error = new ApiError(409, {
+      code: 'VM_NAME_CONFLICT',
+      message: 'name already used by a retained VM',
+    });
+    renderCreatePage();
+    goToReviewStep();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.');
+    expect(alert).not.toHaveTextContent('VM_NAME_CONFLICT');
+    expect(alert).not.toHaveTextContent('name already used');
+    expect(within(alert).getByText('같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.')).toHaveAttribute(
+      'title',
+      'VM_NAME_CONFLICT',
+    );
+  });
+
   it('504 타임아웃이면 실패 대신 진행 중일 수 있음과 재시도 방법을 안내한다', () => {
     createMutation.error = new ApiError(504, {
       code: 'VM_CONTROL_TIMEOUT',
@@ -162,5 +193,67 @@ describe('VM 생성 중 기록 정리', () => {
       within(notice).getByText(/같은 이름·사양으로 다시 생성하면 이어서 복구됩니다/),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '같은 사양으로 다시 생성' })).toBeEnabled();
+  });
+});
+
+describe('같은 이름의 VM (QA 1-F2)', () => {
+  it('목록에 같은 이름이 있으면 2단계에서 막는다', () => {
+    listedVms.items = [{ vm_id: 'vm-existing', name: 'drive-vm-a', state: 'stopped' }];
+    renderCreatePage();
+    fireEvent.click(screen.getByRole('button', { name: /Linux Base/ }));
+    fireEvent.click(screen.getByRole('button', { name: '다음' }));
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'drive-vm-a' } });
+    expect(
+      screen.getByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'drive-vm-b' } });
+    expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
+  });
+
+  it('서버가 200(같은 사양 재요청 = 기존 VM 시작)이면 "생성 완료"가 아니라 기존 VM 을 시작했다고 알린다', () => {
+    createMutation.data = { vm: { vm_id: 'vm-existing', name: 'drive-vm-a' }, created: false };
+    renderCreatePage();
+    goToReviewStep();
+    expect(
+      screen.getByText('같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('새 VM이 성공적으로 생성되었습니다.')).toBeNull();
+  });
+
+  it('201 이면 생성 완료', () => {
+    createMutation.data = { vm: { vm_id: 'vm-new', name: 'drive-vm-a' }, created: true };
+    renderCreatePage();
+    goToReviewStep();
+    expect(screen.getByText('새 VM이 성공적으로 생성되었습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('템플릿 목록 안내', () => {
+  it('보드에 닿지 못해 템플릿을 못 읽으면 보드 연결 문제라고 안내한다', () => {
+    templatesQuery.data = undefined;
+    templatesQuery.error = new ApiError(503, {
+      code: 'VM_CONTROL_UNAVAILABLE',
+      message: 'VM 제어 서비스에 연결할 수 없습니다.',
+    });
+    renderCreatePage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent('보드에 연결할 수 없어 템플릿을 불러오지 못했습니다');
+  });
+
+  it('그 밖의 오류는 일반 실패 문구를 보여 준다', () => {
+    templatesQuery.data = undefined;
+    templatesQuery.error = new ApiError(500, { code: 'INTERNAL_ERROR' });
+    renderCreatePage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent('템플릿을 불러오지 못했습니다.');
+    expect(screen.queryByText(/보드에 연결할 수 없어/)).not.toBeInTheDocument();
+  });
+
+  it('보드에 공개된 템플릿이 없으면 빈 목록 안내를 보여 준다', () => {
+    templatesQuery.data = [];
+    renderCreatePage();
+
+    expect(screen.getByText(/보드에 공개된 템플릿이 없습니다/)).toBeInTheDocument();
   });
 });

@@ -1,9 +1,10 @@
 import { setupServer } from 'msw/node';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { getSession, refreshSession, request, setSession } from '../api/client';
+import { getSession, refreshSession, request, requestWithStatus, setSession } from '../api/client';
 import {
   VM_CPU_PERCENT_METRIC,
   type AgentExitCommand,
+  type CommandStatusResponse,
   type MetricHistoryResponse,
   type TokenResponse,
   type StressCommand,
@@ -13,7 +14,7 @@ import {
 } from '../api/types';
 import { canStartVm, canStopVm } from '../format';
 import { setMockBoardDown } from './board';
-import { MOCK_PASSWORD, VM_IDS } from './data';
+import { MOCK_PASSWORD, MOCK_USER, VM_IDS } from './data';
 import { handlers, resetMockState } from './handlers';
 
 // 화면이 쓰는 실제 클라이언트(api/client.ts)로 mock 흐름을 돌린다
@@ -39,7 +40,7 @@ afterAll(() => {
 async function login(password = MOCK_PASSWORD) {
   const token = await request<TokenResponse>('/api/v1/auth/login', {
     method: 'POST',
-    body: { username: 'admin', password },
+    body: { username: MOCK_USER.username, password },
     auth: false,
   });
   setSession(token);
@@ -49,7 +50,7 @@ async function login(password = MOCK_PASSWORD) {
 describe('MSW mock API', () => {
   it('로그인 → 목록 → 상세', async () => {
     const token = await login();
-    expect(token.user.username).toBe('admin');
+    expect(token.user.username).toBe(MOCK_USER.username);
 
     const list = await request<VmListResponse>('/api/v1/vms');
     expect(list.items.map((vm) => vm.name)).toEqual(['autonomous', 'manual', 'interaction']);
@@ -103,7 +104,7 @@ describe('MSW mock API', () => {
     expect(canStopVm('stopped')).toBe(false);
   });
 
-  it('생성은 입력값을 검사하고, 같은 이름은 VM_NAME_CONFLICT', async () => {
+  it('생성은 입력값을 검사하고, 같은 이름·다른 사양은 VM_NAME_CONFLICT, 같은 사양 재요청은 200 + 기존 VM (backend VmService.create)', async () => {
     await login();
     const body = {
       name: 'extra',
@@ -112,12 +113,15 @@ describe('MSW mock API', () => {
       vcpus: 1,
       memory_mib: 256,
     };
-    const created = await request<Vm>('/api/v1/vms', { method: 'POST', body });
-    expect(created.name).toBe('extra');
-    await expect(request('/api/v1/vms', { method: 'POST', body })).rejects.toMatchObject({
-      status: 409,
-      code: 'VM_NAME_CONFLICT',
-    });
+    const created = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+    expect(created.status).toBe(201);
+    expect(created.data.name).toBe('extra');
+    const again = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+    expect(again.status).toBe(200);
+    expect(again.data.vm_id).toBe(created.data.vm_id);
+    await expect(
+      request('/api/v1/vms', { method: 'POST', body: { ...body, memory_mib: 512 } }),
+    ).rejects.toMatchObject({ status: 409, code: 'VM_NAME_CONFLICT' });
     await expect(
       request('/api/v1/vms', { method: 'POST', body: { ...body, name: ' x', vcpus: 9 } }),
     ).rejects.toMatchObject({
@@ -129,9 +133,20 @@ describe('MSW mock API', () => {
     });
   });
 
-  it('삭제 뒤 상세는 VM_NOT_FOUND', async () => {
+  it('실행 중 VM 삭제는 409 INVALID_VM_STATE (보드 계약 — 정지된 VM만 삭제)', async () => {
     await login();
     const id = '22222222-2222-4222-8222-222222222222';
+    await expect(request(`/api/v1/vms/${id}`, { method: 'DELETE' })).rejects.toMatchObject({
+      status: 409,
+      code: 'INVALID_VM_STATE',
+    });
+    await expect(request<Vm>(`/api/v1/vms/${id}`)).resolves.toMatchObject({ vm_id: id });
+  });
+
+  it('정지 뒤 삭제하면 상세는 VM_NOT_FOUND', async () => {
+    await login();
+    const id = '22222222-2222-4222-8222-222222222222';
+    await request(`/api/v1/vms/${id}/stop`, { method: 'POST' });
     await request(`/api/v1/vms/${id}`, { method: 'DELETE' });
     await expect(request(`/api/v1/vms/${id}`)).rejects.toMatchObject({ status: 404, code: 'VM_NOT_FOUND' });
   });
@@ -234,5 +249,46 @@ describe('MSW mock API', () => {
         body: { workers: 1, duration_s: 30 },
       }),
     ).rejects.toMatchObject({ status: 400, code: 'UNSUPPORTED_GUEST_KIND' });
+  });
+
+  it('부하 명령 상태는 백엔드 형식: 성공, 끝나기 전 두 번째 부하는 BUSY 거절, CPU 4워커는 실패, 없는 명령은 404', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      await login();
+      await request(`/api/v1/vms/${VM_IDS.interaction}/start`, { method: 'POST' });
+      const stress = (body: object, kind = 'cpu') =>
+        request<StressCommand>(`/api/v1/vms/${VM_IDS.interaction}/stress/${kind}`, { method: 'POST', body });
+      const status = (id: string) =>
+        request<CommandStatusResponse>(`/api/v1/vms/${VM_IDS.interaction}/commands/${id}`);
+
+      const first = await stress({ workers: 1, duration_s: 30 });
+      const busy = await stress({ memory_mib: 128, duration_s: 30 }, 'memory');
+      expect(await status(busy.command_id)).toMatchObject({
+        status: 'REJECTED',
+        error: { code: 'BUSY' },
+        command_id: busy.command_id,
+        vm_id: VM_IDS.interaction,
+      });
+      const running = await status(first.command_id);
+      expect(running).toMatchObject({ status: 'ACCEPTED', error: null, finished_at: null });
+      expect(running).not.toHaveProperty('message');
+      expect(running).not.toHaveProperty('updated_at');
+
+      vi.setSystemTime(Date.now() + 3000);
+      expect(await status(first.command_id)).toMatchObject({ status: 'SUCCEEDED', error: null });
+      const failing = await stress({ workers: 4, duration_s: 30 });
+      vi.setSystemTime(Date.now() + 3000);
+      expect(await status(failing.command_id)).toMatchObject({
+        status: 'FAILED',
+        error: { code: 'PROCESS_EXITED' },
+      });
+
+      await expect(status('00000000-0000-4000-8000-000000000000')).rejects.toMatchObject({
+        status: 404,
+        code: 'COMMAND_NOT_FOUND',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,33 +1,36 @@
 /** TanStack Query 훅. 경로·응답은 VM 관리 API 계약 §5, 인증은 노션 API 명세 */
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { useState } from 'react';
-import { request, setSession } from './client';
+import { ApiError, request, requestWithStatus } from './client';
 import type {
   CreateVmRequest,
+  AutoInputUnavailableCommand,
+  AutoInputUnavailableRequest,
   AgentExitCommand,
+  AppExitCommand,
+  AppExitRequest,
   AutoDelayCommand,
   AutoDelayRequest,
   CommandStatusResponse,
+  DomainKillResponse,
   Display,
   DisplayListResponse,
   EventListResponse,
-  LoginRequest,
   MetricHistoryResponse,
   PhoneLinkStatus,
   PhonePairingCode,
+  PerceptionFaultOperation,
   ProcessesResponse,
   RouteRequest,
-  SignupRequest,
-  SignupResponse,
   StressCommand,
   StressRequest,
   TelemetryHeartbeatResponse,
   Template,
   ThreadsResponse,
-  TokenResponse,
   UpdateVcpuPinningRequest,
   UpdateVmResourcesRequest,
   Vm,
+  VmCrashCommand,
   VmListResponse,
   VmResourceUpdateResult,
   VmSynchronizationResult,
@@ -48,6 +51,7 @@ export const keys = {
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
   phoneLink: ['display', 'phone-link'] as const,
+  perceptionFault: (id: string) => ['drive', 'faults', 'perception-block', id] as const,
 };
 
 /**
@@ -188,6 +192,27 @@ export function useStartAutoDelay(vmId: string) {
   });
 }
 
+/** 현재 AUTO 제어권을 가진 VM을 백엔드가 판정해 연산 지연을 적용한다. */
+export function useStartActiveDriveAutoDelay() {
+  return useMutation({
+    mutationFn: (body: AutoDelayRequest) =>
+      request<AutoDelayCommand>('/api/v1/drive/faults/auto-delay', {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartAutoInputUnavailable(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AutoInputUnavailableRequest) =>
+      request<AutoInputUnavailableCommand>(
+        `/api/v1/vms/${encodeURIComponent(vmId)}/faults/auto-input-unavailable`,
+        { method: 'POST', body },
+      ),
+  });
+}
+
 export function useStartAgentExit(vmId: string) {
   return useMutation({
     mutationFn: () =>
@@ -196,6 +221,69 @@ export function useStartAgentExit(vmId: string) {
       }),
   });
 }
+
+export function useStartVmCrash(vmId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<VmCrashCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/vm-crash`, {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+export function useStartAppExit(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AppExitRequest) =>
+      request<AppExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/app-exit`, {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartDomainKill(vmId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<DomainKillResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/domain-kill`, {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+export function useStartPerceptionBlock() {
+  return useMutation({
+    mutationFn: (durationS: number) =>
+      request<PerceptionFaultOperation>('/api/v1/drive/faults/perception-block', {
+        method: 'POST',
+        body: { duration_s: durationS },
+      }),
+  });
+}
+
+export function usePerceptionFaultOperation(operationId: string | null) {
+  return useQuery({
+    queryKey: keys.perceptionFault(operationId ?? ''),
+    queryFn: ({ signal }) =>
+      request<PerceptionFaultOperation>(
+        `/api/v1/drive/faults/perception-block/${encodeURIComponent(operationId!)}`,
+        { signal },
+      ),
+    enabled: Boolean(operationId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'ENDED' || status === 'REJECTED' || status === 'UNKNOWN' || status === 'FAILED'
+        ? false
+        : 500;
+    },
+  });
+}
+
+/** 명령이 없다는 응답(404 COMMAND_NOT_FOUND): 다시 물어도 같으므로 재시도·반복 조회를 멈춘다 */
+const commandGone = (error: unknown) => error instanceof ApiError && error.status === 404;
 
 export function useCommandStatus(vmId: string, commandId: string | null, acceptedIsTerminal = false) {
   return useQuery({
@@ -206,7 +294,9 @@ export function useCommandStatus(vmId: string, commandId: string | null, accepte
         { signal },
       ),
     enabled: Boolean(vmId && commandId),
+    retry: (count, error) => !commandGone(error) && count < 1,
     refetchInterval: (query) => {
+      if (commandGone(query.state.error)) return false;
       const status = query.state.data?.status;
       return status === 'SUCCEEDED' ||
         status === 'FAILED' ||
@@ -383,37 +473,19 @@ export function useSynchronizeVms() {
   });
 }
 
+/** 201 = 새로 만듦. 200 = 같은 이름·같은 사양의 재요청이라 서버가 기존 VM 을 시작해 돌려줌 (backend VmService.create) */
+export interface CreateVmResult {
+  vm: Vm;
+  created: boolean;
+}
+
 export function useCreateVm() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (body: CreateVmRequest) => request<Vm>('/api/v1/vms', { method: 'POST', body }),
-    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
-  });
-}
-
-export function useLogin() {
-  return useMutation({
-    mutationFn: (body: LoginRequest) =>
-      request<TokenResponse>('/api/v1/auth/login', { method: 'POST', body, auth: false }),
-    onSuccess: setSession,
-  });
-}
-
-export function useSignup() {
-  return useMutation({
-    mutationFn: (body: SignupRequest) =>
-      request<SignupResponse>('/api/v1/auth/signup', { method: 'POST', body, auth: false }),
-  });
-}
-
-export function useLogout() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
-    onSettled: () => {
-      setSession(null);
-      clearVmList();
-      client.clear();
+    mutationFn: async (body: CreateVmRequest): Promise<CreateVmResult> => {
+      const { data, status } = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+      return { vm: data, created: status !== 200 };
     },
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }

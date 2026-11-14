@@ -1,365 +1,1032 @@
-import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Button, Card, Modal, StatusBadge } from '@xenova/ui';
+import { useMemo, useState, type CSSProperties } from 'react';
+import { Link } from 'react-router';
+import { ApiError } from '../api/client';
+import { commandErrorCode } from '../api/commandStatus';
+import type { DriveMode } from '../api/drive';
+import { agentErrorText, commandStateText } from '../api/errorText';
 import {
-  driveKeyOf,
-  mockDemo,
-  cancelResume,
-  pressKey,
-  requestResume,
-  useManualInput,
-  type DriveKey,
-  type DriveMode,
-  type InputResult,
-} from '../api/drive';
-import { useVms } from '../api/queries';
-import {
-  appHealth,
-  appHealthLabel,
-  osLabel,
-  plain,
-  ROLE_ORDER,
-  ROLES,
-  signed,
-  vmOf,
-  type AppId,
-} from '../domain/roles';
+  useCommandStatus,
+  useEvents,
+  usePerceptionFaultOperation,
+  useStartActiveDriveAutoDelay,
+  useStartAutoInputUnavailable,
+  useStartPerceptionBlock,
+  useStartVmCrash,
+  useVms,
+} from '../api/queries';
+import type { PerceptionFaultOperation, Vm } from '../api/types';
+import { MODE_HEALTH, MODE_LABEL, ROLES } from '../domain/roles';
+import { STATE_HEALTH, STATE_LABEL } from '../format';
 import { useDrive } from '../layout/DriveContext';
-import { SimTrackControl } from './SimTrackControl';
 import styles from './pages.module.css';
 
-/**
- * W-07 시연 제어 (화면 정의서 W-07, UI-08·DS-01) — 공병우 -128·-130, 격리 시연 API 는 정송하 -135.
- * 위: 격리 시연 — 세 VM 을 나란히 두고 각자 [강제 종료]. 다른 둘이 계속 도는 것을 같은 줄에서 본다.
- * 아래: 수동주행 입력 + 자율주행 재개(POST /api/v1/drive/resume, 3·2·1).
- * 화면 배치 카드(REST-23·24, -129)는 2026-11-12 제거 — HDMI 가 합친 한 화면(/display/combined)으로 바뀌어 모니터별 배치가 무의미하고,
- * 보드엔 그 WebSocket 에 붙는 라우터가 없어 항상 "모니터 꺼짐" 이었다 (계약 display-route-v1 "기존 Spring 화면 배치" 절).
- * 강제 종료 API(-135)는 아직 없다 → mock 에서만 동작.
- */
+type ScenarioId = 'vm-crash' | 'delay' | 'empty-result' | 'jetson-loss';
+const SCENARIOS: { id: ScenarioId; label: string; title: string; ready: boolean }[] = [
+  { id: 'vm-crash', label: '시연 1', title: '주행 VM 장애', ready: true },
+  { id: 'delay', label: '시연 2', title: '연산 지연 반복', ready: true },
+  { id: 'empty-result', label: '시연 3', title: 'AUTO 입력 처리 장애', ready: true },
+  { id: 'jetson-loss', label: '시연 4', title: 'Jetson 인지 송신 단절', ready: true },
+];
+
+interface Run {
+  targetId: string;
+  targetName: string;
+  initialMode: DriveMode | null;
+  commandId: string;
+  startedAt: string;
+}
+
+interface DelayRun extends Run {
+  delayMs: number;
+  durationS: number;
+}
+
+const DELAY_SCENARIO = { delay_ms: 100, duration_s: 30 } as const;
+
+export function failureText(error: unknown): string {
+  if (
+    error instanceof ApiError &&
+    (error.status === 404 || error.status === 405) &&
+    error.code !== 'VM_NOT_FOUND'
+  )
+    return '배포된 백엔드에 장애 시연 API가 아직 없습니다.';
+  return error instanceof Error ? error.message : '요청이 실패했습니다.';
+}
+
+export function perceptionFaultErrorText(error: unknown): string {
+  if (error instanceof ApiError && (error.status === 404 || error.status === 405))
+    return '배포된 백엔드에 Jetson 인지 단절 시연 API가 아직 없습니다.';
+  return error instanceof Error ? error.message : 'Jetson 인지 단절 요청이 실패했습니다.';
+}
+
 export function DemoPage() {
-  const { drive } = useDrive();
+  const [selected, setSelected] = useState<ScenarioId>('vm-crash');
+  const scenario = SCENARIOS.find((item) => item.id === selected)!;
   return (
     <div className={styles.page}>
       <section className={styles.pageHead}>
         <div>
-          <div className={styles.eyebrow}>시연 제어</div>
-          <h1>격리 시연</h1>
+          <div className={styles.eyebrow}>Simulator</div>
+          <h1>장애 시연</h1>
+          <p className={styles.dim}>장애 발생부터 주행 제어권 승계와 VM 복구까지 한 화면에서 확인합니다.</p>
         </div>
-        <span className={styles.grow} />
-        {mockDemo ? (
-          <Button variant="ghost" onClick={mockDemo.togglePerception}>
-            {drive?.perception?.valid === false ? '인지 복구' : '인지 끊김 (D5)'}
-          </Button>
-        ) : (
-          <span className={styles.draft}>강제 종료 API(-135) 미구현 — mock 모드에서만 동작</span>
-        )}
       </section>
       <nav className={styles.simulatorTabs} aria-label="Simulator 하위 메뉴">
         <Link to="/simulator" aria-current="page">
-          시뮬레이션 제어
+          장애 시연
         </Link>
         <Link to="/simulator/stress">부하 테스트</Link>
       </nav>
-      <div className={styles.cols3}>
-        {ROLE_ORDER.map((app) => (
-          <IsolationCard key={app} app={app} />
+      <nav className={styles.scenarioTabs} aria-label="장애 시연 선택">
+        {SCENARIOS.map((item) => (
+          <button
+            type="button"
+            key={item.id}
+            aria-pressed={selected === item.id}
+            onClick={() => setSelected(item.id)}
+          >
+            <span>{item.label}</span>
+            <strong>{item.title}</strong>
+            {!item.ready && <small>준비 중</small>}
+          </button>
         ))}
+      </nav>
+      {scenario.ready ? (
+        scenario.id === 'vm-crash' ? (
+          <VmCrashScenario />
+        ) : scenario.id === 'delay' ? (
+          <DelayScenario />
+        ) : scenario.id === 'empty-result' ? (
+          <AutoInputUnavailableScenario />
+        ) : (
+          <JetsonLossScenario />
+        )
+      ) : (
+        <Card title={`${scenario.label} · ${scenario.title}`}>
+          <div className={styles.scenarioEmpty}>
+            <StatusBadge health="stopped" label="준비 중" size="sm" />
+            <p>시연 조건과 복구 판정 API가 연결되면 이 탭에 전용 제어 및 관측 화면이 추가됩니다.</p>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function DelayScenario() {
+  const vms = useVms();
+  const { drive, socket } = useDrive();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [run, setRun] = useState<DelayRun | null>(null);
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
+  );
+  const control = drive?.control ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const controlFresh = socket === 'open' && control != null && control.received_ago_ms < 3000;
+  const start = useStartActiveDriveAutoDelay();
+  const command = useCommandStatus(run?.targetId ?? '', run?.commandId ?? null);
+
+  const commandAccepted = Boolean(
+    run && command.data && ['ACCEPTED', 'RUNNING', 'SUCCEEDED'].includes(command.data.status),
+  );
+  const delayRunning = command.data?.status === 'RUNNING' || command.data?.status === 'SUCCEEDED';
+  const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
+  const commandFinishedWithoutHandoff = command.data?.status === 'SUCCEEDED' && activeId === run?.targetId;
+  const sawHandoff = Boolean(run && activeId && activeId !== run.targetId);
+  const modePreserved = Boolean(run && sawHandoff && control?.mode === 'AUTO');
+  const finished = sawHandoff && modePreserved;
+  const failed = commandFailed || commandFinishedWithoutHandoff;
+  const unavailableReason = !controlFresh
+    ? '주행 제어 상태가 최신이 아닙니다.'
+    : control?.mode !== 'AUTO'
+      ? '자동주행 중에만 연산 지연 시연을 시작할 수 있습니다.'
+      : !activeVm
+        ? '현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.'
+        : activeVm.guest_kind !== 'zephyr'
+          ? '현재 활성 VM이 Zephyr가 아닙니다.'
+          : activeVm.state !== 'running'
+            ? '현재 활성 VM이 실행 중이 아닙니다.'
+            : null;
+
+  const begin = () => {
+    if (!activeVm || start.isPending) return;
+    setRun(null);
+    start.mutate(DELAY_SCENARIO, {
+      onSuccess: (submitted) =>
+        setRun({
+          targetId: submitted.vm_id,
+          targetName: activeVm.name,
+          initialMode: control?.mode ?? null,
+          commandId: submitted.command_id,
+          startedAt: submitted.submitted_at,
+          delayMs: submitted.delay_ms,
+          durationS: submitted.duration_s,
+        }),
+    });
+  };
+
+  return (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 2</span>
+          <h2>반복 연산 지연과 주행 제어권 승계</h2>
+          <p>현재 AUTO 주행 VM에 100ms 지연을 반복해 deadline miss와 백업 VM 승계를 관측합니다.</p>
+        </div>
+        <Button
+          variant="danger"
+          disabled={Boolean(unavailableReason) || start.isPending || Boolean(run && !finished && !failed)}
+          title={unavailableReason ?? undefined}
+          onClick={() => setConfirmOpen(true)}
+        >
+          {start.isPending ? '지연 명령 전송 중…' : finished || failed ? '시연 다시 시작' : '시연 시작'}
+        </Button>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {start.isError && (
+        <p className={styles.scenarioWarning} role="alert">
+          {failureText(start.error)}
+        </p>
+      )}
+      <div className={styles.scenarioSummary}>
+        <Summary label="현재 활성 VM" value={activeVm?.name ?? '미확인'} mono={activeVm?.vm_id.slice(0, 8)} />
+        <Summary
+          label="주행 모드"
+          value={control?.mode ? MODE_LABEL[control.mode] : '미확인'}
+          health={control?.mode ? MODE_HEALTH[control.mode] : 'stopped'}
+        />
+        <Summary
+          label="지연 프리셋"
+          value={`${DELAY_SCENARIO.delay_ms}ms · ${DELAY_SCENARIO.duration_s}초`}
+          health={run && !finished && !failed ? 'recovering' : finished ? 'ok' : 'stopped'}
+        />
       </div>
-      {/* 시뮬레이터 구성일 때만 (실차 구성에는 없다) */}
-      <SimTrackControl />
-      {/* 화면 배치 카드가 빠져 한 장만 남았으므로 한 줄 전체를 쓴다 */}
-      <Card title="수동주행 입력">
-        <ManualInput />
-        <Resume />
+      <Card title="주행 VM 상태">
+        <div className={styles.drivingVmGrid}>
+          {drivingVms.length ? (
+            drivingVms.map((vm) => <DrivingVm key={vm.vm_id} vm={vm} active={vm.vm_id === activeId} />)
+          ) : (
+            <p className={styles.dim}>주 구동·백업 역할이 지정된 Zephyr VM이 없습니다.</p>
+          )}
+        </div>
+      </Card>
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            <p>시연을 시작하면 연산 지연 실행부터 AUTO 제어권 승계까지 실제 관측 결과가 표시됩니다.</p>
+          </div>
+        ) : (
+          <div>
+            <div className={styles.runMeta}>
+              <span>
+                시작 대상 <b>{run.targetName}</b>
+              </span>
+              <span>
+                {run.delayMs}ms · {run.durationS}초
+              </span>
+              <span className={styles.mono}>{run.commandId.slice(0, 8)}</span>
+              <time>{new Date(run.startedAt).toLocaleTimeString('ko-KR')}</time>
+            </div>
+            <ol className={styles.scenarioProgress}>
+              <ProgressStep
+                done={commandAccepted}
+                failed={commandFailed}
+                title="연산 지연 명령 수락"
+                detail={
+                  command.data
+                    ? commandFailed
+                      ? agentErrorText(commandErrorCode(command.data))
+                      : commandStateText(command.data.status)
+                    : 'Zephyr 명령 응답 대기 중'
+                }
+              />
+              <ProgressStep
+                done={delayRunning}
+                failed={commandFailed}
+                title="반복 지연 실행"
+                detail={
+                  delayRunning
+                    ? `${run.delayMs}ms 지연을 적용하고 있습니다.`
+                    : '명령 실행 상태를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={sawHandoff}
+                failed={commandFinishedWithoutHandoff}
+                title="백업 VM으로 제어권 승계"
+                detail={
+                  sawHandoff
+                    ? `${run.targetName}에서 ${activeVm?.name ?? activeId}으로 전환됐습니다.`
+                    : commandFinishedWithoutHandoff
+                      ? '지연 명령은 끝났지만 active_vm_id 변경을 확인하지 못했습니다.'
+                      : '반복 deadline miss 판정과 active_vm_id 변경을 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={modePreserved}
+                failed={sawHandoff && control?.mode !== 'AUTO'}
+                title="AUTO 주행 유지"
+                detail={`시작: ${run.initialMode ? MODE_LABEL[run.initialMode] : '미확인'} · 현재: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`}
+              />
+            </ol>
+          </div>
+        )}
+      </Card>
+      {activeVm && (
+        <Modal
+          open={confirmOpen}
+          title="자동주행 연산 지연 시연"
+          onClose={() => setConfirmOpen(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirmOpen(false)}>
+                취소
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  begin();
+                  setConfirmOpen(false);
+                }}
+              >
+                지연 발생
+              </Button>
+            </>
+          }
+        >
+          <p>
+            현재 활성 VM <b>{activeVm.name}</b>의 AUTO 계산 뒤에 100ms 지연을 30초 동안 반복합니다. 백업 VM이
+            준비되지 않았다면 안전 정지할 수 있습니다.
+          </p>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+interface InputFaultRun extends Run {
+  durationS: number;
+}
+
+function AutoInputUnavailableScenario() {
+  const vms = useVms();
+  const { drive, socket } = useDrive();
+  const [durationS, setDurationS] = useState(50);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [run, setRun] = useState<InputFaultRun | null>(null);
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
+  );
+  const control = drive?.control ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const controlFresh = socket === 'open' && control != null && control.received_ago_ms < 3000;
+  const start = useStartAutoInputUnavailable(activeVm?.vm_id ?? '');
+  const command = useCommandStatus(run?.targetId ?? '', run?.commandId ?? null);
+  const commandRunning = command.data?.status === 'ACCEPTED' || command.data?.status === 'RUNNING';
+  const commandSucceeded = command.data?.status === 'SUCCEEDED';
+  const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
+  const targetLifecycle = run ? drive?.vm_apps?.[run.targetId]?.autonomous?.lifecycle : null;
+  const targetLifecycleFresh = run
+    ? drive?.vm_apps?.[run.targetId]?.autonomous?.lifecycle_source.status === 'fresh'
+    : false;
+  const inputUnavailable = targetLifecycleFresh && targetLifecycle?.reason === 'INPUT_UNAVAILABLE';
+  const sawHandoff = Boolean(run && activeId && activeId !== run.targetId);
+  const autoPreserved = Boolean(run && sawHandoff && control?.mode === 'AUTO');
+  const terminal = commandSucceeded || commandFailed;
+  const durationValid = Number.isInteger(durationS) && durationS >= 1 && durationS <= 120;
+  const unavailableReason = !controlFresh
+    ? '주행 제어 상태가 최신이 아닙니다.'
+    : control?.mode !== 'AUTO' || control.active_app !== 'autonomous'
+      ? 'AUTO 모드에서 자율주행 중일 때만 시연할 수 있습니다.'
+      : !activeVm
+        ? '현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.'
+        : activeVm.guest_kind !== 'zephyr'
+          ? '현재 활성 VM이 Zephyr가 아닙니다.'
+          : activeVm.state !== 'running'
+            ? '현재 활성 VM이 실행 중이 아닙니다.'
+            : !durationValid
+              ? '장애 지속 시간은 1초부터 120초까지 입력해 주세요.'
+              : null;
+
+  const begin = () => {
+    if (!activeVm || start.isPending || !durationValid) return;
+    setRun(null);
+    start.mutate(
+      { duration_s: durationS },
+      {
+        onSuccess: (submitted) =>
+          setRun({
+            targetId: activeVm.vm_id,
+            targetName: activeVm.name,
+            initialMode: control?.mode ?? null,
+            commandId: submitted.command_id,
+            startedAt: submitted.submitted_at,
+            durationS: submitted.duration_s,
+          }),
+      },
+    );
+  };
+
+  return (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 3</span>
+          <h2>활성 VM의 AUTO 입력 처리 장애와 승계</h2>
+          <p>
+            Jetson 입력 원본은 유지하고, 현재 활성 VM 내부의 AUTO 계산 입력만 차단해 백업 VM 승계를
+            확인합니다.
+          </p>
+        </div>
+        <div className={styles.scenarioAction}>
+          <label htmlFor="input-fault-duration">장애 지속 시간</label>
+          <div>
+            <input
+              id="input-fault-duration"
+              type="number"
+              min={1}
+              max={120}
+              step={1}
+              value={durationS}
+              aria-describedby="input-fault-duration-help"
+              onChange={(event) => setDurationS(Number(event.target.value))}
+            />
+            <span>초</span>
+          </div>
+          <small id="input-fault-duration-help">1~120초 · 안정적인 승계 시연은 10초 이상 권장</small>
+          <Button
+            variant="danger"
+            disabled={Boolean(unavailableReason) || start.isPending || Boolean(run && !terminal)}
+            title={unavailableReason ?? undefined}
+            onClick={() => setConfirmOpen(true)}
+          >
+            {start.isPending ? '장애 명령 전송 중…' : terminal ? '시연 다시 시작' : '시연 시작'}
+          </Button>
+        </div>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {start.isError && (
+        <p className={styles.scenarioWarning} role="alert">
+          {failureText(start.error)}
+        </p>
+      )}
+      <div className={styles.scenarioSummary}>
+        <Summary label="현재 활성 VM" value={activeVm?.name ?? '미확인'} mono={activeVm?.vm_id.slice(0, 8)} />
+        <Summary
+          label="주행 모드"
+          value={control?.mode ? MODE_LABEL[control.mode] : '미확인'}
+          health={control?.mode === 'AUTO' ? 'ok' : 'fault'}
+        />
+        <Summary
+          label="시연 결과"
+          value={autoPreserved ? 'AUTO 유지 · 승계 완료' : sawHandoff ? '승계 후 모드 확인 중' : '대기 중'}
+          health={autoPreserved ? 'ok' : sawHandoff ? 'recovering' : 'stopped'}
+        />
+      </div>
+      <Card title="주행 VM과 AUTO 입력 상태">
+        <div className={styles.drivingVmGrid}>
+          {drivingVms.map((vm) => {
+            const report = drive?.vm_apps?.[vm.vm_id]?.autonomous;
+            const lifecycle = report?.lifecycle_source.status === 'fresh' ? report.lifecycle : null;
+            const affected = run?.targetId === vm.vm_id;
+            return (
+              <article
+                key={vm.vm_id}
+                className={styles.inputVm}
+                data-active={vm.vm_id === activeId}
+                data-fault={affected && lifecycle?.reason === 'INPUT_UNAVAILABLE'}
+              >
+                <div>
+                  <span>{vm.role === 'primary_drive' ? '주 구동 VM' : '백업 VM'}</span>
+                  {vm.vm_id === activeId && <b>ACTIVE</b>}
+                </div>
+                <h3>{vm.name}</h3>
+                <p className={styles.mono}>{vm.vm_id.slice(0, 8)}</p>
+                <dl>
+                  <div>
+                    <dt>AUTO 상태</dt>
+                    <dd>{lifecycle?.reason ?? lifecycle?.readiness ?? '미확인'}</dd>
+                  </div>
+                  <div>
+                    <dt>실행 단계</dt>
+                    <dd>{lifecycle?.phase ?? '미확인'}</dd>
+                  </div>
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      </Card>
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            <p>시연을 시작하면 활성 VM의 입력 장애 관측부터 AUTO 승계까지 표시됩니다.</p>
+          </div>
+        ) : (
+          <div>
+            <div className={styles.runMeta}>
+              <span>
+                대상 <b>{run.targetName}</b> · {run.durationS}초
+              </span>
+              <span className={styles.mono}>{run.commandId.slice(0, 8)}</span>
+              <time>{new Date(run.startedAt).toLocaleTimeString('ko-KR')}</time>
+            </div>
+            <ol className={styles.scenarioProgress}>
+              <ProgressStep
+                done={commandRunning || commandSucceeded}
+                failed={commandFailed}
+                title="입력 장애 명령 실행"
+                detail={
+                  command.data
+                    ? commandFailed
+                      ? agentErrorText(commandErrorCode(command.data))
+                      : commandStateText(command.data.status)
+                    : 'VM 응답 대기 중'
+                }
+              />
+              <ProgressStep
+                done={inputUnavailable || sawHandoff}
+                title="활성 VM의 INPUT_UNAVAILABLE 관측"
+                detail={
+                  inputUnavailable
+                    ? 'AUTO 계산 입력을 사용할 수 없는 상태가 확인됐습니다.'
+                    : sawHandoff
+                      ? '장애 판정 후 제어권이 이미 이동했습니다.'
+                      : 'VM lifecycle 보고를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={sawHandoff}
+                title="반복 장애 판정과 백업 VM 승계"
+                detail={
+                  sawHandoff
+                    ? `새 활성 VM: ${activeVm?.name ?? activeId}`
+                    : 'active_vm_id 변경을 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={autoPreserved}
+                failed={sawHandoff && control?.mode !== 'AUTO'}
+                title="AUTO 주행 모드 유지"
+                detail={`시작: ${run.initialMode ? MODE_LABEL[run.initialMode] : '미확인'} · 현재: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`}
+              />
+            </ol>
+          </div>
+        )}
+      </Card>
+      {activeVm && (
+        <Modal
+          open={confirmOpen}
+          title="AUTO 입력 처리 장애 시연"
+          onClose={() => setConfirmOpen(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirmOpen(false)}>
+                취소
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  begin();
+                  setConfirmOpen(false);
+                }}
+              >
+                {durationS}초 장애 발생
+              </Button>
+            </>
+          }
+        >
+          <p>
+            <b>{activeVm.name}</b> 한 대의 AUTO 계산 입력만 {durationS}초 동안 차단합니다. 백업 VM과 Jetson
+            입력 원본에는 영향을 주지 않습니다.
+          </p>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function JetsonLossScenario() {
+  const { drive, socket } = useDrive();
+  const vms = useVms();
+  const start = useStartPerceptionBlock();
+  const [duration, setDuration] = useState(50);
+  const [run, setRun] = useState<PerceptionFaultOperation | null>(null);
+  const operation = usePerceptionFaultOperation(run?.operation_id ?? null);
+  const current = operation.data ?? run;
+  const control = drive?.control ?? null;
+  const perception = drive?.perception ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
+  );
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const durationValid = Number.isInteger(duration) && duration >= 1 && duration <= 120;
+  const perceptionReady = perception?.valid === true && perception.received_ago_ms < 200;
+  const inProgress = Boolean(current && !['ENDED', 'REJECTED', 'UNKNOWN', 'FAILED'].includes(current.status));
+  const operationFailed =
+    current?.status === 'REJECTED' || current?.status === 'UNKNOWN' || current?.status === 'FAILED';
+  const applied = current?.status === 'APPLIED' || current?.status === 'ENDED';
+  const ended = current?.status === 'ENDED';
+  const sawLoss = Boolean(run && (perception?.valid === false || ended));
+  const sameActive = Boolean(run?.active_vm_id && activeId === run.active_vm_id);
+  const manual = control?.mode === 'MANUAL';
+  const bothInputsUnavailable = Boolean(
+    run &&
+    drivingVms.length >= 2 &&
+    drivingVms.every((vm) => {
+      const reason = drive?.vm_apps?.[vm.vm_id]?.autonomous?.lifecycle?.reason ?? '';
+      return reason.includes('WORLD_UNAVAILABLE') || reason.includes('INPUT_UNAVAILABLE');
+    }),
+  );
+  const recovered = Boolean(ended && sawLoss && perceptionReady);
+
+  const unavailableReason =
+    socket !== 'open'
+      ? '주행 상태 연결이 끊겨 있습니다.'
+      : control?.mode !== 'AUTO'
+        ? '자율주행 중일 때만 시연을 시작할 수 있습니다.'
+        : !activeVm
+          ? '현재 활성 주행 VM을 확인할 수 없습니다.'
+          : !perceptionReady
+            ? 'Jetson 인지 결과가 정상 수신 중이 아닙니다.'
+            : !durationValid
+              ? '장애 지속 시간은 1~120초여야 합니다.'
+              : null;
+
+  const begin = () => {
+    if (unavailableReason || start.isPending) return;
+    setRun(null);
+    start.mutate(duration, { onSuccess: setRun });
+  };
+
+  return (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 4</span>
+          <h2>Jetson 인지 송신 단절과 수동 전환</h2>
+          <p>
+            Jetson 계산은 유지한 채 World 송신만 끊고, 두 주행 VM의 공통 입력 소실과 MANUAL 전환을 확인합니다.
+          </p>
+        </div>
+        <div className={styles.scenarioAction}>
+          <label>
+            <span>장애 지속 시간</span>
+            <span className={styles.memoryInputGroup}>
+              <input
+                aria-label="장애 지속 시간"
+                type="number"
+                min={1}
+                max={120}
+                step={1}
+                value={duration}
+                disabled={inProgress || start.isPending}
+                aria-invalid={!durationValid}
+                onChange={(event) => setDuration(Number(event.target.value))}
+              />
+              <span>초</span>
+            </span>
+          </label>
+          <Button
+            variant="danger"
+            disabled={Boolean(unavailableReason) || inProgress || start.isPending}
+            onClick={begin}
+          >
+            {start.isPending
+              ? 'Jetson 상태 확인 중…'
+              : ended || operationFailed
+                ? '시연 다시 시작'
+                : '시연 시작'}
+          </Button>
+        </div>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {start.isError && (
+        <p className={styles.scenarioWarning} role="alert">
+          {perceptionFaultErrorText(start.error)}
+        </p>
+      )}
+      <div className={styles.scenarioSummary}>
+        <Summary label="현재 활성 VM" value={activeVm?.name ?? '미확인'} mono={activeId?.slice(0, 8)} />
+        <Summary
+          label="주행 모드"
+          value={control?.mode ? MODE_LABEL[control.mode] : '미확인'}
+          health={control?.mode === 'AUTO' ? 'ok' : control?.mode === 'MANUAL' ? 'recovering' : 'fault'}
+        />
+        <Summary
+          label="Jetson 인지 입력"
+          value={perceptionReady ? `${perception?.hz ?? 0} Hz · 정상` : sawLoss ? '송신 단절' : '미확인'}
+          health={perceptionReady ? 'ok' : 'fault'}
+        />
+      </div>
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            <p>시연을 시작하면 Jetson 명령 적용부터 수동 전환, 인지 송신 복구까지 표시됩니다.</p>
+          </div>
+        ) : (
+          <div>
+            <div className={styles.runMeta}>
+              <span>
+                시작 active VM <b>{run.active_vm_id?.slice(0, 8) ?? '미확인'}</b>
+              </span>
+              <span className={styles.mono}>{run.command_id.slice(0, 8)}</span>
+              <time>{new Date(run.submitted_at).toLocaleTimeString('ko-KR')}</time>
+            </div>
+            <ol className={styles.scenarioProgress}>
+              <ProgressStep
+                done={Boolean(current && current.status !== 'QUERYING')}
+                failed={operationFailed}
+                title="Jetson 제어 window 확인"
+                detail={
+                  current?.status === 'QUERYING'
+                    ? 'Jetson STATUS 응답 대기 중'
+                    : (current?.reason ?? '현재 서비스와 window를 확인했습니다.')
+                }
+              />
+              <ProgressStep
+                done={applied}
+                failed={operationFailed}
+                title="인지 결과 송신 차단 적용"
+                detail={
+                  applied
+                    ? `World 송신을 ${run.duration_s}초 동안 차단했습니다.`
+                    : 'BLOCK 적용 결과를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={sawLoss}
+                title="두 주행 VM의 공통 인지 입력 소실"
+                detail={
+                  bothInputsUnavailable
+                    ? '두 VM 모두 입력 없음 상태를 보고했습니다.'
+                    : sawLoss
+                      ? '인지 입력 만료를 확인했고 VM 상태 보고를 기다립니다.'
+                      : '인지 결과 만료를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={manual}
+                title="AUTO에서 MANUAL로 안전 전환"
+                detail={
+                  manual
+                    ? '자동 복귀하지 않고 명시적인 수동 입력을 기다립니다.'
+                    : `현재 모드: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`
+                }
+              />
+              <ProgressStep
+                done={sameActive && manual}
+                failed={Boolean(run.active_vm_id && activeId && !sameActive)}
+                title="기존 active VM 유지"
+                detail={
+                  sameActive
+                    ? '공통 입력 장애이므로 VM 미러링을 수행하지 않았습니다.'
+                    : 'active_vm_id를 확인하는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={recovered}
+                title="Jetson 인지 송신 복구"
+                detail={
+                  recovered
+                    ? '새 인지 결과 수신이 재개됐으며 주행 모드는 MANUAL로 유지됩니다.'
+                    : ended
+                      ? '차단은 종료됐고 새 인지 결과를 기다립니다.'
+                      : '설정한 지속 시간이 끝나기를 기다립니다.'
+                }
+              />
+            </ol>
+          </div>
+        )}
       </Card>
     </div>
   );
 }
 
-// ---- 격리 시연 (UI-08, -135 미구현) ----
-
-const KILL_EFFECT: Record<AppId, string> = {
-  autonomous: '명령이 끊겨 게이트웨이가 수동주행으로 넘긴다 (MANUAL, gen +1). 복구되면 AUTO_READY.',
-  manual: '수동주행이 제어 중이면 SAFE_STOP, 아니면 예비만 사라진다.',
-  interaction: '주행과 무관 — 차는 그대로 달린다 (격리).',
-};
-
-function IsolationCard({ app }: { app: AppId }) {
-  const navigate = useNavigate();
-  const { drive } = useDrive();
+function VmCrashScenario() {
   const vms = useVms();
-  const toast = useToast();
-  const [confirm, setConfirm] = useState(false);
-  const role = ROLES[app];
-  const vm = vmOf(app, vms.data?.items, drive);
-  const state = drive?.apps[app];
-  const health = appHealth(role, vm, state);
-  const down = vm?.state !== 'running' || health === 'recovering' || health === 'fault';
-  const active = !!vm && drive?.control?.active_vm_id === vm.vm_id && drive.control.received_ago_ms < 3000;
-  return (
-    <Card>
-      <div className={styles.appCard} style={{ borderTop: `3px solid ${role.color}` }}>
-        <div className={styles.row}>
-          <b style={{ color: role.color, fontSize: 'var(--x-text-lg)' }}>{role.title}</b>
-          <span className={styles.grow} />
-          <StatusBadge health={health} label={appHealthLabel(vm, state)} size="sm" />
-        </div>
-        <div className={styles.eyebrow}>
-          {vm ? `${vm.name} · ${osLabel(vm)}` : app}
-          {active ? ' · 제어 중' : ''}
-        </div>
-        <div className={styles.rows}>
-          <div>
-            <span>{role.driving ? '명령' : '생존 신호'}</span>
-            <span className={styles.mono}>
-              {role.driving
-                ? state?.command_fresh
-                  ? `${state.command_hz} Hz`
-                  : '없음'
-                : state?.heartbeat_ago_ms != null
-                  ? `${(state.heartbeat_ago_ms / 1000).toFixed(1)}초 전`
-                  : '없음'}
-            </span>
-          </div>
-        </div>
-        <p className={styles.dim}>강제 종료 시: {KILL_EFFECT[app]}</p>
-        <div className={styles.row}>
-          <Button
-            variant="danger"
-            style={{ flex: 1 }}
-            disabled={!mockDemo || down}
-            title={down ? '이미 꺼져 있거나 복구 중' : undefined}
-            onClick={() => setConfirm(true)}
-          >
-            강제 종료
-          </Button>
-          <Button variant="secondary" disabled={!vm} onClick={() => navigate('/simulator/stress')}>
-            부하 테스트
-          </Button>
-        </div>
-      </div>
-      <Modal
-        open={confirm}
-        title="강제 종료"
-        onClose={() => setConfirm(false)}
-        footer={
-          <>
-            <Button variant="secondary" onClick={() => setConfirm(false)}>
-              취소
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                mockDemo?.forceKill(app);
-                setConfirm(false);
-                toast.show(`${role.title} 강제 종료 — 복구 서비스가 다시 시작한다`, 'fault', 3000);
-              }}
-            >
-              강제 종료
-            </Button>
-          </>
-        }
-      >
-        <p>
-          <b style={{ color: role.color }}>{role.title}</b> 도메인을 강제 종료한다. 디스크는 지우지 않고 복구
-          서비스가 다시 시작한다.
-        </p>
-        <p className={styles.dim}>{KILL_EFFECT[app]}</p>
-      </Modal>
-    </Card>
+  const { drive, socket } = useDrive();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [run, setRun] = useState<Run | null>(null);
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
   );
-}
+  const control = drive?.control ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const target = run ? drivingVms.find((vm) => vm.vm_id === run.targetId) : undefined;
+  const controlFresh = socket === 'open' && control != null && control.received_ago_ms < 3000;
+  const start = useStartVmCrash(activeVm?.vm_id ?? '');
+  const command = useCommandStatus(run?.targetId ?? '', run?.commandId ?? null, true);
+  const events = useEvents({ vm_id: run?.targetId ?? '__not-started__', limit: 30 });
 
-// ---- 수동주행 입력 (MQTT 계약 §7) ----
-
-const RESULT_LABEL: Record<InputResult, string> = {
-  SENT: '보냄',
-  RELEASED: '놓음',
-  NOT_MANUAL: 'MANUAL 이 아니라 버려짐',
-  NOT_CONNECTED: '백엔드가 브로커에 연결되지 않음',
-};
-
-/**
- * 눌린 키 집합이 바뀔 때만 보낸다. 누르고 있는 동안의 반복(20 Hz)은 백엔드가 한다 (MQTT 계약 §7).
- * MANUAL 이 아니면 입력을 받지 않는다 — 백엔드도 같은 이유로 버린다. 손을 떼거나 창을 벗어나면 정지(200 ms).
- */
-function ManualInput() {
-  const { drive } = useDrive();
-  const mode = drive?.control?.mode ?? null;
-  const { socket, result, sendKeys } = useManualInput();
-  const [held, setHeld] = useState<DriveKey[]>([]);
-  const heldRef = useRef<DriveKey[]>([]);
-  const enabled = mode === 'MANUAL' && socket === 'open';
-  const manual = drive?.apps.manual?.last_command;
-
-  const press = useCallback(
-    (key: DriveKey, down: boolean) => {
-      const next = pressKey(heldRef.current, key, down);
-      if (next === heldRef.current) return;
-      heldRef.current = next;
-      setHeld(next);
-      sendKeys(next);
-    },
-    [sendKeys],
+  const commandAccepted = command.data?.status === 'ACCEPTED' || command.data?.status === 'SUCCEEDED';
+  const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
+  const sawHandoff = Boolean(run && activeId && activeId !== run.targetId);
+  const sawFailure = Boolean(
+    run && (target?.state === 'crashed' || target?.state === 'stopped' || sawHandoff),
   );
-
-  const releaseAll = useCallback(() => {
-    if (heldRef.current.length === 0) return;
-    heldRef.current = [];
-    setHeld([]);
-    sendKeys([]);
-  }, [sendKeys]);
-
-  useEffect(() => {
-    if (!enabled) {
-      releaseAll();
-      return;
-    }
-    const onKey = (down: boolean) => (event: KeyboardEvent) => {
-      const key = driveKeyOf(event.key);
-      if (!key) return;
-      // 누를 때만 거른다: 폼 요소 안의 입력과 Ctrl·Meta·Alt 조합(Ctrl+S 등)은 주행 입력이 아니다.
-      // 뗄 때는 거르지 않는다 — 키를 누른 채 포커스가 select 로 넘어가면 keyup 이 버려져 백엔드가 20Hz 로 계속 보낸다
-      if (down) {
-        if (event.ctrlKey || event.metaKey || event.altKey) return;
-        if ((event.target as HTMLElement | null)?.closest?.('input, textarea, select')) return;
-        event.preventDefault(); // 화살표·스페이스로 페이지가 스크롤되지 않게
-      }
-      press(key, down);
-    };
-    const down = onKey(true);
-    const up = onKey(false);
-    window.addEventListener('keydown', down);
-    window.addEventListener('keyup', up);
-    window.addEventListener('blur', releaseAll); // 창을 떠나면 keyup 을 못 받는다
-    return () => {
-      window.removeEventListener('keydown', down);
-      window.removeEventListener('keyup', up);
-      window.removeEventListener('blur', releaseAll);
-    };
-  }, [enabled, press, releaseAll]);
-
-  const pad = (key: DriveKey, text: string, extra = '') => (
-    <button
-      type="button"
-      className={[styles.key, held.includes(key) ? styles.keyOn : '', extra].join(' ')}
-      disabled={!enabled}
-      aria-pressed={held.includes(key)}
-      onPointerDown={() => press(key, true)}
-      onPointerUp={() => press(key, false)}
-      onPointerLeave={() => press(key, false)}
-      onPointerCancel={() => press(key, false)}
-    >
-      {text}
-    </button>
+  const runEvents = (events.data?.items ?? []).filter(
+    (event) => run && Date.parse(event.occurred_at) >= Date.parse(run.startedAt),
   );
-
-  return (
-    <>
-      <p className={enabled ? styles.dim : styles.draft}>
-        {socket !== 'open'
-          ? '입력 소켓 연결 중…'
-          : enabled
-            ? '화살표·WASD 로 운전, 스페이스는 브레이크. 손을 떼면 0.2초 뒤 정지한다.'
-            : `MANUAL 일 때만 입력 전달 — 지금 ${mode ?? '모드 없음'} 이라 입력 무시`}
-      </p>
-      <div className={styles.pad} style={{ '--accent': ROLES.manual.color } as CSSProperties}>
-        <span />
-        {pad('up', '▲')}
-        <span />
-        {pad('left', '◀')}
-        {pad('brake', '■')}
-        {pad('right', '▶')}
-        <span />
-        {pad('down', '▼')}
-        <span />
-      </div>
-      <div className={styles.rows}>
-        <div>
-          <span>눌린 키</span>
-          <span>
-            {held.length ? held.join(' + ') : '없음'}
-            {result && ` · ${RESULT_LABEL[result]}`}
-          </span>
-        </div>
-        <div>
-          <span>수동주행 명령</span>
-          <span>{manual ? `${plain(manual.v_mps)} m/s · ${signed(manual.steer_rad)} rad` : '—'}</span>
-        </div>
-      </div>
-    </>
+  const recoveryStarted = runEvents.some((event) => event.type === 'recovery.started');
+  const recoveryFinished = runEvents.some(
+    (event) => event.type === 'recovery.completed' || event.type === 'recovery.recovered',
   );
-}
+  const recoveryFailed = runEvents.some((event) => event.type === 'recovery.failed');
+  const recovered = Boolean(run && sawFailure && target?.state === 'running' && recoveryFinished);
+  const modePreserved = Boolean(run && sawHandoff && control?.mode === run.initialMode);
+  const finished = recovered && sawHandoff && modePreserved;
+  const unavailableReason = !controlFresh
+    ? '주행 제어 상태가 최신이 아닙니다.'
+    : !activeVm
+      ? '현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.'
+      : activeVm.guest_kind !== 'zephyr'
+        ? '현재 활성 VM이 Zephyr가 아닙니다.'
+        : activeVm.state !== 'running'
+          ? '현재 활성 VM이 실행 중이 아닙니다.'
+          : null;
 
-/**
- * [자율주행 재개]·[수동주행 시작]·[출력 다시 허용] — 누르면 POST /api/v1/drive/resume (백엔드와 같은 허용 모드, 계약 mqtt 5.2 v1.8.3).
- * - AUTO_READY: 게이트웨이가 받아들이면 3·2·1 카운트다운 뒤 AUTO (계약 v1.2 §6, 화면 위 알림).
- *   카운트다운 중에는 [취소]로 멈출 수 있다 (DELETE, 계약 v1.7) — 모드는 그대로다.
- * - MANUAL·AUTO: 출력 금지(disarmed)된 모드를 재무장. 화면은 출력 허가 여부를 모르므로 늘 누를 수 있고,
- *   이미 출력 중이면 게이트웨이가 조용히 무시한다.
- * - SAFE_STOP: 게이트웨이가 준비된 수동 VM 을 골라 MANUAL 로 재무장한다.
- */
-const RESUMABLE: readonly DriveMode[] = ['AUTO_READY', 'MANUAL', 'AUTO', 'SAFE_STOP'];
-
-/** 운영자용 문구 — 계약 용어(재무장)는 쓰지 않는다. 같은 요청이지만 모드마다 게이트웨이가 하는 일이 다르다 */
-function resumeLabel(mode: DriveMode | null | undefined) {
-  if (mode === 'SAFE_STOP') return '▶ 수동주행 시작';
-  if (mode === 'MANUAL' || mode === 'AUTO') return '▶ 출력 다시 허용';
-  return '▶ 자율주행 재개';
-}
-
-function Resume() {
-  const { drive } = useDrive();
-  const toast = useToast();
-  const [sending, setSending] = useState(false);
-  const mode = drive?.control?.mode;
-  const ready = mode != null && RESUMABLE.includes(mode);
-  const counting = drive?.resume ?? null;
-  const cancelledByOperator = drive?.resume_cancel?.reason === 'operator_cancelled';
-  const send = async (job: () => Promise<void> = requestResume) => {
-    setSending(true);
-    try {
-      await job();
-    } catch (error) {
-      toast.show(error instanceof Error ? error.message : String(error), 'fault', 5000);
-    } finally {
-      setSending(false);
-    }
+  const begin = () => {
+    if (!activeVm || start.isPending) return;
+    setRun(null);
+    start.mutate(undefined, {
+      onSuccess: (submitted) =>
+        setRun({
+          targetId: activeVm.vm_id,
+          targetName: activeVm.name,
+          initialMode: control?.mode ?? null,
+          commandId: submitted.command_id,
+          startedAt: submitted.submitted_at,
+        }),
+    });
   };
+
   return (
-    <div style={{ marginTop: 'var(--x-space-4)' }}>
-      <Button
-        style={{ width: '100%' }}
-        disabled={!ready || !!counting || sending}
-        onClick={() => void send()}
-      >
-        {counting
-          ? `▶ ${Math.max(1, Math.ceil(counting.remaining_ms / 1000))}초 뒤 자율주행`
-          : resumeLabel(mode)}
-      </Button>
-      {counting && (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 1</span>
+          <h2>현재 주행 VM 장애와 자동 승계</h2>
+          <p>활성 Zephyr VM을 crash 상태로 만들고, 백업 VM 승계와 기존 주행 모드 유지 여부를 관측합니다.</p>
+        </div>
         <Button
           variant="danger"
-          style={{ width: '100%', marginTop: 'var(--x-space-2)' }}
-          disabled={sending}
-          onClick={() => void send(cancelResume)}
+          disabled={
+            Boolean(unavailableReason) || start.isPending || Boolean(run && !finished && !commandFailed)
+          }
+          title={unavailableReason ?? undefined}
+          onClick={() => setConfirmOpen(true)}
         >
-          취소 — 수동주행 유지
+          {start.isPending
+            ? '장애 명령 전송 중…'
+            : finished || commandFailed
+              ? '시연 다시 시작'
+              : '시연 시작'}
         </Button>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {start.isError && (
+        <p className={styles.scenarioWarning} role="alert">
+          {failureText(start.error)}
+        </p>
       )}
-      <p className={styles.dim}>
-        {counting
-          ? '카운트다운 중 — [취소]하면 수동주행을 유지한다. 그 사이 자율주행이 다시 끊겨도 취소된다.'
-          : mode === 'SAFE_STOP'
-            ? '안전 정지 중 — 누르면 게이트웨이가 준비된 수동주행 VM 으로 수동주행을 시작한다 (준비된 VM 이 없으면 무시). 202 는 보냈다는 뜻이고, 적용은 모드가 바뀌는 것으로 확인한다.'
-            : mode === 'MANUAL' || mode === 'AUTO'
-              ? '차량 출력이 막힌 상태라면 다시 허용한다. 이미 출력 중이면 게이트웨이가 무시한다. 202 는 보냈다는 뜻이고, 적용은 모드가 바뀌는 것으로 확인한다.'
-              : ready
-                ? cancelledByOperator
-                  ? '재개를 취소했다. 수동주행 유지 중 — 누르면 다시 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
-                  : '자율주행이 준비됐다(AUTO_READY). 누르면 3·2·1 을 센 뒤 AUTO 로 돌아간다.'
-                : '주행 상태를 받으면 [자율주행 재개]·[수동주행 시작]·[출력 다시 허용]을 누를 수 있다.'}
-      </p>
+      <div className={styles.scenarioSummary}>
+        <Summary label="현재 활성 VM" value={activeVm?.name ?? '미확인'} mono={activeVm?.vm_id.slice(0, 8)} />
+        <Summary
+          label="주행 모드"
+          value={control?.mode ? MODE_LABEL[control.mode] : '미확인'}
+          health={control?.mode ? MODE_HEALTH[control.mode] : 'stopped'}
+        />
+        <Summary
+          label="주행 상태 연결"
+          value={controlFresh ? '정상 수신' : socket === 'open' ? '데이터 지연' : '연결 끊김'}
+          health={controlFresh ? 'ok' : 'fault'}
+        />
+      </div>
+      <Card title="주행 VM 상태">
+        <div className={styles.drivingVmGrid}>
+          {drivingVms.length ? (
+            drivingVms.map((vm) => <DrivingVm key={vm.vm_id} vm={vm} active={vm.vm_id === activeId} />)
+          ) : (
+            <p className={styles.dim}>주 구동·백업 역할이 지정된 Zephyr VM이 없습니다.</p>
+          )}
+        </div>
+      </Card>
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            <p>시연을 시작하면 명령 수락부터 장애 VM 재기동까지 실제 관측 결과가 표시됩니다.</p>
+          </div>
+        ) : (
+          <div>
+            <div className={styles.runMeta}>
+              <span>
+                대상 <b>{run.targetName}</b>
+              </span>
+              <span className={styles.mono}>{run.commandId.slice(0, 8)}</span>
+              <time>{new Date(run.startedAt).toLocaleTimeString('ko-KR')}</time>
+            </div>
+            <ol className={styles.scenarioProgress}>
+              <ProgressStep
+                done={commandAccepted}
+                failed={commandFailed}
+                title="장애 명령 수락"
+                detail={
+                  command.data
+                    ? command.data.status === 'FAILED' || command.data.status === 'REJECTED'
+                      ? agentErrorText(commandErrorCode(command.data))
+                      : commandStateText(command.data.status)
+                    : 'VM 응답 대기 중'
+                }
+              />
+              <ProgressStep
+                done={sawFailure}
+                title="활성 VM 장애 관측"
+                detail={
+                  sawFailure
+                    ? '대상 VM의 중단 또는 제어권 이탈을 확인했습니다.'
+                    : 'VM 상태 변화를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={sawHandoff}
+                title="백업 VM으로 제어권 승계"
+                detail={
+                  sawHandoff
+                    ? `현재 활성 VM: ${activeVm?.name ?? activeId}`
+                    : 'active_vm_id 변경을 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={modePreserved}
+                title="기존 주행 모드 유지"
+                detail={`시작: ${run.initialMode ? MODE_LABEL[run.initialMode] : '미확인'} · 현재: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`}
+              />
+              <ProgressStep
+                done={recoveryStarted}
+                failed={recoveryFailed}
+                title="자동 복구 시작"
+                detail={
+                  recoveryFailed
+                    ? '복구 실패 이벤트가 발생했습니다.'
+                    : recoveryStarted
+                      ? '플랫폼 복구 워커가 작업을 시작했습니다.'
+                      : '복구 이벤트를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
+                done={recovered}
+                failed={recoveryFailed}
+                title="장애 VM 자동 복구"
+                detail={
+                  recovered
+                    ? '복구 완료 이벤트와 running 상태를 모두 확인했습니다.'
+                    : `현재 대상 상태: ${target ? STATE_LABEL[target.state] : '미확인'}`
+                }
+              />
+            </ol>
+          </div>
+        )}
+      </Card>
+      {activeVm && (
+        <Modal
+          open={confirmOpen}
+          title="현재 주행 VM 장애 시연"
+          onClose={() => setConfirmOpen(false)}
+          footer={
+            <>
+              <Button variant="secondary" onClick={() => setConfirmOpen(false)}>
+                취소
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  begin();
+                  setConfirmOpen(false);
+                }}
+              >
+                장애 발생
+              </Button>
+            </>
+          }
+        >
+          <p>
+            <b>{activeVm.name}</b>을 crash 상태로 만듭니다. 주행 제어권이 다른 VM으로 넘어가고 자동 복구되는지
+            확인합니다.
+          </p>
+        </Modal>
+      )}
     </div>
+  );
+}
+
+function Summary({
+  label,
+  value,
+  mono,
+  health,
+}: {
+  label: string;
+  value: string;
+  mono?: string;
+  health?: 'ok' | 'recovering' | 'fault' | 'stopped';
+}) {
+  return (
+    <div className={styles.summaryItem}>
+      <span>{label}</span>
+      {health ? <StatusBadge health={health} label={value} size="sm" /> : <strong>{value}</strong>}
+      {mono && <small className={styles.mono}>{mono}</small>}
+    </div>
+  );
+}
+
+function DrivingVm({ vm, active }: { vm: Vm; active: boolean }) {
+  const role = vm.role === 'primary_drive' ? ROLES.autonomous : ROLES.manual;
+  return (
+    <article
+      className={styles.drivingVm}
+      data-active={active}
+      style={{ '--vm-accent': role.color } as CSSProperties}
+    >
+      <div>
+        <span>{role.title}</span>
+        {active && <b>ACTIVE</b>}
+      </div>
+      <h3>{vm.name}</h3>
+      <p className={styles.mono}>{vm.vm_id.slice(0, 8)}</p>
+      <StatusBadge health={STATE_HEALTH[vm.state]} label={STATE_LABEL[vm.state]} size="sm" />
+    </article>
+  );
+}
+
+function ProgressStep({
+  done,
+  failed = false,
+  title,
+  detail,
+}: {
+  done: boolean;
+  failed?: boolean;
+  title: string;
+  detail: string;
+}) {
+  return (
+    <li data-state={failed ? 'failed' : done ? 'done' : 'waiting'}>
+      <i aria-hidden="true">{failed ? '!' : done ? '✓' : '·'}</i>
+      <div>
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </div>
+    </li>
   );
 }

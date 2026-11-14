@@ -1,7 +1,8 @@
-import { Button, Card, useToast } from '@xenova/ui';
+import { Button, Card, Modal, useToast } from '@xenova/ui';
 import { useMemo, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router';
-import { ApiError } from '../api/client';
+import { commandErrorCode } from '../api/commandStatus';
+import { agentErrorText, commandStateText, errorText } from '../api/errorText';
 import {
   useCommandStatus,
   useMetrics,
@@ -13,16 +14,17 @@ import {
   useVms,
 } from '../api/queries';
 import type { CommandState, StressRequest, Vm } from '../api/types';
+import { defaultMemoryStressMib, maxMemoryStressMib, memoryStressHint } from '../domain/stressLimits';
 import { cpuPercentOf, latest, memoryPercentOf } from '../domain/vmMetrics';
 import { osLabel } from '../domain/roles';
+import { STATE_LABEL } from '../format';
 import styles from './pages.module.css';
 
 const MIB = 1024 * 1024;
 const terminal = new Set<CommandState>(['SUCCEEDED', 'FAILED', 'REJECTED']);
 
-function errorMessage(error: unknown) {
-  return error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
-}
+/** 명령을 보내지 못했을 때 화면 문구 (공용 한글 문구표, 서버 원문·코드 없음) */
+const sendErrorText = (error: unknown) => errorText(error, '명령을 보내지 못했습니다.');
 
 function Gauge({ label, value }: { label: string; value: number | null }) {
   const safe = Math.max(0, Math.min(100, value ?? 0));
@@ -181,25 +183,38 @@ export function SimulatorStressLab() {
   const autoDelay = useStartAutoDelay(vm?.vm_id ?? '');
   const agentExit = useStartAgentExit(vm?.vm_id ?? '');
   const metrics = useMetrics(vm?.vm_id ?? '', Boolean(vm), 5);
-  const [commandId, setCommandId] = useState<string | null>(null);
-  const [agentExitCommand, setAgentExitCommand] = useState(false);
+  // 보낸 명령은 보낸 VM 과 함께 둔다. 지금 선택된 VM 과 같을 때만 조회해서, 응답 전에 VM 을 바꾸거나
+  // 목록 첫 VM 으로 바뀌어도 이전 VM 의 명령 ID 로 새 VM 을 조회하지 않는다 (404 반복 조회 방지)
+  const [sent, setSent] = useState<{ vmId: string; commandId: string; agentExit: boolean } | null>(null);
+  const current = sent && vm && sent.vmId === vm.vm_id ? sent : null;
+  const commandId = current?.commandId ?? null;
+  const agentExitCommand = current?.agentExit ?? false;
   const command = useCommandStatus(vm?.vm_id ?? '', commandId, agentExitCommand);
-  const [feedback, setFeedback] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ vmId: string; text: string; fault: boolean } | null>(null);
+  const shown = notice && vm && notice.vmId === vm.vm_id ? notice : null;
+  const feedback = shown?.text ?? null;
+  const setFeedback = (text: string | null, vmId = vm?.vm_id, fault = false) =>
+    setNotice(text && vmId ? { vmId, text, fault } : null);
   const [cpuAmount, setCpuAmount] = useState(1);
   const [cpuDuration, setCpuDuration] = useState(30);
-  const [memoryMib, setMemoryMib] = useState(256);
+  // 메모리 부하 값은 입력한 VM 과 함께 둔다. 다른 VM 을 고르면 그 VM 의 상한 안 기본값으로 시작한다 (QA 1-B3)
+  const [memoryInput, setMemoryInput] = useState<{ vmId: string; value: number } | null>(null);
+  const memoryMib =
+    vm && memoryInput?.vmId === vm.vm_id ? memoryInput.value : vm ? defaultMemoryStressMib(vm.memory_mib) : 0;
+  const setMemoryMib = (value: number) => vm && setMemoryInput({ vmId: vm.vm_id, value });
   const [memoryDuration, setMemoryDuration] = useState(30);
   const [delayMs, setDelayMs] = useState(20);
   const [delayDuration, setDelayDuration] = useState(30);
   const toast = useToast();
+  // 되돌리기 어려운 장애 주입(Agent 종료·연산 지연)은 확인 창을 거친다
+  const [confirm, setConfirm] = useState<'agentExit' | 'delay' | null>(null);
 
   function selectVm(nextVmId: string) {
     setVmId(nextVmId);
-    setCommandId(null);
-    setAgentExitCommand(false);
+    setConfirm(null);
+    setSent(null);
     setFeedback(null);
     setCpuAmount(1);
-    setMemoryMib(256);
   }
 
   const samples = metrics.data?.items ?? [];
@@ -217,52 +232,72 @@ export function SimulatorStressLab() {
       !terminal.has(command.data.status) &&
       !(agentExitCommand && command.data.status === 'ACCEPTED'),
     );
+  const commandState = command.data?.status;
+  const commandFault = command.isError || commandState === 'FAILED' || commandState === 'REJECTED';
+  const commandHeadline = commandState
+    ? `명령 ${commandStateText(commandState)}`
+    : command.isError
+      ? '명령 확인 실패'
+      : shown?.fault
+        ? '명령 전송 실패'
+        : '명령 전송';
+  const commandDetail = command.isError
+    ? errorText(command.error, '명령 상태를 확인하지 못했습니다.')
+    : commandState === 'FAILED' || commandState === 'REJECTED'
+      ? agentErrorText(commandErrorCode(command.data))
+      : commandState === 'SUCCEEDED'
+        ? '명령 실행이 끝났습니다.'
+        : feedback;
   const cpuMin = 1;
   const cpuMax = 4;
-  const memoryMax = 512;
+  // VM 메모리의 70%·최대 512 MiB (백엔드와 같은 규칙, QA 1-B3)
+  const memoryMax = vm ? maxMemoryStressMib(vm.memory_mib) : 0;
 
   async function sendStress(input: StressRequest) {
     if (!vm) return;
+    // 응답을 기다리는 사이 VM 을 바꿀 수 있으므로 보낸 VM 을 붙잡아 둔다
+    const target = vm.vm_id;
     try {
       setFeedback(null);
       const result = await stress.mutateAsync(input);
-      setAgentExitCommand(false);
-      setCommandId(result.command_id);
-      setFeedback('명령을 전송했습니다. telemetry 변화를 확인하세요.');
+      setSent({ vmId: target, commandId: result.command_id, agentExit: false });
+      setFeedback('명령을 전송했습니다. telemetry 변화를 확인하세요.', target);
       toast.show(`${vm.name}: 부하 명령 전송`, 'ok');
     } catch (error) {
-      setFeedback(errorMessage(error));
-      toast.show(errorMessage(error), 'fault', 5000);
+      setFeedback(sendErrorText(error), target, true);
+      toast.show(sendErrorText(error), 'fault', 5000);
     }
   }
 
   async function sendDelay() {
     if (!vm) return;
+    // 응답을 기다리는 사이 VM 을 바꿀 수 있으므로 보낸 VM 을 붙잡아 둔다
+    const target = vm.vm_id;
     try {
       setFeedback(null);
       const result = await autoDelay.mutateAsync({ delay_ms: delayMs, duration_s: delayDuration });
-      setAgentExitCommand(false);
-      setCommandId(result.command_id);
-      setFeedback('주행 연산 지연 명령을 전송했습니다.');
+      setSent({ vmId: target, commandId: result.command_id, agentExit: false });
+      setFeedback('주행 연산 지연 명령을 전송했습니다.', target);
       toast.show(`${vm.name}: 연산 지연 명령 전송`, 'ok');
     } catch (error) {
-      setFeedback(errorMessage(error));
-      toast.show(errorMessage(error), 'fault', 5000);
+      setFeedback(sendErrorText(error), target, true);
+      toast.show(sendErrorText(error), 'fault', 5000);
     }
   }
 
   async function sendAgentExit() {
     if (!vm) return;
+    // 응답을 기다리는 사이 VM 을 바꿀 수 있으므로 보낸 VM 을 붙잡아 둔다
+    const target = vm.vm_id;
     try {
       setFeedback(null);
       const result = await agentExit.mutateAsync();
-      setAgentExitCommand(true);
-      setCommandId(result.command_id);
-      setFeedback('Agent 종료 명령을 전송했습니다. heartbeat 손실과 자동복구 상태를 확인하세요.');
+      setSent({ vmId: target, commandId: result.command_id, agentExit: true });
+      setFeedback('Agent 종료 명령을 전송했습니다. heartbeat 손실과 자동복구 상태를 확인하세요.', target);
       toast.show(`${vm.name}: Agent 종료 명령 전송`, 'ok');
     } catch (error) {
-      setFeedback(errorMessage(error));
-      toast.show(errorMessage(error), 'fault', 5000);
+      setFeedback(sendErrorText(error), target, true);
+      toast.show(sendErrorText(error), 'fault', 5000);
     }
   }
 
@@ -301,14 +336,15 @@ export function SimulatorStressLab() {
               data-selected={item.vm_id === vm?.vm_id || undefined}
               onClick={() => selectVm(item.vm_id)}
             >
+              {/* OS 는 원문(guest_kind) 대신 OS 이름, VM 상태는 한글 (VM 목록과 같은 라벨) */}
               <span className={styles.stressOsBadge} data-kind={item.guest_kind}>
-                {item.guest_kind}
+                {osLabel(item)}
               </span>
-              <strong>{item.name}</strong>
+              <strong title={item.name}>{item.name}</strong>
               <small>
-                {osLabel(item)} · {item.vcpus} vCPU · {item.memory_mib} MiB
+                {item.vcpus} vCPU · {item.memory_mib} MiB
               </small>
-              <i>{item.state === 'running' ? 'RUNNING' : item.state.toUpperCase()}</i>
+              <i>{STATE_LABEL[item.state] ?? item.state}</i>
             </button>
           ))}
         </div>
@@ -414,6 +450,7 @@ export function SimulatorStressLab() {
                         onChange={setMemoryDuration}
                       />
                     </div>
+                    {vm && <p className={styles.dim}>{memoryStressHint(vm.memory_mib)}</p>}
                     <Button
                       disabled={
                         !ready ||
@@ -446,7 +483,7 @@ export function SimulatorStressLab() {
                         실행하면 Agent가 결과 전달 후 종료됩니다. 대상 이미지에 데모 명령 설정이 필요합니다.
                       </p>
                     </div>
-                    <Button disabled={!ready || busy} onClick={() => void sendAgentExit()}>
+                    <Button disabled={!ready || busy} onClick={() => setConfirm('agentExit')}>
                       Agent 종료 실행
                     </Button>
                   </div>
@@ -490,23 +527,23 @@ export function SimulatorStressLab() {
                       delayDuration < 1 ||
                       delayDuration > 120
                     }
-                    onClick={() => void sendDelay()}
+                    onClick={() => setConfirm('delay')}
                   >
                     연산 지연 시작
                   </Button>
                 </div>
               )}
             </div>
-            {(feedback || command.data) && (
+            {(feedback || command.data || command.isError) && (
+              // 상태·사유는 한글로만. 명령 ID 는 글자로 보이지 않고 title 에만 남긴다
               <div
                 className={styles.stressCommand}
-                data-tone={
-                  command.data?.status === 'FAILED' || command.data?.status === 'REJECTED' ? 'fault' : 'ok'
-                }
+                data-tone={commandFault || shown?.fault ? 'fault' : 'ok'}
+                title={commandId ?? undefined}
+                role="status"
               >
-                <strong>{command.data ? `명령 ${command.data.status}` : '명령 전송'}</strong>
-                <span>{command.data?.message || feedback}</span>
-                {commandId && <code>{commandId}</code>}
+                <strong>{commandHeadline}</strong>
+                <span>{commandDetail}</span>
               </div>
             )}
           </section>
@@ -544,7 +581,7 @@ export function SimulatorStressLab() {
               </Card>
               <Card
                 title={vm.guest_kind === 'zephyr' ? '스레드' : '프로세스'}
-                actions={<span className={styles.pinningCardTag}>{vm.guest_kind.toUpperCase()}</span>}
+                actions={<span className={styles.pinningCardTag}>{osLabel(vm)}</span>}
               >
                 <ExecutionSnapshot vm={vm} />
               </Card>
@@ -552,6 +589,54 @@ export function SimulatorStressLab() {
           </section>
         </>
       )}
+      <Modal
+        open={confirm !== null && Boolean(vm)}
+        title={confirm === 'agentExit' ? 'Agent 종료' : '주행 연산 지연'}
+        onClose={() => setConfirm(null)}
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setConfirm(null)}>
+              취소
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                const action = confirm;
+                setConfirm(null);
+                if (action === 'agentExit') void sendAgentExit();
+                else if (action === 'delay') void sendDelay();
+              }}
+            >
+              {confirm === 'agentExit' ? 'Agent 종료' : '지연 시작'}
+            </Button>
+          </>
+        }
+      >
+        {vm && confirm && (
+          <div className={styles.deleteConfirm}>
+            <span aria-hidden="true">!</span>
+            <div>
+              {confirm === 'agentExit' ? (
+                <>
+                  <strong>‘{vm.name}’ VM의 Agent를 종료하시겠습니까?</strong>
+                  <p>
+                    Agent가 결과를 보낸 뒤 종료되어 heartbeat가 끊깁니다. 자동 복구로 Agent가 다시 뜰 때까지
+                    이 VM에 부하·명령을 보낼 수 없습니다.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <strong>‘{vm.name}’ VM의 주행 연산에 지연을 넣으시겠습니까?</strong>
+                  <p>
+                    주행 연산 루프에 {delayMs} ms 지연을 {delayDuration}초 동안 넣습니다. 그동안 주행 명령이
+                    늦게 나가 차량 반응이 늦어질 수 있습니다.
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
