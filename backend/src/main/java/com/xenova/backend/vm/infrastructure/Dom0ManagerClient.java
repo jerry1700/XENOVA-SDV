@@ -43,6 +43,7 @@ public class Dom0ManagerClient implements VmControlPort {
     private static final Logger log = LoggerFactory.getLogger(Dom0ManagerClient.class);
 
     private static final int MAX_ATTEMPTS = 2;
+    private static final String CPU_NOT_READY = "CPU_NOT_READY";
 
     private final RestClient queryClient;
     private final RestClient commandClient;
@@ -281,6 +282,14 @@ public class Dom0ManagerClient implements VmControlPort {
     }
 
     private ApiException mapError(Dom0ErrorResponse error, int upstreamStatus) {
+        // The platform refuses to start a guest until this boot's host preparation matches the CPU policy
+        // (a pinning change that returned host_preparation_required=true). dom0-manager has no mapping for it and
+        // sends it as DriverError, so the platform code is checked first.
+        if (CPU_NOT_READY.equals(error.platformCode())) {
+            return new ApiException(HttpStatus.CONFLICT, CPU_NOT_READY,
+                    "CPU 배치를 바꾼 뒤 보드 호스트 준비가 끝나지 않아 VM을 시작할 수 없습니다. "
+                            + "보드에서 호스트 준비를 실행하거나 보드를 재부팅해 주세요.");
+        }
         return switch (error.code() == null ? "" : error.code()) {
             case "VMNotFound" -> new ApiException(
                     HttpStatus.NOT_FOUND, "VM_NOT_FOUND", "보드에서 VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.");

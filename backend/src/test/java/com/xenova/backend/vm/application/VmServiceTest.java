@@ -454,6 +454,8 @@ class VmServiceTest {
         assertThat(result.sharedPcpus()).containsExactly(0, 3);
         assertThat(result.exclusivePcpus()).containsExactly(1);
         assertThat(result.pcpus()).allSatisfy(pcpu -> assertThat(pcpu.loadPercent()).isNull());
+        // only a pinning change response carries it
+        assertThat(result.hostPreparationRequired()).isNull();
     }
 
     @Test
@@ -481,6 +483,27 @@ class VmServiceTest {
                 new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)));
         assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(3)));
         assertThat(result.exclusivePcpus()).containsExactly(1);
+        assertThat(result.hostPreparationRequired()).isTrue();
+    }
+
+    @Test
+    void aGuestOnlyPinningChangeThatNeedsNoHostPreparationIsAcceptedAndReported() {
+        // Platform 1e41ea73: changing only guest placement keeps this boot's dom0 preparation (false)
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        when(vmControlPort.cpuLayout()).thenReturn(cpuLayout());
+        when(vmControlPort.updateCpuPolicy(any(), eq("pin-2"))).thenReturn(new CpuPolicyUpdate(
+                new CpuPolicyUpdate.CpuPolicy(
+                        "2.0", "operation-2", 3, "Pool-0", List.of(0, 3), List.of(
+                        new CpuPolicyUpdate.CpuPlacement("vm-1", "shared", List.of(3)),
+                        new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)))),
+                false));
+
+        VmResourceView result = service.updateVcpuPinning(
+                "vm-1", List.of(new CpuLayout.VcpuAffinity(0, List.of(3))), "pin-2");
+
+        assertThat(result.hostPreparationRequired()).isFalse();
+        assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(3)));
     }
 
     @Test
