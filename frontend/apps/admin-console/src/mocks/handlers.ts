@@ -9,6 +9,7 @@
 import { delay, http, HttpResponse, type JsonBodyType } from 'msw';
 import {
   VM_CPU_PERCENT_METRIC,
+  type AutoInputUnavailableRequest,
   type CpuStressRequest,
   type AutoDelayRequest,
   type CommandState,
@@ -42,6 +43,7 @@ import {
   resetScenario,
   RouteError,
   scenarioEvents,
+  snapshot,
   setRoute,
   startVm,
   stopVm,
@@ -525,6 +527,70 @@ export const handlers = [
         operation_id: crypto.randomUUID(),
         vm_id: vm.vm_id,
         delay_ms: body.delay_ms,
+        duration_s: body.duration_s,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.post('*/api/v1/drive/faults/auto-delay', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const control = snapshot().control;
+    if (!control || control.source?.status !== 'fresh')
+      return error(503, 'DRIVE_STATE_UNAVAILABLE', '최신 주행 상태를 확인할 수 없습니다.');
+    if (control.mode !== 'AUTO')
+      return error(409, 'DRIVE_MODE_NOT_AUTO', '자동주행 중에만 연산 지연 시나리오를 시작할 수 있습니다.');
+    const vm = control.active_vm_id ? find(control.active_vm_id) : undefined;
+    if (!vm) return error(409, 'ACTIVE_DRIVE_VM_UNAVAILABLE', '현재 자동주행 VM을 확인할 수 없습니다.');
+    const body = (await request.json()) as Partial<AutoDelayRequest>;
+    if (
+      !Number.isInteger(body.delay_ms) ||
+      body.delay_ms! < 1 ||
+      body.delay_ms! > 100 ||
+      !Number.isInteger(body.duration_s) ||
+      body.duration_s! < 1 ||
+      body.duration_s! > 120
+    ) {
+      return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    }
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        delay_ms: body.delay_ms,
+        duration_s: body.duration_s,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.post('*/api/v1/vms/:vmId/faults/auto-input-unavailable', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr' || vm.state !== 'running')
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 Zephyr VM이 아닙니다.');
+    const body = (await request.json()) as Partial<AutoInputUnavailableRequest>;
+    if (!Number.isInteger(body.duration_s) || body.duration_s! < 1 || body.duration_s! > 120)
+      return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
         duration_s: body.duration_s,
         submitted_at: now.toISOString(),
         expires_at: new Date(now.getTime() + 30_000).toISOString(),

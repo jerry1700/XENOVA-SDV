@@ -196,6 +196,15 @@ export interface AutoDelayCommand extends SubmittedCommand {
   duration_s: number;
 }
 
+/** 활성 Zephyr VM의 AUTO 계산 입력만 일정 시간 사용할 수 없게 만드는 시연 명령 */
+export interface AutoInputUnavailableRequest {
+  duration_s: number;
+}
+
+export interface AutoInputUnavailableCommand extends SubmittedCommand {
+  duration_s: number;
+}
+
 /** POST /api/v1/vms/{id}/faults/agent-exit — Linux Agent 종료 데모 명령 */
 export type AgentExitCommand = SubmittedCommand;
 
@@ -496,6 +505,21 @@ export interface TelemetryHeartbeatResponse {
   publish_submit_failures_total?: number | null;
   received_at: string | null;
   age_ms: number | null;
+}
+
+export type PerceptionFaultStatus =
+  'QUERYING' | 'COMMAND_SENT' | 'APPLIED' | 'ENDED' | 'REJECTED' | 'UNKNOWN' | 'FAILED';
+
+export interface PerceptionFaultOperation {
+  operation_id: string;
+  command_id: string;
+  duration_s: number;
+  status: PerceptionFaultStatus;
+  reason: string | null;
+  active_vm_id: string | null;
+  mode_before: string | null;
+  submitted_at: string;
+  updated_at: string;
 }
 
 // ---- 화면 배치 (노션 API 명세 REST-23·REST-24, 백엔드 -129) ----

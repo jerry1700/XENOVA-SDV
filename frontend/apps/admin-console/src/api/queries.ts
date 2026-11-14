@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { ApiError, request, requestWithStatus } from './client';
 import type {
   CreateVmRequest,
+  AutoInputUnavailableCommand,
+  AutoInputUnavailableRequest,
   AgentExitCommand,
   AppExitCommand,
   AppExitRequest,
@@ -17,6 +19,7 @@ import type {
   MetricHistoryResponse,
   PhoneLinkStatus,
   PhonePairingCode,
+  PerceptionFaultOperation,
   ProcessesResponse,
   RouteRequest,
   StressCommand,
@@ -48,6 +51,7 @@ export const keys = {
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
   phoneLink: ['display', 'phone-link'] as const,
+  perceptionFault: (id: string) => ['drive', 'faults', 'perception-block', id] as const,
 };
 
 /**
@@ -188,6 +192,27 @@ export function useStartAutoDelay(vmId: string) {
   });
 }
 
+/** 현재 AUTO 제어권을 가진 VM을 백엔드가 판정해 연산 지연을 적용한다. */
+export function useStartActiveDriveAutoDelay() {
+  return useMutation({
+    mutationFn: (body: AutoDelayRequest) =>
+      request<AutoDelayCommand>('/api/v1/drive/faults/auto-delay', {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartAutoInputUnavailable(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AutoInputUnavailableRequest) =>
+      request<AutoInputUnavailableCommand>(
+        `/api/v1/vms/${encodeURIComponent(vmId)}/faults/auto-input-unavailable`,
+        { method: 'POST', body },
+      ),
+  });
+}
+
 export function useStartAgentExit(vmId: string) {
   return useMutation({
     mutationFn: () =>
@@ -226,6 +251,34 @@ export function useStartDomainKill(vmId: string) {
         method: 'POST',
       }),
     onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+export function useStartPerceptionBlock() {
+  return useMutation({
+    mutationFn: (durationS: number) =>
+      request<PerceptionFaultOperation>('/api/v1/drive/faults/perception-block', {
+        method: 'POST',
+        body: { duration_s: durationS },
+      }),
+  });
+}
+
+export function usePerceptionFaultOperation(operationId: string | null) {
+  return useQuery({
+    queryKey: keys.perceptionFault(operationId ?? ''),
+    queryFn: ({ signal }) =>
+      request<PerceptionFaultOperation>(
+        `/api/v1/drive/faults/perception-block/${encodeURIComponent(operationId!)}`,
+        { signal },
+      ),
+    enabled: Boolean(operationId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'ENDED' || status === 'REJECTED' || status === 'UNKNOWN' || status === 'FAILED'
+        ? false
+        : 500;
+    },
   });
 }
 
