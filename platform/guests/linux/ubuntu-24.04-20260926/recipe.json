@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "source_id": "ubuntu-24.04-20260926",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "files": [
     {
       "source": "files/motd",
