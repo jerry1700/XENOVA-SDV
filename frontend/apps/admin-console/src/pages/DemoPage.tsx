@@ -982,7 +982,7 @@ function Summary({
   health?: 'ok' | 'recovering' | 'fault' | 'stopped';
 }) {
   return (
-    <div className={styles.summaryItem}>
+    <div className={styles.scenarioSummaryItem}>
       <span>{label}</span>
       {health ? <StatusBadge health={health} label={value} size="sm" /> : <strong>{value}</strong>}
       {mono && <small className={styles.mono}>{mono}</small>}

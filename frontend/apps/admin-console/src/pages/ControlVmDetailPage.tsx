@@ -2,6 +2,7 @@ import { Button, Card, Modal, useToast } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useVm, useVmResources, useVms, type VmAction } from '../api/queries';
 import type { Vm } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
@@ -93,8 +94,8 @@ export function ControlVmDetailPage() {
       {vm.isPending && <div className={styles.statePanel}>VM 관리 정보를 불러오는 중입니다…</div>}
       <LiveDataAlert />
       {vm.error instanceof ApiError && vm.error.status === 404 && (
-        <div className={styles.statePanel} role="alert">
-          {vm.error instanceof ApiError ? `${vm.error.message} (${vm.error.code})` : String(vm.error)}
+        <div className={styles.statePanel} role="alert" title={vm.error.code}>
+          {errorText(vm.error, VM_LOAD_FAILED_TEXT)}
         </div>
       )}
 

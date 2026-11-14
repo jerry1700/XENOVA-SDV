@@ -1,6 +1,6 @@
 import { Button, Card, Modal, StatusBadge, type Health } from '@xenova/ui';
 import { useState } from 'react';
-import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useIssuePhonePairingCode, usePhoneLink } from '../api/queries';
 import type { PhonePairingCode, PhoneRelayState } from '../api/types';
 import { useNow } from '../useNow';
@@ -17,7 +17,7 @@ const RELAY: Record<PhoneRelayState, { health: Health; label: string }> = {
 };
 
 function errorMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : '요청을 처리하지 못했습니다.';
+  return errorText(error);
 }
 
 function remaining(expiresAt: string, now: number): number {

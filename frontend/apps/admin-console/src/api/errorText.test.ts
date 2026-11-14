@@ -64,6 +64,84 @@ describe('errorText — 화면에 보일 오류 문구', () => {
   });
 });
 
+describe('백엔드 새 코드·낡은 로그인 문구 (S15P31E110-471)', () => {
+  it.each<KnownErrorCode>([
+    'NOT_FOUND',
+    'OPERATION_NOT_FOUND',
+    'RESOURCE_UPDATE_UNSUPPORTED',
+    'CPU_PLACEMENT_CONFLICT',
+    'CPU_POLICY_NOT_CONFIGURED',
+    'EVENT_CURSOR_EXPIRED',
+    'TIME_RANGE_INVALID',
+    'SIM_UNAVAILABLE',
+    'PHONE_RELAY_NOT_LISTENING',
+    'PHONE_LINK_UNAVAILABLE',
+    'LOG_SOURCE_UNAVAILABLE',
+    'PHONE_NOT_CONNECTED',
+    'DISPLAY_MODE_BUSY',
+    'DISPLAY_MODE_NOT_APPLIED',
+    'DISPLAY_SETUP_REQUIRED',
+    'DISPLAY_MODE_ROLLBACK_INCOMPLETE',
+    'DISPLAY_MODE_UNAVAILABLE',
+    'DISPLAY_MODE_TIMEOUT',
+  ])('%s 는 기본 문구가 아니라 전용 한글 문구', (code) => {
+    const text = errorText(new ApiError(409, { code, message: 'raw server text' }));
+    expect(text).toBe(ERROR_TEXT[code]);
+    expect(text).not.toBe(DEFAULT);
+    expect(text).not.toContain(code);
+  });
+
+  it('로그인 화면이 없으므로 다시 로그인하라는 문구를 쓰지 않는다', () => {
+    for (const text of Object.values(ERROR_TEXT)) expect(text).not.toContain('로그인해 주세요');
+    expect(ERROR_TEXT.TOKEN_REVOKED).toBe('콘솔 연결이 만료되었습니다. 페이지를 새로고침해 주세요.');
+  });
+
+  it('백엔드가 더 보내지 않는 LOGIN_RATE_LIMITED 는 표에 없다 (모르는 코드처럼 기본 문구)', () => {
+    expect(Object.hasOwn(ERROR_TEXT, 'LOGIN_RATE_LIMITED')).toBe(false);
+    expect(errorText(new ApiError(429, { code: 'LOGIN_RATE_LIMITED', message: 'x' }))).toBe(DEFAULT);
+  });
+});
+
+describe('INVALID_VM_STATE·INVALID_ARGUMENT — 서버 한글 사유 우선 (S15P31E110-471)', () => {
+  it('서버 message 가 한글이면 그 사유를 그대로 보인다', () => {
+    expect(
+      errorText(
+        new ApiError(409, {
+          code: 'INVALID_VM_STATE',
+          message: '보드가 종료 중이라 새 작업을 받을 수 없습니다.',
+        }),
+      ),
+    ).toBe('보드가 종료 중이라 새 작업을 받을 수 없습니다.');
+    expect(
+      errorText(
+        new ApiError(400, {
+          code: 'INVALID_ARGUMENT',
+          message: '이 템플릿이 허용하지 않는 vCPU·메모리 값입니다.',
+        }),
+      ),
+    ).toBe('이 템플릿이 허용하지 않는 vCPU·메모리 값입니다.');
+  });
+
+  it('한글이 아니거나 비었으면 표의 문구', () => {
+    expect(errorText(new ApiError(409, { code: 'INVALID_VM_STATE', message: 'domain abc is running' }))).toBe(
+      ERROR_TEXT.INVALID_VM_STATE,
+    );
+    expect(errorText(new ApiError(400, { code: 'INVALID_ARGUMENT', message: '   ' }))).toBe(
+      ERROR_TEXT.INVALID_ARGUMENT,
+    );
+    // 본문에 message 가 없으면 ApiError 가 만든 기본 문구(한글)다 — 서버 사유로 보지 않는다
+    expect(errorText(new ApiError(409, { code: 'INVALID_VM_STATE' }))).toBe(ERROR_TEXT.INVALID_VM_STATE);
+  });
+
+  it('다른 코드는 서버 message 가 한글이어도 표의 문구', () => {
+    expect(
+      errorText(
+        new ApiError(409, { code: 'VM_NAME_CONFLICT', message: '보드에 같은 이름의 VM이 이미 있습니다.' }),
+      ),
+    ).toBe(ERROR_TEXT.VM_NAME_CONFLICT);
+  });
+});
+
 describe('commandStateText — 명령 상태', () => {
   it.each<[CommandState, string]>([
     ['PENDING', '대기'],

@@ -194,7 +194,7 @@ describe('Network 탭', () => {
       expect(section.parentElement?.lastElementChild).toBe(section);
       expect(within(section).getByText('인터페이스')).toBeInTheDocument();
       expect(within(section).getByText('링크(carrier)')).toBeInTheDocument();
-      expect(within(section).getAllByText('데이터 없음 (백엔드 미지원)')).toHaveLength(2);
+      expect(within(section).getAllByText('데이터 없음')).toHaveLength(2);
     }
     expect(screen.queryByText('ok')).not.toBeInTheDocument();
     expect(screen.queryByText(/직접 계측|rx_bytes_per_s/)).not.toBeInTheDocument();

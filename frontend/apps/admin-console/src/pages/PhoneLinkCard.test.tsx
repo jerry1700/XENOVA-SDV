@@ -131,6 +131,7 @@ describe('휴대폰 화면 연결 카드', () => {
     };
     render(<PhoneLinkCard />);
     expect(screen.getByRole('alert')).toHaveTextContent('보드의 휴대폰 화면 중계 상태를 확인할 수 없습니다.');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('PHONE_LINK_UNAVAILABLE');
   });
 });
 

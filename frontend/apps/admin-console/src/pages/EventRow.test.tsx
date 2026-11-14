@@ -48,3 +48,35 @@ describe('이벤트 행 펼치기 (터치 기기에서 전체 내용 보기)', (
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
   });
 });
+
+describe('모르는 이벤트 종류 (S15P31E110-471)', () => {
+  it('화면에는 "기타 이벤트", 원문 type 은 행 title 에만 있다 (펼쳐도 보이지 않는다)', async () => {
+    const user = userEvent.setup();
+    const unknown = { ...failed, type: 'vm.migrated', severity: 'INFO', payload: {} } as unknown as VmEvent;
+    const { container } = render(<EventRow event={unknown} time="10:02:03" />);
+    const row = container.firstElementChild as HTMLElement;
+    expect(screen.getByRole('button')).toHaveTextContent('기타 이벤트');
+    expect(row).toHaveAttribute('title', expect.stringContaining('원문 vm.migrated'));
+    await user.click(screen.getByRole('button'));
+    expect(row).not.toHaveTextContent('vm.migrated');
+  });
+
+  it('VM 생성 이벤트는 원문 vm.created 대신 한글로 보인다', () => {
+    const created = { ...failed, type: 'vm.created', severity: 'INFO', payload: {} } as VmEvent;
+    const { container } = render(<EventRow event={created} time="10:02:03" />);
+    const row = container.firstElementChild as HTMLElement;
+    expect(row).toHaveTextContent('생성');
+    expect(row).not.toHaveTextContent('vm.created');
+    expect(row.getAttribute('title')).not.toContain('vm.created');
+  });
+});
+
+describe('읽을 수 없는 시각 (S15P31E110-471)', () => {
+  it('시각 title 에 Invalid Date 대신 "시각 미상"', () => {
+    const broken = { ...failed, occurred_at: 'not-a-date' } as VmEvent;
+    const { container } = render(<EventRow event={broken} time="—" />);
+    const time = container.querySelector('time')!;
+    expect(time).toHaveAttribute('title', '시각 미상');
+    expect(container).not.toHaveTextContent(/Invalid Date|NaN/);
+  });
+});

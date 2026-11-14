@@ -118,35 +118,31 @@ const EARLY_MAX = 32;
 
 /** 거부 사유 → 화면 문구. 시뮬레이터가 message 를 주면 그것을 먼저 띄운다 (계약 §12.1 "화면에 그대로 띄울 한 줄") */
 export const SIM_REJECT_TEXT: Record<string, string> = {
-  ON_CAR: '차와 겹치는 자리라 놓을 수 없어요',
-  OUT_OF_TRACK: '벽 밖이라 놓을 수 없어요',
-  INVALID: '시뮬레이터가 받을 수 없는 명령이에요',
-  NO_GAP: '차가 지나갈 틈이 없어요',
-  TOO_DENSE: '장애물이 너무 촘촘해 차가 지나가지 못해요',
-  TOO_CLOSE: '차 바로 앞이라 피할 거리가 부족해요',
+  ON_CAR: '차와 겹치는 자리라 놓을 수 없습니다',
+  OUT_OF_TRACK: '벽 밖이라 놓을 수 없습니다',
+  INVALID: '시뮬레이터가 받을 수 없는 명령입니다',
+  NO_GAP: '차가 지나갈 틈이 없습니다',
+  TOO_DENSE: '장애물이 너무 촘촘해 차가 지나가지 못합니다',
+  TOO_CLOSE: '차 바로 앞이라 피할 거리가 부족합니다',
   NO_RESPONSE: SIM_NO_RESPONSE,
 };
 
 /** 적용 → 화면 문구 (명령 op 별) */
 export const SIM_DONE_TEXT: Record<string, string> = {
-  'obstacle.add': '장애물을 놓았어요',
-  'obstacle.move': '장애물을 옮겼어요',
-  'obstacle.remove': '장애물을 치웠어요',
-  estop: 'E-stop 을 바꿨어요',
-  push: '차를 밀었어요',
-  'track.select': '트랙을 바꿨어요',
-  'race.start': '출발선에 세웠어요',
+  'obstacle.add': '장애물을 놓았습니다',
+  'obstacle.move': '장애물을 옮겼습니다',
+  'obstacle.remove': '장애물을 치웠습니다',
+  estop: 'E-stop을 바꿨습니다',
+  push: '차를 밀었습니다',
+  'track.select': '트랙을 바꿨습니다',
+  'race.start': '출발선에 세웠습니다',
 };
 
 /** 결과 한 줄 (적용·거부·응답 없음) */
 export function describeSimResult(r: SimCommandResult): string {
-  if (r.ok) return SIM_DONE_TEXT[r.op] ?? '적용했어요';
+  if (r.ok) return SIM_DONE_TEXT[r.op] ?? '적용했습니다';
   if (r.code === 'NO_RESPONSE') return SIM_NO_RESPONSE;
-  return (
-    r.message ||
-    (r.code && SIM_REJECT_TEXT[r.code]) ||
-    `시뮬레이터가 거부했어요${r.code ? ` (${r.code})` : ''}`
-  );
+  return r.message || (r.code && SIM_REJECT_TEXT[r.code]) || '시뮬레이터가 거부했습니다';
 }
 
 /**

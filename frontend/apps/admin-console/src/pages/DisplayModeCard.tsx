@@ -1,6 +1,6 @@
 import { Button, Card, Modal, StatusBadge, type Health } from '@xenova/ui';
 import { useState } from 'react';
-import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useDisplayMode, useSetDisplayMode } from '../api/queries';
 import type { DisplayModeName, DisplayModeStatus } from '../api/types';
 import styles from './DisplayModeCard.module.css';
@@ -18,7 +18,7 @@ function badge(status: DisplayModeStatus): { health: Health; label: string } {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : '화면을 전환하지 못했습니다.';
+  return errorText(error, '화면을 전환하지 못했습니다.');
 }
 
 /**

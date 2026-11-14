@@ -95,7 +95,7 @@ export function ShowcasePage() {
             </>
           }
         >
-          확인용 모달. Esc 나 바깥 클릭으로도 닫힌다.
+          확인용 모달입니다. Esc 나 바깥 클릭으로도 닫힙니다.
         </Modal>
       </Card>
     </div>

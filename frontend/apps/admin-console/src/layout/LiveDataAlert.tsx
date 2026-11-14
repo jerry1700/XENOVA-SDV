@@ -2,6 +2,7 @@ import { useQueryClient, type Query, type QueryKey } from '@tanstack/react-query
 import { useToast } from '@xenova/ui';
 import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react';
 import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { lastFetchFailed } from '../api/queries';
 import styles from './layout.module.css';
 
@@ -72,7 +73,7 @@ function AlertBox({ snapshot }: { snapshot: string }) {
       <strong>실시간 데이터를 불러오지 못하고 있습니다</strong>
       <ul>
         {failures.map((failure) => (
-          <li key={failure.label}>
+          <li key={failure.label} title={failure.code}>
             {failure.label}: {failure.message}
           </li>
         ))}
@@ -84,6 +85,8 @@ function AlertBox({ snapshot }: { snapshot: string }) {
 interface Failure {
   label: string;
   message: string;
+  /** 서버 오류 코드 — 화면 문구에는 넣지 않고 title 로만 */
+  code?: string;
 }
 
 /** 조회별 마지막 오류. 다시 읽기 시작하면 TanStack Query 가 state.error 를 비우므로 여기 남겨 둔다 */
@@ -91,7 +94,7 @@ const lastErrors = new Map<string, unknown>();
 
 /** 실패 목록을 문자열로 돌려준다 (내용이 같으면 같은 값이라 다시 그리지 않는다). 없으면 빈 문자열 */
 function failingSnapshot(queries: Query[]): string {
-  const byLabel = new Map<string, string>();
+  const byLabel = new Map<string, Failure>();
   for (const query of queries) {
     if (query.state.error) lastErrors.set(query.queryHash, query.state.error);
     if (!lastFetchFailed(query.state)) {
@@ -102,10 +105,15 @@ function failingSnapshot(queries: Query[]): string {
     if (query.getObserversCount() === 0 || !error) continue;
     if (error instanceof ApiError && [401, 403, 404].includes(error.status)) continue;
     const label = labelOf(query.queryKey);
-    if (!byLabel.has(label)) byLabel.set(label, messageOf(error));
+    if (!byLabel.has(label))
+      byLabel.set(label, {
+        label,
+        message: messageOf(error),
+        code: error instanceof ApiError ? error.code : undefined,
+      });
   }
   if (byLabel.size === 0) return '';
-  return JSON.stringify([...byLabel].map(([label, message]) => ({ label, message })));
+  return JSON.stringify([...byLabel.values()]);
 }
 
 function labelOf(key: QueryKey): string {
@@ -133,6 +141,5 @@ function labelOf(key: QueryKey): string {
 }
 
 function messageOf(error: unknown): string {
-  if (error instanceof ApiError) return `${error.message} (${error.code})`;
-  return error instanceof Error ? error.message : String(error);
+  return errorText(error, '응답을 받지 못했습니다. 잠시 후 다시 시도합니다.');
 }

@@ -15,7 +15,7 @@ export const ZEPHYR_INTERFACE_UP_METRIC = 'network.interface_up';
 export const ZEPHYR_CARRIER_METRIC = 'network.carrier';
 
 const NO_DATA = '데이터 없음';
-export const BACKEND_UNSUPPORTED = '데이터 없음 (백엔드 미지원)';
+export const BACKEND_UNSUPPORTED = '데이터 없음';
 /** 백엔드가 값을 못 읽으면 표본 status 문자열이 사유 자리에 들어온다 (예: "ok"). 사유로 보여 주지 않는다 */
 const STATUS_WORDS = new Set(['ok', 'unavailable']);
 

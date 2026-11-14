@@ -1,7 +1,7 @@
 import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router';
-import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useSynchronizeVms, useVms, type VmAction } from '../api/queries';
 import type { Vm, VmSynchronizationResult } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
@@ -51,8 +51,11 @@ export function VmListPage() {
         needsAttention ? 10000 : 5000,
       );
     } catch (error) {
-      const message = error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
-      toast.show(`VM 동기화에 실패했습니다. ${message}`, 'fault', 5000);
+      toast.show(
+        `VM 동기화에 실패했습니다. ${errorText(error, '잠시 후 다시 시도해 주세요.')}`,
+        'fault',
+        5000,
+      );
     }
   };
 

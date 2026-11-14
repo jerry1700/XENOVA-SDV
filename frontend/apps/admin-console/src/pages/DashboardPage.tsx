@@ -15,12 +15,13 @@ import type { Health } from '@xenova/ui';
 import { useId, type CSSProperties } from 'react';
 import { Link, useNavigate } from 'react-router';
 import type { DriveState, SocketState } from '../api/drive';
+import { errorText } from '../api/errorText';
 import { useEvents, useMetrics, useTelemetryHeartbeat, LIVE_POLL_MS, useVms } from '../api/queries';
-import { restartSimRace, selectSimTrack, useSimState, type SimView } from '../api/sim';
+import { restartSimRace, selectSimTrack, SimCommandError, useSimState, type SimView } from '../api/sim';
 import type { Vm, VmEvent } from '../api/types';
 import { cpuPercentOf, latest, memoryPercentOf } from '../domain/vmMetrics';
 import { observedControl, vmAppObservations } from '../domain/driveObservations';
-import { clock, describe } from '../domain/events';
+import { clock, describe, unknownEventType } from '../domain/events';
 import { publisherObservation } from '../domain/telemetryPublisher';
 import { buildManagedRamSeries, managedRamReason } from '../domain/managedRam';
 import { APP_MEMORY_REGIONS, buildAppMemorySeries, formatAppBytes } from '../domain/appMemory';
@@ -152,7 +153,9 @@ export function LegacyDashboardPage() {
               </div>
             ))}
           </div>
-          <p className={styles.dim}>항목에 마우스를 올리면 뜻이 나온다. 셋 중 하나라도 켜지면 차는 선다.</p>
+          <p className={styles.dim}>
+            항목에 마우스를 올리면 뜻이 나옵니다. 셋 중 하나라도 켜지면 차는 섭니다.
+          </p>
         </Card>
         <Card
           title="인지 (젯슨)"
@@ -190,7 +193,7 @@ export function LegacyDashboardPage() {
           </div>
           {perception && !perception.valid && (
             <p className={styles.dim}>
-              인지가 끊기면 자율주행이 정지 명령을 낸다. 모드는 그대로다 (시나리오 D5).
+              인지가 끊기면 자율주행이 정지 명령을 냅니다. 모드는 그대로입니다 (시나리오 D5).
             </p>
           )}
         </Card>
@@ -206,7 +209,7 @@ export function LegacyDashboardPage() {
                   {clock(event.occurred_at)}{' '}
                   <span className={`${styles.sev} ${styles[`sev${event.severity}`]}`}>{event.severity}</span>
                 </span>
-                <span>
+                <span title={unknownEventType(event) ?? undefined}>
                   {title}
                   {detail && <span className={styles.dim}> · {detail}</span>}
                 </span>
@@ -215,7 +218,7 @@ export function LegacyDashboardPage() {
           );
         })}
         {events.data?.items.length === 0 && <p className={styles.dim}>이벤트 없음</p>}
-        {events.error && <p className={styles.dim}>이벤트를 불러오지 못했다</p>}
+        {events.error && <p className={styles.dim}>이벤트를 불러오지 못했습니다.</p>}
       </Card>
     </div>
   );
@@ -378,7 +381,13 @@ function SimCard({ sim, drive, board }: { sim: SimView; drive: DriveState | null
   const circuit = sim.world && isCircuit(sim.world.track) ? circuitOf(sim.world.track) : null;
   const race = pose?.race;
   const act = (job: Promise<void>) =>
-    job.catch((e: unknown) => toast.show(e instanceof Error ? e.message : String(e), 'fault'));
+    job.catch((e: unknown) =>
+      // 시뮬레이터 거부·응답 없음은 이미 한글 한 줄(describeSimResult), HTTP 오류는 코드별 문구
+      toast.show(
+        e instanceof SimCommandError ? e.message : errorText(e, '시뮬레이터 명령을 보내지 못했습니다.'),
+        'fault',
+      ),
+    );
   return (
     <Card
       className={styles.appCard}
@@ -599,6 +608,11 @@ function VmOverviewCard({
   const eventSummary = latestEvent
     ? `${clock(latestEvent.occurred_at)} · ${describe(latestEvent, () => vm.name).title}`
     : '최근 중요 이벤트 없음';
+  // 모르는 이벤트 종류는 화면에 "기타 이벤트" — 원문 type 은 title 로만 (S15P31E110-471)
+  const latestRawType = latestEvent ? unknownEventType(latestEvent) : null;
+  const eventLinkTitle = latestRawType
+    ? `${vm.name} 이벤트 보기 · 원문 ${latestRawType}`
+    : `${vm.name} 이벤트 보기`;
   const unavailable = overviewMetricUnavailable(metrics.isPending, samples.length);
   const driving = role ? role.driving : vm.guest_kind === 'zephyr';
 
@@ -638,7 +652,7 @@ function VmOverviewCard({
         <OverviewStatusLine label="APP" labelTitle="앱 상태" value={overviewAppSignal(apps)} />
         <OverviewStatusLine
           label="LINK"
-          labelTitle={linux ? 'Linux Agent heartbeat (v1)' : 'Zephyr Telemetry heartbeat (v2)'}
+          labelTitle={linux ? 'Linux Agent 생존 신호' : 'Zephyr 텔레메트리 생존 신호'}
           value={linkLabel}
           tone={linkTone}
           detail={linux ? 'Agent' : `Telemetry${telemetryAge == null ? '' : ` · ${ago(telemetryAge)}`}`}
@@ -683,7 +697,7 @@ function VmOverviewCard({
             <Link
               className={styles.vmCardEventLink}
               to={`/dashboard/events?vm=${encodeURIComponent(vm.vm_id)}`}
-              title={`${vm.name} 이벤트 보기`}
+              title={eventLinkTitle}
             >
               {eventSummary}
             </Link>
@@ -815,8 +829,8 @@ function overviewAppSignal(reports: ReturnType<typeof vmAppObservations>): strin
 }
 
 function overviewMetricUnavailable(pending: boolean, sampleCount: number): string | null {
-  if (pending) return 'Loading metrics';
-  if (sampleCount === 0) return 'No metric data';
+  if (pending) return '메트릭을 불러오는 중';
+  if (sampleCount === 0) return '메트릭 없음';
   return null;
 }
 
@@ -825,7 +839,8 @@ function overviewLatestEvent(events: VmEvent[] | undefined, vmId: string | undef
 }
 
 function overviewObserved(value: string | undefined): string {
-  if (!value) return 'Waiting for data';
+  if (!value) return '데이터 대기 중';
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString('ko-KR', { hour12: false });
+  // 읽을 수 없는 시각은 원문 대신 — (Invalid Date·원문 노출 방지)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('ko-KR', { hour12: false });
 }
