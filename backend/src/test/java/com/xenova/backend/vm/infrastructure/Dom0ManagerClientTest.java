@@ -608,6 +608,64 @@ class Dom0ManagerClientTest {
     }
 
     @Test
+    void displayModeSwitchPostsTheModeAndWaitsLongerThanTheQueryTimeout() {
+        AtomicReference<String> sent = new AtomicReference<>();
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/api/v1/display/mode", exchange -> {
+            requests.incrementAndGet();
+            sent.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            try {
+                Thread.sleep(800); // longer than the 300 ms query read timeout: a switch may take minutes
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            respond(exchange, 200, """
+                    {"mode":"mobile","boot_default":"hdmi",
+                     "services":{"hdmi":"inactive","mobile":"active","feed":"active"},
+                     "hdmi_renderer_ready":false,"observed_at":"2026-11-14T09:00:00Z"}
+                    """);
+        });
+
+        JsonNode result = client.setDisplayMode("mobile");
+
+        assertThat(sent.get()).contains("\"mode\":\"mobile\"");
+        assertThat(requests).hasValue(1);
+        assertThat(result.path("mode").asText()).isEqualTo("mobile");
+        assertThat(result.path("services").path("mobile").asText()).isEqualTo("active");
+    }
+
+    @Test
+    void displayModeRefusalsUseTheBoardReason() {
+        server.createContext("/api/v1/display/mode", exchange -> respond(exchange, 409, """
+                {"code":"InvalidState","message":"no USB link","platform_code":"USB_LINK_ABSENT"}
+                """));
+
+        assertThatThrownBy(() -> client.setDisplayMode("mobile"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("PHONE_NOT_CONNECTED");
+                });
+    }
+
+    @Test
+    void displayModeErrorsMapToDisplayCodes() {
+        assertThat(code("InvalidState", "DISPLAY_MODE_BUSY", 409)).isEqualTo("DISPLAY_MODE_BUSY");
+        assertThat(code("InvalidState", "MOBILE_ENDPOINT_NOT_READY", 409)).isEqualTo("DISPLAY_MODE_NOT_APPLIED");
+        assertThat(code("InvalidState", "DISPLAY_MODE_FAILED_RESTORED", 409)).isEqualTo("DISPLAY_MODE_NOT_APPLIED");
+        assertThat(code("InvalidState", "MODE_GUARD_NOT_LOADED", 409)).isEqualTo("DISPLAY_SETUP_REQUIRED");
+        assertThat(code("DriverError", "ROLLBACK_INCOMPLETE_CHECK_DISPLAY_SERVICES", 500))
+                .isEqualTo("DISPLAY_MODE_ROLLBACK_INCOMPLETE");
+        assertThat(code("DriverTimeout", "DISPLAY_MODE_TIMEOUT", 504)).isEqualTo("DISPLAY_MODE_TIMEOUT");
+        assertThat(code("PlatformUnavailable", null, 503)).isEqualTo("DISPLAY_MODE_UNAVAILABLE");
+        assertThat(code("Unauthorized", null, 401)).isEqualTo("VM_CONTROL_BAD_RESPONSE");
+    }
+
+    private static String code(String code, String platformCode, int status) {
+        return Dom0ManagerClient.mapDisplayModeError(
+                new Dom0ErrorResponse(code, "m", null, null, platformCode), status).getCode();
+    }
+
+    @Test
     void driverErrorsAreNotRetried() {
         AtomicInteger requests = new AtomicInteger();
 

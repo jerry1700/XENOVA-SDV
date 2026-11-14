@@ -47,6 +47,9 @@ public class Dom0ManagerClient implements VmControlPort {
 
     private final RestClient queryClient;
     private final RestClient commandClient;
+    // The board's display_mode command may take up to 240s including its rollback (dom0 contract 4.14).
+    private static final Duration DISPLAY_MODE_TIMEOUT = Duration.ofSeconds(260);
+    private final RestClient displayModeClient;
     private final ObjectMapper objectMapper;
     private final Duration retryBackoff;
 
@@ -55,6 +58,7 @@ public class Dom0ManagerClient implements VmControlPort {
         this.retryBackoff = properties.retryBackoff();
         this.queryClient = createClient(properties, properties.queryTimeout());
         this.commandClient = createClient(properties, properties.commandTimeout());
+        this.displayModeClient = createClient(properties, DISPLAY_MODE_TIMEOUT);
     }
 
     /** Read-only execution logs; independent from the console's interactive PTY lease. */
@@ -90,6 +94,29 @@ public class Dom0ManagerClient implements VmControlPort {
                 .uri("/api/v1/display/phone-link/pairing-code")
                 .retrieve()
                 .onStatus(status -> status.isError(), this::handleError)
+                .body(JsonNode.class)));
+    }
+
+    /** Current display mode (HDMI / phone) and the display services on the board (dom0 contract 4.14). */
+    public JsonNode displayMode() {
+        return requireBody(executeQuery(() -> queryClient.get()
+                .uri("/api/v1/display/mode")
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleDisplayModeError)
+                .body(JsonNode.class)));
+    }
+
+    /**
+     * Switches the display mode (dom0 contract 4.14). The board runs its display_mode command to the end, which is
+     * usually a few seconds but up to 240s with its own rollback, so this uses a client that waits longer than that.
+     * Not retried once sent: a second call would race the first switch.
+     */
+    public JsonNode setDisplayMode(String mode) {
+        return requireBody(executeCommand(() -> displayModeClient.post()
+                .uri("/api/v1/display/mode")
+                .body(Map.of("mode", mode))
+                .retrieve()
+                .onStatus(status -> status.isError(), this::handleDisplayModeError)
                 .body(JsonNode.class)));
     }
 
@@ -279,6 +306,55 @@ public class Dom0ManagerClient implements VmControlPort {
         log.warn("dom0-manager error: status={}, code={}, platform_code={}, message={}, detail={}",
                 response.getStatusCode().value(), error.code(), error.platformCode(), error.message(), error.detail());
         throw mapError(error, response.getStatusCode().value());
+    }
+
+    private void handleDisplayModeError(
+            org.springframework.http.HttpRequest request,
+            org.springframework.http.client.ClientHttpResponse response) throws IOException {
+        Dom0ErrorResponse error;
+        try {
+            error = objectMapper.readValue(response.getBody(), Dom0ErrorResponse.class);
+        } catch (Exception exception) {
+            throw new ApiException(
+                    HttpStatus.BAD_GATEWAY, "DISPLAY_MODE_UNAVAILABLE", "보드의 화면 전환 응답을 해석할 수 없습니다.");
+        }
+        log.warn("dom0-manager display mode error: status={}, code={}, platform_code={}, message={}",
+                response.getStatusCode().value(), error.code(), error.platformCode(), error.message());
+        throw mapDisplayModeError(error, response.getStatusCode().value());
+    }
+
+    // dom0 contract 4.14: the board's reason is in platform_code. 409 means the mode did not change (or was restored).
+    static ApiException mapDisplayModeError(Dom0ErrorResponse error, int upstreamStatus) {
+        String platformCode = error.platformCode() == null ? "" : error.platformCode();
+        return switch (error.code() == null ? "" : error.code()) {
+            case "InvalidState" -> switch (platformCode) {
+                case "USB_LINK_ABSENT" -> new ApiException(HttpStatus.CONFLICT, "PHONE_NOT_CONNECTED",
+                        "휴대폰이 USB로 연결되어 있지 않습니다. 케이블을 연결하고 USB 테더링을 켠 뒤 다시 시도해 주세요.");
+                case "DISPLAY_MODE_BUSY", "DISPLAY_SERVICE_NOT_SETTLED" -> new ApiException(HttpStatus.CONFLICT,
+                        "DISPLAY_MODE_BUSY", "다른 화면 전환이 진행 중입니다. 잠시 후 다시 시도해 주세요.");
+                case "MOBILE_ENDPOINT_NOT_READY" -> new ApiException(HttpStatus.CONFLICT, "DISPLAY_MODE_NOT_APPLIED",
+                        "휴대폰 중계가 USB 연결을 찾지 못해 이전 화면을 유지했습니다. USB 테더링을 확인해 주세요.");
+                case "HDMI_RENDERER_NOT_READY", "DISPLAY_SERVICE_TRANSITION_FAILED", "DISPLAY_MODE_FAILED_RESTORED" ->
+                        new ApiException(HttpStatus.CONFLICT, "DISPLAY_MODE_NOT_APPLIED",
+                                "화면 전환에 실패해 이전 화면을 유지했습니다. 잠시 후 다시 시도해 주세요.");
+                default -> new ApiException(HttpStatus.CONFLICT, "DISPLAY_SETUP_REQUIRED",
+                        "보드의 화면 설정이 준비되지 않아 전환할 수 없습니다. 보드의 표시 서비스 설정을 확인해 주세요.");
+            };
+            case "InvalidArgument" -> new ApiException(
+                    HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "보드가 화면 전환 요청을 거절했습니다.");
+            case "DriverError" -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "DISPLAY_MODE_ROLLBACK_INCOMPLETE",
+                    "화면 전환에 실패했고 이전 화면으로 완전히 되돌리지 못했습니다. 보드에서 화면 서비스를 확인해 주세요.");
+            case "DriverTimeout" -> new ApiException(HttpStatus.GATEWAY_TIMEOUT, "DISPLAY_MODE_TIMEOUT",
+                    "보드의 화면 전환이 시간 안에 끝나지 않았습니다. 상태를 새로 고쳐 확인해 주세요.");
+            case "Unauthorized" -> serviceTokenRejected(upstreamStatus);
+            default -> {
+                if (upstreamStatus == HttpStatus.UNAUTHORIZED.value()) {
+                    yield serviceTokenRejected(upstreamStatus);
+                }
+                yield new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "DISPLAY_MODE_UNAVAILABLE",
+                        "보드의 화면 상태를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.");
+            }
+        };
     }
 
     private ApiException mapError(Dom0ErrorResponse error, int upstreamStatus) {
