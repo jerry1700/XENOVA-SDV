@@ -58,10 +58,10 @@ python3 -B platform/scripts/package-xenova-drive-template.py \
 ## 게이트웨이 odometry 설정
 
 초안은 [`platform/services/gateway/examples/odometry-xenova-rc-1.json`](../../../services/gateway/examples/odometry-xenova-rc-1.json)이다.
-vehicle·calibration·`metres_per_tick`·`track_width_m`·`wheelbase_m`은 실측값을 넣었다.
-나머지 값(clock·나이·주기·오차, `maximum_speed_mps` 0.5)은 개발 motion 모델의 값이다.
-보드의 기존 `gateway-odometry.json`과 비교한 뒤 기존 값을 유지할지 정한다.
-`maximum_speed_mps`는 엔코더 불연속 판정에도 쓰이므로 운용 상한 0.3보다 여유를 둔다.
+보드의 기존 `/etc/xenova/gateway-odometry.json`(2026-11-14)과 비교한 결과, 엔코더 0.164mm/틱·윤거·축간은
+이미 실측값이었다. 차이는 calibration 이름(`encoder-uncalibrated-1` → `encoder-measured-1`) 하나만 남겼다.
+보드의 오차 값(위치 5mm, 거리 비율 2% 등)은 개발 motion 모델의 합성값보다 보수적이라 그대로 유지한다.
+`maximum_speed_mps` 1.0은 엔코더 불연속 판정의 상한이라 운용 속도 0.3보다 크게 둔다.
 `OdometryConfig.load()`는 소유자가 게이트웨이 실행 uid와 같고 group/other 권한이 없는(0600) 일반 파일만 받는다.
 
 ## 확인 범위
