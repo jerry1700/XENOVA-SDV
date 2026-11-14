@@ -1,0 +1,10 @@
+[Unit]
+Description=Xenova persistent dom0 journal
+After=systemd-remount-fs.service
+
+[Mount]
+What=/var/log-persistent/journal
+Where=/var/volatile/log/journal
+Type=none
+Options=bind
+TimeoutSec=5s

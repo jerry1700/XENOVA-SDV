@@ -46,6 +46,8 @@ topic write xenova/v1/vms/+/inventory
 topic write xenova/v1/console/resume
 topic write xenova/v1/sim/command
 topic write xenova/v1/probes/#
+topic write xenova/v1/mapper/oak-1/fault/command.json
+topic write xenova/v1/mapper/oak-1/fault/query.json
 
 user dom0-server
 topic read xenova/v1/#
@@ -83,8 +85,12 @@ topic read xenova/v1/display/#
 topic read xenova/v1/console/#
 topic read xenova/v1/recovery/#
 topic read xenova/v1/probes/#
+topic read xenova/v1/mapper/oak-1/fault/command.json
+topic read xenova/v1/mapper/oak-1/fault/query.json
 topic write xenova/v1/apps/perception/events
 topic write xenova/v1/probes/#
+topic write xenova/v1/mapper/oak-1/fault/result.json
+topic write xenova/v1/mapper/oak-1/fault/status.json
 
 user simulator
 topic read xenova/v1/sim/command

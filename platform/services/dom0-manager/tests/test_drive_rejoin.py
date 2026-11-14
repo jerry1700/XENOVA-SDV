@@ -442,6 +442,39 @@ def test_batch_single_snapshot_then_two_metadata_lanes_without_extra_probe_or_le
     assert Path(q.config['binding_file']).read_bytes()==before and len(c.calls)==3
 
 
+def test_batch_realigns_idle_healthy_targets_after_split(batch_cadence):
+    c=batch_cadence;q=c.coordinator;a,b=c.pair
+    q._rows.update(c.rows)
+    q._due={a:c.now[0],b:c.now[0]+.6}
+    for _ in range(4):
+        released=c.now[0];before=len(c.calls)
+        q.pump()
+        batch,=c.calls[before:]
+        assert batch.args==(c.pair,)
+        stamp=int(released*1000)
+        rows={vm:{**c.rows[vm],'observed_monotonic_ms':stamp} for vm in c.pair}
+        c.now[0]=released+.2;batch.future.set_result(rows);q.pump()
+        c.calls[before+1].future.set_result(rows[a])
+        c.now[0]=released+.3;q.pump()
+        assert q.cache.current(a)['observed_monotonic_ms']==stamp
+        c.calls[before+2].future.set_result(rows[b])
+        c.now[0]=released+.4;q.pump()
+        assert q.cache.current(b)['observed_monotonic_ms']==stamp
+        assert len(c.calls)==before+3
+        assert q._due=={a:released+1,b:released+1}
+        c.now[0]=released+1
+
+
+def test_batch_does_not_advance_unavailable_target_retry(batch_cadence):
+    c=batch_cadence;q=c.coordinator;a,b=c.pair
+    q._rows={a:c.rows[a],b:{'status':'unavailable','reason':'OSError'}}
+    q._due={a:c.now[0],b:c.now[0]+.6}
+    q.pump()
+    batch,=c.calls
+    assert batch.args==((a,),)
+    assert q._due[b]==c.now[0]+.6
+
+
 @pytest.mark.parametrize('outcome',['error','missing','wrong-target'])
 def test_batch_error_is_not_absence_and_recovers_after_original_failure_backoff(batch_cadence,outcome):
     c=batch_cadence;q=c.coordinator
@@ -482,7 +515,7 @@ def test_batch_dispatches_due_other_target_without_overlapping_same_owned_work(b
     c.calls[3].future.set_result(c.rows[c.pair[1]]);q.pump()
     assert len(c.calls)==4
     c.calls[1].future.set_result(c.rows[c.pair[0]]);q.pump()
-    assert len(c.calls)==5 and c.calls[-1].args==((c.pair[0],),)
+    assert len(c.calls)==5 and c.calls[-1].args==(c.pair,)  # Both lanes are idle again.
 
 
 @pytest.mark.parametrize('change',[None,'execution','intent','stopped','error','stop'])
@@ -646,6 +679,7 @@ def test_slow_a_keeps_its_lane_while_b_renews_from_actual_new_batch_observations
             assert q._futures[a]is original_a and not original_a.done()
             assert q.cache.current(b)['execution_id']==rows[b]['execution_id']
         assert now[0]-f.ticks>3  # Longer than the unchanged binding lease.
+        assert q.cache.current(a) is None
         assert [call[1]for call in calls if call[0]=='batch']==[pair,(b,),(b,),(b,),(b,)]
         assert calls.count(('provision',a))==int(slow_phase=='provision')
         assert calls.count(('refresh',a))==int(slow_phase=='refresh')

@@ -11,17 +11,23 @@
 | 호스트 | Windows 11 + WSL2 Ubuntu 24.04, x86_64 |
 | 타깃 | Raspberry Pi 4, `raspberrypi4-64` |
 | dom0 | `xenova-xen-bringup-image` |
+| 배포판 | `xenova` — 고정 Poky 정책을 계승하며 표시 버전은 해당 기반 버전 유지 |
 | dom0 설치 | Manager·CLI·복구/신원·CPU 정책, FastAPI/Uvicorn·통계·heartbeat worker, Paho·공용 MQTT 클라이언트, xentop·Mosquitto |
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
 | 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.4, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
+| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 및 공통 drive warm-lattice-lab의 현재 배포 버전과 manifest. Network Starter는 과거 지원 입력으로 유지 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
 | 이미지 구성 | FAT boot + dom0 rootfs + `xenova-data` ext4 |
 
 소스·빌드·캐시는 WSL의 Linux 파일시스템에 둔다. Windows 경로는 완성된 압축 이미지와 로그를 전달할 때 사용한다.
+
+배포판 정의는 `meta-xenova/conf/distro/xenova.conf`에 있다. 고정된 `poky.conf`를 계승해 기존 패키지 정책·기능·컴파일 대상과 SDK vendor를 유지한다. 현재 표시 버전 `6.0.4`와 codename `wrynose`는 기반 설정의 값이며 별도의 Xenova 제품 릴리스 번호나 게스트 펌웨어 버전이 아니다.
+`os-release`의 ID·NAME과 로그인 배너는 Xenova를 표시하며, `ID_LIKE=poky`와 기존 CPE는 기반 계보를 보존한다. 로그인 후 안내문은 `Welcome to Xenova.` 한 줄이다. 기존 hostname·계정·SSH·getty 설정은 유지한다.
+
+기존 빌드 디렉터리를 전환할 때는 설정을 백업한 뒤 관리 블록의 `DISTRO = "poky"` 한 줄만 `DISTRO = "xenova"`로 바꾸고 `setup-yocto.sh --verify`로 확인한다. `TARGET_VENDOR=-poky`는 기존 컴파일 대상·캐시를 유지하기 위한 내부 식별자다. download·sstate를 삭제하거나 컴파일 대상의 모든 Poky 문자열을 일괄 변경하지 않는다.
 
 **PowerShell:**
 
@@ -128,6 +134,8 @@ FastAPI·Pydantic Core·MQTT와 필수 호스트 빌드 도구는 이미지 의�
 고정 meta-clang·meta-browser 레이어로 X11·Chromium을 빌드한다. FFmpeg x11grab/MJPEG,
 한글 폰트와 Playwright도 이미지에 설치한다. Chromium 빌드는 메모리와 시간이 많이
 필요하므로 download·sstate·hash-equivalence 캐시를 실행 간 공유한다.
+HDMI 키오스크의 화면 꺼짐 방지에는 `xset`을, 선택형 native JPEG 송신에는 `libturbojpeg`를 포함한다.
+라이브러리 설치만으로 화면 캡처·송신을 활성화하지 않는다.
 
 display 웹 화면은 Linux Node.js 22.12 이상과 저장소의 npm lockfile로 먼저 빌드한다.
 NODE_ROOT는 기존 도구 캐시의 절대 경로이며, 처음 준비할 때는 공식 archive의
@@ -144,8 +152,9 @@ cp -a "$REPO/frontend" "$RUN/frontend-build"
 )
 mkdir "$RUN/display-web-input"
 cp -a "$RUN/frontend-build/apps/vm-screens/dist" "$RUN/display-web-input/display-web"
+export XENOVA_DISPLAY_WEB_ASSETS="$RUN/display-web-input"
 DISPLAY_WEB_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
-printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$RUN/display-web-input" \
+printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$XENOVA_DISPLAY_WEB_ASSETS" \
   >> "$YOCTO_BUILD_DIR/conf/local.conf"
 ```
 
@@ -161,10 +170,24 @@ xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 use
 따른다. 설정 예제는 /usr/share/xenova/display/examples/에 있다.
 공통 이미지에 토큰·장치별 매핑·시연 키를 넣지 않는다.
 
+휴대폰 USB 테더링 개발을 위해 이미지에 RNDIS·CDC-ECM·CDC-NCM 호스트 모듈을 포함한다.
+현재 고정 커널의 `CONFIG_USB_USBNET=y`와 해당 드라이버의 `=m` 설정을 사용한다.
+모듈 포함만으로 IP·DHCP·라우트·DNS를 설정하거나 휴대폰 접속 서비스를 활성화하지 않는다.
+ESP32 CP210x USB-UART 연결용 `usbserial`·`cp210x` 모듈도 이미지에 포함한다. 다음 패키지 manifest 검사에서 두 커널 버전별 패키지를 확인한다.
+실제 USB 인식·주소 확인 뒤 [휴대폰 접속 절차](../../platform/services/display/router/deploy/mobile-access/mobile-access.README.md)를 따른다.
+
+`20-xenova-usb-phone.network`는 RNDIS·CDC-NCM·CDC-ECM 링크에 먼저 적용한다. DHCP IPv4 주소와 직접 연결된 서브넷은 사용하지만, 휴대폰이 공급하는 기본 경로·추가 경로·DNS·NTP·도메인은 받지 않는다. IPv6 RA·link-local도 사용하지 않고 online 대기 대상에서 제외한다. Wi-Fi와 다른 Ethernet 드라이버의 규칙은 유지한다.
+같은 드라이버를 쓰는 USB Ethernet 동글도 이 주소 전용 정책의 대상이다. 동글을 외부 uplink로 운영하려면 해당 장치를 좁혀 매칭하는 더 이른 `.network` 규칙으로 명시적으로 구성한다. 이 파일은 `xen-tools-net-conf`의 설정 파일로 보존한다.
+
+HDMI는 `dtoverlay=vc4-kms-v3d-pi4,cma-64`를 사용한다. 고정 커널 소스의 Pi4 overlay를 기존 DTB 목록에 추가해 빌드하고, WIC의 `overlays/vc4-kms-v3d-pi4.dtbo`로 배포한다. 일반 overlay 이름의 `overlay_map` 변환에 의존하지 않는다.
+WIC 검사는 이 설정과 실제 overlay·deploy 해시를 함께 확인한다. 기본 DTB와 Xen 바이너리, 3GiB dom0 메모리는 유지하며 vCPU·클럭은 아래 Pi 4 기본 부팅 프로필을 따른다. HDMI KMS 지원이 Xen 아래 V3D 가속 성공을 뜻하지는 않는다.
+
 xenova-gateway는 기존 코드·pyserial·비활성 서비스 템플릿을 포함한다.
 A/B UUID·실행 바인딩·권한 원본·broker·시리얼 장치를 확인한 뒤
 [Gateway 운영 절차](../../platform/services/gateway/README.md#verified-프로필-운영)로 설정한다.
 패키지 포함·ARM 실행과 물리 HDMI·실제 장치 출력 수락은 별개다.
+
+새 Linux VM 생성에는 이미지의 `/etc/xenova/creation-policy.json`을 사용한다. 승인 기본값은 호출 20분·실행 19분·정리 30초이며 root:root·0600으로 설치한다. 정책은 CONFFILES로 관리하며 패키지 갱신 후 활성값과 보존본을 확인한다. null 예시는 활성 설정으로 복사하지 않는다. 시간 단위·대기 차감·재전달은 [생성 시간 계약](cli-manager-spec.md#creation-deadline)을 따른다.
 
 ### ARM64 사용자 공간 실행
 
@@ -293,14 +316,23 @@ v = json.loads((r/"platform/guests/sources.lock.json").read_text())[sys.argv[1]]
 print(Path(os.environ["CACHE"])/"downloads"/v["url"].rsplit("/", 1)[1])
 PY
 )"
+  extra=()
+  if [[ "$sid" == debian-* ]]; then
+    extra=(--display-web-assets "$RUN/display-web-input/display-web"
+           --display-web-revision "$DISPLAY_WEB_REVISION")
+  fi
   run "prepare-$sid" sudo unshare --mount --propagation private \
     python3 -B "$REPO/platform/scripts/prepare-xenova-guests.py" \
     --execute template --source "$sid" --input "$input" \
-    --output "$RELEASE_ROOT/linux/$sid/$version"
+    --output "$RELEASE_ROOT/linux/$sid/$version" "${extra[@]}"
 done
 ```
 
 이 경로에서 새 rootfs에 `python3-paho-mqtt`를 설치하고, 저장소의 기존 Agent installer를 호출한다. Python import·Agent enable·설치 영수증·커널/부트 자산을 검사한 번들이 게시된다. `template.json`의 `guest_agent`와 `/etc/xenova/agent-install.json`에 패키지 버전과 실제 소스·deb 해시가 기록된다.
+
+Agent 배포 서비스의 기본 설정은 MQTT-04 `stress`·`agent_exit` 명령을 허용한다.
+VM별 자격은 UUID가 확정된 뒤 `/etc/xenova/agent.env`에 공급한다.
+운영자는 이 파일에 `XENOVA_AGENT_DEMO_COMMANDS=0`을 설정해 데모 명령을 끌 수 있다.
 
 ### A/B 공통 Zephyr 주행 firmware
 
@@ -314,9 +346,10 @@ run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
   --zephyr-source "$ZEPHYR_SOURCE" --tools "$ZEPHYR_TOOLS" \
   --output "$RUN/drive-build" --execute
 
+read -r -p "기존 게시본과 다른 새 주행 버전 (예: 1.0.9): " DRIVE_VERSION
 run drive-template-package python3 -B \
   "$REPO/platform/scripts/package-xenova-drive-template.py" \
-  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version 1.0.8
+  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version "$DRIVE_VERSION"
 ```
 
 포장 도구는 현재 source fingerprint·ARM payload·실제 앱 profile과
@@ -398,17 +431,19 @@ broker 주소·password·VM UUID를 공유 firmware에 넣지 않는다.
 
 ### 실제 manifest로 기본 선택 확정
 
-새 게시본을 준비한 실행에서는 실제 manifest와 배포 버전을 읽어 기본 lock·factory 버전을 맞춘다.
+새 게시본을 준비한 실행에서는 게시할 때 지정한 `DRIVE_VERSION`과 실제 manifest에서
+기본 lock·factory 버전·조립 예제를 맞춘다.
 
 ```bash
-run select-templates python3 -B - <<'PY'
-import hashlib, json, os
+run select-templates python3 -B - "$DRIVE_VERSION" <<'PY'
+import hashlib, json, os, sys
 from pathlib import Path
 repo = Path(os.environ["REPO"])
 release = Path(os.environ["RELEASE_ROOT"])
 path = repo/"platform/guests/default-templates.lock.json"
 lock = json.loads(path.read_text())
 versions = {}
+selected = {}
 for entry in lock["templates"]:
     if entry["guest_kind"] == "linux":
         recipe = json.loads((repo/"platform/guests/linux"/entry["id"]/"recipe.json").read_text())
@@ -416,23 +451,37 @@ for entry in lock["templates"]:
         directory = Path("linux")/entry["id"]/version
         manifest = release/directory/"template.json"
     else:
-        directory = Path(entry["directory"])
+        version = sys.argv[1]
+        directory = Path("zephyr")/entry["id"]/version
         manifest = release/directory/"firmware.json"
         meta = json.loads(manifest.read_text())
         assert meta["id"] == entry["id"] and meta["template_id"] == entry["template_id"]
         assert meta["source"]["app"] == "xenova-drive" and meta["source"]["drive_profile"] == "warm-lattice-lab"
-        version = meta["template_version"]
+        assert meta["template_version"] == version
     entry.update(version=version, directory=str(directory),
                  manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest())
     versions[entry["template_id"]] = version
+    selected[entry["template_id"]] = entry
 path.write_text(json.dumps(lock, indent=2)+"\n")
 path = repo/"platform/yocto/meta-xenova/recipes-core/xenova-platform/files/defaults.json"
 defaults = json.loads(path.read_text())
 for record in defaults["instances"]+defaults["firmware_instances"]:
     record["template_version"] = versions[record["template_id"]]
 path.write_text(json.dumps(defaults, indent=2)+"\n")
+path = repo/"platform/first-install/example.config.json"
+example = json.loads(path.read_text())
+for row in example["linux_templates"]:
+    entry = selected[row["template_id"]]
+    row.update(template_dir="/absolute/xenova-template-releases/"+entry["directory"],
+               template_version=entry["version"], template_manifest_sha256=entry["manifest_sha256"])
+zephyr = next(entry for entry in selected.values() if entry["guest_kind"] == "zephyr")
+example["rtos_templates"] = [{
+    "template_dir": "/absolute/xenova-template-releases/"+zephyr["directory"],
+    "template_manifest_sha256": zephyr["manifest_sha256"],
+}]
+path.write_text(json.dumps(example, indent=2)+"\n")
 PY
-git diff -- platform/guests/default-templates.lock.json \
+git diff -- platform/guests/default-templates.lock.json platform/first-install/example.config.json \
   platform/yocto/meta-xenova/recipes-core/xenova-platform/files/defaults.json
 ```
 
@@ -551,9 +600,9 @@ bitbake -c package_write_rpm xenova-platform xenova-dom0-manager xenova-gateway
 ```
 
 플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
-`xenova-boot-status.service`와 sysinit enablement를 확인한다. 기존 agetty의
-`/run/issue.d`·reload 기능을 사용하며 새 그래픽 런타임은 필요하지 않다.
-고정 이미지의 getty가 agetty인지도 패키지 manifest와 실제 unit에서 대조한다.
+`xenova-boot-status.service`와 sysinit enablement를 확인한다. Xen 이미지의 로그인
+배너는 기존 agetty가 표시하고, 부팅 상태는 상세 명령에서 조회한다. 이미지 rootfs에서
+`serial-getty@hvc0.service` 활성화 링크와 `serial-getty@ttyS0.service` 링크의 부재를 확인한다.
 다른 renderer를 쓰는 설치본의 화면 인계는 [부팅 표시](management-boot-boundaries.md#부팅-진행지연실패-표시)를 따른다.
 
 Pi 4의 기본 부팅 프로필은 Xen `dom0_max_vcpus=2`와 firmware `force_turbo=1`이다.
@@ -687,7 +736,23 @@ try:
     work.mount(dev+"p2", root, readonly=True)
     installed = assemble.platform_root_ok(root)
     check(bool(installed), "actual dom0 source, units, cfg, Wi-Fi, identity")
+    getty = root/"etc/systemd/system/getty.target.wants"
+    check((getty/"serial-getty@hvc0.service").is_symlink(), "Xen dom0 hvc0 login enabled")
+    check(not os.path.lexists(getty/"serial-getty@ttyS0.service"), "Xen dom0 ttyS0 login disabled")
     check((root/"usr/bin/systemd-run").is_file(), "per-execution scope tool systemd-run")
+    phone_policy = root/"etc/systemd/network/20-xenova-usb-phone.network"
+    check(phone_policy.is_file() and phone_policy.read_bytes() ==
+          (repo/"platform/yocto/meta-xenova/recipes-extended/xen/files/20-xenova-usb-phone.network").read_bytes(),
+          "installed USB phone address-only policy matches source")
+    check(phone_policy.stat().st_uid == 0 and phone_policy.stat().st_mode & 0o777 == 0o644,
+          "USB phone policy root ownership and mode 0644")
+    creation_policy = root/"etc/xenova/creation-policy.json"
+    check(creation_policy.is_file() and creation_policy.read_bytes() ==
+          (repo/"platform/yocto/meta-xenova/recipes-core/xenova-platform/files/creation-policy.json").read_bytes(),
+          "installed approved creation time policy matches source")
+    policy_stat = creation_policy.stat()
+    check((policy_stat.st_uid, policy_stat.st_gid, policy_stat.st_mode & 0o777) == (0, 0, 0o600),
+          "creation policy root:root ownership and mode 0600")
     broker_sources = {
         "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
         "platform/deploy/mosquitto/etc/policy.json": "usr/share/xenova/mqtt/policy.json",
@@ -853,18 +918,22 @@ required = {"xenova-platform", "xenova-bringup", "xenova-dom0-manager",
     "xen-tools-xenstat", "libxenmanage1", "mosquitto", "mosquitto-clients",
     "qemu-system-i386", "systemd-extra-utils", "tailscale", "tailscaled",
     "xenova-display", "xenova-gateway", "python3-pyserial", "python3-playwright",
-    "nodejs", "chromium-x11", "ffmpeg", "xserver-xorg", "openbox",
+    "nodejs", "chromium-x11", "ffmpeg", "xserver-xorg", "openbox", "xset", "libturbojpeg0",
     "source-han-sans-kr-fonts", "xf86-input-libinput", "xf86-video-fbdev"}
 assert required <= names, sorted(required-names)
 assert any(n.startswith("kernel-module-brcmfmac-cyw-") for n in names)
 assert any(n.startswith("kernel-module-v3d-") for n in names)
 assert any(n.startswith("kernel-module-tun-") for n in names)
 assert any(n.startswith("kernel-module-ipv6-") for n in names)
+for module in ("usbserial", "cp210x"):
+    assert any(n.startswith(f"kernel-module-{module}-") for n in names), f"Missing ESP32 module: {module}"
 assert "python3-fastapi-ptest" not in names
 print(path)
-print("PASS", len(required)+1, "required packages including kernel-versioned CYW module")
+print("PASS required packages including kernel-versioned Wi-Fi, graphics, TUN, IPv6 and ESP32 serial modules")
 PY
 ```
+
+현재 고정 빌드에서 recipe/RDEPENDS 이름은 `libturbojpeg`이고, 실제 이미지 manifest의 ABI 패키지명은 `libturbojpeg0`이다. pkgdata의 `PKG:libturbojpeg` 대응과 실제 라이브러리 로딩을 함께 확인한다.
 
 ## 6. 완료 dom0 게시
 
@@ -1075,6 +1144,7 @@ sha256sum "$EXPORT/xenova-first-install.img.zst" \
 | 확인 대상 | 수락 근거 |
 |---|---|
 | 최초 등록·신원 | 기본 세 VM의 UUID/MAC, Linux machine-id·SSH 공개키, seed 등록 완료 |
+| 외부 서버 등록 | 최초 설치에서는 자동 전송하지 않음. 네트워크·필요한 Tailnet 접속·Spring 자격 준비 뒤 [등록 조회·수동 notify](cli-manager-spec.md#cmd-registrations)로 별도 확인 |
 | CPU 준비·자동 시작 | first-boot·Xen ready → CPU prepare → VM autostart → host admission 순서. `cpu-layout --json`의 host.ready와 실제 모든 vCPU hard mask |
 | 재부팅·복구 | A/B 협조형 reboot·Linux 일반 reboot·recover_once·host 재부팅 뒤 같은 정책 revision과 실제 배치, 새로운 실행 신원 |
 | 서비스 | dom0-manager·recovery worker enable/active, xentop 통계 조회, broker 인증·구독·건강 상태 게시 |
@@ -1089,6 +1159,12 @@ CPU 정책이 없는 기존 설치의 활성화는 모든 관리 게스트가 �
 공통 이미지에는 HTTP 토큰·MQTT 암호·개인 Wi-Fi 설정을 넣지 않는다. 설치 후 `xenova-dom0-manager.service`가 `dom0_manager.service_token`을 실행해 `/etc/xenova/dom0-manager-token.env`를 0600으로 준비한다. `/etc/xenova/dom0-manager.env`의 기존 서비스 토큰은 우선하며 자동 회전하지 않는다. worker는 `/etc/xenova/recovery-worker.env`의 `XENOVA_RECOVERY_*` 설정을 읽고, broker 연결 문제로 VM 자동 시작이나 host admission을 외부 online 대기에 묶지 않는다.
 
 Debian·Ubuntu 게스트의 내부 DHCP는 `192.168.77.1`을 NTP 서버로 전달한다. `xenova-guest-ntp.service`는 `xenbr0`에서만 듣고, dom0의 `systemd-timesyncd`가 첫 동기화를 마치고 커널의 UTC 오차 한도를 확인한 뒤 응답한다. 게스트 자동 시작은 이 동기화를 기다리지 않는다. 보드에서는 `ss -lun 'sport = :123'`, 게스트에서는 `timedatectl timesync-status`와 `timedatectl show -p NTPSynchronized`로 확인한다. Zephyr는 실행별 XenStore UTC 대응을 사용한다.
+
+Zephyr UTC 저널은 `journalctl -b -u xenova-telemetry-clock.service`로 확인한다.
+dom0 시계가 미동기화 상태이면 `CLOCK_SYNC_PENDING`을 남기고 기존 타이머가 다음
+회차에 다시 확인한다. 동기화 뒤 `responses`가 1 이상이면 그 회차에 XenStore에
+응답을 저장한 건수다. 종료로 호스트 접근이 닫히면 `HOST_QUIESCING`으로 건너뛰며,
+시계 오류, 잘못된 요청, 저장 실패는 계속 서비스 오류로 기록한다.
 
 pinning 기능 수락과 성능 효과는 나누어 기록한다. 동일 펌웨어·입력·broker 설정에서 pinning 전/후 × Debian 부하 유무를 비교하고, guest 계산 주기와 Gateway 지연 각각의 p95/p99·관측 최대·deadline miss·오류/손실을 보관한다. 실제 주행 앱이 없는 경우 타이밍 harness 결과로 범위를 명시한다.
 
@@ -1180,7 +1256,7 @@ MQTT·앱 준비는 Network Starter와 해당 앱의 별도 수락 근거로 기
 
 ## 2026-11-04 앱 메모리 제공물: 수동 버퍼와 RAM 요약
 
-선택 주행 프로필의 로컬 제공 및 다음 이미지 기본 선택 버전은 `1.0.8`이다. `build-xenova-drive-app.py`의
+2026-11-04 제공한 주행 프로필의 버전은 `1.0.8`이다. 현재 기본 선택은 템플릿 lock을 따른다. `build-xenova-drive-app.py`의
 `--app drive --profile warm-lattice-lab`과 `package-xenova-drive-template.py --version 1.0.8`을
 사용하며 출력은 기존 release와 다른 새 디렉터리로 지정한다. 기존 source receipt 검증을 유지한다.
 

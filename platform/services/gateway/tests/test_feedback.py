@@ -173,6 +173,9 @@ def test_real_serial_wait_wakes_for_rx_and_queued_stop_without_another_reader(de
     def wait_longer(_):
         entered.set();return wait_io(5)
     monkeypatch.setattr(owner,'_wait_io',wait_longer)
+    # The owner can already be in an indefinite, RX-only wait after HELLO.
+    with owner.condition:
+        owner._wake()
     assert entered.wait(1)
     submission=owner.submit_stop(StopFrame(42,0,1),time.monotonic())
     wait(lambda:submission.outcome() is not None)

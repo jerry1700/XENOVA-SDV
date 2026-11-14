@@ -8,7 +8,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
+import com.xenova.backend.vm.domain.CpuLayout;
+import com.xenova.backend.vm.domain.CpuPolicyUpdate;
 import com.xenova.backend.vm.domain.VmControlOperation;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import com.sun.net.httpserver.HttpExchange;
@@ -67,8 +70,12 @@ class Dom0ManagerClientTest {
     }
 
     @Test
-    void listReadsXenDomainsAndSendsServiceToken() {
+    void listGetsVmCollectionOnceAndSendsServiceToken() {
+        AtomicInteger requests = new AtomicInteger();
+        AtomicReference<String> method = new AtomicReference<>();
         server.createContext("/api/v1/vms", exchange -> {
+            requests.incrementAndGet();
+            method.set(exchange.getRequestMethod());
             authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
             respond(exchange, 200, """
                     [{"vm_id":"%s","state":"running","vcpus":1,"memory_mib":256}]
@@ -77,8 +84,9 @@ class Dom0ManagerClientTest {
 
         List<VmRuntime> result = client.list();
 
-        assertThat(result).containsExactly(
-                new VmRuntime(VM_ID, VmState.RUNNING, 1, 256));
+        assertThat(result).containsExactly(new VmRuntime(VM_ID, VmState.RUNNING, 1, 256));
+        assertThat(requests).hasValue(1);
+        assertThat(method).hasValue("GET");
         assertThat(authorization.get()).isEqualTo("Bearer service-secret");
     }
 
@@ -255,6 +263,86 @@ class Dom0ManagerClientTest {
         assertThat(operation.status()).isEqualTo("completed");
     }
 
+    @Test
+    void resourceUpdatePutsTheBodyAndIdempotencyKey() throws IOException {
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> requestKey = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/api/v1/vms/" + VM_ID + "/resources", exchange -> {
+            method.set(exchange.getRequestMethod());
+            requestKey.set(exchange.getRequestHeaders().getFirst("Idempotency-Key"));
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {
+                      "vm_id":"%s",
+                      "operation_id":"resize-operation",
+                      "before":{"vcpus":1,"memory_mib":256},
+                      "after":{"vcpus":2,"memory_mib":512},
+                      "applies_on_next_start":true
+                    }
+                    """.formatted(VM_ID));
+        });
+
+        VmResourceUpdate result = client.updateResources(VM_ID, 2, 512, "resize-1");
+
+        assertThat(method.get()).isEqualTo("PUT");
+        assertThat(requestKey.get()).isEqualTo("resize-1");
+        assertThat(objectMapper.readTree(body.get()).toString())
+                .isEqualTo("{\"vcpus\":2,\"memory_mib\":512}");
+        assertThat(result.after().vcpus()).isEqualTo(2);
+        assertThat(result.after().memoryMib()).isEqualTo(512);
+        assertThat(result.appliesOnNextStart()).isTrue();
+    }
+
+    @Test
+    void cpuLayoutReadsThePlatformPolicy() {
+        server.createContext("/api/v1/cpu-layout", exchange -> respond(exchange, 200, """
+                {
+                  "configured":true,
+                  "policy_revision":2,
+                  "policy_schema_version":"2.0",
+                  "host":{"online_pcpus":[0,1,2,3],"max_cpu_id":3,"desired_dom0_pcpus":[0,3],"ready":true},
+                  "reservations":[{"vm_id":"%s","pcpus":[2]}],
+                  "vms":[{"vm_id":"%s","vcpus":1,"allocation":"shared",
+                    "desired_hard_affinity":[{"vcpu":0,"pcpus":[0,3]}]}]
+                }
+                """.formatted(VM_ID, VM_ID)));
+
+        CpuLayout layout = client.cpuLayout();
+
+        assertThat(layout.policyRevision()).isEqualTo(2);
+        assertThat(layout.host().desiredDom0Pcpus()).containsExactly(0, 3);
+        assertThat(layout.vms()).singleElement().satisfies(vm ->
+                assertThat(vm.desiredHardAffinity().getFirst().pcpus()).containsExactly(0, 3));
+    }
+
+    @Test
+    void cpuPolicyUpdatePutsFullPolicyAndIdempotencyKey() throws IOException {
+        AtomicReference<String> requestKey = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        server.createContext("/api/v1/cpu-policy", exchange -> {
+            requestKey.set(exchange.getRequestHeaders().getFirst("Idempotency-Key"));
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {"policy":{"schema_version":"2.0","operation_id":"operation-1","policy_revision":3,
+                    "pool_name":"Pool-0","shared_pcpus":[0,3],"placements":[
+                    {"vm_id":"%s","mode":"shared","pcpus":[3]}]},"host_preparation_required":true}
+                    """.formatted(VM_ID));
+        });
+        CpuPolicyUpdate.Request request = new CpuPolicyUpdate.Request(
+                2, List.of(0, 3), List.of(new CpuPolicyUpdate.CpuPlacement(VM_ID, "shared", List.of(3))));
+
+        CpuPolicyUpdate result = client.updateCpuPolicy(request, "pin-1");
+
+        assertThat(requestKey.get()).isEqualTo("pin-1");
+        assertThat(objectMapper.readTree(body.get())).isEqualTo(objectMapper.readTree("""
+                {"expected_policy_revision":2,"shared_pcpus":[0,3],"placements":[
+                {"vm_id":"%s","mode":"shared","pcpus":[3]}]}
+                """.formatted(VM_ID)));
+        assertThat(result.policy().policyRevision()).isEqualTo(3);
+        assertThat(result.hostPreparationRequired()).isTrue();
+    }
+
     // Visible ASCII keys may hold '+', '{' or '&': they must reach dom0-manager unchanged, not as a space,
     // a broken URI template (500) or an extra parameter.
     @Test
@@ -409,6 +497,65 @@ class Dom0ManagerClientTest {
                 """,
                 HttpStatus.BAD_GATEWAY,
                 "VM_CONTROL_BAD_RESPONSE");
+    }
+
+    @Test
+    void phoneLinkReadsRelayStateWithServiceToken() {
+        AtomicReference<String> method = new AtomicReference<>();
+        server.createContext("/api/v1/display/phone-link", exchange -> {
+            method.set(exchange.getRequestMethod());
+            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            respond(exchange, 200, """
+                    {"configured":true,"relay":"listening","url":"http://10.117.188.25:8084/display/mobile",
+                     "usb":{"interface":"usb0","present":true,"ipv4":["10.117.188.25/24"],"gateway":"10.117.188.86"},
+                     "configured_phone_ipv4":"10.117.188.86","subnet_mismatch":false,
+                     "pairing":{"active":false,"expires_at":null},"observed_at":"2026-11-12T08:29:10Z"}
+                    """);
+        });
+
+        JsonNode status = client.phoneLink();
+
+        assertThat(method).hasValue("GET");
+        assertThat(authorization.get()).isEqualTo("Bearer service-secret");
+        assertThat(status.path("url").asText()).isEqualTo("http://10.117.188.25:8084/display/mobile");
+        assertThat(status.path("usb").path("gateway").asText()).isEqualTo("10.117.188.86");
+    }
+
+    @Test
+    void phonePairingCodeIsPostedAndNotRetriedAfterTheRequestWasSent() {
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/api/v1/display/phone-link/pairing-code", exchange -> {
+            requests.incrementAndGet();
+            try {
+                Thread.sleep(800); // longer than the 300 ms query read timeout
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            respond(exchange, 200, """
+                    {"code":"123456","expires_at":"2026-11-12T08:31:05Z"}
+                    """);
+        });
+
+        assertThatThrownBy(() -> client.issuePhonePairingCode())
+                .isInstanceOfSatisfying(ApiException.class,
+                        exception -> assertThat(exception.getStatus()).isEqualTo(HttpStatus.GATEWAY_TIMEOUT));
+        assertThat(requests).hasValue(1);
+    }
+
+    @Test
+    void phonePairingCodeReturnsTheIssuedCode() {
+        AtomicReference<String> method = new AtomicReference<>();
+        server.createContext("/api/v1/display/phone-link/pairing-code", exchange -> {
+            method.set(exchange.getRequestMethod());
+            respond(exchange, 200, """
+                    {"code":"123456","expires_at":"2026-11-12T08:31:05Z"}
+                    """);
+        });
+
+        JsonNode issued = client.issuePhonePairingCode();
+
+        assertThat(method).hasValue("POST");
+        assertThat(issued.path("code").asText()).isEqualTo("123456");
     }
 
     @Test

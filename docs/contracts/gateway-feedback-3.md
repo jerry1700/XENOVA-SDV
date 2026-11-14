@@ -21,7 +21,7 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 - decoded raw는 payload+5B, payload 최대240B. `packet()`은 240 초과를 거절하고 `unpack()`은 delimiter 포함 frame256B 초과·불일치 길이·CRC·잘못된 COBS를 거절한다. 기본9개 제품 payload 중 최장 REPORT123B/wire상한130B다. 선택형 단일존 ToF는145B/wire상한152B이며 같은 serial adapter에서 소비한다. 별도 thread/serial handle을 만들지 않는다.
 - header raw offset: id0..1, length2, payload3부터, CRC는 `3+payload_length`부터2B. 다음 표의 offset은 **payload 시작 기준**이다. raw offset은 +3.
 - RX는 최대4096B/read, 부분 frame을 유지한다. 중간 손상·oversize는 다음0 delimiter까지 버린다. 빈 delimiter는 frame이 아니다. invalid/oversize 계수는 진단이며 성공 ACK가 아니다.
-- 현 SerialSink 코드 기본 baud는115200이다. baud는 설치 시 명시하고 실제 USB bridge/MCU 지원·전체 트래픽·STOP 지연을 계측한다. 구8×8 설계의460800/8N1 목표를 새 단일존 구성의 필수값으로 계승하지 않는다. USB line 설정 자체를 물리 적용 보증으로 해석하지 않는다.
+- 현 SerialSink 코드 기본 baud는115200이다. baud는 설치 시 명시하고 실제 USB bridge/MCU 지원·전체 트래픽·STOP 지연을 계측한다. 구8×8 설계의460800/8N1 목표를 새 단일존 구성의 필수값으로 계승하지 않는다. USB line 설정 자체를 물리 적용 보증으로 해석하지 않는다. `vehicle/ESP32` 펌웨어의 개발용 기본값은460800이며, 운영값은 실제 USB에서 SENSOR와 REPORT가 함께 흐를 때의 계측으로 확정한다.
 
 ## 3. 정확 payload layout
 
@@ -46,7 +46,7 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 | 0 | `version` | `B` / 1 | version | 정확히 3 |
 | 1 | `pi_session` | `16s` / 16 | RFC UUID 16B; 현재 Pi/device와 exact | 원 HELLO echo |
 | 17 | `device_boot_session` | `16s` / 16 | UUID | NIL 금지; 부팅마다 새 identity; 같은 Pi 연결 중 변경은 fault |
-| 33 | `capabilities` | `H` / 2 | bit mask | (caps & 0x01f7)==0x01f7; HOLD_STEER 추가 0x0400 |
+| 33 | `capabilities` | `H` / 2 | bit mask | (caps & 0x01f7)==0x01f7; HOLD_STEER 추가 0x0400; 근거리 제동 추가 0x1000 |
 | 35 | `vehicle_config_sha256` | `32s` / 32 | digest 원 32B | 원 HELLO 및 Pi 등록값 exact |
 | 67 | `firmware_sha256` | `32s` / 32 | 등록 firmware digest 원 32B | Pi 등록값 exact; flash attestation으로 해석 금지 |
 | 99 | `encoder_bits` | `B` / 1 | signed cumulative counter 폭 | 32 또는 64; Pi OdometryConfig와 exact |
@@ -78,7 +78,7 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 | 72 | `source_sample` | `Q` / 8 | 실제 센서 표본 순번 | wire u64; 정상 source는 1..2^63-1, wrap 재사용 금지 |
 | 80 | `cumulative_left_ticks` | `q` / 8 | signed ticks | encoder_bits signed 범위; 명령 적분값 금지 |
 | 88 | `cumulative_right_ticks` | `q` / 8 | signed ticks | encoder_bits signed 범위; 누계·wrap 규칙 동일 |
-| 96 | `quality` | `B` / 1 | encoder/steering quality bits | 1 필수, unknown bit 금지; measured2/estimated4 동시 금지 |
+| 96 | `quality` | `B` / 1 | encoder/steering quality bits | 1 필수, unknown bit 금지; measured2/estimated4 동시 금지; cap0x1000 장치만 앞 막힘8/뒤 막힘16 |
 | 97 | `steering_mrad` | `i` / 4 | signed mrad | quality2/4이면 abs(value)<=1400; 없으면 정확히 0 |
 | 101 | `steering_error_mrad` | `H` / 2 | 보수 오차 mrad | quality2/4이면 1..65535; 없으면 정확히 0 |
 
@@ -127,7 +127,7 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 | 40 | `source_device_us` | `Q` / 8 | 같은 device_boot_session의 단조 us; 재부팅 시 새 session | 실제 latch 시각; 1..2^63-1 |
 | 48 | `cumulative_left_ticks` | `q` / 8 | signed ticks | encoder_bits signed 범위 |
 | 56 | `cumulative_right_ticks` | `q` / 8 | signed ticks | encoder_bits signed 범위 |
-| 64 | `quality` | `B` / 1 | sensor quality bits | CLOCK_REPLY와 같은 1/2/4 규칙 |
+| 64 | `quality` | `B` / 1 | sensor quality bits | CLOCK_REPLY와 같은 1/2/4 규칙과 막힘8/16 |
 | 65 | `steering_mrad` | `i` / 4 | signed mrad | quality2/4이면 abs(value)<=1400; 없으면0 |
 | 69 | `steering_error_mrad` | `H` / 2 | 보수 오차 mrad | quality2/4이면 양수; 없으면0 |
 | 71 | `clock_epoch` | `16s` / 16 | 원 installed epoch | 현재 epoch exact |
@@ -180,7 +180,7 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 | 97 | `clock_sequence` | `Q` / 8 | 원 command lease | 원 COMMAND exact; STOP0 |
 | 105 | `cutoff_device_us` | `Q` / 8 | 같은 device_boot_session의 단조 us; 재부팅 시 새 session | 원 COMMAND exact; STOP0 |
 | 113 | `stop_command_sequence` | `Q` / 8 | 원 STOP reference | 원 COMMAND exact; STOP0 |
-| 121 | `reason` | `H` / 2 | 공통 reason0..20 | 설계 enum 아래 참조; 성공0, 실패 원 이유 보존 |
+| 121 | `reason` | `H` / 2 | 공통 reason0..21 | 설계 enum 아래 참조; 성공0, 실패 원 이유 보존 |
 
 ### TOF_SAMPLE3 `0x0f17` · MCU → Pi (선택형 단일존 / MCU·물리 미수락)
 
@@ -212,17 +212,11 @@ Pi Gateway의 단일 `OutputOwner`가 TX/RX·프레이밍·명령 원 기한·AC
 
 Pi HELLO는 version3+새 Pi session+등록 config digest다. MCU는 부팅 session과 실제 지원 cap, 등록 config/firmware digest, 실제 누계 encoder 폭을 ACK한다. ACK의 원 Pi echo/NIL 아닌 device session/등록 SHA/encoder ABI/필수 mask가 모두 맞아야 Pi `ready`가 된다. 이는 출력 허가나 정지 확인이 아니다. ACK만으로 DRIVE를 시작하지 않는다.
 
-현 필수 mask는 **0x01f7**. 기본 u16 의미는 ACCEPT0x1, APPLY0x2, VELOCITY0x4, STEERING0x8, STATIONARY0x10, ODOMETRY0x20, **ABS_EXPIRY0x40, CLOCK4_LATCH0x80, DIRECTION_GATE0x100, STATIONARY_STEER0x400**이다. 선택형 단일존 ToF는 신규 `TOF_CAPABILITY=0x0800`을 검사한다. 구 조각형0x0200은 역사 예약값으로 두며 새 ToF 지원으로 인정하지 않는다. ToF를 쓸 profile에는0x0800, 정지 조향 profile에는0x0400도 필요하다. `tof_profiles: []`는0x0800 없이 정상이며, 선택한 ToF의 cap 부족은 ToF만 unavailable로 남긴다. clock/encoder/STOP의 기존 준비조건을 ToF로 막지 않는다. 0x8은 필수 mask 밖이며 AUTO HOLD의 measured steering sensor quality와 동일 개념이 아니다. 없는 기능을 cap로 광고하지 않는다.
+Pi는 `ready` 전에는 같은 Pi session의 HELLO를50ms 간격으로 다시 보낸다. handshake 기한은 첫 HELLO부터 세며 재전송으로 늘지 않고, 기한 뒤의 고장은 늦은 ACK로 풀리지 않는다. MCU는 열려 있는 session과 같은 Pi session의 HELLO에 session을 닫지 않고 같은 ACK로 답한다.
+
+현 필수 mask는 **0x01f7**. 기본 u16 의미는 ACCEPT0x1, APPLY0x2, VELOCITY0x4, STEERING0x8, STATIONARY0x10, ODOMETRY0x20, **ABS_EXPIRY0x40, CLOCK4_LATCH0x80, DIRECTION_GATE0x100, STATIONARY_STEER0x400**이다. 선택형 단일존 ToF는 신규 `TOF_CAPABILITY=0x0800`을 검사한다. 선택형 근거리 제동은 `PROXIMITY_CAPABILITY=0x1000`으로 알린다. 구 조각형0x0200은 역사 예약값으로 두며 새 ToF 지원으로 인정하지 않는다. ToF를 쓸 profile에는0x0800, 정지 조향 profile에는0x0400도 필요하다. `tof_profiles: []`는0x0800 없이 정상이며, 선택한 ToF의 cap 부족은 ToF만 unavailable로 남긴다. clock/encoder/STOP의 기존 준비조건을 ToF로 막지 않는다. 0x8은 필수 mask 밖이며 AUTO HOLD의 measured steering sensor quality와 동일 개념이 아니다. 없는 기능을 cap로 광고하지 않는다.
 
 같은 Pi 연결에서 MCU boot session이 바뀌면 DEVICE_RESTARTED fault·ready 철회다. 새 ACK/새 표본이 기존 fault를 자동 해제하지 않는다. clock/session/cumulative counter를 조용히 초기화해 같은 장치로 계속 달리지 않는다. Pi 재기동은 새 pi_session/clock_epoch로 다시 설치한다. boot session 생성·영구 저장 방식은 MCU 제공물에 명시한다.
-
-Pi의 가상 ToF 복구 시험에서는 선택 cap `0x1000`을 별도로 사용한다. 이 cap을 광고한
-세션만 SENSOR/CLOCK_REPLY quality의 `0x08`(전진 차단), `0x10`(후진 차단)을
-방향별 로컬 추진 차단으로 해석한다. 두 비트는 기존 encoder/steering quality와
-분리하고 같은 원 표본에 결합한다. 이 cap이 있는 DRIVE의 REPORT status REJECTED,
-reason `21`은 근거리 차단이며 장치 전체 고장으로 처리하지 않는다. 해당 거절만으로
-정지를 확인하거나 차단을 해제하지 않는다. ESP32 실물 펌웨어가 이 확장을 광고하고
-제동·정지 원 표본을 내는지는 아직 확인하지 않았다.
 
 `firmware_sha256`은 **등록된 기대값과 ACK 자기보고 digest를 비교하는 코드**다. 바이너리 전체 자체 내장 hash/flash contents 검증/보안 attestation이라고 확정할 수 없다. 현 확인 범위에는 bin/ELF/partition 중 hash 대상, hash-domain/canonical manifest, NVS 저장·업데이트·읽기 검증 절차가 없다. config SHA의 canonical bytes도 없다. 자기 해시를 자신을 포함한 binary에 넣는 순환 정의를 만들지 말고 빌드 manifest·분리 저장값·읽기 검증 범위를 MCU 담당이 제안해 공동 등록한다. Pi의 private profile 소유·권한 검사는 firmware contents 검증을 대신하지 않는다.
 
@@ -260,7 +254,9 @@ ACCEPTED는 파싱·수락, APPLIED는 실제 actuator 적용, REJECTED는 거�
 
 report_sequence는 장치 session 안에서 증가한다. <=Pi HWM은 duplicate ignore이며 현재성을 갱신하지 않는다. 현 코드의 report slot을 같은 명령에서 ACCEPTED 뒤 APPLIED 순으로 생산하고, APPLIED 뒤 뒤늦은 ACCEPTED로 회귀시키지 않는다. 부록B §10.1의 **MCU 계약은 최근 원 command 결과8개+최고 sequence fence+별도 active STOP pin1개**다. 같은 seq/같은 bytes는 원 ACK/report sequence·time replay만 하며 재적용/watchdog/E 연장0, 같은 seq/다른 bytes는 conflict다. 원 STOP은 HOLD50Hz에 ACK cache에서 밀려도 pin으로 유지해야 한다. 이후 실제 새로운 stationary 관측 보고만 새 report/sample/time을 가질 수 있다. INSTALL 동일 retry도 timer를 새로 시작하지 않는다. 이 설계가 현재 MCU에서 구현됐다고 주장하지 않는다.
 
-공통 CLOCK_ACK/REPORT reason:u16은0 OK/1 BAD_LENGTH/2 BAD_CRC/3 SESSION_MISMATCH/4 SEQUENCE_REPLAY/5 IDEMPOTENCY_CONFLICT/6 CLOCK_UNAVAILABLE/7 CLOCK_EXPIRED/8 COMMAND_EXPIRED/9 RANGE/10 DIRECTION_STOP_REQUIRED/11 DEVICE_FAULT/12 CONFIG_MISMATCH/13 COUNTER_EXHAUSTED/14 E_STOP/15 GENERATION_REPLAY/16 UNSUPPORTED_PROFILE/17 TIMESTAMP_ORDER/18 SENSOR_UNAVAILABLE/19 DEADLINE_MISMATCH/20 CLOCK_DRIFT다. CLOCK_ACK status1 INSTALLED/3 REJECTED이며 Pi는 성공1/reason0만 usable로 받는다. CRC/session을 확인 못 하는 frame에는 ACK를 발명하지 않고 bounded error counter만 남긴다.
+공통 CLOCK_ACK/REPORT reason:u16은0 OK/1 BAD_LENGTH/2 BAD_CRC/3 SESSION_MISMATCH/4 SEQUENCE_REPLAY/5 IDEMPOTENCY_CONFLICT/6 CLOCK_UNAVAILABLE/7 CLOCK_EXPIRED/8 COMMAND_EXPIRED/9 RANGE/10 DIRECTION_STOP_REQUIRED/11 DEVICE_FAULT/12 CONFIG_MISMATCH/13 COUNTER_EXHAUSTED/14 E_STOP/15 GENERATION_REPLAY/16 UNSUPPORTED_PROFILE/17 TIMESTAMP_ORDER/18 SENSOR_UNAVAILABLE/19 DEADLINE_MISMATCH/20 CLOCK_DRIFT/21 PROXIMITY_BLOCKED다. 21은 REPORT에서만 쓴다. CLOCK_ACK status1 INSTALLED/3 REJECTED이며 Pi는 성공1/reason0만 usable로 받는다. CRC/session을 확인 못 하는 frame에는 ACK를 발명하지 않고 bounded error counter만 남긴다.
+
+**근거리 제동(선택형, cap0x1000).** MCU는 앞·뒤 ToF로 가까운 물체를 보면 그 방향의 출력을 스스로 끊고, SENSOR/CLOCK_REPLY 표본 quality의 앞 막힘8/뒤 막힘16으로 알린다. 막혀 있는 동안 모든 표본에 켜지고 풀리면 꺼진다. 센서가 판단할 값을 주지 않아 막을 때도 같은 bit다. 막힌 방향의 DRIVE는 REJECTED/reason21로 거절하고 STOP·HOLD_STEER·반대 방향 DRIVE는 그 이유로 거절하지 않는다. 끊긴 DRIVE의 REPORT는 더 보내지 않는다. Pi는 cap0x1000 장치의 두 bit를 odometry에 넘기지 않고 view의 `proximity_front_blocked`/`proximity_rear_blocked`로 낸다. 이 값은 odometry가 받아들인 가장 새 표본의 것이며, 표본이 끊기거나 거절되는 동안에는 갱신되지 않는다. DRIVE의 REJECTED/reason21은 `DEVICE_REJECTED`로 묶지 않는다. 그 명령만 거절된 것으로 적고(`rejection=PROXIMITY_BLOCKED`, `proximity_rejected` 증가) 적용 대기에서 빼 `DEVICE_APPLY_TIMEOUT`으로도 넘기지 않는다. cap0x1000이 없는 장치의 두 bit와 reason21, STOP·HOLD_STEER의 reason21, status4는 기존처럼 거절/고장이다. 근거리 정지는 STOP APPLIED가 아니며 방향을 바꾸려면 기존 규칙대로 새 STOP의 APPLIED가 필요하다. Gateway는 현재 Vehicle과 연결된 차단 상태가 있으면 그 방향의 DRIVE를 전송하지 않는다. AUTO는 협상된 ClockReply에서 이 상태와 기존 정지 근거를 받아 후진과 차로 회피 가능 여부를 판단한다. 기준 거리와 판단 규칙은 MCU 쪽 설정이며 [ToF 요청서](../requests/2026-11-10-tof-vl53l0x-gateway-jetson.md) 2.1에 있다. MCU 구현과 실차 확인은 아직 없다.
 
 flags는 reported velocity1/steering2/stationary4 presence다. flag가 없는 velocity/steering slot은0이어야 하고 Pi view는 null로 해석한다. `stationary`는0/1만 허용하며 APPLIED STOP+flag4의 후보만 physical_stop에 반영된다. REPORT steering에는 measured/estimated quality가 없으므로 실제 조향 준비 검사는 **SENSOR/CLOCK_REPLY의 원 quality+positive error**를 사용한다. 현 feedback3 REPORT parser는 feedback1과 달리 presence를 ACK capability의 각 sensor bit와 별도 재대조하지 않는다. 이를 firmware의 허위 cap/센서 허용이라고 해석하지 않으며 공식 수락 시 cross-check 범위를 결정한다.
 
@@ -272,7 +268,7 @@ AUTO cusp HOLD_READY는 여기서 더 나아가 실제 HOLD APPLIED 이후 연�
 
 MCU는 실제 양쪽 누계 ticks와 실제 latch/sample을 보낸다. 순번은 송신횟수가 아니라 실제 sensor sample ID다. 같은 표본을 다른 시각/ID로 다시 만들지 않는다. signed32/64 범위의 정상 wrap은 Pi가 모듈러 차분한다. source 시각/순번 역전·0·동일 sample 재사용은 sensor 검산에서 거절한다. ticks의 reset을 정상 wrap으로 위장하지 말고 새 boot session/명시 fault와 재설치로 구분한다. **time/command/report/sample/clock은1..2^63-1, generation은1..2^32-1이며 wrap 전 STOP·새 disarmed session 절차가 필요하다.** MCU32bit micros를 atomic64 확장 없이 u64로 포장하지 않는다. encoder modulo와 debug counteru8만 wrap 예외다. Pi의 일부 parser는 이 전체 의미범위를 모든 필드에 똑같이 강제하지 않으므로 최종 codec 회귀에서 계약과 실제 거절 경계를 분리한다.
 
-Pi odometry는 원 Δticks와 source dt·승인 최대속도·Ackermann 일관성을 검사한다. 긴 gap은 새 odom epoch/anchor가 필요하고 잃어버린 이동을0으로 복구하지 않는다. Pi의 별도 absolute meter는 연속 source_sample+1일 때 wrap-aware `max(abs(ΔL),abs(ΔR))`를 누적한다. MCU가 mean/abs(mean)으로 원 누계 wheel 정보를 줄이면 안 된다. 이 meter와 임무 거리예산은 Pi 내부이며 ESP packet을 새로 만들지 않는다.
+Pi odometry는 원 Δticks와 source dt·승인 최대속도·Ackermann 일관성을 검사한다. 좌우가 한 tick씩 정반대로 움직인 표본은 encoder 양자화 폭으로 보아 거절하지 않고 측정대로 제자리 yaw로 적분하며, 두 tick 이상의 정반대 변화는 `ODOM_ACKERMANN_INCONSISTENT`로 거절한다. 긴 gap은 새 odom epoch/anchor가 필요하고 잃어버린 이동을0으로 복구하지 않는다. Pi의 별도 absolute meter는 연속 source_sample+1일 때 wrap-aware `max(abs(ΔL),abs(ΔR))`를 누적한다. MCU가 mean/abs(mean)으로 원 누계 wheel 정보를 줄이면 안 된다. 이 meter와 임무 거리예산은 Pi 내부이며 ESP packet을 새로 만들지 않는다.
 
 시계 불연속, device restart, malformed/과기한/다른 session, partial TX, RX EOF, command ACK timeout은 현재성/출력에 영향을 준다. Pi read는 partial frame을 다음 read까지 유지하지만 incomplete bytes를 ACK로 쓰지 않는다. nonblocking TX가 partial이면 전체 적용 여부 미확정으로 실패하고 serial frame을 성공 처리하지 않는다. readable 이후 빈 read가 EOF이며 idle의 빈 read와 구분한다. 물리 USB 단절 때 Pi가 STOP을 전송할 수 있다고 가정하지 않는다. 독립 MCU cutoff/watchdog/E-stop·brake가 최종 보호다. MCU의 brake/stop 출력 방식·무전원 상태·고장 latch 해제 절차는 실차 공동 수락 항목이다.
 
@@ -318,7 +314,7 @@ STOP/fault→COMMAND/FEEDBACK→encoder/clock→ToF 순위이며 ToF polling/res
 고정 vector는 독립 stdlib CRC/COBS/struct와 Pi codec의 byte offset/size·원 bytes를 비교하는 기준이다. 실행별 source·결과·미수락 경계는 Jetson-drive-docs/making-reports에서 관리하며 개별 시험 경과를 계약 수락으로 대신하지 않는다. codec와 ToF consumer의 소프트웨어 선택자는 다음과 같다.
 
 ```text
-pytest -o addopts= -q platform/services/gateway/tests/test_feedback3_vectors.py platform/services/gateway/tests/test_tof_feedback3.py
+pytest -o addopts= -q platform/services/gateway/tests/test_feedback3_vectors.py platform/services/gateway/tests/test_tof_feedback3.py platform/services/gateway/tests/test_feedback3_proximity.py
 ```
 
 원 feedback3 PTY2개와 ControlFacts 실제 PTY3개는 pyserial 준비/승인 대기 상태이며 이 codec 선택과 별개다. mock/development-fd 또는 단순 codec 성공을 그5개의 PASS·실제 USB/MCU·타이머/실측 센서·정지 수락으로 바꾸지 않는다.
@@ -334,6 +330,7 @@ pytest -o addopts= -q platform/services/gateway/tests/test_feedback3_vectors.py 
 | 실제 단일 owner·원 E·link failure | [output_owner.py](../../platform/services/gateway/xenova_gateway/output_owner.py) |
 | private 설치 profile | [operator_profile.py](../../platform/services/gateway/xenova_gateway/operator_profile.py) `load_feedback3/private_profile` |
 | 선택 ToF 단일패킷 raw queue·원 capture mapping | [tof_feedback3.py](../../platform/services/gateway/xenova_gateway/tof_feedback3.py) `TofReceipt/TofInbox/TofReceiver`; [verified_runner.py](../../platform/services/gateway/xenova_gateway/verified_runner.py) `configure_mapper_tof/_mapper_tof_once` |
+| 근거리 막힘 표시·reason21 거절 수용 | [feedback3.py](../../platform/services/gateway/xenova_gateway/feedback3.py) `_sample`, REPORT 처리, `proximity_view` |
 | 원 ToF 최신 사본·J 전달/HWM | [mapper_uplink.py](../../platform/services/gateway/xenova_gateway/mapper_uplink.py) `submit_tof/offer_tof/revoke_tof` |
 
 가상 [virtual_feedback3.py](../../platform/services/gateway/examples/virtual_feedback3.py)는 시험 대역이며 firmware 구현 기준 전체나 물리 센서 대용이 아니다. 기본 zero steering error 등 일부 옛 가상 설정은 현 quality 계약에서 유효하지 않을 수 있으므로 실물 설정으로 복사하지 않는다.

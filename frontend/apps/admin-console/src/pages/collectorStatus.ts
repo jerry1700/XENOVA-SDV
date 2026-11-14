@@ -1,4 +1,5 @@
-import type { TelemetryHeartbeatResponse } from '../api/types';
+import type { Health } from '@xenova/ui';
+import type { TelemetryHeartbeatResponse, Vm } from '../api/types';
 import { ago } from '../domain/roles';
 
 /**
@@ -21,17 +22,26 @@ export function heartbeatCount(value: number | null | undefined): string {
   return Number.isSafeInteger(value) ? value.toLocaleString('ko-KR') : '표시 범위 초과';
 }
 
+/** 경과 시간을 정수로만: 1초 미만은 "방금", 그 이상은 ago() 의 정수 초·분 (VM 상세 수집기 요약용) */
+export function agoWhole(ms: number): string {
+  return ms < 1000 ? '방금' : ago(ms);
+}
+
 /**
  * 마지막 수집 성공 경과. last_collection_success_age_ms 는 heartbeat 를 보낸 시점 기준이므로
  * 받은 뒤 흐른 시간을 더한다
  */
-export function lastCollectionSuccess(report: TelemetryHeartbeatResponse | undefined, now: number): string {
+export function lastCollectionSuccess(
+  report: TelemetryHeartbeatResponse | undefined,
+  now: number,
+  format: (ms: number) => string = ago,
+): string {
   const age = report?.last_collection_success_age_ms;
   if (age == null) return '—';
   if (!Number.isSafeInteger(age) || age < 0) return '표시 범위 초과';
   const received = Date.parse(report?.received_at ?? '');
   const sinceReceived = Number.isFinite(received) ? Math.max(0, now - received) : 0;
-  const text = ago(age + sinceReceived);
+  const text = format(age + sinceReceived);
   return report?.status === 'STALE' ? `${text} (마지막 heartbeat 기준)` : text;
 }
 
@@ -44,3 +54,11 @@ export function collectorTooltip(report: TelemetryHeartbeatResponse | undefined,
     `전송 실패 누계: ${heartbeatCount(report?.publish_submit_failures_total)}`,
   ].join('\n');
 }
+
+/** Linux Agent 생존(v1) 상태 → 점 색 (VM Control 상세 Agent 표시와 같은 기준) */
+export const AGENT_HEALTH = {
+  ONLINE: 'ok',
+  STALE: 'recovering',
+  OFFLINE: 'fault',
+  UNKNOWN: 'stopped',
+} satisfies Record<NonNullable<Vm['agent_status']>, Health>;

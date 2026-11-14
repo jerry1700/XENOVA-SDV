@@ -4,7 +4,8 @@ With "ui_origin" in the root config (Plan A, 349) the phone gets the web app and
 presentation from the display domU (VM3 guest_app) instead; dom0 only relays them.
 
 Pairing uses a root-visible, single-use code (120s/5 attempts) and one read-only
-browser session (8h). No VM commands, new feed, HDMI, MQTT or Gateway ownership.
+browser session (8h), entered once per service run: after a USB re-plug that moves the
+address, the paired phone opens the new URL without a code. No VM commands, new feed, HDMI, MQTT or Gateway ownership.
 The listener follows the phone link across cable re-plugs (393): see PhoneLink.
 """
 from __future__ import annotations
@@ -62,16 +63,42 @@ class Pairing:
         self.clock, self.publish = clock, publish
         self.code, self.code_until, self.tries = "", 0, 0
         self.session, self.session_until = "", 0
+        self.carried = False
 
     def rotate(self):
-        # Operator rotation also revokes the previous phone session.
+        # Operator rotation also revokes the previous phone session (and a pending carry-over).
         self.code, self.code_until, self.tries = f"{secrets.randbelow(1000000):06d}", self.clock() + CODE_SECONDS, 0
-        self.session, self.session_until = "", 0
+        self.session, self.session_until, self.carried = "", 0, False
         self.publish(self.code)
 
+    def carry_over(self):
+        """The link moved to a new address while a phone was paired: let that phone in once more.
+
+        The old cookie belongs to the old address and is revoked here. Screen requests on the new
+        address (same USB link, phone IP, Host/Origin checks) are handed a fresh session with the
+        remaining lifetime; no new code. The hand-out stays open until that session is used once,
+        so a browser pre-load that drops its cookie does not use it up. Returns False when nothing
+        was paired.
+        """
+        if not (self.session and self.clock() < self.session_until):
+            return False
+        self.session, self.carried = secrets.token_urlsafe(32), True
+        return True
+
+    def claim(self):
+        if not self.carried or self.clock() >= self.session_until:
+            return None
+        return self.session
+
+    def remaining(self):
+        return max(1, int(self.session_until - self.clock()))
+
     def valid(self, value):
-        return bool(self.session and self.clock() < self.session_until
-                    and hmac.compare_digest(value.encode(), self.session.encode()))
+        ok = bool(self.session and self.clock() < self.session_until
+                  and hmac.compare_digest(value.encode(), self.session.encode()))
+        if ok:
+            self.carried = False  # the phone holds the carried session now; close the hand-out
+        return ok
 
     def pair(self, code):
         self.tries += 1
@@ -79,7 +106,7 @@ class Pairing:
                 or not re.fullmatch(r"[0-9]{6}", code)
                 or not hmac.compare_digest(code, self.code)):
             return None
-        self.code = ""
+        self.code, self.carried = "", False
         self.publish(None)
         self.session, self.session_until = secrets.token_urlsafe(32), self.clock() + SESSION_SECONDS
         return self.session
@@ -124,11 +151,23 @@ def create_app(endpoint, feed, pairing, *, rotate_signal=False):
             "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"})
         return response
 
+    def with_session(response, session, max_age):
+        response.set_cookie(COOKIE, session, httponly=True, samesite="strict", secure=False,
+                            max_age=max_age, path="/")
+        return response
+
+    def carried_in():
+        # After a link move, the phone that was paired opens the new URL without a code (once).
+        session = pairing.claim()
+        if session:
+            return with_session(RedirectResponse(PHONE_SCREEN, status_code=303), session, pairing.remaining())
+        return None
+
     @app.get("/connect")
     def connect_page(request: Request):
         if pairing.valid(request.cookies.get(COOKIE, "")):
             return RedirectResponse(PHONE_SCREEN, status_code=303)
-        return HTMLResponse(PAGE)
+        return carried_in() or HTMLResponse(PAGE)
 
     @app.post("/connect")
     async def connect_phone(request: Request):
@@ -148,33 +187,39 @@ def create_app(endpoint, feed, pairing, *, rotate_signal=False):
         if not session:
             return HTMLResponse(PAGE.replace('<form method=',
                 '<p role="alert">번호가 다르거나 만료됐어요. 5회 실패했거나 2분이 지났다면 새 번호를 발급받아 주세요.</p><form method='), status_code=401)
-        response = RedirectResponse(PHONE_SCREEN, status_code=303)
-        response.set_cookie(COOKIE, session, httponly=True, samesite="strict", secure=False,
-                            max_age=SESSION_SECONDS, path="/")
-        return response
+        return with_session(RedirectResponse(PHONE_SCREEN, status_code=303), session, SESSION_SECONDS)
 
     @app.get("/{path:path}")
     def read(request: Request, path: str):
         path = "/" + path
         if path in ("/", "/display/mobile"):
             # The advertised phone URL (endpoint.json) opens the integrated screen.
+            if not pairing.valid(request.cookies.get(COOKIE, "")):
+                return carried_in() or RedirectResponse(PHONE_SCREEN, status_code=303)
             return RedirectResponse(PHONE_SCREEN, status_code=303)
         # Scope is checked before auth; do not expose any command/state/internal path.
         if not allowed_path(path) or request.url.query or "%" in request.scope.get("raw_path", b"").decode("latin1"):
             return Response(status_code=404)
+        handed = None
         if not pairing.valid(request.cookies.get(COOKIE, "")):
-            if path == PHONE_SCREEN:
-                return RedirectResponse("/connect", status_code=303)
-            return JSONResponse({"code": "PHONE_SESSION_REQUIRED"}, status_code=401)
+            # The screen itself is served with the carried session (no redirect to the same URL).
+            handed = pairing.claim() if path == PHONE_SCREEN else None
+            if not handed:
+                if path == PHONE_SCREEN:
+                    return RedirectResponse("/connect", status_code=303)
+                return JSONResponse({"code": "PHONE_SESSION_REQUIRED"}, status_code=401)
         try:
             upstream = feed.get(path)
             if path == PHONE_SCREEN and upstream.status != 200:
-                return HTMLResponse(PENDING_PAGE, status_code=503)
-            return Response(upstream.body, status_code=upstream.status, headers={"Content-Type": upstream.content_type})
+                response = HTMLResponse(PENDING_PAGE, status_code=503)
+            else:
+                response = Response(upstream.body, status_code=upstream.status,
+                                     headers={"Content-Type": upstream.content_type})
         except FeedUnavailable as error:
-            if path == PHONE_SCREEN:
-                return HTMLResponse(PENDING_PAGE, status_code=503)
-            return JSONResponse({"code": error.code}, status_code=503)
+            if path != PHONE_SCREEN:
+                return JSONResponse({"code": error.code}, status_code=503)
+            response = HTMLResponse(PENDING_PAGE, status_code=503)
+        return with_session(response, handed, pairing.remaining()) if handed else response
 
     return app
 
@@ -272,7 +317,8 @@ class PhoneLink:
 
     - Cable out or no usable address: stop listening, remove endpoint.json, wait.
     - Back on the same address (a new kernel device): listen again; the paired session stays.
-    - Back on a new address: listen there, publish the new URL and a new pairing code.
+    - Back on a new address: listen there and publish the new URL. A phone that was paired opens
+      it once without a code (Pairing.carry_over); with no paired phone a new code is issued.
     The trust rules do not change: same root config, USB device check, phone IP, Host/Origin.
     """
 
@@ -333,12 +379,15 @@ class PhoneLink:
                     self.publish(None)
                     say("Phone link is back but the listener could not bind yet; retrying.")
                     continue
+                carried = (action == "new_address" and found.phone_ip == self.endpoint.phone_ip
+                           and self.pairing.carry_over())
                 self.app.state.endpoint = self.endpoint = found
-                if action == "new_address":
+                if action == "new_address" and not carried:
                     self.pairing.rotate()
                 self.publish(found)
                 say("Phone link back on the same address; the paired session continues." if action == "rebind"
-                    else "Phone link moved to a new address; a new URL and pairing code were issued.")
+                    else "Phone link moved to a new address; the paired phone opens the new URL without a new code."
+                    if carried else "Phone link moved to a new address; a new URL and pairing code were issued.")
         finally:
             if events is not None:
                 loop.remove_reader(events.fileno())

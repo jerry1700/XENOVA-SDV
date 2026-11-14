@@ -12,6 +12,9 @@ int xshutdown_start(xshutdown_hook hook, void *context);
 /* Local initialization unwind; never submits a Xen shutdown. -EBUSY means
  * an accepted external request owns cleanup, including its failure. */
 int xshutdown_stop(int64_t deadline);
+/* Test-only abrupt domain failure. Success does not return because Xen leaves
+ * the domain in the crash shutdown state for dom0 recovery observation. */
+int xshutdown_crash(void);
 struct xshutdown_status {
  bool started, worker_joined, watch_owned, features_possible, request_owned;
  int initial_error, cleanup_error;

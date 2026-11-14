@@ -39,7 +39,7 @@ ARM 모듈 설치 fixture와 전체 RPM/이미지·운영 교체를 구분한다
 `xenova-platform`은 `/usr/lib/xenova`의 순수 `xenova_registration`, 로컬 `xenova_registration_hook`,
 Manager/CLI/first-boot를 설치한다. `assemble.py`의 source gate도 새 hook을 요구한다.
 `xenova-dom0-manager`는 site-packages의 `api/registrations.py`, `registration_sender.py`, settings·driver·app을
-기존 패키지에 함께 설치한다. 새 상주 daemon이나 CLI 통지 proxy는 없다. factory 사건만 일시 systemd job을 만든다.
+기존 패키지에 함께 설치한다. 새 상주 daemon이나 CLI 통지 proxy는 없다. 새 factory는 자동 통지 job을 만들지 않는다.
 netclient/io/ctypes/sqlite3 등 실제 target 분할 의존성을 대조한다.
 `sqlite3`는 기존 runtime_logs의 앱 import에 필요하다. 실제 ARM import에서 누락을 확인해 의존성에 명시했으며 DB/Worker 저장 정책을 바꾸지 않는다.
 
@@ -49,17 +49,19 @@ Spring 송신은 API 프로세스 소유다. unit은 선택 `/etc/xenova/spring-
 기존 `/etc/xenova/dom0-manager-token.env`와 `dom0-manager.env`의 `XENOVA_SERVICE_TOKEN`은 로컬 API 인증용이다.
 Spring 전용 파일에 이 변수를 덮어쓰지 않는다. helper는 API bind/port와 API token만 읽으며 Spring 전용 파일을 읽지 않는다.
 
-자동 기회 소비→잠금/대상 FD 반환→로컬 후속의 순서다. factory의 first-boot main은 complete 뒤
-잠금을 반환하고 별도 helper로 일시 job을 `--no-block` 예약한다. job은 API를 Requires/After로 참조하고
-API의 `Type=notify` 준비 완료 뒤 실행된다. `dom0_manager.__main__.ReadyServer`가 ASGI startup과
-listen 성공 뒤에만 `READY=1`을 보낸다. first-boot 완료·autostart는 API/HTTP를 기다리지 않는다.
-API는 기존 host-admission 이후 순서를 유지한다. 송신의 기존 15초 예산과 runtime 상한은 job 실행 때 시작한다.
-job은 일반 큐/영속 spool이 아니며 현재 factory의 새 등록 UUID에만 만들어진다. API 실패·다음 부팅에서 재예약하지 않는다.
-명시 API restart가 남은 dependent를 다시 실행해도 `/run/xenova/registration-notices/factory-started-UUID`의
-배타 표식이 같은 boot의 두 번째 송신을 차단한다. 이 표식은 API startup/종료에서 삭제하지 않는다.
-POST를 시도한 뒤에는 retry/GET이 없다. API startup/multi-worker·다음 boot가 과거 대상을 순회해 보충하지 않는다.
+일반 create의 통지는 자동 기회 소비 → 잠금/대상 FD 반환 → 로컬 후속의 순서다.
 API sender는 worker 공통 4 slot과 자체 deadline을 가지며 종료 때 자식을 kill/wait한다.
-helper도 4 slot이고 관리 FD는 상속하지 않는다. 커널/필수 저장의 모든 정체를 선점하는 보장은 아니다.
+helper도 4 slot이고 관리 FD는 상속하지 않는다. POST 뒤 retry/GET은 없으며 API startup·
+multi-worker·다음 boot가 과거 대상을 순회해 보충하지 않는다. 커널/필수 저장의 모든 정체를 선점하는 보장은 아니다.
+
+최초 설치는 로컬 등록과 기존 autostart 준비에서 완료한다. 자동 notify·통지 job·새 통지 기회는 만들지 않는다.
+과거 factory progress의 `registration_notices`와 결과 파일은 보존한다.
+운영자가 Wi-Fi/유선 연결과 필요한 Tailscale·Spring 자격을 준비한 뒤 GET과 UUID별 수동 POST로 등록한다.
+Spring 자격이 없어도 로컬 등록 조회와 기본 VM 관리는 가능하다.
+기존 `Type=notify` API의 READY 의미와 host-admission 이후 기동 순서는 바꾸지 않는다.
+이전 버전이 이미 예약한 defer/after-api job의 호환 경로는 유지하므로, 실행 중인 구형 job은
+원 소유·결과를 확인한 운영 절차로 처리한다. 새 first-boot·API 재시작이 이를 재생성하지 않는다.
+이후 로컬 검증은 [최초 설치 로컬 등록 후속](../verification/first-install-local-registration-20261105.md)을 따른다.
 
 운영 실행 없이 다음 교체 순서를 인계한다.
 
@@ -74,7 +76,7 @@ helper도 4 slot이고 관리 FD는 상속하지 않는다. 커널/필수 저장
    송신 설정 부재에서 notify만 제한되고 GET/기본 관리가 되는지도 확인한다. 패키지 갱신으로 과거 자동 기회를 초기화하지 않는다.
 4. 승인된 fixture UUID로만 명시 curl POST와 Spring confirmed·거절/응답 유실을 공동 수락한다.
    동일 UUID의 단건은 기존 값을 보존하며 목록 동기화의 필드 갱신과 별도다.
-5. 실패 시 원 journal/factory 기회·자산을 보존한다. 삭제/새 UUID/기회 초기화로 통과시키거나
+5. 실패 시 원 journal·factory 진행·자산·과거 통지 기록을 보존한다. 삭제/새 UUID/기회 초기화로 통과시키거나
    구형 binary가 새 설치 집합을 읽는지 확인 없이 downgrade하지 않는다.
 
 정규 package QA/ARM import·소유 root smoke와 실제 board/systemd·Spring DB·운영 교체는
@@ -115,7 +117,7 @@ OS 공통 정적 CPU 배치는 이전 검증 범위를 유지한다. 기존 full
 | 명시 world 설치 | `/usr/sbin/xenova-world-install`; root private 입력만 읽고 현재 등록/정지/소유 guard 뒤 world 부분 적용. broker/VM 생성 없음 |
 | 등록 조회·선택 통지 | 하위 projection/hook와 dom0-manager route/sender를 같은 제공 후보로 설치. 비활성 `/usr/share/xenova/spring-registration.env.example`; FastAPI 전용 root 0600 설정은 운영/Spring 담당 공급. 옛 직접 sender/CLI 제거. [설치 절차](#registration-api) |
 | 실제 drive template | `package-xenova-drive-template.py --build-root ... --output NEW`가 현재 소스와 실제 ARM BUILD_RECEIPT·payload를 대조해 새 immutable envelope 생성. `default-templates.lock.json`·defaults·assembly example이 실제 hash 선택. lab 차량 프로필이며 실제 차량 승인값 아님 |
-| Linux template/seed | 기존 1.0.2 선택 자산 유지. 다음 template builder는 실제 Agent receipt에서 profile 생성. 새 seed는 현재 guest_identity helper를 포함하고 host UUID 계획 뒤 private env 공급. 전체 Linux rootfs를 이번에 재제작하지 않음 |
+| Linux template/seed | Ubuntu 1.0.5·Debian 1.0.8 준비 입력은 현재 Agent·공용 MQTT 소스와 설치 receipt를 포함한다. seed는 현재 guest_identity helper를 사용하고 host UUID 계획 뒤 private env를 공급한다. 실제 선택은 기본 lock과 검증한 template manifest를 따른다 |
 
 고정 Yocto Python 3.14의 `ssl.py`/`_ssl`은 `python3-io`, HTTP client는 `python3-netclient`,
 urllib.parse/threading 등은 해당 manifest의 core/dependency로 확인한다. 미존재 `python3-ssl`은 사용하지 않는다.
@@ -207,7 +209,7 @@ env example의 선택 입력이다. 파일/차량/시간 승인값은 설치 담
 
 | 입력·공급 담당 | 실제 원천·권한 | 없거나 실패할 때 |
 |---|---|---|
-| 생성 시간 정책 / 플랫폼·운영 승인 | `/etc/xenova/creation-policy.json`을 승인값으로 별도 공급. `/usr/share/xenova/creation-policy.json.example`의 null은 활성값이 아님 | 신규 Linux create 운영 수락 대기. 기존 완료 회수·지원 수습·조회/stop까지 전역 차단하지 않음. 승인 없는 fallback 숫자 없음 |
+| 생성 시간 정책 / 플랫폼·운영 승인 | `/etc/xenova/creation-policy.json`을 root:root·0600으로 설치. 기본 호출 20분·실행 19분·정리 30초이며 CONFFILES로 관리하며 패키지 갱신 뒤 활성값을 확인. null 예시는 활성 설정과 별도 | [원 기한·예산 계약](cli-manager-spec.md#creation-deadline)을 유지. 정책 부재·무효는 새 Linux create만 수락 전 거절하며 완료 회수·지원 수습·조회/stop은 전역 차단하지 않음. 새 이미지의 실제 생성·상위 응답 대기 수락은 별도 |
 | CPU / 플랫폼·운영 | `/etc/xenova/cpu-policy-preset.json`은 최초 공급, 현재 `/srv/xenova` 정책·anchor와 이번 host receipt는 기존 CPU 경로가 소유 | empty placements도 정상 현재 정책. 과거 factory가 현재 해제를 덮지 않음. 준비 오류는 새 start/recover 허가를 제한하고 정확한 기존 실행 stop은 별도 guard |
 | Gateway / 플랫폼·Gateway·차량 | `/usr/share/xenova/gateway.env.example`에서 승인한 설정만 root:root 0600 `/etc/xenova/gateway.env`로 별도 공급. 실제 UUID 쌍·profile·broker/ACL·device·root 소유 차량 한계 필요 | 운영 설정과 승인된 자산이 없으면 실제 차량 출력 대기. factory 기본의 mock 기동 조건은 아래 절 참조 |
 | Authority·binding / Gateway·신원 공급 | 기존 `/srv/xenova/drive-control`, `/run/xenova/drive-bindings.json`, 단일 Gateway lease와 현재 host 검증 | package hook의 initialize/backup 복원/자동 이동 없음. 설치·프로세스 생존이 재무장·출력 허가가 아님 |

@@ -73,8 +73,8 @@ def scene_input_probe(tmp_path_factory):
         (include/name).write_text('#include <xenova/drive_runtime.h>\n')
     (include/'zephyr/logging/log.h').write_text('#define LOG_LEVEL_INF 3\n#define LOG_MODULE_REGISTER(...)\n#define LOG_INF(...) test_log(__VA_ARGS__)\n')
     source=directory/'scene-input.c'
-    # 이 회귀는 진단 filter를 켜지 않으므로 원 harness의 미사용 상태만 제외한다.
-    prefix=HARNESS.split('int main(',1)[0]
+    # Scene 전용 main에서 호출하지 않는 원 harness의 진단 상태와 budget 시험을 제외한다.
+    prefix=HARNESS.split('static void budget_handoff(',1)[0]
     assert prefix.count('static int test_log_filtered;')==1
     source.write_text(prefix.replace('static int test_log_filtered;','',1)+SCENE_MAIN)
     world=HOME/'world';mqtt=HOME.parent/'common/xenova-mqtt-c'

@@ -47,6 +47,11 @@ public class VmStateTracker {
         busy.remove(vmId);
     }
 
+    // A Spring create/start/stop/delete is in flight for the VM.
+    public boolean inOperation(String vmId) {
+        return busy.contains(vmId);
+    }
+
     // Taken just before the VM list is read.
     public long mark() {
         return sequence.get();

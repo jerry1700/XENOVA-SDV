@@ -90,3 +90,23 @@ WSL2 Ubuntu 준비 호스트에서 공식 Debian 13 ARM64 입력의 SHA-512를 `
 - `audio/interaction-theme.mp3`: 289226 bytes, SHA-256 `a5acc1edfd36502a024116fdff8b5b5877763563fb9c29ce172aa31dc662199c`
 
 `verify-xenova-template.py`의 전체 root 해시, read-only ext4 검사, Xenova 준비 상태와 공유 신원 제거 검사를 통과했다. MP3와 `xenova-guest-display.target`, `xenova-guest-display-app.service` enable 링크도 root.raw 내부에서 확인했다. 실제 보드 catalog 게시, VM 부팅, SSH listener와 HDMI 재생 검증은 아직 수행하지 않았다.
+
+## 7. Debian Interaction 1.0.8 빌드
+
+1.0.7 보드 검증에서 음원이 재생되지 않았다. 화면은 `public/`의 고정 경로 `/audio/interaction-theme.mp3`를 불렀지만, VM guest app은 `/assets/` 아래 허용 확장자만 서비스해 404를 냈다. 이미지 안에 MP3가 있는지만 확인하고 실제로 서비스되는지는 확인하지 않아 놓쳤다.
+
+- frontend `40e5980f`: 음원을 import해 `assets/interaction-theme-<hash>.mp3`로 내보낸다.
+- platform: `1a6dec7f`(guest app·휴대폰 relay가 `/assets/*.mp3` 허용)가 들어간 `platform` 기준으로 빌드했다.
+- 템플릿 준비 도구가 guest app의 `ASSET` 허용 규칙을 읽어, 서비스할 수 없는 화면 파일(`index.html`, `favicon.*` 제외)이 있으면 빌드를 거부한다. 1.0.7 화면 빌드(`b4f0d9a1`)는 이 검사에서 `audio/README.txt`로 거부되고, `40e5980f`는 통과한다.
+
+WSL2 Ubuntu 준비 호스트에서 1.0.7과 같은 공식 Debian 입력(`sources.lock.json` 대조)과 명령으로 생성했다. 기존 1.0.7은 수정하지 않았다.
+
+- template manifest SHA-256: `69b5d0677090f57f2ecc2d8aa245c4385a1abbe892e20d5b18209e57ff13b36e`
+- root SHA-256: `da4083afe63ef917e56d0b5712ccd6379c97abf1d7e955a8be13c31223492913`
+- board bundle SHA-256: `97888631cc2fe28e620954f2d961d88cb9c87a4f7441bb58d9855ef1e2f44418` (`debian-13-arm64-1.0.8.tar.gz`, GNU sparse tar, 534267491 bytes). 보드에 zstd가 없어 gzip으로 만들고, busybox tar 대신 키트의 `extract-template.py`(Python tarfile, sparse 유지)로 푼다.
+- frontend revision: `40e5980ff024eedc529c40ccc9e2c8eb57366e6f`
+- frontend tree SHA-256: `0278a688397ef6069151819524670554b7b23496ef9af6cb2cee496661cd15f4`
+- frontend bytes: `931835`
+- `assets/interaction-theme-BL9Fpv_x.mp3`: 289226 bytes, SHA-256 `a5acc1edfd36502a024116fdff8b5b5877763563fb9c29ce172aa31dc662199c`(1.0.7과 같은 음원)
+
+`verify-xenova-template.py`를 통과했다(`xenova_layout`, `shared_guest_identity_absent` true). root.raw 안에서 `/opt/xenova/display-web/assets/interaction-theme-BL9Fpv_x.mp3`, mp3를 허용하는 `guest_app.py`, `xenova-guest-display.target` enable 링크를 확인했다. 번들은 키트 스크립트로 다시 풀어 `template.json`과 root.raw 해시가 위 값과 같음을 확인했다. 보드 catalog 게시, VM 부팅, HDMI 재생 검증은 아직 수행하지 않았다(`guest_boot_tested`, `ssh_listener_tested` false).

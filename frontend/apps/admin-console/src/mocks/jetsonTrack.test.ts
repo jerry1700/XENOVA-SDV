@@ -89,7 +89,9 @@ describe('Jetson 시험 코스', () => {
     const T = s.T;
     expect(decide(T, perceive(T, { ...s.car }, []), null).target).toBe(-0.1425);
     expect(steerLimit(T)).toBeCloseTo(Math.atan(0.2 / 0.55), 12);
-    const [[back, south], , [mouth, north]] = demo.layout!.parking_slots[0]!.outline;
+    const outline = demo.layout!.parking_slots[0]!.outline;
+    const [back, south] = outline[0]!;
+    const [mouth, north] = outline[2]!;
     const x = (back + mouth) / 2;
     const y = (south + north) / 2;
     const car = { ...s.car, x, y, yaw: 0 };

@@ -44,6 +44,7 @@ export function onSessionChange(listener: Listener): () => void {
 export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
   body?: unknown;
+  headers?: Record<string, string>;
   /** 인증 API(/api/v1/auth/**)는 토큰을 붙이지 않고 재발급도 하지 않는다 */
   auth?: boolean;
   signal?: AbortSignal;
@@ -56,7 +57,7 @@ async function parse<T>(response: Response): Promise<T> {
 }
 
 async function send(path: string, options: RequestOptions): Promise<Response> {
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', ...options.headers };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (options.auth !== false && session) headers.Authorization = `Bearer ${session.access_token}`;
   try {

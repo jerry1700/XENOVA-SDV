@@ -64,11 +64,12 @@ function memoryTelemetry(
       status: 'ok',
       source_rc: 0,
     },
+    // 관리 RAM 요약은 host_provisioned(세 ID 모두 있음) 또는 unbound(모두 없음) 문맥만 믿는다 (domain/managedRam identity)
     context: {
-      binding: 'mock',
+      binding: 'host_provisioned',
       host_boot_id: 'mock-host-boot',
       execution_id: `mock-exec-${vmId}`,
-      receipt_id: null,
+      receipt_id: `mock-receipt-${vmId}`,
     },
   };
 }
@@ -85,6 +86,25 @@ function poolValues(region: 'net_rx_data' | 'net_tx_data', usedBytes: number): M
 const HEAP_INTERVAL_MS = 10_000;
 const HEAP_SAMPLES = 30;
 const HEAP_ACCOUNTED = 48 * 1024;
+
+/**
+ * Zephyr 관리 RAM (memory.firmware.* · memory.page_allocator.free_bytes). 검증 규칙 image ≤ mapped, mapped + free ≤ total 을 지킨다.
+ * 구성: 정적 데이터 200 KiB, 펌웨어 이미지(mapped − image) 약 1.9 MiB, 할당 페이지(committed − mapped) 약 0.5 MiB (VM A 는 조금씩 증가)
+ */
+const RAM_TOTAL = 4 * 1024 * 1024;
+const RAM_STATIC = 200 * 1024;
+const RAM_MAPPED = RAM_STATIC + 1946 * 1024;
+
+function ramValues(busy: boolean, index: number): MetricValue[] {
+  const allocated = 512 * 1024 + (busy ? index * 4 * 1024 : (index % 3) * 4 * 1024);
+  const free = RAM_TOTAL - RAM_MAPPED - allocated;
+  return [
+    metric('memory.firmware.ram_region_bytes', RAM_TOTAL, 'bytes', {}),
+    metric('memory.firmware.mapped_bytes', RAM_MAPPED, 'bytes', {}),
+    metric('memory.firmware.static_data_bytes', RAM_STATIC, 'bytes', {}),
+    metric('memory.page_allocator.free_bytes', free, 'bytes', {}),
+  ];
+}
 
 /**
  * Zephyr 커널 heap 표본(최근 5분, 10초 간격). 실제 Publisher 처럼 memory 계열만 담은 별도 표본이다.
@@ -113,6 +133,7 @@ export function mockKernelHeapSamples(vmId: string, now = Date.now()): MetricSam
         metric('memory.kernel_heap.free_bytes', HEAP_ACCOUNTED - used, 'bytes'),
         metric('memory.kernel_heap.high_water_bytes', highWater, 'bytes'),
         metric('memory.kernel_heap.accounted_bytes', HEAP_ACCOUNTED, 'bytes'),
+        ...ramValues(busy, index),
       ],
     };
   });
@@ -409,6 +430,50 @@ export function mockAppMemorySamples(vmId: string, now = Date.now()): MetricSamp
     }));
     return [automatic, ...manual];
   }).flat();
+}
+
+const CPU_INTERVAL_MS = 10_000;
+const CPU_SAMPLES = 30;
+
+/**
+ * Zephyr CPU 표본(최근 5분, 10초 간격). Telemetry 2.1 CPU 페이지처럼 cpu.system.percent 1개와
+ * 스레드별 cpu.thread.percent(labels: thread_id·thread_name·name_truncated)를 한 표본에 담는다.
+ * VM A(주 구동)는 계산 부하로 조금 높게, VM B(백업)는 대기라 낮게.
+ */
+export function mockZephyrCpuSamples(vmId: string, now = Date.now()): MetricSample[] {
+  const busy = vmId === VM_IDS.autonomous;
+  return Array.from({ length: CPU_SAMPLES }, (_, index) => {
+    const wave = Math.sin(index / 3);
+    const system = Math.round((busy ? 34 + 6 * wave : 9 + 2 * wave) * 10) / 10;
+    const threads: [string, string, number][] = [
+      ['2', 'drive_worker', busy ? system * 0.6 : system * 0.3],
+      ['3', 'telemetry', busy ? 4.2 : 3.1],
+      ['4', 'net_rx', busy ? 2.4 : 1.2],
+      ['5', 'idle', Math.max(0, 100 - system)],
+    ];
+    const observedAt = new Date(
+      now - OBSERVATION_DELAY_MS - (CPU_SAMPLES - 1 - index) * CPU_INTERVAL_MS,
+    ).toISOString();
+    return {
+      sample_id: `cpu-${vmId}-${index}-${now}`,
+      vm_id: vmId,
+      boot_id: `mock-boot-${vmId}`,
+      source: 'zephyr_telemetry',
+      observed_at: observedAt,
+      received_at: observedAt,
+      window_ms: 1000,
+      values: [
+        metric('cpu.system.percent', system, 'percent'),
+        ...threads.map(([id, name, value]) =>
+          metric('cpu.thread.percent', Math.round(value * 10) / 10, 'percent', {
+            thread_id: id,
+            thread_name: name,
+            name_truncated: 'false',
+          }),
+        ),
+      ],
+    };
+  });
 }
 
 const NETWORK_INTERVAL_MS = 2000;

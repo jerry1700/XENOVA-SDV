@@ -1,29 +1,211 @@
+/* Console 탭 실행 로그. Memory·Network 탭과 같은 규칙: 작은 영문 소제목, 색 점 상태, 토큰 색만 */
 .panel {
   display: grid;
+  gap: var(--x-space-2);
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
   gap: var(--x-space-3);
 }
+
+.heading {
+  display: grid;
+  gap: 2px;
+}
+
+.heading h2 {
+  margin: 0;
+  font-size: var(--x-text-lg);
+}
+
+.eyebrow {
+  color: var(--x-primary);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
 .controls {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
   gap: var(--x-space-4);
+  font-size: var(--x-text-sm);
 }
-.controls h2 {
-  margin-right: auto;
-}
+
 .controls label {
   display: inline-flex;
   align-items: center;
   gap: var(--x-space-2);
+  cursor: pointer;
 }
+
+/* 상태 한 줄: 조회 상태 + 수집 소스 칩 */
+.statusRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--x-space-2) var(--x-space-4);
+  font-size: var(--x-text-sm);
+}
+
+.sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--x-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sources .dot {
+  padding: 2px var(--x-space-2);
+  border: 1px solid var(--x-border);
+  border-radius: 999px;
+  background: var(--x-surface-2);
+  color: var(--x-text-muted);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  font-weight: 500;
+}
+
+.dot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--x-space-1);
+  color: var(--x-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dot i {
+  width: 0.6em;
+  height: 0.6em;
+  flex: none;
+  border-radius: 50%;
+  background: var(--x-stopped);
+}
+
+.dot[data-tone='ok'] i {
+  background: var(--x-ok);
+}
+
+.dot[data-tone='recovering'] i {
+  background: var(--x-recovering);
+}
+
+.dot[data-tone='fault'] i {
+  background: var(--x-fault);
+}
+
+.dot[title] {
+  cursor: help;
+}
+
+.detail,
+.hint {
+  margin: 0;
+  color: var(--x-text-muted);
+  font-size: var(--x-text-xs);
+}
+
+.detail {
+  color: var(--x-fault);
+}
+
+.hint {
+  cursor: help;
+}
+
+.alert {
+  margin: 0;
+  padding: var(--x-space-1) var(--x-space-3);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-recovering-soft);
+  color: var(--x-recovering);
+  font-size: var(--x-text-sm);
+}
+
+/* 로그 출력: 행마다 같은 열 위치 (시각 | 레벨 | 소스/컴포넌트 | VM | 메시지) */
 .output {
   height: 320px;
   overflow: auto;
+  border: 1px solid var(--x-border);
+  border-radius: var(--x-radius-sm);
+  background: var(--x-surface-sunken);
+  color: var(--x-text);
+  font-family: var(--x-font-mono);
+  font-size: var(--x-text-xs);
+  line-height: 1.6;
+}
+
+.output ol {
+  margin: 0;
+  padding: var(--x-space-2) 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 12ch 7ch minmax(0, 18ch) minmax(0, 10ch) minmax(0, 1fr);
+  gap: var(--x-space-3);
+  align-items: baseline;
+  padding: 1px var(--x-space-3);
+}
+
+.row:hover {
+  background: color-mix(in srgb, var(--x-text) 5%, transparent);
+}
+
+.row time {
+  color: var(--x-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.level {
+  justify-self: start;
+  padding: 0 var(--x-space-1);
+  border-radius: 4px;
+  background: var(--x-stopped-soft);
+  color: var(--x-text-muted);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.level[data-tone='ok'] {
+  background: var(--x-ok-soft);
+  color: var(--x-ok);
+}
+
+.level[data-tone='recovering'] {
+  background: var(--x-recovering-soft);
+  color: var(--x-recovering);
+}
+
+.level[data-tone='fault'] {
+  background: var(--x-fault-soft);
+  color: var(--x-fault);
+}
+
+.cell {
+  overflow: hidden;
+  color: var(--x-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message {
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.empty {
+  margin: 0;
   padding: var(--x-space-3);
-  background: #10151c;
-  color: #dce6ef;
-  font-size: 12px;
-  line-height: 1.6;
+  color: var(--x-text-muted);
 }

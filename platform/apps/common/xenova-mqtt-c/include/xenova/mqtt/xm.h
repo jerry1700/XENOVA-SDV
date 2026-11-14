@@ -257,6 +257,24 @@ int xm_auto_delay_command_parse(struct xm_span payload, struct xm_auto_delay_com
 int xm_auto_delay_result_json(char *out, size_t n, const struct xm_auto_delay_command *command,
 			      const char *status, uint64_t duration_ms, const char *error_code);
 
+struct xm_auto_input_fault_command {
+	char command_id[129], operation_id[129], expected_boot_id[XM_UUID_LEN + 1];
+	uint32_t duration_s;
+};
+int xm_auto_input_fault_command_parse(struct xm_span payload, struct xm_auto_input_fault_command *out);
+int xm_auto_input_fault_result_json(char *out, size_t n, const struct xm_auto_input_fault_command *command,
+				    const char *status, uint64_t duration_ms, const char *error_code);
+
+/* Test-only Zephyr VM crash command. The command has no parameters; identity
+ * and idempotency fields follow the same closed MQTT command envelope used by
+ * auto_delay. */
+struct xm_vm_crash_command {
+	char command_id[129], operation_id[129], expected_boot_id[XM_UUID_LEN + 1];
+};
+int xm_vm_crash_command_parse(struct xm_span payload, struct xm_vm_crash_command *out);
+int xm_vm_crash_result_json(char *out, size_t n, const struct xm_vm_crash_command *command,
+			    const char *status, const char *error_code);
+
 #ifdef __cplusplus
 }
 #endif

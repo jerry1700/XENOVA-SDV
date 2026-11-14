@@ -29,8 +29,8 @@
 
 ## 부팅 진행·지연·실패 표시
 
-화면을 사용할 수 있게 된 뒤 `xenova-boot-status.service`가 systemd와 현재 부팅의
-보조 진행 기록을 읽어 로그인 전 안내문을 갱신한다. VM을 시작·정지하거나 준비 여부를
+부팅 중 `xenova-boot-status.service`가 systemd와 현재 부팅의
+보조 진행 기록을 읽어 상태와 실패 이력을 저장한다. VM을 시작·정지하거나 준비 여부를
 판정하는 서비스가 아니다. 표시기 없이도 기존 부팅과 로그인이 진행된다. 커널·PID1 정지나 표시기 실행 전 문제를
 이 서비스가 관측할 수 있다고 가정하지 않는다.
 
@@ -72,33 +72,26 @@ dom0 Linux의 `console=hvc0`는 Xen PV 콘솔 경로이며 Xen의 `console=dtuar
 정상 U-Boot 경로는 `/chosen` 전체를 출력하지 않는다. `xenova_debug=1`일 때만
 Xen·dom0의 bootargs 두 속성을 출력하며 firmware 난수 seed는 덤프하지 않는다.
 
-HDMI의 텍스트 VT는 기존 `getty@tty1`과 agetty가 소유한다. 표시기는 VT를 직접 열거나
-전환하지 않고 `/run/issue.d/90-xenova.issue`와 agetty의 reload trigger만 갱신한다.
-agetty는 입력 전의 로그인 안내문만 다시 읽고, 사용자 이름의 첫 문자를 읽으면 갱신을
-멈춘다. 암호 입력·로그인 셸에 별도 출력을 주입하지 않는다. 키 입력을 기다리는
-새 부팅 장벽도 없다. SSH 명령 출력과 셸 초기화는 변경하지 않는다.
+HDMI 텍스트 로그인은 `getty@tty1`, 시리얼 케이블 로그인은 `serial-getty@hvc0`가
+담당한다. 각 콘솔의 agetty가 시작할 때 기존 XENOVA 배너와 로그인 프롬프트를 표시한다.
+부팅 상태 서비스는 로그인 안내를 다시 그리지 않는다. Xen 이미지는 dom0에 노출되지
+않는 `ttyS0`용 getty 자동 시작 링크를 제거한다.
 
-초기 VT의 한글 폰트 지원을 전제하지 않으므로 로그인 전 안내는 ASCII다. 상세 명령은
-UTF-8 표시 이름을 보존한다. 한글 렌더러가 없는 VT에서 실제 한글 모양을 그리는
-기능을 추가한 것은 아니다. hvc0의 기존 agetty에도 같은 평문 안내가 표시될 수 있다.
-표시기는 ANSI 재출력·강제 VT 전환·PAM·계정·mount namespace를 변경하지 않는다.
-
-별도로 설치한 kmscon이나 그래픽 키오스크는 자신의 화면을 계속 소유한다. 이 표시기는
-그 화면을 덮거나 전환하지 않는다. 해당 렌더러에서 issue를 읽지 않으면 자동 안내가
-보이지 않으며, 기존 로그인·SSH에서 아래 명령으로 조회한다. 실제 HDMI 인계 수락은
-설치된 renderer·getty 구성과 물리 화면을 함께 확인해야 한다.
-
-고정 getty는 sysinit 뒤에 시작한다. 따라서 그 이전 저장소 준비가 오래 걸리면 보조
-진행 기록은 쌓여도 HDMI에는 getty 시작 후에 표시된다. 이 구간의 실시간 HDMI 진행은
-현재 지원 범위가 아니며 hvc0의 기본 오류 경로를 사용한다. 표시기를 일찍 실행하는 것과
-화면 renderer가 일찍 준비되는 것은 별개다.
+부팅 진행과 실패 이력은 로그인 후 아래 명령으로 조회한다. 상세 명령은 UTF-8 표시
+이름을 보존하며, ASCII가 필요한 터미널에서는 `--ascii`를 쓸 수 있다. 그래픽 키오스크는
+자신의 화면을 계속 소유한다.
 
 `systemd.show_status=true`는 간결한 unit 시작·종료 상태 전체를, `error`는 실패 상태를
 표시한다. `auto`는 평소 조용히 있다가 상당한 부팅 지연이 생기면 표시를 켠다.
 현재 기본값은 `error`를 유지하며 이 선택은 journal 수집 수준과 다르다.
-의미의 근거는 [systemd 문서](https://www.freedesktop.org/software/systemd/man/latest/systemd.html#systemd.show_status)와
-[agetty 구현](https://github.com/util-linux/util-linux/blob/v2.41.5/term-utils/agetty.c)의
-입력 전 issue 갱신 경계다.
+의미의 근거는 [systemd 문서](https://www.freedesktop.org/software/systemd/man/latest/systemd.html#systemd.show_status)다.
+
+### 재부팅 뒤 dom0 저널 확인
+
+Pi 4 이미지는 `/var/log/journal`을 dom0 rootfs의 `/var/log-persistent/journal`에
+연결한 뒤 기존 `systemd-journal-flush.service`로 초기 로그를 옮긴다.
+저널 보관 상한은 64MiB, 파일 단위 상한은 8MiB다. 다음 부팅에서
+`journalctl -b -1`로 이전 부팅을 확인한다.
 
 ### 자세히 확인하기
 
@@ -125,15 +118,11 @@ unit 실행의 성공을 현재 것으로 사용하지 않는다. `/run/xenova/b
 둘 다 관리 원장이나 영구 보관소가 아니다. 진행 게시 실패는 기존 필수 journal·결과
 저장·JSON stdout을 바꾸지 않는다. 원인 문자열 전체나 인증 설정은 화면에 싣지 않는다.
 
-표시 서비스는 5초 간격으로 최대 600초 동안 관측하고, 상태 변화에 안내문을 갱신한다.
-지연의 경과시간만 바뀌면 최대 30초 간격으로 갱신한다. 종료 뒤에도 마지막 안내는
-남지만 현재 상태의 보장이 아니므로 상세 명령으로 다시 읽는다. 실패 요약을 남기기
-위해 로그인이나 정상 VM을 막지 않는다. 표시용 데이터가 불완전하면 그 한계를 표시한다.
+상태 서비스는 5초 간격으로 최대 600초 동안 관측한다. 종료 뒤에도 마지막 보조 상태는
+남고, 현재 상태는 상세 명령으로 다시 읽는다. 데이터가 불완전하면 그 한계를 표시한다.
 
-표시만 중지하려면 `systemctl disable --now xenova-boot-status.service`를 사용한다.
-기존 VM·부팅 unit·getty에는 중지 의존성이 없다. 안내 파일까지 없애려면 표시기를
-중지한 뒤 **표시기 소유 파일** `/run/issue.d/90-xenova.issue`만 제거하고
-`agetty --reload`를 실행한다. `/etc/issue`나 기존 로그인 설정은 건드리지 않는다.
+자동 관측을 중지하려면 `systemctl disable --now xenova-boot-status.service`를 사용한다.
+기존 VM·부팅 unit·getty는 독립적으로 실행된다.
 
 
 배포 파일·의존성·설정 공급·내부 reader/writer 교체와 Gateway의 비활성 unit은 [배포 준비](deployment-readiness.md)를 따른다.
@@ -158,6 +147,18 @@ unit의 `After/Before`는 순서를 지정하고 `Requires/Wants`는 함께 시�
 종료 guard를 Requires+After로 요구하고, CPU 준비는 Wants+After로 연결한다.
 CPU 정책이 활성화되면 모든 수동/자동 start·reboot·recover_once가 현재 host 준비와
 실제 배치를 다시 검사하므로, 준비 서비스의 active 표시만으로 시작을 허가하지 않는다.
+
+선택적 UTC 기준 제공과 콘솔 증거 수집은 각각
+`xenova-telemetry-clock.service`·`xenova-telemetry-evidence.service`가 수행한다.
+두 unit은 데이터 마운트 외에 `Requisite=xenova-first-boot.service`와
+`After=xenova-first-boot.service`를 함께 사용한다. 최초 등록이 진행 중이면 그
+작업 뒤에 실행되고, 등록이 실패했거나 활성 상태가 아니면 수집 명령을 실행하지 않는다.
+first-boot는 성공 후 활성 상태를 유지하는 oneshot이다. 이 의존성은 first-boot를
+수집기에서 새로 시작하거나 중단된 등록을 대신 복구하지 않는다.
+타이머의 `OnBootSec=10`은 실행 시도 시각이며 등록 성공의 근거가 아니다.
+VM autostart는 이 두 수집기의 완료를 기다리지 않는다.
+`storage_check()`의 실제 설치·마운트 검증도 그대로 적용된다.
+
 
 CPU 준비 서비스에는 VM으로 중지 전파를 일으키는 PartOf/BindsTo나 ExecStop이 없다.
 재시작이 실행 중 VM을 종료하거나 affinity를 초기화하지 않는다. 네트워크가 필요 없는
@@ -217,17 +218,20 @@ factory seed·초기화/grow 정책은 이 통합으로 바꾸지 않는다.
 
 ## 최초 등록과 매 부팅 준비
 
-일반 생성과 factory의 자격/등록-only 통지는 [공급 계약](../contracts/vm-provisioning-v1.md)을 따른다.
+일반 생성과 factory의 자격 공급·등록 명세는 [공급 계약](../contracts/vm-provisioning-v1.md)을 따른다.
 factory의 UUID 계획 뒤 대상 lease를 유지하고 해시/guest I/O 동안 공통 관리 잠금을 반환한다.
-local 등록 완료 뒤 선택 로컬 FastAPI 후속을 시작하며 HTTP 응답을 부팅/다른 VM 제어의 선행조건으로 두지 않는다.
-현재 first-boot는 complete 기회 소비 후 common/대상 FD를 반환하고 helper로 일시 통지 job을 비동기 예약한다.
-job은 API의 `Type=notify` READY 뒤 실행한다. 기존 autostart→host admission→API 순서는 유지하므로,
-부팅/autostart가 통지를 기다리는 역방향 의존은 없다. API의 listen 성공 뒤부터 기존 15초 송신 예산을 사용한다.
-API 실패/중단·재시작·다음 boot에서 job을 재생성하지 않는다. dependency restart의 재진입도 같은 boot의
-배타 실행 표식으로 차단한다. 표식/대기 job은 영속 재시도 큐가 아니며 원 progress의 내구 소비는 그대로다.
-Spring 송신·토큰은 FastAPI가 소유한다.
-[설정·교체·기동 경계](deployment-readiness.md#registration-api)를 따른다.
-완료 boot/replay는 자동 통지 기회를 보충하지 않는다. broker는 첫 등록 뒤 기존 bridge/mount 조건으로 기동한다.
+first-boot는 로컬 등록을 확정하고 기존 autostart에 인계한다. 자동 외부 통지나 일시 통지 job을
+예약하지 않으며 네트워크·Tailscale·Spring 응답을 최초 설치의 완료 조건으로 두지 않는다.
+기존 autostart → host admission → API 순서는 유지한다.
+
+설치 후 운영자가 기본 네트워크와 필요한 Tailnet 접속·Spring 자격을 설정한 뒤,
+기존 등록 조회와 인증된 수동 notify API로 서버 등록을 요청한다. 로컬 설치 완료와
+서버의 `confirmed`는 별개다. API 기동·재시작이나 완료 boot가 factory 등록을 자동 보충하지 않는다.
+과거 progress·통지 결과는 보존하며 새 자동 통지 기회로 재해석하지 않는다.
+
+일반 VM create의 선택적 통지는 원 journal의 기회 소비와 잠금 반환 뒤 기존 helper로 수행한다.
+Spring 송신·토큰은 FastAPI가 소유한다. [설정·교체·기동 경계](deployment-readiness.md#registration-api)를 따른다.
+broker는 첫 로컬 등록 뒤 기존 bridge/mount 조건으로 기동한다.
 
 최초 설치는 seed·카탈로그·identity plan으로 UUID/MAC와 자산을 확정한다. 중단 후에는
 같은 plan을 재개한다. 서비스 재시도나 최신 코드 설치를 이유로 신원을 다시 발급하거나

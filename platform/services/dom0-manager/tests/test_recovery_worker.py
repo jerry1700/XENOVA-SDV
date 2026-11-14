@@ -1,12 +1,15 @@
 """관측 어댑터·MQTT 연결·감시 루프 (S15P31E110-124). 실제 브로커·플랫폼은 없다."""
 
 import queue
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 from dataclasses import replace
 from uuid import UUID
 
 import pytest
 
+from dom0_manager.drivers.platform import SerializedManager
 from dom0_manager.drivers.xl import Xl
 from dom0_manager.errors import PlatformUnavailable
 from dom0_manager.models import VmState
@@ -476,14 +479,15 @@ def test_worker_collects_engine_results_even_when_observation_fails():
     calls = []
     engine = SimpleNamespace(on_judgment=lambda j, now: calls.append(("judgment", j.vm_id)), tick=lambda now: calls.append(("tick", now)),
                              observation_unavailable=lambda: calls.append(('unavailable',)),
-                             collect=lambda now: calls.append(("collect", now)), shutdown=lambda: calls.append(("shutdown",)))
+                             collect=lambda now, *, observations_available: calls.append(("collect", now, observations_available)),
+                             shutdown=lambda: calls.append(("shutdown",)))
 
     def observer():
         raise PlatformUnavailable("busy")
 
     worker = RecoveryWorker(SETTINGS, observer, Watcher(SETTINGS, HeartbeatTable(), AppHeartbeatTable(), clock=lambda: clock[0]),
                             link=LinkState.up, engine=engine, clock=lambda: clock[0])
-    assert worker.run_once() == [] and calls == [('unavailable',), ("collect", 1000.0)]  # 안정 근거를 끊고 원 결과는 회수한다.
+    assert worker.run_once() == [] and calls == [('unavailable',), ("collect", 1000.0, False)]
     worker.shutdown()
     assert calls[-1] == ("shutdown",)
 
@@ -653,6 +657,99 @@ def test_worker_does_not_clear_health_on_a_partial_intent_response():
         worker.run_once()
     assert client.cleared == [] and watcher.health(ZEPHYR) is not None
 
+
+
+def test_pending_registration_keeps_other_intents_eligible_and_recovers_on_refresh():
+    pending = _view(STOPPED, "pending", desired="unknown", applicable=False, revision=None)
+    manager = FakeManager([_view(DEBIAN, "debian-dev"),
+                           _view(ZEPHYR, "zephyr-drive-a", kind="zephyr"),
+                           {**pending, "registration_pending": True}])
+    observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents")
+
+    observations = {o.vm_id: o for o in observer()}
+    assert observer.intent_known
+    assert observations[DEBIAN].eligible and observations[ZEPHYR].eligible
+    assert not observations[STOPPED].intent_known and not observations[STOPPED].eligible
+
+    manager.views[2] = {**_view(STOPPED, "pending"), "registration_pending": True}
+    assert not any(o.intent_known for o in observer())
+    assert not observer.intent_known
+
+    manager.views[2] = _view(STOPPED, "pending", desired="stopped")
+    observations = {o.vm_id: o for o in observer()}
+    assert observer.intent_known and observations[STOPPED].intent_known
+    assert not observations[STOPPED].eligible
+
+
+def test_pending_registration_does_not_block_another_vm_crash_judgment():
+    clock = [1000.0]
+    pending = {**_view(STOPPED, "pending", desired="unknown", applicable=False, revision=None),
+               "registration_pending": True}
+    manager = FakeManager([_view(DEBIAN, "debian-dev", xen_state="crashed", domid=1), pending])
+    xl = FakeRunner({("xl", "list", "-v"): XL_LIST_V.replace("-b----", "---sc-", 1)})
+    observer = PlatformObserver(manager, Xl(xl), intent_action="recovery-intents", clock=lambda: clock[0])
+    watcher = Watcher(SETTINGS, HeartbeatTable(), AppHeartbeatTable(),
+                      confirm=observer.confirm, clock=lambda: clock[0])
+    client = FakeClient()
+    worker = RecoveryWorker(SETTINGS, observer, watcher, link=lambda: link_state(client),
+                            health_publisher=HealthPublisher(client), clock=lambda: clock[0])
+    judged = worker.run_once()
+    assert [(j.vm_id, j.reason) for j in judged] == [(DEBIAN, FailureReason.DOMAIN_CRASHED)]
+    assert watcher.health(STOPPED).state == HealthState.OBSERVATION_UNAVAILABLE
+    assert not watcher.health(STOPPED).intent_known and client.cleared == []
+    clock[0] += 5
+    worker.run_once()
+    assert client.cleared == []
+
+
+def test_recovery_intents_falls_back_once_to_the_existing_read_contract():
+    class OlderManager(FakeManager):
+        def call(self, action, spec=None, **kwargs):
+            if action == "recovery-intents":
+                self.calls.append((action, spec))
+                return {"ok": False, "error": {"code": "INVALID_SPEC", "message": "unsupported management action",
+                                               "retryable": False, "details": {}}}
+            return super().call(action, spec, **kwargs)
+
+    manager = OlderManager([_view(DEBIAN, "debian-dev")])
+    observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents")
+    assert observer()[0].intent_known and observer()[0].intent_known
+    assert [action for action, _ in manager.calls] == ["recovery-intents", "intents", "templates", "intents"]
+
+
+def test_periodic_intent_refresh_continues_during_recover_once():
+    clock = [0.0]
+    started, release = Event(), Event()
+
+    class RecoveringManager(FakeManager):
+        def fork(self):
+            return FakeManager(self.views)
+
+        def call(self, action, spec=None, **kwargs):
+            if action != "recover_once":
+                return super().call(action, spec, **kwargs)
+            started.set()
+            assert release.wait(5)
+            return {"ok": True}
+
+    inner = RecoveringManager([_view(DEBIAN, "debian-dev")])
+    manager = SerializedManager(inner, busy_timeout_s=0.05)
+    observer = PlatformObserver(manager, Xl(_runner()), intent_action="recovery-intents", clock=lambda: clock[0])
+    assert observer()[0].desired_state == "running"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        recovery = pool.submit(manager.call, "recover_once", execute=True)
+        try:
+            assert started.wait(5)
+            inner.views[0] = _view(DEBIAN, "debian-dev", desired="stopped", revision=3)
+            clock[0] = 60.0  # 템플릿 갱신도 due인 관측 주기
+            observations = observer()
+            assert observer.intent_known and observations[0].intent_known
+            assert (observations[0].desired_state, observations[0].intent_revision) == ("stopped", 3)
+            assert not recovery.done()
+        finally:
+            release.set()
+        assert recovery.result()["ok"]
 
 
 def test_intent_rows_without_an_applicable_intent_are_valid():

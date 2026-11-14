@@ -228,7 +228,14 @@ class RejoinCoordinator:
                             self._futures[vm]=self._executor.submit(self._work,vm,initial_row=rows[vm])
             if self.observe_many is not None:
                 if not self._stop.is_set() and self._batch is None:
-                    targets=tuple(vm for vm in self.vm_ids if vm not in self._futures and now>=self._due.get(vm,0))
+                    idle=tuple(vm for vm in self.vm_ids if vm not in self._futures)
+                    targets=tuple(vm for vm in idle if now>=self._due.get(vm,0))
+                    if len(targets)==1 and len(idle)==2 and all(
+                            self._rows.get(vm,{}).get('status')=='observed' and
+                            self._due.get(vm,0)<=now+1 for vm in idle):
+                        # After a split, bring the idle healthy peer into this round.
+                        # The due VM never waits, and failed or busy peers keep their own cadence.
+                        targets=idle
                     if targets:
                         # One request-local snapshot uses the existing executor;
                         # due subsets preserve each VM's failure backoff.

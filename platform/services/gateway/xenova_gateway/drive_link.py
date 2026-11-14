@@ -108,6 +108,10 @@ class DriveLinkProvider:
         self._scene=None
         self.vehicle_history=OrderedDict();self.vehicle_origin=None
         io.configure(runner.authority.host,self.instance)
+        self._read_vehicle_sample = getattr(runner, 'vehicle_sample', self._vehicle_sample_from_view)
+
+    def _vehicle_sample_from_view(self):
+        return self.runner.device_view().get('vehicle_sample')
 
     def reject(self,reason):
         self.rejected+=1;self.reasons[reason]=self.reasons.get(reason,0)+1
@@ -185,19 +189,21 @@ class DriveLinkProvider:
                 ('vehicle','map_epoch','frame_epoch','odom_epoch','configuration','calibration','primitive')):
             return self.reject('SCENE_SOURCE')
         value=schema.DriveLink(major=2);value.scene_grant.CopyFrom(grant)
-        wire=encode(value);self._scene=raw,wire
+        wire=encode(value);self._scene=wire,grant.valid_until_pi_us,grant.lifecycle_state
         for vm in self.io.vms:self.io.offer(inbound(vm),wire,'scene')
         return True
 
     def _send_scene(self,vm):
         if self._scene is None:return
-        grant=decode(self._scene[0],schema.SceneGrant)
+        # Reuse only the fields derived from the validated immutable wire.
+        # Runtime authority and current expiry are still checked on every send.
+        wire,expires,state=self._scene
         runtime=getattr(self.runner,'scene_runtime',None)
         now=int(self.runner._clock()*1e6)
-        if (now>=grant.valid_until_pi_us or runtime is None
-                or grant.lifecycle_state==2 and runtime.motion_grant(now) is None):
+        if (now>=expires or runtime is None
+                or state==2 and runtime.motion_grant(now) is None):
             self.clear_scene();return
-        self.io.offer(inbound(vm),self._scene[1],'scene')
+        self.io.offer(inbound(vm),wire,'scene')
 
     def publish_mission(self,grant):
         """Actor delivery after the durable issuer's commit; this method issues no authority.
@@ -436,7 +442,7 @@ class DriveLinkProvider:
                     peer=(vm,binding['execution_id'],app_instance(binding,'autonomous'))
                     sample=self.vehicle_history.get(body.vehicle_sequence) if body.HasField('vehicle_sequence') else None
                     sample=None if sample is None else decode(sample,schema.VehicleSample)
-                    current=self.runner.device_view().get('vehicle_sample')
+                    current=self._read_vehicle_sample()
                     if (modern is None or not modern.episodes.supported(peer) or not body.HasField('calculation_sequence')
                             or not body.calculation_sequence or not body.vehicle_sequence or sample is None or current is None
                             or int(candidate['road_revision'])<int(saved[2]['road_revision']) or self.trust is None
@@ -497,7 +503,7 @@ class DriveLinkProvider:
             if type(item) is _DecodedIncoming:
                 self._receive(*item.arguments,decoded=True)
             else:self.receive(*item)
-        sample=self.runner.device_view().get('vehicle_sample')
+        sample=self._read_vehicle_sample()
         identity=None if sample is None else tuple(sample.get(k) for k in ('host_boot','device_session','odom_epoch','pi_session','sequence'))
         if sample and identity!=self.last_vehicle:
             body=schema.VehicleSample(major=1,**{**sample,'gateway_instance':self.instance})

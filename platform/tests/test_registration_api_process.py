@@ -85,7 +85,7 @@ class RegistrationApiProcessTest(unittest.TestCase):
             if self.process.poll() is not None:
                 self.fail(self.process.stdout.read().decode())
             try:
-                status,_=self.request('GET','/openapi.json',auth=False)
+                status,_=self.request('GET','/openapi.json')
                 if status==200:break
             except OSError:pass
             time.sleep(.02)
@@ -126,7 +126,8 @@ class RegistrationApiProcessTest(unittest.TestCase):
         self.assertEqual(self.calls,[])
         self.assertEqual(set(rows[0]),{'vm_id','name','guest_kind','template_id','template_version','vcpus','memory_mib','assigned_ipv4'})
         z=next(row for row in rows if row['guest_kind']=='zephyr');self.assertEqual(z['assigned_ipv4'],'192.168.77.90')
-        schema=self.request('GET','/openapi.json',auth=False)[1]
+        self.assertEqual(self.request('GET','/openapi.json',auth=False)[0],401)
+        schema=self.request('GET','/openapi.json')[1]
         self.assertEqual(schema['paths']['/api/v1/vm-registrations']['get']['responses']['200']['content']['application/json']['schema']['type'],'array')
         command=['curl','--silent','--show-error','--fail','-H','Authorization: Bearer '+TOKEN,
                  f'http://127.0.0.1:{self.port}/api/v1/vm-registrations']
@@ -259,7 +260,7 @@ class RegistrationApiProcessTest(unittest.TestCase):
                            time.monotonic()+hook.CALL_SECONDS,identity,api_unit=unit,unit_prefix=prefix+'-')
         return callback
 
-    def test_factory_api_failure_cancels_job_without_restart_refill_then_manual_recovers(self):
+    def test_legacy_deferred_api_failure_does_not_refill_then_manual_recovers(self):
         self.stop_api();unit,prefix,barrier=self.owned_api_unit(fails=True)
         callback=self.defer_to_owned_api(self.metadata['data'],self.metadata['run'],self.identity,unit,prefix)
         end=time.monotonic()+5
@@ -272,47 +273,54 @@ class RegistrationApiProcessTest(unittest.TestCase):
         self.start_api();time.sleep(.15);self.assertEqual(self.calls,[])
         self.assertTrue(self.notify()[1]['confirmed']);self.assertEqual(len(self.calls),1)
 
-    def test_factory_ready_after_old_budget_then_once_and_api_restart_does_not_requeue(self):
+    def test_factory_is_local_then_existing_api_allows_explicit_notification(self):
         self.stop_api()
         board=Board(self.root/'board');board.grow_mount();board.factory()
-        # factory 자산을 실제 서버가 읽는 등록부로 연결한다. guest 준비/실제 장치만 Board 대역이다.
-        # 새 서버에는 이 factory data를 읽는 product Manager를 선택한다.
-        os.environ['REGISTRATION_FACTORY_DATA']=str(board.p.data)
-        try:
-            unit,prefix,barrier=self.owned_api_unit()
-            import xenova_first_boot as boot
-            import xenova_vm as vm
-            from xenova_runtime import operation_lock
-            scheduled=[]
-            def automatic(data,runtime,record,*,wait_ready):
-                self.assertTrue(wait_ready)
-                # 부팅의 공통 잠금이 이미 반환된 실제 후속 경계다.
-                with operation_lock(runtime):pass
-                scheduled.append(self.defer_to_owned_api(data,runtime,record['uuid'],unit,prefix))
-            before=time.monotonic()
+        import xenova_first_boot as boot
+        import xenova_vm as vm
+        from xenova_runtime import operation_lock
+
+        def first_boot():
             with (patch.object(boot,'FirstBoot',return_value=board.p),
                   patch.object(boot,'operation_lock',side_effect=lambda:operation_lock(board.p.run)),
                   patch.object(sys,'argv',['xenova-first-boot','register']),
-                  patch.object(hook,'automatic',side_effect=automatic)):
+                  patch.object(hook,'automatic',side_effect=AssertionError('factory must not notify'))):
                 boot.main()
-            self.assertLess(time.monotonic()-before,5)
-            notices=list(vm.load_records(board.p.data,validate_assets=False).values())
-            self.assertEqual(len(notices),2)
-            # 기존 15초 전체 예산보다 늦게 API를 준비해도 송신 예산은 아직 시작하지 않았다.
-            time.sleep(hook.CALL_SECONDS+1)
+
+        first_boot()
+        registry={identity:record.copy() for identity,record in vm.load_records(board.p.data,validate_assets=False).items()}
+        self.assertEqual(len(registry),2)
+        self.assertEqual(self.calls,[])
+        self.assertNotIn('registration_notices',json.loads((board.data/'.first-install-state.json').read_text()))
+        self.assertFalse((board.data/'registration-notices').exists())
+        self.assertFalse((board.p.run/'registration-notices').exists())
+
+        # API/network configuration is a later, independent step.
+        with patch.dict(os.environ,{'REGISTRATION_FACTORY_DATA':str(board.p.data)}):
+            self.start_api(configured=False)
+            status,rows=self.request('GET','/api/v1/vm-registrations')
+            self.assertEqual(status,200)
+            expected={record['uuid'] for record in registry.values()}
+            self.assertEqual({row['vm_id'] for row in rows},expected)
+            identity=rows[0]['vm_id']
+            status,body=self.notify(identity)
+            self.assertEqual((status,body['state'],body['confirmed']),(503,'not-configured',False))
             self.assertEqual(self.calls,[])
-            active=subprocess.check_output(['systemctl','show',unit,'--property=ActiveState','--value'],text=True).strip()
-            self.assertEqual(active,'activating')
-            jobs=subprocess.check_output(['systemctl','list-jobs','--no-legend'],text=True)
-            self.assertTrue(all(callback in jobs for callback in scheduled))
-            barrier.touch()
-            for record in notices:self.assertTrue(self.wait_result(board.p.data,record['uuid'])['confirmed'])
-            self.assertEqual(len(self.calls),2);self.assertEqual(board.p.register(),[])
-            self.assertEqual(len(list((board.p.run/'registration-notices').glob('factory-started-*'))),2)
-            subprocess.run(['systemctl','restart',unit],capture_output=True,check=True,timeout=8)
-            time.sleep(.2);self.assertEqual(len(self.calls),2)
-            self.assertEqual(subprocess.check_output(['systemctl','show',unit,'--property=ActiveState','--value'],text=True).strip(),'active')
-        finally:os.environ.pop('REGISTRATION_FACTORY_DATA',None)
+
+            self.stop_api();self.start_api()
+            status,rows=self.request('GET','/api/v1/vm-registrations')
+            self.assertEqual(status,200);self.assertEqual({row['vm_id'] for row in rows},expected)
+            self.assertEqual(self.calls,[])
+            self.assertTrue(self.notify(identity)[1]['confirmed'])
+            self.assertEqual(len(self.calls),1)
+            self.assertEqual(self.calls[0][2]['data']['registration']['vm_id'],identity)
+
+            # Neither a completed first-boot nor API restart resends the factory records.
+            first_boot()
+            self.stop_api();self.start_api()
+            self.assertEqual(len(self.calls),1)
+            self.assertEqual(registry,vm.load_records(board.p.data,validate_assets=False))
+            self.assertFalse((board.data/'registration-notices').exists())
 
 
 if __name__=='__main__':unittest.main()

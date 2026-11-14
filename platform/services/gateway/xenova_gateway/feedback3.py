@@ -24,11 +24,11 @@ PROBE3=struct.Struct('<16s16sQQ');CLOCK3=struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3=struct.Struct('<16s16s16sQQQqqQQ');CLOCK_ACK3=struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
-PROXIMITY_CAPABILITY=0x1000
-PROXIMITY_MASK=0x18
-PROXIMITY_BLOCKED=21
+# 근거리 제동(ToF)을 하는 장치는 표본 quality 의 두 bit 로 막힌 방향을 알리고, 막힌 방향의 DRIVE 를 reason 21 로 거절한다.
+PROXIMITY_CAPABILITY=0x1000;PROXIMITY_FRONT=0x08;PROXIMITY_REAR=0x10;PROXIMITY_BLOCKED=21
 CLOCK_PROBE_INTERVAL_US=200000
 CLOCK_INSTALL_RETRY_US=50000
+HELLO_RETRY_US=50000
 
 
 @dataclass(frozen=True)
@@ -64,26 +64,35 @@ class Feedback3SerialSink(FeedbackSerialSink):
         if type(profile) is not Feedback3Profile or kwargs.get('odometry') is None:raise ValueError('feedback3 measured policy/odometry required')
         self.profile=profile;self.stationary_policy=profile.stationary
         self.clock_epoch=str(uuid4());self.clock_sequence=0;self.probe_sequence=0;self.outstanding=None
+        self.hello_sent_us=0
         self.last_probe_us=0;self.previous_interval=None;self.streak=0;self.leases=OrderedDict();self.install=None
         self.stop_pin=None;self.report_hwm=0;self.gate_revision=0;self.last_motion=False
         self._matched_stop_snapshot=None;self._direction_snapshot=None;self.phase_key=None;self.phase_end=0
         self._vehicle_wire_cache=OrderedDict()
         self.hold_row=None;self.hold_start=None
-        self._proximity=None
+        self.proximity=None;self.proximity_rejected=0
+        self._proximity_source=None
         self.tof_inbox=TofInbox();self._tof_selection=None;self._tof_context_snapshot=None
         super().__init__(*args,**kwargs)
         self.protocol_version=3;self.odometry.clock_profile3=True
+
+    @property
+    def proximity_view(self):
+        """odometry 가 받아들인 가장 새 표본이 알린 막힌 방향. 근거리 제동을 알리지 않은 장치는 None 이다."""
+        blocked=getattr(self,'proximity',None)
+        return dict(proximity_front_blocked=None if blocked is None else bool(blocked&PROXIMITY_FRONT),
+            proximity_rear_blocked=None if blocked is None else bool(blocked&PROXIMITY_REAR),
+            proximity_rejected=getattr(self,'proximity_rejected',0))
 
     def _view(self):
         value=super()._view()
         value.update(profile='feedback-3',clock_epoch=self.clock_epoch,clock_lease_revision=self.clock_sequence,
             clock_ready=self.ready and self._sensor_available() and self._lease(int(self.clock()*1e6)) is not None if hasattr(self,'clock') else False)
+        value.update(self.proximity_view)
         if hasattr(self,'odometry'):
             sample=value.get('vehicle_sample')
-            if sample is not None and self._proximity is not None:
-                device,source,flags=self._proximity
-                if (device,source)==(sample['device_session'],sample['source_sample']):
-                    value['proximity_flags']=flags
+            if sample is not None and self._proximity_source==(sample['device_session'],sample['source_sample']):
+                value['proximity_flags']=self.proximity
             value['absolute_meter']=self.odometry.absolute.snapshot
             self._matched_stop_snapshot=self._make_matched_stop()
             pin=self.stop_pin
@@ -130,14 +139,37 @@ class Feedback3SerialSink(FeedbackSerialSink):
         pad=drift_pad(self.profile.drift_ppm,abs(at-lease['reference']))
         return lease['lower']-pad,lease['upper']+pad
 
+    def _poll_deadlines(self):
+        yield from super()._poll_deadlines()
+        if self.started is not None and not self.ready and self.fault is None:
+            yield (self.hello_sent_us + HELLO_RETRY_US) / 1_000_000
+        if not self.ready or not self._sensor_available():
+            return
+        if self.outstanding is None:
+            yield (self.last_probe_us + CLOCK_PROBE_INTERVAL_US) / 1_000_000
+        else:
+            yield (self.outstanding[1] + self.profile.probe_timeout_us) / 1_000_000
+        lease_end = self.snapshot.get('clock_valid_until_pi_us', 0)
+        if lease_end:
+            yield lease_end / 1_000_000
+        install = self.install
+        if install is not None and not install['ack']:
+            retry = install['sent_us'] + CLOCK_INSTALL_RETRY_US
+            if retry < install['expires']:
+                yield retry / 1_000_000
+
     def _poll(self,now,*,owned_ready=None):
         if self.started is None:
-            self.started=now;self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
+            self.started=now;self._send_hello()
         invalid=self.framer.invalid+self.framer.oversize
         # feedback3의 시계 처리까지 끝난 최종 view 하나만 게시한다.
         super()._poll(now,owned_ready=owned_ready,publish_view=False)
         if self.framer.invalid+self.framer.oversize!=invalid:self.tof_inbox.reject(reason='outer_frame_loss')
         at=int(self.clock()*1e6)
+        # 부팅 중인 장치나 앞서 끊긴 조각이 HELLO를 삼킬 수 있다. 같은 Pi session으로 다시 보내며
+        # handshake 기한과 그 뒤의 고장 유지는 바꾸지 않는다.
+        if not self.ready and self.fault is None and at-self.hello_sent_us>=HELLO_RETRY_US:
+            self._send_hello()
         if self.ready and self._sensor_available():
             if self.outstanding is not None and at>=self.outstanding[1]+self.profile.probe_timeout_us:
                 self.outstanding=None;self.streak=0
@@ -149,6 +181,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
                     and at - self.install['sent_us'] >= CLOCK_INSTALL_RETRY_US):
                 self._send_install(self.install)
         self.snapshot=self._view()
+
+    def _send_hello(self):
+        self._send(packet(HELLO,HELLO3.pack(3,UUID(self.pi_session).bytes,bytes.fromhex(self.profile.vehicle_config_sha256))))
+        self.hello_sent_us=int(self.clock()*1e6)
 
     def _send_install(self, lease):
         self._send(lease['wire'])
@@ -267,9 +303,9 @@ class Feedback3SerialSink(FeedbackSerialSink):
             raise FeedbackError('feedback3 deadline echo')
         if row['kind']!=2 and at>=row['expires']:raise FeedbackError('feedback3 original command expired')
         if not flags&1 and velocity or not flags&2 and steering:raise FeedbackError('feedback3 unsupported measurement')
-        proximity_rejection=(status==3 and reason==PROXIMITY_BLOCKED and row['kind']==1
-            and self.capabilities&PROXIMITY_CAPABILITY)
-        if proximity_rejection:self.pending.pop(seq,None)
+        # 가까운 물체 때문에 이 DRIVE 만 받지 않은 것이다. 장치 고장이 아니고 적용을 기다릴 명령도 아니다.
+        blocked=status==3 and reason==PROXIMITY_BLOCKED and row['kind']==1 and bool(self.capabilities&PROXIMITY_CAPABILITY)
+        if blocked:self.pending.pop(seq,None);self.proximity_rejected+=1
         elif status in (3,4):self._fail('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
         self.report_hwm=report_seq;row['accepted']=status in (1,2);row['applied']=status==2
         row['feedback']=payload
@@ -278,7 +314,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
             observed_monotonic=now,command_generation=generation,command_counter=counter,command_sequence=seq,
             command_kind='STOP' if row['kind']==2 else 'HOLD_STEER' if row['kind']==3 else 'DRIVE',sample_seq=sample,
             observation_source='device_report',pi_session=self.pi_session,device_session=self.device_session,status=STATUS[status])
-        if proximity_rejection:evidence['rejection']='PROXIMITY_BLOCKED'
+        if blocked:evidence['rejection']='PROXIMITY_BLOCKED'
         measured=next((value for value in reversed(self.odometry.samples)
             if value['source_sample']==sample and value['source_us']==stamp),None)
         evidence['applied_pi_lower_us']=None if measured is None else measured['pi_sample_us']-measured['clock_error_us']
@@ -298,12 +334,14 @@ class Feedback3SerialSink(FeedbackSerialSink):
         lo,hi=stamp+lower,min(stamp+upper,now)
         if not 0<=lo<=hi<=now or now-lo>self.odometry.config.maximum_sample_age_us:
             raise FeedbackError('sensor3 observation window')
-        flags=None
+        blocked=None
         if self.capabilities&PROXIMITY_CAPABILITY:
-            flags=quality&PROXIMITY_MASK;quality&=~PROXIMITY_MASK
+            blocked=quality&(PROXIMITY_FRONT|PROXIMITY_REAR);quality&=~blocked
         accepted=self.odometry.observe_mapped(self.pi_session,self.device_session,stamp,sample,left,right,quality,steer,error,lo,hi)
-        if accepted is not None and flags is not None:
-            self._proximity=(self.device_session,sample,flags)
+        if blocked is not None:
+            self.proximity=blocked
+            # The first sample can seed odometry without publishing a Vehicle.
+            self._proximity_source=None if accepted is None else (self.device_session,sample)
 
     @property
     def matched_stop(self):
@@ -316,8 +354,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
         rows=[row for row in self.odometry.samples if row['source_sample']<=sample
             and row['pi_sample_us']-row['clock_error_us']>=pin['submitted_us']]
         if rows:
-            end=rows[-1]['pi_sample_us']
-            while len(rows)>2 and end-rows[1]['pi_sample_us']>=self.stationary_policy.window_us+2*rows[1]['clock_error_us']:
+            # check_stationary_window 은 창의 길이에서 처음과 마지막 표본의 시각 오차를 뺀다. 같은 식으로 잘라야
+            # 마지막 표본의 오차가 더 클 때에도 남긴 창이 그 검사에 모자라지 않는다.
+            end=rows[-1]['pi_sample_us']-rows[-1]['clock_error_us']
+            while len(rows)>2 and end-rows[1]['pi_sample_us']-rows[1]['clock_error_us']>=self.stationary_policy.window_us:
                 rows.pop(0)
         if (not rows or rows[-1]['source_sample']!=sample or self.odometry.latest is None
                 or self.odometry.latest['source_sample']!=sample):return None
@@ -481,7 +521,8 @@ class Feedback3SerialSink(FeedbackSerialSink):
                 report=FEEDBACK3.unpack(hold['feedback'])
                 rows=[row for row in snapshot['rows'] if row['pi_sample_us']-row['clock_error_us']>=pin['submitted_us']]
                 if rows:
-                    while len(rows)>2 and rows[-1]['pi_sample_us']-rows[1]['pi_sample_us']>=self.stationary_policy.window_us+2*rows[1]['clock_error_us']:rows.pop(0)
+                    newest=rows[-1]['pi_sample_us']-rows[-1]['clock_error_us']
+                    while len(rows)>2 and newest-rows[1]['pi_sample_us']-rows[1]['clock_error_us']>=self.stationary_policy.window_us:rows.pop(0)
                 window=tuple(encode(schema.VehicleSample(major=1,**{**row,'gateway_instance':pin['gateway']})) for row in rows)
                 if len(window)<2:return None
                 check_stationary_window(window,current,self.odometry.host_boot,pin['gateway'],sample['pi_session'],

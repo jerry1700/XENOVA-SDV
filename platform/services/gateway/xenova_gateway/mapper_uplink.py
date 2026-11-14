@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from xenova_drive_world import schema, encode, decode
 from xenova_drive_world.mapper_clock import (ClockPolicy, MapperClockOwner, MapperClockError,
-    ProbePlan, build_probe, candidate_body, plan_json, parse_plan, strict_json,
+    ProbePlan, build_probe, candidate_body, parse_candidate, plan_json, parse_plan, strict_json,
     integer, canonical_uuid, ascii_id, TIMEOUT_US)
 
 
@@ -674,7 +674,6 @@ class GatewayMapperUplink:
                     self.counts['old_candidate'] += 1
                     continue
                 try:
-                    from xenova_drive_world.mapper_clock import parse_candidate
                     _, reply_raw, p4 = parse_candidate(body)
                     if (decimal(header['issued_pi_us']) != p4 or decimal(header['expires_pi_us']) != plan.expires_us):
                         raise ValueError('J_CANDIDATE_ORIGINAL_TIME')
@@ -685,7 +684,6 @@ class GatewayMapperUplink:
                     if lease is not None:
                         provider.world_failure = None
                         if self.scene_reply is not None:
-                            _, reply_raw, _ = parse_candidate(body)
                             try: self.scene_reply(reply_raw, lease, now)
                             except ValueError: self.counts['scene_reply_rejected'] += 1
                 except ValueError:

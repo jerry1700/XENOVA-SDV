@@ -57,7 +57,8 @@ def application():
         f.p.runtime=Path(previous['run'])
     hook.API_ENV=root/'local.env';hook.TOKEN_FILE=root/'token.env'
     # 코드의 자동 hook/실제 subprocess를 사용한다. 기본 fixture setup의 이미 소비된 기회는 되살리지 않는다.
-    settings=Settings(driver='platform',service_token=os.environ['XENOVA_SERVICE_TOKEN'],log_level='CRITICAL',
+    # 스키마 wire 검증에만 개발 문서를 명시적으로 켠다. 기존 서비스 토큰 인증은 유지한다.
+    settings=Settings(driver='platform',service_token=os.environ['XENOVA_SERVICE_TOKEN'],log_level='CRITICAL',api_docs=True,
         registration_url=os.environ.get('XENOVA_REGISTRATION_URL',''),
         registration_token=os.environ.get('VM_REGISTRATION_SERVICE_TOKEN',''),
         registration_timeout_s=float(os.environ.get('XENOVA_REGISTRATION_TIMEOUT','1')),

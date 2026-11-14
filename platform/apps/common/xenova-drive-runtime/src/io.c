@@ -4,6 +4,10 @@
 #include <xenova/drive_io.h>
 #include <xenova/diagnostics.h>
 #include <xenova/auto_delay.h>
+#include <xenova/auto_input_fault.h>
+#if defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+#include <xenova/shutdown.h>
+#endif
 #include <zephyr/sys/atomic.h>
 #include <errno.h>
 #include <stdio.h>
@@ -17,14 +21,46 @@ static struct k_thread thread;
 static atomic_t stop;
 static struct xm_zclient *client;
 static char control_topic[XM_TOPIC_MAX], input_topic[XM_TOPIC_MAX], perception_topic[XM_TOPIC_MAX];
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
 static char fault_command_topic[XM_TOPIC_MAX],fault_result_topic[XM_TOPIC_MAX];
-static bool fault_command_registered,fault_running;
-static int64_t fault_last_rx=-1,fault_started_ms,fault_deadline_ms;
+static bool fault_command_registered;
+static int64_t fault_last_rx=-1;
+#endif
+#if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
+static bool input_fault_running,input_fault_result_valid;
+static int64_t input_fault_started_ms,input_fault_deadline_ms;
+static struct xm_auto_input_fault_command input_fault_command;
+static char input_fault_last_payload[512];
+#endif
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
+static bool fault_running;
+static int64_t fault_started_ms,fault_deadline_ms;
 static struct xm_auto_delay_command fault_command;
 /* 수락한 마지막 명령의 결과만 소유한다. 재전달은 원 payload를 바꾸지 않는다. */
 static char fault_last_payload[512];
 static bool fault_result_valid;
+#endif
+#if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
+static void input_fault_result(const struct xm_auto_input_fault_command *command,const char *status,const char *error,uint64_t duration)
+{
+ char json[sizeof(input_fault_last_payload)];
+ if(command==&input_fault_command)input_fault_result_valid=false;
+ if(!command->command_id[0])return;
+ int length=xm_auto_input_fault_result_json(json,sizeof(json),command,status,duration,error);
+ if(length<0)return;
+ if(command==&input_fault_command){memcpy(input_fault_last_payload,json,(size_t)length+1);input_fault_result_valid=true;}
+ (void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",json);
+}
+static bool same_input_fault_command(const struct xm_auto_input_fault_command *a,const struct xm_auto_input_fault_command *b)
+{
+ return !strcmp(a->command_id,b->command_id)&&!strcmp(a->operation_id,b->operation_id)&&
+  !strcmp(a->expected_boot_id,b->expected_boot_id)&&a->duration_s==b->duration_s;
+}
+#endif
+#if defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+static struct xm_vm_crash_command crash_command;
+static char crash_last_payload[512];
+static bool crash_result_valid;
 #endif
 static bool dual_mode, perception_registered;
 static struct xm_zbinary binary;
@@ -283,6 +319,25 @@ static bool same_fault_command(const struct xm_auto_delay_command *a,const struc
  return !strcmp(a->command_id,b->command_id)&&!strcmp(a->operation_id,b->operation_id)&&
   !strcmp(a->expected_boot_id,b->expected_boot_id)&&a->delay_ms==b->delay_ms&&a->duration_s==b->duration_s;
 }
+#endif
+#if defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+static void crash_result(const struct xm_vm_crash_command *command,const char *status,const char *error)
+{
+ char json[sizeof(crash_last_payload)];
+ if(command==&crash_command)crash_result_valid=false;
+ if(!command->command_id[0])return;
+ int length=xm_vm_crash_result_json(json,sizeof(json),command,status,error);
+ if(length<0)return;
+ if(command==&crash_command){memcpy(crash_last_payload,json,(size_t)length+1);crash_result_valid=true;}
+ (void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",json);
+}
+static bool same_crash_command(const struct xm_vm_crash_command *a,const struct xm_vm_crash_command *b)
+{
+ return !strcmp(a->command_id,b->command_id)&&!strcmp(a->operation_id,b->operation_id)&&
+  !strcmp(a->expected_boot_id,b->expected_boot_id);
+}
+#endif
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
 static void receive_fault_command(void)
 {
  struct xm_envelope env;int64_t age;
@@ -290,6 +345,44 @@ static void receive_fault_command(void)
  int64_t rx=0;for(size_t i=0;i<ARRAY_SIZE(client->latest);i++)if(!strcmp(client->latest[i].topic,fault_command_topic)){rx=client->latest[i].rx_ms;break;}
  if(rx==fault_last_rx)return;fault_last_rx=rx;
  if(!xm_span_eq(env.type,"agent.command"))return;
+#if defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+ struct xm_vm_crash_command crash={0};int crash_rc=xm_vm_crash_command_parse(env.payload,&crash);
+ if(!crash_rc){
+  if(xm_zclient_latest_retained(client,fault_command_topic)){crash_result(&crash,"REJECTED","INVALID_COMMAND");return;}
+  if(strcmp(crash.expected_boot_id,client->id.boot_id)){crash_result(&crash,"REJECTED","BOOT_MISMATCH");return;}
+  if(crash_command.command_id[0]&&!strcmp(crash.command_id,crash_command.command_id)){
+   if(!same_crash_command(&crash,&crash_command))crash_result(&crash,"REJECTED","IDEMPOTENCY_CONFLICT");
+   else if(crash_result_valid)(void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",crash_last_payload);
+   return;
+  }
+  crash_result_valid=false;crash_command=crash;
+  /* Finish the bounded ACCEPTED publish attempt before the non-returning crash
+   * hypercall so command and recovery logs can be correlated when it arrives. */
+  crash_result(&crash_command,"ACCEPTED",NULL);
+  int rc=xshutdown_crash();
+  crash_result(&crash_command,"FAILED",rc==-ENOTSUP?"UNSUPPORTED":"CRASH_FAILED");
+  return;
+ }
+#endif
+#if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
+ struct xm_auto_input_fault_command input_fault={0};int input_fault_rc=xm_auto_input_fault_command_parse(env.payload,&input_fault);
+ if(!input_fault_rc){
+  if(xm_zclient_latest_retained(client,fault_command_topic)){input_fault_result(&input_fault,"REJECTED","INVALID_COMMAND",0);return;}
+  if(strcmp(input_fault.expected_boot_id,client->id.boot_id)){input_fault_result(&input_fault,"REJECTED","BOOT_MISMATCH",0);return;}
+  if(input_fault_command.command_id[0]&&!strcmp(input_fault.command_id,input_fault_command.command_id)){
+   if(!same_input_fault_command(&input_fault,&input_fault_command))input_fault_result(&input_fault,"REJECTED","IDEMPOTENCY_CONFLICT",0);
+   else if(input_fault_result_valid)(void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",input_fault_last_payload);
+   return;
+  }
+  struct drive_auto_input_fault_receipt receipt;
+  int rc=drive_auto_input_fault_start(input_fault.duration_s,&receipt);
+  if(rc){input_fault_result(&input_fault,"REJECTED",rc==-EBUSY?"BUSY":"STRESS_FAILED",0);return;}
+  input_fault_result_valid=false;input_fault_command=input_fault;input_fault_running=true;
+  input_fault_started_ms=receipt.started_ms;input_fault_deadline_ms=receipt.expires_at_ms;
+  input_fault_result(&input_fault_command,"RUNNING",NULL,0);return;
+ }
+#endif
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
  struct xm_auto_delay_command incoming={0};int rc=xm_auto_delay_command_parse(env.payload,&incoming);
  if(xm_zclient_latest_retained(client,fault_command_topic)){fault_result(&incoming,"REJECTED","INVALID_COMMAND",0);return;}
  if(rc){fault_result(&incoming,"REJECTED",rc==-ERANGE?"INVALID_PARAMETERS":"INVALID_COMMAND",0);return;}
@@ -305,7 +398,20 @@ static void receive_fault_command(void)
  /* owner가 다시 시각을 읽으면 정상 만료를 STRESS_FAILED로 판정할 수 있다. */
  fault_result_valid=false;fault_command=incoming;fault_running=true;fault_started_ms=receipt.started_ms;
  fault_deadline_ms=receipt.expires_at_ms;fault_result(&fault_command,"RUNNING",NULL,0);
+#elif defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+ if(crash.command_id[0])crash_result(&crash,"REJECTED",crash_rc==-ERANGE?"INVALID_PARAMETERS":"INVALID_COMMAND");
+#endif
 }
+#endif
+#if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
+static void observe_input_fault_command(void)
+{
+ if(!input_fault_running)return;int64_t now=k_uptime_get();
+ if(now>=input_fault_deadline_ms){input_fault_running=false;input_fault_result(&input_fault_command,"SUCCEEDED",NULL,(uint64_t)(now-input_fault_started_ms));}
+ else if(!drive_auto_input_fault_active()){input_fault_running=false;input_fault_result(&input_fault_command,"FAILED","STRESS_FAILED",(uint64_t)(now-input_fault_started_ms));}
+}
+#endif
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
 static void observe_fault_command(void)
 {
  if(!fault_running)return;
@@ -322,7 +428,7 @@ static void owner(void *a,void *b,void *c) {
   uint64_t before=clock_us();
   if(atomic_get(&stop)||!xd_owner_admit())break;
   int rc=xd_owner_prepare(client,control_topic,input_topic);
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
   if(!rc&&!fault_command_registered){
    rc=xm_topic_vm(fault_command_topic,sizeof(fault_command_topic),client->id.vm_id,"command");
    if(rc>=0)rc=xm_topic_vm(fault_result_topic,sizeof(fault_result_topic),client->id.vm_id,"command-result");
@@ -350,8 +456,14 @@ static void owner(void *a,void *b,void *c) {
   xd_manual_bind(&manual_source,working.app_instances[1]);
   client->accept_input=accept_input;client->accept_context=NULL;
   before=clock_us();(void)xm_zclient_poll(client,0);after=clock_us();
+#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+  receive_fault_command();
+#endif
 #if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
-  receive_fault_command();observe_fault_command();
+  observe_fault_command();
+#endif
+#if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
+  observe_input_fault_command();
 #endif
   k_mutex_lock(&exchange_lock,K_FOREVER);stats.poll_max_us=MAX(stats.poll_max_us,after-before);k_mutex_unlock(&exchange_lock);
   refresh();
@@ -361,6 +473,9 @@ static void owner(void *a,void *b,void *c) {
  }
 #if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
  if(fault_running){fault_running=false;drive_auto_delay_stop();fault_result(&fault_command,"FAILED","AGENT_STOPPING",(uint64_t)MAX(k_uptime_get()-fault_started_ms,0));}
+#endif
+#if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
+ if(input_fault_running){input_fault_running=false;drive_auto_input_fault_stop();input_fault_result(&input_fault_command,"FAILED","AGENT_STOPPING",(uint64_t)MAX(k_uptime_get()-input_fault_started_ms,0));}
 #endif
  if(initialized)xm_zclient_close(client);
  k_mutex_lock(&exchange_lock,K_FOREVER);

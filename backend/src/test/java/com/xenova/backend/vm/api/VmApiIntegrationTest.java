@@ -97,7 +97,7 @@ class VmApiIntegrationTest {
 
     @Test
     void linuxTemplatesKeepTheirOwnMinimumBelowTheCommonFloor() throws Exception {
-        createVm("debian-16", "debian-13-arm64", "1.0.6", 1, 16)
+        createVm("debian-16", "debian-13-arm64", "1.0.8", 1, 16)
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"));
 
@@ -244,7 +244,7 @@ class VmApiIntegrationTest {
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].template_id").value("debian-13-arm64"))
-                .andExpect(jsonPath("$[0].version").value("1.0.6"))
+                .andExpect(jsonPath("$[0].version").value("1.0.8"))
                 .andExpect(jsonPath("$[0].display_name").value("Debian 13"))
                 .andExpect(jsonPath("$[0].guest_kind").value("linux"))
                 .andExpect(jsonPath("$[1].version").value("1.0.2"))
@@ -260,7 +260,7 @@ class VmApiIntegrationTest {
         createVm("zephyr-01", "zephyr-xenvm-starter-arm64", "1.1.0", 1, 16)
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.guest_kind").value("zephyr"));
-        createVm("debian-02", "debian-13-arm64", "1.0.6", 1, 256)
+        createVm("debian-02", "debian-13-arm64", "1.0.8", 1, 256)
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.guest_kind").value("linux"));
 
@@ -339,7 +339,7 @@ class VmApiIntegrationTest {
 
     @Test
     void unknownRoleIsAValidationError() throws Exception {
-        createVm("pilot-01", "debian-13-arm64", "1.0.6", 1, 256, "\"pilot\"")
+        createVm("pilot-01", "debian-13-arm64", "1.0.8", 1, 256, "\"pilot\"")
                 .andExpect(status().isUnprocessableEntity())
                 .andExpect(jsonPath("$.code").value("VALIDATION_ERROR"))
                 .andExpect(jsonPath("$.errors[0].field").value("role"));
@@ -384,7 +384,7 @@ class VmApiIntegrationTest {
 
     private org.springframework.test.web.servlet.ResultActions createVm(String name, int vcpus, int memoryMib)
             throws Exception {
-        return createVm(name, "debian-13-arm64", "1.0.6", vcpus, memoryMib);
+        return createVm(name, "debian-13-arm64", "1.0.8", vcpus, memoryMib);
     }
 
     private org.springframework.test.web.servlet.ResultActions createVm(

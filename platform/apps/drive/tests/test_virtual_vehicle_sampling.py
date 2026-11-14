@@ -33,6 +33,7 @@ def test_batched_probes_capture_real_times_and_keep_consumer_latest(monkeypatch)
     parser = pair.Framer()
     captures = []
     reads = []
+    batch_size = 0
     advance = vehicle._advance
     read = os.read
 
@@ -50,7 +51,20 @@ def test_batched_probes_capture_real_times_and_keep_consumer_latest(monkeypatch)
             read_paused.set()
             assert release_read.wait(2)
             hold_read.clear()
-        data = read(fd, size)
+            # PTY reads may split the two writes. Deliver a single batch to
+            # the parser while still reading the real bytes from the PTY.
+            assert 0 < batch_size <= size
+            batch = bytearray()
+            deadline = time.monotonic() + 1
+            while len(batch) < batch_size:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0 and select.select([fd], [], [], remaining)[0]
+                chunk = read(fd, batch_size - len(batch))
+                assert chunk
+                batch.extend(chunk)
+            data = bytes(batch)
+        else:
+            data = read(fd, size)
         if fd == master:
             reads.append(data)
         return data
@@ -106,11 +120,12 @@ def test_batched_probes_capture_real_times_and_keep_consumer_latest(monkeypatch)
         first = queue_probe()
         time.sleep(.021)
         second = queue_probe()
+        batch_size = len(first) + len(second)
         reads.clear()
         capture_start = len(captures)
         release_read.set()
         received_samples = receive_samples(2)
-        assert reads == [first + second]  # 두 probe가 실제 한 read에서 완성됐다.
+        assert reads == [first + second]  # 두 probe를 파서의 같은 호출에 전달한다.
         samples = [SAMPLE.unpack(payload) for payload, _ in received_samples]
         assert samples[0][2] < samples[1][2]
         assert samples[0][3] < samples[1][3]

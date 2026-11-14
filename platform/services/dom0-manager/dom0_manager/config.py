@@ -16,7 +16,7 @@ PLATFORM_STOP_WAIT_S = 90.0
 HTTP_ONLY_ENV = (
     "XENOVA_HOST", "XENOVA_PORT", "XENOVA_SERVICE_TOKEN", "XENOVA_CONSOLE_ENABLED", "XENOVA_CONSOLE_LOCK_DIR",
     "XENOVA_REGISTRATION_URL", "VM_REGISTRATION_SERVICE_TOKEN", "XENOVA_REGISTRATION_TIMEOUT", "XENOVA_REGISTRATION_SLOT_DIR",
-    "XENOVA_DOM0_API_DOCS",
+    "XENOVA_DOM0_API_DOCS", "XENOVA_PHONE_RUNTIME_DIR", "XENOVA_PHONE_CONFIG",
 )
 
 
@@ -68,6 +68,9 @@ class Settings:
     registration_token: str = ""
     registration_timeout_s: float | str = 5.0
     registration_slot_dir: str = "/run/xenova/registration-sender"
+    # USB 휴대폰 화면 중계(xenova-display-mobile)의 런타임 폴더와 설정. GET/POST /api/v1/display/phone-link 가 읽는다(계약 4.13)
+    phone_runtime_dir: str = "/run/xenova-display-mobile"
+    phone_config: str = "/etc/xenova/display-mobile.json"
 
     def __post_init__(self) -> None:
         if self.console_enabled and not self.service_token:
@@ -135,6 +138,8 @@ class Settings:
             registration_token=read("VM_REGISTRATION_SERVICE_TOKEN", cls.registration_token, str),
             registration_timeout_s=read("XENOVA_REGISTRATION_TIMEOUT", cls.registration_timeout_s, str),
             registration_slot_dir=read("XENOVA_REGISTRATION_SLOT_DIR", cls.registration_slot_dir, str),
+            phone_runtime_dir=read("XENOVA_PHONE_RUNTIME_DIR", cls.phone_runtime_dir, str),
+            phone_config=read("XENOVA_PHONE_CONFIG", cls.phone_config, str),
         )
 
     @classmethod

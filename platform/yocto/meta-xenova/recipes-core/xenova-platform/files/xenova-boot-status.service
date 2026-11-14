@@ -1,11 +1,10 @@
 [Unit]
-Description=Summarize Xenova boot facts through the existing agetty login banner
+Description=Record Xenova boot status
 # Do not depend on the storage/registration/VM operations being observed.
 DefaultDependencies=no
 After=systemd-remount-fs.service
 Before=shutdown.target
 Conflicts=shutdown.target
-ConditionPathExists=/usr/sbin/agetty
 
 [Service]
 Type=simple

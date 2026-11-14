@@ -70,7 +70,8 @@ export function ConsolePanel({
         setStatus({ state, message });
         if (state === 'connected') {
           term.focus();
-          if (vm.guest_kind === 'linux') connection.send('\r');
+          // Linux 는 로그인 프롬프트, Zephyr 는 셸 프롬프트(uart:~$)를 바로 띄우려고 Enter 한 번. Zephyr 셸은 빈 Enter 에 프롬프트만 다시 그린다.
+          connection.send('\r');
         }
       },
       data: (bytes) => {

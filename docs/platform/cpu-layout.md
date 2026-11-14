@@ -78,6 +78,12 @@ CPU 정책이 활성화돼 있으면 저장할 자원 수량과 정책 문맥의
 해제는 전체 정책 목록에서 대상 UUID를 제거하는 명시 변경이다. 다른 지정을 보존하고
 조회한 revision을 전달한다. 구형 원장 replay·혼합 writer 제한은 [정식 계약](cli-manager-spec.md#cmd-cpu-policy-set)을 따른다.
 
+dom0의 공유 집합과 Xen 풀이 같으면 공유/전용 모드나 실제 허용 pCPU가 바뀌는 VM만
+정지한다. Debian·Ubuntu·Zephyr에 같은 조건을 적용한다. 예를 들어 Debian의 공유
+마스크를 `{0,3}`에서 `{3}`으로 좁히면 Debian만, Zephyr A/B의 전용 코어를 교환하면
+A와 B만 정지한다. 최초 설정이나 dom0 공유 집합·Xen 풀 변경에는 전체 정지와 호스트
+준비가 필요하다. 차량 출력권을 가진 VM의 계획 정비는 기존 인계·보호 절차를 따른다.
+
 Manager 호출:
 
 ```python
@@ -127,7 +133,10 @@ xenova-vm cpu-policy-set --spec-file /root/cpu-policy-request.json \
 오래된 revision은 TARGET_CHANGED다. 같은 요청 재전달은 원래 key를 유지한다.
 새 정책 변경은 새 key와 현재 revision을 사용한다. 완료 key는 과거 결과를 반환하며 정책을 다시 덮어쓰지 않는다.
 계획 모드는 파일·affinity·intent를 변경하지 않는다. 계획에 표시된 operation UUID는 저장이 확정된 ID가 아니다.
-실행 응답의 data.policy는 저장된 정책이며 data.host_preparation_required=true는 아직 현재 호스트 적용을 완료하지 않았다는 뜻이다.
+실행 응답의 `data.policy`는 저장된 정책이다. `host_preparation_required=false`이면
+같은 부팅의 기존 dom0 준비 근거가 유효해 재적용 없이 VM을 시작할 수 있다.
+`true`이면 VM 시작 전에 호스트 준비를 수행한다. 재전달은 당시 결과이므로 현재
+준비 상태는 `cpu-layout`의 `host.ready`에서 확인한다.
 `pin-vcpu`, `set-affinity`, `reserve-core` 같은 별도 공개 변경 명령은 제공하지 않는다.
 
 ### 3. 실제 배치 조회: cpu-layout
@@ -246,6 +255,10 @@ CPU 준비의 private 사용 관측 중에도 다른 VM의 조회·stop은 기�
 정책 publication journal: `/srv/xenova/cpu-policy-operations/<operation_id>.json`.
 정책 저장은 prepared journal → activation anchor → 정책 원자 게시 → completed 순서다.
 원래 spec/key 재전달로 준비 또는 게시 경계를 마무리한다. 완료 key는 과거 결과만 재생한다.
+게스트 배치만 바꾼 게시를 이력에 기록한다. 호스트는 해당 게시 전의 준비 영수증을
+동일 부팅·dom0 신원·실제 마스크·온라인 토폴로지 확인 후 계속 사용한다. VM 제어와
+복구는 해당 VM 배치가 마지막으로 바뀐 정책 문맥을 사용한다. 전체 정책의 최신
+revision은 `cpu-layout`에 표시한다. 게시가 미완료인 동안에는 새 시작을 보류한다.
 활성화 anchor나 history가 있는데 정책이 없으면 CPU_POLICY_INVALID다.
 유효한 과거 정책 파일을 복사해 덮어쓴 경우에도 최신 완료 journal revision·활성화 소유자를 대조해 rollback으로 거절한다.
 정책·anchor·history를 함께 지우는 외부 root 행위를 탐지하는 tamper-proof 저장소라고 주장하지 않는다.

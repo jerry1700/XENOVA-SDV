@@ -1,7 +1,7 @@
 /* GCC -fanalyzer 로 컴파일만 한다. 출력 구조체를 초기화하지 않고 unpack 하는 보통의 사용을 적어 두어,
  * unpack 이 출력 구조체의 기존 값을 읽으면 분석 경고로 빌드가 멈춘다.
  * test_feedback3 은 출력 구조체를 0xa5 로 채운 뒤 unpack 하므로 이런 읽기를 드러내지 못한다 */
-#include "payloads.c"
+#include "feedback3/payloads.c"
 
 #define FB3_ANALYZE(name, type, field) \
 	int analyze_##name(const uint8_t *payload, size_t len) \

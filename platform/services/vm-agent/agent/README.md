@@ -66,7 +66,7 @@ v1 heartbeat 는 에이전트 프로세스가 살아 있다는 뜻일 뿐이고,
 
 ## 데모 명령 (MQTT-04·05)
 
-격리·자동 복구 시연용입니다. 필수 제품 기능이 아니므로 `XENOVA_AGENT_DEMO_COMMANDS=1` 인 에이전트만 실행하고, 꺼져 있으면 모든 명령을 `DEMO_DISABLED` 로 거절합니다. 규칙은 [MQTT 계약 3.2절](../../../../docs/contracts/mqtt-contract-v1.md#32-데모-명령-mqtt-0405)이 기준입니다.
+격리·자동 복구 시연용입니다. `XENOVA_AGENT_DEMO_COMMANDS=1` 인 에이전트만 실행하고, 꺼져 있으면 모든 명령을 `DEMO_DISABLED` 로 거절합니다. 시연·QA 에서 늘 쓰므로 **`deploy/xenova-agent.service` 가 `Environment=XENOVA_AGENT_DEMO_COMMANDS=1` 로 항상 켭니다**(2026-11-14). 이 유닛으로 만든 템플릿 이미지부터 적용되며, 끄려면 `/etc/xenova/agent.env` 에 `XENOVA_AGENT_DEMO_COMMANDS=0` 을 둡니다. 규칙은 [MQTT 계약 3.2절](../../../../docs/contracts/mqtt-contract-v1.md#32-데모-명령-mqtt-0405)이 기준입니다.
 
 | 항목 | 값 |
 | --- | --- |
@@ -90,7 +90,7 @@ v1 heartbeat 는 에이전트 프로세스가 살아 있다는 뜻일 뿐이고,
 | `XENOVA_AGENT_METRICS_INTERVAL` | `2` | metrics 수집·발행 주기(초) |
 | `XENOVA_AGENT_TOP_PROCESSES` | `10` | `processes[]` 개수(0~50). 0 이면 빈 목록이고 /proc 을 훑지 않는다 |
 | `XENOVA_AGENT_TELEMETRY` | `1` | 자체 상태의 v2 Telemetry 발행(1/0, true/false, yes/no, on/off). v1 토픽에는 영향이 없다 |
-| `XENOVA_AGENT_DEMO_COMMANDS` | `0` | MQTT-04 데모 명령(stress·agent_exit) 실행(1/0 등). 시연용 이미지에서만 켬 |
+| `XENOVA_AGENT_DEMO_COMMANDS` | 코드 `0`, **배포 유닛 `1`** | MQTT-04 데모 명령(stress·agent_exit) 실행(1/0 등). 배포 유닛이 항상 켠다(`agent.env` 로 끌 수 있음) |
 | `XENOVA_AGENT_LOG_LEVEL` | `INFO` | DEBUG/INFO/WARNING/ERROR/CRITICAL |
 
 heartbeat 주기는 계약값 5초로 고정이며 환경변수로 바꿀 수 없습니다(`XENOVA_AGENT_HEARTBEAT_INTERVAL`이 설정돼 있으면 시작을 거부). 시험용 짧은 주기는 `AgentSettings(heartbeat_interval_s=…)` 생성자로만 줍니다. vm_id 는 소문자·하이픈 표준형으로 정규화해 토픽과 봉투에 씁니다(Spring·registry 문자열과 글자까지 같아야 함). UUID 가 아니거나 nil UUID(Domain-0)이거나, 포트·로그 레벨이 범위 밖이면 시작하지 않고 종료 코드 2 로 끝납니다.

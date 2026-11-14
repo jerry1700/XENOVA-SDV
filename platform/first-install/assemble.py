@@ -315,6 +315,7 @@ def platform_root_ok(root):
         raise ValueError('platform lacks first-install capabilities; rebuild dom0 from the new Yocto source, no rootfs injection allowed')
     expected = {'usr/lib/xenova/xenova_vm.py': FILES / 'xenova_vm.py',
                 'etc/xenova/defaults.json': FILES / 'defaults.json',
+                'etc/xenova/creation-policy.json': FILES / 'creation-policy.json',
                 'usr/lib/xenova/xenova_first_boot.py': FILES / 'xenova_first_boot.py',
                 'usr/lib/xenova/first_install_contract.py': ROOT / 'platform/first-install/first_install_contract.py',
                 'usr/sbin/xenova-first-boot': FILES / 'xenova-first-boot',
@@ -324,7 +325,9 @@ def platform_root_ok(root):
                 'usr/lib/xenova/xenova_zephyr.py': FILES / 'xenova_zephyr.py',
                 **{'usr/lib/xenova/'+n:FILES/n for n in ('xenova_resources.py','xenova_zephyr_transition.py','xenova_zephyr_control.py')},
                 'etc/systemd/journald.conf.d/20-xenova.conf': FILES / 'xenova-journald.conf',
-                'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf'}
+                'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf',
+                'usr/lib/systemd/system/var-volatile-log-journal.mount': FILES / 'var-volatile-log-journal.mount',
+                'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
                  'xenova_creation.py','xenova_creation_auto.py',
@@ -347,13 +350,31 @@ def platform_root_ok(root):
     for name in ('prepare_instance.py', 'prepare_rootfs.py', 'guest_identity.py'):
         expected['usr/lib/xenova/' + name] = ROOT / 'platform/guests/common' / name
     units = ['xenova-boot-status.service', 'xenova-cpu-prepare.service', 'xenova-data-prepare.service', 'xenova-first-boot.service', 'srv-xenova.mount',
-             'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-xen-ready.service', 'xenova-host-admission.service']
+             'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-xen-ready.service', 'xenova-host-admission.service',
+             'xenova-telemetry-clock.service', 'xenova-telemetry-clock.timer',
+             'xenova-telemetry-evidence.service', 'xenova-telemetry-evidence.timer']
     expected.update({'usr/lib/systemd/system/' + u: FILES / u for u in units})
     expected.update(deployment_payloads.installed_sources(root))
     for relative, source in expected.items():
         if not path(relative).is_file() or path(relative).read_bytes() != source.read_bytes():
             raise ValueError('platform source/installed contract mismatch: ' + relative)
-    for name in ['sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl']:
+    for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+        relative = 'etc/systemd/system/timers.target.wants/' + name
+        link = root / relative
+        if not link.is_symlink() or path(relative) != path('usr/lib/systemd/system/' + name):
+            raise ValueError('required telemetry timer not enabled: ' + name)
+    # The bind must cover the path journald actually opens on the Yocto image.
+    if path('var/log/journal') != root.resolve() / 'var/volatile/log/journal':
+        raise ValueError('dom0 journal path does not match the Yocto /var/log layout')
+    journal_backing = path('var/log-persistent/journal')
+    if journal_backing != root.resolve() / 'var/log-persistent/journal' or not journal_backing.is_dir():
+        raise ValueError('persistent dom0 journal backing directory missing')
+    flush_unit = path('usr/lib/systemd/system/systemd-journal-flush.service')
+    flush_link = 'usr/lib/systemd/system/sysinit.target.wants/systemd-journal-flush.service'
+    if (not flush_unit.is_file() or not (root / flush_link).is_symlink()
+            or path(flush_link) != flush_unit):
+        raise ValueError('required dom0 service not enabled: systemd-journal-flush.service')
+    for name in ['sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl', 'journalctl']:
         if not any(path(prefix + name).is_file() and path(prefix + name).stat().st_mode & 0o111
                    for prefix in ('usr/sbin/', 'usr/bin/', 'sbin/', 'bin/')):
             raise ValueError('required platform growth tool missing: ' + name)
