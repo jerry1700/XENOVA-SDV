@@ -601,6 +601,8 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `POST` | `/api/v1/vms/{vm_id}/stop` | `200` VM (`state: stopped`) | dom0 단건 조회로 정지 전 상태를 읽은 뒤 **runtime 유무와 관계없이** dom0 stop을 호출. 플랫폼이 `desired_state: stopped` 의도를 기록해야 Recovery Worker가 사용자가 끈 VM을 다시 켜지 않는다(1.2절). 이미 꺼져 있었으면 `vm.state.changed` 이벤트만 남기지 않음. dom0는 `204`지만 Spring은 레코드로 VM 객체를 만들어 반환 |
 | `DELETE` | `/api/v1/vms/{vm_id}` | `204` | dom0 retire 성공 뒤 Spring 레코드를 `RETIRED`로 보존하고 v1 목록·단건 조회에서는 숨김 |
 | `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 보드 카탈로그(템플릿별 최신) + 설정 표시 정보 (2.3절). 보드 미조회 시 `503` |
+| `GET` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 뷰 | vCPU·메모리, pCPU 수, `vcpu_pinning`(VM의 hard affinity), `shared_pcpus`(dom0 공유 집합), `exclusive_pcpus`, `limits`. `host_preparation_required`는 `null` |
+| `PUT` | `/api/v1/vms/{vm_id}/resources/vcpu-pinning` | `200` 자원 뷰 | 본문 `{mappings:[{vcpu, pcpus}]}`(모든 vCPU에 같은 마스크). 공유 VM은 공유 집합 안, 전용 VM은 공유·다른 전용 코어 밖. 응답 `host_preparation_required`: `true`면 보드 호스트 준비 뒤 시작 가능(1차 보드는 늘 `true`), `false`면 바로 시작 가능(플랫폼 1e41ea73 이후 게스트 배치만 바뀐 변경). 공유·전용 방식과 공유 집합은 바꾸지 않는다 |
 
 같은 `/api/v1/vms` 아래의 그 밖의 공개 엔드포인트(위 VM 관리와 별도. 형식의 기준은 각 계약·[백엔드 README](../../backend/README.md)):
 
@@ -760,6 +762,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 | `400 InvalidArgument` | `400 INVALID_ARGUMENT`. `platform_code` `TEMPLATE_NOT_FOUND`·`TEMPLATE_VERSION_NOT_FOUND` "보드에 해당 템플릿 버전이 없습니다. 템플릿을 다시 선택하세요.", `RESOURCE_UNSUPPORTED` "이 템플릿이 허용하지 않는 vCPU·메모리 값입니다.", 그 밖 "보드가 요청 값을 받아들이지 않았습니다. 입력값을 확인하세요." |
 | `507 InsufficientResources` | `507 INSUFFICIENT_RESOURCES`. message는 `resource.name`에 따라 메모리·CPU 부족 또는 "VM에 할당할 수 있는 IP 주소가 없습니다."(`ipv4`, Linux VM IP 풀 고갈) |
 | `500 DriverError` | `500 VM_DRIVER_ERROR` ("보드에서 VM 작업을 처리하지 못했습니다. 잠시 후 다시 시도하세요.") |
+| `platform_code=CPU_NOT_READY` (dom0 code와 무관, 보통 `500 DriverError`) | `409 CPU_NOT_READY` "CPU 배치를 바꾼 뒤 보드 호스트 준비가 끝나지 않아 VM을 시작할 수 없습니다. 보드에서 호스트 준비를 실행하거나 보드를 재부팅해 주세요." 핀닝 변경이 `host_preparation_required=true`였는데 `xenova-vm cpu-host-prepare` 없이 시작한 경우. 호스트 준비는 웹 API가 없다 |
 | `501 NotSupported` | `501 VM_CONTROL_NOT_SUPPORTED` ("보드가 아직 지원하지 않는 작업입니다."). 생성에서 받으면 dom0가 거부한 것이므로 Spring 기록을 지움 |
 | `503 PlatformUnavailable` | `503 VM_CONTROL_UNAVAILABLE` (전송 실패와 같은 코드, 잠시 후 재시도 가능). 생성에서 받아도 기록은 유지 |
 | `504 DriverTimeout` | `504 VM_CONTROL_TIMEOUT` (응답 타임아웃과 같은 코드) |
