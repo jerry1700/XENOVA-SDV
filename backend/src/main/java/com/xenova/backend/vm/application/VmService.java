@@ -442,7 +442,9 @@ public class VmService {
             String mode,
             List<Integer> mask,
             int previousRevision) {
-        if (update == null || update.policy() == null || !update.hostPreparationRequired()
+        // host_preparation_required may be false: since the platform scopes changes to affected VMs (1e41ea73),
+        // a guest-only placement change keeps this boot's dom0 preparation and the VM can start right away.
+        if (update == null || update.policy() == null
                 || update.policy().policyRevision() != previousRevision + 1
                 || update.policy().placements() == null) {
             throw malformedCpuLayout();
