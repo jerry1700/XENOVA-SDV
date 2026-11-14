@@ -2,7 +2,7 @@
 # platform/scripts/setup-yocto.sh가 새 빌드의 conf/local.conf 관리 블록에 적용한다.
 
 MACHINE = "raspberrypi4-64"
-DISTRO = "poky"
+DISTRO = "xenova"
 
 INIT_MANAGER = "systemd"
 DISTRO_FEATURES:append = " virtualization xen x11 opengl"

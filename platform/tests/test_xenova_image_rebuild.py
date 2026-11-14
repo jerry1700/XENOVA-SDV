@@ -1,8 +1,14 @@
 """이미지 재빌드의 ACL·템플릿 라우팅·sparse 복사 경계를 실제 구현으로 검사한다."""
+import ast
+import configparser
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,9 +22,62 @@ def load(name, path):
 
 resolver = load("image_rebuild_resolver", ROOT / "platform/scripts/resolve-xenova-templates.py")
 broker = load("image_rebuild_broker", ROOT / "platform/deploy/mosquitto/scripts/xenova_broker.py")
+wic = load("image_rebuild_wic", ROOT / "platform/scripts/check-xenova-wic.py")
 
 
 class ImageRebuildContractTest(unittest.TestCase):
+    def test_documented_manifest_check_rejects_missing_esp32_modules(self):
+        guide = (ROOT / "docs/platform/build-guide.md").read_text()
+        command = re.search(r"^run wic-packages python3 -B - <<'PY'\n(.*?)^PY$",
+                            guide, re.M | re.S).group(1)
+        required = next(ast.literal_eval(node.value) for node in ast.parse(command).body
+                        if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "required"
+                                for target in node.targets))
+        other_modules = {"brcmfmac-cyw", "v3d", "tun", "ipv6"}
+        names = required | {f"kernel-module-{name}-test-kernel"
+                            for name in other_modules | {"usbserial", "cp210x"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            deploy = Path(tmp)
+            manifest = deploy / "xenova-xen-bringup-image-raspberrypi4-64.rootfs.manifest"
+            for missing in (None, "usbserial", "cp210x"):
+                with self.subTest(missing=missing):
+                    supplied = names - ({f"kernel-module-{missing}-test-kernel"} if missing else set())
+                    manifest.write_text("".join(f"{name} test 1.0\n" for name in sorted(supplied)))
+                    result = subprocess.run([sys.executable, "-B", "-c", command],
+                                            env={**os.environ, "DEPLOY": str(deploy)},
+                                            capture_output=True, text=True)
+                    if missing:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertIn(f"Missing ESP32 module: {missing}", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_wic_requires_one_explicit_pi4_kms_overlay_with_64mib_cma(self):
+        expected = "dtoverlay=vc4-kms-v3d-pi4,cma-64"
+        self.assertTrue(wic.pi4_kms_enabled("# display\n" + expected + "\nenable_uart=1\n"))
+        for config in ("dtoverlay=vc4-kms-v3d", "dtoverlay=vc4-kms-v3d,cma-64",
+                       "dtoverlay=vc4-kms-v3d-pi4", "dtoverlay=vc4-kms-v3d-pi4,cma-256",
+                       "dtoverlay=vc4-kms-v3d-pi5,cma-64", "# " + expected,
+                       expected + "\n" + expected,
+                       expected + "\ndtoverlay=vc4-kms-v3d"):
+            with self.subTest(config=config):
+                self.assertFalse(wic.pi4_kms_enabled(config))
+
+    def test_phone_dhcp_policy_preserves_management_uplink_and_boot_independence(self):
+        path = ROOT / "platform/yocto/meta-xenova/recipes-extended/xen/files/20-xenova-usb-phone.network"
+        policy = configparser.ConfigParser()
+        policy.read_string(path.read_text())
+        self.assertEqual(set(policy["Match"]["Driver"].split()), {"rndis_host", "cdc_ncm", "cdc_ether"})
+        self.assertEqual(policy["Link"]["RequiredForOnline"], "no")
+        self.assertEqual(policy["Network"]["DHCP"], "ipv4")
+        for key in ("LinkLocalAddressing", "IPv6AcceptRA"):
+            self.assertEqual(policy["Network"][key], "no")
+        for key in ("UseGateway", "UseRoutes", "UseDNS", "UseNTP", "UseDomains"):
+            self.assertEqual(policy["DHCPv4"][key], "no")
+        self.assertNotIn("Name", policy["Match"])
+        self.assertLess(path.name, "80-wired.network")
+
     def test_backend_can_read_all_v2_telemetry_but_has_no_v2_write_grant(self):
         rules = broker.policy(ROOT / "platform/deploy/mosquitto/etc/policy.json")
         grants = broker.grants(broker.acl(broker.default_accounts(rules), rules))["backend"]

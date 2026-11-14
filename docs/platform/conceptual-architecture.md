@@ -1100,7 +1100,7 @@ Store·netfront·watch·worker·grant의 확보/노출/종료/반환, 부분 초
 |VM 자산·구성·수명|Debian·Ubuntu·Zephyr 선택/준비·등록과 lifecycle/journal/tombstone 경로를 소스·계약·기존 시험에 대응|같은 후보의 정규 설치·고정 실물 산출물·OS별 제품 종단|
 |사용자 의도·원 제어|원 key/revision·pending·완료 replay·효과 미확정과 현재 관측 분리. FastAPI key stop/원 key 조회는 이미 제공|Spring 원 key 보존·후속 이행·응답 역전, 신규 하위 동시성/수습의 HTTP 소비|
 |실행·관측|host/execution/incarnation·guard, 요청별 ReadContext·잠금 밖 일반 조회, 제한된 재관측|보드/상위 부하의 실제 비용·지연·공정성. 화면 snapshot을 제출 guard로 대체하지 않음|
-|준비 실행·예약·실패 종결|5번의 원 host/기한·소유 자원 정상 종료·명시 private 수습·동일 수습 재개·내구 예약 반환. 양 Linux 실패 뒤 별도 신규 생성까지 로컬 통과|운영 생성 시간 정책 공급과 같은 모듈 후보 설치, 실제 Xen/SD/mount/loop·전원 상실·외부 권한 수락|
+|준비 실행·예약·실패 종결|5번의 원 host/기한·소유 자원 정상 종료·명시 private 수습·동일 수습 재개·내구 예약 반환. 양 Linux 실패 뒤 별도 신규 생성까지 로컬 통과|승인한 시간 정책을 포함한 새 이미지의 실제 생성, 같은 모듈 후보 설치, 실제 Xen/SD/mount/loop·전원 상실·외부 권한 수락|
 |Zephyr 앱·runtime|원문이 설명한 공통 실행/준비·앱 신원·cancel/join·자원 보호와 [기반 결과](../verification/zephyr-drive-foundation-20261029.md)를 기본 관리 접점에 연결|상태 있는 planner·실제 상태 전송·운영 예산·일반 자동 앱 복구. 이번에 게스트 전체 재검증하지 않음|
 |신원 공급·재합류|실행/receipt/Store·binding·최소 소비와 하위 복구 완료의 다른 의미를 연결|원 결과 수습의 전체 상위 반영·실제 provisioning/입력/Standby 종단|
 |건강·복구|개념의 episode/attempt·의도/예산·관측 불가 보호를 현재 관리/Worker 요청과 연결|D01 Linux 기능·대상별 전달·안정 구간·episode 간 누적 예산·공통 기반 정책 대기 유지|
@@ -1112,7 +1112,7 @@ Store·netfront·watch·worker·grant의 확보/노출/종료/반환, 부분 초
 
 ### 12.3 5번이 실제로 제공하는 계약
 
-[정식 생성/수습 계약](cli-manager-spec.md#cmd-operation-reconcile)을 따른다. 새 Linux create는 `/etc/xenova/creation-policy.json`의 유한 정책을 요구한다. recipe는 값이 null인 예시만 `/usr/share/xenova/creation-policy.json.example`로 설치한다. 정책 부재/무효에서는 새 수락을 거절하며 운영 기본 시간값을 시험값에서 정하지 않았다. 완료 replay·원 조회·지원되는 명시 수습은 정책 부재만으로 차단하지 않는다.
+[정식 생성/수습 계약](cli-manager-spec.md#cmd-operation-reconcile)을 따른다. 새 Linux create는 `/etc/xenova/creation-policy.json`의 유한 정책을 요구한다. recipe는 승인된 호출 20분·실행 19분·정리 30초의 활성 정책을 root:root·0600으로 설치하며, null 예시는 `/usr/share/xenova/creation-policy.json.example`에 따로 둔다. [시간의 의미와 원 기한](cli-manager-spec.md#creation-deadline)은 그대로이며 정책 부재/무효에서는 새 수락을 거절한다. 완료 replay·원 조회·지원되는 명시 수습은 정책 부재만으로 차단하지 않는다.
 
 새 Linux asset journal schema 1.1의 `creation.version=1`은 원 host·수락 시각·불변 실행 기한·정책을 결합한다. 원 기한은 호출 진입/대기 비용과 종료 여유를 고려해 최초 수락에서 고정하며 재전달/조회/재시작으로 늘리지 않는다. 기한 없는 legacy 미완료/다른 boot는 새 생성 기한을 발급해 재개하지 않는다. 현재 host의 명시 private 수습과 완료된 구버전 결과 replay는 별개다. 구형 writer/일부 모듈의 혼합 배포는 지원하지 않는다.
 

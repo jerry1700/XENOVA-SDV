@@ -3,9 +3,11 @@
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 
 # 브릿지는 xenova-bridge.service가 생성하고 고정 IP를 설정한다.
-# virt_networking.bbclass에는 networkd 비관리 규칙만 설치하도록 전달한다.
-VIRT_NETWORKING_FILES = "${UNPACKDIR}/10-ether.network ${UNPACKDIR}/10-xenbr0.network"
+# virt_networking.bbclass로 비관리 규칙과 USB 전화의 주소 전용 정책을 설치한다.
+VIRT_NETWORKING_FILES = "${UNPACKDIR}/10-ether.network ${UNPACKDIR}/10-xenbr0.network ${UNPACKDIR}/20-xenova-usb-phone.network"
 SRC_URI:remove = "file://10-xenbr0.netdev"
+SRC_URI += "file://20-xenova-usb-phone.network"
+CONFFILES:${PN}-net-conf += "${sysconfdir}/systemd/network/20-xenova-usb-phone.network"
 SRC_URI += "file://0002-console-filter-xenova-evidence.patch file://xenova_console_evidence.h file://xenova_console_evidence_file.h file://xenova_console_evidence_async.h"
 python do_patch:append() {
     import shutil

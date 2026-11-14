@@ -64,9 +64,9 @@ class DriveBindingTest(unittest.TestCase):
                 self.assertEqual(error.error['code'],'OPERATION_IN_PROGRESS')
                 return True
             return False
-        def validating(context,identity):
+        def validating(context,identity,**kwargs):
             checks.append(admission_held())
-            return validate(context,identity)
+            return validate(context,identity,**kwargs)
         @contextmanager
         def locked(runtime,name,**kwargs):
             locks.append(name)

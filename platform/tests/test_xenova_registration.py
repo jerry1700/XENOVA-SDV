@@ -108,13 +108,18 @@ class RegistrationTest(unittest.TestCase):
         result=self.m.fork().call('stop',{'vm_id':self.f.vm_id},idempotency_key='after-registration')
         self.f.ok(result);self.assertEqual(len(self.f.physical('shutdown')),1)
 
-    def test_factory_completion_returns_only_first_new_registration_opportunities(self):
+    def test_factory_completion_has_no_automatic_notification_opportunity(self):
         import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as root:
             b=Board(Path(root)/'board');b.grow_mount();b.factory()
-            notices=b.p.register();self.assertEqual(len(notices),2)
             self.assertEqual(b.p.register(),[])
+            state_path=b.data/'.first-install-state.json'
+            state=json.loads(state_path.read_text())
+            self.assertEqual(state['phase'],'complete')
+            self.assertNotIn('registration_notices',state)
+            self.assertEqual(b.p.register(),[])
+            self.assertEqual(state,json.loads(state_path.read_text()))
 
 
 if __name__=='__main__':unittest.main()

@@ -1,8 +1,8 @@
-"""등록 확정 후의 선택적 로컬 FastAPI 1회 호출. Spring 자격/URL은 취급하지 않는다.
+"""일반 create 확정 후 선택적 로컬 FastAPI 1회 호출. Spring 자격/URL은 취급하지 않는다.
 
-자동 기회는 원 create/factory 기록에서 이미 소비한다. 이 helper는 재시도 큐가 아니다.
-factory는 현재 등록 사건의 일시 systemd job만 예약한다. API READY 뒤 실행 예산을
-시작하며 재부팅/API 재시작에 목록을 훑거나 job을 재생성하지 않는다.
+자동 기회는 원 create 기록에서 소비하며 이 helper는 재시도 큐가 아니다.
+최초 설치는 이 helper를 호출하지 않는다. defer/after-api 경로는 구버전이 시작한
+후속 실행의 호환용으로 유지하며 현재 first-boot와 API 재시작은 이를 새로 호출하지 않는다.
 """
 import fcntl
 import http.client

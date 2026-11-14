@@ -1,5 +1,6 @@
-"""부팅 통지의 비동기 예약·설치 순서. 실제 systemd/HTTP 왕복은 process 시험에서 다룬다."""
+"""최초 설치의 로컬 등록과 구형 통지 job 호환. HTTP 왕복은 process 시험에서 다룬다."""
 import configparser
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,14 +9,17 @@ import time
 import unittest
 from unittest.mock import patch
 
+from first_install_fixture import Board
+import xenova_first_boot as boot
 import xenova_registration_hook as hook
+from xenova_runtime import operation_lock
 
 ROOT=Path(__file__).resolve().parents[2]
 VM='850e8400-e29b-41d4-a716-446655440001'
 
 
 class RegistrationBootTest(unittest.TestCase):
-    def test_real_defer_subprocess_only_submits_async_job_without_http_or_secret_inheritance(self):
+    def test_legacy_defer_subprocess_preserves_async_job_and_secret_isolation(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'run').mkdir();(root/'data').mkdir();(root/'bin').mkdir()
             env=root/'local.env';env.write_text('XENOVA_HOST=127.0.0.1\nXENOVA_PORT=1\n');env.chmod(0o600)
@@ -44,6 +48,55 @@ class RegistrationBootTest(unittest.TestCase):
             self.assertEqual(args[index+1:],[str(root/'data'),str(root/'run'),str(env),str(root/'token'),VM])
             self.assertFalse((root/'data/registration-notices').exists())
 
+    def first_boot(self, board):
+        with (patch.object(boot,'FirstBoot',return_value=board.p),
+              patch.object(boot,'operation_lock',side_effect=lambda:operation_lock(board.p.run)),
+              patch.object(boot.sys,'argv',['xenova-first-boot','register'])):
+            boot.main()
+
+    def test_first_boot_entrypoint_registers_locally_without_notification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            board=Board(Path(directory)/'board');board.grow_mount();board.factory()
+            with patch.object(hook,'automatic',side_effect=AssertionError('factory must not notify')):
+                self.first_boot(board)
+                registry={p.parent.name:p.read_bytes() for p in board.data.glob('instances/*/instance.json')}
+                self.assertEqual(len(registry),2)
+                state_path=board.data/'.first-install-state.json'
+                state=json.loads(state_path.read_text())
+                self.assertEqual(state['phase'],'complete')
+                self.assertNotIn('registration_notices',state)
+                self.assertEqual({json.loads(value)['uuid'] for value in registry.values()},
+                                 {value['uuid'] for value in state['identities'].values()})
+                assets={str(p.relative_to(board.data)):hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in board.data.glob('instances/*/*') if p.is_file()}
+                self.first_boot(board)
+                self.assertEqual(registry,{p.parent.name:p.read_bytes() for p in board.data.glob('instances/*/instance.json')})
+                self.assertEqual(assets,{str(p.relative_to(board.data)):hashlib.sha256(p.read_bytes()).hexdigest()
+                                        for p in board.data.glob('instances/*/*') if p.is_file()})
+                self.assertEqual(state,json.loads(state_path.read_text()))
+            self.assertFalse((board.data/'registration-notices').exists())
+            self.assertFalse((board.p.run/'registration-notices').exists())
+            self.assertTrue(json.loads((board.p.run/'install-ready.json').read_text())['fresh_registration'] is False)
+
+    def test_existing_factory_notice_history_is_preserved_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            board=Board(Path(directory)/'board');board.grow_mount();board.factory();board.p.register()
+            path=board.data/'.first-install-state.json'
+            state=json.loads(path.read_text())
+            legacy=[next(iter(state['identities'].values()))['uuid']]
+            state['registration_notices']=legacy;path.write_text(json.dumps(state))
+            previous=board.data/'registration-notices'/(legacy[0]+'.json')
+            previous.parent.mkdir()
+            previous.write_text('{"automatic":true,"state":"delivery-unknown","confirmed":false}\n')
+            saved=previous.read_bytes()
+            with patch.object(hook,'automatic',side_effect=AssertionError('factory must not replay')):
+                self.first_boot(board)
+                self.first_boot(board)
+            self.assertEqual(json.loads(path.read_text())['registration_notices'],legacy)
+            self.assertEqual(previous.read_bytes(),saved)
+            self.assertEqual(list(previous.parent.iterdir()),[previous])
+            self.assertFalse((board.p.run/'registration-notices').exists())
+
     def test_ready_unit_is_after_autostart_and_boot_does_not_wait_for_api(self):
         files=ROOT/'platform/yocto/meta-xenova/recipes-core'
         def unit(relative):
@@ -54,7 +107,10 @@ class RegistrationBootTest(unittest.TestCase):
         self.assertEqual(api['Service']['Type'],'notify');self.assertEqual(api['Service']['NotifyAccess'],'main')
         self.assertIn('xenova-host-admission.service',api['Unit']['After'].split())
         self.assertIn('xenova-vms.service',admission['Unit']['After'].split())
-        self.assertNotIn(hook.API_UNIT,dict(first['Unit']).values())
+        for key in ('After','Before','Wants','Requires','BindsTo','PartOf'):
+            dependencies=first['Unit'].get(key,'').split()
+            for external in (hook.API_UNIT,'network-online.target','tailscaled.service'):
+                self.assertNotIn(external,dependencies)
         self.assertNotIn('ExecStartPost',api['Service'])
 
 
