@@ -32,4 +32,8 @@ public interface VmControlPort {
 
     // Forced shutdown and disk deletion. Idempotent.
     void destroy(String vmId);
+
+    // Fault injection: removes only the Xen domain and keeps the registration and the running intent, so the
+    // recovery worker restarts it (DOMAIN_ABSENT). Unlike stop, it is not recorded as an operator stop.
+    void kill(String vmId);
 }

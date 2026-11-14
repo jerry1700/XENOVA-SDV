@@ -13,7 +13,10 @@ public record VmResourceView(
         List<Integer> exclusivePcpus,
         List<PcpuStatus> pcpus,
         ResourceLimits limits,
-        Instant observedAt) {
+        Instant observedAt,
+        // Only on a pinning change response: true means this boot's host preparation must run before the VM
+        // can start; false means it can start right away. null on GET /resources.
+        Boolean hostPreparationRequired) {
 
     public record PcpuStatus(int pcpu, Double loadPercent) {
     }

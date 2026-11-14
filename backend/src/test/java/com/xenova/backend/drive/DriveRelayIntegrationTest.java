@@ -9,6 +9,7 @@ import com.xenova.backend.event.domain.EventSeverity;
 import com.xenova.backend.event.domain.EventType;
 import com.xenova.backend.event.domain.VmEvent;
 import com.xenova.backend.event.domain.VmEventRepository;
+import com.xenova.backend.testsupport.MqttTestClients;
 import io.moquette.broker.Server;
 import io.moquette.broker.config.MemoryConfig;
 import java.io.IOException;
@@ -87,7 +88,7 @@ class DriveRelayIntegrationTest {
 
     @BeforeEach
     void connectFakeGateway() throws Exception {
-        fake = new MqttClient("tcp://127.0.0.1:" + MQTT_PORT, "fake-gateway", new MemoryPersistence());
+        fake = new MqttClient("tcp://127.0.0.1:" + MQTT_PORT, MqttTestClients.uniqueId("fake-gateway"), new MemoryPersistence());
         fake.connect();
         fake.subscribe(DriveStateTracker.PREFIX + "apps/manual/input", 0, (topic, message) ->
                 inputs.add(objectMapper.readTree(message.getPayload())));
@@ -96,9 +97,8 @@ class DriveRelayIntegrationTest {
     }
 
     @AfterEach
-    void disconnectFakeGateway() throws Exception {
-        fake.disconnect();
-        fake.close();
+    void disconnectFakeGateway() {
+        MqttTestClients.closeQuietly(fake);
     }
 
     @AfterAll

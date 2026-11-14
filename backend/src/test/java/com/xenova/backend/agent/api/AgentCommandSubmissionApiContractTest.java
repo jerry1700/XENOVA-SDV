@@ -16,6 +16,10 @@ import com.xenova.backend.agent.application.AgentExitCommand;
 import com.xenova.backend.agent.application.AgentExitService;
 import com.xenova.backend.agent.application.AutoDelayCommand;
 import com.xenova.backend.agent.application.AutoDelayService;
+import com.xenova.backend.agent.application.AutoInputUnavailableCommand;
+import com.xenova.backend.agent.application.AutoInputUnavailableService;
+import com.xenova.backend.agent.application.VmCrashCommand;
+import com.xenova.backend.agent.application.VmCrashService;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +36,8 @@ class AgentCommandSubmissionApiContractTest {
     private final AgentStressService stressService = mock(AgentStressService.class);
     private final AutoDelayService delayService = mock(AutoDelayService.class);
     private final AgentExitService exitService = mock(AgentExitService.class);
+    private final VmCrashService crashService = mock(VmCrashService.class);
+    private final AutoInputUnavailableService inputUnavailableService = mock(AutoInputUnavailableService.class);
     private MockMvc mvc;
 
     @BeforeEach
@@ -41,7 +47,8 @@ class AgentCommandSubmissionApiContractTest {
                 .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
         mvc = MockMvcBuilders.standaloneSetup(
                         new AgentStressController(stressService), new AutoDelayController(delayService),
-                        new AgentExitController(exitService))
+                        new AgentExitController(exitService), new VmCrashController(crashService),
+                        new AutoInputUnavailableController(inputUnavailableService))
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(mapper)).build();
     }
 
@@ -103,5 +110,42 @@ class AgentCommandSubmissionApiContractTest {
                 .andExpect(jsonPath("$.operation_id").value("operation-3"));
 
         verify(exitService).send(VM_ID);
+    }
+
+    @Test
+    void acceptsVmCrashWithoutRequestBodyAndReturnsTrackingIdentity() throws Exception {
+        when(crashService.send(VM_ID)).thenReturn(new VmCrashCommand(
+                "command-4", "operation-4", VM_ID, NOW, NOW.plusSeconds(30)));
+
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/vm-crash", VM_ID))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.command_id").value("command-4"))
+                .andExpect(jsonPath("$.operation_id").value("operation-4"));
+
+        verify(crashService).send(VM_ID);
+    }
+
+    @Test
+    void acceptsAutoInputUnavailableDuration() throws Exception {
+        when(inputUnavailableService.send(VM_ID, 50)).thenReturn(new AutoInputUnavailableCommand(
+                "command-5", "operation-5", VM_ID, 50, NOW, NOW.plusSeconds(30)));
+
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/auto-input-unavailable", VM_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"duration_s\":50}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.command_id").value("command-5"))
+                .andExpect(jsonPath("$.vm_id").value(VM_ID))
+                .andExpect(jsonPath("$.duration_s").value(50));
+
+        verify(inputUnavailableService).send(VM_ID, 50);
+    }
+
+    @Test
+    void rejectsOutOfRangeAutoInputUnavailableDuration() throws Exception {
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/auto-input-unavailable", VM_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"duration_s\":121}"))
+                .andExpect(status().isBadRequest());
     }
 }

@@ -5,7 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -13,11 +16,11 @@ import com.xenova.backend.common.error.ApiException;
 import com.xenova.backend.agent.application.AgentInventoryCleaner;
 import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
+import com.xenova.backend.template.application.FixedTemplateCatalog;
 import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.vm.domain.VmRole;
 import com.xenova.backend.template.domain.VmTemplate;
-import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.CreateVmCommand;
 import com.xenova.backend.vm.domain.CpuLayout;
@@ -41,6 +44,9 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -77,8 +83,7 @@ class VmServiceTest {
 
     @BeforeEach
     void setUp() {
-        TemplateCatalog templateCatalog = new TemplateCatalog(new TemplateCatalogProperties(
-                List.of(new VmTemplate("alpine", "1.2.0", "Alpine 1.2.0", 128, GuestKind.LINUX))));
+        TemplateCatalog templateCatalog = FixedTemplateCatalog.of(new VmTemplate("alpine", "1.2.0", "Alpine 1.2.0", 128, GuestKind.LINUX));
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         // Disabled cache: every read goes to the port, as these cases were written for.
         VmRuntimeCache runtimeCache = new VmRuntimeCache(
@@ -291,6 +296,47 @@ class VmServiceTest {
     }
 
     @Test
+    void killRemovesOnlyTheDomainThroughDom0AndRecordsTheFault() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.find("vm-1")).thenReturn(Optional.of(new VmRuntime("vm-1", VmState.RUNNING, 1, 256)));
+
+        DomainKill killed = service.kill("vm-1");
+
+        assertThat(killed.vmId()).isEqualTo("vm-1");
+        assertThat(killed.operationId()).isNotBlank();
+        assertThat(killed.submittedAt()).isEqualTo(NOW);
+        verify(vmControlPort).kill("vm-1");
+        verify(vmControlPort, never()).stop(anyString()); // 정지는 의도를 stopped 로 바꿔 복구가 일어나지 않는다
+        verify(vmControlPort, never()).destroy(anyString());
+        verify(eventRecorder).faultInjected("vm-1", "alpine-1", "force_kill");
+        // 사용자 정지가 아니다 — 꺼짐은 다음 동기화가 장애로 감지한다
+        verify(stateTracker, never()).changedByUser(anyString(), any(), any(), anyString());
+    }
+
+    @Test
+    void killOfAVmThatIsNotRunningIsInvalidState() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.find("vm-1")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.kill("vm-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("INVALID_VM_STATE");
+                });
+        verify(vmControlPort, never()).kill(anyString());
+    }
+
+    @Test
+    void killOfAnUnknownVmIsNotFound() {
+        when(vmRecordRepository.findById("vm-x")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.kill("vm-x"))
+                .isInstanceOfSatisfying(ApiException.class, exception ->
+                        assertThat(exception.getCode()).isEqualTo("VM_NOT_FOUND"));
+        verify(vmControlPort, never()).kill(anyString());
+    }
+
+    @Test
     void stopRecordsTheStateItStoppedFrom() {
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
         when(vmControlPort.find("vm-1")).thenReturn(Optional.of(new VmRuntime("vm-1", VmState.RUNNING, 1, 256)));
@@ -408,6 +454,8 @@ class VmServiceTest {
         assertThat(result.sharedPcpus()).containsExactly(0, 3);
         assertThat(result.exclusivePcpus()).containsExactly(1);
         assertThat(result.pcpus()).allSatisfy(pcpu -> assertThat(pcpu.loadPercent()).isNull());
+        // only a pinning change response carries it
+        assertThat(result.hostPreparationRequired()).isNull();
     }
 
     @Test
@@ -435,6 +483,27 @@ class VmServiceTest {
                 new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)));
         assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(3)));
         assertThat(result.exclusivePcpus()).containsExactly(1);
+        assertThat(result.hostPreparationRequired()).isTrue();
+    }
+
+    @Test
+    void aGuestOnlyPinningChangeThatNeedsNoHostPreparationIsAcceptedAndReported() {
+        // Platform 1e41ea73: changing only guest placement keeps this boot's dom0 preparation (false)
+        VmRecord record = record("vm-1", "alpine-1");
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
+        when(vmControlPort.cpuLayout()).thenReturn(cpuLayout());
+        when(vmControlPort.updateCpuPolicy(any(), eq("pin-2"))).thenReturn(new CpuPolicyUpdate(
+                new CpuPolicyUpdate.CpuPolicy(
+                        "2.0", "operation-2", 3, "Pool-0", List.of(0, 3), List.of(
+                        new CpuPolicyUpdate.CpuPlacement("vm-1", "shared", List.of(3)),
+                        new CpuPolicyUpdate.CpuPlacement("vm-z", "exclusive", List.of(1)))),
+                false));
+
+        VmResourceView result = service.updateVcpuPinning(
+                "vm-1", List.of(new CpuLayout.VcpuAffinity(0, List.of(3))), "pin-2");
+
+        assertThat(result.hostPreparationRequired()).isFalse();
+        assertThat(result.vcpuPinning()).containsExactly(new CpuLayout.VcpuAffinity(0, List.of(3)));
     }
 
     @Test
@@ -497,6 +566,33 @@ class VmServiceTest {
     }
 
     @Test
+    void deletingARunningVmSaysToStopItFirst() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        org.mockito.Mockito.doThrow(new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", "지금 VM 상태에서는…"))
+                .when(vmControlPort).destroy("vm-1");
+
+        assertThatThrownBy(() -> service.destroy("vm-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("INVALID_VM_STATE");
+                    assertThat(exception.getMessage()).isEqualTo("실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.");
+                });
+    }
+
+    @Test
+    void rebootingAVmThatIsNotRunningExplainsWhatToDoInstead() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmControlPort.requestReboot("vm-1", "reboot-1"))
+                .thenThrow(new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", "지금 VM 상태에서는…"));
+
+        assertThatThrownBy(() -> service.reboot("vm-1", "reboot-1"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getCode()).isEqualTo("INVALID_VM_STATE");
+                    assertThat(exception.getMessage()).startsWith("실행 중인 VM만 재부팅할 수 있습니다.");
+                });
+    }
+
+    @Test
     void destroyOfAVmTheBoardNoLongerRegistersRetiresTheRow() {
         VmRecord record = record("vm-1", "web-test");
         when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record));
@@ -546,6 +642,78 @@ class VmServiceTest {
         assertThatThrownBy(() -> service.get("missing"))
                 .isInstanceOfSatisfying(ApiException.class, exception ->
                         assertThat(exception.getCode()).isEqualTo("VM_NOT_FOUND"));
+    }
+
+    // ---- QA 1-B2: 같은 VM 동시 작업 거절 ----
+
+    @Test
+    void anotherRequestForAVmWithAnOperationInFlightIsRefusedWithoutReachingDom0() throws Exception {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            entered.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        }).when(vmControlPort).stop("vm-1");
+
+        CompletableFuture<Vm> stopping = CompletableFuture.supplyAsync(() -> service.stop("vm-1"));
+        assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // 다른 종류(삭제·재부팅)도, 같은 종류(정지)도 거절된다
+        assertInProgress(() -> service.destroy("vm-1"));
+        assertInProgress(() -> service.stop("vm-1"));
+        assertInProgress(() -> service.reboot("vm-1", "reboot-1"));
+        verify(vmControlPort, never()).destroy("vm-1");
+        verify(vmControlPort, never()).requestReboot(anyString(), anyString());
+
+        release.countDown();
+        assertThat(stopping.get(5, TimeUnit.SECONDS).state()).isEqualTo(VmState.STOPPED);
+        verify(vmControlPort, times(1)).stop("vm-1");
+    }
+
+    @Test
+    void anOperationOnAnotherVmIsNotBlocked() throws Exception {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        when(vmRecordRepository.findById("vm-2")).thenReturn(Optional.of(record("vm-2", "alpine-2")));
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            entered.countDown();
+            release.await(5, TimeUnit.SECONDS);
+            return null;
+        }).when(vmControlPort).stop("vm-1");
+
+        CompletableFuture<Vm> stopping = CompletableFuture.supplyAsync(() -> service.stop("vm-1"));
+        assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+        assertThat(service.stop("vm-2").state()).isEqualTo(VmState.STOPPED);
+        verify(vmControlPort).stop("vm-2");
+
+        release.countDown();
+        stopping.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void aFailedOperationReleasesTheVmForTheNextRequest() {
+        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(record("vm-1", "alpine-1")));
+        doThrow(new ApiException(HttpStatus.GATEWAY_TIMEOUT, "VM_CONTROL_TIMEOUT", "시간 초과"))
+                .doNothing()
+                .when(vmControlPort).stop("vm-1");
+
+        assertThatThrownBy(() -> service.stop("vm-1"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        exception -> assertThat(exception.getCode()).isEqualTo("VM_CONTROL_TIMEOUT"));
+        assertThat(service.stop("vm-1").state()).isEqualTo(VmState.STOPPED);
+        verify(vmControlPort, times(2)).stop("vm-1");
+    }
+
+    private static void assertInProgress(org.assertj.core.api.ThrowableAssert.ThrowingCallable call) {
+        assertThatThrownBy(call).isInstanceOfSatisfying(ApiException.class, exception -> {
+            assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(exception.getCode()).isEqualTo("VM_OPERATION_IN_PROGRESS");
+            assertThat(exception.getMessage()).isEqualTo("이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요.");
+        });
     }
 
     private static VmRecord record(String vmId, String name) {

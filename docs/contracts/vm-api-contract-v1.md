@@ -127,22 +127,27 @@ Spring이 자기 레코드와 dom0-manager 응답을 조합해 구성합니다. 
 | 필드 | 의미 |
 |---|---|
 | `template_id` | 플랫폼 공개 카탈로그 ID (예: `debian-13-arm64`) |
-| `version` | 템플릿 버전. VM 생성 요청에서는 이 값을 `template_version`으로 보냄 |
-| `display_name` | 드롭다운 표시 이름 (예: `Debian 12`) |
+| `version` | 보드에 공개된 이 템플릿의 최신 버전. VM 생성 요청에서는 이 값을 `template_version`으로 보냄 |
+| `display_name` | 드롭다운 표시 이름 (예: `Debian 13`) |
 | `min_memory_mib` | 이 템플릿의 최소 메모리 |
-| `guest_kind` | 이 템플릿으로 만든 VM의 종류 `linux` / `zephyr` |
+| `guest_kind` | 이 템플릿으로 만든 VM의 종류 `linux` / `zephyr` (보드 카탈로그 값) |
 
 ```json
 [
-  { "template_id": "ubuntu-24.04-arm64", "version": "1.0.0", "display_name": "Ubuntu 24.04", "min_memory_mib": 512, "guest_kind": "linux" },
-  { "template_id": "debian-13-arm64", "version": "1.0.0", "display_name": "Debian 13", "min_memory_mib": 256, "guest_kind": "linux" },
-  { "template_id": "zephyr-xenvm-starter-arm64", "version": "1.0.0", "display_name": "Zephyr Starter 1.0.0", "min_memory_mib": 16, "guest_kind": "zephyr" }
+  { "template_id": "ubuntu-24.04-arm64", "version": "1.0.5", "display_name": "Ubuntu 24.04", "min_memory_mib": 512, "guest_kind": "linux" },
+  { "template_id": "debian-13-arm64", "version": "1.0.8", "display_name": "Debian 13", "min_memory_mib": 256, "guest_kind": "linux" },
+  { "template_id": "zephyr-drive-lattice-lab-arm64", "version": "1.0.8", "display_name": "Zephyr Drive Lattice Lab", "min_memory_mib": 16, "guest_kind": "zephyr" }
 ]
 ```
 
 플랫폼 기본 Ubuntu·Debian·Zephyr 공개 카탈로그의 ID와 버전을 그대로 사용합니다. dom0-manager는 템플릿 값을 변환하지 않습니다. OS 검증에서는 카탈로그 ID를 게스트의 `os-release` ID(`ubuntu`, `debian`)와 별도로 대응시킵니다.
 
-1차 데이터는 Spring 설정 파일(`application.yml`의 `xenova.template-catalog.templates`)에 고정하며, Ubuntu·Debian·Zephyr마다 플랫폼이 공개한 버전 하나를 사용합니다. 최소 메모리 값은 실측에 따라 조정할 수 있습니다.
+**버전은 보드에서 읽습니다.** Spring은 dom0-manager `GET /api/v1/templates`(보드 `/srv/xenova/catalog`의 모든 공개 버전)를 조회해 `xenova.template-catalog.refresh-interval`(기본 30초) 동안 캐시합니다. 그래서 이미지를 보드에 올리기만 하면 위저드에 반영되고, 백엔드 커밋은 필요 없습니다.
+
+- **목록(`GET /api/v1/templates`)**: `template_id`마다 가장 높은 버전 하나만 보입니다. 버전은 점으로 나눈 숫자로 비교합니다(`1.0.10` > `1.0.9`).
+- **검증(생성·시작·자원 변경)**: 보드에 남아 있는 모든 버전을 허용합니다. 옛 버전으로 만든 VM도 그 버전이 보드에 남아 있으면 계속 쓸 수 있습니다.
+- **표시 이름·최소 메모리**: 보드 카탈로그에 없으므로 `application.yml`의 `xenova.template-catalog.templates`에 `template-id`별로 둡니다. 여기에 없는 템플릿은 보드에 있어도 보이지 않고, 여기에 있어도 보드에 없으면 보이지 않습니다. 목록 순서가 위저드 표시 순서입니다.
+- **보드 장애**: 조회에 실패하면 마지막으로 읽은 목록을 계속 씁니다. 한 번도 읽지 못했으면 dom0-manager 오류(`503 VM_CONTROL_UNAVAILABLE` 등)를 그대로 돌려줍니다.
 
 ---
 
@@ -604,7 +609,9 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `POST` | `/api/v1/vms/{vm_id}/start` | `200` VM | dom0 단건 조회 후 도메인이 없을 때만 create 재호출. 이미 `running`이면 그대로 반환. `crashed`·`paused`·`stopping`이면 `409 INVALID_VM_STATE`로 거부(정지 후 다시 시작). 플랫폼 CLI와 같은 동작이며 자동 복구는 하지 않음 |
 | `POST` | `/api/v1/vms/{vm_id}/stop` | `200` VM (`state: stopped`) | dom0 단건 조회로 정지 전 상태를 읽은 뒤 **runtime 유무와 관계없이** dom0 stop을 호출. 플랫폼이 `desired_state: stopped` 의도를 기록해야 Recovery Worker가 사용자가 끈 VM을 다시 켜지 않는다(1.2절). 이미 꺼져 있었으면 `vm.state.changed` 이벤트만 남기지 않음. dom0는 `204`지만 Spring은 레코드로 VM 객체를 만들어 반환 |
 | `DELETE` | `/api/v1/vms/{vm_id}` | `204` | dom0 retire 성공 뒤 Spring 레코드를 `RETIRED`로 보존하고 v1 목록·단건 조회에서는 숨김 |
-| `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 설정 파일 고정 데이터 (2.3절) |
+| `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 보드 카탈로그(템플릿별 최신) + 설정 표시 정보 (2.3절). 보드 미조회 시 `503` |
+| `GET` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 뷰 | vCPU·메모리, pCPU 수, `vcpu_pinning`(VM의 hard affinity), `shared_pcpus`(dom0 공유 집합), `exclusive_pcpus`, `limits`. `host_preparation_required`는 `null` |
+| `PUT` | `/api/v1/vms/{vm_id}/resources/vcpu-pinning` | `200` 자원 뷰 | 본문 `{mappings:[{vcpu, pcpus}]}`(모든 vCPU에 같은 마스크). 공유 VM은 공유 집합 안, 전용 VM은 공유·다른 전용 코어 밖. 응답 `host_preparation_required`: `true`면 보드 호스트 준비 뒤 시작 가능(1차 보드는 늘 `true`), `false`면 바로 시작 가능(플랫폼 1e41ea73 이후 게스트 배치만 바뀐 변경). 공유·전용 방식과 공유 집합은 바꾸지 않는다 |
 
 같은 `/api/v1/vms` 아래의 그 밖의 공개 엔드포인트(위 VM 관리와 별도. 형식의 기준은 각 계약·[백엔드 README](../../backend/README.md)):
 
@@ -777,10 +784,11 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 |---|---|---|
 | `401` | `UNAUTHORIZED` / `INVALID_TOKEN` / `TOKEN_REVOKED` | 토큰 없음 / 잘못됐거나 만료 / 로그아웃으로 폐기 |
 | `422` | `VALIDATION_ERROR` | 입력값 규칙 위반 — dom0-manager를 호출하지 않고 거절 |
-| `404` | `TEMPLATE_NOT_FOUND` | 템플릿 목록에 없는 `template_id`·`template_version` |
+| `404` | `TEMPLATE_NOT_FOUND` | 보드에 공개되지 않았거나 표시 정보가 없는 `template_id`·`template_version` |
 | `404` | `VM_NOT_FOUND` | Spring 레코드에 없는 `vm_id` |
 | `409` | `VM_NAME_CONFLICT` | 같은 이름의 VM이 다른 명세로 이미 있음 |
 | `409` | `INVALID_VM_STATE` | 시작 요청인데 도메인이 `crashed`·`paused`·`stopping` 상태로 남아 있음 |
+| `409` | `VM_OPERATION_IN_PROGRESS` | 같은 VM에 생성(기존 VM 재요청)·시작·정지·삭제·자원 변경·재부팅·vCPU 핀닝 중 하나가 아직 진행 중. "이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요." dom0-manager를 호출하지 않으며 요청을 쌓지 않는다 (11장) |
 
 입력 오류는 `422 VALIDATION_ERROR` 가 원칙이고(본문 필드 검증과 경로·질의 값의 형식 오류 모두), 구현상 아래 두 곳만 `400` 이다.
 
@@ -789,21 +797,23 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 | `GET /api/v1/logs` | `400 VALIDATION_ERROR` (`errors` 없음) | `limit` 1..500 밖, 음수 `after`, 128자를 넘는 `source_id`·`component`, 허용하지 않는 `level`. dom0 로그 조회도 같은 경우 `400 InvalidArgument` 다([실행 로그 계약](runtime-logs-v1.md)). 단 `vm_id` 가 UUID 형식이 아니거나 `after`·`limit` 이 정수가 아니면 공통 처리로 `422 VALIDATION_ERROR` |
 | `POST /api/v1/vms/registrations` | `400 INVALID_REGISTRATION` | 등록 통지 본문 오류 (서비스 간 경로, 5장) |
 
-**dom0-manager 오류 변환** (dom0 본문의 `code`로 판단하며 `detail`은 로그에만 남김)
+**dom0-manager 오류 변환** (dom0 본문의 `code`·`platform_code`로 판단한다. dom0 `message`(영어, 내부 ID 포함)와 `detail`은 로그에만 남기고 **공개 `message`는 코드별 한글 문구**다. QA 1-B1, 2026-11-13)
 
 | dom0 | Spring 공개 |
 |---|---|
-| `404 VMNotFound` | 단건 조회에서는 오류가 아니라 "도메인 없음"(`stopped`)으로 처리. 그 밖에는 `404 VM_NOT_FOUND` |
-| `409 VMExists` | 생성·시작에서는 성공으로 처리(10.1절). 그 밖에는 `409 VM_ALREADY_EXISTS` |
+| `404 VMNotFound` | 단건 조회에서는 오류가 아니라 "도메인 없음"(`stopped`)으로 처리. 그 밖에는 `404 VM_NOT_FOUND` ("보드에서 VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.") |
+| `409 VMExists` | 생성·시작에서는 성공으로 처리(10.1절). 그 밖에는 `409 VM_ALREADY_EXISTS` ("보드에 같은 VM이 이미 있습니다.") |
 | `409 VMSpecConflict` | 현재 Spring 매핑이 없어 `502 VM_CONTROL_BAD_RESPONSE`로 반환. 명세 충돌을 공개 `409`로 전달하는 Spring 연결은 후속 작업 |
 | `409 VMNameConflict` | `409 VM_NAME_CONFLICT`. 생성·시작에서도 **성공으로 처리하지 않는다**(같은 VM 이 아님) |
-| `409 InvalidState` | `409 INVALID_VM_STATE` |
-| `400 InvalidArgument` | `400 INVALID_ARGUMENT` |
+| `409 InvalidState` | `409 INVALID_VM_STATE`. message는 `platform_code`별: `VM_NOT_STOPPED` "VM을 정지한 뒤 다시 시도하세요.", `VM_NOT_RUNNING` "실행 중인 VM에서만 할 수 있는 작업입니다.", `HOST_QUIESCING` "보드가 종료 중이라 새 작업을 받을 수 없습니다.", `BOOT_ADMISSION_REQUIRED` "보드의 VM 실행 정책이 확정되지 않아 지금은 시작할 수 없습니다.", `TARGET_CHANGED`·`INTENT_MISMATCH` "그사이 VM 상태가 바뀌었습니다…", `ASSET_IN_USE` "VM 디스크를 다른 작업이 사용 중입니다…", `VM_PURGED` "이미 완전히 삭제된 VM입니다.", 그 밖·없음 "지금 VM 상태에서는 할 수 없는 작업입니다. VM 상태를 확인한 뒤 다시 시도하세요." 작업을 아는 곳은 더 구체적으로 바꾼다: 삭제 "실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.", 재부팅 "실행 중인 VM만 재부팅할 수 있습니다. 꺼진 VM은 시작하고, 비정상 상태면 정지한 뒤 시작하세요." |
+| `400 InvalidArgument` | `400 INVALID_ARGUMENT`. `platform_code` `TEMPLATE_NOT_FOUND`·`TEMPLATE_VERSION_NOT_FOUND` "보드에 해당 템플릿 버전이 없습니다. 템플릿을 다시 선택하세요.", `RESOURCE_UNSUPPORTED` "이 템플릿이 허용하지 않는 vCPU·메모리 값입니다.", 그 밖 "보드가 요청 값을 받아들이지 않았습니다. 입력값을 확인하세요." |
 | `507 InsufficientResources` | `507 INSUFFICIENT_RESOURCES`. message는 `resource.name`에 따라 메모리·CPU 부족 또는 "VM에 할당할 수 있는 IP 주소가 없습니다."(`ipv4`, Linux VM IP 풀 고갈) |
-| `500 DriverError` | `500 VM_DRIVER_ERROR` |
+| `500 DriverError` | `500 VM_DRIVER_ERROR` ("보드에서 VM 작업을 처리하지 못했습니다. 잠시 후 다시 시도하세요.") |
+| `platform_code=CPU_NOT_READY` (dom0 code와 무관, 보통 `500 DriverError`) | `409 CPU_NOT_READY` "CPU 배치를 바꾼 뒤 보드 호스트 준비가 끝나지 않아 VM을 시작할 수 없습니다. 보드에서 호스트 준비를 실행하거나 보드를 재부팅해 주세요." 핀닝 변경이 `host_preparation_required=true`였는데 `xenova-vm cpu-host-prepare` 없이 시작한 경우. 호스트 준비는 웹 API가 없다 |
 | `501 NotSupported` | `501 VM_CONTROL_NOT_SUPPORTED` ("보드가 아직 지원하지 않는 작업입니다."). 생성에서 받으면 dom0가 거부한 것이므로 Spring 기록을 지움 |
 | `503 PlatformUnavailable` | `503 VM_CONTROL_UNAVAILABLE` (전송 실패와 같은 코드, 잠시 후 재시도 가능). 생성에서 받아도 기록은 유지 |
 | `504 DriverTimeout` | `504 VM_CONTROL_TIMEOUT` (응답 타임아웃과 같은 코드) |
+| `404 OperationNotFound` | `404 OPERATION_NOT_FOUND` ("보드에서 요청한 작업 기록을 찾을 수 없습니다.") |
 | `401 Unauthorized` (또는 본문과 관계없이 401) | 서비스 토큰 설정 불일치. 사용자 로그인 문제가 아니므로 `502 VM_CONTROL_BAD_RESPONSE`로 전달하고 로그에 경고 |
 | 해석할 수 없는 본문, 모르는 `code`, 본문이 필요한데 없음 | `502 VM_CONTROL_BAD_RESPONSE` |
 
@@ -867,6 +877,7 @@ FastAPI는 검증 실패 시 기본적으로 `422 HTTPValidationError`를 반환
 ## 11. 동시성 · 실행 모델
 
 - 제어 계층은 **`vm_id` 단위 락**으로 동일 VM에 대한 변경 연산을 직렬화한다. 같은 `vm_id`에 create가 동시에 도달하면 `xl create`가 중복 실행된다.
+- **Spring은 같은 VM에 상태 변경 요청이 진행 중이면 다음 요청을 기다리게 하지 않고 즉시 `409 VM_OPERATION_IN_PROGRESS`로 거절한다**(2026-11-14, QA 1-B2). 대상은 생성(기존 VM 재요청)·시작·정지·삭제·자원 변경·재부팅·vCPU 핀닝이며, 같은 종류의 중복과 다른 종류(예: 정지 중 삭제)를 모두 포함한다. 다른 VM의 작업과 조회는 막지 않는다. 요청이 끝나면(성공·실패 모두) 바로 해제되므로 실패 뒤 같은 요청의 재전달은 플랫폼의 원 작업 이어 가기로 간다. 진행 중 목록은 Spring 인스턴스 안에서만 유지되므로 백엔드가 한 대일 때 유효하다. 이 거절이 없으면 뒤의 요청은 dom0-manager의 VM 잠금 뒤에서 기다렸다가 앞 작업이 남긴 상태 위에서 실행된다.
 - `xl` 호출은 블로킹 subprocess이므로 **비동기 핸들러에서 직접 호출하지 않고 별도 스레드로 분리**한다. 워커 1개 구성에서 직접 호출하면 한 VM의 create 30초 동안 목록 조회를 포함한 모든 요청이 대기한다.
 
 ---
