@@ -25,12 +25,21 @@ const int TOF_XSHUT[FB3_TOF_SENSORS] = {16, 4};  // 앞, 뒤
 
 const uint32_t MOTOR_HZ = 20000;  // MDD10A 최대 20 kHz
 const uint8_t MOTOR_BITS = 10;
-// 속도를 PWM 으로 바꾸는 값. 엔코더로 되먹이지 않는 개루프다.
-// 모터의 무부하 320 rpm 과 바퀴 둘레 217 mm 로 어림했고, 바퀴를 띄운 시험에서 잰 값으로 바꿔야 한다
-const int32_t FULL_DUTY_MMPS = 1150;
-// 조향을 서보 펄스로 바꾸는 값. 한계는 조립 안내서 단계 K 에서 찾은 것이고, 기울기와 부호는 맞추기 전이다
-const int32_t SERVO_CENTER_US = 1500, SERVO_MIN_US = 900, SERVO_MAX_US = 2100;
-const int32_t SERVO_US_PER_RAD = 637;
+// 속도를 PWM 으로 바꾸는 값. 엔코더로 되먹이지 않는 개루프다. 바닥에서 3초씩 달려 엔코더로 잰 두 점
+// (듀티 17.4 % 에 0.145 m/s, 26.1 % 에 0.256 m/s)을 이은 직선이다. 듀티 6 % 까지는 바퀴가 구르지 않는다.
+// 배터리 전압과 바닥에 따라 달라진다
+const int32_t FULL_DUTY_MMPS = 1276;
+const uint32_t MOTOR_START_DUTY = 62;  // 1023 가운데
+// 조향(앞바퀴 각)을 서보 펄스로 바꾸는 값. 한계는 조립 안내서 단계 K 에서 찾았고, 나머지는 바닥에서 조향마다
+// 3초씩 달려 양쪽 엔코더의 차이로 잰 값이다(조립 안내서 9.2).
+//  - 바퀴 1 rad 에 1170 us. 서보 팔이 도는 각의 0.545 배만 바퀴가 꺾인다
+//  - 가운데 1523 us. 1500 us 에서는 바퀴가 왼쪽으로 1.2도 틀어져 있다
+//  - 유격 66 us. 조향 방향을 바꾸면 바퀴가 3.3도 늦게 따라와서, 움직이는 쪽으로 그만큼 더 보낸다
+const int32_t SERVO_CENTER_US = 1523, SERVO_MIN_US = 900, SERVO_MAX_US = 2100;
+const int32_t SERVO_US_PER_RAD = 1170;
+const int32_t SERVO_BACKLASH_US = 66;
+// 이보다 작은 조향 변화에는 서보를 움직이지 않는다. 명령이 조금씩 흔들릴 때 유격 보정이 좌우로 떨지 않게 한다
+const int32_t STEER_STEP_MRAD = 10;
 const uint32_t SERVO_PERIOD_US = 20000;  // 50 Hz
 
 // 켜질 때 두 센서의 주소가 같아서(0x29), XSHUT 으로 하나씩 켜며 이 주소로 옮긴다
@@ -108,6 +117,8 @@ void cutOutput(void *) {
 mcpwm_cmpr_handle_t servoCompare = nullptr;
 mcpwm_gen_handle_t servoGenerator = nullptr;
 bool servoOn = false;  // 펄스를 내고 있다. 켜진 뒤 첫 명령 전에는 핀을 LOW 로 잡아 둔다
+int32_t steerHeldMrad = 0;  // 서보에 걸어 둔 조향
+int32_t steerSide = 0;      // 서보가 마지막으로 움직인 쪽. 왼쪽 +1, 오른쪽 -1, 아직 움직이지 않았으면 0
 
 bool startServo() {
   mcpwm_timer_handle_t timer = nullptr;
@@ -152,9 +163,14 @@ bool driveOutput(void *, int16_t velocityMmps, int16_t steeringMrad) {
   bool forward = velocityMmps >= 0;
   int32_t speed = forward ? velocityMmps : -static_cast<int32_t>(velocityMmps);
   uint32_t top = (1u << MOTOR_BITS) - 1;
-  uint32_t duty = static_cast<uint32_t>(speed) * top / FULL_DUTY_MMPS;
+  uint32_t duty = speed ? MOTOR_START_DUTY + static_cast<uint32_t>(speed) * top / FULL_DUTY_MMPS : 0;
+  int32_t change = steeringMrad - steerHeldMrad;
+  if (steerSide == 0 || change >= STEER_STEP_MRAD || change <= -STEER_STEP_MRAD) {
+    if (change != 0) steerSide = change > 0 ? 1 : -1;
+    steerHeldMrad = steeringMrad;
+  }
   // 조향은 왼쪽이 + 이고(MQTT 계약 v1), 이 차의 서보는 펄스가 짧을수록 왼쪽이다(조립 안내서 9.2)
-  int32_t pulseUs = SERVO_CENTER_US - steeringMrad * SERVO_US_PER_RAD / 1000;
+  int32_t pulseUs = SERVO_CENTER_US - steerHeldMrad * SERVO_US_PER_RAD / 1000 - steerSide * SERVO_BACKLASH_US;
   pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
   bool ok = mcpwm_comparator_set_compare_value(servoCompare, static_cast<uint32_t>(pulseUs)) == ESP_OK;
   if (ok && !servoOn) {
