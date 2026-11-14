@@ -6,6 +6,16 @@ import { errorText } from '../api/errorText';
 import { useCreateVm, useTemplates, useVms } from '../api/queries';
 import type { Template } from '../api/types';
 import { loadVmList } from '../api/vmListCache';
+import {
+  MEMORY_MAX_MIB,
+  MEMORY_STEP_MIB,
+  memoryMinMib,
+  memoryProblem,
+  VCPUS_MAX,
+  VCPUS_MIN,
+  vcpusProblem,
+  vmNameProblem,
+} from '../domain/vmLimits';
 import styles from './pages.module.css';
 import {
   blockVmCreationUnload,
@@ -24,7 +34,7 @@ const TEMPLATE_ACCENTS = [
   'var(--x-app-manual)',
   'var(--x-app-interaction)',
 ] as const;
-const MAX_MEMORY = 1024;
+/** 입력칸 화살표 한 번의 증감. 검증 단위는 vmLimits.MEMORY_STEP_MIB(16) */
 const MEMORY_STEP = 64;
 const ZEPHYR_PROFILE = { vcpus: 1, memory_mib: 16 };
 
@@ -47,15 +57,22 @@ export function VmCreatePage() {
   const vms = useVms();
   // 같은 이름이 있으면 서버는 409(사양 다름) 또는 200(같은 사양 = 기존 VM 시작)이라 새 VM 이 생기지 않는다 (QA 1-F2)
   const duplicateName = name.length > 0 && (vms.data?.items ?? []).some((vm) => vm.name === name);
-  const nameOk = name.length >= 1 && name.length <= 63 && name.trim() === name && !duplicateName;
-  const resourcesOk =
-    template !== null &&
-    Number.isInteger(spec.vcpus) &&
-    spec.vcpus >= 1 &&
-    spec.vcpus <= 4 &&
-    Number.isInteger(spec.memory_mib) &&
-    spec.memory_mib >= template.min_memory_mib &&
-    spec.memory_mib <= MAX_MEMORY;
+  /** 서버 422 errors[] 를 입력칸별 한글 이유로 바꾼 것. 그 칸을 고치면 지운다 */
+  const [serverReasons, setServerReasons] = useState<FieldReasons>({});
+  /** 한 번도 입력하지 않은 빈 이름에는 이유를 띄우지 않는다 */
+  const [nameTouched, setNameTouched] = useState(false);
+  const nameRule = vmNameProblem(name);
+  const nameReason =
+    serverReasons.name ?? (duplicateName ? DUPLICATE_NAME_TEXT : nameTouched ? nameRule : null);
+  const nameOk = nameRule === null && !duplicateName && !serverReasons.name;
+  // Zephyr 는 고정 프로필이라 입력을 검사하지 않는다
+  const memoryMin = memoryMinMib(template?.min_memory_mib);
+  const vcpusReason = template && !zephyr ? (serverReasons.vcpus ?? vcpusProblem(vcpus)) : null;
+  const memoryReason =
+    template && !zephyr ? (serverReasons.memory_mib ?? memoryProblem(memory, memoryMin)) : null;
+  const resourcesOk = template !== null && vcpusReason === null && memoryReason === null;
+  const clearServerReason = (field: keyof FieldReasons) =>
+    setServerReasons(({ [field]: _cleared, ...rest }) => rest);
 
   useEffect(() => {
     mounted.current = true;
@@ -82,7 +99,7 @@ export function VmCreatePage() {
 
   const pick = (selected: Template) => {
     setTemplate(selected);
-    setMemory(Math.max(selected.min_memory_mib, Math.min(memory, MAX_MEMORY)));
+    setMemory(Math.max(selected.min_memory_mib, Math.min(memory, MEMORY_MAX_MIB)));
     create.reset();
   };
 
@@ -107,8 +124,15 @@ export function VmCreatePage() {
         finishVmCreation(name);
         if (mounted.current) setLastCreationDuration(duration);
       })
-      .catch(() => {
+      .catch((failure: unknown) => {
         finishVmCreation(name);
+        // 서버가 입력칸 규칙으로 거절했으면(422 errors[]) 입력 단계로 돌아가 해당 칸 아래에 이유를 보인다
+        const reasons = fieldReasonsOf(failure, memoryMinMib(template.min_memory_mib));
+        if (!reasons || !mounted.current) return;
+        setServerReasons(reasons);
+        setNameTouched(true);
+        setStep(1);
+        create.reset();
       });
   };
 
@@ -214,6 +238,12 @@ export function VmCreatePage() {
             <p>{template.display_name} 템플릿에 적용할 이름과 초기 자원을 설정합니다.</p>
           </div>
 
+          {Object.keys(serverReasons).length > 0 && (
+            <div className={styles.createError} role="status">
+              <strong>서버가 입력값을 받아들이지 않았습니다. 표시된 칸을 고쳐 주세요.</strong>
+            </div>
+          )}
+
           <div className={styles.createFormLayout}>
             <Card className={styles.createFormCard} title="기본 정보">
               <div className={styles.createForm}>
@@ -224,14 +254,18 @@ export function VmCreatePage() {
                 <input
                   id="vm-name"
                   value={name}
-                  onChange={(event) => setName(event.target.value)}
+                  onChange={(event) => {
+                    setName(event.target.value);
+                    setNameTouched(true);
+                    clearServerReason('name');
+                  }}
                   placeholder="예: drive-vm-a"
-                  aria-invalid={name.length > 0 && !nameOk}
-                  aria-describedby={duplicateName ? 'vm-name-duplicate' : undefined}
+                  aria-invalid={nameReason !== null}
+                  aria-describedby={nameReason ? 'vm-name-reason' : undefined}
                 />
-                {duplicateName && (
-                  <small id="vm-name-duplicate" role="alert">
-                    같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.
+                {nameReason && (
+                  <small id="vm-name-reason" role="alert">
+                    {nameReason}
                   </small>
                 )}
 
@@ -254,14 +288,24 @@ export function VmCreatePage() {
                         min={1}
                         max={4}
                         value={vcpus}
-                        onChange={(event) => setVcpus(Number(event.target.value))}
+                        aria-invalid={vcpusReason !== null}
+                        aria-describedby={vcpusReason ? 'vm-vcpus-reason' : undefined}
+                        onChange={(event) => {
+                          setVcpus(Number(event.target.value));
+                          clearServerReason('vcpus');
+                        }}
                       />
+                      {vcpusReason && (
+                        <small id="vm-vcpus-reason" role="alert">
+                          {vcpusReason}
+                        </small>
+                      )}
                     </div>
                     <div>
                       <label htmlFor="vm-memory">
                         <span>메모리</span>
                         <small>
-                          {template.min_memory_mib}~{MAX_MEMORY} MiB
+                          {template.min_memory_mib}~{MEMORY_MAX_MIB} MiB · {MEMORY_STEP_MIB} MiB 단위
                         </small>
                       </label>
                       <div className={styles.inputWithUnit}>
@@ -269,13 +313,23 @@ export function VmCreatePage() {
                           id="vm-memory"
                           type="number"
                           min={template.min_memory_mib}
-                          max={MAX_MEMORY}
+                          max={MEMORY_MAX_MIB}
                           step={MEMORY_STEP}
                           value={memory}
-                          onChange={(event) => setMemory(Number(event.target.value))}
+                          aria-invalid={memoryReason !== null}
+                          aria-describedby={memoryReason ? 'vm-memory-reason' : undefined}
+                          onChange={(event) => {
+                            setMemory(Number(event.target.value));
+                            clearServerReason('memory_mib');
+                          }}
                         />
                         <span>MiB</span>
                       </div>
+                      {memoryReason && (
+                        <small id="vm-memory-reason" role="alert">
+                          {memoryReason}
+                        </small>
+                      )}
                     </div>
                   </div>
                 )}
@@ -479,6 +533,29 @@ export function VmCreatePage() {
       </Modal>
     </div>
   );
+}
+
+const DUPLICATE_NAME_TEXT = '같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.';
+
+type FieldReasons = Partial<Record<'name' | 'vcpus' | 'memory_mib', string>>;
+
+/**
+ * 422 VALIDATION_ERROR 의 errors[].field 를 입력칸별 한글 이유로. 서버 reason 은 `name은 …` 처럼 필드 영문명이
+ * 섞여 있어 쓰지 않는다. 입력칸이 없는 필드뿐이면 null (확인 단계의 공용 오류 문구로 보인다)
+ */
+function fieldReasonsOf(error: unknown, memoryMin: number): FieldReasons | null {
+  if (!(error instanceof ApiError) || error.status !== 422 || !error.fieldErrors?.length) return null;
+  const reasons: FieldReasons = {};
+  for (const { field } of error.fieldErrors) {
+    if (field === 'name') {
+      reasons.name = 'VM 이름은 1~63자이며 앞뒤 공백과 제어문자를 쓸 수 없습니다.';
+    } else if (field === 'vcpus') {
+      reasons.vcpus = `vCPU는 ${VCPUS_MIN}~${VCPUS_MAX}개 사이 정수로 입력해 주세요.`;
+    } else if (field === 'memory_mib') {
+      reasons.memory_mib = `메모리는 ${memoryMin}~${MEMORY_MAX_MIB} MiB 사이로 입력해 주세요.`;
+    }
+  }
+  return Object.keys(reasons).length ? reasons : null;
 }
 
 /** 템플릿 버전은 보드 카탈로그에서 읽는다. 보드에 한 번도 닿지 못하면 백엔드가 dom0-manager 오류를 그대로 준다 */

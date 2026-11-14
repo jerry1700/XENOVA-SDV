@@ -121,15 +121,69 @@ describe('MSW mock API', () => {
     expect(again.data.vm_id).toBe(created.data.vm_id);
     await expect(
       request('/api/v1/vms', { method: 'POST', body: { ...body, memory_mib: 512 } }),
-    ).rejects.toMatchObject({ status: 409, code: 'VM_NAME_CONFLICT' });
+    ).rejects.toMatchObject({
+      status: 409,
+      code: 'VM_NAME_CONFLICT',
+      message: '이미 사용 중인 VM 이름입니다.',
+    });
     await expect(
       request('/api/v1/vms', { method: 'POST', body: { ...body, name: ' x', vcpus: 9 } }),
     ).rejects.toMatchObject({
       status: 422,
+      code: 'VALIDATION_ERROR',
+      message: '요청 값이 올바르지 않습니다.',
       fieldErrors: [
-        { field: 'name', reason: expect.any(String) },
-        { field: 'vcpus', reason: '1~4' },
+        { field: 'name', reason: 'name은 1~63자이며 제어문자와 앞뒤 공백은 사용할 수 없습니다.' },
+        { field: 'vcpus', reason: 'vcpus는 1~4여야 합니다.' },
       ],
+    });
+  });
+
+  it('생성 검증 문구·순서가 backend 원문과 같다 (CreateVmRequest → 템플릿 → 템플릿 최소 메모리)', async () => {
+    await login();
+    const body = {
+      name: 'extra',
+      template_id: 'debian-13-arm64',
+      template_version: '1.0.0',
+      vcpus: 1,
+      memory_mib: 256,
+    };
+    const fields = (patch: object) =>
+      request('/api/v1/vms', { method: 'POST', body: { ...body, ...patch } }).catch(
+        (e: { fieldErrors?: { field: string; reason: string }[] }) => e.fieldErrors,
+      );
+    expect(await fields({ name: '' })).toEqual([
+      { field: 'name', reason: 'name은 필수입니다.' },
+      { field: 'name', reason: 'name은 1~63자이며 제어문자와 앞뒤 공백은 사용할 수 없습니다.' },
+    ]);
+    expect(await fields({ name: 'a'.repeat(64) })).toEqual([
+      { field: 'name', reason: 'name은 1~63자이며 제어문자와 앞뒤 공백은 사용할 수 없습니다.' },
+    ]);
+    expect(await fields({ name: 'a\u0007b' })).toHaveLength(1);
+    expect(await fields({ name: 'a'.repeat(63) })).toMatchObject({ name: 'a'.repeat(63) });
+    expect(await fields({ memory_mib: 2048 })).toEqual([
+      { field: 'memory_mib', reason: 'memory_mib는 16~1024여야 합니다.' },
+    ]);
+    // 요청 검증을 통과해야 템플릿을 본다
+    await expect(
+      request('/api/v1/vms', { method: 'POST', body: { ...body, template_id: 'nope', vcpus: 9 } }),
+    ).rejects.toMatchObject({ status: 422, fieldErrors: [{ field: 'vcpus' }] });
+    await expect(
+      request('/api/v1/vms', { method: 'POST', body: { ...body, template_id: 'nope' } }),
+    ).rejects.toMatchObject({
+      status: 404,
+      code: 'TEMPLATE_NOT_FOUND',
+      message: '존재하지 않는 템플릿입니다.',
+    });
+    // 16~1024 안이어도 템플릿 최소값보다 작으면 errors 없는 422
+    const min = await request('/api/v1/vms', { method: 'POST', body: { ...body, memory_mib: 64 } }).catch(
+      (e: unknown) => e,
+    );
+    expect(min).toMatchObject({
+      status: 422,
+      code: 'VALIDATION_ERROR',
+      message: expect.stringMatching(/^memory_mib는 이 템플릿의 최소값\(\d+\) 이상이어야 합니다\.$/),
+      fieldErrors: undefined,
     });
   });
 
@@ -139,6 +193,7 @@ describe('MSW mock API', () => {
     await expect(request(`/api/v1/vms/${id}`, { method: 'DELETE' })).rejects.toMatchObject({
       status: 409,
       code: 'INVALID_VM_STATE',
+      message: '실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.',
     });
     await expect(request<Vm>(`/api/v1/vms/${id}`)).resolves.toMatchObject({ vm_id: id });
   });
@@ -148,7 +203,11 @@ describe('MSW mock API', () => {
     const id = '22222222-2222-4222-8222-222222222222';
     await request(`/api/v1/vms/${id}/stop`, { method: 'POST' });
     await request(`/api/v1/vms/${id}`, { method: 'DELETE' });
-    await expect(request(`/api/v1/vms/${id}`)).rejects.toMatchObject({ status: 404, code: 'VM_NOT_FOUND' });
+    await expect(request(`/api/v1/vms/${id}`)).rejects.toMatchObject({
+      status: 404,
+      code: 'VM_NOT_FOUND',
+      message: '존재하지 않는 VM입니다.',
+    });
   });
 
   it('VM CPU 메트릭은 할당 vCPU 기준 필드명을 사용한다', async () => {

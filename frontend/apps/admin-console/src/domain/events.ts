@@ -48,7 +48,23 @@ const REASON: Record<string, string> = {
   readiness_lost: '준비 상태 깨짐',
 };
 
-const str = (value: unknown) => (value == null ? '' : String(value));
+/**
+ * payload 값을 한 줄 글자로. 글자·유한한 숫자·참거짓만 보이고, 객체·배열·NaN 처럼 글자로 바꾸면
+ * `[object Object]`·`NaN` 이 되는 값은 비운다 (S15P31E110-469)
+ */
+export function payloadText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
+  if (typeof value === 'boolean') return String(value);
+  return '';
+}
+
+/** payload 의 유한한 숫자만, 아니면 null */
+export function payloadNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+const str = payloadText;
 
 /** 한 줄 제목과 보조 설명 */
 export function describe(
@@ -62,8 +78,8 @@ export function describe(
         title: `${str(p.from) || '—'} → ${str(p.to)}`,
         detail: [
           REASON[str(p.reason)] ?? str(p.reason),
-          p.generation != null && `gen ${str(p.generation)}`,
-          p.handoff_ms != null && `인계 ${str(p.handoff_ms)} ms`,
+          str(p.generation) && `gen ${str(p.generation)}`,
+          payloadNumber(p.handoff_ms) != null && `인계 ${str(p.handoff_ms)} ms`,
         ]
           .filter(Boolean)
           .join(' · '),
@@ -75,10 +91,10 @@ export function describe(
       };
     case 'drive.resume.accepted':
       return {
-        title: `재개 승인 — ${Number(p.switch_in_ms ?? 3000) / 1000}초 뒤 AUTO`,
+        title: `재개 승인 — ${(payloadNumber(p.switch_in_ms) ?? 3000) / 1000}초 뒤 AUTO`,
         detail: [
-          p.requested_by && `요청 ${str(p.requested_by)}`,
-          p.generation != null && `gen ${str(p.generation)}`,
+          str(p.requested_by) && `요청 ${str(p.requested_by)}`,
+          str(p.generation) && `gen ${str(p.generation)}`,
         ]
           .filter(Boolean)
           .join(' · '),

@@ -3,6 +3,15 @@ import { useState } from 'react';
 import { ApiError } from '../api/client';
 import { useTemplates, useUpdateVmResources } from '../api/queries';
 import type { Vm } from '../api/types';
+import {
+  MEMORY_MAX_MIB,
+  MEMORY_STEP_MIB,
+  memoryMinMib,
+  memoryProblem,
+  VCPUS_MAX,
+  VCPUS_MIN,
+  vcpusProblem,
+} from '../domain/vmLimits';
 import styles from './pages.module.css';
 
 type Feedback = { tone: 'ok' | 'fault'; message: string } | null;
@@ -29,23 +38,17 @@ export function ResourceAdjustmentPanel({ vm, accent }: ResourceAdjustmentPanelP
     (item) => item.template_id === vm.template_id && item.version === vm.template_version,
   );
   const limits = {
-    vcpus_min: 1,
-    vcpus_max: 4,
-    memory_mib_min: template?.min_memory_mib ?? 128,
-    memory_mib_max: 1024,
-    memory_mib_step: 16,
+    vcpus_min: VCPUS_MIN,
+    vcpus_max: VCPUS_MAX,
+    memory_mib_min: memoryMinMib(template?.min_memory_mib),
+    memory_mib_max: MEMORY_MAX_MIB,
+    memory_mib_step: MEMORY_STEP_MIB,
   };
   const sizeDirty = size.vcpus !== currentSize.vcpus || size.memory_mib !== currentSize.memory_mib;
   const fixedProfile = vm.guest_kind === 'zephyr';
   const sizeEditable = !fixedProfile && vm.state === 'stopped';
-  const sizeValid =
-    Number.isInteger(size.vcpus) &&
-    size.vcpus >= limits.vcpus_min &&
-    size.vcpus <= limits.vcpus_max &&
-    Number.isInteger(size.memory_mib) &&
-    size.memory_mib >= limits.memory_mib_min &&
-    size.memory_mib <= limits.memory_mib_max &&
-    size.memory_mib % limits.memory_mib_step === 0;
+  const sizeProblem = vcpusProblem(size.vcpus) ?? memoryProblem(size.memory_mib, limits.memory_mib_min);
+  const sizeValid = sizeProblem === null;
 
   const applySize = async () => {
     setSizeFeedback(null);
@@ -143,9 +146,9 @@ export function ResourceAdjustmentPanel({ vm, accent }: ResourceAdjustmentPanelP
             </small>
           </div>
         </div>
-        {!sizeValid && (
+        {sizeProblem && (
           <p className={styles.resourceValidation} role="alert">
-            vCPU와 메모리의 허용 범위 및 변경 단위를 확인해 주세요.
+            {sizeProblem}
           </p>
         )}
 

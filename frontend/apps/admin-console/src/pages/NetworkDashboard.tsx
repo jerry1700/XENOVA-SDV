@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import type { DriveState } from '../api/drive';
 import { LIVE_POLL_MS, useMetrics, useTelemetryHeartbeat } from '../api/queries';
 import type { AgentStatus, Vm } from '../api/types';
+import { observedControl } from '../domain/driveObservations';
 import { buildPacketRateSeries, bytesToKiB, poolLevel } from '../domain/memoryPools';
 import {
   buildLinuxNetworkSeries,
@@ -21,6 +22,7 @@ import { publisherObservation } from '../domain/telemetryPublisher';
 import { vmAuthorityOf } from '../domain/vmAuthority';
 import type { DiskIoCounter } from '../domain/vmMetrics';
 import { AGENT_LABEL } from '../format';
+import { useDrive } from '../layout/DriveContext';
 import { LiveDataAlert } from '../layout/LiveDataAlert';
 import { useNow } from '../useNow';
 import { collectorBadgeLabel, collectorTooltip } from './collectorStatus';
@@ -101,7 +103,9 @@ function ZephyrNetworkPanel({ vm, drive }: { vm: Vm; drive: DriveState | null })
   const ratePoints = mergeDirectRxRate(bytes.rates, rxRate.points);
   const interfaceUp = interfaceFlagOf(samples, ZEPHYR_INTERFACE_UP_METRIC);
   const carrier = interfaceFlagOf(samples, ZEPHYR_CARRIER_METRIC);
-  const authority = vmAuthorityOf(role, vm, drive?.control?.active_vm_id);
+  const { socket } = useDrive();
+  // Memory 탭·Overview·VM 상세와 같이 소켓이 열려 있고 control 이 신선할 때만 ACTIVE/STANDBY 를 판정한다
+  const authority = vmAuthorityOf(role, vm, observedControl(drive, socket)?.active_vm_id);
   const lastUpdated = relativeTime(latestTime(pools.lastObservedAt, bytes.observedAt));
   const style = { '--vm-accent': role?.color ?? UNASSIGNED_COLOR, ...RX_TX_ACCENTS } as CSSProperties;
 
@@ -180,7 +184,9 @@ function LinuxNetworkPanel({ vm, drive }: { vm: Vm; drive: DriveState | null }) 
   const role = roleOf(vm, drive);
   const metrics = useMetrics(vm.vm_id, true, 5, LIVE_POLL_MS, { keepLastData: true });
   const series = buildLinuxNetworkSeries(metrics.data?.items ?? []);
-  const authority = vmAuthorityOf(role, vm, drive?.control?.active_vm_id);
+  const { socket } = useDrive();
+  // Memory 탭·Overview·VM 상세와 같이 소켓이 열려 있고 control 이 신선할 때만 ACTIVE/STANDBY 를 판정한다
+  const authority = vmAuthorityOf(role, vm, observedControl(drive, socket)?.active_vm_id);
   const agent = vm.agent_status ?? 'UNKNOWN';
   const style = { '--vm-accent': role?.color ?? UNASSIGNED_COLOR, ...RX_TX_ACCENTS } as CSSProperties;
 

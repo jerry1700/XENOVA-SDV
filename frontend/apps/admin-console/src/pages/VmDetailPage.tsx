@@ -2,7 +2,7 @@ import { Card } from '@xenova/ui';
 import { lazy, Suspense, type CSSProperties } from 'react';
 import { Link, useParams } from 'react-router';
 import { ApiError } from '../api/client';
-import { useEvents, useVm } from '../api/queries';
+import { useEvents, useVm, vmGone } from '../api/queries';
 import { AGENT_LABEL, STATE_HEALTH, STATE_LABEL } from '../format';
 import { MODE_LABEL, osLabel, roleOf } from '../domain/roles';
 import { observedControl, vmAppObservations } from '../domain/driveObservations';
@@ -68,10 +68,14 @@ function AppStateTile({
 }
 
 /** S15P31E110-299: 제어 작업과 분리한 관측 중심 VM 상세 화면. */
+/** 조회가 실패했는데 '불러오는 중'이 남지 않게 (QA S15P31E110-469) */
+const VM_LOAD_FAILED_TEXT = 'VM 정보를 불러오지 못했습니다.';
+
 export function VmDetailPage() {
   const { vmId = '' } = useParams();
   const vm = useVm(vmId);
-  const events = useEvents({ vm_id: vmId, limit: 8 });
+  // 없는 VM(404)이면 이 VM 의 이벤트도 다시 읽지 않는다 (S15P31E110-469)
+  const events = useEvents({ vm_id: vmId, limit: 8 }, { enabled: !vmGone(vm.error) });
   const { drive, socket } = useDrive();
   const role = vm.data ? roleOf(vm.data, drive) : null;
   const control = observedControl(drive, socket);
@@ -117,7 +121,8 @@ export function VmDetailPage() {
             )}
           </div>
           <p>
-            {role?.title ?? '역할 미지정'} · {vm.data ? osLabel(vm.data) : 'VM 정보를 불러오는 중입니다.'}
+            {role?.title ?? '역할 미지정'} ·{' '}
+            {vm.data ? osLabel(vm.data) : vm.error ? VM_LOAD_FAILED_TEXT : 'VM 정보를 불러오는 중입니다.'}
           </p>
         </div>
       </header>
