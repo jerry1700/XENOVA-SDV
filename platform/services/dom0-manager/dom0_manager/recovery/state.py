@@ -28,7 +28,7 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 BUDGET_SCHEMA_VERSION = 2  # 구형 writer가 예산을 조용히 버리지 못하게 하는 내부 호환 경계.
-MODES = ("start-if-absent", "graceful-restart", "force-restart")
+MODES = ("start-if-absent", "graceful-restart", "force-restart", "restart-crashed")
 GUEST_KINDS = ("linux", "zephyr")
 REASONS = frozenset(reason.value for reason in FailureReason)
 PROTECTION_SPEC = frozenset({"host_boot_id", "target_vm", "target_execution_id", "intent_revision", "lifecycle_generation", "expected_owner",

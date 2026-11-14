@@ -359,9 +359,25 @@ class FunctionFailureScopeTests(unittest.TestCase):
 
     def test_real_binding_loss_still_selects_b_immediately(self):
         w = self.w
+        old_instance = w.ids[A]['autonomous']
         w.alive.remove(A)
         w.tick()
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        w.tick(.1)
+        self.assertTrue(w.m.output_permitted)
+        generation = w.m.generation
+
+        w.alive.add(A)
+        w.executions[A] = str(uuid4())
+        w.ids[A] = {app: str(uuid4()) for app in ('autonomous', 'manual')}
+        w.tick(silent={(A, 'autonomous'), (A, 'manual')})
+        self.assertFalse(w.m.accept_session(A, BOOT, old_instance, w.t, app='autonomous'))
+        self.assertFalse(w.m._qualified(A, 'autonomous', w.t))
+
+        w.tick(w.m.timing.ready_hold_s + .1)
+        self.assertTrue(w.m._qualified(A, 'autonomous', w.t, held=True))
+        self.assertTrue(w.m.output_permitted)
+        self.assertEqual((w.m.mode, w.m.active_vm, w.m.generation), (Mode.AUTO, B, generation))
 
     def test_rejected_work_preserves_applied_state_without_creating_readiness(self):
         w = self.w

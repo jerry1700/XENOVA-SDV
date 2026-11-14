@@ -4,6 +4,7 @@ Only Xen/Store and the clock are external boundaries. This is not a Xen board
 or device-application test. Readiness observation cannot claim Active ownership.
 """
 import importlib.util
+import json
 import os
 import sys
 import time
@@ -13,12 +14,17 @@ from uuid import UUID,uuid4
 from unittest.mock import patch
 
 import pytest
+from dom0_manager.drivers.xl import CommandResult, Xl
+from dom0_manager.recovery.config import RecoverySettings
 from dom0_manager.recovery.engine import RecoveryEngine
+from dom0_manager.recovery.heartbeats import HeartbeatTable
+from dom0_manager.recovery.observe import PlatformObserver
 from dom0_manager.recovery.platform_recovery import PlatformRecovery
 from dom0_manager.recovery.policy import RecoveryPolicy
 from dom0_manager.recovery.state import RecoveryStore,RecoveryStatus
 from dom0_manager.recovery.model import Judgment,FailureReason,HealthState,VmHealth
 from dom0_manager.recovery.protection import GatewayProtection
+from dom0_manager.recovery.watcher import Watcher
 from fake_gateway import FakeGateway
 from dom0_manager.recovery.rejoin import RejoinCoordinator,ProductionBootstrap,production,valid_vm_trust_payload
 from xenova_mqtt import Identity,topics
@@ -34,45 +40,77 @@ import xenova_vm
 
 @pytest.fixture
 def fixture():
-    f=network.NetworkPlatformTest('runTest');f.setUp()
+    f=network.NetworkPlatformTest('runTest');f.setUp(instance_id='zephyr-drive-a')
     try:f.upgrade_start();yield f
     finally:f.doCleanups()
 
-@pytest.mark.parametrize('present',[False,True])
+@pytest.mark.parametrize('fault',['absent','heartbeat','crash'])
 @pytest.mark.parametrize('warm',[False,True])
 @pytest.mark.parametrize('batch',[False,True])
-def test_engine_completion_provisions_current_execution_then_standby_readiness(fixture,tmp_path,monkeypatch,present,warm,batch):
+def test_engine_completion_provisions_current_execution_then_standby_readiness(fixture,tmp_path,monkeypatch,fault,warm,batch):
     f=fixture;vm=f.zid;other=str(uuid4());current=f.state();before=current['execution_id']
     health=None
-    # External Xen boundary: the original domain disappeared, or it is still running but its app heartbeat stopped.
-    if not present:f.xen.rows=[];reason=FailureReason.DOMAIN_ABSENT
+    if fault=='absent':f.xen.rows=[];reason=FailureReason.DOMAIN_ABSENT
+    elif fault=='crash':
+        f.xen.states={current['domid']:'---sc-'}
+        # FakeXen reuses the domid after destroy. Only the old incarnation crashed.
+        def checkpoint(phase, op):
+            if phase=='recovery-stop-returned':
+                f.xen.states.clear()
+        f.p.execution_checkpoint=checkpoint
+        (f.p.data/'.first-install-state.json').write_text(json.dumps(
+            {'schema':1,'phase':'complete','identities':{f.z['id']:{'uuid':vm}}}))
+        reason=FailureReason.DOMAIN_CRASHED
     else:
         policy=tmp_path/'execution-policy.json'
-        policy.write_text(__import__('json').dumps({'schema_version':'1.0','autostart_stopped':None,
+        policy.write_text(json.dumps({'schema_version':'1.0','autostart_stopped':None,
             'manual_running':None,'force_restart_vm_ids':[vm]}))
         f.p.execution_policy_path=policy  # isolated FakeXen approval, never a board policy
         # Force evidence gate (S15P31E110-347): current UNHEALTHY evidence for the platform's current execution.
         reason=FailureReason.APP_HEARTBEAT_LOST
         health=VmHealth(vm_id=UUID(vm),state=HealthState.UNHEALTHY,desired_state='running',xen_state='running',heartbeat_age_s=None,
             reason=reason,manager_seq=1,intent_known=True,domid=current['domid'],execution_id=current['execution_id'])
-    # Gateway boundary (S15P31E110-346): fake provider whose binding is the platform's current execution.
     platform=PlatformRecovery(f.m);view=platform.view(UUID(vm))
     gateway=FakeGateway(view['host_boot_id'],lambda:f.ticks)
-    gateway.bind(vm,view['execution_id'],revision=view['intent_revision'],generation=view['generation'])
+    gateway.vm_ids=(vm,other)
+    gateway.owner=other
+    if fault=='heartbeat':
+        gateway.bind(vm,view['execution_id'],revision=view['intent_revision'],generation=view['generation'])
     protection=GatewayProtection(gateway,deadline_s=5.0,call_budget_s=1.0,clock=lambda:f.ticks)
-    engine=RecoveryEngine(RecoveryPolicy(),platform,SimpleNamespace(health=lambda vm_id:health if str(vm_id)==vm else None),
+    if fault=='crash':
+        runner=SimpleNamespace(run=lambda args, **kwargs: CommandResult(0,f.xen(args, **kwargs),''))
+        # The legacy transition fixture has no template catalog entry. Supply
+        # the registered template metadata expected by the production observer.
+        def observer_call(action, *args):
+            reply=f.m.call(action,*args)
+            data=reply['data'] if reply['ok'] else {}
+            for row in data.get('vms', [data.get('vm')]):
+                if row and row.get('vm_id')==vm:
+                    row.update(template_id='fixture-zephyr',template_version='1.0.0')
+            return reply
+        observer=PlatformObserver(SimpleNamespace(call=observer_call),Xl(runner),
+            drive_bindings=SimpleNamespace(current=lambda *_:None),drive_vm_ids=(vm,other),
+            clock=lambda:f.ticks,intent_action='recovery-intents')
+        watcher=Watcher(RecoverySettings(),HeartbeatTable(),confirm=observer.confirm,clock=lambda:f.ticks)
+        judgments=watcher.tick(observer())
+        assert len(judgments)==1 and judgments[0].reason is FailureReason.DOMAIN_CRASHED
+        assert watcher.health(UUID(vm)).execution_id is None
+    else:
+        watcher=SimpleNamespace(health=lambda vm_id:health if str(vm_id)==vm else None)
+        judgments=[Judgment(uuid4(),UUID(vm),reason,f.ticks,'zephyr','running',current['intent_revision'],None,None,None)]
+    engine=RecoveryEngine(RecoveryPolicy(),platform,watcher,
         RecoveryStore(tmp_path/'recoveries.json'),clock=lambda:f.ticks,inline=True,drive_vm_ids=[vm,other],protection=protection)
-    engine.on_judgment(Judgment(uuid4(),UUID(vm),reason,f.ticks,'zephyr','running',
-        current['intent_revision'],None,None,None))
+    engine.on_judgment(judgments[0])
     with patch.object(xenova_vm.os,'sync'):engine.tick()
     record=engine.records()[0]
-    assert gateway.count('submit') == int(present)
+    assert gateway.count('submit') == int(fault=='heartbeat')
     protected=[row['spec']['target_execution_id'] for row in gateway.rows.values()]
-    assert protected==([before] if present else [])  # start-if-absent needs no Gateway protection
-    if present:assert record.protection['phase']=='PROTECTED'  # released only after the new execution binds in the Gateway
+    assert protected==([before] if fault=='heartbeat' else [])
+    if fault=='heartbeat':assert record.protection['phase']=='PROTECTED'
+    if fault=='crash':assert record.mode=='restart-crashed' and gateway.owner==other
     assert record.status is RecoveryStatus.COMPLETED and record.execution_id!=before
     observed=observe(f.p,vm);assert observed['execution_id']==record.execution_id
-    assert len(f.physical('destroy'))==(1 if present else 0)
+    assert len(f.physical('destroy'))==int(fault!='absent')
     assert observed['execution_owner_kind']=='recovery'
     spec=importlib.util.spec_from_file_location('provision_xenova_telemetry',ROOT/'platform/scripts/provision-xenova-telemetry.py')
     api=importlib.util.module_from_spec(spec);spec.loader.exec_module(api)
@@ -199,6 +237,45 @@ def test_engine_completion_provisions_current_execution_then_standby_readiness(f
         assert coordinator._work(vm)['status']=='stopped'
         assert len(applied)==(3 if warm else 2)  # only the deadline-triggered app update adds one Store write
     finally:coordinator.stop();engine.shutdown()
+
+
+@pytest.mark.parametrize('change,error',[
+    ('before-plan','TARGET_CHANGED'),
+    ('before-destroy','TARGET_CHANGED'),
+    ('replacement','TARGET_CHANGED'),
+    ('unapproved','RECOVERY_MODE_UNSUPPORTED'),
+])
+def test_crash_restart_refuses_to_destroy_ineligible_execution(fixture,change,error):
+    f=fixture
+    current=f.state()
+    domid=current['domid']
+    if change!='before-plan':
+        f.xen.states={domid:'---sc-'}
+    if change=='before-destroy':
+        control=f.p.control
+        def became_running(*args, **kwargs):
+            f.xen.states.clear()
+            return control(*args, **kwargs)
+        f.p.control=became_running
+    if change=='replacement':
+        control=f.p.control
+        def replace_domain(*args, **kwargs):
+            f.xen.rows=[dict(row) for row in f.xen.rows]
+            return control(*args, **kwargs)
+        f.p.control=replace_domain
+    factory_id=str(uuid4()) if change=='unapproved' else f.zid
+    (f.p.data/'.first-install-state.json').write_text(json.dumps(
+        {'schema':1,'phase':'complete','identities':{f.z['id']:{'uuid':factory_id}}}))
+    spec=dict(vm_id=f.zid,recovery_attempt_id=str(uuid4()),expected_host_boot_id=f.host,
+        expected_lifecycle_generation=current['generation'],expected_intent_revision=current['intent_revision'],
+        expected_execution={'execution_id':current['execution_id']},mode='restart-crashed',
+        deadline_monotonic_ms=int((f.ticks+90)*1000))
+    with patch.object(xenova_vm.os,'sync'):
+        f.fails(f.m.call('recover_once',spec,execute=True),error)
+        f.fails(f.m.call('recover_once',spec,execute=True),error)
+    assert f.physical('destroy')==[]
+    assert len(f.physical('create'))==1
+
 
 def test_missing_mount_is_rejected_before_receipt_creation(tmp_path,monkeypatch):
     config=tmp_path/'config.json';atomic_json(config,{'schema_version':'1.0-drive-rejoin-config'})

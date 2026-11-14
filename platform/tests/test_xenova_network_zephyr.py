@@ -42,13 +42,13 @@ class NetworkPlatformTest(unittest.TestCase):
     sleep=foundation.FoundationTest.sleep
     ok=foundation.FoundationTest.ok
     fails=foundation.FoundationTest.fails
-    def setUp(self):
+    def setUp(self, *, instance_id="zephyr-drive-test"):
         foundation.FoundationTest.setUp(self)
         self.addCleanup(patch.stopall)
         self.linux=self.r
         self.legacy=bundle(self.p.data/"legacy-starter")
         self.fw=network_bundle(self.legacy,self.p.data/"network-app")
-        self.z=zephyr.new_instance(self.p.data,"zephyr-drive-test",self.legacy,{})
+        self.z=zephyr.new_instance(self.p.data,instance_id,self.legacy,{})
         self.p.execution().initialize(self.z,"stopped","create")
         self.zid=self.z["uuid"];self.zdir=self.p.data/"instances"/self.z["id"]
         self.xen.records[self.z["id"]]=self.z

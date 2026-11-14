@@ -7,7 +7,7 @@
 - 이 모듈은 Gateway I/O 와 응답 판정만 한다. 기록 전이·저장은 엔진이 잠금 안에서 한다
 - host 가 바뀐 보호는 정산하지 않고 이력(HISTORICAL)으로 둔다. 현재 host 의 보호만 활성으로 보는 것은 Gateway 쪽 결정이며,
   Gateway 가 그것을 반영하기 전에는 이전 host 의 보호가 재선택과 새 보호를 계속 막는다(그동안 주행 VM force 는 보류된다)
-- crashed·미합류 실행은 Gateway binding 이 없어 보호를 요청하지 않는다. binding 부재를 확인한 재선택 차단 전용 보호가 계약에 생기면 그때 받는다
+- Xen이 crash를 확인한 실행에는 binding 기반 보호 대신 현재 출력 권한의 철회를 확인한다. 재시작 시 Xen이 같은 crash를 다시 검증한다
 - Gateway 응답 하나를 성공으로 믿지 않는다: 원 spec 과 같은 대상·실행·의도·기한, durable, 현재 host·대상 일치, held·owner_excluded 를 본다
 """
 
@@ -148,11 +148,7 @@ class GatewayProtection:
         self._budget_ms = int(call_budget_s * 1000)
         self._clock = clock  # Gateway 와 같은 host 의 단조시계(CLOCK_MONOTONIC). 기한은 이 시계의 ms 다
 
-    # ---- 요청 만들기 ----
-
-    def plan(self, vm_id: UUID, view: dict[str, Any], parent_deadline_ms: int, *,
-             standby_only: bool = False) -> dict[str, Any]:
-        """지금 Gateway 문맥과 플랫폼 view 로 원 spec 을 만든다. 키는 여기서 한 번 만든다. 맞지 않으면 ProtectionHold."""
+    def _current_context(self, view: dict[str, Any]) -> dict[str, Any]:
         try:
             context = self._gateway.context()
         except (GatewayUncertain, GatewayRefused) as exc:
@@ -163,16 +159,38 @@ class GatewayProtection:
             raise ProtectionHold("Gateway context has no current host/owner/generation")
         if context.get("storage_uncertain") is not False:
             raise ProtectionHold("Gateway storage is uncertain")
+        if host != view.get("host_boot_id"):
+            raise ProtectionHold(f"Gateway host {host} differs from the platform host {view.get('host_boot_id')}")
+        return context
+
+    def check_crash_withdrawal(self, vm_id: UUID, view: dict[str, Any]) -> None:
+        """Crash가 입증된 실행의 binding 제거와 Gateway의 제어권 철회를 확인한다."""
+        context = self._current_context(view)
+        targets, owner = context["targets"], context["owner"]
+        if str(vm_id) not in targets or owner not in targets:
+            raise ProtectionHold("Gateway context does not identify the configured drive pair")
+        if targets[str(vm_id)] is not None:
+            raise ProtectionHold("Gateway still has a binding for the crashed VM")
+        if owner == str(vm_id) and not (
+            context.get("output_permitted") is False
+            and (context.get("mode") == "SAFE_STOP" or context.get("phase") in ("APPLIED", "DISARMED", "FAILED"))
+        ):
+            raise ProtectionHold("Gateway has not withdrawn the crashed VM's driving authority")
+
+    # ---- 요청 만들기 ----
+
+    def plan(self, vm_id: UUID, view: dict[str, Any], parent_deadline_ms: int, *,
+             standby_only: bool = False) -> dict[str, Any]:
+        """지금 Gateway 문맥과 플랫폼 view 로 원 spec 을 만든다. 키는 여기서 한 번 만든다. 맞지 않으면 ProtectionHold."""
+        context = self._current_context(view)
+        host, owner, generation, targets = (context[k] for k in ("host_boot_id", "owner", "generation", "targets"))
         if (standby_only and owner == str(vm_id) and context.get("mode") != "SAFE_STOP"
                 and (context.get("phase") != "APPLIED" or context.get("output_permitted") is not False)):
             # The protection key carries this same owner/generation. A later
             # rearm of disarmed MANUAL makes the original request stale.
             raise ProtectionHold("target has or is applying driving authority")
-        if host != view.get("host_boot_id"):
-            raise ProtectionHold(f"Gateway host {host} differs from the platform host {view.get('host_boot_id')}")
         target = targets.get(str(vm_id))
         if not isinstance(target, dict):
-            # crashed·미합류 실행은 binding 이 없어 Gateway 가 보호를 받지 않는다(TARGET_CHANGED). 보내지 않고 보류한다
             raise ProtectionHold("Gateway has no current binding for this VM; protection cannot be issued")
         bound = (target.get("execution_id"), target.get("intent_revision"), target.get("lifecycle_generation"))
         current = (view.get("execution_id"), view.get("intent_revision"), view.get("generation"))
