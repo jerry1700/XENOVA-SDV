@@ -93,6 +93,17 @@ function useWithoutStaleData<TData, TError>(
   } as UseQueryResult<TData, TError>;
 }
 
+/** 없는 VM(404). 다시 읽어도 404 라 그 VM 의 조회는 주기 재조회를 멈춘다 (S15P31E110-469) */
+export function vmGone(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+/** 404 를 받기 전까지만 ms 주기로 다시 읽는다 */
+const pollUntilGone =
+  (ms: number) =>
+  (query: { state: { error: Error | null } }): number | false =>
+    vmGone(query.state.error) ? false : ms;
+
 /**
  * pollMs: VM Control 은 1초 (관측 시각이 초 단위로 바뀌게), 나머지는 LIVE_POLL_MS.
  * keepLastData: 실패해도 마지막 목록을 남긴다 — 화면이 직접 "조회 불가" 로 표시할 때만 (대시보드 Overview 카드)
@@ -126,7 +137,7 @@ export function useVm(vmId: string) {
     useQuery({
       queryKey: keys.vm(vmId),
       queryFn: ({ signal }) => request<Vm>(`/api/v1/vms/${encodeURIComponent(vmId)}`, { signal }),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -138,7 +149,7 @@ export function useVmResources(vmId: string) {
       queryFn: ({ signal }) =>
         request<VmResources>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources`, { signal }),
       enabled: Boolean(vmId),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -317,7 +328,10 @@ export function useTemplates() {
 }
 
 /** 이벤트 목록. 실시간 추가는 WS /ws/v1/events 대신 짧은 주기 재조회로 한다 (초안) */
-export function useEvents(params: { vm_id?: string; type?: string; severity?: string; limit?: number } = {}) {
+export function useEvents(
+  params: { vm_id?: string; type?: string; severity?: string; limit?: number } = {},
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const query = new URLSearchParams(
     Object.entries(params).filter(([, v]) => v != null && v !== '') as [string, string][],
   ).toString();
@@ -326,6 +340,7 @@ export function useEvents(params: { vm_id?: string; type?: string; severity?: st
       queryKey: keys.events(query),
       queryFn: ({ signal }) =>
         request<EventListResponse>(`/api/v1/events${query ? `?${query}` : ''}`, { signal }),
+      enabled,
       refetchInterval: LIVE_POLL_MS,
     }),
   );
@@ -350,7 +365,7 @@ export function useMetrics(
         );
       },
       enabled,
-      refetchInterval: pollMs,
+      refetchInterval: pollUntilGone(pollMs),
     }),
     keepLastData,
   );
@@ -363,7 +378,7 @@ export function useProcesses(vmId: string, enabled: boolean) {
       queryFn: ({ signal }) =>
         request<ProcessesResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/processes`, { signal }),
       enabled,
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -375,7 +390,7 @@ export function useThreads(vmId: string) {
       queryFn: ({ signal }) =>
         request<ThreadsResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/threads`, { signal }),
       enabled: Boolean(vmId),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -389,7 +404,7 @@ export function useTelemetryHeartbeat(vmId: string) {
           signal,
         }),
       enabled: Boolean(vmId),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
       retry: false,
     }),
   );

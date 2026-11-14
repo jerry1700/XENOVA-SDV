@@ -2,12 +2,16 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render as rtlRender, screen, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { initialVms } from '../mocks/data';
+import { initialVms, VM_IDS } from '../mocks/data';
 import { ResourcesPage } from './ResourcesPage';
 
-const state = vi.hoisted(() => ({ metricsError: null as Error | null }));
+const state = vi.hoisted(() => ({
+  metricsError: null as Error | null,
+  drive: null as unknown,
+  socket: 'open' as string,
+}));
 
-vi.mock('../layout/DriveContext', () => ({ useDrive: () => ({ drive: null }) }));
+vi.mock('../layout/DriveContext', () => ({ useDrive: () => ({ drive: state.drive, socket: state.socket }) }));
 // 공용 1초 시계는 첫 렌더에 모듈을 불러온 시각을 돌려줄 수 있어, 표본(렌더 때 만든 현재 시각)보다 과거가 된다.
 // Pool 현재값은 수신 시각보다 이른 now 를 오류로 보므로 테스트에서는 렌더 시점의 현재 시각을 쓴다
 vi.mock('../useNow', () => ({ useNow: () => Date.now() }));
@@ -82,6 +86,8 @@ const render = (ui: ReactElement) =>
 
 beforeEach(() => {
   state.metricsError = null;
+  state.drive = null;
+  state.socket = 'open';
 });
 
 describe('Memory 탭', () => {
@@ -216,5 +222,30 @@ describe('Network 탭', () => {
     render(<ResourcesPage view="network" />);
 
     expect(screen.getAllByRole('alert')).toHaveLength(initialVms().length);
+  });
+});
+
+describe('Network 탭 제어권 — Memory 탭·Overview 와 같은 observedControl (S15P31E110-469)', () => {
+  const authorityOf = (name: string) =>
+    screen
+      .getAllByRole('heading', { level: 3 })
+      .find((heading) => heading.textContent?.includes(name))!
+      .closest('article, section, div[class]')!
+      .parentElement!.querySelector('[data-authority]')!;
+  const autonomous = () => initialVms().find((vm) => vm.vm_id === VM_IDS.autonomous)!.name;
+  const driveWith = (status: string) => ({
+    control: { active_vm_id: VM_IDS.autonomous, source: { status } },
+  });
+
+  it.each([
+    ['소켓 열림·신선', 'open', 'fresh', 'ACTIVE'],
+    ['소켓 끊김', 'closed', 'fresh', 'UNKNOWN'],
+    ['소켓 거부', 'rejected', 'fresh', 'UNKNOWN'],
+    ['관측 만료', 'open', 'stale', 'UNKNOWN'],
+  ])('%s (socket=%s, source=%s) → %s', (_label, socket, status, expected) => {
+    state.socket = socket;
+    state.drive = driveWith(status);
+    render(<ResourcesPage view="network" />);
+    expect(authorityOf(autonomous())).toHaveTextContent(expected);
   });
 });

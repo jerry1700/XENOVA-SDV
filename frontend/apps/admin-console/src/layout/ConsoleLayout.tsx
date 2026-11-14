@@ -2,6 +2,7 @@ import { AppShell } from '@xenova/ui';
 import logo from '@xenova/ui/assets/xenova-logo.png';
 import { Link, NavLink, Outlet } from 'react-router';
 import { DriveProvider } from './DriveContext';
+import { DriveSocketAlert } from './DriveSocketAlert';
 import { LiveDataAlertHost } from './LiveDataAlert';
 import { MockBoardSwitch } from './MockBoardSwitch';
 import { ResumeNotice } from './ResumeNotice';
@@ -33,6 +34,7 @@ export function ConsoleLayout() {
         }
       >
         <ResumeNotice />
+        <DriveSocketAlert />
         <LiveDataAlertHost />
         <Outlet />
         <MockBoardSwitch />

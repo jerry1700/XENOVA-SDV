@@ -3,7 +3,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties
 import { useSearchParams } from 'react-router';
 import { useEvents, useVms } from '../api/queries';
 import type { EventSeverity, Vm, VmEvent } from '../api/types';
-import { CATEGORY_LABEL, categoryOf, clock, type EventCategory } from '../domain/events';
+import { CATEGORY_LABEL, categoryOf, clock, payloadNumber, type EventCategory } from '../domain/events';
 import { MODE_LABEL, plain, roleOf, sortVms } from '../domain/roles';
 import { useDrive } from '../layout/DriveContext';
 import { SEVERITY_LABEL } from './eventLine';
@@ -59,7 +59,7 @@ export function EventsPage() {
   const vmOf = (vmId: string | null | undefined): Vm | undefined =>
     vmId ? vms.data?.items.find((v) => v.vm_id === vmId) : undefined;
   const lastHandoff = (events.data?.items ?? []).find(
-    (e) => e.type === 'drive.mode.changed' && e.payload.handoff_ms != null,
+    (e) => e.type === 'drive.mode.changed' && payloadNumber(e.payload.handoff_ms) != null,
   );
   const control = drive?.control;
 
@@ -143,7 +143,7 @@ export function EventsPage() {
           <strong>
             {lastHandoff ? (
               <>
-                {String(lastHandoff.payload.handoff_ms)}
+                {payloadNumber(lastHandoff.payload.handoff_ms)}
                 <small>ms</small>
               </>
             ) : (

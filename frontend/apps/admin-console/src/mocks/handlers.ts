@@ -196,28 +196,31 @@ const find = (id: string) => {
   const vm = vms.find((v) => v.vm_id === id);
   return vm && live(vm);
 };
-const vmNotFound = () => error(404, 'VM_NOT_FOUND', 'VM을 찾을 수 없습니다.');
+const vmNotFound = () => error(404, 'VM_NOT_FOUND', '존재하지 않는 VM입니다.');
 
+/** backend CreateVmRequest 의 name 패턴: 1~63자, 앞뒤 공백·제어문자·줄/문단 구분자 금지 */
+// eslint-disable-next-line no-control-regex
+const CREATE_NAME_PATTERN = /^(?![ \t\n\x0B\f\r])(?!.*[ \t\n\x0B\f\r]$)[^\p{Cc}\p{Zl}\p{Zp}]{1,63}$/u;
+
+/** backend CreateVmRequest 의 Bean Validation (필드 순서·문구 원문 그대로). 템플릿 최소 메모리는 VmService.create 가 따로 본다 */
 function validate(body: Partial<CreateVmRequest>): { field: string; reason: string }[] {
   const errors: { field: string; reason: string }[] = [];
-  const name = body.name ?? '';
-  // eslint-disable-next-line no-control-regex
-  if (name.length < 1 || name.length > 63 || name.trim() !== name || /[\u0000-\u001f]/.test(name)) {
-    errors.push({ field: 'name', reason: '1~63자, 앞뒤 공백·제어문자 금지' });
+  const name = body.name;
+  if (name == null || name.trim() === '') errors.push({ field: 'name', reason: 'name은 필수입니다.' });
+  if (name != null && !CREATE_NAME_PATTERN.test(name)) {
+    errors.push({ field: 'name', reason: 'name은 1~63자이며 제어문자와 앞뒤 공백은 사용할 수 없습니다.' });
   }
-  if (!Number.isInteger(body.vcpus) || body.vcpus! < 1 || body.vcpus! > 4) {
-    errors.push({ field: 'vcpus', reason: '1~4' });
+  if (!body.template_id?.trim()) errors.push({ field: 'template_id', reason: 'template_id는 필수입니다.' });
+  if (!body.template_version?.trim()) {
+    errors.push({ field: 'template_version', reason: 'template_version은 필수입니다.' });
   }
-  const template = TEMPLATES.find(
-    (t) => t.template_id === body.template_id && t.version === body.template_version,
-  );
-  if (
-    template &&
-    (!Number.isInteger(body.memory_mib) ||
-      body.memory_mib! < template.min_memory_mib ||
-      body.memory_mib! > 1024)
-  ) {
-    errors.push({ field: 'memory_mib', reason: `${template.min_memory_mib}~1024` });
+  if (body.vcpus == null) errors.push({ field: 'vcpus', reason: 'vcpus는 필수입니다.' });
+  else if (!Number.isInteger(body.vcpus) || body.vcpus < 1 || body.vcpus > 4) {
+    errors.push({ field: 'vcpus', reason: 'vcpus는 1~4여야 합니다.' });
+  }
+  if (body.memory_mib == null) errors.push({ field: 'memory_mib', reason: 'memory_mib는 필수입니다.' });
+  else if (!Number.isInteger(body.memory_mib) || body.memory_mib < 16 || body.memory_mib > 1024) {
+    errors.push({ field: 'memory_mib', reason: 'memory_mib는 16~1024여야 합니다.' });
   }
   return errors;
 }
@@ -750,12 +753,20 @@ export const handlers = [
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
     const body = (await request.json()) as Partial<CreateVmRequest>;
+    // backend 순서: 요청 검증(422 + errors) → 템플릿(404) → 템플릿 최소 메모리(422) → 이름 충돌(409)
+    const errors = validate(body);
+    if (errors.length) return error(422, 'VALIDATION_ERROR', '요청 값이 올바르지 않습니다.', errors);
     const template = TEMPLATES.find(
       (t) => t.template_id === body.template_id && t.version === body.template_version,
     );
-    if (!template) return error(404, 'TEMPLATE_NOT_FOUND', '템플릿을 찾을 수 없습니다.');
-    const errors = validate(body);
-    if (errors.length) return error(422, 'VALIDATION_ERROR', '입력값을 확인해 주세요.', errors);
+    if (!template) return error(404, 'TEMPLATE_NOT_FOUND', '존재하지 않는 템플릿입니다.');
+    if (body.memory_mib! < template.min_memory_mib) {
+      return error(
+        422,
+        'VALIDATION_ERROR',
+        `memory_mib는 이 템플릿의 최소값(${template.min_memory_mib}) 이상이어야 합니다.`,
+      );
+    }
     const same = vms.find((vm) => vm.name === body.name);
     if (same) {
       // backend VmService.create: 같은 이름·같은 사양 재요청은 기존 VM 을 시작해 200, 사양이 다르면 409
@@ -764,7 +775,7 @@ export const handlers = [
         same.template_version === template.version &&
         same.vcpus === body.vcpus &&
         same.memory_mib === body.memory_mib;
-      if (!sameSpec) return error(409, 'VM_NAME_CONFLICT', '같은 이름의 VM이 있습니다.');
+      if (!sameSpec) return error(409, 'VM_NAME_CONFLICT', '이미 사용 중인 VM 이름입니다.');
       return HttpResponse.json(live(same) as unknown as JsonBodyType, { status: 200 });
     }
     const vm: Vm = {
@@ -814,9 +825,10 @@ export const handlers = [
     if (!authorized(request)) return unauthorized();
     const target = find(String(params.vmId));
     if (!target) return vmNotFound();
-    // 보드 계약 v1.1: 도메인이 남아 있으면 삭제하지 않는다 (강제 종료 없음)
+    // 보드 계약 v1.1: 도메인이 남아 있으면 삭제하지 않는다 (강제 종료 없음).
+    // backend VmService.destroy 가 보드 원문(stop it before delete)을 아래 문구로 바꿔 돌려준다
     if (target.state !== 'stopped')
-      return error(409, 'INVALID_VM_STATE', `domain ${target.vm_id} is running; stop it before delete`);
+      return error(409, 'INVALID_VM_STATE', '실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.');
     vms = vms.filter((vm) => vm.vm_id !== params.vmId);
     pinningByVm.delete(String(params.vmId));
     return new HttpResponse(null, { status: 204 });
