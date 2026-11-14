@@ -79,6 +79,7 @@ class Contracts(unittest.TestCase):
         self.assertIn('include_dir /srv/xenova/mqtt/current/config.d', config)
         self.assertIn('listener 1883 127.0.0.1', config)
         self.assertIn('listener 1883 192.168.77.1', config)
+        self.assertIn('listener 1883\nbind_interface wlan0', config)
         self.assertNotIn('0.0.0.0', config)
         base = (FILES / 'mosquitto.service').read_text()
         for original in ['User=mosquitto', 'Type=notify', 'WatchdogSec=3min', 'NotifyAccess=main',
