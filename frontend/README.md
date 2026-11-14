@@ -50,7 +50,7 @@ docker run --rm -p 8081:8080 xenova-vm-screens
 API·WebSocket 프록시와 운영 도메인은 배포 Nginx 설정에서 연결합니다.
 
 - 콘솔 환경변수는 `apps/admin-console/.env.example` 을 `.env.local` 로 복사해 바꿉니다 (`VITE_BACKEND_ORIGIN`, `VITE_API_BASE_URL`, `VITE_MOCK`).
-- 디자인 확인만 할 때는 로그인 없이 `http://localhost:5173/components-public`.
+- 디자인 확인만 할 때는 서버 연결 없이 `http://localhost:5173/components-public` (개발 모드에서만 열림 — 개발 서버·`VITE_MOCK=true` 빌드. 운영 빌드에서는 `/components`·`/components-public` 모두 콘솔 첫 화면으로 넘어간다).
 
 ## 관리 콘솔
 

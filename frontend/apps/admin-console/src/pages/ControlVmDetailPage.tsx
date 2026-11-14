@@ -26,6 +26,9 @@ import { LiveDataAlert } from '../layout/LiveDataAlert';
 const VM_ACCENTS = ['var(--x-app-autonomous)', 'var(--x-app-manual)', 'var(--x-app-interaction)'] as const;
 
 /** Dashboard의 관측 상세와 분리된 VM Control 전용 관리 상세. */
+/** 조회가 실패했는데 '불러오는 중'이 남지 않게 (QA S15P31E110-469) */
+const VM_LOAD_FAILED_TEXT = 'VM 정보를 불러오지 못했습니다.';
+
 export function ControlVmDetailPage() {
   const { vmId = '' } = useParams();
   const vm = useVm(vmId);
@@ -77,7 +80,13 @@ export function ControlVmDetailPage() {
         <div className={styles.controlDetailTitle}>
           <span className={styles.controlCardKicker}>VIRTUAL MACHINE CONTROL</span>
           <h1>{vm.data?.name ?? 'VM 관리 상세'}</h1>
-          <p>{vm.data ? `${osLabel(vm.data)} · ${vm.data.template_id}` : 'VM 정보를 불러오는 중입니다.'}</p>
+          <p>
+            {vm.data
+              ? `${osLabel(vm.data)} · ${vm.data.template_id}`
+              : vm.error
+                ? VM_LOAD_FAILED_TEXT
+                : 'VM 정보를 불러오는 중입니다.'}
+          </p>
         </div>
       </header>
 

@@ -2,7 +2,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastProvider } from '@xenova/ui';
 import { render, screen } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../api/client';
 import { initialVms, VM_IDS } from '../mocks/data';
 import { ControlVmDetailPage } from './ControlVmDetailPage';
 
@@ -13,8 +14,12 @@ const resourcesQuery = vi.hoisted(() => ({
   isPending: false,
 }));
 
+/** 설정하면 useVm 이 이 결과를 돌려준다 (조회 실패 화면용) */
+const vmQueryOverride = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
+
 vi.mock('../api/queries', () => ({
-  useVm: (vmId: string) => ({ data: VMS.find((vm) => vm.vm_id === vmId), error: null, isPending: false }),
+  useVm: (vmId: string) =>
+    vmQueryOverride.value ?? { data: VMS.find((vm) => vm.vm_id === vmId), error: null, isPending: false },
   useVms: () => ({ data: { items: VMS }, error: null, isPending: false }),
   useVmResources: () => resourcesQuery,
 }));
@@ -73,6 +78,28 @@ describe('VM Control 상세 자원 패널', () => {
     renderDetail(VM_IDS.interaction);
     expect(screen.getByText('조회 실패')).toBeInTheDocument();
     resourcesQuery.error = null;
+  });
+});
+
+describe('VM Control 상세 부제 (S15P31E110-469)', () => {
+  afterEach(() => {
+    vmQueryOverride.value = null;
+  });
+
+  it('조회 중에는 "불러오는 중", 실패하면 "불러오지 못했습니다"', () => {
+    vmQueryOverride.value = { data: undefined, error: null, isPending: true };
+    const view = renderDetail('missing');
+    expect(screen.getByText('VM 정보를 불러오는 중입니다.')).toBeInTheDocument();
+    view.unmount();
+
+    vmQueryOverride.value = {
+      data: undefined,
+      error: new ApiError(404, { code: 'VM_NOT_FOUND', message: '존재하지 않는 VM입니다.' }),
+      isPending: false,
+    };
+    renderDetail('missing');
+    expect(screen.getByText('VM 정보를 불러오지 못했습니다.')).toBeInTheDocument();
+    expect(screen.queryByText('VM 정보를 불러오는 중입니다.')).toBeNull();
   });
 });
 

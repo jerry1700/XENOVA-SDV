@@ -1,6 +1,6 @@
 import type { DriveMode } from '../api/drive';
 import type { AgentStatus, EventSeverity, VmEvent, VmState } from '../api/types';
-import { describe } from '../domain/events';
+import { describe, payloadNumber, payloadText } from '../domain/events';
 import { MODE_LABEL } from '../domain/roles';
 import { AGENT_LABEL, STATE_LABEL } from '../format';
 import { RECOVERY_CODE_LABEL } from './vmDetailEventFormat';
@@ -33,7 +33,8 @@ export const EVENT_KIND: Partial<Record<VmEvent['type'], string>> = {
 
 export const SEVERITY_LABEL: Record<EventSeverity, string> = { INFO: '정보', WARNING: '경고', ERROR: '오류' };
 
-const str = (value: unknown) => (value == null ? '' : String(value));
+/** 객체·배열·NaN 은 `[object Object]`·`NaN` 대신 비운다 (domain/events payloadText) */
+const str = payloadText;
 const stateLabel = (value: unknown) => STATE_LABEL[str(value) as VmState] ?? str(value);
 const agentLabel = (value: unknown) => AGENT_LABEL[str(value) as AgentStatus] ?? (str(value) || '—');
 const modeLabel = (value: unknown) => MODE_LABEL[str(value) as DriveMode] ?? (str(value) || '—');
@@ -82,7 +83,7 @@ export function eventLine(event: VmEvent): EventLine {
       note = base.detail;
       break;
     case 'drive.resume.accepted':
-      text = `재개 승인 — ${Number(p.switch_in_ms ?? 3000) / 1000}초 뒤 ${MODE_LABEL.AUTO}`;
+      text = `재개 승인 — ${(payloadNumber(p.switch_in_ms) ?? 3000) / 1000}초 뒤 ${MODE_LABEL.AUTO}`;
       raw = title;
       note = base.detail;
       break;

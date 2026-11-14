@@ -47,10 +47,11 @@ function sync(overrides: Partial<VmSynchronizationResult> = {}): VmSynchronizati
     registered: 0,
     updated: 0,
     unchanged: 1,
+    restored: 0,
+    retired: 0,
+    skipped: 0,
     conflicts: 0,
     incomplete: 0,
-    missing_from_board: 0,
-    retired: 0,
     results: [],
     ...overrides,
   };
@@ -116,6 +117,63 @@ describe('VM 등록 동기화 버튼', () => {
     expect(await screen.findByText('debian-dev')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'VM 동기화' }));
     expect(await screen.findByText('VM 동기화 완료: 보드 1대, 바뀐 것 없음')).toBeInTheDocument();
+  });
+
+  it('보류·충돌·정보 부족은 성공 응답이어도 VM 이름과 사유를 같이 보인다', async () => {
+    stubBackend(
+      () => Response.json(response('2026-11-12T01:00:00Z')),
+      async () =>
+        Response.json(
+          sync({
+            discovered: 3,
+            unchanged: 0,
+            retired: 1,
+            skipped: 1,
+            conflicts: 1,
+            incomplete: 1,
+            results: [
+              {
+                vm_id: '11111111-0000-4000-8000-000000000001',
+                name: 'old-debian',
+                action: 'retired',
+                reason: 'missing_from_board',
+              },
+              {
+                vm_id: '11111111-0000-4000-8000-000000000002',
+                name: 'zephyr-a',
+                action: 'skipped',
+                reason: 'in_operation',
+              },
+              {
+                vm_id: '11111111-0000-4000-8000-000000000003',
+                name: 'debian',
+                action: 'conflict',
+                reason: 'duplicate_name',
+              },
+              {
+                vm_id: 'abcdef12-0000-4000-8000-000000000004',
+                name: null,
+                action: 'incomplete',
+                reason: 'registration_metadata_missing',
+              },
+            ],
+          }),
+        ),
+    );
+    renderPage();
+    const user = userEvent.setup();
+
+    expect(await screen.findByText('debian-dev')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'VM 동기화' }));
+
+    expect(
+      await screen.findByText('VM 동기화 완료: 보드 3대 · 정리 1 · 보류 1 · 충돌 1 · 정보 부족 1'),
+    ).toBeInTheDocument();
+    const problems = screen.getByRole('list', { name: '동기화 확인 필요' });
+    expect(problems).toHaveTextContent('zephyr-a: 작업 진행 중이라 이번엔 정리하지 않음');
+    expect(problems).toHaveTextContent('debian: 이미 다른 VM이 쓰는 이름');
+    expect(problems).toHaveTextContent('abcdef12: 보드 등록 정보가 부족함');
+    expect(problems).not.toHaveTextContent('old-debian');
   });
 
   it('503이면 기존 목록을 유지하고 오류를 알린다', async () => {
