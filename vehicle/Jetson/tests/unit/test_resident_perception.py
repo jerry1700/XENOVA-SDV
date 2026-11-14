@@ -108,6 +108,40 @@ assert 'depthai' not in sys.modules
             else:
                 child.close()
 
+    @unittest.skipUnless(sys.platform=='linux','실제 Linux seqpacket 통로 시험')
+    def test_actor_boot_accepts_the_registered_jpeg_selection_and_rejects_a_different_one(self):
+        calibration=provisional()
+        raw=canonical(calibration.to_dict())
+        profile=YolopBenchProfile('FAKE',Path('assets'),Path('manifest.json'))
+        plain,video=runtime_artifacts(profile,raw),runtime_artifacts(profile,raw,jpeg_enabled=True)
+        self.assertNotEqual(plain['graph_profile_sha256'],video['graph_profile_sha256'])
+        def refs(artifacts,jpeg):
+            return RawBindingProfile('FAKE',str(uuid.uuid4()),artifacts['model_id'],artifacts['parser_id'],
+                artifacts['graph_profile_sha256'],artifacts['format_table_sha256'],artifacts['calibration_bundle'],True,jpeg)
+        peer=LifecyclePeer(str(uuid.uuid4()),str(uuid.uuid4()),str(uuid.uuid4()),'A',video['release_sha256'])
+        def boot(raw_profile):
+            return SimpleNamespace(profile=profile,peer=peer,raw_profile=raw_profile,perception_profile_bytes=raw)
+        parent,child=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+        parent.setblocking(False)
+        child.setblocking(False)
+        actor=None
+        try:
+            # 영상 옵션으로 등록한 manifest 에 JPEG 선택이 다르면 거절한다
+            for wrong in (refs(video,False),refs(plain,True)):
+                with self.assertRaisesRegex(ValueError,'manifests differ'):
+                    _Actor(child,boot(wrong))
+            actor=_Actor(child,boot(refs(video,True)))
+            parent.settimeout(2)
+            packet=json.loads(parent.recv(65536))
+            self.assertEqual(packet['kind'],'HELLO')
+            self.assertEqual(packet['payload']['release_sha256'],video['release_sha256'])
+        finally:
+            parent.close()
+            if actor is not None:
+                actor.link.close()
+            else:
+                child.close()
+
 
 if __name__=='__main__':
     unittest.main()
