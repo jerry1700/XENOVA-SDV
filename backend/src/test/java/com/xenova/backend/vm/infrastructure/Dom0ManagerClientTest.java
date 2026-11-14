@@ -657,6 +657,24 @@ class Dom0ManagerClientTest {
                 });
     }
 
+    @Test
+    void startRefusedUntilHostPreparationIsAClear409() {
+        // dom0-manager has no mapping for the platform's CPU_NOT_READY and sends it as DriverError
+        server.createContext(
+                "/api/v1/vms",
+                exchange -> respond(exchange, 500, """
+                        {"code":"DriverError","message":"CPU_NOT_READY: prepare this host boot and policy revision",
+                         "platform_code":"CPU_NOT_READY"}
+                        """));
+
+        assertThatThrownBy(() -> client.launch(VM_ID, SPEC))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("CPU_NOT_READY");
+                    assertThat(exception.getMessage()).contains("호스트 준비").doesNotContain("prepare this host");
+                });
+    }
+
     private void assertLaunchFailsWith(
             int dom0Status,
             String body,
