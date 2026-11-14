@@ -52,9 +52,10 @@
 #define XENOVA_J_APPLY_US 2000
 
 /* 받아들이는 속도(mm/s)와 조향(mrad)의 크기. 속도는 책상 시험용으로 낮게 잡은 값이다.
- * 조향 700 mrad(약 40도)는 서보 펄스 1054 us 에서 1946 us 로, 바퀴가 끝에 닿지 않는 범위(900 us 에서 2100 us) 안이다 */
+ * 조향은 앞바퀴 각이다. 350 mrad(약 20도)는 유격 보정까지 더해 서보 펄스 1048 us 에서 1998 us 로,
+ * 바퀴가 끝에 닿지 않는 범위(900 us 에서 2100 us) 안이다 */
 #define XENOVA_MAX_VELOCITY_MMPS 600
-#define XENOVA_MAX_STEERING_MRAD 700
+#define XENOVA_MAX_STEERING_MRAD 350
 
 /* 엔코더 누계 폭. Pi 의 OdometryConfig.encoder_bits 와 같아야 한다 */
 #define XENOVA_ENCODER_BITS 32
