@@ -13,6 +13,7 @@ from time import perf_counter_ns
 
 from .inputs import PerceptionInput, FrameStamp
 from .tape import TapeProfile, extract_tape
+from .rectify import rgb_view
 from .road import RoadGeometryLimits, RoadProfile, infer_road
 from .lane_tracking import mapped_lane_ahead, track_lane
 from .mapped_registration import MappedRegistration
@@ -181,6 +182,9 @@ class PerceptionPipeline:
         if type(calibration) is not CalibrationProfile:
             raise ValueError('pipeline requires CalibrationProfile')
         self.calibration = calibration
+        # 왜곡 계수가 있는 RGB 는 편 영상과 무왜곡 모델로 흰선·가림·NN 후보를 처리한다. 없으면 None 이다.
+        self._rgb_view = rgb_view(calibration.rgb)
+        self._rgb_camera = calibration.rgb if self._rgb_view is None else self._rgb_view.camera
         self.profile = PipelineProfile() if profile is None else profile
         if type(self.profile) is not PipelineProfile or type(targets) is not tuple or len(targets)>4:
             raise ValueError('invalid pipeline or target profile')
@@ -402,7 +406,7 @@ class PerceptionPipeline:
 
     def _occlusion(self, evidence):
         from .occlusion import box_occlusion
-        return box_occlusion(() if evidence is None else evidence.hit_boxes,self.calibration.rgb)
+        return box_occlusion(() if evidence is None else evidence.hit_boxes,self._rgb_camera)
 
     def _uses_observed_support(self, graph):
         return (self.reference is not None and self.reference.feature_policy=='OBSERVED_STRIP_SUPPORT_V1'
@@ -602,7 +606,7 @@ class PerceptionPipeline:
             nn_new=self.nn_gate.accept(nn_stamp,hashlib.sha256(packet.payload).hexdigest())
             if nn_new:
                 from .neural import build_neural_layer
-                self._last_neural=build_neural_layer(observation,self.calibration)
+                self._last_neural=build_neural_layer(observation,self.calibration,rgb_view=self._rgb_view)
         self.counts['rgb']+=int(rgb_new); self.counts['depth']+=int(depth_new); self.counts['nn']+=int(nn_new)
         self.counts['duplicate_rgb']+=int(not rgb_new)
         self.counts['duplicate_depth']+=int(observation.depth is not None and not depth_new)
@@ -698,7 +702,8 @@ class PerceptionPipeline:
         if rgb_new:
             self._last_rgb_key,self._last_capture=observation.rgb.stamp.key,capture
             self._last_rgb=observation.rgb.array()
-            self._last_tape=extract_tape(self._last_rgb,self.calibration.rgb,self.calibration.plane,self.profile.tape,
+            tape_rgb=self._last_rgb if self._rgb_view is None else self._rgb_view.image(self._last_rgb)
+            self._last_tape=extract_tape(tape_rgb,self._rgb_camera,self.calibration.plane,self.profile.tape,
                 stamp=observation.rgb.stamp,occlusion_mask=self._occlusion(evidence),nn_candidates=observation.nn,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
             self._last_road=infer_road(self._last_tape,self.profile.road)
