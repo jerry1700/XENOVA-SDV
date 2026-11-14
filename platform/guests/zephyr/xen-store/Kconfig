@@ -5,3 +5,10 @@ config XENOVA_XENSTORE
 	help
 	  Bounded XenStore wire client and read-only XenBus VIF observation.
 	  The caller owns one client and serializes lifecycle operations.
+
+config XENOVA_DOM0LESS_BOOT
+	bool "Wait for Xen boot domain backends"
+	depends on XENOVA_XENSTORE
+	help
+	  The guest runs before dom0 initializes XenStore and attaches its VIF.
+	  Wait for their initial publication without reconnecting an active session.

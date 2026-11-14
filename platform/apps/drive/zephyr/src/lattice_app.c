@@ -923,12 +923,14 @@ int drive_lattice_reset_poll(int64_t deadline){
  return planner_start();
 }
 int drive_lattice_join(int64_t deadline){
+ if(!initialized)return 0;
  preflight_revoke();planner_operation_available=false;
  atomic_set(&stop,1);atomic_set(&planner_stop,1);de_stop(&engine);int rc=0;
  if(planner_started&&!planner_joined){int64_t left=deadline-k_uptime_get();if(k_thread_join(&planner_thread,left>0?K_MSEC(left):K_NO_WAIT))rc=-ETIMEDOUT;else planner_joined=true;}
  int io=dl_join(deadline);return rc?rc:io;
 }
 void drive_lattice_report(void){
+ if(!initialized)return;
  dl_report();
  unsigned path_leases=0,path_writers=0,map_readers=0,map_writers=0;
  for(unsigned k=0;k<DE_PATH_SLOTS;k++){

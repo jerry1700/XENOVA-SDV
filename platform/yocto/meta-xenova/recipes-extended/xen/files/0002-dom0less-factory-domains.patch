@@ -1,0 +1,139 @@
+Subject: [PATCH] arm: initialize Xenova factory guest identity and PV console
+
+Upstream-Status: Inappropriate [Xenova factory boot contract]
+
+--- a/xen/common/device-tree/dom0less-build.c
++++ b/xen/common/device-tree/dom0less-build.c
+@@ -24,6 +24,7 @@
+ #include <public/bootfdt.h>
+ #include <public/domctl.h>
+ #include <public/event_channel.h>
++#include <public/io/console.h>
+ #include <public/io/xs_wire.h>
+ 
+ #include <asm/setup.h>
+@@ -611,6 +612,48 @@
+     return 0;
+ }
+ 
++/* Match the ARM libxl PV console ABI before the guest first runs. */
++static int __init alloc_factory_console(struct domain *d)
++{
++    struct page_info *page;
++    struct xencons_interface *ring;
++    evtchn_alloc_unbound_t evtchn = { .dom = d->domain_id, .remote_dom = 0 };
++    gfn_t gfn = gaddr_to_gfn(GUEST_MAGIC_BASE);
++    mfn_t mfn;
++    int rc;
++
++    if ( !hardware_domain || hardware_domain->domain_id != 0 ||
++         is_domain_direct_mapped(d) || d->max_pages == UINT_MAX )
++        return -EINVAL;
++
++    d->max_pages++;
++    page = alloc_domheap_page(d, 0);
++    if ( !page )
++        return -ENOMEM;
++
++    mfn = page_to_mfn(page);
++    rc = guest_physmap_add_page(d, gfn, mfn, 0);
++    if ( rc )
++    {
++        free_domheap_page(page);
++        return rc;
++    }
++
++    ring = map_domain_page(mfn);
++    clear_page(ring);
++    ring->connection = XENCONSOLE_DISCONNECTED;
++    unmap_domain_page(ring);
++
++    rc = evtchn_alloc_unbound(&evtchn, 0);
++    if ( rc )
++        return rc;
++
++    gnttab_seed_entry(d, GNTTAB_RESERVED_CONSOLE, 0, gfn_x(gfn));
++    d->arch.hvm.params[HVM_PARAM_CONSOLE_PFN] = gfn_x(gfn);
++    d->arch.hvm.params[HVM_PARAM_CONSOLE_EVTCHN] = evtchn.port;
++    return 0;
++}
++
+ static int __init alloc_xenstore_params(struct kernel_info *kinfo)
+ {
+     struct domain *d = kinfo->bd.d;
+@@ -632,7 +675,7 @@
+     return rc;
+ }
+ 
+-static void __init domain_vcpu_affinity(struct domain *d,
++void __init boot_domain_vcpu_affinity(struct domain *d,
+                                         const struct dt_device_node *node)
+ {
+     struct dt_device_node *np;
+@@ -819,7 +862,16 @@
+             return rc;
+     }
+ 
+-    domain_vcpu_affinity(d, node);
++    boot_domain_vcpu_affinity(d, node);
++
++    if ( dt_find_property(node, "xenova,boot-id", NULL) )
++    {
++        if ( kinfo->dom0less_feature != DOM0LESS_ENHANCED )
++            return -EINVAL;
++        rc = alloc_factory_console(d);
++        if ( rc )
++            return rc;
++    }
+ 
+     rc = alloc_xenstore_params(kinfo);
+ 
+@@ -853,6 +905,19 @@
+             panic("Error allocating ID for domain %s\n", dt_node_name(node));
+ 
+         max_init_domid = max(max_init_domid, domid);
++
++        /* Dom0 later replaces this loader identity with the registered UUID. */
++        {
++            u32 len;
++            const void *id = dt_get_property(node, "xenova,boot-id", &len);
++
++            if ( id )
++            {
++                if ( len != sizeof(ki.bd.create_cfg.handle) )
++                    panic("Invalid xenova,boot-id for %s\n", dt_node_name(node));
++                memcpy(ki.bd.create_cfg.handle, id, len);
++            }
++        }
+ 
+         ki.bd.d = domain_create(domid, &ki.bd.create_cfg, ki.bd.create_flags);
+         if ( IS_ERR(ki.bd.d) )
+--- a/xen/include/xen/dom0less-build.h
++++ b/xen/include/xen/dom0less-build.h
+@@ -42,6 +42,8 @@
+ #define DOM0LESS_ENHANCED        (DOM0LESS_ENHANCED_NO_XS | DOM0LESS_XENSTORE)
+ 
+ void create_domUs(void);
++void boot_domain_vcpu_affinity(struct domain *d,
++                              const struct dt_device_node *node);
+ bool is_dom0less_mode(void);
+ void set_xs_domain(struct domain *d);
+ 
+--- a/xen/arch/arm/domain_build.c
++++ b/xen/arch/arm/domain_build.c
+@@ -2101,6 +2101,15 @@
+     if ( rc )
+         panic("Could not set up %pd guest OS (rc = %d)\n", dom0, rc);
+ 
++#ifdef CONFIG_DOM0LESS_BOOT
++    {
++        const struct dt_device_node *node = dt_find_node_by_path("/chosen/dom0");
++
++        if ( node )
++            boot_domain_vcpu_affinity(dom0, node);
++    }
++#endif
++
+     set_xs_domain(dom0);
+ }
+ 

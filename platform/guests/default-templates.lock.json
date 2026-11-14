@@ -20,9 +20,9 @@
     {
       "guest_kind": "zephyr",
       "id": "xenova-zephyr-drive-lattice-lab-1.0.0",
-      "version": "1.0.9",
-      "directory": "zephyr/xenova-zephyr-drive-lattice-lab-1.0.0/1.0.9",
-      "manifest_sha256": "926ab258782290e5e8feffd544f49e1bc2ee2c58f4a741ee7f1dafe53e52d22b",
+      "version": "1.0.10",
+      "directory": "zephyr/xenova-zephyr-drive-lattice-lab-1.0.0/1.0.10",
+      "manifest_sha256": "46ac082b72bc1f333b4a43c215cb57da486c0bf88216d078302d53570b34ca2c",
       "template_id": "zephyr-drive-lattice-lab-arm64"
     }
   ]

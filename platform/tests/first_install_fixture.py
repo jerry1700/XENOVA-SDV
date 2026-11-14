@@ -161,6 +161,7 @@ def platform_root(root):
                'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
+                 'xenova_dom0less.py',
                  'xenova_creation.py','xenova_creation_auto.py',
                  'xenova_resources.py','xenova_zephyr_transition.py','xenova_zephyr_control.py',
                  'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
@@ -197,6 +198,10 @@ def platform_root(root):
     library = root/'usr/lib/libxenmanage.so.1'
     library.parent.mkdir(parents=True, exist_ok=True)
     library.write_text('packaging fixture: not a target binary')
+    helper = root/'usr/lib/xen/bin/init-dom0less'
+    helper.parent.mkdir(parents=True)
+    helper.write_text('packaging fixture: not a target binary')
+    helper.chmod(0o755)
     cap = root / 'usr/share/xenova/first-install-capabilities.json'
     cap.parent.mkdir(parents=True, exist_ok=True)
     cap.write_text(json.dumps(contract.FEATURES))
@@ -288,8 +293,13 @@ def starter_bundle(target):
     from test_xenova_lifecycle import application_bundle, bundle
     target = Path(target)
     source = application_bundle(bundle(target.parent / (target.name + '-diagnostic')), target)
+    config = source / 'zephyr.config'
+    config.chmod(0o644)
+    config.write_text(config.read_text() + '\nCONFIG_XENOVA_DOM0LESS_BOOT=y\n')
+    config.chmod(0o444)
     manifest = source / 'firmware.json'
     meta = json.loads(manifest.read_text())
+    meta['files'][config.name] = {'sha256': assemble.sha(config), 'bytes': config.stat().st_size}
     lock = json.loads((ROOT / 'platform/guests/zephyr/starter.lock.json').read_text())
     meta.update(id=lock['id'], kind='zephyr-xen-firmware', version=lock['version'])
     meta['source'].update({k: lock[k] for k in ('app','app_files','app_source_sha256','zephyr_commit','sdk_version')})

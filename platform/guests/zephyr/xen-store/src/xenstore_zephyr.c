@@ -118,6 +118,23 @@ int xs_zephyr_open(struct xs_zephyr *z)
 		parameter, map_page, unmap_page, bind_port, unbind_port, mask_port, unmask_port
 	};
 	int rc = xs_link_open(&z->link, &ops, &io);
+#if defined(CONFIG_XENOVA_DOM0LESS_BOOT)
+	if (!rc) {
+		/* Claim the event port now, but do not issue the first request
+		 * until xenstored has published this ring as connected. */
+		struct xenstore_domain_interface *ring = z->link.mapping;
+		int64_t deadline = k_uptime_get() + 360000;
+		while (__atomic_load_n(&ring->connection, __ATOMIC_ACQUIRE) ==
+		       XENSTORE_RECONNECT) {
+			if (k_uptime_get() >= deadline) {
+				(void)xs_link_close(&z->link, 0);
+				rc = -ETIMEDOUT;
+				break;
+			}
+			(void)k_sem_take(&z->wake, K_MSEC(100));
+		}
+	}
+#endif
 	if (!rc) { owner = z; session_used = true; }
 	k_mutex_unlock(&store_owner_lock);
 	return rc;

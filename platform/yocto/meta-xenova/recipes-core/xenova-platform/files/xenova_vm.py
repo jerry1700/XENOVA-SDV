@@ -607,7 +607,7 @@ class Platform:
             if ready.strip()!='1':
                 refuse('RECOVERY_MODE_UNSUPPORTED','cooperative handler is not ready in this execution')
 
-    def wait_reboot_removed(self,record,old,deadline):
+    def wait_reboot_removed(self,record,old,deadline,*,cleanup_deadline=None):
         """Two trusted snapshots plus incarnation checks; (null) is never absence."""
         previous=old['domid']
         def pair():
@@ -638,6 +638,10 @@ class Platform:
                 raise
             if any(value!=old['xen_unique_id'] for value in incarnations):
                 raise DomainIdentityError('old reboot incarnation was replaced')
+            current = snapshots[-1].get(previous)
+            if cleanup_deadline is not None and self.clock() < cleanup_deadline and current:
+                if current['xen_state'] == 'shutdown' and current['xen_state_flags'][4] == 'r':
+                    self._remove_shutdown_boot_domain(record, old, cleanup_deadline)
             self.sleep(min(0.1,max(0,deadline-self.clock())))
         raise PlatformError('cooperative reboot removal deadline exceeded; no force')
 
@@ -660,6 +664,16 @@ class Platform:
         else:
             self.timed_command(['xl',action,str(row['domid'])],deadline)
         return row
+
+    def _remove_shutdown_boot_domain(self, record, row, deadline):
+        # Xen boot domains have no xl create monitor to dispose them after a
+        # cooperative shutdown. Remove only the same acknowledged incarnation.
+        from xenova_dom0less import owns_execution
+        if not owns_execution(self, record, row, deadline):
+            return
+        current = self.resolve_domain(record, expected=row, deadline=deadline)
+        if current['xen_state'] == 'shutdown':
+            self.control(record, 'destroy', row, deadline=deadline)
 
     def _settle_created_domain(self, record, row, deadline):
         """생성 직후의 빈 xl 상태만 기존 기한 안에서 재관측한다.
@@ -695,9 +709,13 @@ class Platform:
         domains = self.domains(deadline=deadline)
         existing = self.matching(record, domains)
         if existing:
-            state = started_state(record, existing[0])
-            if _accept:
-                _accept()
+            current = existing[0]
+            if current['xen_state'] == 'unknown':
+                current = self._settle_created_domain(record, current, deadline)
+            started_state(record, current)
+            owner = _accept() if _accept else _owner
+            from xenova_dom0less import adopt
+            adopt(self, record, current, deadline, owner=owner, result=_result)
             if _result is not None:
                 _result['stage'] = 'start_confirmation'
             observation = execution.observe(record, deadline)
@@ -965,6 +983,11 @@ class Platform:
                                         'stage': 'identity-recheck'}
             save()
             try:
+                if strategy == 'graceful':
+                    from xenova_dom0less import owns_execution
+                    unique = owns_execution(self, record, row, deadline)
+                    if unique:
+                        row = {**row, 'xen_unique_id': unique}
                 if _result is not None:
                     _result['physical_submitted'] = True
                     _result['stage'] = 'shutdown_submit'
@@ -1014,6 +1037,12 @@ class Platform:
                     result['instances'][key].update(result=strategy, stage='domain-removed', xen_state='stopped')
                 else:
                     current = after.get(domid) or before[domid]
+                    if strategy == 'graceful' and row.get('xen_unique_id') and current['xen_state'] == 'shutdown':
+                        try:
+                            self._remove_shutdown_boot_domain(record, row, deadline)
+                        except PlatformError as exc:
+                            result['instances'][key].update(result='failed', error=str(exc))
+                            continue
                     result['instances'][key]['xen_state'] = current['xen_state']
                     remaining.append((record, row, strategy))
             pending = remaining
@@ -1141,6 +1170,14 @@ class Platform:
             raise PlatformError('Zephyr graceful reboot unsupported; use reboot --force')
         self.execution().require_launch_available(record)
         cpu_context = self.cpu().context(record)
+        from xenova_dom0less import owns_execution
+        if guest_kind(record) == 'linux' and not force and owns_execution(self, record, rows[0], deadline):
+            owner = _accept() if _accept else None
+            self.stop_many([record], timeout=timeout, deadline=deadline,
+                           _observed={record['uuid']:_observed} if _observed else None, _result=_result)
+            self.start(record, _owner=owner, deadline=deadline, _result=_result)
+            print(json.dumps({'action': 'reboot', 'id': record['id'], 'forced': False, 'app_readiness': 'unknown'}))
+            return
         if guest_kind(record) == 'zephyr' or force:
             owner = _accept() if _accept else None
             self.stop_many([record], timeout=timeout, force=True, deadline=deadline,
@@ -1320,6 +1357,13 @@ def legacy_command(action, options, *, platform=None):
     args = Namespace(**{'force':False,'execute':False,'id':None,'bundle':None,'sha256':None,
                         **options,'action':action})
     p = platform if platform is not None else Platform()
+    if args.action == 'boot-domains':
+        from xenova_dom0less import enabled, prepare
+        if enabled():
+            deadline = p.clock()+45
+            with operation_lock(p.runtime, deadline=deadline, clock=p.clock, sleep=p.sleep):
+                prepare(p, p.records(validate_assets=False), deadline)
+        return
     if args.action in ('host-init', 'host-quiesce'):
         value = p.execution().initialize_host() if args.action == 'host-init' else p.execution().quiesce('systemd-shutdown')
         if args.action=='host-quiesce':
@@ -1344,7 +1388,7 @@ def legacy_command(action, options, *, platform=None):
         dhcp_ready(int(args.id))
         return
     if args.action == 'check-xen':
-        # xenova-xen-ready.service의 30초 상한 안에서 모든 xl 조회가 예산을 공유한다.
+        # 부팅 도메인 등록 이후의 모든 xl 조회가 이 기한을 공유한다.
         p.check_xen(deadline=p.clock()+25)
         return
     if args.action == 'firmware-replace':
