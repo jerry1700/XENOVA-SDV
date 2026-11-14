@@ -698,6 +698,31 @@ describe('VM telemetry dashboard', () => {
     expect(ops.getByText('heartbeat 기준 · 단계 미수신')).toBeInTheDocument();
   });
 
+  it.each([
+    ['fresh', '유휴'],
+    ['stale', '관측 만료'],
+  ] as const)('shows the %s Interaction heartbeat on Overview and VM detail', async (status, expected) => {
+    fixture();
+    const snapshot = structuredClone(drive);
+    snapshot.vm_apps![VM_IDS.interaction] = {
+      interaction: {
+        lifecycle: null,
+        lifecycle_source: { status: 'unknown', age_ms: null },
+        heartbeat: { state: 'idle' },
+        heartbeat_source: { status, age_ms: status === 'fresh' ? 150 : 3500 },
+      },
+    };
+    useDrive.mockReturnValue({ drive: snapshot, socket: 'open' });
+    const overview = renderPage('/dashboard/overview');
+    const card = within(await screen.findByRole('article', { name: 'interaction' }));
+    expect(card.getByText(expected)).toBeInTheDocument();
+    overview.unmount();
+
+    renderPage(`/dashboard/vms/${VM_IDS.interaction}`);
+    const detail = within((await screen.findByRole('heading', { name: '운영 상태' })).closest('section')!);
+    expect(detail.getByText(new RegExp(`인터랙션 · ${expected}`))).toBeInTheDocument();
+  });
+
   it('labels each app line in Korean and shows the reason in Korean with the raw code as title', async () => {
     fixture();
     const labelled = structuredClone(drive);
