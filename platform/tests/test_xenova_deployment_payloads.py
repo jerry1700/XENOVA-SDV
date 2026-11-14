@@ -58,8 +58,11 @@ class DeploymentPayloadTest(unittest.TestCase):
 
     def test_actual_recipe_installs_both_source_trees_and_safe_server_config(self):
         self.install_apps()
+        # Display and its platform setup helper have dedicated installation and image-gate tests.
+        display_sources = (payloads.DISPLAY, payloads.RECIPES/"xenova-display", payloads.RECIPES/"xenova-platform")
         for relative,source in payloads.source_files("usr/lib/python3.14/site-packages").items():
-            self.assertEqual((self.root/relative).read_bytes(),source.read_bytes(),relative)
+            if not any(source.is_relative_to(directory) for directory in display_sources):
+                self.assertEqual((self.root/relative).read_bytes(),source.read_bytes(),relative)
         env=(self.root/"etc/xenova/dom0-manager.env").read_text()
         for setting in ("XENOVA_DRIVER=platform","XENOVA_HOST=127.0.0.1","XENOVA_PORT=8081"):
             self.assertIn(setting,env)
@@ -88,6 +91,56 @@ class DeploymentPayloadTest(unittest.TestCase):
         inputs=assemble.source_fingerprints()
         for source in payloads.source_files("usr/lib/python3/site-packages").values():
             self.assertIn(str(source.relative_to(ROOT)),inputs)
+
+    def test_gate_rejects_missing_or_changed_creation_policy(self):
+        platform_root(self.root)
+        target = self.root/'etc/xenova/creation-policy.json'
+        before = target.read_bytes()
+        for changed in (None, b'{"schema_version":"1.0","call_ms":120000}'):
+            with self.subTest(changed=changed):
+                if changed is None:
+                    target.unlink()
+                else:
+                    target.write_bytes(changed)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'source/installed contract mismatch'):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    target.write_bytes(before)
+
+    def test_gate_rejects_missing_or_stale_telemetry_units(self):
+        platform_root(self.root)
+        for name in ('xenova-telemetry-clock', 'xenova-telemetry-evidence'):
+            for suffix in ('.service', '.timer'):
+                with self.subTest(name=name, suffix=suffix):
+                    target = self.root/'usr/lib/systemd/system'/(name+suffix)
+                    before = target.read_bytes()
+                    target.unlink()
+                    try:
+                        with self.assertRaisesRegex(ValueError, 'source/installed contract mismatch'):
+                            assemble.platform_root_ok(self.root)
+                    finally:
+                        target.write_bytes(before)
+            target = self.root/'usr/lib/systemd/system'/(name+'.service')
+            before = target.read_text()
+            target.write_text(before.replace('Requisite=xenova-first-boot.service', ''))
+            try:
+                with self.assertRaisesRegex(ValueError, 'source/installed contract mismatch'):
+                    assemble.platform_root_ok(self.root)
+            finally:
+                target.write_text(before)
+
+    def test_gate_requires_both_telemetry_timers_enabled(self):
+        platform_root(self.root)
+        for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+            with self.subTest(name=name):
+                link = self.root/'etc/systemd/system/timers.target.wants'/name
+                link.unlink()
+                try:
+                    with self.assertRaisesRegex(ValueError, 'required telemetry timer not enabled'):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    link.symlink_to('/usr/lib/systemd/system/'+name)
 
     def test_gate_rejects_each_missing_runtime_log_installation(self):
         platform_root(self.root)

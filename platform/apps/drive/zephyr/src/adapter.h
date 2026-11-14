@@ -18,7 +18,7 @@ struct drive_sample { float v_mps,steer_rad,nearest_m; enum auto_reason auto_rea
  bool binary_input;enum drive_sample_clock clock_domain;int64_t input_sequence,input_received_ms,valid_until_ms;
  char map_epoch[37];uint64_t reference_revision,observation_sequence;uint32_t path_generation,tracker_index,maneuver_phase;
  /* 현대 command는 원 계산 snapshot에 추가한다. 위 legacy clock/source prefix는 유지한다. */
- bool modern_command,gate_required,hold_steer;int requested_direction;
+ bool modern_command,gate_required,hold_steer,tof_recovery,tof_busy,tof_coast;int requested_direction;
  struct xm_drive_command3 command;uint64_t valid_until_guest_us,phase_until_pi_us;
  unsigned segment_index,cusp_index; };
 typedef int (*drive_calculate)(void *context,struct xm_span control,struct xm_span input,

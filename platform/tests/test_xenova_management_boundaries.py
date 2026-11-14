@@ -214,7 +214,16 @@ class ManagementBoundaryTest(unittest.TestCase):
         if fail_after_wait:
             self.assertFalse(result[0]['ok'])
             self.assertEqual(op['status'], 'RECOVERY_REQUIRED')
-            self.assertEqual(op['error'], result[0]['error'])
+            reported = result[0]['error']
+            self.assertEqual({k: v for k, v in reported.items() if k != 'details'},
+                             {k: v for k, v in op['error'].items() if k != 'details'})
+            self.assertEqual(reported['details'], {
+                **op['error']['details'],
+                'operation_context': {
+                    'operation_id': op['operation_id'], 'accepted': True,
+                    'completion': 'uncertain', 'phase': op['phase'],
+                },
+            })
         else:
             self.assertTrue(result[0]['ok'], result[0])
             self.assertEqual(op['status'], 'SUCCEEDED')

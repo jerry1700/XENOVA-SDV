@@ -21,7 +21,7 @@ def float_upper(value):
     return rounded
 
 
-def build_control_facts(runner, *, view=None):
+def build_control_facts(runner, *, view=None, proximity_supported=False):
     """view를 지정하면 상위 Vehicle과 같은 원 스냅샷을 사용하며 다시 읽지 않는다."""
     if view is None:view=runner.device_view()
     sample=view.get('vehicle_sample');original=view.get('absolute_meter')
@@ -39,6 +39,22 @@ def build_control_facts(runner, *, view=None):
     value=schema.DriveControlFacts(major=1,valid_until_pi_us=end,meter=schema.PiAbsoluteMeter(
         meter_epoch=UUID(anchor.meter_epoch).bytes,total_ticks=anchor.total_ticks,metres_per_tick=anchor.metres_per_tick,
         gap_revision=anchor.gap_revision,valid=anchor.valid,vehicle_sequence=anchor.vehicle_sequence))
+    flags=view.get('proximity_flags') if proximity_supported else None
+    if flags is not None:
+        proximity=value.proximity
+        proximity.front_blocked=bool(flags&8);proximity.rear_blocked=bool(flags&16)
+        receiver=getattr(runner,'_tof_receiver',None)
+        ranges=receiver.current_ranges(sample,now) if receiver is not None else {}
+        front=ranges.get(0)
+        if front is not None and proximity.front_blocked:
+            distance,stamp,error,_=front
+            # Associate the single-zone ray with the exact Vehicle in this reply.
+            # The mapper still has to confirm that the projected hit is occupied.
+            if distance<150 and abs(sample['pi_sample_us']-stamp)+error+sample['clock_error_us']<=50000:
+                proximity.front_vehicle_sequence=sample['sequence'];proximity.front_range_mm=distance
+        rear=ranges.get(1)
+        if rear is not None:
+            proximity.rear_range_mm=rear[0];proximity.rear_valid_until_pi_us=min(end,rear[3])
     source=view.get('stop_facts_source')
     if source is None:return value
     pin=source['pin'];frame=pin['frame'];witness=pin['witness'];command=witness.get('command',{})

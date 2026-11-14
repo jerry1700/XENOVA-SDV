@@ -71,6 +71,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
         self._vehicle_wire_cache=OrderedDict()
         self.hold_row=None;self.hold_start=None
         self.proximity=None;self.proximity_rejected=0
+        self._proximity_source=None
         self.tof_inbox=TofInbox();self._tof_selection=None;self._tof_context_snapshot=None
         super().__init__(*args,**kwargs)
         self.protocol_version=3;self.odometry.clock_profile3=True
@@ -89,6 +90,9 @@ class Feedback3SerialSink(FeedbackSerialSink):
             clock_ready=self.ready and self._sensor_available() and self._lease(int(self.clock()*1e6)) is not None if hasattr(self,'clock') else False)
         value.update(self.proximity_view)
         if hasattr(self,'odometry'):
+            sample=value.get('vehicle_sample')
+            if sample is not None and self._proximity_source==(sample['device_session'],sample['source_sample']):
+                value['proximity_flags']=self.proximity
             value['absolute_meter']=self.odometry.absolute.snapshot
             self._matched_stop_snapshot=self._make_matched_stop()
             pin=self.stop_pin
@@ -333,9 +337,11 @@ class Feedback3SerialSink(FeedbackSerialSink):
         blocked=None
         if self.capabilities&PROXIMITY_CAPABILITY:
             blocked=quality&(PROXIMITY_FRONT|PROXIMITY_REAR);quality&=~blocked
-        self.odometry.observe_mapped(self.pi_session,self.device_session,stamp,sample,left,right,quality,steer,error,lo,hi)
-        # odometry 가 받아들인 표본만 막힘 상태를 바꾼다. 순번이 뒤로 간 표본도 odometry 가 거절한다.
-        if blocked is not None:self.proximity=blocked
+        accepted=self.odometry.observe_mapped(self.pi_session,self.device_session,stamp,sample,left,right,quality,steer,error,lo,hi)
+        if blocked is not None:
+            self.proximity=blocked
+            # The first sample can seed odometry without publishing a Vehicle.
+            self._proximity_source=None if accepted is None else (self.device_session,sample)
 
     @property
     def matched_stop(self):

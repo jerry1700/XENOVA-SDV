@@ -407,13 +407,7 @@ class FirstBoot:
             for spec in specs:
                 current = read_json(self.data/'instances'/spec['record']['id']/'instance.json')
                 execution.initialize(current, 'running', 'factory')
-        notices=[]
-        if not completed:
-            consumed=state.setdefault('registration_notices',[])
-            for spec in specs:
-                current=read_json(self.data/'instances'/spec['record']['id']/'instance.json')
-                if current['uuid'] not in consumed:
-                    consumed.append(current['uuid']);notices.append(current)
+        # 최초 설치는 로컬 등록만 확정한다. 과거 통지 이력은 보존하고 새 기회는 만들지 않는다.
         state['phase'] = 'complete'
         self.save(state_path, state)
         self.save(self.run / 'install-ready.json', {'factory_id': factory['factory_id'], 'dom0_machine_id': mid,
@@ -421,8 +415,8 @@ class FirstBoot:
         if asset_errors:
             print(json.dumps({'registration': 'complete', 'asset_errors': asset_errors}))
         print('installation verified; hand off to existing VM autostart service')
-        # 부팅은 HTTP 응답을 기다리지 않는다. complete 뒤 중단되면 송신 0회일 수 있다.
-        return notices
+        # 구형 호출자의 반환형은 유지하되 factory에는 자동 통지 대상이 없다.
+        return []
 
 
 def main():
@@ -439,13 +433,9 @@ def main():
         if args.action == 'grow':
             boot.grow()
         else:
-            notices=boot.register(common=common)
+            boot.register(common=common)
         # 성공 근거는 기존 필수 저장과 unit 결과다. 이 파일은 표시 보조 정보뿐이다.
         display('complete', mode=getattr(boot, 'display_mode', 'storage-verification'))
-    # common/자산 보호와 요청 출력의 상속 FD를 반환한 뒤 시작한다. 부팅은 HTTP를 기다리지 않는다.
-    if args.action=='register':
-        from xenova_registration_hook import automatic
-        for record in notices or []:automatic(boot.data,boot.run,record,wait_ready=True)
 
 
 if __name__ == '__main__':

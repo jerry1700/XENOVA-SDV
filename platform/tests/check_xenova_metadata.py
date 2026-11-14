@@ -22,10 +22,16 @@ def selected(values, name, *, directory=False):
 _, boot = load('xen-rpi-u-boot-scr')
 assert selected(boot, 'boot.cmd.xen.in') == LAYER / 'recipes-bsp/xen-rpi-u-boot-scr/files/boot.cmd.xen.in'
 assert boot['S'] == boot['UNPACKDIR']
-assert boot['RPI_DOM0_MEM'] == '1024M'
+assert boot['RPI_DOM0_MEM'] == '3072M'
 _, xen = load('xen-tools')
 assert '10-xenbr0.netdev' not in xen['VIRT_NETWORKING_FILES']
 assert 'file://10-xenbr0.netdev' not in xen['SRC_URI'].split()
+phone = '20-xenova-usb-phone.network'
+assert selected(xen, phone) == LAYER / 'recipes-extended/xen/files' / phone
+assert 'file://' + phone in xen['SRC_URI'].split()
+assert '/etc/systemd/network/' + phone in xen['CONFFILES:xen-tools-net-conf'].split()
+assert any(fnmatchcase('/etc/systemd/network/' + phone, pattern) for pattern in xen['FILES:xen-tools-net-conf'].split())
+assert any(Path(path).name == phone for path in xen['VIRT_NETWORKING_FILES'].split())
 for filename in ['10-ether.network', '10-xenbr0.network']:
     assert selected(xen, filename) == LAYER / 'recipes-extended/xen/files' / filename
 text, bringup = load('xenova-bringup')
@@ -33,7 +39,11 @@ assert bringup['SYSTEMD_AUTO_ENABLE:xenova-bringup'] == 'enable'
 assert "sed -e 's|@BINDIR@|/usr/bin|g'" in text
 platform_text, platform = load('xenova-platform')
 assert platform['SYSTEMD_AUTO_ENABLE:xenova-platform'] == 'enable'
-assert set(platform['SYSTEMD_SERVICE:xenova-platform'].split()) == {'srv-xenova.mount', 'xenova-vm-shutdown.service', 'xenova-vms.service', 'xenova-first-boot.service', 'xenova-host-admission.service'}
+assert set(platform['SYSTEMD_SERVICE:xenova-platform'].split()) == {
+    'srv-xenova.mount', 'xenova-vm-shutdown.service', 'xenova-vms.service',
+    'xenova-first-boot.service', 'xenova-host-admission.service',
+    'xenova-boot-status.service', 'xenova-display-check.service',
+    'xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'}
 # package task는 실행하지 않는다. 실제 해석된 install 목록과 모든 패키지의 FILES를 대조한다.
 installed_units = re.search(r'for unit in ([^;]+); do', platform_text).group(1).split()
 for unit in installed_units:
@@ -48,6 +58,9 @@ for unit in installed_units:
 assert 'xenova-xen-ready.service' not in platform['SYSTEMD_SERVICE:xenova-platform'].split()
 assert 'xenova-data-prepare.service' not in platform['SYSTEMD_SERVICE:xenova-platform'].split()
 assert selected(platform, 'first_install_contract.py').resolve() == ROOT / 'platform/first-install/first_install_contract.py'
+assert 'file://creation-policy.json' in platform['SRC_URI'].split()
+assert selected(platform, 'creation-policy.json') == LAYER / 'recipes-core/xenova-platform/files/creation-policy.json'
+assert '/etc/xenova/creation-policy.json' in platform['CONFFILES:xenova-platform'].split()
 assert selected(platform, 'xenova-wifi-modprobe.conf') == LAYER / 'recipes-core/xenova-platform/files/xenova-wifi-modprobe.conf'
 assert '/etc/modprobe.d/xenova-wifi.conf' in platform['FILES:xenova-platform'].split()
 assert '/etc/modprobe.d/xenova-wifi.conf' in platform['CONFFILES:xenova-platform'].split()
@@ -68,12 +81,19 @@ missing = required - set(platform['RDEPENDS:xenova-platform'].split())
 assert not missing, f'Required runtime packages are undeclared: {sorted(missing)}'
 text, image = load('xenova-xen-bringup-image')
 assert 'xen-' + image['MACHINE'] + ';xen' in image['IMAGE_BOOT_FILES'].split()
+assert image['VC4DTBO'] == 'vc4-kms-v3d-pi4,cma-64'
+assert 'overlays/vc4-kms-v3d-pi4.dtbo' in image['KERNEL_DEVICETREE'].split()
+assert 'vc4-kms-v3d-pi4.dtbo;overlays/vc4-kms-v3d-pi4.dtbo' in image['IMAGE_BOOT_FILES'].split()
 assert 'xen:do_deploy' in (logs / 'wic-depends.txt').read_text().split()
 print('PASS WIC: Xen deploy file maps to xen, with explicit do_deploy dependency')
 assert not {'empty-root-password', 'allow-empty-password', 'debug-tweaks', 'serial-autologin-root'} & set(image['IMAGE_FEATURES'].split())
 assert 'usermod -p' in image['EXTRA_USERS_PARAMS'] and 'perseus-dev' in image['EXTRA_USERS_PARAMS']
 assert 'xenova_platform_policy' in image['ROOTFS_POSTPROCESS_COMMAND']
 assert 'xenova-platform' in image['IMAGE_INSTALL'].split()
+usb_serial = {'kernel-module-usbserial', 'kernel-module-cp210x'}
+missing_usb_serial = usb_serial - set(image['IMAGE_INSTALL'].split())
+assert not missing_usb_serial, f'ESP32 USB serial modules missing from image: {sorted(missing_usb_serial)}'
+print('PASS ESP32 USB serial image dependencies: ' + ', '.join(sorted(usb_serial)))
 assert 'tzdata-asia' in image['IMAGE_INSTALL'].split()
 assert 'xenova_set_timezone' in image['ROOTFS_POSTPROCESS_COMMAND']
 assert re.search(r'^xenova_set_timezone\s*\(\)\s*\{', text, re.M)

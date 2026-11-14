@@ -10,7 +10,7 @@ SRC_URI = "file://xenova_boot_progress.py file://xenova_boot_status.py file://xe
 FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../scripts:${THISDIR}/../../../../first-install:${THISDIR}/../../../../guests/common:${THISDIR}/../../../../guests:"
 S = "${UNPACKDIR}"
 SRC_URI += " file://xenova_preparation.py"
-SRC_URI += " file://xenova_creation.py file://creation-policy.json.example"
+SRC_URI += " file://xenova_creation.py file://creation-policy.json file://creation-policy.json.example"
 SRC_URI += " file://xenova_creation_auto.py file://creation-reconcile-policy.json.example"
 SRC_URI += " file://xenova_drive_binding.py file://provision-xenova-telemetry.py"
 SRC_URI += " file://xenova_telemetry_support.py file://xenova_telemetry_evidence.py file://xenova-telemetry-support file://xenova-telemetry-clock.service file://xenova-telemetry-clock.timer"
@@ -99,7 +99,8 @@ do_install() {
     done
     install -m 0644 "${S}/update-xenova-guest-ssh.py" "${D}${libdir}/xenova/update_guest_ssh.py"
     install -d "${D}${datadir}/xenova"
-    # 운영 시간값은 보드 수락 후 별도로 공급한다. 예시를 활성 설정으로 설치하지 않는다.
+    # 승인된 생성 시간 정책은 활성 설정으로, null 예시는 별도 참고 파일로 설치한다.
+    install -m 0600 "${S}/creation-policy.json" "${D}${sysconfdir}/xenova/creation-policy.json"
     install -m 0644 "${S}/creation-policy.json.example" "${D}${datadir}/xenova/creation-policy.json.example"
     install -m 0644 "${S}/creation-reconcile-policy.json.example" "${D}${datadir}/xenova/creation-reconcile-policy.json.example"
     install -m 0644 "${S}/first-install-capabilities.json" "${D}${datadir}/xenova/first-install-capabilities.json"
@@ -126,3 +127,4 @@ FILES:${PN} += "${systemd_system_unitdir}/var-volatile-log-journal.mount ${syste
 FILES:${PN} += "${systemd_system_unitdir}/xenova-display-check.service"
 FILES:${PN} += "${systemd_system_unitdir}/xenova-telemetry-evidence.service ${systemd_system_unitdir}/xenova-telemetry-evidence.timer ${sysconfdir}/systemd/system/xenconsoled.service.d/20-xenova-evidence.conf"
 CONFFILES:${PN} += "${sysconfdir}/xenova/cpu-policy-preset.json ${sysconfdir}/modprobe.d/xenova-wifi.conf ${sysconfdir}/xenova/execution-policy.json ${sysconfdir}/xenova/defaults.json ${sysconfdir}/ssh/xenova-auth.conf ${sysconfdir}/systemd/journald.conf.d/20-xenova.conf ${sysconfdir}/systemd/system.conf.d/20-xenova.conf"
+CONFFILES:${PN} += "${sysconfdir}/xenova/creation-policy.json"

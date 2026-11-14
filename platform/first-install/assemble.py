@@ -315,6 +315,7 @@ def platform_root_ok(root):
         raise ValueError('platform lacks first-install capabilities; rebuild dom0 from the new Yocto source, no rootfs injection allowed')
     expected = {'usr/lib/xenova/xenova_vm.py': FILES / 'xenova_vm.py',
                 'etc/xenova/defaults.json': FILES / 'defaults.json',
+                'etc/xenova/creation-policy.json': FILES / 'creation-policy.json',
                 'usr/lib/xenova/xenova_first_boot.py': FILES / 'xenova_first_boot.py',
                 'usr/lib/xenova/first_install_contract.py': ROOT / 'platform/first-install/first_install_contract.py',
                 'usr/sbin/xenova-first-boot': FILES / 'xenova-first-boot',
@@ -349,12 +350,19 @@ def platform_root_ok(root):
     for name in ('prepare_instance.py', 'prepare_rootfs.py', 'guest_identity.py'):
         expected['usr/lib/xenova/' + name] = ROOT / 'platform/guests/common' / name
     units = ['xenova-boot-status.service', 'xenova-cpu-prepare.service', 'xenova-data-prepare.service', 'xenova-first-boot.service', 'srv-xenova.mount',
-             'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-xen-ready.service', 'xenova-host-admission.service']
+             'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-xen-ready.service', 'xenova-host-admission.service',
+             'xenova-telemetry-clock.service', 'xenova-telemetry-clock.timer',
+             'xenova-telemetry-evidence.service', 'xenova-telemetry-evidence.timer']
     expected.update({'usr/lib/systemd/system/' + u: FILES / u for u in units})
     expected.update(deployment_payloads.installed_sources(root))
     for relative, source in expected.items():
         if not path(relative).is_file() or path(relative).read_bytes() != source.read_bytes():
             raise ValueError('platform source/installed contract mismatch: ' + relative)
+    for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+        relative = 'etc/systemd/system/timers.target.wants/' + name
+        link = root / relative
+        if not link.is_symlink() or path(relative) != path('usr/lib/systemd/system/' + name):
+            raise ValueError('required telemetry timer not enabled: ' + name)
     # The bind must cover the path journald actually opens on the Yocto image.
     if path('var/log/journal') != root.resolve() / 'var/volatile/log/journal':
         raise ValueError('dom0 journal path does not match the Yocto /var/log layout')
