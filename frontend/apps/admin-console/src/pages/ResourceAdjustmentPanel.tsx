@@ -1,6 +1,6 @@
 import { Button, Card, useToast } from '@xenova/ui';
 import { useState } from 'react';
-import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useTemplates, useUpdateVmResources } from '../api/queries';
 import type { Vm } from '../api/types';
 import {
@@ -17,7 +17,7 @@ import styles from './pages.module.css';
 type Feedback = { tone: 'ok' | 'fault'; message: string } | null;
 
 function messageOf(error: unknown): string {
-  return error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
+  return errorText(error);
 }
 
 interface ResourceAdjustmentPanelProps {

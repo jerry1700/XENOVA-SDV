@@ -186,7 +186,7 @@ describe('Zephyr 인터페이스 상태', () => {
       metric({ name: ZEPHYR_INTERFACE_UP_METRIC, value: value as number | null, unavailable_reason: reason }),
     ]);
 
-  it('지금 백엔드처럼 value=null·사유 "ok" 면 "ok" 를 보여 주지 않고 백엔드 미지원으로 표시한다', () => {
+  it('지금 백엔드처럼 value=null·사유 "ok" 면 "ok" 를 보여 주지 않고 데이터 없음으로 표시한다 (개발용 사유 문구 없이)', () => {
     expect(interfaceFlagOf([flag('2026-11-04T01:00:00Z', null, 'ok')], ZEPHYR_INTERFACE_UP_METRIC)).toEqual({
       state: 'missing',
       reason: BACKEND_UNSUPPORTED,

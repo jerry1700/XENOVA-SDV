@@ -103,6 +103,17 @@ describe('차량 화면 출력 카드', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('휴대폰이 USB로 연결되어 있지 않습니다');
   });
 
+  it('모르는 코드의 서버 원문은 보이지 않고 기본 안내를 보인다 (S15P31E110-471)', () => {
+    state.change = {
+      ...state.change,
+      isError: true,
+      error: new ApiError(500, { code: 'SOMETHING_NEW', message: 'display switch failed: renderer down' }),
+    };
+    render(<DisplayModeCard />);
+    expect(screen.getByRole('alert')).toHaveTextContent('화면을 전환하지 못했습니다.');
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/renderer|SOMETHING_NEW/);
+  });
+
   it('서비스가 꺼져 있으면 확인 필요 배지를 보인다', () => {
     show({ ...hdmi, services: { ...hdmi.services, hdmi: 'failed' } });
     render(<DisplayModeCard />);

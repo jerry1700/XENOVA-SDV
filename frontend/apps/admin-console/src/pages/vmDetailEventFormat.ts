@@ -20,5 +20,7 @@ const two = (n: number) => String(n).padStart(2, '0');
 /** HH:mm:ss (화면 시계 기준, 밀리초 없이) */
 export const shortClock = (iso: string) => {
   const d = new Date(iso);
+  // 읽을 수 없는 시각은 NaN:NaN:NaN 대신 (domain/events clock 과 같은 규칙)
+  if (Number.isNaN(d.getTime())) return '—';
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
 };

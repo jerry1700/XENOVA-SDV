@@ -2,6 +2,7 @@ import { Card } from '@xenova/ui';
 import { lazy, Suspense, type CSSProperties } from 'react';
 import { Link, useParams } from 'react-router';
 import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useEvents, useVm, vmGone } from '../api/queries';
 import { AGENT_LABEL, STATE_HEALTH, STATE_LABEL } from '../format';
 import { MODE_LABEL, osLabel, roleOf } from '../domain/roles';
@@ -134,8 +135,12 @@ export function VmDetailPage() {
 
       {vm.isPending && <div className={styles.statePanel}>VM 상세 정보를 불러오는 중입니다…</div>}
       {vm.error && (
-        <div className={styles.statePanel} role="alert">
-          {vm.error instanceof ApiError ? `${vm.error.message} (${vm.error.code})` : String(vm.error)}
+        <div
+          className={styles.statePanel}
+          role="alert"
+          title={vm.error instanceof ApiError ? vm.error.code : undefined}
+        >
+          {errorText(vm.error, VM_LOAD_FAILED_TEXT)}
         </div>
       )}
 
@@ -168,7 +173,7 @@ export function VmDetailPage() {
               {vm.data.guest_kind === 'linux' && (
                 <div className={styles.collectorLine}>
                   <div>
-                    <span className={styles.collectorTitle}>Linux Agent 생존 (v1)</span>
+                    <span className={styles.collectorTitle}>Linux Agent 생존</span>
                     <StatusDot health={AGENT_HEALTH[vm.data.agent_status ?? 'UNKNOWN']}>
                       {AGENT_LABEL[vm.data.agent_status ?? 'UNKNOWN']}
                     </StatusDot>

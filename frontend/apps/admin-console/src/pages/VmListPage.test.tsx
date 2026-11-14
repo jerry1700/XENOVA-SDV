@@ -193,9 +193,10 @@ describe('VM 등록 동기화 버튼', () => {
 
     expect(
       await screen.findByText(
-        'VM 동기화에 실패했습니다. VM 제어 서비스에 연결할 수 없습니다. (VM_CONTROL_UNAVAILABLE)',
+        'VM 동기화에 실패했습니다. 보드에 연결할 수 없습니다. 보드 상태를 확인해 주세요.',
       ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/VM_CONTROL_UNAVAILABLE/)).not.toBeInTheDocument();
     expect(screen.getByText('debian-dev')).toBeInTheDocument();
   });
 });

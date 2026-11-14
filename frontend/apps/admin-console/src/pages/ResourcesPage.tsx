@@ -418,7 +418,7 @@ function CpuVmChart({ role, vm }: { role: Role | null; vm: Vm }) {
           {vm ? `${vm.vcpus} vCPU · ${vm.guest_kind === 'zephyr' ? 'Zephyr' : 'Linux'}` : 'VM 연결 대기'}
         </span>
         <span>
-          {metrics.error ? '메트릭 연결 오류' : values.length ? `${values.length} samples` : 'No samples'}
+          {metrics.error ? '메트릭 연결 오류' : values.length ? `수집 ${values.length}건` : '수집 없음'}
         </span>
       </div>
     </Card>

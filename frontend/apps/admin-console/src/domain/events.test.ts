@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { categoryOf, describe as describeEvent, payloadNumber, payloadText } from './events';
+import {
+  categoryOf,
+  describe as describeEvent,
+  isKnownEventType,
+  payloadNumber,
+  payloadText,
+  UNKNOWN_EVENT_LABEL,
+  unknownEventType,
+} from './events';
 import type { EventType, VmEvent } from '../api/types';
 
 function event(type: EventType): VmEvent {
@@ -72,5 +80,43 @@ describe('payload 값 글자 처리 — [object Object]·NaN·undefined 미표�
     expect(of('drive.mode.changed', { from: 'AUTO', to: 'MANUAL', handoff_ms: 120 }).detail).toContain(
       '인계 120 ms',
     );
+  });
+});
+
+describe('이벤트 종류 원문을 화면 문구에 쓰지 않는다 (S15P31E110-471)', () => {
+  const ALL: EventType[] = [
+    'vm.created',
+    'vm.deleted',
+    'vm.state.changed',
+    'agent.status.changed',
+    'recovery.started',
+    'recovery.completed',
+    'recovery.recovered',
+    'recovery.cancelled',
+    'recovery.failed',
+    'demo.command.sent',
+    'demo.command.completed',
+    'demo.command.failed',
+    'drive.mode.changed',
+    'drive.fault.detected',
+    'drive.resume.accepted',
+    'drive.resume.cancelled',
+    'display.route.changed',
+  ];
+
+  it.each(ALL)('%s 의 제목에 원문 type 이 없다', (type) => {
+    const { title, detail } = describeEvent(event(type), () => 'VM1');
+    expect(title).not.toContain(type);
+    expect(detail).not.toContain(type);
+    expect(isKnownEventType(type)).toBe(true);
+    expect(unknownEventType(event(type))).toBeNull();
+  });
+
+  it('모르는 종류는 "기타 이벤트"이고 원문 type 은 unknownEventType 으로만 얻는다', () => {
+    const unknown = event('vm.migrated' as EventType);
+    expect(describeEvent(unknown, () => 'VM1')).toEqual({ title: `VM1 ${UNKNOWN_EVENT_LABEL}`, detail: '' });
+    expect(UNKNOWN_EVENT_LABEL).toBe('기타 이벤트');
+    expect(isKnownEventType('vm.migrated')).toBe(false);
+    expect(unknownEventType(unknown)).toBe('vm.migrated');
   });
 });

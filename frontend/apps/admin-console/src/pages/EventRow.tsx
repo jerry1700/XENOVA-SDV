@@ -3,6 +3,11 @@ import type { VmEvent } from '../api/types';
 import { eventLine, SEVERITY_LABEL } from './eventLine';
 import styles from './pages.module.css';
 
+/** 시각 전체(로캘). 읽을 수 없으면 Invalid Date 대신 */
+const fullTime = (iso: string) => {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? '시각 미상' : at.toLocaleString('ko-KR');
+};
 /**
  * 이벤트 한 줄: 시각 | 상태 | (대상) | 내용. VM 상세 "최근 생명주기·복구 이벤트"와 이벤트 화면 공용.
  * 상태는 경고·오류만 작은 색 글자 (정보는 비움, 열 폭은 유지). 종류·보조 글(사유·세대 등)·원문 코드는
@@ -32,10 +37,10 @@ export function EventRow({
       className={styles.detailEventRow}
       data-target={withTarget || undefined}
       data-open={open || undefined}
-      title={line.full}
+      title={line.rawType ? `${line.full} · 원문 ${line.rawType}` : line.full}
       onClick={toggle}
     >
-      <time dateTime={event.occurred_at} title={new Date(event.occurred_at).toLocaleString('ko-KR')}>
+      <time dateTime={event.occurred_at} title={fullTime(event.occurred_at)}>
         {time}
       </time>
       <span
