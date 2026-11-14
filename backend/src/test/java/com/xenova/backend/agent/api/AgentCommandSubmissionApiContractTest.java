@@ -20,6 +20,8 @@ import com.xenova.backend.agent.application.AutoInputUnavailableCommand;
 import com.xenova.backend.agent.application.AutoInputUnavailableService;
 import com.xenova.backend.agent.application.VmCrashCommand;
 import com.xenova.backend.agent.application.VmCrashService;
+import com.xenova.backend.agent.application.ZephyrFaultCommand;
+import com.xenova.backend.agent.application.ZephyrFaultService;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +40,7 @@ class AgentCommandSubmissionApiContractTest {
     private final AgentExitService exitService = mock(AgentExitService.class);
     private final VmCrashService crashService = mock(VmCrashService.class);
     private final AutoInputUnavailableService inputUnavailableService = mock(AutoInputUnavailableService.class);
+    private final ZephyrFaultService faultService = mock(ZephyrFaultService.class);
     private MockMvc mvc;
 
     @BeforeEach
@@ -48,7 +51,7 @@ class AgentCommandSubmissionApiContractTest {
         mvc = MockMvcBuilders.standaloneSetup(
                         new AgentStressController(stressService), new AutoDelayController(delayService),
                         new AgentExitController(exitService), new VmCrashController(crashService),
-                        new AutoInputUnavailableController(inputUnavailableService))
+                        new AutoInputUnavailableController(inputUnavailableService), new ZephyrFaultController(faultService))
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(mapper)).build();
     }
 
@@ -147,5 +150,37 @@ class AgentCommandSubmissionApiContractTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"duration_s\":121}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void acceptsFrontendAppExitAndRejectsManual() throws Exception {
+        when(faultService.appExit(VM_ID)).thenReturn(
+                new ZephyrFaultCommand("exit", "operation-exit", VM_ID, NOW, NOW.plusSeconds(30)));
+
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/app-exit", VM_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"app_id\":\"autonomous\"}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.command_id").value("exit"))
+                .andExpect(jsonPath("$.operation_id").value("operation-exit"))
+                .andExpect(jsonPath("$.vm_id").value(VM_ID));
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/app-exit", VM_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"app_id\":\"manual\"}"))
+                .andExpect(status().isBadRequest());
+
+        verify(faultService).appExit(VM_ID);
+    }
+
+    @Test
+    void acceptsBoundedTxBlock() throws Exception {
+        when(faultService.blockAutoTx(VM_ID, 5)).thenReturn(
+                new ZephyrFaultCommand("block", "operation-block", VM_ID, NOW, NOW.plusSeconds(30)));
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/auto-tx-block", VM_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"duration_s\":5}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.command_id").value("block"));
+        mvc.perform(post("/api/v1/vms/{vmId}/faults/auto-tx-block", VM_ID)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"duration_s\":121}"))
+                .andExpect(status().isBadRequest());
+        verify(faultService).blockAutoTx(VM_ID, 5);
     }
 }
