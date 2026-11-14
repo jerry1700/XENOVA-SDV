@@ -190,6 +190,19 @@ function authorized(request: Request): boolean {
 const unauthorized = () => error(401, 'INVALID_TOKEN', '인증이 필요합니다.');
 /** mock 휴대폰 연결번호의 만료 시각(ms). 번호 값은 남기지 않는다 */
 let mockPairingExpiresAt: number | null = null;
+/** mock 표시 모드. 재부팅 뒤처럼 HDMI 로 시작하고, 휴대폰 모드여야 중계가 듣는다 */
+let mockDisplayMode: 'hdmi' | 'mobile' = 'hdmi';
+const mockDisplayModeStatus = () => ({
+  mode: mockDisplayMode,
+  boot_default: 'hdmi',
+  services: {
+    hdmi: mockDisplayMode === 'hdmi' ? 'active' : 'inactive',
+    mobile: mockDisplayMode === 'mobile' ? 'active' : 'inactive',
+    feed: 'active',
+  },
+  hdmi_renderer_ready: mockDisplayMode === 'hdmi',
+  observed_at: new Date().toISOString(),
+});
 /** 자율주행 VM 은 시연 시나리오(강제 종료 → 재시작)를 따른다 */
 const live = (vm: Vm): Vm => ({ ...vm, state: vmStateOf(vm.vm_id) ?? vm.state });
 const find = (id: string) => {
@@ -838,12 +851,13 @@ export const handlers = [
   http.get('*/api/v1/display/phone-link', async ({ request }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
-    const active = mockPairingExpiresAt !== null && mockPairingExpiresAt > Date.now();
+    const listening = mockDisplayMode === 'mobile';
+    const active = listening && mockPairingExpiresAt !== null && mockPairingExpiresAt > Date.now();
     return HttpResponse.json(
       {
         configured: true,
-        relay: 'listening',
-        url: 'http://10.117.188.25:8084/display/mobile',
+        relay: listening ? 'listening' : 'stopped',
+        url: listening ? 'http://10.117.188.25:8084/display/mobile' : null,
         usb: { interface: 'usb0', present: true, ipv4: ['10.117.188.25/24'], gateway: '10.117.188.86' },
         configured_phone_ipv4: '10.117.188.86',
         subnet_mismatch: false,
@@ -857,12 +871,38 @@ export const handlers = [
   http.post('*/api/v1/display/phone-link/pairing-code', async ({ request }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
+    if (mockDisplayMode !== 'mobile') {
+      return error(
+        409,
+        'PHONE_RELAY_NOT_LISTENING',
+        '휴대폰 화면 중계가 꺼져 있거나 휴대폰이 연결되지 않았습니다.',
+      );
+    }
     mockPairingExpiresAt = Date.now() + 120_000;
     const code = String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
     return HttpResponse.json(
       { code, expires_at: new Date(mockPairingExpiresAt).toISOString() },
       { headers: { 'Cache-Control': 'no-store' } },
     );
+  }),
+
+  // ---- 표시 모드 HDMI / 휴대폰 (REST-40·REST-41). 실제 보드처럼 전환에 몇 초 걸린다 ----
+  http.get('*/api/v1/display/mode', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    return HttpResponse.json(mockDisplayModeStatus(), { headers: { 'Cache-Control': 'no-store' } });
+  }),
+
+  http.post('*/api/v1/display/mode', async ({ request }) => {
+    if (!authorized(request)) return unauthorized();
+    const body = (await request.json()) as { mode?: string };
+    if (body.mode !== 'hdmi' && body.mode !== 'mobile') {
+      return error(422, 'VALIDATION_ERROR', '요청 값이 올바르지 않습니다.');
+    }
+    await delay(2500);
+    mockDisplayMode = body.mode;
+    if (body.mode === 'hdmi') mockPairingExpiresAt = null;
+    return HttpResponse.json(mockDisplayModeStatus(), { headers: { 'Cache-Control': 'no-store' } });
   }),
 
   // ---- 화면 배치 (REST-23·REST-24, 백엔드 -129) ----
