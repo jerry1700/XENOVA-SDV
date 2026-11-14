@@ -42,7 +42,8 @@ assert platform['SYSTEMD_AUTO_ENABLE:xenova-platform'] == 'enable'
 assert set(platform['SYSTEMD_SERVICE:xenova-platform'].split()) == {
     'srv-xenova.mount', 'xenova-vm-shutdown.service', 'xenova-vms.service',
     'xenova-first-boot.service', 'xenova-host-admission.service',
-    'xenova-boot-status.service', 'xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'}
+    'xenova-boot-status.service', 'xenova-display-check.service',
+    'xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'}
 # package task는 실행하지 않는다. 실제 해석된 install 목록과 모든 패키지의 FILES를 대조한다.
 installed_units = re.search(r'for unit in ([^;]+); do', platform_text).group(1).split()
 for unit in installed_units:
