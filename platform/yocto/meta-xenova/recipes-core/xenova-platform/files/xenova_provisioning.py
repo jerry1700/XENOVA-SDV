@@ -14,6 +14,7 @@ from prepare_rootfs import inside
 
 DISPLAY_GUEST_TOKEN = Path('/etc/xenova/guest-display/guest-data.token')
 DISPLAY_GUEST_NETWORK = ipaddress.ip_network('192.168.77.0/24')
+INTERACTION_ENV = 'etc/xenova/interaction-app.env'
 
 
 def private(path, *, directory=False):
@@ -42,13 +43,16 @@ def home(data, identity, *, create=False):
     return parent/identity
 
 
-def ensure(data, record, *, gid=None, rules=None, reload=None, deadline=None, clock=time.monotonic, retry_reload=False):
+def ensure(data, record, *, gid=None, rules=None, reload=None, deadline=None, clock=time.monotonic,
+           retry_reload=False, interaction_app=False):
     """검증된 원 대상/프로필의 필요한 계정만 확보한다. 비밀 없는 단계 요약을 반환한다."""
     profile=validate(record['provisioning_profile'],guest_kind=record.get('guest_kind'))
     channels=profile['channels'];identity=broker.vm_id(record['uuid'])
     if not channels:return {'state':'not-requested','declaration':profile['source'],'channels':[]}
     destination=home(data,identity,create=True)
     accounts=([identity] if set(channels)&{'agent','drive'} else [])+(['telemetry-'+identity] if 'telemetry' in channels else [])
+    if interaction_app:
+        accounts.append(broker.INTERACTION_PREFIX + identity)
     from xenova_preparation import _current, check_creation
     check_creation()
     current=_current()
@@ -90,6 +94,9 @@ def ensure(data, record, *, gid=None, rules=None, reload=None, deadline=None, cl
                 parsed,_=bootstrap_api().credentials(previous,identity,'drive')
                 if 'world' in parsed:payload['world']=parsed['world']
             put(destination/(channel+'.json'),json.dumps(payload,sort_keys=True)+'\n')
+    if interaction_app:
+        password = value['secrets'][broker.INTERACTION_PREFIX + identity]
+        put(destination / 'interaction-app.env', broker.interaction_environment(identity, password))
     if not result['reused'] or retry_reload and summary['broker_application']=='unconfirmed':
         try:summary['broker_application']=(reload or broker.reload_broker)()
         except (broker.SetupError,OSError):summary['broker_application']='unconfirmed'
@@ -230,8 +237,15 @@ def receipt_directory(data,identity,execution,*,create=False):
 def apply_linux(data, record, root, *, factory=False, display_token_path=DISPLAY_GUEST_TOKEN, **kwargs):
     """기존 private root mount에서만 호출. 공용 template/seed 빌드에는 호출하지 않는다."""
     from prepare_rootfs import write
-    summary=ensure(data,record,**kwargs)
     root=Path(root)
+    display_unit = inside(root, 'usr/lib/systemd/system/xenova-guest-display-app.service', create_parents=False)
+    interaction_app = (
+        'agent' in record['provisioning_profile']['channels']
+        and inside(root, 'etc/xenova/guest-display-domu.json', create_parents=False).is_file()
+        and display_unit.is_file()
+        and f'EnvironmentFile=-/{INTERACTION_ENV}' in display_unit.read_text().splitlines()
+    )
+    summary=ensure(data,record,interaction_app=interaction_app,**kwargs)
     display=apply_guest_display(record,root,token_path=display_token_path)
     if 'agent' not in summary['channels']:
         return {**summary,'display_application':display['state']}
@@ -243,6 +257,10 @@ def apply_linux(data, record, root, *, factory=False, display_token_path=DISPLAY
         raise ValueError('guest identity differs from credential target')
     target=inside(root,'etc/xenova/agent.env',follow_final=False)
     put(target,credential_file(data,record['uuid'],'agent').read_text())
+    if interaction_app:
+        source = home(data, record['uuid']) / 'interaction-app.env'
+        private(source)
+        put(inside(root, INTERACTION_ENV, follow_final=False), source.read_text())
     write(root,'etc/systemd/system/xenova-agent.service.d/20-xenova-provisioning.conf',
           '[Unit]\nConditionPathExists=/etc/xenova/agent.env\n',0o644)
     summary['guest_application']='private-root-configured'

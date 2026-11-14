@@ -17,6 +17,10 @@
     "read": ["xenova/v1/#"],
     "write": ["xenova/v1/vms/{vm_id}/heartbeat", "xenova/v1/vms/{vm_id}/inventory", "xenova/v1/vms/{vm_id}/metrics", "xenova/v1/vms/{vm_id}/command-result", "xenova/v1/vms/{vm_id}/apps/autonomous/events", "xenova/v1/vms/{vm_id}/apps/manual/events", "xenova/v1/probes/#", "xenova/v1/vms/{vm_id}/drive/link/out", "xenova/v2/vms/{vm_id}/telemetry/inventory", "xenova/v2/vms/{vm_id}/telemetry/heartbeat", "xenova/v2/vms/{vm_id}/telemetry/metrics", "xenova/v2/vms/{vm_id}/telemetry/events", "xenova/v2/vms/{vm_id}/telemetry/snapshot"]
   },
+  "interaction_app": {
+    "read": [],
+    "write": ["xenova/v1/vms/{vm_id}/apps/interaction/events"]
+  },
   "telemetry": {
     "read": [],
     "write": ["xenova/v1/vms/{vm_id}/metrics", "xenova/v2/vms/{vm_id}/telemetry/inventory", "xenova/v2/vms/{vm_id}/telemetry/heartbeat", "xenova/v2/vms/{vm_id}/telemetry/metrics", "xenova/v2/vms/{vm_id}/telemetry/events", "xenova/v2/vms/{vm_id}/telemetry/snapshot"]

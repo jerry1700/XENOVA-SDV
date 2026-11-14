@@ -25,6 +25,7 @@ POLICY = Path('/usr/share/xenova/mqtt/policy.json')
 if not POLICY.exists():
     POLICY = Path(__file__).resolve().parents[1] / 'etc/policy.json'
 NAMES = re.compile(r'[A-Za-z0-9._-]{1,96}\Z')
+INTERACTION_PREFIX = 'interaction-'
 GENERATION = re.compile(r'generations/[0-9a-f]{32}\Z')
 
 
@@ -163,13 +164,18 @@ def vm_ids(values):
 
 def policy(path=POLICY):
     value = read_json(path)
-    if (set(value) != {'schema_version', 'services', 'vm', 'telemetry', 'development_vm_ids'} or
+    required = {'schema_version', 'services', 'vm', 'telemetry', 'development_vm_ids'}
+    if (set(value) - {'interaction_app'} != required or
             value['schema_version'] != 1):
         raise SetupError('unsupported account policy')
     for name, entry in value['services'].items():
         if not NAMES.fullmatch(name) or set(entry) != {'default', 'read', 'write'} or type(entry['default']) is not bool:
             raise SetupError('invalid service policy')
-    for entry in [*value['services'].values(), value['vm'], value['telemetry']]:
+    if 'interaction_app' in value and value['interaction_app'] != {
+            'read': [], 'write': ['xenova/v1/vms/{vm_id}/apps/interaction/events']}:
+        raise SetupError('interaction account must be write-only and VM-scoped')
+    for entry in [*value['services'].values(), value['vm'], value['telemetry'],
+                  *([value['interaction_app']] if 'interaction_app' in value else [])]:
         for access in ('read', 'write'):
             if not isinstance(entry[access], list) or any(not isinstance(t, str) or not t.startswith('xenova/') or
                     any(c.isspace() or ord(c) < 32 for c in t) for t in entry[access]):
@@ -181,6 +187,9 @@ def policy(path=POLICY):
 def profile(name, rules):
     if name in rules['services']:
         return 'service'
+    if name.startswith(INTERACTION_PREFIX) and 'interaction_app' in rules:
+        vm_id(name.removeprefix(INTERACTION_PREFIX))
+        return 'interaction_app'
     if name.startswith('telemetry-'):
         vm_id(name[10:])
         return 'telemetry'
@@ -200,7 +209,9 @@ def acl(records, rules):
         if profile(name, rules) != kind:
             raise SetupError('account/profile mismatch')
         entry = rules['services'][name] if kind == 'service' else rules[kind]
-        value = name[10:] if kind == 'telemetry' else name
+        value = name.removeprefix('telemetry-') if kind == 'telemetry' else name
+        if kind == 'interaction_app':
+            value = name.removeprefix(INTERACTION_PREFIX)
         lines += ['', 'user ' + name]
         for access in ('read', 'write'):
             lines += ['topic ' + access + ' ' + topic.replace('{vm_id}', value) for topic in entry[access]]
@@ -265,7 +276,7 @@ def check_bundle(path, gid, rules, *, legacy=False, allow_policy_change=False):
         if (not isinstance(revoked,list) or len(set(revoked))!=len(revoked)
                 or any(not isinstance(n,str) or not NAMES.fullmatch(n) or n in records for n in revoked)):
             raise SetupError('invalid revoked account fence')
-        if not isinstance(records, dict) or any(not isinstance(n, str) or kind not in ('service', 'vm', 'telemetry')
+        if not isinstance(records, dict) or any(not isinstance(n, str) or kind not in ('service', 'vm', 'telemetry', 'interaction_app')
                                                 for n, kind in records.items()):
             raise SetupError('invalid account profile manifest')
         if (not allow_policy_change and manifest['policy_sha256'] !=
@@ -595,6 +606,15 @@ def render_environment(settings):
     return ''.join(f'{key}="{value}"\n' for key, value in settings.items())
 
 
+def interaction_environment(identity, password):
+    return render_environment({
+        'XENOVA_INTERACTION_VM_ID': vm_id(identity),
+        'XENOVA_INTERACTION_BROKER_HOST': '192.168.77.1',
+        'XENOVA_INTERACTION_BROKER_PORT': '1883',
+        'XENOVA_INTERACTION_BROKER_PASSWORD': password,
+    })
+
+
 def export(value, name, form, output, execute=False):
     """계정 하나만 전용 파일로 전달한다. guest 설정과 receipt는 쓰지 않는다."""
     if name not in value['secrets']:
@@ -611,6 +631,10 @@ def export(value, name, form, output, execute=False):
         content = f'XENOVA_AGENT_BROKER_USERNAME={name}\nXENOVA_AGENT_BROKER_PASSWORD={password}\n'
     elif form == 'credentials':
         content = json.dumps({'username': name, 'password': password}) + '\n'
+    elif form == 'interaction-env':
+        if value['profiles'].get(name) != 'interaction_app':
+            raise SetupError('interaction export requires a VM-scoped screen account')
+        content = interaction_environment(name.removeprefix(INTERACTION_PREFIX), password)
     elif form == 'backend-env':
         if name != 'backend':
             raise SetupError('backend export requires backend account')
@@ -658,7 +682,7 @@ def main(argv=None):
     check.add_argument('--runtime', action='store_true', help='require current configuration-compatible generation')
     command = commands.add_parser('export-account')
     command.add_argument('name')
-    command.add_argument('--format', choices=('agent-env', 'backend-env', 'display-env', 'recovery-env', 'credentials', 'drive', 'telemetry'), required=True)
+    command.add_argument('--format', choices=('agent-env', 'backend-env', 'display-env', 'interaction-env', 'recovery-env', 'credentials', 'drive', 'telemetry'), required=True)
     command.add_argument('--output', type=Path, required=True)
     command.add_argument('--execute', action='store_true')
     args = parser.parse_args(argv)

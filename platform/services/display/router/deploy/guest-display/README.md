@@ -16,6 +16,10 @@ HDMI 선택지의 **현재 구조는 A안**이다. 웹 UI(vm-screens + 화면 �
 
 데이터 흐름: dom0 feed(127.0.0.1:8082) → dom0 guest data(192.168.77.1:8085, 토큰) → VM3 화면 앱 서버 → dom0 Chromium(HDMI).
 
+Debian 화면 서버는 선택적 `/etc/xenova/interaction-app.env`에서 자기 VM의 MQTT 자격을 받는다. 이 파일은 앱 유닛을 설치한 private 게스트에 공급하며 systemd가 root로 읽는다(0600). `AppHeartbeat`가 HTTP 수신 루프에서 발행하며, 브로커가 끊겨도 HTTP는 계속 응답한다. 관리 콘솔의 APP은 신선한 보고를 `유휴`로 표시하고, 만료된 보고는 `관측 만료`로 표시한다. LINK는 Agent 연결을 표시한다.
+
+`journalctl -u xenova-guest-display-app.service`의 `presentation responses`에는 실제 데이터 요청 결과별 누계, 최근 결과와 마지막 성공 시각이 남는다. 최초 관측한 결과 종류는 바로 기록하고, 반복 요청은 요약한다. 누계는 앱 재시작 때 초기화된다. 정적 자산·유휴 heartbeat는 요청 성공 횟수를 늘리지 않는다.
+
 ## 설정 파일
 
 | 위치 | 파일 | 예제 |

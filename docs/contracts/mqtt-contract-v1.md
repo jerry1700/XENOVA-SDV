@@ -375,6 +375,7 @@ ESP32가 시리얼로 보낸 상태를 게이트웨이가 바꿔 발행한다. �
 | ID | 토픽 | `type` | 발행 → 구독 | 주기 | QoS | 주요 payload |
 | --- | --- | --- | --- | --- | --- | --- |
 | MQTT-06 | `xenova/v1/apps/{app_id}/events` | `app.heartbeat` | 앱 VM → 백엔드, 인터랙션 VM, 주행 화면 | 1초 | 0 | `state`, `uptime_s` |
+| MQTT-06 (Debian 화면 서버) | `xenova/v1/vms/{vm_id}/apps/interaction/events` | `app.heartbeat` | Debian → 백엔드 | 1초 | 0 | `state: idle`, `uptime_s` |
 
 | 필드 | 타입 | 설명 |
 | --- | --- | --- |
@@ -387,7 +388,8 @@ ESP32가 시리얼로 보낸 상태를 게이트웨이가 바꿔 발행한다. �
 - verified의 `active`는 게스트가 적용한 control에서 자신이 선택됐다는 보고이며 Gateway의 실제 출력 허가가 아니다. 준비·승격은 §6.2를 따른다.
 - Legacy의 에이전트가 없는 Zephyr 주행 VM에서는 이 신호가 앱 쪽 생존 정보다. 복구 서비스의 VM 재시작 판정(5.1)과 게이트웨이의 `AUTO_READY` 판정(5.2)은 Xen 도메인 상태와 이 신호를 쓴다 (시나리오 §8 D8).
 - Linux VM 에서 도는 앱도 같은 토픽·형식으로 보낸다(어떤 앱을 올릴지는 4장 앱 구성에 따른다). 주행과 무관한 앱의 평상시 상태는 `idle` 이다. 에이전트의 `agent.heartbeat`(3장)는 VM·에이전트 생존이고 앱 생존이 아니며, `metrics` 의 `processes[]` 는 CPU 상위 목록이라 앱 생존 근거로 쓰지 않는다.
-- Linux 앱의 이 신호는 **상태 표시용**이다. 복구 서비스는 Linux VM 을 이 신호로 재시작하지 않는다(Linux VM 재시작 근거는 Xen 상태와 `agent.heartbeat`). 멈춘 Linux 앱은 게스트 안 systemd 가 `Restart=on-failure`·`WatchdogSec` 으로 되살린다. 앱은 처리 루프에서 이 신호와 watchdog 통지를 함께 보낸다(공용 클라이언트 `xenova_mqtt.AppHeartbeat`).
+- Linux 앱의 이 신호는 **상태 표시용**이다. 복구 서비스는 Linux VM 을 이 신호로 재시작하지 않는다(Linux VM 재시작 근거는 Xen 상태와 `agent.heartbeat`). 앱은 처리 루프에서 공용 클라이언트 `xenova_mqtt.AppHeartbeat`를 호출한다. 유닛에 `WatchdogSec`를 설정한 앱은 같은 호출에서 systemd 통지도 보낼 수 있다.
+- Debian 화면 서버는 HTTP 수신 루프에 진입한 뒤 `idle`을 보고한다. 공통 봉투의 VM UUID·boot ID·발행자 instance ID로 수신 기록을 구분하며 retain은 끈다. `interaction-{vm_id}` 계정은 이 VM의 토픽에만 발행할 수 있다. 실제 presentation 응답 성공과 실패는 게스트 저널에 남는다. 화면 렌더링은 dom0에서 확인한다.
 
 ### 6.2 앱 준비 보고 `app.readiness`
 
