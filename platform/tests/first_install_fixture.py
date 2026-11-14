@@ -228,8 +228,13 @@ def platform_root(root):
         target=root/'usr/lib/firmware'/relative
         target.parent.mkdir(parents=True,exist_ok=True)
         target.write_bytes(b'fixture: not real firmware')
-    for relative in ('brcmfmac.ko.xz', 'cyw/brcmfmac-cyw.ko.xz'):
-        target = root/'usr/lib/modules/6.18.33-v8/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac'/relative
+    for relative in (
+        'net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko.xz',
+        'net/wireless/broadcom/brcm80211/brcmfmac/cyw/brcmfmac-cyw.ko.xz',
+        'usb/serial/usbserial.ko.xz',
+        'usb/serial/cp210x.ko.xz',
+    ):
+        target = root/'usr/lib/modules/6.18.33-v8/kernel/drivers'/relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b'packaging fixture: not a kernel module')
     for name, text in [('qemu-config-host.h', '#define CONFIG_VNC 1\n#define CONFIG_XEN_BACKEND 1\n'),

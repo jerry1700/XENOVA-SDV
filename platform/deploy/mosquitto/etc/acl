@@ -61,6 +61,7 @@ topic write xenova/v1/apps/manual/input
 topic write xenova/v1/apps/vehicle/events
 topic write xenova/v1/probes/#
 topic write xenova/v1/vms/+/drive/link/in
+topic write xenova/v1/mapper/oak-1/clock/request.pb
 
 user interaction
 topic read xenova/v1/#
@@ -83,8 +84,11 @@ topic read xenova/v1/display/#
 topic read xenova/v1/console/#
 topic read xenova/v1/recovery/#
 topic read xenova/v1/probes/#
+topic read xenova/v1/mapper/oak-1/clock/request.pb
 topic write xenova/v1/apps/perception/events
 topic write xenova/v1/probes/#
+topic write xenova/v1/mapper/oak-1/clock/reply.pb
+topic write xenova/v1/world/snapshot.pb
 
 user simulator
 topic read xenova/v1/sim/command

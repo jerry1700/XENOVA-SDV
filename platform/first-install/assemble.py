@@ -367,15 +367,20 @@ def platform_root_ok(root):
     module_tree = path('usr/lib/modules')
     releases = [p for p in module_tree.iterdir() if p.is_dir()] if module_tree.is_dir() else []
     if not releases:
-        raise ValueError('required management wireless kernel modules missing')
+        raise ValueError('required platform kernel modules missing')
     for release in releases:
-        directory = path(str(release.relative_to(root)) + '/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac')
-        for name in ('brcmfmac', 'brcmfmac-cyw'):
+        for relative, name in (
+            ('net/wireless/broadcom/brcm80211/brcmfmac', 'brcmfmac'),
+            ('net/wireless/broadcom/brcm80211/brcmfmac', 'brcmfmac-cyw'),
+            ('usb/serial', 'usbserial'),
+            ('usb/serial', 'cp210x'),
+        ):
+            directory = path(str(release.relative_to(root)) + '/kernel/drivers/' + relative)
             suffixes = {name + suffix for suffix in ('.ko', '.ko.xz', '.ko.gz', '.ko.zst')}
             candidates = [path(str(p.relative_to(root))) for p in directory.rglob(name + '.ko*')
                           if p.name in suffixes]
             if not any(p.is_file() and p.stat().st_size for p in candidates):
-                raise ValueError('required management wireless kernel module missing: ' + name)
+                raise ValueError('required platform kernel module missing: ' + name)
     for relative, defines in [
         ('usr/share/xenova/qemu-config-host.h', ('CONFIG_VNC', 'CONFIG_XEN_BACKEND')),
         ('usr/share/xenova/qemu-i386-config-target.h', ('CONFIG_XEN',)),

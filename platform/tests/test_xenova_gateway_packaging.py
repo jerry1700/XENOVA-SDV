@@ -29,10 +29,12 @@ class GatewayPackagingTest(unittest.TestCase):
             recipe = RECIPES / 'xenova-gateway/xenova-gateway_0.1.0.bb'
             for item in (recipe.parent / 'files').iterdir():
                 shutil.copyfile(item, source / item.name)
+            for item in (project / 'deploy').glob('*.example'):
+                shutil.copyfile(item, source / item.name)
             install = re.search(r'^do_install\(\) \{\n(.*?)^\}', recipe.read_text(), re.M | re.S).group(1)
             env = dict(os.environ, S=str(source), D=str(dest),
                        PYTHON_SITEPACKAGES_DIR='/usr/lib/python3/site-packages',
-                       systemd_system_unitdir='/usr/lib/systemd/system', datadir='/usr/share')
+                       systemd_system_unitdir='/usr/lib/systemd/system', datadir='/usr/share', bindir='/usr/bin')
             subprocess.run(['bash', '-e', '-c', install], env=env, check=True)
             installed = dest / 'usr/lib/python3/site-packages/xenova_gateway'
             self.assertEqual({p.name for p in installed.glob('*.py')},
@@ -42,7 +44,14 @@ class GatewayPackagingTest(unittest.TestCase):
                 self.assertEqual(item.stat().st_mode & 0o777, 0o644)
             self.assertFalse((dest / 'etc/xenova/gateway.env').exists())
             self.assertFalse((dest / 'srv').exists())
-            self.assertTrue((dest / 'usr/share/xenova/gateway.env.example').is_file())
+            environment = (dest / 'usr/share/xenova/gateway.env.example').read_text()
+            self.assertIn('XENOVA_GATEWAY_SINK=serial\n', environment)
+            self.assertIn('XENOVA_GATEWAY_SERIAL_PORT=\n', environment)
+            self.assertIn('XENOVA_GATEWAY_SERIAL_BAUD=460800\n', environment)
+            self.assertIn('XENOVA_GATEWAY_SERIAL_PROFILE=feedback-3\n', environment)
+            self.assertIn('XENOVA_GATEWAY_FEEDBACK_TIMEOUT_MS=\n', environment)
+            for item in (project / 'deploy').glob('*.example'):
+                self.assertEqual((dest / 'usr/share/xenova' / item.name).read_bytes(), item.read_bytes())
             self.assertEqual((dest / 'usr/lib/systemd/system/xenova-gateway.service').read_bytes(),
                              (recipe.parent / 'files/xenova-gateway.service').read_bytes())
             self.assertNotIn('tests', {p.name for p in installed.iterdir()})

@@ -153,18 +153,16 @@ CONTROL_AUTHORITY_CONFLICT이며 원본/복원 근거를 확인해야 한다. �
 root 전용 `/etc/xenova/gateway.env`에 warm, A/B 등록 UUID, 기존 MQTT 계정,
 차량 한계, feedback-3 설정과 timeout을 지정한다. USB 어댑터는
 `ls -l /dev/serial/by-id/`로 확인하고 해당 경로 전체를 `XENOVA_GATEWAY_SERIAL_PORT`에 넣는다.
+포트가 비어 있으면 Gateway가 기본 `/dev/ttyUSB0`를 사용하므로 설치 전에 이 값을 채운다.
 
 운영 env가 있으면 Recovery Config가 factory 설정을 생략한다.
 A/B 연결은 등록된 UUID, 앱 모델, 기존 drive·telemetry 인증 파일 경로를
 [Recovery 설정 예시](../dom0-manager/deploy/drive-rejoin.example.json) 형식으로
 `/etc/xenova/drive-rejoin.json`에 등록한다. warm의 `readiness_profile`은
 `warm-drive-1`이며, 앱 모델은 설치된 펌웨어의 선언을 따른다. 운영 env와 JSON은
-root:root 0600으로 둔다. Recovery Worker의 systemd drop-in에 다음을 지정한다.
-
-```ini
-[Service]
-Environment=XENOVA_RECOVERY_DRIVE_CONFIG=/etc/xenova/drive-rejoin.json
-```
+root:root 0600으로 둔다. [Recovery Worker drop-in 예시](deploy/90-drive-rejoin.conf.example)를
+`/etc/systemd/system/xenova-recovery-worker.service.d/90-drive-rejoin.conf`로 설치한다.
+Yocto 패키지는 세 배포 예시를 모두 `/usr/share/xenova`에 설치한다.
 
 USB 시리얼의 자동 시작에는 [Gateway drop-in 예시](deploy/90-esp32-serial.conf.example)와
 [udev 규칙 예시](deploy/90-xenova-esp32.rules.example)를 사용한다.

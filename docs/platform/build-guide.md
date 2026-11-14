@@ -15,7 +15,7 @@
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
 | 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.4, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
+| 기본 선택 | Linux와 Zephyr 주행 템플릿의 버전·해시는 [default-templates.lock.json](../../platform/guests/default-templates.lock.json)을 확인 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
@@ -309,6 +309,8 @@ UUID·MAC·인증정보·CPU 정책은 VM별로 유지한다. 현재 factory 선
 `zephyr-drive-lattice-lab-arm64`의 `warm-lattice-lab` 프로필이다.
 
 ```bash
+# 게시할 후보에 사용할 새 버전을 지정한다.
+: "${DRIVE_TEMPLATE_VERSION:?set the new Zephyr template version}"
 run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
   --app drive --profile warm-lattice-lab \
   --zephyr-source "$ZEPHYR_SOURCE" --tools "$ZEPHYR_TOOLS" \
@@ -316,7 +318,7 @@ run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
 
 run drive-template-package python3 -B \
   "$REPO/platform/scripts/package-xenova-drive-template.py" \
-  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version 1.0.8
+  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version "$DRIVE_TEMPLATE_VERSION"
 ```
 
 포장 도구는 현재 source fingerprint·ARM payload·실제 앱 profile과
@@ -325,6 +327,16 @@ run drive-template-package python3 -B \
 0444·디렉터리 0555로 보존한다. 기존 게시본은 덮어쓰지 않는다.
 실제 manifest와 version은 아래 선택 확정 절차로 기본 lock·A/B 설정에 반영한다.
 A/B seed와 보관 원본의 `zephyr.bin` 해시가 같아야 한다.
+
+실차 Pi 재부팅 검증에 사용한 공통 A/B 번들은 `warm-lattice-lab` 1.0.11이었다.
+동일 후보를 재현할 때는 아래 두 해시를 확인하고, 조립 설정의 `rtos_templates`에
+실제 게시본 경로와 `template_manifest_sha256`을 지정한다.
+다음 실차용 주행 프로필을 빌드하면 두 VM에 그 새 번들을 함께 선택하고 새 해시를 기록한다.
+
+| Pi 검증 번들 파일 | SHA-256 |
+| --- | --- |
+| `firmware.json` | `e587dbf71937e03a9d1663bbdb881bab84b87e258ba9a8c74a77c7ca9f59f392` |
+| `zephyr.bin` | `94aece19951de6557b6da5cb4065512140269d7dcfc5d82ad01781bac5b3bce7` |
 
 공용 seed/firmware에는 VM 암호가 없고 host 첫 등록에서 UUID별로 공급한다.
 `lattice-lab-1`은 시험 차량 프로필이다. ARM 빌드·패키징과 실제 보드·실차 수락은
@@ -587,6 +599,18 @@ seed에 넣지 않는다. 새 VM 계정은 이미지 재빌드 없이 `xenova-br
 주행은 VM UUID 계정, Telemetry는 `telemetry-UUID` 계정을 쓴다. Telemetry 계정은 자기 VM의
 v1 `/metrics`와 v2 텔레메트리를 발행한다. 기존 설치에 정책을 교체하면
 [브로커 ACL 갱신 절차](../../platform/deploy/mosquitto/README.md#기존-계정과-업데이트)를 따른다.
+
+실차용 이미지의 Gateway는 현재 저장소 소스에서 패키징한다. 조립 전 검사에서
+Gateway unit·운영 설정 예시·Recovery Worker 예시의 설치 바이트와 CP210x·USB serial 모듈을
+확인한다. 브로커는 `wlan0`에서 Jetson 연결을 받고 공통 ACL에서 `oak-1` 지도·시계 토픽을 허용한다.
+
+이미지 기록 및 첫 등록 후에는 [Pi 실차 Gateway 설치](../../platform/services/gateway/README.md#pi-실차-gateway-자동-시작)를 따른다.
+보드마다 `gateway.env`, `drive-rejoin.json`, USB 식별자와 MQTT 자격증명을 채운다.
+차량별 `vehicle-limits.json`, `gateway-odometry.json`, `gateway-feedback3.json`과
+feedback timeout은 장치 담당자가 확정한 값을 사용한다. 주행용 번들의 축간거리·조향
+상한을 실측값과 대조한다. Pi의 `gateway-mapper-uplink.json`과 Jetson의 JIO 프로필은
+운영 지도·시계에 같은 차량 식별자와 보정 번들을 사용한다. 정지 상태에서
+ESP32를 연결한 채 재부팅해 Gateway·A/B 바인딩을 확인하고 실시간 지도 수락을 별도로 확인한다.
 
 고정 meta-networking에는 Tailscale 1.94.2가 있지만, 현재 이미지는 보안 수정이 포함된
 공식 ARM64 정적 릴리스 1.104.2를 meta-xenova recipe로 고정한다. TS-2026-013의 수정은
@@ -1180,7 +1204,7 @@ MQTT·앱 준비는 Network Starter와 해당 앱의 별도 수락 근거로 기
 
 ## 2026-11-04 앱 메모리 제공물: 수동 버퍼와 RAM 요약
 
-선택 주행 프로필의 로컬 제공 및 다음 이미지 기본 선택 버전은 `1.0.8`이다. `build-xenova-drive-app.py`의
+이 이력에서 선택한 주행 프로필 버전은 `1.0.8`이었다. `build-xenova-drive-app.py`의
 `--app drive --profile warm-lattice-lab`과 `package-xenova-drive-template.py --version 1.0.8`을
 사용하며 출력은 기존 release와 다른 새 디렉터리로 지정한다. 기존 source receipt 검증을 유지한다.
 
