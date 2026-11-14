@@ -73,10 +73,11 @@ function useMockSim(onFrame: ((frame: Frame) => void) | null) {
   });
   const on = onFrame !== null;
   useEffect(() => {
-    if (!on) return;
+    // MOCK 은 빌드 때 정해지는 상수라, 운영 빌드에서는 아래 mock 시나리오 import 가 번들에서 빠진다 (S15P31E110-470)
+    if (!MOCK || !on) return;
     let off: (() => void) | undefined;
     let stopped = false;
-    void import('../mocks/scenario').then((s) => {
+    void scenario().then((s) => {
       if (!stopped) off = s.subscribeSim((snapshot) => ref.current?.(snapshot));
     });
     return () => {

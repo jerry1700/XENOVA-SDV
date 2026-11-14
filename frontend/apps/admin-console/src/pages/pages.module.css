@@ -1,35 +1,7 @@
-.center {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  place-items: center;
-  /* 가운데 카드가 좁은 화면 가장자리에 붙지 않게 */
-  padding: var(--x-space-4);
-}
 .detail {
   display: grid;
   gap: var(--x-space-4);
   min-width: 0;
-}
-.form {
-  display: flex;
-  flex-direction: column;
-  gap: var(--x-space-3);
-}
-.form label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--x-space-1);
-  font-size: var(--x-text-sm);
-  color: var(--x-text-muted);
-}
-.form input {
-  padding: 8px 10px;
-  border: 1px solid var(--x-border);
-  border-radius: var(--x-radius-sm);
-  background: var(--x-surface);
-  color: var(--x-text);
-  font: inherit;
 }
 .error {
   margin: 0;
