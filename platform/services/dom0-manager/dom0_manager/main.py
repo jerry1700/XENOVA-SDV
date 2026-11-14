@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
 from . import __version__
-from .api import console, cpu, health, logs, phone_link, recovery, registrations, stats, templates, vms
+from .api import console, cpu, display_mode, health, logs, phone_link, recovery, registrations, stats, templates, vms
 from .api.errors import install_error_handlers
 from .config import Settings
 from .console import ConsoleSession
@@ -53,6 +53,9 @@ def create_app(
     app.state.console_factory = ConsoleSession
     from .phone_link import PhoneLink
     app.state.phone_link = PhoneLink(settings.phone_runtime_dir, settings.phone_config)
+    from .display_mode import DisplayMode
+    # 휴대폰 모드로 바꾸기 전 USB 링크 확인은 휴대폰 중계 조회와 같은 근거(중계 설정의 usb_interface, ip -j)를 쓴다
+    app.state.display_mode = DisplayMode(usb_present=lambda: app.state.phone_link.status()["usb"]["present"])
     from .registration_sender import RegistrationSender
     app.state.registration_sender = RegistrationSender(settings)
     # 예상된 등록 입력 거절의 유한 부가 진단. 원 operation/등록 기록을 대체하지 않는다.
@@ -81,6 +84,7 @@ def create_app(
     app.include_router(registrations.router, prefix="/api/v1")
     app.include_router(templates.router, prefix="/api/v1")
     app.include_router(phone_link.router, prefix="/api/v1")
+    app.include_router(display_mode.router, prefix="/api/v1")
     install_error_handlers(app)
     _install_request_budget(app, settings.response_reserve_s)
     if settings.service_token:
