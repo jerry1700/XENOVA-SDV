@@ -19,7 +19,12 @@ import com.xenova.backend.vm.infrastructure.Dom0ManagerClient;
 import com.xenova.backend.vm.domain.VmLifecycle;
 import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmLaunchSpec;
+import com.xenova.backend.template.domain.GuestKind;
+import com.xenova.backend.vm.domain.CreateVmCommand;
+import com.xenova.backend.vm.domain.VmRecord;
 import com.xenova.backend.vm.domain.VmRecordRepository;
+import com.xenova.backend.vm.domain.VmRegistrationInventory;
+import com.xenova.backend.vm.domain.VmRegistrationInventoryPort;
 import com.xenova.backend.vm.domain.VmRuntime;
 import com.xenova.backend.vm.domain.VmState;
 import java.util.Optional;
@@ -54,6 +59,9 @@ class VmApiIntegrationTest {
 
     @Autowired
     private VmRecordRepository vmRecordRepository;
+
+    @MockitoBean
+    private VmRegistrationInventoryPort registrationInventory;
 
     private String accessToken;
 
@@ -227,8 +235,42 @@ class VmApiIntegrationTest {
 
         var retired = vmRecordRepository.findById(vmId).orElseThrow();
         org.assertj.core.api.Assertions.assertThat(retired.getLifecycle()).isEqualTo(VmLifecycle.RETIRED);
-        org.assertj.core.api.Assertions.assertThat(retired.getName()).isEqualTo("archive-01");
+        // The retired row gives the name back, so the same name can be created again.
+        org.assertj.core.api.Assertions.assertThat(retired.getName()).isEqualTo("archive-01~" + vmId.substring(0, 8));
         verify(vmControlPort).destroy(vmId);
+        createVm("archive-01", 1, 256).andExpect(status().isCreated());
+    }
+
+    // Deployed case: the platform re-created the VMs, so the board lists new vm_ids under the old names. One request
+    // retires the old row and registers the new one; the rename must reach MySQL before the insert (uk_vms_name).
+    @Test
+    void synchronizationReplacesAVmReCreatedOnTheBoardUnderTheSameName() throws Exception {
+        String oldId = "850e8400-e29b-41d4-a716-446655440101";
+        String newId = "950e8400-e29b-41d4-a716-446655440102";
+        vmRecordRepository.save(new VmRecord(
+                oldId, new CreateVmCommand("debian", "debian-13-arm64", "1.0.8", 1, 256),
+                GuestKind.LINUX, java.time.Instant.parse("2026-11-01T00:00:00Z")));
+        when(registrationInventory.listRegistrations()).thenReturn(java.util.List.of(new VmRegistrationInventory(
+                newId, "debian", GuestKind.LINUX, "debian-13-arm64", "1.0.8", 1, 256, "192.168.77.30")));
+
+        mockMvc.perform(post("/api/v1/vms/synchronizations")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + accessToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.retired").value(1))
+                .andExpect(jsonPath("$.registered").value(1))
+                .andExpect(jsonPath("$.conflicts").value(0))
+                .andExpect(jsonPath("$.results[0].name").value("debian"))
+                .andExpect(jsonPath("$.results[0].action").value("retired"))
+                .andExpect(jsonPath("$.results[1].vm_id").value(newId))
+                .andExpect(jsonPath("$.results[1].action").value("registered"));
+
+        org.assertj.core.api.Assertions.assertThat(vmRecordRepository.findByName("debian"))
+                .hasValueSatisfying(vm -> {
+                    org.assertj.core.api.Assertions.assertThat(vm.getVmId()).isEqualTo(newId);
+                    org.assertj.core.api.Assertions.assertThat(vm.isRegistered()).isTrue();
+                });
+        org.assertj.core.api.Assertions.assertThat(vmRecordRepository.findById(oldId).orElseThrow().getName())
+                .isEqualTo("debian~850e8400");
     }
 
     @Test
