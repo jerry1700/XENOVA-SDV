@@ -8,6 +8,10 @@ IMAGE_INSTALL:append = " xenova-platform xenova-bringup xenova-dom0-manager xeno
 # Gateway is packaged but remains disabled until approved instance settings exist.
 IMAGE_INSTALL:append = " xenova-gateway"
 
+# The factory Debian boot domain uses the kernel PV backend and the Xen block
+# script's loop device. Regular xl-created Linux guests still use qdisk.
+IMAGE_INSTALL:append = " kernel-module-xen-blkback"
+
 # ESP32 CP210x USB-UART runtime; keep both transport modules in the image.
 IMAGE_INSTALL:append = " kernel-module-usbserial kernel-module-cp210x"
 

@@ -1,0 +1,188 @@
+Subject: [PATCH] tools: register one factory guest with its board identity
+
+Upstream-Status: Inappropriate [Xenova factory boot contract]
+
+--- a/tools/helpers/init-dom0less.c
++++ b/tools/helpers/init-dom0less.c
+@@ -114,7 +114,9 @@
+ static int create_xenstore(struct xs_handle *xsh,
+                            libxl_dominfo *info, libxl_uuid uuid,
+                            uint64_t xenstore_pfn,
+-                           evtchn_port_t xenstore_port)
++                           evtchn_port_t xenstore_port,
++                            const char *name, uint64_t console_pfn,
++                            uint64_t console_port)
+ {
+     domid_t domid;
+     unsigned int i;
+@@ -127,6 +129,8 @@
+     char cpu_str[STR_MAX_LENGTH];
+     char xenstore_port_str[STR_MAX_LENGTH];
+     char ring_ref_str[STR_MAX_LENGTH];
++    char console_port_str[STR_MAX_LENGTH];
++    char console_pfn_str[STR_MAX_LENGTH];
+     xs_transaction_t t;
+     struct timeval start_time;
+     char start_time_str[STR_MAX_LENGTH];
+@@ -143,14 +147,15 @@
+     rc = snprintf(id_str, STR_MAX_LENGTH, "%u", domid);
+     if (rc < 0 || rc >= STR_MAX_LENGTH)
+         return rc;
+-    rc = snprintf(dom_name_str, STR_MAX_LENGTH, "dom0less-%u", domid);
++    rc = name ? snprintf(dom_name_str, STR_MAX_LENGTH, "%s", name)
++              : snprintf(dom_name_str, STR_MAX_LENGTH, "dom0less-%u", domid);
+     if (rc < 0 || rc >= STR_MAX_LENGTH)
+         return rc;
+     rc = snprintf(uuid_str, STR_MAX_LENGTH, LIBXL_UUID_FMT, LIBXL_UUID_BYTES(uuid));
+     if (rc < 0 || rc >= STR_MAX_LENGTH)
+         return rc;
+     rc = snprintf(vm_val_str, STR_MAX_LENGTH,
+-                  "vm/" LIBXL_UUID_FMT, LIBXL_UUID_BYTES(uuid));
++                  "/vm/" LIBXL_UUID_FMT, LIBXL_UUID_BYTES(uuid));
+     if (rc < 0 || rc >= STR_MAX_LENGTH)
+         return rc;
+     rc = snprintf(max_memkb_str, STR_MAX_LENGTH, "%"PRIu64, info->max_memkb);
+@@ -165,6 +170,9 @@
+     rc = snprintf(xenstore_port_str, STR_MAX_LENGTH, "%u", xenstore_port);
+     if (rc < 0 || rc >= STR_MAX_LENGTH)
+         return rc;
++
++    snprintf(console_port_str, sizeof(console_port_str), "%"PRIu64, console_port);
++    snprintf(console_pfn_str, sizeof(console_pfn_str), "%"PRIu64, console_pfn);
+ 
+ retry_transaction:
+     t = xs_transaction_start(xsh);
+@@ -202,8 +210,8 @@
+ 
+     if (!do_xs_write_dom(xsh, t, domid, "control", "")) goto err;
+     if (!do_xs_write_dom(xsh, t, domid, "control/shutdown", "")) goto err;
+-    if (!do_xs_write_dom(xsh, t, domid, "control/feature-poweroff", "1")) goto err;
+-    if (!do_xs_write_dom(xsh, t, domid, "control/feature-reboot", "1")) goto err;
++    if (!do_xs_write_dom(xsh, t, domid, "control/feature-poweroff", name ? "" : "1")) goto err;
++    if (!do_xs_write_dom(xsh, t, domid, "control/feature-reboot", name ? "" : "1")) goto err;
+     if (!do_xs_write_dom(xsh, t, domid, "control/feature-suspend", "")) goto err;
+     if (!do_xs_write_dom(xsh, t, domid, "control/sysrq", "")) goto err;
+     if (!do_xs_write_dom(xsh, t, domid, "control/platform-feature-multiprocessor-suspend", "1")) goto err;
+@@ -218,6 +226,12 @@
+     if (!do_xs_write_dom(xsh, t, domid, "store/port", xenstore_port_str)) goto err;
+     if (!do_xs_write_dom(xsh, t, domid, "store/ring-ref", ring_ref_str)) goto err;
+ 
++    if (console_port) {
++        if (!do_xs_write_dom(xsh, t, domid, "console/ring-ref", console_pfn_str)) goto err;
++        if (!do_xs_write_dom(xsh, t, domid, "console/port", console_port_str)) goto err;
++        if (!do_xs_write_dom(xsh, t, domid, "console/type", "xenconsoled")) goto err;
++    }
++
+     if (!do_xs_write_libxl(xsh, t, domid, "type", "pvh")) goto err;
+     if (!do_xs_write_libxl(xsh, t, domid, "dm-version", "qemu_xen")) goto err;
+ 
+@@ -238,10 +252,12 @@
+ static int init_domain(struct xs_handle *xsh,
+                        struct xc_interface_core *xch,
+                        xenforeignmemory_handle *xfh,
+-                       libxl_dominfo *info)
++                       libxl_dominfo *info, const libxl_uuid *requested_uuid,
++                       const char *name)
+ {
+     libxl_uuid uuid;
+     uint64_t xenstore_evtchn, xenstore_pfn;
++    uint64_t console_pfn = 0, console_port = 0;
+     int rc;
+ 
+     printf("Init dom0less domain: %u\n", info->domid);
+@@ -255,7 +271,7 @@
+ 
+     /* no xen,enhanced; nothing to do */
+     if (!xenstore_evtchn)
+-        return 0;
++        return requested_uuid ? 1 : 0;
+ 
+     /* Get xenstore page */
+     if (get_xs_page(xch, info, &xenstore_pfn) != 0)
+@@ -292,14 +308,24 @@
+                err(1, "xc_dom_gnttab_seed");
+     }
+ 
+-    libxl_uuid_generate(&uuid);
+-    xc_domain_sethandle(xch, info->domid, libxl_uuid_bytearray(&uuid));
++    if (requested_uuid) {
++        if (xc_hvm_param_get(xch, info->domid, HVM_PARAM_CONSOLE_PFN, &console_pfn) ||
++            xc_hvm_param_get(xch, info->domid, HVM_PARAM_CONSOLE_EVTCHN, &console_port) ||
++            !console_pfn || !console_port)
++            return 1;
++        uuid = *requested_uuid;
++    } else {
++        libxl_uuid_generate(&uuid);
++    }
++    if (xc_domain_sethandle(xch, info->domid, libxl_uuid_bytearray(&uuid)))
++        return 1;
+ 
+     rc = gen_stub_json_config(info->domid, &uuid);
+     if (rc)
+         err(1, "gen_stub_json_config");
+ 
+-    rc = create_xenstore(xsh, info, uuid, xenstore_pfn, xenstore_evtchn);
++    rc = create_xenstore(xsh, info, uuid, xenstore_pfn, xenstore_evtchn,
++                         name, console_pfn, console_port);
+     if (rc)
+         err(1, "writing to xenstore");
+ 
+@@ -323,6 +349,23 @@
+     struct xs_handle *xsh = NULL;
+     struct xc_interface_core *xch = NULL;
+     xenforeignmemory_handle *xfh = NULL;
++
++    libxl_uuid boot_id, requested_uuid;
++    unsigned long requested_domid = 0;
++
++    /* With arguments, initialize only the requested loader incarnation. */
++    if (argc != 1) {
++        char *end;
++        if (argc != 5)
++            errx(1, "usage: init-dom0less [DOMID BOOT-UUID VM-UUID NAME]");
++        requested_domid = strtoul(argv[1], &end, 10);
++        if (!requested_domid || *end || requested_domid >= DOMID_FIRST_RESERVED ||
++            libxl_uuid_from_string(&boot_id, argv[2]) ||
++            libxl_uuid_from_string(&requested_uuid, argv[3]) ||
++            libxl_uuid_is_nil(&boot_id) || libxl_uuid_is_nil(&requested_uuid) ||
++            !argv[4][0] || strlen(argv[4]) > 39)
++            errx(1, "invalid factory domain identity");
++    }
+ 
+     /* TODO reuse libxl xsh connection */
+     xsh = xs_open(0);
+@@ -347,6 +390,23 @@
+         goto out;
+     }
+ 
++    if (requested_domid) {
++        rc = 1;
++        for (i = 0; i < nb_vm; i++) {
++            if (info[i].domid == requested_domid) {
++                bool named = !libxl_uuid_compare(&requested_uuid, &info[i].uuid);
++                if (!named && libxl_uuid_compare(&boot_id, &info[i].uuid))
++                    errx(1, "factory boot handle changed");
++                if (domain_exists(xsh, info[i].domid))
++                    rc = named ? 0 : 1;
++                else
++                    rc = init_domain(xsh, xch, xfh, &info[i], &requested_uuid, argv[4]);
++                break;
++            }
++        }
++        goto out;
++    }
++
+     for (i = 0; i < nb_vm; i++) {
+         domid_t domid = info[i].domid;
+ 
+@@ -356,8 +416,8 @@
+ 
+         printf("Checking domid: %u\n", domid);
+         if (!domain_exists(xsh, domid)) {
+-            rc = init_domain(xsh, xch, xfh, &info[i]);
+-            if (rc < 0) {
++            rc = init_domain(xsh, xch, xfh, &info[i], NULL, NULL);
++            if (rc != 0) {
+                 fprintf(stderr, "init_domain failed.\n");
+                 goto out;
+             }

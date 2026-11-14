@@ -12,7 +12,7 @@ import xenova_vm as vm
 
 ALIASES = {'delete':'retire', 'recover-once':'recover_once', 'status':'list'}
 LEGACY = {'check-xen','check-network','dhcp-ready','autostart','shutdown-all','poweroff',
-          'reboot-board','console','firmware-replace','diagnose','host-init','host-quiesce'}
+          'reboot-board','console','firmware-replace','diagnose','host-init','host-quiesce','boot-domains'}
 TARGETS = {'get','intents','provision','provisioning','retire','restore','purge','start','stop','reboot','destroy',
            'autostart-set','board-shutdown-set','config','snapshot','probe','execution-context',
            'firmware-transition','update-resources','cpu-layout'}

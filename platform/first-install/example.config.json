@@ -12,8 +12,8 @@
   },
   "rtos_templates": [
     {
-      "template_dir": "/absolute/xenova-template-releases/zephyr/xenova-zephyr-drive-lattice-lab-1.0.0/1.0.9",
-      "template_manifest_sha256": "926ab258782290e5e8feffd544f49e1bc2ee2c58f4a741ee7f1dafe53e52d22b"
+      "template_dir": "/absolute/xenova-template-releases/zephyr/xenova-zephyr-drive-lattice-lab-1.0.0/1.0.10",
+      "template_manifest_sha256": "46ac082b72bc1f333b4a43c215cb57da486c0bf88216d078302d53570b34ca2c"
     }
   ],
   "linux_templates": [

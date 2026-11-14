@@ -346,7 +346,7 @@ run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
   --zephyr-source "$ZEPHYR_SOURCE" --tools "$ZEPHYR_TOOLS" \
   --output "$RUN/drive-build" --execute
 
-read -r -p "기존 게시본과 다른 새 주행 버전 (예: 1.0.9): " DRIVE_VERSION
+read -r -p "기존 게시본과 다른 새 주행 버전 (예: 1.0.10): " DRIVE_VERSION
 run drive-template-package python3 -B \
   "$REPO/platform/scripts/package-xenova-drive-template.py" \
   --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version "$DRIVE_VERSION"
@@ -358,6 +358,8 @@ run drive-template-package python3 -B \
 0444·디렉터리 0555로 보존한다. 기존 게시본은 덮어쓰지 않는다.
 실제 manifest와 version은 아래 선택 확정 절차로 기본 lock·A/B 설정에 반영한다.
 A/B seed와 보관 원본의 `zephyr.bin` 해시가 같아야 한다.
+조기 부팅용 A/B에는 `CONFIG_XENOVA_DOM0LESS_BOOT=y`가 필요하다. 이 설정은
+XenStore와 VIF가 처음 연결되기를 기다리는 펌웨어를 만들어 조립기가 확인한다.
 
 공용 seed/firmware에는 VM 암호가 없고 host 첫 등록에서 UUID별로 공급한다.
 `lattice-lab-1`은 시험 차량 프로필이다. ARM 빌드·패키징과 실제 보드·실차 수락은
@@ -1025,6 +1027,10 @@ PY
 ## 8. seed 생성과 최종 조립·검증
 
 조립 실행 안에서 Debian seed와 Zephyr A/B의 독립 firmware 자산, 카탈로그, factory metadata가 준비된다. Debian seed의 machine-id·SSH 키와 각 VM의 UUID/MAC는 최초 보드 부팅에서 확정한다. CPU 프리셋은 공통 이미지에 보드 UUID를 넣지 않고, 첫 identity plan에서 확정한 A/B UUID에 연결한다. 기존 identity plan·CPU 정책을 새 기본값으로 덮어쓰지 않는다.
+
+최종 조립기는 복사한 FAT에 `xenova-guests.scr`, Debian 커널·initramfs, Zephyr A/B의 부팅 펌웨어를 추가하고 다시 읽어 해시를 확인한다. U-Boot가 커널·펌웨어와 Device Tree를 Xen에 전달하면 Xen이 dom0와 기본 domU 세 대를 같은 부팅 단계에서 실행 가능 상태로 만든다. FAT에 게스트가 없는 Yocto 중간 이미지와 기존 설치는 등록 후 `xl create` 경로를 쓴다. UART에서 `setenv xenova_skip_boot_guests 1`을 지정하고 부팅하면 해당 부팅에 기존 시작 경로를 쓸 수 있다.
+
+dom0는 보드별 UUID/MAC가 확정된 뒤 Xen boot handle로 각 도메인을 찾고 XenStore·PV 콘솔을 연결한다. `xenova-vms.service`는 기존 실행 기록을 게시하고, Debian의 `root.raw`는 Xen의 `block` 스크립트와 커널 블록 백엔드로, PV NIC는 `xenbr0`에 연결한다. 조기 부팅용 Debian initramfs에는 루트 장치가 나타날 때까지만 대기하는 훅을 추가한다. 저장된 기동 의도, CPU 정책 또는 펌웨어 자산이 조립 당시 설정과 다르면 해당 조기 도메인을 분리하고 현재 등록 정책을 적용한다. 게스트의 초기 실행과 앱·차량 출력 준비는 별도 단계다.
 
 ```bash
 run check-before-assembly python3 -B "$RUN/tools/inputs.py" check

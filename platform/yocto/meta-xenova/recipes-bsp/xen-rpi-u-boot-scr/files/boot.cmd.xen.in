@@ -77,5 +77,12 @@ if test "${xenova_debug}" = "1"; then
     fdt print /chosen xen,dom0-bootargs
 fi
 
+# 완성 이미지의 FAT에만 기본 게스트를 등록하는 보조 스크립트가 있다.
+# boot.scr의 실행 버퍼와 겹치지 않는 위치에서 읽는다.
+if test "${xenova_skip_boot_guests}" != "1" && size mmc ${devnum}:1 xenova-guests.scr; then
+    fatload mmc ${devnum}:1 0x07000000 xenova-guests.scr || exit 1
+    source 0x07000000 || exit 1
+fi
+
 echo Boot Xen
 booti ${xen_loadaddr} - ${fdt_addr_r}

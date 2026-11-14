@@ -18,6 +18,8 @@ setenv() { key=$1; shift; export "$key=$*"; }
 fdt() { echo "FDT $*"; [ "${FAIL:-}" != "fdt-$1" ] && [ "${FAIL:-}" != "fdt-$1-${3:-}" ]; }
 part() { echo "PART $*"; [ "${FAIL:-}" != part ] || return 1; rootfs_partuuid=test-root; }
 fatload() { echo "LOAD $*"; [ "${FAIL:-}" != "$4" ] || return 1; filesize=1234; }
+size() { [ "${GUEST_SCRIPT:-}" = 1 ]; }
+source() { echo "SOURCE $*"; [ "${FAIL:-}" != source ]; }
 booti() { echo "BOOT $*"; }
 sleep() { :; }
 '''
@@ -33,6 +35,9 @@ for name, values, failure in [
     ('stop-on-partuuid-failure', {'FAIL': 'part'}, True),
     ('stop-on-xen-load-failure', {'FAIL': 'xen'}, True),
     ('stop-on-kernel-load-failure', {'FAIL': 'Image'}, True),
+    ('load-factory-domains', {'GUEST_SCRIPT': '1'}, False),
+    ('skip-factory-domains', {'GUEST_SCRIPT': '1', 'xenova_skip_boot_guests': '1'}, False),
+    ('stop-on-factory-script-failure', {'GUEST_SCRIPT': '1', 'FAIL': 'source'}, True),
 ]:
     env = {**os.environ, 'devtype': '', 'devnum': '', 'FAIL': '', 'xenova_debug': '', 'fdtcontroladdr': '0x3aff0000', 'fdt_addr_r': '0x05600000', **values}
     result = subprocess.run(['bash', '-c', boot_mocks + boot], env=env, text=True, capture_output=True, timeout=5)
@@ -45,6 +50,10 @@ for name, values, failure in [
         assert f'LOAD mmc {devnum}:1 0x00200000 xen' in result.stdout
         assert f'LOAD mmc {devnum}:1 0x00400000 Image' in result.stdout
         assert 'BOOT 0x00200000 - 0x05600000' in result.stdout
+        if name == 'load-factory-domains':
+            assert result.stdout.index('SOURCE 0x07000000') < result.stdout.index('BOOT ')
+        if name == 'skip-factory-domains':
+            assert 'SOURCE ' not in result.stdout
         xen_args = next(line.split() for line in result.stdout.splitlines()
                         if line.startswith('FDT set /chosen xen,xen-bootargs '))
         assert [arg for arg in xen_args if arg.startswith('dom0_max_vcpus=')] == ['dom0_max_vcpus=2'], (name, xen_args)
@@ -123,4 +132,4 @@ assert not any(fnmatch.fnmatchcase('eth0', pattern) for pattern in rules)
 assert any(fnmatch.fnmatchcase('vif1.0', pattern) for pattern in rules)
 assert any(fnmatch.fnmatchcase('xenbr0', pattern) for pattern in rules)
 print('PASS network-rules-match-only-vif-and-xenbr0')
-print('PASS 20 boot/init/network regression cases (hardware not exercised)')
+print('PASS 23 boot/init/network regression cases (hardware not exercised)')
