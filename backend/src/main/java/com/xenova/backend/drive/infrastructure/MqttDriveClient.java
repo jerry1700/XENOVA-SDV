@@ -4,6 +4,8 @@ import com.xenova.backend.agent.infrastructure.MqttProperties;
 import com.xenova.backend.drive.application.DriveEventLogger;
 import com.xenova.backend.drive.application.DriveInputPublisher;
 import com.xenova.backend.drive.application.DriveStateTracker;
+import com.xenova.backend.drive.application.PerceptionFaultPublisher;
+import com.xenova.backend.drive.application.PerceptionFaultService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -28,13 +30,15 @@ import org.springframework.util.StringUtils;
 // Same start-up behaviour: the application starts without a broker and keeps retrying.
 @Component
 @ConditionalOnProperty(prefix = "xenova.mqtt", name = "enabled", havingValue = "true")
-public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, DriveInputPublisher {
+public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, DriveInputPublisher,
+        PerceptionFaultPublisher {
 
     // QoS is the subscription maximum: vehicle/control is QoS 1 retained, the rest arrive at their own QoS.
     static final String[] TOPICS = {
             DriveStateTracker.CONTROL_TOPIC, DriveStateTracker.STATUS_TOPIC, DriveStateTracker.APP_EVENTS_FILTER,
-            DriveStateTracker.VM_APP_EVENTS_FILTER};
-    static final int[] QOS = {1, 0, 1, 0};
+            DriveStateTracker.VM_APP_EVENTS_FILTER, PerceptionFaultService.RESULT_TOPIC,
+            PerceptionFaultService.STATUS_TOPIC};
+    static final int[] QOS = {1, 0, 1, 0, 0, 0};
 
     private static final Logger log = LoggerFactory.getLogger(MqttDriveClient.class);
     // Matches the 10 s connection timeout below.
@@ -43,6 +47,7 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
     private final MqttProperties properties;
     private final DriveStateTracker tracker;
     private final DriveEventLogger eventLogger;
+    private final PerceptionFaultService perceptionFaultService;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
         Thread thread = new Thread(runnable, "mqtt-drive-client");
         thread.setDaemon(true);
@@ -58,10 +63,12 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
     private volatile MqttClient client;
     private volatile boolean running;
 
-    public MqttDriveClient(MqttProperties properties, DriveStateTracker tracker, DriveEventLogger eventLogger) {
+    public MqttDriveClient(MqttProperties properties, DriveStateTracker tracker, DriveEventLogger eventLogger,
+            PerceptionFaultService perceptionFaultService) {
         this.properties = properties;
         this.tracker = tracker;
         this.eventLogger = eventLogger;
+        this.perceptionFaultService = perceptionFaultService;
     }
 
     @Override
@@ -135,6 +142,10 @@ public class MqttDriveClient implements SmartLifecycle, MqttCallbackExtended, Dr
     public void messageArrived(String topic, MqttMessage message) {
         // An exception thrown back to Paho closes the connection, so one bad message must not escape.
         try {
+            if (PerceptionFaultService.RESULT_TOPIC.equals(topic) || PerceptionFaultService.STATUS_TOPIC.equals(topic)) {
+                perceptionFaultService.accept(topic, message.getPayload());
+                return;
+            }
             tracker.accept(topic, message.getPayload(), message.isRetained())
                     .ifPresent(notice -> recorder.execute(() -> eventLogger.record(notice)));
         } catch (RuntimeException exception) {
