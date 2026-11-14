@@ -41,24 +41,29 @@ function AppStateTile({
     <div>
       <span>앱 상태</span>
       {reports.length > 0 ? (
-        reports.map(({ appId, appLabel, stage, reason, reasonLabel, phaseLabel, heartbeatLabel }) =>
-          // 단계(lifecycle)가 없고 heartbeat 가 신선하면 heartbeat 문구로 대신 보이고 출처를 작게 적는다
-          PHASE_UNAVAILABLE.has(phaseLabel) && FRESH_HEARTBEAT.has(heartbeatLabel) ? (
-            <strong key={appId} data-app={appId}>
-              {appLabel} · {heartbeatLabel}
-              <small className={styles.detailTileNote}>heartbeat 기준 · 단계 {phaseLabel}</small>
-            </strong>
-          ) : (
-            <strong key={appId} data-app={appId}>
-              {appLabel} · {stage}
-              {reason && (
-                <>
-                  {' · '}
-                  <span title={reason}>{reasonLabel}</span>
-                </>
-              )}
-            </strong>
-          ),
+        reports.map(
+          ({ appId, appLabel, stage, reason, reasonLabel, phaseLabel, heartbeatLabel, heartbeat }) =>
+            // 단계(lifecycle)가 없고 heartbeat 가 신선하면 heartbeat 문구로 대신 보이고 출처를 작게 적는다
+            appId === 'interaction' ? (
+              <strong key={appId} data-app={appId}>
+                {appLabel} · {heartbeat}
+              </strong>
+            ) : PHASE_UNAVAILABLE.has(phaseLabel) && FRESH_HEARTBEAT.has(heartbeatLabel) ? (
+              <strong key={appId} data-app={appId}>
+                {appLabel} · {heartbeatLabel}
+                <small className={styles.detailTileNote}>heartbeat 기준 · 단계 {phaseLabel}</small>
+              </strong>
+            ) : (
+              <strong key={appId} data-app={appId}>
+                {appLabel} · {stage}
+                {reason && (
+                  <>
+                    {' · '}
+                    <span title={reason}>{reasonLabel}</span>
+                  </>
+                )}
+              </strong>
+            ),
         )
       ) : (
         <strong>미확인</strong>

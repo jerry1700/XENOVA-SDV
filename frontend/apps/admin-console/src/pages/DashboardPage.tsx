@@ -635,7 +635,7 @@ function VmOverviewCard({
 
       <div className={styles.vmStatusRows}>
         <OverviewStatusLine label="VM" value={STATE_LABEL[vm.state]} tone={STATE_HEALTH[vm.state]} />
-        <OverviewStatusLine label="APP" labelTitle="앱 상태" value={overviewAppSignal(apps, 'phaseLabel')} />
+        <OverviewStatusLine label="APP" labelTitle="앱 상태" value={overviewAppSignal(apps)} />
         <OverviewStatusLine
           label="LINK"
           labelTitle={linux ? 'Linux Agent heartbeat (v1)' : 'Zephyr Telemetry heartbeat (v2)'}
@@ -805,14 +805,13 @@ function appMemoryLayers(
   };
 }
 
-function overviewAppSignal(
-  reports: ReturnType<typeof vmAppObservations>,
-  field: 'phaseLabel' | 'heartbeatLabel',
-): string {
-  const labels = new Set(reports.map((report) => report[field]));
+function overviewAppSignal(reports: ReturnType<typeof vmAppObservations>): string {
+  const value = (report: (typeof reports)[number]) =>
+    report.appId === 'interaction' ? report.heartbeatLabel : report.phaseLabel;
+  const labels = new Set(reports.map(value));
   if (labels.size === 0) return '미확인';
-  if (labels.size === 1) return reports[0]![field];
-  return reports.map((report) => `${report.appLabel}: ${report[field]}`).join(' · ');
+  if (labels.size === 1) return value(reports[0]!);
+  return reports.map((report) => `${report.appLabel}: ${value(report)}`).join(' · ');
 }
 
 function overviewMetricUnavailable(pending: boolean, sampleCount: number): string | null {
