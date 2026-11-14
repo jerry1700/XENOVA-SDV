@@ -293,6 +293,8 @@ Spring은 3.1의 네 상태에 `stopped`를 더해 다섯 상태를 공개합니
 | `PUT` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 변경 결과 (4.12) | `400`, `401`, `404`, `409`, `500`, `501`, `503`, `504` |
 | `GET` | `/api/v1/display/phone-link` | `200` 휴대폰 중계 상태 (4.13) | `401`, `503` |
 | `POST` | `/api/v1/display/phone-link/pairing-code` | `200` 새 연결번호 (4.13) | `401`, `409`, `503` |
+| `GET` | `/api/v1/display/mode` | `200` 표시 모드 (4.14) | `401`, `503`, `504` |
+| `POST` | `/api/v1/display/mode` | `200` 전환 뒤 표시 모드 (4.14) | `400`, `401`, `409`, `500`, `503`, `504` |
 | `GET` | `/healthz` | `200` | `401`, `503` |
 
 `/healthz` 를 뺀 모든 엔드포인트는 선택 헤더 `X-Request-Budget-Ms`(요청 예산, 4.9)를 받는다.
@@ -588,6 +590,59 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 - 요청 하나가 번호 하나를 만들고 앞 번호를 무효로 하므로 Spring 은 자동 재시도하지 않는다. 동시 요청은 dom0-manager 안에서 하나씩 처리한다.
 - `409 InvalidState`: 중계가 `listening` 이 아님(신호를 보내지 않음). `503 PlatformUnavailable`: `systemctl`·`ip`·파일 읽기 실패, 신호 거절, 또는 2초 안에 새 번호가 나오지 않음.
 - 번호를 웹에 보여 주는 근거: 로그인한 운영자는 이미 SSH 로 같은 파일을 읽을 수 있고, 번호는 USB 로 연결된 휴대폰에서만(중계가 `usb0` 에 묶임) 2분·5회 안에 쓸 수 있다.
+
+### 4.14 `GET /api/v1/display/mode`, `POST /api/v1/display/mode` — 표시 장치 모드(HDMI / 휴대폰) 전환
+
+차량 통합 화면은 HDMI 모니터 또는 USB 테더링 휴대폰 중 하나에 나온다. 지금까지는 보드에 SSH 로 들어가 `sudo python3 -m xenova_display.display_mode mobile` 로 바꿨고, 휴대폰 중계는 재부팅 뒤 꺼져 있다. 관리 콘솔에서 바꿀 수 있게 dom0-manager 가 같은 명령을 대신 실행한다. 전환 로직(잠금, 순서, 실패 시 되돌리기)은 그 명령의 것이고 dom0-manager 는 바꾸지 않는다.
+
+| 요청 | 보드에서 하는 일 |
+|---|---|
+| `GET` | `display_mode status` 결과를 옮긴다 (한도 10초) |
+| `POST {"mode": "mobile"}` | USB 링크(4.13 의 `usb.present`)가 없으면 명령을 부르지 않고 `409 USB_LINK_ABSENT`. 있으면 `display_mode mobile`: 휴대폰 중계를 켜고 접속 주소가 생긴 뒤 HDMI 를 끈다 |
+| `POST {"mode": "hdmi"}` | `display_mode hdmi`: HDMI 를 켜고 화면이 실제로 그려진 뒤 휴대폰 중계를 끈다 |
+
+`GET`·`POST` 응답 `200` (`POST` 는 전환 뒤 상태):
+
+```json
+{
+  "mode": "mobile",
+  "boot_default": "hdmi",
+  "services": {"hdmi": "inactive", "mobile": "active", "feed": "active"},
+  "hdmi_renderer_ready": false,
+  "observed_at": "2026-11-14T09:00:00Z"
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `mode` | 지금 선택된 표시 모드 `hdmi` · `mobile` |
+| `boot_default` | 재부팅 뒤 모드. 지금은 항상 `hdmi` |
+| `services.hdmi` | `xenova-display-hdmi.service` 의 systemd 상태(`active`·`inactive`·`activating`·`deactivating`·`failed` 등, 못 읽으면 `unknown`) |
+| `services.mobile` | `xenova-display-mobile.service`(휴대폰 중계)의 상태 |
+| `services.feed` | `xenova-display-feed.service`(두 모드가 함께 쓰는 화면 데이터)의 상태. `active` 가 아니면 전환을 거절한다 |
+| `hdmi_renderer_ready` | HDMI 화면이 실제로 그려지고 있음(렌더러 상태 파일 기준) |
+| `observed_at` | 보드에서 읽은 시각(UTC) |
+
+- 휴대폰 모드가 되어도 휴대폰이 실제로 붙은 것은 아니다. 접속 주소와 연결번호는 4.13 으로 읽는다.
+- 전환은 보통 수 초, 최악 240초(되돌리기 포함) 걸린다. 도중에 끊으면 두 화면이 모두 꺼질 수 있어 끊지 않는다. 요청 예산(4.9)은 시작 전에만 확인한다(소진이면 바꾸지 않고 `504`). 호출자는 240초보다 길게 기다린다.
+- 동시 전환은 명령의 잠금이 막는다(`409 DISPLAY_MODE_BUSY`). 표시 장치를 바꿔도 VM·주행 모드·Gateway·MQTT 는 바뀌지 않는다.
+- 응답은 `Cache-Control: no-store`.
+
+오류 (`platform_code` 로 분기, `retryable` 은 다시 눌러 볼 만한지):
+
+| HTTP | code | platform_code | 상황 |
+|---|---|---|---|
+| `400` | `InvalidArgument` | — | `mode` 가 `hdmi`·`mobile` 이 아님 |
+| `409` | `InvalidState` | `USB_LINK_ABSENT` | (mobile) 케이블·USB 테더링 없음. 명령을 부르지 않음. retryable |
+| `409` | `InvalidState` | `DISPLAY_MODE_BUSY` | 다른 전환이 진행 중. retryable |
+| `409` | `InvalidState` | `MOBILE_ENDPOINT_NOT_READY` · `HDMI_RENDERER_NOT_READY` · `DISPLAY_SERVICE_TRANSITION_FAILED` · `DISPLAY_MODE_FAILED_RESTORED` | 전환 실패, 이전 모드로 되돌림. retryable |
+| `409` | `InvalidState` | `DISPLAY_SERVICE_NOT_SETTLED` | 표시 서비스가 켜지거나 꺼지는 중. retryable |
+| `409` | `InvalidState` | `SHARED_FEED_NOT_ACTIVE` · `MODE_GUARD_NOT_LOADED` · `NATIVE_DISPLAY_UNITS_REQUIRED` · `LEGACY_MOBILE_FIRST_REQUIRES_MIGRATION` · `FOREIGN_MODE_MARKER` · `UNSAFE_CONFIGURATION` · `UNSAFE_RUNTIME_DIRECTORY` | 보드 표시 설정 문제. 보드 작업 필요 |
+| `500` | `DriverError` | `ROLLBACK_INCOMPLETE_CHECK_DISPLAY_SERVICES` | 실패 후 이전 모드로 완전히 되돌리지 못함. 보드에서 표시 서비스 확인 |
+| `503` | `PlatformUnavailable` | 명령이 준 코드 또는 없음 | 명령 실행·결과 해석 실패 |
+| `504` | `DriverTimeout` | `DISPLAY_MODE_TIMEOUT` 또는 없음 | 명령이 시한 안에 안 끝남(상태를 다시 읽어 확인), 또는 시작 전 예산 소진 |
+
+dom0less 로 바뀌면 이 명령을 실행하는 곳이 dom0 에서 표시 장치를 가진 VM 으로 옮겨간다. 경로와 본문은 그대로 둔다.
 
 ---
 
@@ -934,3 +989,4 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.22 | 2026-11-12 | v1.17의 런타임 자동 갱신 루프를 제거하고 공개 `GET /api/v1/vms` 요청 시 단일 동기화로 변경. 등록 VM과 dom0 런타임을 결합하고 상태 이벤트를 반영한 최신 목록을 반환하며, 경합 VM 제외·조회 실패 시 기존 상태 보존·프로세스 내 동시 요청 직렬화를 명시 |
 | v1.23 | 2026-11-12 | VM 상태 5초 주기 조회(`EVENT_VM_STATE_CHECK_INTERVAL_MS`)를 되살린다. 공개 `GET /api/v1/vms` 요청 시 동기화와 함께 동작하며 실행 상태만 다룬다. 보드 등록 목록 → VM 테이블 등록 동기화는 주기 실행 없이 `POST /api/v1/vms/synchronizations` 요청 때만 실행한다 |
 | v1.24 | 2026-11-13 | dom0-manager의 생성·정지·보관 오류에 선택 `context` 추가. 기존 원장으로 작업 ID 조회 제공(8.1.1) |
+| v1.25 | 2026-11-14 | 표시 장치 모드 조회 `GET /api/v1/display/mode` 와 전환 `POST /api/v1/display/mode`(4.14). 보드 명령 `display_mode` 를 그대로 실행하고, mobile 은 USB 링크가 없으면 `409 USB_LINK_ABSENT`, 전환 도중 끊지 않음(최악 240초) |

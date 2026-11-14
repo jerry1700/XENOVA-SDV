@@ -87,6 +87,10 @@ sudo python3 -m xenova_display.display_mode mobile
 ```
 HDMI는 꺼지고 휴대폰 서비스(`xenova-display-mobile`)만 켜진다. 실패하면(폰 미연결 등) 전환하지 않고 HDMI를 그대로 둔다(390).
 
+관리 콘솔의 휴대폰 연결 화면(`/phone-link`)에서도 같은 명령을 실행할 수 있다(2026-11-14, 계약 4.14 `POST /api/v1/display/mode`).
+"휴대폰 모드 켜기"·"HDMI로 돌아가기" 버튼이 dom0-manager 를 거쳐 위 명령을 그대로 부르므로 결과·되돌리기 규칙은 같다.
+웹에서 휴대폰 모드를 누를 때는 USB 테더링이 먼저 켜져 있어야 한다(없으면 명령을 부르지 않고 거절).
+
 ### 폰 연결 순서
 1. 폰을 USB 케이블로 보드에 연결하고 **USB 테더링**을 켠다.
 2. 접속 주소: `sudo cat /run/xenova-display-mobile/endpoint.json`의 `url` (예: `http://10.58.23.26:8084/display/mobile`).
