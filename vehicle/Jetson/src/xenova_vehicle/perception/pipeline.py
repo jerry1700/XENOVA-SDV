@@ -309,7 +309,7 @@ class PerceptionPipeline:
             points=[transform_point(v,(p.x,p.y,p.yaw)) for v in points]
         return min(v[0] for v in points)-error,min(v[1] for v in points)-error,max(v[0] for v in points)+error,max(v[1] for v in points)+error
 
-    def _free_visibility(self, grid, pose):
+    def _free_visibility(self, grid, pose, *, prioritize_departure=False):
         """현재 depth 영상 안의 셀을 먼저 시도한다. FREE 증명은 별도로 수행한다."""
         import numpy as np
         camera, plane = self.calibration.right, self.calibration.plane
@@ -325,26 +325,42 @@ class PerceptionPipeline:
             c, s = math.cos(p.yaw), math.sin(p.yaw)
             x, y = c*x+s*y, -s*x+c*y
         z = -(plane.normal[0]*x+plane.normal[1]*y+plane.offset)/plane.normal[2]
-        z += min(t.base_height_m[0]+t.core_height_m/2 for t in self.targets)
         xyz = np.stack((x,y,z),axis=-1)-camera.translation
         transform = np.asarray(camera.rotation) @ np.asarray(camera.rectification).T
         optical = xyz @ transform
         projection = transform @ np.asarray(camera.k).T
         image = xyz @ projection
         left, top, right, bottom = camera.roi
-        # A cell can contain the edge of an obstacle whose core is outside the cell.
-        # Prefer cells whose whole nominal core-placement area is in the depth FOV.
+        # Rank likely certificates by testing the target placements around each
+        # cell. This only schedules work. The actual ray proof is unchanged.
         extent = max(t.max_extent_m for t in self.targets)+resolution/math.sqrt(2.)
         def margin(direction):
-            return extent*(abs(direction[0]-plane.normal[0]*direction[2]/plane.normal[2])
-                           +abs(direction[1]-plane.normal[1]*direction[2]/plane.normal[2]))
+            return extent * math.hypot(direction[0]-plane.normal[0]*direction[2]/plane.normal[2],
+                                       direction[1]-plane.normal[1]*direction[2]/plane.normal[2])
         depth_margin = margin(transform[:,2])
         visible = ((optical[...,2] >= camera.near_m+depth_margin)
                    & (optical[...,2] <= camera.far_m-depth_margin))
         for axis, lower, upper in ((0,left,right),(1,top,bottom)):
             visible &= image[...,axis]-lower*image[...,2] >= margin(projection[:,axis]-lower*projection[:,2])
             visible &= upper*image[...,2]-image[...,axis] > margin(upper*projection[:,2]-projection[:,axis])
-        return visible
+        ahead = x-self.calibration.body.front
+        # Reserve new observations for the upcoming sweep. Cells now under the
+        # body keep the certificate earned when they were still ahead of it.
+        distance = np.hypot(ahead,y) + np.where(ahead < 0.,camera.far_m,0.)
+        if not prioritize_departure:
+            return visible, distance, None
+        # Pi's departure exception ends at most 10 cm beyond the bumper.
+        # Give the next two rows a chance even when a cone could partly sit
+        # outside the depth image. The ray certificate still checks that case.
+        center_visible = ((optical[..., 2] >= camera.near_m) & (optical[..., 2] <= camera.far_m)
+            & (image[..., 0] >= left * image[..., 2]) & (image[..., 0] < right * image[..., 2])
+            & (image[..., 1] >= top * image[..., 2]) & (image[..., 1] < bottom * image[..., 2]))
+        half_cell = resolution * (abs(c) + abs(s)) / 2 if pose is not None else resolution / 2
+        departure_edge_m = .10
+        near_departure = (center_visible & (ahead + half_cell >= departure_edge_m)
+            & (ahead - half_cell < departure_edge_m + 2 * resolution)
+            & (np.abs(y) - half_cell <= self.calibration.body.width / 2))
+        return visible, distance, near_departure
 
     def _domain(self, pose, grid):
         import numpy as np
@@ -929,12 +945,16 @@ class PerceptionPipeline:
                     self._free_scheduler=scheduler
                 else:scheduler=self._free_scheduler
                 parking_cells = {cell for bay in parking_clearance for cell in parking_clearance_cells(bay, grid.spec)} if can_free else ()
-                visible = self._free_visibility(grid, pose) if can_free else None
+                view = (self._free_visibility(grid, pose, prioritize_departure=region.vehicle_stopped)
+                        if can_free and region is not None else None)
+                visible, proximity, near_departure = (None, None, None) if view is None else view
                 plan=scheduler.plan(context_key=schedule_context,needed_mask=needed,support=grid.support,permission=grid.permission,
                     state=grid.state,observed_us=grid.observed_us,time_known=grid.time_known,now_us=now_us,
                     capture_lower_us=None if capture_interval is None else capture_interval[0],max_cells=self.profile.max_free_cells,
                     max_ray_tests=remaining,cycle_bound_us=cycle_bound_us,completion_bound_us=completion_bound_us,
-                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells,visible_mask=visible)
+                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells,visible_mask=visible,
+                    required_proximity=proximity,priority_mask=None if region is None else region.priority_mask,
+                    near_departure_mask=near_departure)
                 selected=plan.cells
                 if not plan.needed_count:can_free=False
                 if scheduling_status not in ('NEEDED_REGION_OUTSIDE_GRID','NEEDED_REGION_EXPIRED','NEEDED_POSE_CHANGED'):scheduling_status=plan.status

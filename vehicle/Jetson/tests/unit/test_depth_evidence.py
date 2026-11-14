@@ -45,6 +45,14 @@ class DepthEvidenceTests(unittest.TestCase):
         self.assertGreater(certificate.required_tiles, 1)
         self.assertLessEqual(certificate.work, 256)
 
+    def test_tile_outside_radial_extent_does_not_require_a_witness(self):
+        target = TargetClass(.5, .5, .5, qualified=True)
+        bounds = (-.01, -.01, .01, .01)
+        rays = tuple(ray for ray in witness_rays() if ray.direction_lower[0] * ray.direction_lower[1] == 0.)
+        result = certify_cell(bounds, rays, (target,), profile(), tile_size_m=.125)
+        self.assertEqual(result.required_tiles, 77)
+        self.assertEqual(result.status, 'UNKNOWN')
+
     def test_blind_volume_and_long_protrusion_are_not_cleared(self):
         p = profile()
         target = TargetClass(.5, .5, .5, qualified=True)

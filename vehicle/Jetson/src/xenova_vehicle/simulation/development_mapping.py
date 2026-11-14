@@ -46,7 +46,7 @@ class DevelopmentMappingNotReady(ValueError):
 def _development_stopping(grid, pose, snapshot, limits, now, *, current_sensors=None):
     """기존 stopping_region의 같은 보수 원식을 명시 개발 domain에만 적용한다."""
     import numpy as np
-    from ..mapping.free_schedule import StoppingRegion
+    from ..mapping.free_schedule import StoppingRegion, braking_work_mask
     inputs = snapshot.metric_inputs; vehicle = inputs.vehicle; admission = snapshot.sensors
     if current_sensors is not None:
         from ..runtime.pc_current_sensors import PcCurrentSensors
@@ -76,11 +76,12 @@ def _development_stopping(grid, pose, snapshot, limits, now, *, current_sensors=
     needed = ((np.nextafter(x0, -np.inf) <= bounds[2]) & (np.nextafter(x0+r, np.inf) >= bounds[0])
         & (np.nextafter(y0, -np.inf) <= bounds[3]) & (np.nextafter(y0+r, np.inf) >= bounds[1]))
     complete = bool(ox <= bounds[0] and oy <= bounds[1] and bounds[2] <= ox+spec.width*r and bounds[3] <= oy+spec.height*r)
+    priority = braking_work_mask(spec,p,body,vehicle.message(),travel+braking,limits.body_error_m,needed)
     return StoppingRegion(spec, grid.frame_id, snapshot.calibration.sha256, p.clock_id, p.epoch,
         (source['map_epoch'], source['frame_epoch'], source['odom_epoch']), vehicle.source_key, vehicle.wire_sha256,
         now, min(vehicle.valid_until_j_us, now+limits.cycle_bound_us+limits.completion_bound_us),
         limits.cycle_bound_us, limits.completion_bound_us, bounds, radius, complete,
-        needed.tobytes(), vehicle, admission, pose)
+        needed.tobytes(), priority.tobytes(), vehicle, admission, pose)
 
 
 @dataclass(frozen=True)
