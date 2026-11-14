@@ -676,10 +676,13 @@ enum dw_result dw_link_decode(const uint8_t *p,size_t n,xenova_drive_DriveLink *
   }
   if(r->has_direction_gate){
    const xenova_drive_DirectionGateWitness *g=&r->direction_gate;
+   bool recovery=p->supports_proximity_facts&&g->producer_role==1&&g->segment_index==g->cusp_index&&
+    ((g->segment_index==16&&g->gate.requested_direction==-1)||(g->segment_index==17&&g->gate.requested_direction==1));
    if(!g->control_generation||!positive63(g->vehicle_sequence)||!positive63(g->valid_until_pi_us)||
       !positive63(g->gate.gate_revision)||g->gate.state>4||g->gate.requested_direction< -1||g->gate.requested_direction>1||
       (g->gate.state&&!positive63(g->gate.stop_command_sequence))||g->mission_id.size!=16||g->driver_session.size!=16||
-      g->segment_index>=3||g->cusp_index>=512||!source_uuid_text(g->pi_session)||!source_uuid_text(g->device_session))return DW_ARRAY;
+      (!recovery&&(g->segment_index>=3||g->cusp_index>=512))||
+      !source_uuid_text(g->pi_session)||!source_uuid_text(g->device_session))return DW_ARRAY;
    if(g->producer_role==1){
     if(!positive63(g->calculation_sequence)||!positive63(g->plan_revision)||!positive63(g->phase_revision)||
        !positive63(g->mission_revision)||!positive63(g->grant_revision)||!g->gate.requested_direction||
@@ -699,6 +702,7 @@ enum dw_result dw_link_decode(const uint8_t *p,size_t n,xenova_drive_DriveLink *
   if(r->has_episode_status){enum dw_result status=dw_episode_status_validate(&r->episode_status);if(status)return status;}
   {enum dw_result route=dw_route_clock_validate(r);if(route)return route;}
   if(r->has_control_facts){
+   if(r->control_facts.has_proximity&&!p->supports_proximity_facts)return DW_VERSION;
    enum dw_result facts=dw_control_facts_validate(&r->control_facts,&r->vehicle);if(facts)return facts;
    if(r->control_facts.meter.valid&&(!r->vehicle.has_gateway_instance||
       strcmp(r->vehicle.gateway_instance,r->gateway_instance)||strcmp(r->vehicle.host_boot,r->host_boot)))return DW_SOURCE;

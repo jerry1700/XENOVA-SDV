@@ -81,5 +81,12 @@ enum dw_result dw_control_facts_validate(const xenova_drive_DriveControlFacts *f
  if((m->valid||(f->has_stop&&f->stop.state))&&!positive63(f->valid_until_pi_us))return DW_TIME;
  if(f->has_stop){enum dw_result rc=ep_stop(&f->stop);if(rc)return rc;const xenova_drive_StopFacts *s=&f->stop;
   if(s->state&&(!v->has_pi_session||strcmp(s->pi_session,v->pi_session)||strcmp(s->device_session,v->device_session)||s->stationary_last_sequence>v->sequence||s->stationary_observed_pi_us>v->pi_sample_us))return DW_SOURCE;}
+ if(f->has_proximity){const xenova_drive_ProximityFacts *p=&f->proximity;
+  if(!f->valid_until_pi_us||!v->has_pi_session||p->has_front_vehicle_sequence!=p->has_front_range_mm||
+     p->has_rear_range_mm!=p->has_rear_valid_until_pi_us)return DW_SOURCE;
+  if(p->has_front_range_mm&&(!p->front_blocked||p->front_vehicle_sequence!=v->sequence||!p->front_range_mm||p->front_range_mm>=150))return DW_SOURCE;
+  if(p->has_rear_range_mm&&(!p->rear_range_mm||p->rear_range_mm>65535||!p->rear_valid_until_pi_us||
+     p->rear_valid_until_pi_us>f->valid_until_pi_us))return DW_TIME;
+ }
  return DW_OK;
 }

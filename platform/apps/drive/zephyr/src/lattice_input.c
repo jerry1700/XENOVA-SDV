@@ -1204,6 +1204,7 @@ static void state_step(void){
       /* Codec knowledge does not install the route status/State/apply consumer. */
       if(!role){p->has_supported_state_features=true;
        p->supported_state_features=DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION;
+       p->has_supports_proximity_facts=true;p->supports_proximity_facts=true;
        #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
        if(dl_route_installed())p->supported_state_features|=DW_ROUTE_STATE;
        #endif
