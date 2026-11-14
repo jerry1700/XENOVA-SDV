@@ -25,7 +25,6 @@ import { clock, describe, unknownEventType } from '../domain/events';
 import { publisherObservation } from '../domain/telemetryPublisher';
 import { buildManagedRamSeries, managedRamReason } from '../domain/managedRam';
 import { APP_MEMORY_REGIONS, buildAppMemorySeries, formatAppBytes } from '../domain/appMemory';
-import { vmAuthorityOf } from '../domain/vmAuthority';
 import {
   ago,
   appHealth,
@@ -604,7 +603,6 @@ function VmOverviewCard({
       ? Number(ramDisplay.percent)
       : null;
   const apps = vmAppObservations(vm.vm_id, drive, socket);
-  const authority = vmAuthorityOf(role, vm, observedControl(drive, socket)?.active_vm_id);
   const eventSummary = latestEvent
     ? `${clock(latestEvent.occurred_at)} · ${describe(latestEvent, () => vm.name).title}`
     : '최근 중요 이벤트 없음';
@@ -632,7 +630,6 @@ function VmOverviewCard({
     >
       <div className={styles.vmCardTop}>
         <div>
-          <span className={styles.vmKicker}>{role?.title ?? '역할 미지정'}</span>
           <h3 id={titleId}>
             <Link className={styles.vmCardTitleLink} to={detailPath}>
               {vm.name}
@@ -642,9 +639,6 @@ function VmOverviewCard({
             {driving ? 'Drive' : 'Infotainment'} · {osLabel(vm)}
           </p>
         </div>
-        <span className={styles.authority} data-authority={authority.toLowerCase()}>
-          {authority}
-        </span>
       </div>
 
       <div className={styles.vmStatusRows}>
