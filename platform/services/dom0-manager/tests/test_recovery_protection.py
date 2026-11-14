@@ -10,7 +10,7 @@ import pytest
 from dom0_manager.errors import DriverError, InvalidState
 from dom0_manager.recovery.config import RecoverySettings
 from dom0_manager.recovery.engine import KEEP_CLOSED
-from dom0_manager.recovery.model import HealthState
+from dom0_manager.recovery.model import FailureReason, HealthState
 from dom0_manager.recovery.policy import RecoveryPolicy
 from dom0_manager.recovery.protection import GatewayProtection, GatewayRefused, GatewayUncertain
 from dom0_manager.recovery.state import RecoveryStatus, RecoveryStore
@@ -84,6 +84,27 @@ def test_protection_is_recorded_before_submit_and_force_runs_only_after_protecte
     (_, (_, context)), = [c for c in w.gateway.calls if c[0] == "finish"]
     assert context == {"host_boot_id": HOST, "expected_generation": 7, "target_execution_id": NEW}
     assert stored(w)["protection"]["phase"] == "RELEASED" and w.gateway.issued == 1
+
+
+def test_app_escalation_preserves_target_if_it_has_since_taken_manual(tmp_path):
+    from dataclasses import replace
+
+    w = drive(tmp_path)
+    normal_context = w.gateway.context
+    w.gateway.owner = str(VM)
+    w.gateway.context = lambda: {**normal_context(), "mode": "MANUAL"}
+    reason = FailureReason.VM_UNTRUSTED
+    w.watcher.failing(VM, reason, execution_id=EXEC)
+    w.engine.on_judgment(replace(zephyr_judgment(), reason=reason))
+    w.tick()
+    assert held(w) and w.gateway.issued == 0
+    assert not w.platform.recover_calls()
+
+    w.gateway.context = lambda: {**normal_context(), "mode": "MANUAL", "output_permitted": False}
+    w.gateway.generation += 1
+    w.advance(10)
+    w.tick()
+    assert w.platform.recover_calls()[0][1]["mode"] == "force-restart"
 
 
 def test_lost_submit_response_is_resolved_with_the_same_key(tmp_path):

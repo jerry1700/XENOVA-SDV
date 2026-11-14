@@ -91,6 +91,10 @@ static void transient_deadline_tests(void){
  work.sample.reason="DEADLINE";
  view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1001,0,true);
  assert(!strcmp(view.state,"NOT_READY")&&!strcmp(view.reason,"DEADLINE"));
+ work.health.failure=XDH_UNVERIFIED;
+ view=drive_warm_classify(&adapter,&selected,&status,&work,true,
+  (struct xm_span){0},0,1,2,1001,0,true);
+ assert(!strcmp(view.reason,"CALCULATION_FAILED"));
  status.revoked=true;status.state=DRIVE_TASK_STOPPING;
  view=drive_warm_classify(&adapter,&selected,&status,&work,true,(struct xm_span){0},0,1,2,1001,0,true);
  assert(!strcmp(view.phase,"STOPPING")&&!strcmp(view.reason,"APP_STOPPING"));

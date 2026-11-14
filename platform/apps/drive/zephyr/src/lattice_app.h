@@ -15,6 +15,8 @@ int drive_lattice_command(const struct drive_completion *,struct xm_drive_comman
 void drive_lattice_command_attempt(const struct drive_completion *,const struct xm_drive_command3 *);
 /* Old AUTO calculation owner has joined before this poll/restart. */
 int drive_lattice_reset_poll(int64_t original_deadline_ms);
+/* A timed preparation calculation failed for the replacement AUTO. */
+bool drive_lattice_recovery_deadline_failed(void);
 void drive_lattice_adapter(struct drive_adapter *,bool manual);
 int drive_lattice_join(int64_t original_deadline_ms);
 /* Called by the state I/O owner. Builds a real completed-path snapshot only;

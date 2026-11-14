@@ -25,6 +25,9 @@ static inline struct drive_warm_view drive_warm_classify(const struct drive_adap
    /* A newer running job has not replaced this completed fact. Its deadline
     * miss cannot invalidate the previous completion before its own lease. */
    if(!clock_valid||tick<work->finished_ms||tick-work->finished_ms>=300)v.reason="CALCULATION_FAILED";
+   else if(v.reason&&!strcmp(v.reason,"DEADLINE")&&
+      work->health.failure!=XDH_NONE&&work->health.failure!=XDH_DEADLINE)
+    v.reason="CALCULATION_FAILED"; /* A clock/resource/worker error cannot authorize deadline recovery. */
    if(!v.reason)v.state="READY";
   }else if(!v.reason)v.reason="STATE_PREPARING";
  }

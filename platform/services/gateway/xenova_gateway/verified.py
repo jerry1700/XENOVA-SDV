@@ -237,7 +237,7 @@ class VerifiedDriveMachine(ControlMachine):
             failure={'reason':reason,'generation':self.generation,'observed_monotonic_ms':int(now*1000)})
         except AuthorityError:self.failure='AUTHORITY_STORAGE_UNCERTAIN'
 
-    def _change(self,mode,vm,reason,now,*,arm=False,manual=None,distrust=None):
+    def _change(self,mode,vm,reason,now,*,arm=False,manual=None,distrust=None,auto_recovery=None):
         if not self.durable_write_available():
             # No control was accepted yet. Re-evaluate current qualifications next
             # turn rather than replaying a stale transition or issuing a generation.
@@ -246,7 +246,8 @@ class VerifiedDriveMachine(ControlMachine):
         cancelled=[] if reason=='resume_requested' else self._cancel_countdown(reason,now)
         self._countdown=None;self._resume_requested.clear()
         self.output_permitted=False
-        try:self.authority.issue(mode,vm,reason,now,self.apply_timeout_s,arm=arm,manual=manual,distrust=distrust)
+        try:self.authority.issue(mode,vm,reason,now,self.apply_timeout_s,arm=arm,manual=manual,distrust=distrust,
+            auto_recovery=auto_recovery)
         except AuthorityError as exc:
             self._fail(str(exc),now)
             return [ForwardStop(self.generation)]

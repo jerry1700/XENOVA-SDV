@@ -1021,6 +1021,7 @@ static enum de_result track(struct drive_engine *e,struct lp_tracker *tracker,ui
       command->requested_direction=path->execution.segments[0].signed_direction;}}
    }
    rc=tracked==LP_PATH_FOUND||tracked==LP_STOP?DE_OK:DE_PATH;
+   if(!live&&tracked==LP_DEADLINE)rc=DE_DEADLINE;
   }
   if(calculated&&live&&(tracked==LP_COLLISION||tracked==LP_INPUT||tracked==LP_NUMERIC))e->path_invalidated=true;
   if(!rc){
@@ -1235,7 +1236,7 @@ enum de_result de_restart(struct drive_engine *e){
 const char *de_reason(enum de_result rc){
  static const char *const reasons[]={"OK","BUSY","INPUT_INVALID","STATE_PREPARING","MAP_UNAVAILABLE","POSE_UNAVAILABLE",
   "PATH_UNAVAILABLE","OBSERVATION_EXPIRED","CONTEXT_CHANGED","STATE_REJECTED","RESOURCE_LIMIT","CANCELLED","CLOCK_ERROR",
-  "STATE_FRAME_CHANGED","STATE_CONFIGURATION_CHANGED","STATE_REFERENCE_CHANGED"};
+  "STATE_FRAME_CHANGED","STATE_CONFIGURATION_CHANGED","STATE_REFERENCE_CHANGED","DEADLINE"};
  return (unsigned)rc<sizeof(reasons)/sizeof(*reasons)?reasons[rc]:"INTERNAL_ERROR";
 }
 

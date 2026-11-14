@@ -1,18 +1,34 @@
-"""Existing Engine completion -> bootstrap receipts -> leased execution binding.
+"""Publish execution bindings and apply Gateway's scoped AUTO recovery request.
 
 Runs inside Recovery Worker, independently of its long recovery executor. No
-VM command, force escalation, authority issuance or app-memory replication is
-implemented here. App-ready observation never means platform restart success.
+VM command, authority issuance or app-memory replication is implemented here.
+Confirmed local cleanup or preparation deadline failure feeds VM recovery.
 """
 from __future__ import annotations
-import fcntl,importlib,logging,os,queue,stat,threading,time
+import fcntl,importlib,logging,os,queue,stat,subprocess,threading,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from uuid import UUID,uuid5
 from xenova_mqtt.drive_binding import BindingCache,app_instance,atomic_json,canonical,private_json
 from xenova_mqtt.readiness import parse as parse_readiness
 
 log=logging.getLogger(__name__)
 CONTEXT=('vm_id','host_boot_id','execution_id','domid','xen_unique_id')
+
+def _auto_fault(authority, row):
+    """Only a committed withdrawal for the exact boot, execution and intent."""
+    vm=row['vm_id'];fault=authority.get('auto_recovery',{}).get(vm)
+    if (not isinstance(fault,dict) or fault['host']!=row['host_boot_id'] or
+        any(fault[k]!=row[k] for k in ('execution_id','boot_id','intent_revision','lifecycle_generation')) or
+        type(authority.get('generation')) is not int or authority['generation']<=fault['generation'] or
+        authority.get('phase') not in ('APPLIED','DISARMED') or
+        authority.get('mode') not in ('AUTO','MANUAL','AUTO_READY','SAFE_STOP') or
+        (authority.get('owner')==vm and authority.get('mode')=='AUTO')):
+        return None
+    return fault
+
+def _auto_request_id(fault):
+    return str(uuid5(UUID(fault['instance']), f"deadline:{fault['execution_id']}:{fault['generation']}"))
 
 def valid_vm_trust_payload(payload):
     """Validate the legacy FW32 envelope, not permission for VM recovery."""
@@ -95,6 +111,46 @@ class ProductionBootstrap:
             raise ValueError('configured/receipt readiness profile differs')
         return value
 
+    def recover_auto(self,row):
+        """Use the same receipt lock and CAS as an explicit app rotation."""
+        if row.get('profile')!='warm-drive-1':return row
+        path=Path(self.config['authority_file'])
+        fault=_auto_fault(private_json(path,self.uid),row)
+        if not fault or app_instance(row,'autonomous')!=fault['instance']:return row
+        vm=row['vm_id'];context={k:row[k] for k in CONTEXT}
+        receipt=Path(self.config['receipt_dir'])/vm/row['execution_id']/'drive.json'
+        expected={k:row[k] for k in (*CONTEXT,'intent_revision','lifecycle_generation','status')}
+        def current():
+            now=self.observe(vm)
+            if any(now.get(k)!=v for k,v in expected.items()):
+                raise ValueError('execution/intent changed before AUTO recovery')
+            if _auto_fault(private_json(path,self.uid),row)!=fault:
+                raise ValueError('AUTO withdrawal no longer current')
+            return {k:now[k] for k in CONTEXT}
+        try:
+            credential,source=self.api.credentials(Path(self.config['credentials'][vm]['drive']),vm,'drive')
+            with self.api.receipt_lock(receipt):
+                store=self.api.XenStore('drive')
+                try:
+                    self.api.reinitialize_app(context,credential,source,receipt,app='autonomous',
+                        expected_instance=fault['instance'],request_id=_auto_request_id(fault),store=store,observe=current)
+                finally:store.close()
+        except (OSError,ValueError,subprocess.SubprocessError) as exc:
+            log.warning('AUTO reinitialization not confirmed vm=%s cause=%s',vm,type(exc).__name__)
+            # Even an uncertain Store call cannot revoke the unaffected app.
+        after=self.observe(vm)
+        if any(after.get(k)!=v for k,v in expected.items()):
+            return {**after,'status':'unavailable','reason':'AUTO_RECOVERY_TARGET_CHANGED'}
+        return {**after,**self.refresh(after)}
+
+    def confirms_auto_rotation(self,row,fault):
+        receipt=Path(self.config['receipt_dir'])/row['vm_id']/row['execution_id']/'drive.json'
+        saved=private_json(receipt,self.uid)
+        change=saved.get('app_changes',{}).get('autonomous',{})
+        return (saved.get('phase')=='applied' and saved.get('context')=={k:row[k] for k in CONTEXT} and
+            saved.get('drive_apps',{}).get('autonomous')==app_instance(row,'autonomous') and
+            app_instance(row,'autonomous')!=fault['instance'] and change.get('request_id')==_auto_request_id(fault))
+
 class RejoinCoordinator:
     def __init__(self,config,observe,provision,host_boot_id,*,clock=time.monotonic,uid=0,observe_many=None):
         self.config=config;self.observe=observe;self.provision=provision;self.clock=clock;self.uid=uid
@@ -108,6 +164,7 @@ class RejoinCoordinator:
         self._published_rows=None
         self._reports=queue.Queue(maxsize=64)
         self._trust_reports=queue.Queue(maxsize=16)
+        self._auto_failures={}
         self._legacy_faults={}  # bounded by the two configured VMs and two legacy reasons
         self.path=Path(config['receipt_dir'])/'rejoin.json';self.path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
         if self.path.parent.resolve()!=self.path.parent or self.path.parent.stat().st_uid!=uid or self.path.parent.stat().st_mode&0o077:
@@ -171,7 +228,7 @@ class RejoinCoordinator:
             if refresh_error is not None:raise refresh_error
             if refreshed is not None:
                 if self._stop.is_set():raise RuntimeError('rejoin stopped after refresh; no binding')
-                return {**row,**refreshed}
+                return self._recover_auto({**row,**refreshed})
         if old.get('execution_id')!=execution or not old.get('app_instance_id'):
             source={'execution_id':execution,'stage':'PROVISIONING',
                 'recovery_attempt_id':row.get('recovery_attempt_id'),'recovery_id':(completed or {}).get('recovery_id')}
@@ -182,13 +239,20 @@ class RejoinCoordinator:
                 raise ValueError('execution/intent changed during provisioning')
             if self._stop.is_set():raise RuntimeError('rejoin stopped after provisioning; no binding')
             self._record(vm,{**source,'stage':'PROVISIONED',**identity})
-            return {**after,**identity}
+            return self._recover_auto({**after,**identity})
         identity=self.provision.refresh(row) if hasattr(self.provision,'refresh') else {
             k:old[k] for k in ('boot_id','app_instance_id','profile','app_instances','app_status') if k in old}
         after=self.observe(vm)
         if any(after.get(k)!=row.get(k) for k in (*CONTEXT,'intent_revision','lifecycle_generation','status')):
             raise ValueError('execution/intent changed during identity refresh')
-        return {**after,**identity}
+        return self._recover_auto({**after,**identity})
+
+    def _recover_auto(self,row):
+        if not hasattr(self.provision,'recover_auto'):return row
+        try:return self.provision.recover_auto(row)
+        except (OSError,ValueError,KeyError,TypeError):
+            # A damaged/unavailable authority read is never a restart command.
+            return row
 
     def pump(self):
         if self._stop.is_set():return
@@ -319,6 +383,27 @@ class RejoinCoordinator:
             except queue.Empty:break
         return values
 
+    def app_recovery_failures(self):
+        """Fresh, exact-execution escalation, kept separate from legacy guest vm.trust."""
+        try:authority=private_json(Path(self.config['authority_file']),self.uid)
+        except (KeyError,ValueError,OSError):return []
+        with self._lock:failures=list(self._auto_failures.items())
+        events=[]
+        for vm,(instance,generation,_,t,failed) in failures:
+            if not failed:continue
+            now=self.clock();row=self.cache.current(vm,now)
+            if not row or not 0<=now-t<=.3 or authority.get('generation')!=generation:continue
+            if (authority.get('owner')==vm and authority.get('mode')!='SAFE_STOP' and
+                authority.get('rearm_required') is not True):
+                continue
+            try:
+                fault=_auto_fault(authority,row)
+                if (fault and instance==app_instance(row,'autonomous') and
+                    self.provision.confirms_auto_rotation(row,fault)):
+                    events.append({'vm_id':vm,'execution_id':row['execution_id'],'scope':'vm'})
+            except (OSError,ValueError,KeyError,TypeError,AttributeError):continue
+        return events
+
     def _apply_readiness(self,message):
         from xenova_mqtt import topics
         info=topics.parse(message.topic);env=message.envelope;t=message.received_monotonic;now=self.clock()
@@ -335,6 +420,13 @@ class RejoinCoordinator:
             authority=private_json(Path(self.config['authority_file']),self.uid)
         except (ValueError,OSError,KeyError,TypeError):return
         if ready.generation!=authority.get('generation'):return
+        if warm and info.app_id=='autonomous':
+            with self._lock:
+                identity=(env['agent_instance_id'],ready.generation)
+                old_failure=self._auto_failures.get(info.vm_id)
+                if not old_failure or old_failure[:2]!=identity or ready.check>old_failure[2]:
+                    failed=(ready.phase,ready.reason) in (('RESIDUAL','RESOURCE_RETAINED'),('WAITING','DEADLINE'))
+                    self._auto_failures[info.vm_id]=(*identity,ready.check,t,failed)
         mode=authority.get('mode')
         if mode not in ('SAFE_STOP','MANUAL','AUTO_READY','AUTO'):return
         app='manual' if mode in ('SAFE_STOP','MANUAL','AUTO_READY') else 'autonomous'

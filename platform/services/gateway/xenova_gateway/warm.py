@@ -4,9 +4,10 @@ The existing Authority issue/apply/rearm boundary remains authoritative. A new
 owner must actually calculate in the newly issued context before output resumes.
 """
 from xenova_mqtt.lifecycle import parse
+from xenova_mqtt.drive_binding import app_instance
 from .verified import VerifiedDriveMachine
 from .machine import DRIVE_APPS,ForwardStop
-from .authority import AuthorityError
+from .authority import AuthorityError,AUTO_RECOVERY_IDENTITY
 
 # 결과의 부적합과 VM/앱 실행 고장을 구분한다. 아래 이유 자체는 새 READY나 명령을 만들지 않는다.
 _CALCULATION_REJECTIONS=frozenset(('CALCULATION_FAILED','DEADLINE'))
@@ -32,7 +33,7 @@ class WarmDriveMachine(VerifiedDriveMachine):
         from xenova_mqtt.manual_session import SessionEvidence
         self.manual_input=SessionEvidence();self.movement=None
         self._deferred_abandon=None
-        self.function_rejections={};self.completed_work={};self.last_ready_work={}
+        self.function_rejections={};self.completed_work={};self.last_ready_work={};self.deadline_misses={}
 
     def on_manual_input(self,payload,received):
         from xenova_mqtt.manual_session import parse
@@ -48,6 +49,7 @@ class WarmDriveMachine(VerifiedDriveMachine):
         self._abandon(reason)
         self.qualification.clear();self.evidence_not_before=now
         self.function_rejections.clear();self.completed_work.clear();self.last_ready_work.clear()
+        self.deadline_misses.clear()
         self.execution_phases.clear()
         return super().block(reason,now)
 
@@ -60,11 +62,6 @@ class WarmDriveMachine(VerifiedDriveMachine):
             self.output_permitted=False;self._authorized=False
             self.failure=self.authority.error or str(exc);return False
         return True
-
-    def _bound(self,vm,at,app=None):
-        # Trust is checked now. The caller separately retains the original
-        # receive time for freshness; a newer cache stamp is not a new session.
-        return super()._bound(vm,self.clock(),app)
 
     def _ready(self,vm,app,now,held=False):
         binding=self.bindings.current(vm,self.clock())
@@ -96,7 +93,32 @@ class WarmDriveMachine(VerifiedDriveMachine):
             previous=self.authority.value.get('pending') or {}
             if manual and reason=='resume_requested' and self.authority.value['rearm_required'] and previous.get('manual_policy')=='NEUTRAL_THEN_ACTION':
                 manual['manual_policy']='NEUTRAL_THEN_ACTION'
-        return super()._change(mode,vm,reason,now,arm=arm,manual=manual,distrust=distrust)
+        recovery=None
+        lost=self.active_vm
+        if (reason in ('autonomous_unavailable','no_fresh_standby') and self.active_app=='autonomous' and
+            self.output_permitted and (vm!=lost or mode is Mode.SAFE_STOP) and self._deadline_recovery_due(lost,now)):
+            row=self.bindings.current(lost,now)
+            if row and self.sessions.get((lost,'autonomous'))==(row['execution_id'],row['boot_id'],app_instance(row,'autonomous')):
+                recovery=(lost,{**{key:row[key] for key in AUTO_RECOVERY_IDENTITY},'instance':app_instance(row,'autonomous'),
+                    'generation':self.generation,'host':self.authority.host})
+        return super()._change(mode,vm,reason,now,arm=arm,manual=manual,distrust=distrust,auto_recovery=recovery)
+
+    def _deadline_recovery_due(self,vm,now):
+        key=(vm,'autonomous')
+        misses=self.deadline_misses.get(key)
+        if misses is None or misses[0]!=self.generation or not self._bound(vm,now,'autonomous'):
+            return False
+        _,_,count,last=misses
+        return count>=_REJECTION_LIMIT or now-last>=self.readiness_lease_s
+
+    def _bound(self,vm,at,app=None):
+        # Old AUTO must not become eligible again during the receipt/Store update.
+        # This fence is durable and scoped to the old instance, preserving MANUAL.
+        fault=self.authority.value.get('auto_recovery',{}).get(vm)
+        row=self.bindings.current(vm,self.clock()) if fault and app in (None,'autonomous') else None
+        if row and row['execution_id']==fault['execution_id'] and app_instance(row,'autonomous')==fault['instance']:
+            return False
+        return super()._bound(vm,self.clock(),app)
 
     def _adopt_control(self,*args,**kwargs):
         actions=super()._adopt_control(*args,**kwargs)
@@ -163,6 +185,7 @@ class WarmDriveMachine(VerifiedDriveMachine):
             self.execution_phases.pop((vm,app),None)
             self.states.invalidate(vm,app)
             self.function_rejections.pop((vm,app),None)
+            self.deadline_misses.pop((vm,app),None)
             self.completed_work.pop((vm,app),None);self.last_ready_work.pop((vm,app),None)
         return True
 
@@ -203,6 +226,18 @@ class WarmDriveMachine(VerifiedDriveMachine):
                 self.function_rejections[key]=(self.generation,previous_failure[1],min(_REJECTION_LIMIT,previous_failure[2]+count))
             else:self.function_rejections[key]=(self.generation,t,count)
         else:self.function_rejections.pop(key,None)
+        if app=='autonomous':
+            misses=self.deadline_misses.get(key)
+            if value.phase=='EXECUTING' and value.reason=='DEADLINE' and value.progress>p.progress and value.progress>0:
+                # A skipped completion provides no evidence of consecutiveness.
+                consecutive=misses and misses[:2]==(value.generation,value.progress-1)
+                count=min(_REJECTION_LIMIT,misses[2]+1) if consecutive else 1
+                self.deadline_misses[key]=(value.generation,value.progress,count,t)
+            elif not (value.phase=='EXECUTING' and value.reason in _CALCULATION_REJECTIONS and
+                      misses and misses[:2]==(value.generation,value.progress)):
+                # An aging report for the same completion can become
+                # CALCULATION_FAILED without any new work replacing the miss.
+                self.deadline_misses.pop(key,None)
         retrying=(value.readiness=='NOT_READY' and self._retrying_function(key,value.reason,value.phase,t))
         valid=value.readiness=='QUALIFIED' or (value.readiness=='READY' and
             (value.progress>p.progress or (p.observed is not None and 0<=t-p.observed<=self.readiness_lease_s)))
@@ -235,6 +270,8 @@ class WarmDriveMachine(VerifiedDriveMachine):
         if not self._bound(vm,now,app):return True
         key=vm,app;p=self.prepared[key];check=self.checks.get(key)
         if self.execution_phases.get(key) in ('STOPPING','RESIDUAL'):return True
+        if key in self.deadline_misses and self.deadline_misses[key][0]==self.generation:
+            return self._deadline_recovery_due(vm,now)
         if not check or not 0<=now-check[1]<=self.readiness_lease_s:return True
         if p.state=='READY' and self._ready(vm,app,now):
             # 계산은 정상이어도 명령 전달만 잠시 비었을 수 있다. READY 보고나

@@ -47,6 +47,7 @@ struct drive_command_gate {
 /* Provisional operating policy: drop four late AUTO results, attempt STOP on
  * the fifth distinct completion. This never renews the prior command lease. */
 #define DRIVE_DEADLINE_RETRY_LIMIT 5U
+#define DRIVE_PERIOD_US UINT64_C(20000)
 struct drive_deadline_gate {
  struct drive_command_context context;
  uint64_t sequence;

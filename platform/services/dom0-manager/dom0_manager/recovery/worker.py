@@ -73,7 +73,8 @@ class RecoveryWorker:
         judgments = self._watcher.tick(observations, now, link=self._link())
         if self._rejoin is not None:
             current={str(obs.vm_id):obs for obs in observations}
-            for event in self._rejoin.trust_events():
+            escalations=getattr(self._rejoin,'app_recovery_failures',lambda:[])()
+            for event in [*self._rejoin.trust_events(),*escalations]:
                 if event.get('scope')!='vm':continue
                 obs=current.get(event['vm_id'])
                 judgment=None if obs is None else self._watcher.report_untrusted(
