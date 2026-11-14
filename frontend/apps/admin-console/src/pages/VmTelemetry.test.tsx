@@ -272,6 +272,8 @@ describe('VM telemetry dashboard', () => {
     });
     const page = renderPage('/dashboard/overview');
     const autonomous = within(await screen.findByRole('article', { name: /autonomous/ }));
+    expect(autonomous.queryByText('주 구동 VM')).not.toBeInTheDocument();
+    expect(autonomous.queryByText('ACTIVE')).not.toBeInTheDocument();
     expect(await autonomous.findByLabelText('Memory 25.000%')).toBeInTheDocument();
     expect(autonomous.getByText(/정적 예약 포함/)).toBeInTheDocument();
     expect(autonomous.queryByText('Kernel heap')).not.toBeInTheDocument();
