@@ -379,6 +379,10 @@ class VerifiedGatewayRunner(GatewayRunner):
             if not self.machine.output_permitted or action.generation!=self.machine.generation or not source:return
             if source.get('command',{}).get('command_kind')=='STOP':
                 self._submit(ForwardStop(action.generation,source),wait_for_stop=False);return
+            flags=device.get('proximity_flags')
+            if flags is not None and ((action.v_mps>0 and flags&8) or (action.v_mps<0 and flags&16)):
+                self._deferred_drive=None
+                return  # The device already holds the inhibited direction.
             if self.operator is not None and not self.operator.output_allowed(source):
                 self._deferred_drive=None;self._submit(ForwardStop(action.generation),wait_for_stop=False);return
             if source.get('valid_until_pi_us') is not None and int(now*1e6)>=source['valid_until_pi_us']:
@@ -589,10 +593,10 @@ class VerifiedGatewayRunner(GatewayRunner):
             return None
         return value
 
-    def control_facts(self, *, view=None):
+    def control_facts(self, *, view=None, proximity_supported=False):
         """원 serial owner의 불변 meter/STOP 사실. current clock나 권위를 발급하지 않는다."""
         from .control_facts import build_control_facts
-        return build_control_facts(self, view=view)
+        return build_control_facts(self,view=view,proximity_supported=proximity_supported)
 
     def current_scene_gate(self):
         from .scene_authority import SceneGate

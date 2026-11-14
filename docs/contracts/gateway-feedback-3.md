@@ -216,6 +216,14 @@ Pi HELLO는 version3+새 Pi session+등록 config digest다. MCU는 부팅 sessi
 
 같은 Pi 연결에서 MCU boot session이 바뀌면 DEVICE_RESTARTED fault·ready 철회다. 새 ACK/새 표본이 기존 fault를 자동 해제하지 않는다. clock/session/cumulative counter를 조용히 초기화해 같은 장치로 계속 달리지 않는다. Pi 재기동은 새 pi_session/clock_epoch로 다시 설치한다. boot session 생성·영구 저장 방식은 MCU 제공물에 명시한다.
 
+Pi의 가상 ToF 복구 시험에서는 선택 cap `0x1000`을 별도로 사용한다. 이 cap을 광고한
+세션만 SENSOR/CLOCK_REPLY quality의 `0x08`(전진 차단), `0x10`(후진 차단)을
+방향별 로컬 추진 차단으로 해석한다. 두 비트는 기존 encoder/steering quality와
+분리하고 같은 원 표본에 결합한다. 이 cap이 있는 DRIVE의 REPORT status REJECTED,
+reason `21`은 근거리 차단이며 장치 전체 고장으로 처리하지 않는다. 해당 거절만으로
+정지를 확인하거나 차단을 해제하지 않는다. ESP32 실물 펌웨어가 이 확장을 광고하고
+제동·정지 원 표본을 내는지는 아직 확인하지 않았다.
+
 `firmware_sha256`은 **등록된 기대값과 ACK 자기보고 digest를 비교하는 코드**다. 바이너리 전체 자체 내장 hash/flash contents 검증/보안 attestation이라고 확정할 수 없다. 현 확인 범위에는 bin/ELF/partition 중 hash 대상, hash-domain/canonical manifest, NVS 저장·업데이트·읽기 검증 절차가 없다. config SHA의 canonical bytes도 없다. 자기 해시를 자신을 포함한 binary에 넣는 순환 정의를 만들지 말고 빌드 manifest·분리 저장값·읽기 검증 범위를 MCU 담당이 제안해 공동 등록한다. Pi의 private profile 소유·권한 검사는 firmware contents 검증을 대신하지 않는다.
 
 ## 5. 원 4시각과 실제 latch → 설치 ACK

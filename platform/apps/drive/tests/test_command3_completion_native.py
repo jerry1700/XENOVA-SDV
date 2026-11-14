@@ -34,6 +34,7 @@ int dl_mission_get(xenova_drive_MissionGrant *out,uint64_t now){(void)out;(void)
 int dl_mission_for_local(xenova_drive_MissionGrant *out,uint64_t now){(void)out;(void)now;return -EAGAIN;}
 static xenova_drive_DirectionGateWitness fixture_gate;static bool fixture_gate_available;
 int dl_direction_get(bool role,xenova_drive_DirectionGateWitness *out,uint64_t now){(void)role;(void)now;if(!fixture_gate_available)return -EAGAIN;*out=fixture_gate;return 0;}
+int dl_control_facts(xenova_drive_DriveControlFacts *out,uint64_t now){(void)out;(void)now;return -EAGAIN;}
 static uint64_t context_u64(const char *text){
  char *end;errno=0;unsigned long long value=strtoull(text,&end,10);
  assert(*text&&*text!='-'&&!*end&&!errno&&value<=INT64_MAX);return (uint64_t)value;
@@ -187,7 +188,7 @@ def command_probe(tmp_path_factory):
         platform/'apps/manual/zephyr/src',platform/'guests/zephyr/diagnostics/include')
     command=['cc','-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-ffunction-sections','-fdata-sections',
         '-Wl,--gc-sections','-fsanitize=address,undefined','-include',str(include/'shim.h'),
-        *['-I'+str(p) for p in includes],str(source),*[str(HOME/'planner'/name) for name in ('task_reference.c','behavior.c','parking.c','route_exit.c','lattice.c','engine.c','generated/primitives.c')],str(platform/'apps/manual/zephyr/src/manual.c'),
+        *['-I'+str(p) for p in includes],str(source),*[str(HOME/'planner'/name) for name in ('task_reference.c','behavior.c','parking.c','route_exit.c','lattice.c','engine.c','tof_auto.c','tof_recovery.c','generated/primitives.c')],str(platform/'apps/manual/zephyr/src/manual.c'),
         str(world/'world.c'),str(world/'generated/world.pb.c'),*[str(world/'nanopb'/name) for name in ('pb_common.c','pb_decode.c','pb_encode.c')],
         *map(str,sorted((mqtt/'src').glob('*.c'))),'-lm' ,'-o',str(binary)]
     result=subprocess.run(command,capture_output=True,text=True,timeout=120)

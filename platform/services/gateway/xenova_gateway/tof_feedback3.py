@@ -10,7 +10,7 @@ import struct
 from uuid import UUID
 from binascii import crc32
 
-from xenova_drive_world import schema,encode
+from xenova_drive_world import schema,decode,encode
 from xenova_drive_world.mapper_clock import drift_pad
 
 
@@ -203,8 +203,25 @@ class TofReceiver:
             try:raw=self._mapped(latest,now)
             except ValueError:
                 self._clear(sensor,sample=state['sample'],latest=True);self.counts['mapping_rejected']+=1
-            else:latest['published']=True;result.append(raw)
+            else:latest['published']=True;latest['wire']=raw;result.append(raw)
         return tuple(result),tuple(sorted(self.revoked))
+
+    def current_ranges(self,vehicle,now):
+        """Return only selected, mapped observations in the current device session."""
+        answer={}
+        for sensor,state in self.sensors.items():
+            latest=state['latest']
+            if latest is None or 'wire' not in latest or now>=latest['valid_until']:continue
+            row=decode(latest['wire'],schema.TofObservation)
+            if (row.pi_session,row.device_session)!=(vehicle['pi_session'],vehicle['device_session']):continue
+            if not row.frame_status&1:continue
+            if row.status==b'\x01' and row.quality[0]&1:
+                distance=int.from_bytes(row.distance_mm_le,'little')
+            elif sensor==1 and row.status in (b'\x02',b'\x03'):
+                distance=65535
+            else:continue
+            answer[sensor]=(distance,row.pi_sample_us,row.clock_error_us+row.sensor_time_error_us,latest['valid_until'])
+        return answer
 
     def _sample(self,item,now):
         if type(item) is not TofReceipt or not 0<=item.received_pi_us<=now:raise ValueError('TOF receipt')

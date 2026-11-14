@@ -24,6 +24,9 @@ PROBE3=struct.Struct('<16s16sQQ');CLOCK3=struct.Struct('<16s16sQQQQQQqqBiH')
 INSTALL3=struct.Struct('<16s16s16sQQQqqQQ');CLOCK_ACK3=struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3=struct.Struct('<16s16sQQqqBiH16sQ')
 REQUIRED_CAPS=0x01f7
+PROXIMITY_CAPABILITY=0x1000
+PROXIMITY_MASK=0x18
+PROXIMITY_BLOCKED=21
 CLOCK_PROBE_INTERVAL_US=200000
 CLOCK_INSTALL_RETRY_US=50000
 
@@ -66,6 +69,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
         self._matched_stop_snapshot=None;self._direction_snapshot=None;self.phase_key=None;self.phase_end=0
         self._vehicle_wire_cache=OrderedDict()
         self.hold_row=None;self.hold_start=None
+        self._proximity=None
         self.tof_inbox=TofInbox();self._tof_selection=None;self._tof_context_snapshot=None
         super().__init__(*args,**kwargs)
         self.protocol_version=3;self.odometry.clock_profile3=True
@@ -75,6 +79,11 @@ class Feedback3SerialSink(FeedbackSerialSink):
         value.update(profile='feedback-3',clock_epoch=self.clock_epoch,clock_lease_revision=self.clock_sequence,
             clock_ready=self.ready and self._sensor_available() and self._lease(int(self.clock()*1e6)) is not None if hasattr(self,'clock') else False)
         if hasattr(self,'odometry'):
+            sample=value.get('vehicle_sample')
+            if sample is not None and self._proximity is not None:
+                device,source,flags=self._proximity
+                if (device,source)==(sample['device_session'],sample['source_sample']):
+                    value['proximity_flags']=flags
             value['absolute_meter']=self.odometry.absolute.snapshot
             self._matched_stop_snapshot=self._make_matched_stop()
             pin=self.stop_pin
@@ -258,7 +267,10 @@ class Feedback3SerialSink(FeedbackSerialSink):
             raise FeedbackError('feedback3 deadline echo')
         if row['kind']!=2 and at>=row['expires']:raise FeedbackError('feedback3 original command expired')
         if not flags&1 and velocity or not flags&2 and steering:raise FeedbackError('feedback3 unsupported measurement')
-        if status in (3,4):self._fail('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
+        proximity_rejection=(status==3 and reason==PROXIMITY_BLOCKED and row['kind']==1
+            and self.capabilities&PROXIMITY_CAPABILITY)
+        if proximity_rejection:self.pending.pop(seq,None)
+        elif status in (3,4):self._fail('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
         self.report_hwm=report_seq;row['accepted']=status in (1,2);row['applied']=status==2
         row['feedback']=payload
         evidence=dict(accepted=row['accepted'],applied=row['applied'],physical_stop=bool(stationary) if flags&4 and status==2 and row['kind']==2 else None,
@@ -266,6 +278,7 @@ class Feedback3SerialSink(FeedbackSerialSink):
             observed_monotonic=now,command_generation=generation,command_counter=counter,command_sequence=seq,
             command_kind='STOP' if row['kind']==2 else 'HOLD_STEER' if row['kind']==3 else 'DRIVE',sample_seq=sample,
             observation_source='device_report',pi_session=self.pi_session,device_session=self.device_session,status=STATUS[status])
+        if proximity_rejection:evidence['rejection']='PROXIMITY_BLOCKED'
         measured=next((value for value in reversed(self.odometry.samples)
             if value['source_sample']==sample and value['source_us']==stamp),None)
         evidence['applied_pi_lower_us']=None if measured is None else measured['pi_sample_us']-measured['clock_error_us']
@@ -285,7 +298,12 @@ class Feedback3SerialSink(FeedbackSerialSink):
         lo,hi=stamp+lower,min(stamp+upper,now)
         if not 0<=lo<=hi<=now or now-lo>self.odometry.config.maximum_sample_age_us:
             raise FeedbackError('sensor3 observation window')
-        self.odometry.observe_mapped(self.pi_session,self.device_session,stamp,sample,left,right,quality,steer,error,lo,hi)
+        flags=None
+        if self.capabilities&PROXIMITY_CAPABILITY:
+            flags=quality&PROXIMITY_MASK;quality&=~PROXIMITY_MASK
+        accepted=self.odometry.observe_mapped(self.pi_session,self.device_session,stamp,sample,left,right,quality,steer,error,lo,hi)
+        if accepted is not None and flags is not None:
+            self._proximity=(self.device_session,sample,flags)
 
     @property
     def matched_stop(self):

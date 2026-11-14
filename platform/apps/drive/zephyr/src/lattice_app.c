@@ -7,6 +7,7 @@
 #include "lattice_memory.h"
 #include "preflight_cadence.h"
 #include "planner_health.h"
+#include "tof_auto.h"
 #include <zephyr/random/random.h>
 #include <zephyr/sys/atomic.h>
 #include <errno.h>
@@ -24,6 +25,9 @@ static struct manual_cfg manual_config;
 static struct k_thread planner_thread;
 K_THREAD_STACK_DEFINE(planner_stack,8192);
 K_MUTEX_DEFINE(app_metadata);
+K_MUTEX_DEFINE(tof_lock);
+static struct lt_auto tof;
+static atomic_bool tof_active;
 static atomic_t stop,planner_stop;
 static bool planner_started,planner_joined,initialized;
 static char app_instance[37];
@@ -287,6 +291,7 @@ static const char *qualified(const void *unused,struct xm_span input,int64_t age
  ARG_UNUSED(unused);ARG_UNUSED(input);ARG_UNUSED(age);
  if(engine.stopping)return "STATE_PREPARING";
  if(!planner_current())return "CALCULATION_FAILED";
+ if(atomic_load(&tof_active)&&engine.local_owner)return NULL;
  if(engine.path_invalidated)return "PATH_INVALIDATED";
  struct dl_clock clock;uint64_t now;dw_vehicle vehicle;
  if(current_vehicle(&clock,&now,&vehicle))return "POSE_UNAVAILABLE";
@@ -320,7 +325,8 @@ static const char *qualified(const void *unused,struct xm_span input,int64_t age
  }
  (void)de_path_release(&engine,ph);return reason;
 }
-static bool state_usable(const void *context){ARG_UNUSED(context);return !engine.stopping&&atomic_load(&prepared_valid);}
+static bool state_usable(const void *context){ARG_UNUSED(context);return !engine.stopping&&
+ (atomic_load(&prepared_valid)||(atomic_load(&tof_active)&&engine.local_owner));}
 static const char *manual_qualified(const void *unused,struct xm_span input,int64_t age){
  ARG_UNUSED(unused);if(!input.p)return "INPUT_UNAVAILABLE";
  if(age<0||age>manual_config.input_timeout_ms)return "INPUT_STALE";
@@ -354,6 +360,7 @@ static bool stop_matches(const struct xm_drive_command2 *stop,const xenova_drive
   gate->cusp_index==stop->cusp_index&&uuid_same(gate->mission_id.bytes,stop->mission_id)&&gate->mission_revision==stop->mission_revision&&
   gate->grant_revision==stop->grant_revision&&!gate->driver_action_seq&&!gate->driver_state_seq;
 }
+#include "lattice_tof.inc"
 static float advance_direction(const struct dl_clock *clock,uint64_t now,const dw_vehicle *vehicle){
  if(!clock->acknowledged)return NAN;
  xenova_drive_DirectionGateWitness gate;if(dl_direction_get(false,&gate,now))return NAN;
@@ -399,6 +406,8 @@ static int automatic(void *unused,struct xm_span control,struct xm_span input,in
  out->modern_command=required;
  if(!planner_current()){out->reason="CALCULATION_FAILED";return 0;}
  xenova_drive_MissionGrant mission={0};if(required&&(!clock.acknowledged||dl_mission_for_local(&mission,now))){out->reason="MISSION_UNAVAILABLE";return 0;}
+ const xenova_drive_DriveControlFacts *facts=required&&!dl_control_facts(&tracking_facts,now)?&tracking_facts:NULL;
+ if(required&&tof_automatic(&mission,facts,&clock,now,deadline,out))return 0;
  float hold_target=advance_direction(&clock,now,&vehicle);
  if(required&&!k_mutex_lock(&app_metadata,K_NO_WAIT)){
   if(direction_phase.active&&(!uuid_same(mission.mission_id.bytes,direction_phase.original_stop.mission_id)||
@@ -406,7 +415,6 @@ static int automatic(void *unused,struct xm_span control,struct xm_span input,in
   k_mutex_unlock(&app_metadata);
  }
  struct lp_budget budget={deadline,clock_us,tracker_cancelled,NULL,NULL};struct lp_command command;
- const xenova_drive_DriveControlFacts *facts=required&&!dl_control_facts(&tracking_facts,now)?&tracking_facts:NULL;
  enum de_result rc=required?de_track_mission_facts(&engine,&mission,facts,now,.02f,&command,&vehicle,budget):de_track(&engine,now,.02f,&command,&vehicle,budget);
  if(rc){out->reason=rc==DE_PATH?lp_reason(command.result):de_reason(rc);return 0;}
  out->v_mps=command.velocity;out->steer_rad=command.velocity?command.steer:0;out->nearest_m=command.known_distance;
@@ -726,6 +734,7 @@ static int planner_step(void){
    }
   }
    if(planner_refresh_mission(now)==-EBUSY)return 1;
+   if(tof_planner(now,guest))return 1;
    behavior_io(&mapping,now,guest);
   if(engine.planning){
    enum de_result rc=de_plan_slice(&engine,4,now);
@@ -856,11 +865,12 @@ void drive_lattice_completed(const struct drive_completion *work){
 int drive_lattice_command(const struct drive_completion *work,struct xm_drive_command3 *out,uint64_t *guest_until){
  if(!work||!out||!guest_until||!work->sample.modern_command)return -EINVAL;
  *out=work->sample.command;*guest_until=work->sample.valid_until_guest_us;
+ if(work->sample.tof_busy)return -EAGAIN;
  struct xm_drive_command2 *c=&out->command;
  c->calculation_sequence=work->sequence;c->completed_guest_us=work->end_us;
  c->v_mps=work->sample.reason?0:work->sample.v_mps;c->steer_rad=work->sample.reason?0:work->sample.steer_rad;
  bool hold=work->sample.hold_steer&&!work->sample.reason;
- bool stop=!hold&&!c->v_mps&&!c->steer_rad;
+ bool stop=!hold&&!c->v_mps&&!c->steer_rad&&(!work->sample.tof_coast||work->sample.reason);
  strcpy(c->command_kind,hold?"HOLD_STEER":stop?"STOP":"DRIVE");
  out->next_direction=work->sample.gate_required?work->sample.requested_direction:0;
  if(!stop&&!hold)out->next_direction=0;
@@ -874,6 +884,7 @@ int drive_lattice_command(const struct drive_completion *work,struct xm_drive_co
   if(!completion_key_current(work,&handle,&path))return -ESTALE;
   (void)de_path_release(&engine,handle);
  }
+ if(!stop&&work->sample.tof_recovery&&!tof_command_current(c))return -ESTALE;
  return 0;
 }
 void drive_lattice_command_attempt(const struct drive_completion *work,const struct xm_drive_command3 *command){
@@ -906,6 +917,7 @@ int drive_lattice_reset_poll(int64_t deadline){
  if(k_mutex_lock(&app_metadata,K_NO_WAIT)){de_stop(&engine);planner_joined=false;return -EAGAIN;}
  strcpy(app_instance,boot.auto_instance_id);prepared_valid=false;prepared_mission_present=false;memset(&completion,0,sizeof(completion));memset(&direction_phase,0,sizeof(direction_phase));
  memset(&phase_registration,0,sizeof(phase_registration));
+ tof.stage=LT_AUTO_IDLE;atomic_store(&tof_active,false);
  preparation_sequence=snapshot_revision=exported_completion=0;copy_message[0]=0;copy_revision=prepared_expiry=0;prepared_gateway[0]=0;k_mutex_unlock(&app_metadata);
  phase_snapshot_valid=false;
  return planner_start();
