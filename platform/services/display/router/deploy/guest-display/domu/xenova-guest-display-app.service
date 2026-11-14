@@ -9,8 +9,8 @@ ConditionPathExists=/etc/xenova/guest-display-domu.json
 Type=simple
 User=xenova-display
 Group=xenova-display
-# Python modules installed under /opt/xenova/display-guest (no pip, stdlib only).
-Environment=PYTHONPATH=/opt/xenova/display-guest
+Environment=PYTHONPATH=/opt/xenova/display-guest:/opt/xenova/mqtt-client
+EnvironmentFile=-/etc/xenova/interaction-app.env
 ExecStart=/usr/bin/python3 -m xenova_display.guest_app --config /etc/xenova/guest-display-domu.json
 Restart=on-failure
 RestartSec=3
