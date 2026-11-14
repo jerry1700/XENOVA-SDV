@@ -126,17 +126,20 @@ def _mask(np, candidate):
     return np.frombuffer(value.tobytes(order='C'), dtype=np.uint8).reshape(360, 640)
 
 
-def build_neural_layer(observation, calibration, max_points=MAX_PLANE_POINTS):
+def build_neural_layer(observation, calibration, max_points=MAX_PLANE_POINTS, *, rgb_view=None):
     """원 RGB parent에 결박된 NN만 받는다. source/SDK parent 대조는 adapter가 먼저 수행한다.
 
     원 source mask의 2×2 복제를 한 NN cell로 표본화한다. 표본 수와 bound 실패를
     별도로 보고하며 미표본 mask 영역을 비도로·빈 공간으로 바꾸지 않는다.
+    rgb_view 를 주면 표본 픽셀을 편 영상의 좌표로 옮겨 무왜곡 모델로 투영한다. 기록하는 픽셀은 원 좌표다.
     """
     if (type(observation) is not PerceptionInput or type(calibration) is not CalibrationProfile
             or observation.calibration_id != calibration.sha256):
         raise ValueError('neural input differs from its calibration')
     if type(max_points) is not int or not 1 <= max_points <= MAX_PLANE_POINTS:
         raise ValueError('neural plane point cap must be in 1..128')
+    if rgb_view is not None and rgb_view.source != calibration.rgb:
+        raise ValueError('rectified view differs from the calibration RGB camera')
     candidates = observation.nn
     if (type(candidates) is not YolopCandidates or observation.nn_key is None
             or candidates.preprocessing_id != PREPROCESSING_ID
@@ -171,8 +174,12 @@ def build_neural_layer(observation, calibration, max_points=MAX_PLANE_POINTS):
     projected, unprojected = [], []
     if selected:
         pixels = np.asarray([point[2] for point in selected], dtype=np.float64)
-        lower, upper, valid = project_ground_bounds_many(pixels[:, 0], pixels[:, 1],
-            calibration.rgb, calibration.plane, pixel_error=calibration.rgb.pixel_error + 1.0)
+        camera, u, v = calibration.rgb, pixels[:, 0], pixels[:, 1]
+        if rgb_view is not None:
+            camera = rgb_view.camera
+            u, v = rgb_view.points(u, v)
+        lower, upper, valid = project_ground_bounds_many(u, v,
+            camera, calibration.plane, pixel_error=camera.pixel_error + 1.0)
         for i, (kind, index, pixel) in enumerate(selected):
             if valid[i]:
                 projected.append(NeuralPlanePoint(kind, index, pixel,
