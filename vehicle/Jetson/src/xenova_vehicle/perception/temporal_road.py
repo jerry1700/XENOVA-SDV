@@ -113,6 +113,8 @@ class RoadLink:
     position_estimate_m: float | None = None
     boundary_normal_bounds_m: tuple[float, float, float] | None = None
     outer_chord_bounds_m: tuple[float, float] | None = None
+    # (start, end), each with the map-frame fit offsets of the two outer lines.
+    outer_fit_offsets_xy: tuple[tuple[tuple[float, float], ...], ...] | None = None
 
     @property
     def heading_for_admission_rad(self):
@@ -124,6 +126,9 @@ class RoadSection:
     """지도 좌표에서 이어진 두 차로. 각 구간의 보간 표시와 원 관측을 보존한다."""
 
     links: tuple[RoadLink, ...]
+    # The demo publisher keeps its fitted section and station axis in the map epoch.
+    publication_curve: 'RoadSection | None' = None
+    map_stations: tuple[float, ...] = ()
 
     @property
     def boundaries(self):
@@ -487,7 +492,7 @@ def _candidate_window(run, key):
     return tuple(run[start:start+31])
 
 
-def _mapped_candidate(run, key, profile, *, stored=False):
+def _mapped_candidate(run, key, profile, *, stored=False, divider_observed=None):
     if not stored:
         run = _candidate_window(run,key)
     if not run:
@@ -541,7 +546,7 @@ def _mapped_candidate(run, key, profile, *, stored=False):
             boundary_observations = tuple(tuple(sorted(role)) for role in run[0].observations)
     hypothesis = LaneHypothesis(0,roles,tuple(lengths),divider,left,right,*centers,inferred,tuple(intervals),error,yaw,
                                 boundary_normal_bounds_m=normal_bounds,outer_chord_bounds_m=chord_bounds,
-                                boundary_observations=boundary_observations)
+                                boundary_observations=boundary_observations,divider_observed=divider_observed)
     return MappedRoad(RoadResult('PARTIAL' if any(inferred) else 'VALID',(hypothesis,),True,
                                  ('MULTI_FRAME_TAPE',),key,True),sources,shape_bounds,heading_estimate,position_estimate)
 
@@ -912,26 +917,456 @@ def _section_station(section, point, heading, max_distance, max_heading):
     return best
 
 
-def stored_road_window(sections, model, pose, profile, *, rear_m, forward_m):
+def _section_overlaps_lane(section, original):
+    """Identify split map sections by shared boundary observations."""
+    evidence = original.boundary_observations
+    if evidence is None:
+        return False
+    matched = set()
+    for link in section.links:
+        for role, observed in enumerate(link.observations):
+            if not link.inferred_roles[role] and not observed.isdisjoint(evidence[role]):
+                matched.add(role)
+        if len(matched) >= 2:
+            return True
+    return False
+
+
+def _covers_longitudinally(section, pose, station, *, forward_extension_m=0.):
+    # Nearest-point projection clamps at a section end. Such a projection does
+    # not show that the rear axle is inside the window along the road.
+    first, last = section.links[0], section.links[-1]
+    ends = ((first, first.start[1], station == 0., 1),
+            (last, last.end[1], station >= _section_length(section), -1))
+    for link, point, at_end, sign in ends:
+        if at_end:
+            heading = _link_heading(link)
+            along = (pose.x-point[0])*math.cos(heading)+(pose.y-point[1])*math.sin(heading)
+            if sign*along < -(forward_extension_m if sign == 1 else 0.):
+                return False
+    return True
+
+
+def _section_local_axis(section, station):
+    """Return the divider point and direction at a projected station."""
+    for link in section.links:
+        a, b = link.start[1], link.end[1]
+        length = math.dist(a, b)
+        if not length:
+            continue
+        if station <= length:
+            t = station / length
+            return tuple(x + t*(y-x) for x,y in zip(a,b)), _link_heading(link)
+        station -= length
+    link = section.links[-1]
+    return link.end[1], _link_heading(link)
+
+
+def _shared_forward_end(first, second, profile):
+    """Check whether one candidate ends on the other's continuing divider."""
+    width = profile.missing_outer_width_m
+    short, long = sorted((first, second), key=lambda row: _section_length(row[2])-row[3])
+    section, at = short[2:]
+    end = _section_length(section)
+    if end-at > width/2 or end < width:
+        return False
+    # At the end of a short fragment, nearest projections may land on two
+    # different parts of the same bend. Compare the shared span point by point.
+    start, _ = _section_local_axis(section, end-width)
+    finish, _ = _section_local_axis(section, end)
+    heading = math.atan2(finish[1]-start[1], finish[0]-start[0])
+    projected = []
+    for index in range(7):
+        point, tangent = _section_local_axis(section, end-width+index*width/6)
+        match = _section_station(long[2],point,tangent,profile.merge_lateral_m,profile.max_heading_rad)
+        if match is None or (projected and match[1] <= projected[-1]):
+            return False
+        projected.append(match[1])
+    if _section_length(long[2])-projected[-1] < width/2:
+        return False
+    projected_start, _ = _section_local_axis(long[2], projected[0])
+    projected_end, _ = _section_local_axis(long[2], projected[-1])
+    projected_heading = math.atan2(projected_end[1]-projected_start[1], projected_end[0]-projected_start[0])
+    return abs(wrap_yaw(projected_heading-heading)) <= profile.merge_heading_rad
+
+
+def _contained_divider(first, second, profile):
+    """Recognize a shorter observation lying inside the same directed map section."""
+    short, long = sorted((first[2], second[2]), key=_section_length)
+    length = _section_length(short)
+    if not profile.min_usable_length_m <= length < _section_length(long):
+        return False
+    # Compare the short observation on its own interval. Its closest point to
+    # the axle may be a clamped endpoint, so comparing the two axle projections
+    # would wrongly reject a fragment that begins just in front of the vehicle.
+    matches = []
+    for at in (0., length/4, length/2, 3*length/4, length):
+        point, heading = _section_local_axis(short, at)
+        match = _section_station(long, point, heading, profile.merge_lateral_m, _DIRECTION_MATCH_RAD)
+        if match is None or (matches and match[1] <= matches[-1]):
+            return False
+        matches.append(match[1])
+    tolerance = profile.merge_lateral_m
+    return (abs(matches[-1]-matches[0]-length) <= 2*tolerance
+            and matches[0] > tolerance and _section_length(long)-matches[-1] > tolerance)
+
+
+def _publication_alignment(previous, original, station, profile):
+    """Match an ordered overlap of all three boundaries to an existing map axis."""
+    import numpy as np
+
+    if not previous.map_stations:
+        return ()
+    old = np.asarray((previous.links[0].start, *(link.end for link in previous.links)))
+    center = original[:, 1]
+    segment = np.diff(center, axis=0)
+    length = np.diff(station)
+    direction = segment / length[:, None]
+    tolerance = profile.missing_outer_width_m / 4
+    matches = []
+    boundary_steps = np.diff(original, axis=0)
+    for index, point in enumerate(old):
+        tangent = old[min(index+1, len(old)-1), 1] - old[max(index-1, 0), 1]
+        along = np.sum((point[1]-center[:-1])*direction, axis=1)
+        fraction = np.clip(along / length, 0., 1.)
+        displaced = original[:-1] + fraction[:, None, None]*boundary_steps
+        distance = np.linalg.norm(displaced-point, axis=2)
+        eligible = ((along >= -profile.station_error_m) & (along <= length+profile.station_error_m)
+                    & (direction @ tangent >= np.linalg.norm(tangent)*math.cos(_DIRECTION_MATCH_RAD))
+                    & (np.max(distance, axis=1) <= tolerance))
+        if np.any(eligible):
+            edge = int(np.argmin(np.where(eligible, distance[:, 1], np.inf)))
+            at = station[edge] + fraction[edge]*length[edge]
+            if not matches or at > matches[-1][0]:
+                matches.append((float(at), previous.map_stations[index]))
+    if len(matches) < 3:
+        return ()
+    span = matches[-1][0] - matches[0][0]
+    if span < max(profile.min_usable_length_m, abs(matches[-1][1]-matches[0][1]-span)):
+        return ()
+    return tuple(matches)
+
+
+def _fit_publication_curve(section, profile, previous=(), fresh_sources=frozenset()):
+    """Fit common cross-sections once when the accumulated demo map changes."""
+    import numpy as np
+
+    original = np.asarray((section.links[0].start, *(link.end for link in section.links)))
+    station = np.r_[0., np.cumsum(np.linalg.norm(np.diff(original[:, 1], axis=0), axis=1))]
+    if len(station) < 4 or np.any(np.diff(station) <= 0):
+        return section
+    width = profile.missing_outer_width_m
+    step = width / 2.85
+    matches, prior = max(((_publication_alignment(curve, original, station, profile), curve)
+                           for curve in previous if curve is not None),
+                          key=lambda row: len(row[0]), default=((), None))
+    if matches:
+        raw, mapped = zip(*matches)
+        origin, end = mapped[0]-raw[0], mapped[-1]+station[-1]-raw[-1]
+        # The covered span keeps its map knots. Only the newly exposed ends
+        # get new knots. Unmatched short tails are folded into the end chord.
+        shared = np.asarray(prior.map_stations)
+        shared = shared[(shared >= origin-.01*step) & (shared <= end+.01*step)]
+        front = np.arange(shared[-1]+step, end-.6*step, step)
+        rear = np.arange(shared[0]-step, origin+.6*step, -step)[::-1]
+        knots = np.concatenate(([origin] if shared[0]-origin >= .6*step else [], rear, shared, front,
+                                [end] if end-shared[-1] >= .6*step else []))
+        sampled = np.interp(knots, mapped, raw)
+        sampled = np.where(knots < mapped[0], knots-origin, sampled)
+        sampled = np.where(knots > mapped[-1], station[-1]+knots-end, sampled).clip(0., station[-1])
+    else:
+        interior = np.arange(step, station[-1]-.6*step, step)
+        sampled = np.r_[0., interior, station[-1]]
+        knots = sampled
+    if len(sampled) < 4 or np.any(np.diff(sampled) <= 0):
+        return replace(section, publication_curve=prior) if matches else section
+
+    values = np.empty((len(sampled), 3, 2))
+    for i, at in enumerate(sampled):
+        offset = station - at
+        nearby = np.argsort(np.abs(offset))[:7]
+        x = offset[nearby] / step
+        fit = np.polynomial.polynomial.polyfit(x, original[nearby].reshape(-1, 6), 3, w=1/(1+x*x))
+        values[i] = fit[0].reshape(3, 2)
+
+    # The section, rather than the moving window, owns the divider and tangent.
+    divider = values[:, 1].copy()
+    divider[1:-1] = .26*divider[:-2] + .48*divider[1:-1] + .26*divider[2:]
+    tangent = np.gradient(divider, sampled, axis=0)
+    magnitude = np.linalg.norm(tangent, axis=1)
+    if np.any(magnitude <= 1e-9):
+        return replace(section, publication_curve=prior) if matches else section
+    normal = np.column_stack((-tangent[:, 1], tangent[:, 0])) / magnitude[:, None]
+    boundaries = original.transpose(1, 2, 0)
+    at_stations = np.stack([np.interp(sampled, station, axis) for line in boundaries for axis in line],
+                           axis=1).reshape(-1, 3, 2)
+    fit = np.stack((divider+width*normal, divider, divider-width*normal), axis=1)
+    # Test the fit locally. An outlying observation at a newly mapped end
+    # must not change how the established bend is represented.
+    valid = np.max(np.linalg.norm(fit-at_stations, axis=2), axis=1) <= width/4
+    values[valid] = fit[valid]
+
+    # Smoothing a bend can shift the entire cross-section away from the
+    # accumulated divider. Estimate that signed offset over neighboring map
+    # stations before deciding which established knots can be refreshed.
+    tangents = np.gradient(values[:, 1], sampled, axis=0)
+    lengths = np.linalg.norm(tangents, axis=1)
+    unit = tangents / np.maximum(lengths, 1e-9)[:, None]
+    normals = np.column_stack((-unit[:, 1], unit[:, 0]))
+    headings = np.unwrap(np.arctan2(unit[:, 1], unit[:, 0]))
+    curvature = np.gradient(headings, sampled)
+    residual = np.sum((at_stations[:, 1]-values[:, 1])*normals, axis=1)
+    shifts = np.zeros(len(sampled))
+    reach = .29  # m, provisional neighborhood for the measured demo course
+    limit = 2*profile.station_error_m
+    for i, at in enumerate(sampled):
+        if lengths[i] <= 1e-9 or abs(curvature[i]) < .65:
+            continue
+        nearby = abs(sampled-at) < reach
+        if np.count_nonzero(nearby) >= 3:
+            shifts[i] = np.clip(np.median(residual[nearby]), -limit, limit)
+    shifts[1:-1] = .2*shifts[:-2] + .6*shifts[1:-1] + .2*shifts[2:]
+    values += shifts[:, None, None]*normals[:, None, :]
+
+    retained = {}
+    if matches:
+        prior_indices = {at: i for i, at in enumerate(prior.map_stations)}
+        for i, (at, mapped_at) in enumerate(zip(sampled, knots)):
+            previous_index = prior_indices.get(mapped_at)
+            if previous_index is None:
+                continue
+            edge = min(len(section.links)-1, int(np.searchsorted(station, at, side='right'))-1)
+            nearby = section.links[max(0, edge-1):edge+1]
+            old = prior.links[previous_index-1].end if previous_index else prior.links[0].start
+            fresh = any(source in fresh_sources for link in nearby
+                        for role, evidence in enumerate(link.observations) if not link.inferred_roles[role]
+                        for source, _ in evidence)
+            # Continued fitting at the ends cannot move an established
+            # cross-section outside the support of the new observation.
+            if not fresh:
+                values[i] = old
+                retained[i] = mapped_at
+
+    previous_links = {} if prior is None else dict(zip(zip(prior.map_stations, prior.map_stations[1:]), prior.links))
+
+    def fitted_link(i, j):
+        old_link = previous_links.get((retained.get(i), retained.get(j)))
+        if old_link is not None:
+            return old_link
+        lo, hi = sampled[i], sampled[j]
+        if hi <= lo:
+            return None
+        a = max(0,min(len(section.links)-1, int(np.searchsorted(station, lo, side='right'))-1))
+        b = int(np.searchsorted(station, hi))
+        span = section.links[a:b]
+        t = (station[a+1:b]-lo)/(hi-lo)
+        chord = values[i] + t[:, None, None]*(values[j]-values[i])
+        residuals = np.vstack((np.linalg.norm(values[[i,j]]-at_stations[[i,j]], axis=2),
+                               np.linalg.norm(chord-original[a+1:b], axis=2)))
+        deviation = tuple(map(float, np.max(residuals, axis=0)))
+        start, end = (tuple(tuple(map(float, point)) for point in row) for row in values[[i,j]])
+        dx, dy = end[1][0]-start[1][0], end[1][1]-start[1][1]
+        if (max(deviation) > width/4
+                or any((q[0]-p[0])*dx+(q[1]-p[1])*dy <= 0 for p,q in zip(start,end))):
+            return None
+        # Chord deformation is local, whereas the placement bound also
+        # includes terms shared by both endpoints of the chord.
+        offsets = values[[i,j]]-at_stations[[i,j]]
+        changes = np.linalg.norm(offsets[1]-offsets[0], axis=1)
+        chord_bounds = tuple(float(changes[role])+2*profile.station_error_m for role in (0,2))
+        sources = frozenset().union(*(link.sources for link in span))
+        evidence = tuple(frozenset().union(*(link.observations[role] for link in span)) for role in range(3))
+        inferred = tuple(any(link.inferred_roles[role] for link in span) for role in range(3))
+        error = max(link.error_m+link.placement_m for link in span)
+        heading = max(link.heading_worst_case_rad+link.placement_rad for link in span)
+        bound = tuple(error+profile.station_error_m+delta for delta in deviation)
+        return RoadLink(start, end, error+max(deviation), sources, evidence,
+                        any(link.interpolated for link in span), heading, inferred,
+                        boundary_normal_bounds_m=bound, outer_chord_bounds_m=chord_bounds,
+                        outer_fit_offsets_xy=tuple(tuple(tuple(map(float,row[role])) for role in (0,2))
+                                                   for row in offsets))
+
+    links = [fitted_link(i, i+1) for i in range(len(sampled)-1)]
+    if any(link is None for link in links):
+        # Roll back a local edit that breaks its seam with the retained map.
+        # Scan again because rolling back one endpoint can affect either neighbor.
+        for _ in range(len(links)):
+            invalid = [i for i, link in enumerate(links) if link is None]
+            if not invalid:
+                break
+            reset = {k for i in invalid for k in (i,i+1)
+                     if k not in retained and matches and knots[k] in prior_indices}
+            if not reset:
+                break
+            for k in reset:
+                idx = prior_indices[knots[k]]
+                values[k] = prior.links[idx-1].end if idx else prior.links[0].start
+                retained[k] = knots[k]
+            for i in {i for k in reset for i in (k-1,k) if 0 <= i < len(links)}:
+                links[i] = fitted_link(i,i+1)
+    first, last = 0, len(links)
+    if any(link is None for link in links):
+        if not matches:
+            return section
+        # A bad extension stays in the raw map. Commit the valid run that
+        # reaches the established section on both sides of a local edit.
+        shared_indices = tuple(i for i, at in enumerate(knots) if at in prior_indices)
+        first = max((i+1 for i in range(shared_indices[0]) if links[i] is None),default=first)
+        last = next((i for i in range(shared_indices[-1],last) if links[i] is None),last)
+        if any(link is None for link in links[first:last]):
+            return replace(section, publication_curve=prior)
+    links = links[first:last]
+    coordinates = tuple(map(float,knots[first:last+1]))
+    if matches:
+        if coordinates[0] in prior.map_stations:
+            first = prior.map_stations.index(coordinates[0])
+            if first and links[0].start == prior.links[first-1].end:
+                links[:0] = prior.links[:first]
+                coordinates = prior.map_stations[:first] + coordinates
+        if coordinates[-1] in prior.map_stations:
+            last = prior.map_stations.index(coordinates[-1])
+            if last < len(prior.links) and links[-1].end == prior.links[last].start:
+                links.extend(prior.links[last:])
+                coordinates += prior.map_stations[last+1:]
+    return replace(section, publication_curve=RoadSection(tuple(links), map_stations=coordinates))
+
+
+def _merge_wire_links(span, profile):
+    """Evaluate one shared shortcut without losing the original corner envelope."""
+    first, last = span[0], span[-1]
+    start, end = first.start, last.end
+    distances = [0.]
+    for link in span:
+        distances.append(distances[-1] + math.dist(link.start[1], link.end[1]))
+    deviations, angles = [], []
+    for role, (a,b) in enumerate(zip(start,end)):
+        dx,dy = b[0]-a[0], b[1]-a[1]
+        length = math.hypot(dx,dy)
+        if length <= 1e-9:
+            return None
+        heading = math.atan2(dy,dx)
+        angles.append(max(abs(wrap_yaw(math.atan2(link.end[role][1]-link.start[role][1],
+                     link.end[role][0]-link.start[role][0])-heading)) for link in span))
+        deviations.append(max(math.dist(link.end[role],
+            (a[0]+dx*at/distances[-1],a[1]+dy*at/distances[-1]))
+            for link,at in zip(span[:-1],distances[1:])))
+    # The positional fit envelope is wider than the tolerance for removing
+    # a corner knot. Check the three lines together.
+    if (max(deviations) > profile.merge_lateral_m
+            or max(angles) > 2*profile.merge_heading_rad):
+        return None
+    offsets = tuple(link.outer_fit_offsets_xy for link in span)
+    if (all(offset is not None for offset in offsets)
+            and all(a[1] == b[0] for a,b in zip(offsets,offsets[1:]))):
+        # With a common fit, the offsets between these endpoints telescope.
+        # At a seam between independent fits, use the sum of chord bounds.
+        chord = tuple(math.dist(offsets[0][0][i], offsets[-1][1][i])+2*profile.station_error_m
+                      for i in range(2))
+    else:
+        chord = tuple(sum(link.outer_chord_bounds_m[i] for link in span) for i in range(2))
+    normal = tuple(max(link.boundary_normal_bounds_m[i] for link in span)+deviations[i] for i in range(3))
+    return RoadLink(start,end,max(link.error_m for link in span)+max(deviations),
+        frozenset().union(*(link.sources for link in span)),
+        tuple(frozenset().union(*(link.observations[i] for link in span)) for i in range(3)),
+        any(link.interpolated for link in span),
+        min(math.pi,max(link.heading_worst_case_rad for link in span)+max(angles)),
+        tuple(any(link.inferred_roles[i] for link in span) for i in range(3)),
+        boundary_normal_bounds_m=normal,outer_chord_bounds_m=tuple(chord))
+
+
+def _wire_curve_links(run, profile):
+    """Keep the densest good geometry allowed by the window's shared bounds."""
+    def fits(link, bound):
+        return all(math.dist(link.start[role],link.end[role]) > bound[i]+1e-6
+                   for i,role in enumerate((0,2)))
+
+    limit = tuple(max(link.outer_chord_bounds_m[i] for link in run) for i in range(2))
+    if all(fits(link,limit) for link in run):
+        return tuple((link,i,i+1) for i,link in enumerate(run))
+
+    edges = []
+    for end in range(1,len(run)+1):
+        choices = [(end-1,run[end-1],0.)]
+        for start in range(end-2,max(-1,end-5),-1):
+            span = run[start:end]
+            candidate = _merge_wire_links(span,profile)
+            if candidate is not None:
+                distortion = max(0.,candidate.error_m-max(item.error_m for item in span))
+                choices.append((start,candidate,distortion))
+        edges.append(choices)
+
+    # A replacement chord can raise the bound shared by the rest of the
+    # wire window. Admit only a solution checked against its own final bound.
+    for _ in range(4):
+        best = [(0.,0,())]
+        for end,choices in enumerate(edges,1):
+            paths = []
+            for start,link,distortion in choices:
+                if best[start] is None or not fits(link,limit):
+                    continue
+                error,count,links = best[start]
+                paths.append((max(error,distortion),count-1,(*links,(link,start,end))))
+            best.append(min(paths,key=lambda path:path[:2]) if paths else None)
+        if best[-1] is None:
+            return None
+        selected = best[-1][2]
+        bound = tuple(max(link.outer_chord_bounds_m[i] for link,_,_ in selected) for i in range(2))
+        if all(fits(link,bound) for link,_,_ in selected):
+            return selected
+        limit = tuple(max(a,b) for a,b in zip(limit,bound))
+    return None
+
+
+def stored_road_window(sections, model, pose, profile, *, rear_m, forward_m, demo_course=False):
     """Cut the connected mapped section tied to the original lane IDs."""
     original = model.road.hypotheses[0]
     a,b = original.divider[:2]
     heading = math.atan2(b[1]-a[1],b[0]-a[0])
     anchor = ((a[0]+b[0])/2,(a[1]+b[1])/2)
+    end_a,end_b = original.divider[-2:]
+    end_heading = math.atan2(end_b[1]-end_a[1],end_b[0]-end_a[0])
+    end_anchor = tuple((u+v)/2 for u,v in zip(end_a,end_b))
     width = profile.missing_outer_width_m
     matches = []
     for section in sections:
         identity = _section_station(section,anchor,heading,width/3,profile.max_heading_rad/2)
         if identity is None:
+            identity = _section_station(section,end_anchor,end_heading,width/3,profile.max_heading_rad/2)
+        if identity is None and _section_overlaps_lane(section,original):
+            identity = (width/3, 0.)
+        if identity is None and not demo_course:
             continue
         nearest = _section_station(section,(pose.x,pose.y),pose.yaw,1.5*width,profile.max_heading_rad)
-        if nearest is not None:
-            matches.append((identity[0],nearest[0],section,nearest[1]))
+        if nearest is not None and _covers_longitudinally(section,pose,nearest[1],
+                forward_extension_m=min(profile.max_gap_m,rear_m) if demo_course else 0.):
+            # The demo is one directed loop with two lanes throughout. A
+            # separate observed part can use the same left/right lane IDs.
+            identity_distance = width if identity is None else identity[0]
+            matches.append((identity_distance,nearest[0],section,nearest[1]))
     if not matches:
         return None
     closest_anchor = min(row[0] for row in matches)
     matches = [row for row in matches if row[0] <= closest_anchor+profile.merge_lateral_m]
     matches.sort(key=lambda row:(row[1],row[0]))
+    if demo_course:
+        # Long and short reconstructions of the same bend can have distant
+        # endpoints. Compare their divider at the vehicle before choosing.
+        _, distance, section, station = matches[0]
+        point, heading = _section_local_axis(section, station)
+        local = []
+        for row in matches:
+            _, d, other, at = row
+            if d > distance + profile.merge_lateral_m:
+                continue
+            other_point, other_heading = _section_local_axis(other, at)
+            if ((math.dist(point,other_point) > width/3
+                    or abs(wrap_yaw(heading-other_heading)) > profile.merge_heading_rad)
+                    and not _shared_forward_end(matches[0], row, profile)
+                    and not _contained_divider(matches[0], row, profile)):
+                return None
+            local.append(row)
+        matches = [max(local, key=lambda row: (
+            min(rear_m, row[3]) + min(forward_m, _section_length(row[2])-row[3]), -row[1]))]
     identity,distance,section,station = matches[0]
     if any(d <= distance+profile.merge_lateral_m and
            i <= identity+profile.merge_lateral_m and
@@ -940,25 +1375,113 @@ def stored_road_window(sections, model, pose, profile, *, rear_m, forward_m):
            for i,d,other,_ in matches[1:]):
         return None
     lower, upper = max(0.,station-rear_m), station+forward_m
+    mapped_section = section
+    curve = section.publication_curve if demo_course else None
+    if curve is not None:
+        # Set the window on the published geometry, which can have a different
+        # arc length from the original observation links.
+        match = _section_station(curve,(pose.x,pose.y),pose.yaw,1.5*width,profile.max_heading_rad)
+        if match is not None:
+            station = match[1]
+            lower, upper = max(0.,station-rear_m), station+forward_m
+            section = curve
     offset, run = 0., []
+    preceding = None
     for link in section.links:
         end = offset+math.dist(link.start[1],link.end[1])
         if end > lower and offset < upper and end > offset:
+            if not run and section is curve and preceding is not None:
+                # Carry one existing station behind the body window so a
+                # crossed knot cannot abruptly replace its rear tangent.
+                run.append(preceding)
             run.append(link)
         offset = end
+        preceding = link
     if not run:
         return None
+    at_start = demo_course and lower == 0. and run[0] is section.links[0]
+    if (demo_course and section is not curve and len(run) >= 4
+            and len({source for link in run for source in link.sources}) >= 2):
+        # An unrelated seam outside the requested slice can invalidate the
+        # long fit. Certify this slice against the original mapped knots.
+        local = _fit_publication_curve(RoadSection(tuple(run)), profile).publication_curve
+        if local is not None:
+            section = curve = local
+            run = local.links
     # Keep the map's original stations, rounding the requested extent outward.
     # If the wire cap is reached, keep the rear coverage and expose the shorter forward range.
     run = tuple(run[:31])
+    if at_start:
+        first = run[0]
+        heading = _end_heading(section, True)
+        ux,uy = math.cos(heading),math.sin(heading)
+        a = first.start[1]
+        gap = max(0.,(a[0]-pose.x)*ux+(a[1]-pose.y)*uy)
+        # Extend only the near-camera gap, using the same directed road
+        # tangent and width. Keep the extension distinct from observed paint.
+        if 0. < gap <= profile.max_gap_m:
+            length = min(profile.max_gap_m,gap+rear_m)
+            start = tuple((x-length*ux,y-length*uy) for x,y in first.start)
+            extension = RoadLink(start,first.start,first.error_m+profile.max_curvature_1pm*length**2/8,
+                first.sources,(frozenset(),)*3,True,
+                min(math.pi,first.heading_worst_case_rad+profile.max_curvature_1pm*length),(True,)*3,
+                placement_m=first.placement_m,placement_rad=first.placement_rad,
+                boundary_normal_bounds_m=None if first.boundary_normal_bounds_m is None else tuple(
+                    x+profile.max_curvature_1pm*length**2/8 for x in first.boundary_normal_bounds_m),
+                outer_chord_bounds_m=None if first.outer_chord_bounds_m is None else tuple(
+                    x+profile.max_curvature_1pm*length**2/8 for x in first.outer_chord_bounds_m))
+            run = (extension,*run[:30])
     if any(a.end != b.start for a,b in zip(run,run[1:])):
         return None
-    geometry = _mapped_candidate(run,model.road.source_key,profile,stored=True)
+    # The admitted fit can cover a dashed gap that the sampled map still marks
+    # inferred. Reuse that evidence only within the original fitted interval.
+    observed = tuple(_divider_supported(link, original, profile) for link in run)
+    directional = section is curve and all(link.outer_chord_bounds_m is not None for link in run)
+    if directional:
+        selected = _wire_curve_links(run,profile)
+        if selected is None:
+            if curve is mapped_section.publication_curve:
+                # A tight inner chord can make the shared bound impossible for
+                # this cut. Refit just the observed slice of the same section.
+                # The retry has no cached curve, so it can only run once.
+                raw = replace(mapped_section, publication_curve=None)
+                return stored_road_window((raw,), model, pose, profile,
+                    rear_m=rear_m, forward_m=forward_m, demo_course=demo_course)
+            return None
+        run = tuple(link for link,_,_ in selected)
+        observed = tuple(all(observed[start:end]) for _,start,end in selected)
+    stations = (observed[0], *(a or b for a,b in zip(observed,observed[1:])), observed[-1])
+    geometry = _mapped_candidate(run,model.road.source_key,profile,stored=True,divider_observed=stations)
     if geometry is None:
         return None
     # A map read cannot extend a mixed crossing policy to new intervals.
-    crossing = bytes([int(all(model.crossing))])*len(run)
-    return replace(geometry.road,reasons=('STORED_MAP_WINDOW',)),crossing
+    crossing = bytes(observed) if all(model.crossing) else bytes(len(run))
+    road = replace(geometry.road,reasons=('STORED_MAP_WINDOW',))
+    if directional:
+        normal = tuple(max(link.boundary_normal_bounds_m[i] for link in run) for i in range(3))
+        chord = tuple(max(link.outer_chord_bounds_m[i] for link in run) for i in range(2))
+        lane = replace(road.hypotheses[0],boundary_normal_bounds_m=normal,outer_chord_bounds_m=chord)
+        road = replace(road,hypotheses=(lane,))
+    return road,crossing
+
+
+def _divider_supported(link, original, profile):
+    if link.observations[1] and not link.inferred_roles[1]:
+        return True
+    if original.boundary_observations is None or not original.boundary_observations[1]:
+        return False
+    start, end = link.start[1], link.end[1]
+    heading = _link_heading(link)
+    tolerance = min(profile.merge_lateral_m, profile.missing_outer_width_m / 6)
+    for a,b in zip(original.divider,original.divider[1:]):
+        dx,dy = b[0]-a[0],b[1]-a[1]
+        length = math.hypot(dx,dy)
+        if not length or abs(wrap_yaw(math.atan2(dy,dx)-heading)) > profile.merge_heading_rad:
+            continue
+        if all(0 <= (p[0]-a[0])*dx+(p[1]-a[1])*dy <= length**2
+               and abs((p[0]-a[0])*dy-(p[1]-a[1])*dx) <= length*tolerance for p in (start,end)):
+            return True
+    return False
 
 
 class TemporalRoadMap:
@@ -988,6 +1511,7 @@ class TemporalRoadMap:
         self._entrance_recheck = 0
         self.revision = 0
         self._publication_sections = None
+        self._publication_curves = None
 
     def __deepcopy__(self, memo):
         # frame/strip/link는 불변이다. 후보 코어는 owner의 가변 컨테이너만 복제한다.
@@ -1012,15 +1536,31 @@ class TemporalRoadMap:
         clone._entrance_recheck = self._entrance_recheck
         clone.revision = self.revision
         clone._publication_sections = self._publication_sections
+        clone._publication_curves = self._publication_curves
         return clone
 
-    def publication_sections(self, profile, observation_us):
+    def publication_sections(self, profile, observation_us, *, demo_course=False):
         """Reuse the joined map between bounded refreshes on the compute owner."""
         cached = self._publication_sections
+        # A single visible marking can extend a section without producing a
+        # new three-boundary link in the map.
+        newest_marking = self._markings[-1] if self._markings else None
         if (cached is None or cached[0] != profile or observation_us < cached[2]
-                or cached[1] != self.revision and observation_us-cached[2] >= _PUBLICATION_MAP_REFRESH_US):
-            self._publication_sections = (profile,self.revision,observation_us,self.sections(profile))
-        return self._publication_sections[3]
+                or (cached[1] != self.revision or cached[4] is not newest_marking)
+                and (not cached[3] or observation_us-cached[2] >= _PUBLICATION_MAP_REFRESH_US)):
+            self._publication_sections = (profile,self.revision,observation_us,self.sections(profile),newest_marking)
+        sections = self._publication_sections[3]
+        if not demo_course:
+            return sections
+        cached = self._publication_curves
+        if cached is None or cached[0] is not sections:
+            sources = frozenset(strip.source for strip in self._markings)
+            same_map = cached is not None and cached[2] == profile and cached[3] <= observation_us
+            previous = tuple(section.publication_curve for section in cached[1]) if same_map else ()
+            fresh = sources-cached[4] if same_map else sources
+            curves = tuple(_fit_publication_curve(section,profile,previous,fresh) for section in sections)
+            self._publication_curves = (sections,curves,profile,observation_us,sources)
+        return self._publication_curves[1]
 
     @property
     def links(self):
@@ -1100,6 +1640,9 @@ class TemporalRoadMap:
             return sections
         roles = {key: set(self._roles.get(key,())) | set(self._map_roles.get(key,()))
                  for key in self._roles.keys() | self._map_roles.keys()}
+        for strip in self._markings:
+            if strip.original.outer_role is not None:
+                roles[strip.source,strip.identity] = {strip.original.outer_role}
         observations = ReferenceObservations(self._markings,roles,profile,trace_cache=self._normal_traces)
         # 새로 생긴 긴 단면 하나가 기존 코너의 지도를 밀어내지 않도록 몇 개의 시작점을 비교한다.
         seeds = sorted(sections,key=_section_length,reverse=True)[:3]
@@ -1238,6 +1781,11 @@ class TemporalRoadMap:
             stamp=stamp,capture_pose=capture_pose)
         self._last_source = graph.source_key
         self._markings.extend(projected)
+        if qualified and projected and graph.surface_edges:
+            # Material edges may extend a road once its painted divider has
+            # anchored the roles. Keep them out of the tape refit and admission.
+            self._markings.extend(_project_strips(graph.surface_edges,pose,graph.source_key,
+                stamp=stamp,capture_pose=capture_pose))
         if not _usable_graph(graph):
             return
         strips = _matching_strips(projected)

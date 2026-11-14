@@ -1,4 +1,4 @@
-"""유한 birdview white-band에서 frame-local tape graph를 만든다.
+"""Birdview에서 흰 테이프와 도로 바깥 경계의 프레임별 관측을 만든다.
 
 색/폭/작업 cap은 조정할 실험 profile이다. NN mask는 보조 후보로만 보유하며,
 calibration·통행권·FREE·stable ID를 만들지 않는다. NumPy/OpenCV는 호출 시 불러온다.
@@ -98,6 +98,7 @@ class TapeStrip:
     segment_error_xy: tuple = ()
     width_complete: bool = True
     censored_cross_sections: int = 0
+    outer_role: int | None = None
 
     def __post_init__(self):
         if (type(self.local_id) is not int or self.local_id < 0 or type(self.points_xy) is not tuple
@@ -112,7 +113,8 @@ class TapeStrip:
                 or not math.isfinite(self.error_m) or self.error_m < 0
                 or type(self.observed) is not bool or type(self.closed) is not bool
                 or type(self.width_complete) is not bool or type(self.censored_cross_sections) is not int
-                or self.censored_cross_sections < 0):
+                or self.censored_cross_sections < 0
+                or self.outer_role is not None and (type(self.outer_role) is not int or self.outer_role not in (0, 2))):
             raise ValueError('invalid tape width/error/observation')
         if (type(self.endpoint_error_m) is not tuple or len(self.endpoint_error_m) != 2
                 or any(v is not None and (type(v) not in (int, float) or not math.isfinite(v) or v < 0)
@@ -153,6 +155,7 @@ class TapeGraph:
     skeleton: Any = field(default=None, repr=False, compare=False)
     valid_mask: Any = field(default=None, repr=False, compare=False)
     nn_candidates: Any = field(default=None, repr=False, compare=False)
+    surface_edges: tuple[TapeStrip, ...] = ()
 
     def __post_init__(self):
         if (type(self.strips) is not tuple or len(self.strips) > 32
@@ -162,6 +165,11 @@ class TapeGraph:
                 or self.status not in ('VALID', 'EMPTY', 'UNKNOWN') or type(self.complete) is not bool
                 or type(self.calibration_qualified) is not bool):
             raise ValueError('invalid bounded tape graph')
+        if (type(self.surface_edges) is not tuple or len(self.surface_edges) > 8
+                or len(self.strips + self.surface_edges) > 32
+                or any(type(s) is not TapeStrip or s.outer_role is None for s in self.surface_edges)
+                or len({s.local_id for s in self.strips + self.surface_edges}) != len(self.strips + self.surface_edges)):
+            raise ValueError('invalid bounded road surface edges')
 
     def descriptor(self):
         return dict(status=self.status, complete=self.complete, reasons=list(self.reasons),
@@ -521,8 +529,82 @@ def _close_tape_gaps(white, eligible, cell_m):
     return restored
 
 
+def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, first_id):
+    """Trace the outward dark-to-light transition on both sides of the board."""
+    from .geometry import project_ground_bounds_many
+
+    step = max(1, round(.025 / profile.cell_m))
+    shoulder = max(2, round(.035 / profile.cell_m))
+    if first_id == 32 or hsv.shape[1] <= 2 * shoulder:
+        return ()
+    columns = np.arange(shoulder,hsv.shape[1]-shoulder)
+    width = len(columns)
+    snap = max(1,round(.025/profile.cell_m))
+    max_step = max(2,round(.045/profile.cell_m))
+    candidates = []
+    samples = []
+    for row in range(0, len(hsv), step):
+        band = slice(max(0,row-1),row+2)
+        value = np.median(hsv[band,:,2],axis=0)
+        observed = visible[band].all(axis=0)
+        valid = np.logical_and.reduce([observed[i:i+width] for i in range(2*shoulder+1)])
+        samples.append((row,value,valid))
+    for role, side in ((0, 1), (2, -1)):
+        run = []
+        for row,value,valid in samples:
+            # Both shoulders must be visible. The far sample ignores narrow tape
+            # and the near sample places the boundary at the material or tape edge.
+            inside = columns-side*shoulder
+            outside = columns+side*shoulder
+            change = value[columns+side]-value[columns-side]
+            options = columns[valid & (value[inside] < _EDGE_VALUE_MIN)
+                & (value[outside]-value[inside] >= profile.contrast_min) & (change >= 8)]
+            if run:
+                previous = run[-1][1]
+                options = options[abs(options-previous) <= max_step]
+            if len(options):
+                change_at = change[options-shoulder]
+                # Prefer the first contrast when entering from the black surface.
+                nearby = options[change_at >= .7 * change_at.max()]
+                column = (min if side > 0 else max)(nearby)
+                lo,hi = max(0,column-snap),min(len(value),column+snap+1)
+                tape = np.flatnonzero(white[row,lo:hi])+lo
+                if len(tape):
+                    column = round((int(tape[0])+int(tape[-1]))/2)
+                run.append((row,int(column),bool(len(tape))))
+                continue
+            if len(run) >= 5:
+                candidates.append((role,run))
+            run = []
+        if len(run) >= 5:
+            candidates.append((role,run))
+    result = []
+    for role, pixels in sorted(candidates,key=lambda item: -len(item[1]))[:8]:
+        rows,columns,paint = np.asarray(pixels).T
+        if paint.sum()*10 >= 9*len(paint):
+            continue
+        points = np.column_stack((profile.x_min_m+rows*profile.cell_m,profile.y_min_m+columns*profile.cell_m))
+        contour = cv2.approxPolyDP(points.astype(np.float32), .006, False).reshape(-1, 2)
+        keep = [int(np.argmin(np.sum((points-point)**2,axis=1))) for point in contour]
+        lower,upper,bounded = project_ground_bounds_many(u[rows,columns],v[rows,columns],camera,plane,
+            pixel_error=camera.pixel_error+1.)
+        pad = np.maximum(abs(lower[:,:2]-points),abs(upper[:,:2]-points))
+        errors = np.hypot(pad[:,0],pad[:,1])
+        if (len(keep) < 2 or len(keep) > profile.max_points_per_strip or not bounded.all()
+                or np.max(errors) > profile.max_projection_error_m):
+            continue
+        segment = tuple(tuple(float(a)+.006 for a in np.max(pad[i:j+1],axis=0)) for i,j in zip(keep,keep[1:]))
+        result.append(TapeStrip(first_id+len(result),tuple(tuple(map(float,points[i])) for i in keep),
+            (0.,0.),float(np.max(errors))+.006,'FOV_clip','FOV_clip',
+            point_error_xy=tuple(tuple(map(float,pad[i])) for i in keep),segment_error_xy=segment,
+            width_complete=False,outer_role=role))
+        if first_id+len(result) == 32:
+            break
+    return tuple(result)
+
+
 def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None, nn_candidates=None, diagnostics=None):
-    """원 RGB만으로 white-band 후보를 만들고 가림/경계 tip을 보존한다. NN은 mask gate가 아니다."""
+    """RGB에서 흰 테이프와 어두운 도로 바깥 경계를 별도 관측으로 뽑는다."""
     timing=timing_start(diagnostics,'tape.birdview_remap')
     if type(profile) is not TapeProfile or stamp is not None and type(stamp) is not FrameStamp:
         raise ValueError('expected tape profile and optional original FrameStamp')
@@ -646,7 +728,9 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
                     ('strip_cap_exhausted', 'STRIP_COUNT_CAP'), ('junction_cap_exhausted', 'JUNCTION_COUNT_CAP')):
                 if work[key]:
                     reasons.append(reason)
+    surface_edges = _surface_edges(np,cv2,hsv,visible,white,u,v,camera,plane,profile,len(strips))
+    work['surface_edges'] = len(surface_edges)
     return TapeGraph(tuple(strips), junctions, 'UNKNOWN' if not complete else 'VALID' if strips else 'EMPTY',
         complete, tuple(reasons), None if stamp is None else stamp.key,
         bool(camera.qualified and plane.qualified), work, profile,
-        _readonly(np, white), _readonly(np, skeleton), _readonly(np, valid), nn_candidates)
+        _readonly(np, white), _readonly(np, skeleton), _readonly(np, valid), nn_candidates, surface_edges)

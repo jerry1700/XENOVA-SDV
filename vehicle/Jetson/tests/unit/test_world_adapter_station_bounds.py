@@ -111,6 +111,33 @@ class WorldAdapterStationBoundsTests(unittest.TestCase):
         self.assertTrue(all(lane.heading_bound_rad>=original.hypotheses[0].yaw_error_rad for lane in model.lanes))
         self.assert_original_covered(original,model)
 
+    def test_stored_curve_keeps_turn_without_counting_its_sagitta_as_endpoint_motion(self):
+        original=replace(road(span=.8,error=.10,sagitta=.12),reasons=('STORED_MAP_WINDOW',))
+        model=build(original)
+        self.assertGreater(len(model.divider),2)
+        self.assertEqual(kept_indices(original,model)[::len(model.divider)-1],(0,23))
+        for lane in model.lanes:
+            self.assertAlmostEqual(lane.outer_chord_delta_bound_m,.20,places=6)
+            self.assertGreater(lane.outer_normal_position_bound_m,.10)
+        validate(model)
+
+    def test_stored_curve_without_directional_bounds_cannot_collapse_to_endpoints(self):
+        original = replace(road(span=.8, error=.185, sagitta=.12),
+                           reasons=('STORED_MAP_WINDOW',))
+        # Only a very long chord clears the absolute error test. Its
+        # midpoint leaves the mapped curve by far more than 15 mm.
+        with self.assertRaisesRegex(WorldBuildError, 'do not preserve the curve'):
+            build(original)
+
+    def test_stored_divider_keeps_its_evidence_when_outer_edges_are_inferred(self):
+        original = road(count=4, error=.001, inferred=(True,)*4)
+        shape = replace(original.hypotheses[0], divider_observed=(False, True, True, True))
+        original = replace(original, hypotheses=(shape,), reasons=('STORED_MAP_WINDOW',))
+        model = build(original, b'\x00\x01\x00')
+        self.assertEqual(model.divider_state, b'\x01\x00\x00\x00')
+        self.assertEqual(model.crossing, b'\x00\x01\x00')
+        self.assertTrue(all(lane.point_state == b'\x01'*4 for lane in model.lanes))
+
     def test_original_backtracking_self_crossing_or_wrong_side_is_not_repaired(self):
         for points in (((0.,0.),(.8,0.),(.4,0.),(1.,0.)),
                 ((0.,0.),(1.,.2),(0.,.2),(1.,0.)),

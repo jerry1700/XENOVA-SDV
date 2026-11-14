@@ -26,7 +26,7 @@ from ..storage.records import CatalogRecord, CheckpointPayload, LoadedCheckpoint
 _RECORD = struct.Struct('<5sBIQ32s32s32s')
 _SHAPES = ('divider', 'left_center', 'right_center', 'left_outer', 'right_outer')
 _BOUND_FIELDS = ('boundary_normal_bounds_m', 'outer_chord_bounds_m')
-_OPTIONAL_GEOMETRY_FIELDS = (*_BOUND_FIELDS, 'boundary_observations')
+_OPTIONAL_GEOMETRY_FIELDS = (*_BOUND_FIELDS, 'boundary_observations', 'divider_observed')
 _MAP_IDENTITY = PoseBox((0., 0.), (0., 0.), (0., 0.))
 
 

@@ -9,10 +9,21 @@ from pathlib import Path
 from generate_jetson_tracks import VARIANTS, generate, read_geometry
 from tools.hil_observation.resident import load_motion_profile
 from xenova_vehicle.perception.calibration import canonical as canonical_calibration
+from xenova_vehicle.perception.free_space import TargetClass
 from xenova_vehicle.perception.tape import TapeProfile
 from xenova_vehicle.runtime.mapper_profile import MapperProfile
 from xenova_vehicle.simulation.profile import DevelopmentProfile
 from xenova_vehicle.simulation.scene import Scene, canonical, demo_scene
+
+
+def cone_target_fields(obstacle_seeds):
+    """Derive FREE targets for synthetic cones, rendered as opaque square prisms."""
+    if any(seed['kind'] != 'cone' for seed in obstacle_seeds):
+        return []
+    sizes = sorted({(seed['w'], seed['h']) for seed in obstacle_seeds})
+    return [asdict(TargetClass(core_radius_m=width / 2, core_height_m=height,
+        max_extent_m=math.nextafter(math.hypot(width / 2, width / 2), math.inf), qualified=True))
+        for width, height in sizes]
 
 
 def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sha256,
@@ -64,6 +75,12 @@ def prepare(geometry_path, metadata, mapper_path, output, *, metadata_receipt_sh
         raise ValueError('base mapper must be bound to the parent calibration')
     mapper_fields = original_mapper.to_dict()
     mapper_fields['calibration_profile_sha256'] = motion.bound_calibration.sha256
+    targets = cone_target_fields(track['layout']['obstacle_seeds'])
+    if targets:
+        mapper_fields['targets'] = targets
+        mapper_fields['demo_road_fill'] = True
+        # Match the fixed anchor errors used in the original Pi course replay.
+        mapper_fields['demo_pose_bounds'] = {'position_m': .001, 'heading_rad': .002}
     drift_overrides = {name: value for name, value in (
         ('position_drift_mps', position_drift_mps), ('yaw_drift_rps', yaw_drift_rps)) if value is not None}
     if drift_overrides:
