@@ -211,6 +211,21 @@ describe('같은 이름의 VM (QA 1-F2)', () => {
     expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
   });
 
+  it.each([
+    ['Drive-VM-A', '대소문자만 다름'],
+    ['drivé-vm-a', '악센트만 다름'],
+  ])('%s 처럼 DB 기준으로 같은 이름(%s)도 막는다 (S15P31E110-473)', (typed) => {
+    listedVms.items = [{ vm_id: 'vm-existing', name: 'drive-vm-a', state: 'stopped' }];
+    renderCreatePage();
+    fireEvent.click(screen.getByRole('button', { name: /Linux Base/ }));
+    fireEvent.click(screen.getByRole('button', { name: '다음' }));
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: typed } });
+    expect(
+      screen.getByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+  });
+
   it('서버가 200(같은 사양 재요청 = 기존 VM 시작)이면 "생성 완료"가 아니라 기존 VM 을 시작했다고 알린다', () => {
     createMutation.data = { vm: { vm_id: 'vm-existing', name: 'drive-vm-a' }, created: false };
     renderCreatePage();
@@ -226,6 +241,89 @@ describe('같은 이름의 VM (QA 1-F2)', () => {
     renderCreatePage();
     goToReviewStep();
     expect(screen.getByText('새 VM이 성공적으로 생성되었습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('생성 시간 초과 뒤 다시 생성 (S15P31E110-473)', () => {
+  const timeout = new ApiError(504, { code: 'VM_CONTROL_TIMEOUT', message: 'timeout' });
+  /** 첫 [VM 생성]이 응답 시간 초과로 끝나게 한다 (mutation 상태도 함께 바꾼다) */
+  async function timeOutFirstAttempt() {
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.error = timeout;
+      throw timeout;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'VM 생성' }));
+    expect(await screen.findByRole('button', { name: '같은 사양으로 다시 생성' })).toBeInTheDocument();
+  }
+
+  it('다시 생성이 200(created=false)으로 끝나면 "VM 생성 완료 / 이어서 마쳤습니다"', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    await timeOutFirstAttempt();
+    expect(screen.getByText(/새로고침하면 이 안내가 사라집니다/)).toBeInTheDocument();
+
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.error = null;
+      createMutation.data = { vm: { vm_id: 'vm-new', name: 'drive-vm-a' }, created: false };
+      return createMutation.data;
+    });
+    fireEvent.click(screen.getByRole('button', { name: '같은 사양으로 다시 생성' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'VM 생성 완료' });
+    expect(within(dialog).getByText('앞서 시간이 초과된 생성을 이어서 마쳤습니다.')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/새 VM은 만들지 않았습니다/)).toBeNull();
+  });
+
+  it('시간 초과된 이름은 [이전]으로 돌아가도 같은 이름 차단에서 빠진다 (다른 같은 이름은 그대로 막는다)', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    await timeOutFirstAttempt();
+    // 서버가 이어서 만든 VM 이 목록에 생겼다
+    listedVms.items = [
+      { vm_id: 'vm-new', name: 'drive-vm-a', state: 'stopped' },
+      { vm_id: 'vm-other', name: 'drive-vm-b', state: 'running' },
+    ];
+    fireEvent.click(screen.getByRole('button', { name: '이전' }));
+    expect(screen.queryByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.')).toBeNull();
+    expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'Drive-VM-B' } });
+    expect(
+      screen.getByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.'),
+    ).toBeInTheDocument();
+  });
+
+  it('다시 생성했는데 409 VM_OPERATION_IN_PROGRESS 면 시간 초과 안내를 유지하고 아직 진행 중이라고 알린다', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    await timeOutFirstAttempt();
+
+    const busy = new ApiError(409, { code: 'VM_OPERATION_IN_PROGRESS', message: 'busy' });
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.error = busy;
+      throw busy;
+    });
+    fireEvent.click(screen.getByRole('button', { name: '같은 사양으로 다시 생성' }));
+
+    expect(
+      await screen.findByText('보드에서 생성이 아직 진행 중입니다. 잠시 후 목록에서 확인해 주세요.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('생성 요청의 응답 시간이 초과되었습니다')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '같은 사양으로 다시 생성' })).toBeEnabled();
+    // 일반 오류 문구("이 VM에 다른 작업이 진행 중입니다")로 바꾸지 않는다
+    expect(screen.queryByText(/이 VM에 다른 작업이 진행 중입니다/)).toBeNull();
+  });
+
+  it('시간 초과 없이 처음부터 200 이면 지금처럼 "기존 VM 시작"', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.data = { vm: { vm_id: 'vm-existing', name: 'drive-vm-a' }, created: false };
+      return createMutation.data;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'VM 생성' }));
+    const dialog = await screen.findByRole('dialog', { name: '기존 VM 시작' });
+    expect(within(dialog).getByText(/새 VM은 만들지 않았습니다/)).toBeInTheDocument();
   });
 });
 

@@ -16,16 +16,24 @@ const resourcesQuery = vi.hoisted(() => ({
 
 /** 설정하면 useVm 이 이 결과를 돌려준다 (조회 실패 화면용) */
 const vmQueryOverride = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
+/** 자원 적용 중인 VM id (useVmIdsUpdatingResources) · 409 로 잠긴 VM (isBusy) */
+const lock = vi.hoisted(() => ({ updating: [] as string[], busy: [] as string[] }));
 
 vi.mock('../api/queries', () => ({
   useVm: (vmId: string) =>
     vmQueryOverride.value ?? { data: VMS.find((vm) => vm.vm_id === vmId), error: null, isPending: false },
   useVms: () => ({ data: { items: VMS }, error: null, isPending: false }),
   useVmResources: () => resourcesQuery,
+  useVmIdsUpdatingResources: () => lock.updating,
 }));
 
 vi.mock('./useVmOperationProgress', () => ({
-  useVmOperationProgress: () => ({ operations: {}, now: 0, run: vi.fn() }),
+  useVmOperationProgress: () => ({
+    operations: {},
+    now: 0,
+    run: vi.fn(),
+    isBusy: (vmId: string) => lock.busy.includes(vmId),
+  }),
 }));
 
 // 패널 내부(자원 조회·스트림)는 이 테스트의 관심 밖이라 자리만 확인한다
@@ -113,5 +121,44 @@ describe('VM Control 상세 삭제 — 정지된 VM만 (QA 1-F1·1-F9)', () => {
     expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeDisabled();
     expect(screen.getAllByText(/정지 후 삭제할 수 있습니다/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/VM을 종료하고 연결된 디스크를 삭제합니다/)).toBeNull();
+  });
+});
+
+describe('작업 중 버튼 잠금 (S15P31E110-473)', () => {
+  /** 정지된 VM (mock 데이터는 모두 실행 중이라 상태만 바꾼다) */
+  const stoppedVm = () => {
+    const vm = { ...VMS[1]!, state: 'stopped' as const };
+    vmQueryOverride.value = { data: vm, error: null, isPending: false };
+    return vm;
+  };
+  afterEach(() => {
+    lock.updating = [];
+    lock.busy = [];
+    vmQueryOverride.value = null;
+  });
+
+  it('이 탭에서 자원 적용 중이면 시작·정지를 잠그고 안내한다 (삭제는 상태 규칙대로)', () => {
+    const stopped = stoppedVm();
+    lock.updating = [stopped.vm_id];
+    renderDetail(stopped.vm_id);
+    expect(screen.getByRole('button', { name: 'VM 시작' })).toBeDisabled();
+    expect(screen.getByText('자원을 적용하는 중이라 시작·정지를 잠시 막습니다.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeEnabled();
+  });
+
+  it('서버가 "다른 작업 진행 중"(409)을 줘 잠긴 VM 은 시작·정지·삭제를 모두 잠근다', () => {
+    const stopped = stoppedVm();
+    lock.busy = [stopped.vm_id];
+    renderDetail(stopped.vm_id);
+    expect(screen.getByRole('button', { name: 'VM 시작' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeDisabled();
+    expect(screen.getByText('다른 작업이 진행 중이라 잠시 뒤 다시 누를 수 있습니다.')).toBeInTheDocument();
+  });
+
+  it('잠금이 없으면 정지된 VM 은 시작·삭제할 수 있다', () => {
+    const stopped = stoppedVm();
+    renderDetail(stopped.vm_id);
+    expect(screen.getByRole('button', { name: 'VM 시작' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeEnabled();
   });
 });

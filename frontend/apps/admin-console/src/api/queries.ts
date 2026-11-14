@@ -1,5 +1,11 @@
 /** TanStack Query 훅. 경로·응답은 VM 관리 API 계약 §5, 인증은 노션 API 명세 */
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+  useMutationState,
+} from '@tanstack/react-query';
 import { useState } from 'react';
 import { ApiError, request, requestWithStatus } from './client';
 import type {
@@ -170,9 +176,13 @@ export function useUpdateVcpuPinning(vmId: string) {
   });
 }
 
+/** 자원 적용 mutation 키 — 같은 탭의 다른 화면이 "이 VM 자원 적용 중"을 알 수 있게 (S15P31E110-473) */
+const RESOURCE_UPDATE_KEY = 'vm-resources-update';
+
 export function useUpdateVmResources(vmId: string) {
   const client = useQueryClient();
   return useMutation({
+    mutationKey: [RESOURCE_UPDATE_KEY, vmId],
     mutationFn: (body: UpdateVmResourcesRequest) =>
       request<VmResourceUpdateResult>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources`, {
         method: 'PUT',
@@ -183,6 +193,14 @@ export function useUpdateVmResources(vmId: string) {
       void client.invalidateQueries({ queryKey: keys.vm(vmId) });
       void client.invalidateQueries({ queryKey: keys.vms });
     },
+  });
+}
+
+/** 이 탭에서 자원 적용(PUT /resources)이 진행 중인 VM id 들. 그 VM 의 시작·정지를 잠근다 */
+export function useVmIdsUpdatingResources(): readonly string[] {
+  return useMutationState({
+    filters: { mutationKey: [RESOURCE_UPDATE_KEY], status: 'pending' },
+    select: (mutation) => String(mutation.options.mutationKey?.[1] ?? ''),
   });
 }
 
