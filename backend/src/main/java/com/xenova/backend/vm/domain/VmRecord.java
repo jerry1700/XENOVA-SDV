@@ -16,6 +16,9 @@ import java.util.Objects;
 @Table(name = "vms")
 public class VmRecord {
 
+    private static final int MAX_NAME_LENGTH = 63;
+    private static final int RETIRED_SUFFIX_ID_LENGTH = 8;
+
     @Id
     @Column(name = "vm_id", length = 36)
     private String vmId;
@@ -153,8 +156,25 @@ public class VmRecord {
         this.memoryMib = memoryMib;
     }
 
+    // A retired row gives its name back (uk_vms_name): a VM re-created on the board gets a new vm_id under the same
+    // name and must still be registrable. The old name stays readable as <name>~<first 8 of vm_id>.
     public void retire() {
+        if (!isRegistered()) {
+            return;
+        }
         lifecycle = VmLifecycle.RETIRED;
+        name = retiredName(name, vmId);
+    }
+
+    // The same vm_id is registered on the board again. The caller sets the board's name with
+    // synchronizePlatformRegistration, which replaces the retired name.
+    public void restore() {
+        lifecycle = VmLifecycle.REGISTERED;
+    }
+
+    static String retiredName(String name, String vmId) {
+        String suffix = "~" + vmId.substring(0, Math.min(RETIRED_SUFFIX_ID_LENGTH, vmId.length()));
+        return name.substring(0, Math.min(name.length(), MAX_NAME_LENGTH - suffix.length())) + suffix;
     }
 
     public boolean hasSameSpec(CreateVmCommand command) {

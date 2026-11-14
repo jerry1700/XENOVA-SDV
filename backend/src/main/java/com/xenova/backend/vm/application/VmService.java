@@ -477,6 +477,8 @@ public class VmService {
     // it was already retired or removed with a platform tool, so the delete is complete and the row is retired too.
     public void destroy(String vmId) {
         VmRecord record = findRecord(vmId);
+        // retire() frees the name, so the event keeps the name the VM had.
+        String name = record.getName();
         boolean alreadyGone = underOperation(vmId, () -> {
             boolean gone = false;
             try {
@@ -498,9 +500,9 @@ public class VmService {
             return gone;
         });
         if (alreadyGone) {
-            eventRecorder.vmDeleted(vmId, record.getName(), "platform");
+            eventRecorder.vmDeleted(vmId, name, "platform");
         } else {
-            eventRecorder.vmDeleted(vmId, record.getName());
+            eventRecorder.vmDeleted(vmId, name);
         }
         // Only after dom0-manager confirmed the delete. Failures are logged there and never fail the delete.
         inventoryCleaner.vmDeleted(vmId);

@@ -157,11 +157,69 @@ plan/execute_required는 합의된 wire 요소이며 읽기 API의 실행 요구
 201(신규)/200(동일 UUID)의 `{"vm_id":"…","registration":"confirmed"}`를 검증한다.
 단건은 기존 행을 덮지 않는다. 관리자 `POST /api/v1/vms/synchronizations`가 이 GET을 읽어
 지정 필드를 갱신하는 별도 기능이다. create/start 역호출·실패 fallback으로 사용하지 않는다.
-Spring은 이 동기화를 주기적으로 스스로 실행하지 않는다. 동기화 요청이 올 때만 GET을 읽는다. 연속된 동기화 2회
-(`VM_REGISTRATION_SYNC_MISSING_THRESHOLD`)에서 이 GET에 없는 REGISTERED 행은 플랫폼 도구로 retire·제거된 것으로 보고
-RETIRED로 바꾸며 `vm.deleted`(`source: platform`)를 남긴다. Spring 작업 중이거나 생성 후 20분
-(`VM_REGISTRATION_SYNC_CREATION_GRACE`, dom0 명령 제한) 이내인 행은 제외하고, GET 실패 시에는 아무것도 바꾸지 않는다.
-응답에는 `retired` 개수와 `results[].action: "retired"`(reason `missing_from_board`)가 추가된다.
+Spring은 이 동기화를 주기적으로 스스로 실행하지 않는다. 화면의 "VM 동기화" 버튼(이 POST)이 올 때만 GET을 읽고,
+**요청 한 번에** VM 테이블을 보드와 같게 맞춘다. 보드가 원본이며 VM은 `vm_id`(UUID)로만 짝짓는다(이름으로 짝짓지 않음).
+처리 순서는 정리 → 등록이다. 플랫폼이 VM을 새 UUID로 다시 만들면 같은 이름이 새 `vm_id`로 나타나므로,
+옛 행을 먼저 정리해 이름을 비운 뒤 새 행을 등록한다.
+
+| 보드 | VM 테이블 | 처리 | `results[].action` / `reason` |
+| --- | --- | --- | --- |
+| 없음 | REGISTERED | 즉시 RETIRED, `vm.deleted`(`source: platform`) 기록 | `retired` / `missing_from_board` |
+| 없음 | REGISTERED, Spring 생성·시작·정지·삭제 진행 중 | 이번 요청에서는 건드리지 않음 | `skipped` / `in_operation` |
+| 있음 | 없음 | 새 행 등록 (role 없음) | `registered` |
+| 있음 | REGISTERED, 지정 필드가 다름 | 이름·템플릿·사양·guest_kind·IP 갱신 | `updated` |
+| 있음 | REGISTERED, 같음 | 그대로 | `unchanged` |
+| 있음 | RETIRED (같은 `vm_id`) | REGISTERED로 복구하고 보드 값으로 갱신. role은 유지 | `restored` |
+| 있음, 이름이 다른 REGISTERED 행과 같음 | – | 등록하지 않음 | `conflict` / `duplicate_name` |
+| 같은 `vm_id`가 두 번 | – | 첫 항목만 처리 | `conflict` / `duplicate_board_vm_id` |
+| `vm_id`가 UUID가 아님 | – | 등록하지 않음. 보드에 있는 것으로도 보지 않음 | `incomplete` / `invalid_vm_id` |
+| 등록 정보 부족 | – | 등록하지 않음. 보드에 있는 것으로 보고 정리하지 않음 | `incomplete` / `registration_metadata_missing` |
+
+RETIRED가 된 행은 이름을 `<이름>~<vm_id 앞 8자>`로 바꿔 비운다(`uk_vms_name`이 RETIRED 행에도 걸리므로).
+Spring `DELETE /api/v1/vms/{id}`의 보관도 같다. 이전에 보관된 행은 V10 마이그레이션이 같은 형식으로 바꿨다.
+GET 실패 시에는 아무것도 바꾸지 않는다. 요청은 Spring 프로세스 안에서 하나씩 처리하고, 앞 요청이 커밋한 뒤에 다음 요청이 읽는다.
+
+응답 예 — 보드 3대(`debian`은 새 UUID로 다시 만들어짐, `zephyr-a`는 예전에 정리됐다가 다시 등록됨,
+`zephyr-b`는 등록 정보 부족), 테이블에 옛 `debian`과 생성 중인 `ubuntu-dev`가 있을 때:
+
+```json
+{
+  "discovered": 3,
+  "registered": 1,
+  "updated": 0,
+  "unchanged": 0,
+  "restored": 1,
+  "retired": 1,
+  "skipped": 1,
+  "conflicts": 0,
+  "incomplete": 1,
+  "results": [
+    {"vm_id": "850e8400-e29b-41d4-a716-446655440003", "name": "debian", "action": "retired", "reason": "missing_from_board"},
+    {"vm_id": "850e8400-e29b-41d4-a716-446655440004", "name": "ubuntu-dev", "action": "skipped", "reason": "in_operation"},
+    {"vm_id": "950e8400-e29b-41d4-a716-446655440001", "name": "debian", "action": "registered", "reason": null},
+    {"vm_id": "850e8400-e29b-41d4-a716-446655440002", "name": "zephyr-a", "action": "restored", "reason": null},
+    {"vm_id": "850e8400-e29b-41d4-a716-446655440005", "name": null, "action": "incomplete", "reason": "registration_metadata_missing"}
+  ]
+}
+```
+
+| 필드 | 뜻 |
+| --- | --- |
+| `discovered` | 보드 GET이 돌려준 VM 수 (형식 오류 포함) |
+| `registered` | 보드에만 있어 새로 등록한 수 |
+| `updated` | 보드 기준으로 지정 필드를 갱신한 수 |
+| `unchanged` | 바뀐 것이 없는 수 |
+| `restored` | RETIRED였다가 같은 `vm_id`로 보드에 다시 있어 복구한 수 |
+| `retired` | 보드에 없어 RETIRED로 바꾼 수 (웹 목록에서 빠짐) |
+| `skipped` | 보드에 없지만 Spring 작업 중이라 이번에 정리하지 않은 수. 작업이 끝난 뒤 다시 누르면 처리 |
+| `conflicts` | `duplicate_name`·`duplicate_board_vm_id` 수 |
+| `incomplete` | `invalid_vm_id`·`registration_metadata_missing` 수 |
+| `results[].vm_id` | 보드의 `vm_id`(UUID면 표준 소문자 형식) 또는 테이블의 `vm_id` |
+| `results[].name` | 보드 VM은 보드의 이름, `retired`·`skipped`는 테이블의 이름(정리 전 이름). 보드가 이름을 주지 않으면 `null` |
+| `results[].action` | `registered`·`updated`·`unchanged`·`restored`·`retired`·`skipped`·`conflict`·`incomplete` |
+| `results[].reason` | `retired`·`skipped`·`conflict`·`incomplete`의 사유. 나머지는 `null` |
+
+`results`는 정리·보류 항목이 먼저, 그다음 보드 순서다.
 Spring의 `DELETE /api/v1/vms/{id}`는 dom0-manager 404 VMNotFound(등록 없음)를 이미 지워진 것으로 받아 같은 RETIRED 처리를 한다.
 Spring의 이름 충돌·퇴역 UUID 거절은 원 오류로 돌려준다. 첨부 GET 문서의 이름 유일성/Zephyr null 문구보다
 사용자의 최신 이름·IP 무보정 결정이 우선하며 Spring 제약을 피하려고 데이터를 바꾸지 않는다.

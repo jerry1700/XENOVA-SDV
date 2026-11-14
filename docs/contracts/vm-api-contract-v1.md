@@ -608,7 +608,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `PATCH` | `/api/v1/vms/{vm_id}` | `200` VM (조회 응답과 같은 모양) | 본문 `{"role": "primary_drive"}`, `{"role": null}`이면 역할을 지움. 역할만 바꿀 수 있고 dom0-manager를 호출하지 않으며 이벤트도 남기지 않음. 보관된 VM은 `404 VM_NOT_FOUND` |
 | `POST` | `/api/v1/vms/{vm_id}/start` | `200` VM | dom0 단건 조회 후 도메인이 없을 때만 create 재호출. 이미 `running`이면 그대로 반환. `crashed`·`paused`·`stopping`이면 `409 INVALID_VM_STATE`로 거부(정지 후 다시 시작). 플랫폼 CLI와 같은 동작이며 자동 복구는 하지 않음 |
 | `POST` | `/api/v1/vms/{vm_id}/stop` | `200` VM (`state: stopped`) | dom0 단건 조회로 정지 전 상태를 읽은 뒤 **runtime 유무와 관계없이** dom0 stop을 호출. 플랫폼이 `desired_state: stopped` 의도를 기록해야 Recovery Worker가 사용자가 끈 VM을 다시 켜지 않는다(1.2절). 이미 꺼져 있었으면 `vm.state.changed` 이벤트만 남기지 않음. dom0는 `204`지만 Spring은 레코드로 VM 객체를 만들어 반환 |
-| `DELETE` | `/api/v1/vms/{vm_id}` | `204` | dom0 retire 성공 뒤 Spring 레코드를 `RETIRED`로 보존하고 v1 목록·단건 조회에서는 숨김 |
+| `DELETE` | `/api/v1/vms/{vm_id}` | `204` | dom0 retire 성공 뒤 Spring 레코드를 `RETIRED`로 보존하고 v1 목록·단건 조회에서는 숨김. 보존 행의 이름은 `<이름>~<vm_id 앞 8자>`로 바꿔 같은 이름을 다시 쓸 수 있게 함 |
 | `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 보드 카탈로그(템플릿별 최신) + 설정 표시 정보 (2.3절). 보드 미조회 시 `503` |
 | `GET` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 뷰 | vCPU·메모리, pCPU 수, `vcpu_pinning`(VM의 hard affinity), `shared_pcpus`(dom0 공유 집합), `exclusive_pcpus`, `limits`. `host_preparation_required`는 `null` |
 | `PUT` | `/api/v1/vms/{vm_id}/resources/vcpu-pinning` | `200` 자원 뷰 | 본문 `{mappings:[{vcpu, pcpus}]}`(모든 vCPU에 같은 마스크). 공유 VM은 공유 집합 안, 전용 VM은 공유·다른 전용 코어 밖. 응답 `host_preparation_required`: `true`면 보드 호스트 준비 뒤 시작 가능(1차 보드는 늘 `true`), `false`면 바로 시작 가능(플랫폼 1e41ea73 이후 게스트 배치만 바뀐 변경). 공유·전용 방식과 공유 집합은 바꾸지 않는다 |
@@ -622,7 +622,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `GET` | `/api/v1/vms/{vm_id}/threads` | `200` Zephyr 스레드 표 | Zephyr Telemetry 의 스레드 창을 조합한 최신 값 |
 | `GET` | `/api/v1/vms/{vm_id}/telemetry/heartbeat` | `200` Publisher 상태 | `status` `FRESH`·`STALE`·`UNKNOWN` (MQTT 계약 3장) |
 | `POST` | `/api/v1/vms/registrations` | 신규 `201`, 기존 `200` `{vm_id, registration: "confirmed"}` | 사용자 JWT 가 아니라 등록 통지 전용 서비스 토큰. 본문 오류 `400 INVALID_REGISTRATION`, 충돌 `409 VM_REGISTRATION_CONFLICT` ([등록 계약](vm-provisioning-v1.md)) |
-| `POST` | `/api/v1/vms/synchronizations` | `200` 동기화 결과 | dom0 등록 목록을 읽어 Spring 레코드를 맞춘다 ([등록 계약](vm-provisioning-v1.md)) |
+| `POST` | `/api/v1/vms/synchronizations` | `200` 동기화 결과 | dom0 등록 목록을 읽어 요청 한 번에 Spring 레코드를 보드와 같게 맞춘다. 보드에 없는 행은 즉시 RETIRED(작업 중이면 보류), 같은 `vm_id`가 다시 나타나면 복구 ([등록 계약](vm-provisioning-v1.md)) |
 
 보고서 `GET /api/v1/reports/os-evidence`, `GET /api/v1/reports/performance` 와 실행 로그 `GET /api/v1/logs`(·`/sources`, [실행 로그 계약](runtime-logs-v1.md))도 같은 JWT 로 연다. Spring 에는 VM `reboot`·`control-operations`·`resources` 공개 엔드포인트가 없다(dom0-manager 4.3.1·4.8·4.10·4.12 는 내부 계약).
 
@@ -945,3 +945,4 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.22 | 2026-11-12 | v1.17의 런타임 자동 갱신 루프를 제거하고 공개 `GET /api/v1/vms` 요청 시 단일 동기화로 변경. 등록 VM과 dom0 런타임을 결합하고 상태 이벤트를 반영한 최신 목록을 반환하며, 경합 VM 제외·조회 실패 시 기존 상태 보존·프로세스 내 동시 요청 직렬화를 명시 |
 | v1.23 | 2026-11-12 | VM 상태 5초 주기 조회(`EVENT_VM_STATE_CHECK_INTERVAL_MS`)를 되살린다. 공개 `GET /api/v1/vms` 요청 시 동기화와 함께 동작하며 실행 상태만 다룬다. 보드 등록 목록 → VM 테이블 등록 동기화는 주기 실행 없이 `POST /api/v1/vms/synchronizations` 요청 때만 실행한다 |
 | v1.24 | 2026-11-13 | dom0-manager의 생성·정지·보관 오류에 선택 `context` 추가. 기존 원장으로 작업 ID 조회 제공(8.1.1) |
+| v1.25 | 2026-11-14 | `POST /api/v1/vms/synchronizations`가 요청 한 번에 보드와 맞춘다: 연속 2회·생성 후 20분 유예 제거, 정리 후 등록 순서, 같은 `vm_id` 복구(`restored`), 작업 중 보류(`skipped`), 결과 항목에 `name`. `missing_from_board` 개수 필드 삭제. RETIRED 행은 이름을 `<이름>~<vm_id 앞 8자>`로 비움(V10) |
