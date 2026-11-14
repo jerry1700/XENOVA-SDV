@@ -3,6 +3,7 @@
  * lock. A stuck callback is retained and reported, never forcibly recycled. */
 #include "workers.h"
 #include <xenova/auto_delay.h>
+#include <xenova/auto_input_fault.h>
 #include <xenova/diagnostics.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -74,6 +75,10 @@ static void run(void *argument, void *unused1, void *unused2)
    struct xm_span control = {t->running.control, t->running.control_length};
    struct xm_span input = {t->running.input, t->running.input_length};
    if (!t->running.input_length) { input.p = NULL; }
+   /* Keep reception and MANUAL intact; fault only this guest's AUTO calculation. */
+   if (t == &tasks[DRIVE_TASK_AUTO] && drive_auto_input_fault_active()) {
+    input=(struct xm_span){0};age=-1;
+   }
    result.rc = drive_adapter_run_until(&t->adapter, control, input, age,
      &t->running.manual_witness,t->running.app_instance,t->running.deadline_us,&result.sample);
 	if (t == &tasks[DRIVE_TASK_AUTO] && drive_auto_delay_active()) {

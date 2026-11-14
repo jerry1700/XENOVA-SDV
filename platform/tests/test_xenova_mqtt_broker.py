@@ -56,6 +56,19 @@ class Contracts(unittest.TestCase):
         self.assertNotIn(A, records)
         self.assertNotIn('message-board', records)
 
+    def test_perception_fault_control_uses_exact_oak1_topics(self):
+        rules = broker.policy()
+        backend = rules['services']['backend']
+        perception = rules['services']['perception']
+        prefix = 'xenova/v1/mapper/oak-1/fault/'
+
+        self.assertTrue({prefix + 'command.json', prefix + 'query.json'} <= set(backend['write']))
+        self.assertTrue({prefix + 'command.json', prefix + 'query.json'} <= set(perception['read']))
+        self.assertTrue({prefix + 'result.json', prefix + 'status.json'} <= set(perception['write']))
+        for profile in (backend, perception):
+            self.assertNotIn('xenova/v1/mapper/+/fault/#', profile['read'] + profile['write'])
+            self.assertNotIn('xenova/v1/mapper/#', profile['read'] + profile['write'])
+
     def test_service_and_recipe_do_not_wait_for_tailnet_or_add_reverse_vm_dependency(self):
         text = (FILES / '20-xenova-broker.conf').read_text()
         for required in ['ConditionPathExists=/srv/xenova/mqtt', 'RequiresMountsFor=/srv/xenova', 'check --runtime']:

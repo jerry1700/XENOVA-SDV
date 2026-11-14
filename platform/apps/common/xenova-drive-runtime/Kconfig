@@ -71,6 +71,16 @@ config XENOVA_VM_CRASH_INJECTION
 	  crash shutdown reason without changing the platform desired state. This
 	  is a test fault injector and must not be enabled in normal builds.
 
+config XENOVA_AUTO_INPUT_FAULT_INJECTION
+	bool "Test-only AUTO input-unavailable injection"
+	depends on XENOVA_DRIVE_WORKERS
+	default n
+	help
+	  Accepts a bounded auto_input_unavailable demo command. Only the selected
+	  guest's AUTO worker receives an empty calculation input; MANUAL and the
+	  standby guest remain unchanged. Lifecycle supervision observes the real
+	  INPUT_UNAVAILABLE results and owns the failover decision.
+
 config XENOVA_DRIVE_WARM
 	bool "Explicit warm-drive-1 app lifecycle profile"
 	depends on XENOVA_DRIVE_WORKERS
