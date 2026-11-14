@@ -28,7 +28,7 @@ from .scene import SurveyProfile
 
 
 MAX_BYTES = 65536
-TOP = frozenset(('schema_version','vehicle_configuration','calibration_profile_sha256','capture_timing',
+TOP = frozenset(('schema_version','vehicle_configuration','calibration_profile_sha256','capture_timing','demo_road_fill','demo_pose_bounds',
                  'localization','catalog_policy','survey','rolling_roi','sensors','pipeline','targets','parking_aisles','stopping','motion_qualified'))
 
 
@@ -230,10 +230,12 @@ class MapperProfile:
     parking_aisles: tuple
     stopping: StoppingLimits
     declared_motion_qualified: bool
+    demo_road_fill: bool
+    demo_pose_bounds: tuple[float, float] | None
 
     def __init__(self,value):
         own=_owned(value)
-        if type(own) is not dict or set(own)-TOP or TOP-{'capture_timing','localization','catalog_policy','survey','rolling_roi'}-set(own) or type(own.get('schema_version')) is not int or own['schema_version']!=1:
+        if type(own) is not dict or set(own)-TOP or TOP-{'capture_timing','localization','catalog_policy','survey','rolling_roi','demo_road_fill','demo_pose_bounds'}-set(own) or type(own.get('schema_version')) is not int or own['schema_version']!=1:
             raise MapperProfileError('exact mapper-profile local schema1 required')
         own.setdefault('capture_timing',None)
         _label(own['vehicle_configuration']); _sha(own['calibration_profile_sha256'])
@@ -264,6 +266,16 @@ class MapperProfile:
         if type(targets) is not list or len(targets)>4 or type(aisles) is not list or len(aisles)>4:
             raise MapperProfileError('bounded targets4/parking aisles4 required')
         target_values=tuple(_typed(TargetClass,item) for item in targets)
+        demo_road_fill = own.get('demo_road_fill', False)
+        if type(demo_road_fill) is not bool or (demo_road_fill and not target_values):
+            raise MapperProfileError('demo road fill requires an explicit boolean and obstacle targets')
+        demo_pose_bounds = own.get('demo_pose_bounds')
+        if demo_pose_bounds is not None:
+            keys = ('position_m', 'heading_rad')
+            if (not demo_road_fill or type(demo_pose_bounds) is not dict or set(demo_pose_bounds) != set(keys)
+                    or any(type(v) not in (float, int) or not 0 < v <= 1 for v in demo_pose_bounds.values())):
+                raise MapperProfileError('demo pose bounds require demo road fill and explicit positive metre/radian values')
+            demo_pose_bounds = tuple(float(demo_pose_bounds[key]) for key in keys)
         aisle_values=tuple(_typed(ParkingAisle,item) for item in aisles)
         catalog_policy=None if own.get('catalog_policy') is None else _typed(CatalogPolicy,own['catalog_policy'])
         if catalog_policy is not None and (len(catalog_policy.aisle_lane_indices)!=len(aisle_values)
@@ -281,7 +293,8 @@ class MapperProfile:
         if len(raw)>MAX_BYTES: raise MapperProfileError('canonical mapper profile exceeds64KiB')
         for name,item in dict(canonical_bytes=raw,sha256=sha256(raw).hexdigest(),vehicle_configuration=own['vehicle_configuration'],
                 calibration_profile_sha256=own['calibration_profile_sha256'],capture_timing=timing,localization=localization,catalog_policy=catalog_policy,survey=survey,rolling_roi=rolling,sensors=sensors,pipeline=pipeline,
-                targets=target_values,parking_aisles=aisle_values,stopping=stopping,declared_motion_qualified=own['motion_qualified']).items():
+                targets=target_values,parking_aisles=aisle_values,stopping=stopping,declared_motion_qualified=own['motion_qualified'],
+                demo_road_fill=demo_road_fill,demo_pose_bounds=demo_pose_bounds).items():
             object.__setattr__(self,name,item)
 
     @classmethod

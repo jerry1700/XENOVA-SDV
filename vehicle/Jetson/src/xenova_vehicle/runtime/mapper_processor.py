@@ -597,7 +597,8 @@ class ResidentMapperProcessor:
             stopping=self._config.stopping,
             scene_draft=None if frame_state is None else frame_state.scene,
             hazard_draft=None if frame_state is None else frame_state.hazard,atlas_owner=self._mapping._atlas,
-            tof_overlay=self._tof_obstacles,sensor_snapshot=sensors)
+            tof_overlay=self._tof_obstacles,sensor_snapshot=sensors,demo_road_fill=self._config.demo_road_fill,
+            demo_pose_bounds=self._config.demo_pose_bounds)
         if built is None:return None,'WORLD_NOT_READY'
         alignment=draft.pipeline._alignment
         trust=decode(lease.trust_bytes,schema.WorldTrust)

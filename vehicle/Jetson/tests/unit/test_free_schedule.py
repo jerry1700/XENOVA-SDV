@@ -39,6 +39,66 @@ class FreeScheduleTests(unittest.TestCase):
         self.assertEqual(result.due_not_scheduled_count, 2)
         self.assertFalse(result.all_needed_live_fresh)
 
+    def test_blind_stopping_region_prefers_unobserved_nearby_visible_cells(self):
+        import numpy as np
+        owner, data = scheduler(), fields()
+        data['needed_mask'][0, 2:] = False
+        data['state'][0, 3] = FREE
+        data['time_known'][0, 3] = True
+        data['observed_us'][0, 3] = data['now_us']
+        visible = np.array([[False, False, True, True, True, True, False, False]])
+        distance = np.array([[0., .01, .30, .02, .10, .20, .40, .50]])
+
+        result = owner.plan(**data, visible_mask=visible, priority_mask=data['needed_mask'],
+                            required_proximity=distance)
+
+        self.assertEqual(result.cells, ((4, 0), (5, 0)))
+
+    def test_braking_corridor_prioritizes_visible_renewal_and_missing_cells(self):
+        import numpy as np
+        owner, data = scheduler(), fields()
+        data['state'][0, [0, 3]] = FREE
+        data['observed_us'][0, [0, 3]] = 510000
+        data['time_known'][0, [0, 3]] = True
+        visible = np.array([[True,True,False,True,True,True,True,True]])
+        corridor = np.array([[False,False,True,True,True,False,False,False]])
+        result = owner.plan(**data,visible_mask=visible,priority_mask=corridor)
+        self.assertEqual(result.cells,((3,0),(4,0)))
+        self.assertEqual(result.priorities,('REQUIRED_EXPIRING','REQUIRED_NEW_OR_UNPROVEN'))
+        self.assertEqual(result.needed_count,8)
+
+    def test_departure_edge_gets_a_share_and_failed_candidates_rotate(self):
+        import numpy as np
+        owner, data = scheduler(), fields()
+        visible = np.array([[False, False, False, False, True, True, True, True]])
+        edge = np.array([[False, True, True, True, False, False, False, False]])
+        proximity = np.arange(8, dtype=float)[None, :]
+        data['state'][0, 1] = OCCUPIED
+        data['observed_us'][0, 1] = data['capture_lower_us']
+        data['time_known'][0, 1] = True
+
+        options = dict(visible_mask=visible, near_departure_mask=edge, required_proximity=proximity)
+        first = owner.plan(**data, **options)
+        self.assertEqual(first.cells, ((2, 0), (4, 0)))
+        owner.note_attempts(first, first.cells)
+        second = owner.plan(**data, **options)
+        self.assertEqual(second.cells, ((3, 0), (4, 0)))
+        self.assertFalse(second.all_needed_live_fresh)
+
+    def test_near_visible_cell_precedes_farther_work_and_current_hit_is_not_retested(self):
+        import numpy as np
+        owner, data = scheduler(), fields()
+        data['state'][0, 1] = OCCUPIED
+        data['observed_us'][0, 1] = data['capture_lower_us']
+        data['time_known'][0, 1] = True
+        visible = np.array([[False,True,True,True,True,False,False,False]])
+        distances = np.array([[0.,.01,.1,.04,.05,.3,.4,.5]])
+        first = owner.plan(**data,visible_mask=visible,required_proximity=distances)
+        self.assertEqual(first.cells,((3,0),(4,0)))
+        data['capture_lower_us'] += 1
+        second = owner.plan(**data,visible_mask=visible,required_proximity=distances)
+        self.assertEqual(second.cells,((1,0),(3,0)))
+
     def test_parking_preference_uses_only_the_budget_left_after_the_stopping_region(self):
         owner, data = scheduler(), fields()
         data['needed_mask'][0, 1:] = False

@@ -91,7 +91,8 @@ def _heading_bound(basis, road):
     return bound
 
 
-def _current(draft, state, basis, context, source, calibration, sensors, vehicle, lease, now):
+def _current(draft, state, basis, context, source, calibration, sensors, vehicle, lease, now,
+             *, stored_window=False):
     from xenova_drive_world.mapper_clock import ClockLease
     _need(draft.ready and type(draft.result) is PerceptionResult and type(draft.frame) is FrameEvidence)
     _need(draft.context == context and draft.inputs.storage_context == context)
@@ -132,12 +133,12 @@ def _current(draft, state, basis, context, source, calibration, sensors, vehicle
           and snapshot['clock_id'] == source['clock_epoch'] and draft.pipeline.grid is not None
           and snapshot['frame_id'] == draft.pipeline.grid.frame_id
           and snapshot['revision'] == draft.pipeline.grid.revision)
-    model = state.road_basis.publication_model(state.lane)
+    model = state.road_basis.publication_model(state.lane, stored_window=stored_window)
     _need(model is not None and state.lane.context == context and state.road_basis_material is None)
     _need(model.source.input_kind == 'LIVE'
           and model.source.domain == (calibration.sha256, context.map_epoch, snapshot['frame_id'], context.odom_epoch)
           and model.source.map_revision <= snapshot['revision'])
-    _need(basis.status == 'READY' and basis.latest_lane_source is model.source
+    _need(basis.latest_lane_source is model.source
           and basis.lane_ids == model.lane_ids and basis.latest_model_revision == model.model_revision
           and state.road_basis.snapshot() == basis and 2 <= len(basis.points) <= 64)
     capture = frame.observation.capture_interval
@@ -153,7 +154,8 @@ def _current(draft, state, basis, context, source, calibration, sensors, vehicle
 
 def build_mapping_world(draft, catalog_state, basis, *, context, source, calibration,
                         sensors, current_vehicle, clock_lease, sequence, completed_j_us, published_j_us,
-                        stopping=None,scene_draft=None,hazard_draft=None,atlas_owner=None,tof_overlay=None,sensor_snapshot=None):
+                        stopping=None,scene_draft=None,hazard_draft=None,atlas_owner=None,tof_overlay=None,sensor_snapshot=None,
+                        demo_road_fill=False,demo_pose_bounds=None):
     """원 채택 후보를 build_world에 전달한다. None은 원 자료/기한/표현의 NOT_READY다.
 
     sensors는 원 admission의 frozen read-view 또는 기존 owner다. 외부 source 교체 여부와
@@ -171,7 +173,7 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
     _uint(sequence, positive=True); _uint(completed_j_us); _uint(published_j_us)
     try:
         result, snapshot, model, capture, alignment = _current(draft, catalog_state, basis, context, source,
-            calibration, sensors, current_vehicle, clock_lease, published_j_us)
+            calibration, sensors, current_vehicle, clock_lease, published_j_us, stored_window=stopping is not None)
         # Use the newest expiry calculation for the original observations in the grid.
         # Keep the observation clock independent of the road's capture provenance.
         if stopping is not None:
@@ -218,7 +220,8 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
             publication_road, publication_lane = lane_publication(basis, model)
         else:
             publication_road, publication_lane = lane_window_publication(
-                draft.pipeline,basis,model,mapped,stopping,sum(capture)//2,current_geometry=current_geometry)
+                draft.pipeline,basis,model,mapped,stopping,sum(capture)//2,current_geometry=current_geometry,
+                demo_course=demo_road_fill)
         mask = _preferred(spec, publication_road)
         completed_j_us = max(completed_j_us,snapshot_us)
         value = schema.WorldSnapshot(major=1, minor=2, required_features=11, sequence=sequence,
@@ -237,10 +240,12 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         for point in lower: value.right_boundary.add(x=point[0], y=point[1])
         value.lane_model.CopyFrom(publication_lane)
         interval = alignment.observed_j_interval
-        # 원 anchor 오차를 빼서 좁히지 않는다. Pi가 원 drift를 추가하는 보수성도 유지한다.
+        bounds = mapped.position_error_m, mapped.yaw_error_rad
+        if demo_road_fill and demo_pose_bounds is not None and retained is None:
+            bounds = demo_pose_bounds
         value.localization.CopyFrom(schema.MapLocalization(registration_revision=alignment.registration_revision,
-            anchor_position_bound_m=_f32_up(mapped.position_error_m+math.hypot(anchor.x-mapped.x, anchor.y-mapped.y)),
-            anchor_heading_bound_rad=_f32_up(mapped.yaw_error_rad+abs(anchor.yaw-mapped.yaw)),
+            anchor_position_bound_m=_f32_up(bounds[0]+math.hypot(anchor.x-mapped.x, anchor.y-mapped.y)),
+            anchor_heading_bound_rad=_f32_up(bounds[1]+abs(anchor.yaw-mapped.yaw)),
             geometry_position_bound_m=_f32_up(basis.geometry_error_m+grid_error),
             geometry_heading_bound_rad=_f32_up(_heading_bound(basis, model.road)),
             observed_mapper_us=sum(interval)//2, valid_for_us=alignment.valid_for_us,
@@ -256,6 +261,12 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
         if tof_overlay is not None:
             snapshot, static = tof_overlay.apply(snapshot, sensor_snapshot=sensor_snapshot,
                 alignment=alignment, snapshot_us=snapshot_us, now_us=published_j_us, static_retained=static)
+        if demo_road_fill and stopping is not None and retained is None:
+            from ..mapping.local_map import OCCUPIED
+            from .demo_occupancy import fill_demo_road
+            snapshot = fill_demo_road(snapshot,mask,pose=mapped_capture.sample,camera=calibration.right,
+                targets=draft.pipeline.targets,
+                camera_hits=draft.pipeline.grid.state == OCCUPIED)
         inventory = catalog_state.view.parking
         if inventory is not None:
             _need(inventory.context == context and inventory.input_kind == 'LIVE'

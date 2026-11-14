@@ -148,6 +148,38 @@ CONTROL_PUBLISH_UNCONFIRMED / CONTROL_APPLY_UNCONFIRMED 등으로 남기고 STOP
 현재 준비를 확인한 운영자는 새 요청으로 재무장할 수 있다. 저장 상태·retained 충돌은
 CONTROL_AUTHORITY_CONFLICT이며 원본/복원 근거를 확인해야 한다. 임의 초기화하지 않는다.
 
+## Pi 실차 Gateway 자동 시작
+
+root 전용 `/etc/xenova/gateway.env`에 warm, A/B 등록 UUID, 기존 MQTT 계정,
+차량 한계, feedback-3 설정과 timeout을 지정한다. USB 어댑터는
+`ls -l /dev/serial/by-id/`로 확인하고 해당 경로 전체를 `XENOVA_GATEWAY_SERIAL_PORT`에 넣는다.
+포트가 비어 있으면 Gateway가 기본 `/dev/ttyUSB0`를 사용하므로 설치 전에 이 값을 채운다.
+
+운영 env가 있으면 Recovery Config가 factory 설정을 생략한다.
+A/B 연결은 등록된 UUID, 앱 모델, 기존 drive·telemetry 인증 파일 경로를
+[Recovery 설정 예시](../dom0-manager/deploy/drive-rejoin.example.json) 형식으로
+`/etc/xenova/drive-rejoin.json`에 등록한다. warm의 `readiness_profile`은
+`warm-drive-1`이며, 앱 모델은 설치된 펌웨어의 선언을 따른다. 운영 env와 JSON은
+root:root 0600으로 둔다. [Recovery Worker drop-in 예시](deploy/90-drive-rejoin.conf.example)를
+`/etc/systemd/system/xenova-recovery-worker.service.d/90-drive-rejoin.conf`로 설치한다.
+Yocto 패키지는 세 배포 예시를 모두 `/usr/share/xenova`에 설치한다.
+
+USB 시리얼의 자동 시작에는 [Gateway drop-in 예시](deploy/90-esp32-serial.conf.example)와
+[udev 규칙 예시](deploy/90-xenova-esp32.rules.example)를 사용한다.
+`SERIAL_BY_ID`를 해당 링크의 파일명으로, `ESP32_DEVICE_UNIT`을
+`systemd-escape --path --suffix=device "$serial_port"`의 출력으로 바꾼다.
+각각 `/etc/systemd/system/xenova-gateway.service.d/90-esp32-serial.conf`와
+`/etc/udev/rules.d/90-xenova-esp32.rules`에 설치한다. udev가 부팅 또는 재연결 때
+해당 장치를 감지하면 Gateway를 시작하고, systemd는 장치가 빠지면 Gateway를 정지한다.
+
+설치 후 `systemctl daemon-reload`와 `udevadm control --reload-rules`를 실행한다.
+`systemctl enable xenova-gateway.service`를 실행한 보드는
+`systemctl disable xenova-gateway.service`로 부팅 대상에서 Gateway를 뺀다.
+Recovery 설정 적용에는 `systemctl restart xenova-recovery-worker.service`를 사용한다.
+설치 당시 장치가 이미 연결되어 있으면 `systemctl start xenova-gateway.service`로
+한 번 시작한다. `python3 -m xenova_gateway.client context`를 실행해
+시작 직후 `SAFE_STOP`, `DISARMED`, `output_permitted=false`를 확인한다.
+
 ## 권위 원본 진단과 재확인
 
 다음 로컬 도구는 root 전용이며 broker·시리얼·VM을 조작하지 않는다. 실제 데이터 마운트를

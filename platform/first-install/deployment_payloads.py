@@ -12,6 +12,7 @@ GATEWAY = ROOT / "platform/services/gateway"
 WORLD = ROOT / "platform/apps/drive/world/python"
 DISPLAY = ROOT / "platform/services/display/router"
 RUNTIME_LOGS = RECIPES / "xenova-dom0-manager/files/runtime-logs"
+GATEWAY_FILES = RECIPES / "xenova-gateway/files"
 COLLECTOR = "xenova-runtime-log-collector.service"
 LOG_ENV = "etc/xenova/runtime-logs/collector.env"
 
@@ -36,6 +37,11 @@ def source_files(site_packages):
         LOG_ENV: RUNTIME_LOGS/"runtime-log-db.env",
         "usr/share/xenova/dom0-manager-pyproject.toml": API/"pyproject.toml",
         "usr/share/xenova/mqtt-client-pyproject.toml": MQTT/"pyproject.toml",
+        "usr/lib/systemd/system/xenova-gateway.service": GATEWAY_FILES/"xenova-gateway.service",
+        "usr/share/xenova/gateway.env.example": GATEWAY_FILES/"gateway.env.example",
+        "usr/share/xenova/drive-rejoin.example.json": API/"deploy/drive-rejoin.example.json",
+        **{"usr/share/xenova/"+name: GATEWAY/"deploy"/name for name in (
+            "90-esp32-serial.conf.example", "90-xenova-esp32.rules.example", "90-drive-rejoin.conf.example")},
         "usr/lib/systemd/system/xenova-display-feed.service": RECIPES/"xenova-display/files/xenova-display-feed.service",
         "usr/lib/systemd/system/xenova-display-guest-relay.service": DISPLAY/"deploy/guest-display/xenova-display-guest-relay.service",
         "usr/share/xenova/display/examples/guest-display-data-only.json.example": DISPLAY/"deploy/guest-display/guest-display-data-only.json.example",
@@ -83,6 +89,15 @@ def installed_sources(root):
                      'etc/xenova/guest-display.json', 'etc/xenova/guest-display/guest-data.token'):
         if (root/relative).is_symlink() or path(relative).exists():
             raise ValueError('common image must not contain board Display configuration or credentials')
+    for relative in (
+        'etc/xenova/gateway.env', 'etc/xenova/drive-rejoin.json',
+        'etc/xenova/vehicle-limits.json', 'etc/xenova/gateway-odometry.json', 'etc/xenova/gateway-feedback3.json',
+        'etc/systemd/system/xenova-gateway.service.d/90-esp32-serial.conf',
+        'etc/systemd/system/xenova-recovery-worker.service.d/90-drive-rejoin.conf',
+        'etc/udev/rules.d/90-xenova-esp32.rules',
+    ):
+        if (root/relative).is_symlink() or path(relative).exists():
+            raise ValueError('common image contains board gateway settings: ' + relative)
     collector_link = "etc/systemd/system/multi-user.target.wants/" + COLLECTOR
     if not (root/collector_link).is_symlink() or path(collector_link) != path("usr/lib/systemd/system/" + COLLECTOR):
         raise ValueError("required dom0 service not enabled: " + COLLECTOR)

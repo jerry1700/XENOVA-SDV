@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import math
 
 from .calibration import CalibrationProfile, number, polygon, vector
-from .geometry import Interval, PointBounds, plane_height_bounds, project_point
+from .geometry import Interval, PointBounds, plane_height_bounds, project_point, _matvec, _transpose
 from .ray_batch import RayBundleBatch
 from .point_batch import PointBoundsBatch
 from .ray_witness import witness as _witness
@@ -103,6 +103,28 @@ def _inside_box(bounds, support, guard=1e-10):
     return True
 
 
+def _core_projection(camera):
+    """Project a core's corners, including those outside the active image."""
+    rotation = _transpose(camera.rotation)
+    left, top, right, bottom = camera.roi
+
+    def projection(lower, upper):
+        points = []
+        for x in (lower[0],upper[0]):
+            for y in (lower[1],upper[1]):
+                for z in (lower[2],upper[2]):
+                    raw = _matvec(rotation,(x-camera.translation[0],y-camera.translation[1],z-camera.translation[2]))
+                    u,v,w = _matvec(camera.k,_matvec(camera.rectification,raw))
+                    if w <= 0:
+                        return None
+                    points.append((u/w,v/w))
+        x,y = zip(*points)
+        bounds = max(left,min(x)),max(top,min(y)),min(right,max(x)),min(bottom,max(y))
+        return bounds if bounds[0] <= bounds[2] and bounds[1] <= bounds[3] else None
+
+    return projection
+
+
 def certify_cell(cell_xy_bounds, patches, targets, profile, *, permission_polygon=None,
                  max_tiles=4096, max_ray_tests=200000, tile_size_m=None, hazards=(), work_allowed=None):
     """미검사 placement가 하나라도 남으면 UNKNOWN이다. 후보 ray 순서는 증명 범위를 줄이지 않는다.
@@ -179,56 +201,76 @@ def certify_cell(cell_xy_bounds, patches, targets, profile, *, permission_polygo
             raise ValueError('placement tile exceeds core coverage profile')
         nx, ny = max(1, math.ceil((domain[2] - domain[0]) / step)), max(1, math.ceil((domain[3] - domain[1]) / step))
         nz = max(1, math.ceil((target.base_height_m[1] - target.base_height_m[0]) / (target.core_height_m / 4)))
-        required += nx * ny * nz
-        plans.append((target, domain, nx, ny, nz))
+        # The expanded cell includes a central inscribed square. Keep planning
+        # bounded even if the profile requests very fine tiles.
+        if nx*ny*nz > 2*max_tiles:
+            return result('UNKNOWN','UNTESTED_PLACEMENT_TILES',required=nx*ny*nz)
+        def edges(lo,hi,count):
+            return tuple(lo+(hi-lo)*i/count for i in range(count+1))
+        xs,ys = edges(domain[0],domain[2],nx),edges(domain[1],domain[3],ny)
+        tiles = []
+        for xa,xb in zip(xs,xs[1:]):
+            dx = max(0.,math.nextafter(x0-xb,-math.inf),math.nextafter(xa-x1,-math.inf))
+            for ya,yb in zip(ys,ys[1:]):
+                dy = max(0.,math.nextafter(y0-yb,-math.inf),math.nextafter(ya-y1,-math.inf))
+                # Exclude only tiles entirely outside the radial extent of the cell.
+                if math.nextafter(math.hypot(dx,dy),-math.inf) <= target.max_extent_m:
+                    tiles.append((xa,xb,ya,yb))
+                    if required+len(tiles)*nz > max_tiles:
+                        return result('UNKNOWN','UNTESTED_PLACEMENT_TILES',required=required+len(tiles)*nz)
+        required += len(tiles)*nz
+        plans.append((target,tiles,nz))
     tested = work = 0
     rank_work = len(accepted)
     keys = set()
-    for target, domain, nx, ny, nz in plans:
+    project_core = _core_projection(profile.right)
+    for target,tiles,nz in plans:
         r = math.nextafter(target.core_radius_m / math.sqrt(2.), -math.inf)
-        for ix in range(nx):
-            xa, xb = (domain[0] + (domain[2] - domain[0]) * i / nx for i in (ix, ix + 1))
-            for iy in range(ny):
-                ya, yb = (domain[1] + (domain[3] - domain[1]) * i / ny for i in (iy, iy + 1))
-                floor = plane_height_bounds(Interval(xa, xb), Interval(ya, yb), profile.plane)
-                if floor is None:
-                    return result('UNKNOWN', 'PLANE_INTERVAL_UNBOUNDED', tested, required, work, sorted(keys, key=repr), rank_work)
-                for iz in range(nz):
-                    if work_allowed is not None and tested % 8 == 0 and not work_allowed():
-                        return result('UNKNOWN', 'COMPLETION_BUDGET', tested, required, work,
-                                      sorted(keys, key=repr), rank_work)
-                    if tested >= max_tiles:
-                        return result('UNKNOWN', 'UNTESTED_PLACEMENT_TILES', tested, required, work, sorted(keys, key=repr), rank_work)
-                    a, b = (target.base_height_m[0] + (target.base_height_m[1] - target.base_height_m[0]) * i / nz
-                            for i in (iz, iz + 1))
-                    lower = tuple(math.nextafter(x, math.inf) for x in (xb - r, yb - r, floor.hi + b))
-                    upper = tuple(math.nextafter(x, -math.inf) for x in (xa + r, ya + r, floor.lo + a + target.core_height_m))
-                    if any(lo >= hi for lo, hi in zip(lower, upper)):
-                        return result('UNKNOWN', 'NO_COMMON_CORE_INTERIOR', tested, required, work, sorted(keys, key=repr), rank_work)
-                    center = tuple((lo + hi) / 2 for lo, hi in zip(lower, upper))
-                    uv = project_point(center, profile.right)
-                    if uv is not None and bins:
-                        bx, by = math.floor(uv[0] / 8), math.floor(uv[1] / 8)
-                        pool = [i for dx in range(-2, 3) for dy in range(-2, 3)
-                                for i in bins.get((bx + dx, by + dy), ())]
-                        order = sorted(pool, key=lambda i: ((pixels[i][0] - uv[0]) ** 2
-                            + (pixels[i][1] - uv[1]) ** 2, i))[:32]
-                        rank_work += len(pool)
-                    else:
-                        order = list(range(min(32, len(accepted))))
-                    found = False
-                    for index in order:
-                        if work >= max_ray_tests:
-                            return result('UNKNOWN', 'RAY_TEST_CAP', tested, required, work, sorted(keys, key=repr), rank_work)
-                        work += 1
-                        patch = candidate(index)
-                        if _witness(patch, lower, upper, 1e-9):
-                            if patch.source_key is not None:
-                                keys.add(patch.source_key)
-                            found = True
-                            break
-                    tested += 1
-                    if not found:
-                        return result('UNKNOWN', 'NO_COMMON_RAY_WITNESS', tested, required, work, sorted(keys, key=repr), rank_work)
+        for xa,xb,ya,yb in tiles:
+            floor = plane_height_bounds(Interval(xa, xb), Interval(ya, yb), profile.plane)
+            if floor is None:
+                return result('UNKNOWN', 'PLANE_INTERVAL_UNBOUNDED', tested, required, work, sorted(keys, key=repr), rank_work)
+            for iz in range(nz):
+                if work_allowed is not None and tested % 8 == 0 and not work_allowed():
+                    return result('UNKNOWN', 'COMPLETION_BUDGET', tested, required, work,
+                                  sorted(keys, key=repr), rank_work)
+                a, b = (target.base_height_m[0] + (target.base_height_m[1] - target.base_height_m[0]) * i / nz
+                        for i in (iz, iz + 1))
+                lower = tuple(math.nextafter(x, math.inf) for x in (xb - r, yb - r, floor.hi + b))
+                upper = tuple(math.nextafter(x, -math.inf) for x in (xa + r, ya + r, floor.lo + a + target.core_height_m))
+                if any(lo >= hi for lo, hi in zip(lower, upper)):
+                    return result('UNKNOWN', 'NO_COMMON_CORE_INTERIOR', tested, required, work, sorted(keys, key=repr), rank_work)
+                center = tuple((lo+hi)/2 for lo,hi in zip(lower,upper))
+                uv = project_point(center,profile.right) if bins else None
+                if bins and uv is None and not any(profile.right.distortion):
+                    # An edge core can be visible even when its center is
+                    # outside the ROI. Search the visible part first.
+                    projected = project_core(lower,upper)
+                    if projected is not None:
+                        uv = ((projected[0]+projected[2])/2,(projected[1]+projected[3])/2)
+                if uv is not None:
+                    u,v = uv
+                    bx,by = math.floor(u/8),math.floor(v/8)
+                    pool = [i for dx in range(-2, 3) for dy in range(-2, 3)
+                            for i in bins.get((bx + dx, by + dy), ())]
+                    order = sorted(pool, key=lambda i: ((pixels[i][0] - u) ** 2
+                        + (pixels[i][1] - v) ** 2, i))[:32]
+                    rank_work += len(pool)
+                else:
+                    order = list(range(min(32, len(accepted))))
+                found = False
+                for index in order:
+                    if work >= max_ray_tests:
+                        return result('UNKNOWN', 'RAY_TEST_CAP', tested, required, work, sorted(keys, key=repr), rank_work)
+                    work += 1
+                    patch = candidate(index)
+                    if _witness(patch, lower, upper, 1e-9):
+                        if patch.source_key is not None:
+                            keys.add(patch.source_key)
+                        found = True
+                        break
+                tested += 1
+                if not found:
+                    return result('UNKNOWN', 'NO_COMMON_RAY_WITNESS', tested, required, work, sorted(keys, key=repr), rank_work)
     return result('CLEAR_REGION', 'ALL_TARGET_PLACEMENTS_EXCLUDED', tested, required, work,
                   sorted(keys, key=repr), rank_work)

@@ -47,7 +47,10 @@ def road_error_diagnostics(graph, profile, result):
         raise ValueError('original typed tape/profile/road result required')
     if result.source_key != graph.source_key:
         raise ValueError('road result source differs from tape graph')
-    chains, ambiguous, work = road._chains(graph, profile)
+    surface_ids = {edge.local_id for edge in graph.surface_edges}
+    uses_surface = any(surface_ids.intersection(ids) for h in result.hypotheses for ids in h.strip_ids)
+    strips = graph.strips + graph.surface_edges if uses_surface else graph.strips
+    chains, ambiguous, work = road._chains(graph, profile, strips)
     by_ids = {chain.ids: chain for chain in chains}
     chain_fields = []
     for chain in chains:

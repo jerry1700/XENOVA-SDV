@@ -224,10 +224,13 @@ class RoadBasis:
             0 if self._latest is None else self._latest.model_revision,self.roots,
             tuple(event[0] for event in self._events))
 
-    def publication_model(self, catalog):
-        """Return the admitted geometry for the open basis, without renewing its source."""
+    def publication_model(self, catalog, *, stored_window=False):
+        """Return geometry for the basis; a held basis only supports a checked local window."""
         model = self._latest
-        if (self._status == 'READY' and self._scope == _scope(catalog)
+        usable = self._status == 'READY' or (stored_window and self._raw and self._handoff is not None
+            and self._handoff[2] == 'OVERLAP_SPAN_UNRESOLVED'
+            and self._handoff[0].lane_ids == self._ids)
+        if (usable and self._scope == _scope(catalog)
                 and model is not None and model.lane_ids == self._ids
                 and model.source.qualified and model.road.calibration_qualified
                 and model.original_context_sha256 == catalog.context.sha256
@@ -365,7 +368,17 @@ class RoadBasis:
             if self._handoff is None:self._status='READY';self._reason=None
             return self.snapshot()
         if not self._ids or model.lane_ids==self._ids:self._latest=model
-        if self._handoff is None:self._apply(model,resolution_m)
+        if self._handoff is None:
+            self._apply(model,resolution_m)
+        elif self._handoff[2] == 'OVERLAP_SPAN_UNRESOLVED' and model.lane_ids == self._ids:
+            # A new observation can resolve the short overlap without changing
+            # the existing prefix. Keep the original hold if it still cannot.
+            original_hold = self._handoff
+            self._handoff = None
+            self._apply(model,resolution_m)
+            if self._handoff is not None:
+                self._handoff = original_hold
+                self._reason = original_hold[2]
         return self.snapshot()
 
     def state_fields(self):

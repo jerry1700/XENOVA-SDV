@@ -1,0 +1,6 @@
+# Replace ESP32_DEVICE_UNIT with: systemd-escape --path --suffix=device "$serial_port"
+[Unit]
+ConditionPathExists=/etc/xenova/gateway.env
+Wants=mosquitto.service xenova-vms.service xenova-recovery-config.service
+BindsTo=ESP32_DEVICE_UNIT
+After=ESP32_DEVICE_UNIT
