@@ -24,7 +24,7 @@ static struct drive_engine engine;
 static struct drive_planner_health planner_health;
 static struct manual_cfg manual_config;
 static struct k_thread planner_thread;
-K_THREAD_STACK_DEFINE(planner_stack,8192);
+K_THREAD_STACK_DEFINE(planner_stack,16384);
 K_MUTEX_DEFINE(app_metadata);
 K_MUTEX_DEFINE(tof_lock);
 static struct lt_auto tof;
