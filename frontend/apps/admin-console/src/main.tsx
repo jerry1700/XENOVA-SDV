@@ -17,12 +17,12 @@ import { DemoPage } from './pages/DemoPage';
 import { EventsPage } from './pages/EventsPage';
 import { PhoneLinkPage } from './pages/PhoneLinkPage';
 import { ResourcesPage } from './pages/ResourcesPage';
-import { ShowcasePage } from './pages/ShowcasePage';
 import { SimulatorStressLab } from './pages/SimulatorStressLab';
 import { VmCreatePage } from './pages/VmCreatePage';
 import { VmDetailPage } from './pages/VmDetailPage';
 import { VmListPage } from './pages/VmListPage';
 import { VisionPage } from './pages/VisionPage';
+import { showcaseRoutes } from './showcaseRoutes';
 
 // 관리자 콘솔에만 XENOVA 브랜드 테마를 적용한다. HDMI 화면은 기존 테마를 유지한다.
 document.documentElement.dataset.theme = 'xenova';
@@ -36,6 +36,9 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+// 컴포넌트 견본은 개발 서버·mock 빌드에서만 연다. 운영 빌드는 첫 화면으로 보낸다 (S15P31E110-470)
+const showcase = showcaseRoutes();
 
 const router = createBrowserRouter([
   {
@@ -89,13 +92,13 @@ const router = createBrowserRouter([
               { path: '/console', element: <Navigate to="/dashboard/console" replace /> },
               { path: '/events', element: <KeepQueryRedirect to="/dashboard/events" /> },
               { path: '/phone-link', element: <PhoneLinkPage /> },
-              { path: '/components', element: <ShowcasePage /> },
+              showcase.console,
             ],
           },
         ],
       },
-      // 디자인 확인은 서버 연결 없이도 볼 수 있게
-      { path: '/components-public', element: <ShowcasePage /> },
+      // 디자인 확인은 서버 연결 없이도 볼 수 있게 (개발 서버·mock 빌드에서만)
+      showcase.standalone,
       { path: '*', element: <Navigate to="/dashboard/overview" replace /> },
     ],
   },
