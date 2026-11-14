@@ -23,6 +23,7 @@
 #define FB3_CAP_TOF_FRAGMENT 0x0200u /* 8x8 조각 전송. 지금 계약에서는 쓰지 않는다 */
 #define FB3_CAP_STATIONARY_STEER 0x0400u
 #define FB3_CAP_TOF_SINGLE 0x0800u   /* 단일 존 TOF_SAMPLE */
+#define FB3_CAP_PROXIMITY_GUARD 0x1000u /* ToF 로 가까운 물체를 보면 그 방향의 출력을 끊는다 */
 
 /* CLOCK_ACK status */
 #define FB3_CLOCK_INSTALLED 1u
@@ -52,6 +53,9 @@
 #define FB3_QUALITY_ENCODER 0x01u
 #define FB3_QUALITY_STEERING_MEASURED 0x02u
 #define FB3_QUALITY_STEERING_ESTIMATED 0x04u
+/* 근거리 제동이 그 방향을 막고 있다. PROXIMITY_GUARD 를 알린 장치만 쓴다 */
+#define FB3_QUALITY_FRONT_BLOCKED 0x08u
+#define FB3_QUALITY_REAR_BLOCKED 0x10u
 #define FB3_STEERING_LIMIT_MRAD 1400
 
 /* TOF_SAMPLE frame_status */
@@ -99,6 +103,7 @@ enum fb3_reason {
 	FB3_REASON_SENSOR_UNAVAILABLE = 18,
 	FB3_REASON_DEADLINE_MISMATCH = 19,
 	FB3_REASON_CLOCK_DRIFT = 20,
+	FB3_REASON_PROXIMITY_BLOCKED = 21, /* 근거리 제동이 막고 있는 방향의 DRIVE. REPORT 에서만 쓴다 */
 	FB3_REASON_COUNT
 };
 

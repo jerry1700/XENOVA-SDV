@@ -20,12 +20,18 @@ PC 에서 게이트웨이 코드를 돌리는 것이므로 실제 Pi 의 USB 와
      Pi 의 ToF 선택을 만들어 1초 동안 Pi 가 관측을 받아 넘기는지 본다. 1 다음에 한다. 모터와 서보는 움직이지 않는다.
      실보드에서 관측이 하나도 오지 않으면 확인하지 못한 것으로 적고 넘어간다. --tof 를 주면 그때 실패로 친다.
 
+  근거리 제동: 시뮬레이터에 --wall-mm 을 주면 3·4 대신 한다. 앞 벽으로 DRIVE 를 이어 보내, 장치가 스스로 서고
+     막힌 방향의 DRIVE 를 PROXIMITY_BLOCKED 로 거절하는 동안 Pi 가 그것을 고장으로 보지 않는지, 물러나면 풀리는지 본다.
+     근거리 제동 수용이 들어 있는 게이트웨이 코드가 필요하다. 벽은 250 mm 쯤으로 준다. Pi 의 정지 확인은 달린 거리가
+     늘수록 통과하기 어려워져서(이 도구의 설정으로는 0.4 m 쯤부터 통과하지 못한다) 3·4 와 한 번에 하지 않는다.
+
 펌웨어가 알리는 capability 에 Pi 필수 bit 가 모자라면 Pi 가 HELLO_ACK 를 받지 않는 것을 먼저 확인하고,
 중계가 모자란 bit 를 채워 넣은 채로 1 만 본다. 그것은 부분 호환성 시험이다.
 
 게이트웨이 소스(feedback-3 가 들어 있는 platform/)와 protobuf==6.33.6, paho-mqtt, pyserial 이 필요하다.
 
   python pi_link_check.py --platform <저장소>/platform --sim <빌드 폴더>/sim_link
+  python pi_link_check.py --platform <저장소>/platform --sim <빌드 폴더>/sim_link --wall-mm 250
   python pi_link_check.py --platform <저장소>/platform --port COM8
 """
 import argparse
@@ -39,8 +45,8 @@ import time
 from uuid import UUID, uuid4
 
 from fb3 import (ACK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, HELLO, HELLO3,
-                 HELLO_ACK, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, TOF3, TOF_CAP, TOF_SAMPLE, Peer, Splitter,
-                 add_device_arguments, open_device, packet, unpack)
+                 HELLO_ACK, PROXIMITY_CAP, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, STOP_MM, TOF3, TOF_CAP,
+                 TOF_SAMPLE, Peer, Splitter, add_device_arguments, open_device, packet, unpack)
 
 HANDSHAKE_TIMEOUT_MS = 1000
 LEASE_WAIT_S = 5.0
@@ -56,6 +62,9 @@ STATIONARY_STEER = 0x0400   # HELLO_ACK capabilities 가운데 HOLD_STEER 를 �
 HOLD_S = .5                 # HOLD_STEER 를 이어 보내는 시간
 HOLD_RAD = .1               # 그 HOLD_STEER 의 조향. 왼쪽이 +
 TOF_S = 1.0                 # Pi 가 ToF 관측을 받아 넘기는지 보는 시간
+WALL_S = 2.0                # 벽으로 DRIVE 를 이어 보내는 시간. 그 안에 막히고, 막힌 뒤에도 계속 보낸다
+BACK_S = 0.5                # 막힌 뒤 뒤로 물러나는 시간
+AGAIN_S = 0.2               # 풀린 뒤 다시 앞으로 가 보는 시간
 TOF_MAX_AGE_US = 500000     # Pi 의 ToF 선택에 주는 관측 수명과 시각 오차 한도. 실측값이 아니다
 TOF_MAX_CLOCK_ERROR_US = 100000
 # Pi odometry 에 주는 차체 값. 조립 안내서에서 잰 치수 언저리이고 보정한 값이 아니다
@@ -326,7 +335,7 @@ def keep_holding(sink, drive_frame, counter, witness, seconds):
     return tried, sent, declined, states
 
 
-def keep_driving(sink, drive_frame, counter, witness, seconds):
+def keep_driving(sink, drive_frame, counter, witness, seconds, velocity=DRIVE_MPS):
     """seconds 동안 DRIVE 를 이어 보낸다. (보낸 수, Pi 가 보내기를 거절한 까닭 또는 None, 그동안 Pi 가 본 가장 큰 속도)"""
     from xenova_gateway.sink import SinkError
     sent, refused, fastest = 0, None, 0.
@@ -334,7 +343,7 @@ def keep_driving(sink, drive_frame, counter, witness, seconds):
     while time.monotonic() < end:
         now = int(sink.clock() * 1e6)
         try:
-            sink.write(drive_frame(1, (counter + sent) & 255, DRIVE_MPS, 0., now, now + DRIVE_LIFE_US, witness),
+            sink.write(drive_frame(1, (counter + sent) & 255, velocity, 0., now, now + DRIVE_LIFE_US, witness),
                        time.monotonic())
         except SinkError as error:
             refused = str(error)
@@ -487,7 +496,7 @@ def main():
                 check(len(applied_commands(relay, 2)) == 1, '장치가 그 STOP 을 APPLIED 로 알림')
                 clean('그동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음')
 
-                if args.sim or args.drive:
+                if (args.sim or args.drive) and not args.wall_mm:
                     print(f'DRIVE: Pi 가 {DRIVE_S:.0f}초 동안 {DRIVE_MPS} m/s 의 DRIVE 를 이어 보냄')
                     sent, refused, fastest = keep_driving(sink, DriveFrame, 1, witness, DRIVE_S)
                     check(refused is None and sent >= DRIVE_S / DRIVE_PERIOD_S * 6 // 10,
@@ -538,6 +547,61 @@ def main():
                         check(took is not None, 'HOLD_STEER 뒤의 STOP 으로 Pi 가 다시 정지를 확인함'
                               + (f' ({took:.2f}초)' if took is not None else ''))
                         clean('HOLD_STEER 를 주고받는 동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음')
+
+                if args.wall_mm:
+                    free = 1  # 다음 명령에 쓸 counter
+                    print(f'근거리 제동: 시뮬레이터의 앞 벽으로 {WALL_S:.0f}초 동안 DRIVE 를 이어 보냄')
+                    aware = hasattr(sink, 'proximity_view') and bool(capabilities & PROXIMITY_CAP)
+                    check(aware, '게이트웨이 코드와 장치가 모두 근거리 제동을 앎'
+                          + ('' if aware else ' (이 platform 의 게이트웨이 코드에 근거리 제동 수용이 없거나 장치가 알리지 않음)'))
+                if args.wall_mm and aware:
+                    view = sink.proximity_view
+                    check(view['proximity_front_blocked'] is False and view['proximity_rear_blocked'] is False,
+                          '벽이 멀 때 Pi 가 본 막힌 방향이 없음')
+                    told = len(applied_commands(relay, 1))
+                    sent, refused, fastest = keep_driving(sink, DriveFrame, free, witness, WALL_S)
+                    free += sent
+                    told = len(applied_commands(relay, 1)) - told
+                    view = sink.proximity_view
+                    vehicle = sink.snapshot.get('vehicle_sample')
+                    check(refused is None and sent >= WALL_S / DRIVE_PERIOD_S * 6 // 10,
+                          f'Pi 가 막힌 뒤에도 DRIVE {sent}개를 계속 내보냄' + (f' (그만둔 까닭: {refused})' if refused else ''))
+                    check(view['proximity_front_blocked'] is True and view['proximity_rear_blocked'] is False,
+                          'Pi 가 앞이 막히고 뒤는 열려 있는 것을 봄')
+                    turned = view['proximity_rejected']
+                    check(turned >= 1 and told >= 1 and told + turned >= sent * 9 // 10,
+                          f'장치가 그 DRIVE 를 막히기 전에는 APPLIED({told}개), 막힌 뒤에는 PROXIMITY_BLOCKED({turned}개)로 알림')
+                    left_mm = None if vehicle is None else args.wall_mm - vehicle['left_ticks'] * METRES_PER_TICK * 1000
+                    check(left_mm is not None and vehicle['velocity_mps'] == 0 and STOP_MM - 40 <= left_mm < STOP_MM,
+                          f'차가 벽 앞 {STOP_MM} mm 를 지난 지 40 mm 안에서 서 있음'
+                          + (f' (벽까지 {left_mm:.0f} mm)' if left_mm is not None else ''))
+                    clean('근거리 제동이 걸려 있는 동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음')
+                    took = confirm_stop(sink, StopFrame, free, witness)
+                    free += 1
+                    check(took is not None, '막힌 중의 STOP 으로 Pi 가 정지를 확인함'
+                          + (f' ({took:.2f}초)' if took is not None else ''))
+                    sent, refused, fastest = keep_driving(sink, DriveFrame, free, witness, BACK_S, -DRIVE_MPS)
+                    free += sent
+                    view = sink.proximity_view
+                    check(refused is None and view['proximity_front_blocked'] is False and view['proximity_rejected'] == turned,
+                          f'뒤로 가는 DRIVE {sent}개는 거절되지 않고, 물러나자 Pi 가 본 앞 막힘이 풀림'
+                          + (f' (그만둔 까닭: {refused})' if refused else ''))
+                    poll_until(sink, 0.5, lambda: False)  # 3 처럼 출력이 끊겨 바퀴가 선 뒤에 STOP 을 보낸다
+                    took = confirm_stop(sink, StopFrame, free, witness)
+                    free += 1
+                    check(took is not None, '물러난 뒤의 STOP 으로 Pi 가 정지를 확인함'
+                          + (f' ({took:.2f}초)' if took is not None else ''))
+                    told = len(applied_commands(relay, 1))
+                    sent, refused, fastest = keep_driving(sink, DriveFrame, free, witness, AGAIN_S)
+                    free += sent
+                    told = len(applied_commands(relay, 1)) - told
+                    check(refused is None and told >= sent * 9 // 10 > 0 and sink.proximity_view['proximity_rejected'] == turned,
+                          f'풀린 뒤의 앞으로 가는 DRIVE 는 다시 적용됨 ({sent}개 가운데 APPLIED {told}개)')
+                    poll_until(sink, 0.5, lambda: False)
+                    took = confirm_stop(sink, StopFrame, free, witness)
+                    check(took is not None, '마지막 STOP 으로 Pi 가 정지를 확인함'
+                          + (f' ({took:.2f}초)' if took is not None else ''))
+                    clean('근거리 제동을 주고받는 동안 Pi 가 장치를 고장으로 보거나 프레임을 버리지 않음')
             print('      ' + transcript(relay))
         finally:
             sink.close()

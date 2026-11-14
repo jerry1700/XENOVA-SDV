@@ -81,6 +81,9 @@ if(WIN32)
   target_link_libraries(sim_link PRIVATE winmm)
 endif()
 add_test(NAME esp32_link_bench COMMAND ${Python3_EXECUTABLE} ${TOOLS}/link_bench.py --sim $<TARGET_FILE:sim_link>)
+# 시뮬레이터의 앞 벽으로 다가가 근거리 제동이 걸리고 풀리는 것까지 본다
+add_test(NAME esp32_link_bench_wall
+         COMMAND ${Python3_EXECUTABLE} ${TOOLS}/link_bench.py --sim $<TARGET_FILE:sim_link> --wall-mm 230)
 add_test(NAME esp32_steer_check COMMAND ${Python3_EXECUTABLE} ${TOOLS}/steer_check.py --sim $<TARGET_FILE:sim_link> --hold 0.1)
 add_test(NAME esp32_steer_check_stationary
          COMMAND ${Python3_EXECUTABLE} ${TOOLS}/steer_check.py --sim $<TARGET_FILE:sim_link> --hold 0.1 --stationary)
