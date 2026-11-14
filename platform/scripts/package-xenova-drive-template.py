@@ -38,9 +38,10 @@ def package(build,output,*,version=None):
     version=VERSION if version is None else version
     if not isinstance(version,str) or not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)",version):
         raise ValueError("plain major.minor.patch firmware version required")
-    profile,generated,provenance=module.lattice_inputs(receipt['profile'],bundle)
+    profile,generated,provenance=module.lattice_inputs(receipt['profile'],bundle,receipt.get('vehicle_profile'))
     if (contract.get('world_profile')!=profile['id'] or contract.get('primitive_sha256')!=generated['asset_sha256']
-            or (development and contract.get('development_inputs')!=provenance)):
+            or (development and contract.get('development_inputs')!=provenance)
+            or contract.get('vehicle_profile',{}).get('name')!=receipt.get('vehicle_profile')):
         raise ValueError('selected profile differs from actual ARM build receipt')
     bundle_id=DEVELOPMENT_ID if development else ID
     template=DEVELOPMENT_TEMPLATE if development else TEMPLATE
