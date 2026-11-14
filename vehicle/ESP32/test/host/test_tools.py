@@ -11,6 +11,7 @@ import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'tools'))
 import cutoff_stress
+import fb3
 import link_bench
 import pi_link_check
 import steer_check
@@ -279,8 +280,34 @@ def sensor_fields(sample, stamp, lease=5, pi=PI, quality=1, steering=0, error=0,
     return (pi, DEVICE, sample, stamp, ticks, ticks, quality, steering, error, EPOCH, lease)
 
 
-def lease_checked(sensors, start=1000000, cutoff=1500000, late=link_bench.BOARD_LATE_US):
-    return link_bench.lease_problems(sensors, PI, DEVICE, EPOCH, 5, start, cutoff, late, 32)
+def lease_checked(sensors, start=1000000, cutoff=1500000, late=link_bench.BOARD_LATE_US, allowed=7):
+    return link_bench.lease_problems(sensors, PI, DEVICE, EPOCH, 5, start, cutoff, late, 32, allowed)
+
+
+def test_bench_allows_blocked_bits_only_from_a_guarding_device():
+    plain, guarding = fb3.quality_bits(0x0df7), fb3.quality_bits(0x1df7)
+    check(plain == 7 and guarding == 0x1f, f'근거리 제동을 알린 장치만 quality 의 막힘 bit 를 쓸 수 있음 ({plain:#x}, {guarding:#x})')
+    period = SENSOR_PERIOD_US
+    for quality in (1 | fb3.FRONT_BLOCKED, 1 | fb3.REAR_BLOCKED, 1 | fb3.FRONT_BLOCKED | fb3.REAR_BLOCKED):
+        sensors = [sensor_fields(index + 1, 1000000 + (index + 1) * period, quality=quality) for index in range(24)]
+        check(lease_checked(sensors, allowed=guarding) == [], f'알린 장치의 막힘 bit {quality:#x} 는 문제 없음')
+        check(len(lease_checked(sensors)) == 24, f'알리지 않은 장치의 막힘 bit {quality:#x} 는 표본마다 문제')
+    sensors = [sensor_fields(index + 1, 1000000 + (index + 1) * period, quality=1 | 0x20) for index in range(24)]
+    check(len(lease_checked(sensors, allowed=guarding)) == 24, '알린 장치라도 그 밖의 bit 는 문제')
+    sensors = [sensor_fields(index + 1, 1000000 + (index + 1) * period, quality=fb3.FRONT_BLOCKED) for index in range(24)]
+    check(len(lease_checked(sensors, allowed=guarding)) == 24, '막힘 bit 만 있고 엔코더 bit 가 없으면 문제')
+    names = [fb3.blocked_name(quality) for quality in (1, 1 | fb3.FRONT_BLOCKED, 1 | fb3.REAR_BLOCKED, 0x19)]
+    check(names == ['없음', '앞', '뒤', '앞·뒤'], f'막힌 방향을 글로 옮김 {names}')
+    check(fb3.reason_name(21) == '21 PROXIMITY_BLOCKED', 'reason 21 의 이름')
+
+
+def test_bench_reads_the_latest_valid_front_distance():
+    flow = link_bench.Flow(FakePeer([]))
+    check(link_bench.front_mm(flow) is None, '관측이 없으면 거리도 없음')
+    flow.tofs = [tof_payload(0, 1, 1000, 600), tof_payload(1, 1, 1500, 800, instance=b'j' * 16),
+                 tof_payload(0, 2, 2000, 290), tof_payload(0, 3, 3000, distance=0, status=3, quality=2),
+                 tof_payload(1, 2, 3500, 100, instance=b'j' * 16)]
+    check(link_bench.front_mm(flow) == 290, f'앞 센서가 마지막으로 유효하다고 본 거리를 읽음 ({link_bench.front_mm(flow)})')
 
 
 def test_bench_sees_broken_sample_order():
@@ -626,6 +653,8 @@ def main():
     test_pi_check_sees_silence()
     test_bench_sees_broken_sample_order()
     test_bench_needs_sensor_through_the_lease()
+    test_bench_allows_blocked_bits_only_from_a_guarding_device()
+    test_bench_reads_the_latest_valid_front_distance()
     test_flow_sets_sensor_aside()
     test_bench_sees_report_out_of_step()
     test_bench_needs_drive_reports_to_follow_samples()

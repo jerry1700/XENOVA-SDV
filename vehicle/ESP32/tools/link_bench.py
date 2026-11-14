@@ -24,7 +24,8 @@ from uuid import UUID, uuid4
 
 from fb3 import (ACK3, CLOCK3, CLOCK_ACK, CLOCK_ACK3, CLOCK_INSTALL, CLOCK_PROBE, CLOCK_REPLY, COMMAND, COMMAND3,
                  HELLO, HELLO3, HELLO_ACK, INSTALL3, PROBE3, REPORT, REPORT3, REQUIRED_CAPS, SENSOR, SENSOR3, TOF3,
-                 TOF_CAP, TOF_CRC_BYTES, TOF_SAMPLE, Peer, add_device_arguments, now_us, open_device, packet,
+                 CLEAR_MM, FRONT_BLOCKED, PROXIMITY_CAP, REAR_BLOCKED, STOP_MM, TOF_CAP, TOF_CRC_BYTES, TOF_SAMPLE,
+                 UM_PER_TICK, Peer, add_device_arguments, blocked_name, now_us, open_device, packet, quality_bits,
                  reason_name)
 
 # CLOCK_INSTALL 을 Pi 와 같은 식으로 만들 때 쓰는 값. 실측값이 아니다
@@ -36,12 +37,14 @@ SESSION_MISMATCH, SEQUENCE_REPLAY, IDEMPOTENCY_CONFLICT, CLOCK_UNAVAILABLE, CLOC
 DEVICE_FAULT, TIMESTAMP_ORDER = 11, 17
 DRIVE, STOP, HOLD_STEER = 1, 2, 3                      # COMMAND command_kind
 APPLIED = 2                                            # REPORT status
-RANGE, DIRECTION_STOP_REQUIRED, UNSUPPORTED_PROFILE = 9, 10, 16  # REPORT reason
+RANGE, DIRECTION_STOP_REQUIRED, UNSUPPORTED_PROFILE, PROXIMITY_BLOCKED = 9, 10, 16, 21  # REPORT reason
 STATIONARY_STEER = 0x0400  # HELLO_ACK capabilities 가운데 HOLD_STEER 를 받는다는 bit
 HOLD_MRAD = (100, -100, 0)  # --drive 로 보내는 HOLD_STEER 의 조향
 DRIVE_MMPS = 200       # --drive 로 보내는 DRIVE 의 속도
 DRIVE_LIFE_US = 80000  # 그 DRIVE 의 기한까지 시간
 QUIET_S = 0.3  # 답이 없어야 할 때 기다리는 시간
+# 벽으로 다가갈 때 DRIVE 를 이어 보내는 간격. 기한(DRIVE_LIFE_US)보다 짧아서 출력이 끊기지 않고 이어진다
+APPROACH_PERIOD_S = 0.04
 # 펌웨어가 표본 사이에 두는 간격과, 기한이 이 안으로 남으면 REPORT 를 보내지 않는 여유
 # (link.h 의 FB3_SENSOR_PERIOD_US, FB3_REPORT_MARGIN_US)
 SENSOR_PERIOD_US = 20000
@@ -268,11 +271,11 @@ def drive_report_problems(told, samples, first, cutoff):
     return problems, len(sure)
 
 
-def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, late_us, encoder_bits):
+def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, late_us, encoder_bits, allowed=7):
     """한 lease 가 살아 있던 장치 시각 start_us 부터 cutoff_us 사이에 온 SENSOR 가 어긋난 곳을 글로 돌려준다.
 
     모두 그 session 과 lease 를 가리키고, 표본 시각이 그 구간 안이고, 처음부터 끝까지 한 주기에 late_us 를
-    더한 것보다 길게 끊긴 데가 없어야 한다.
+    더한 것보다 길게 끊긴 데가 없어야 한다. allowed 는 그 장치가 quality 에 쓸 수 있는 bit 다.
     """
     if not sensors:
         return ['SENSOR 가 하나도 오지 않음']
@@ -287,7 +290,8 @@ def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, la
             problems.append(f'표본 {sample} 가 clock_sequence {s_sequence} 를 가리킴')
         elif not start_us < stamp < cutoff_us:
             problems.append(f'표본 {sample} 의 시각이 lease 가 살아 있던 구간 밖 (cutoff 기준 {stamp - cutoff_us} us)')
-        elif not quality & 1 or quality & ~7 or steered == 6 or not -limit <= left < limit or not -limit <= right < limit:
+        elif (not quality & 1 or quality & ~allowed or steered == 6 or not -limit <= left < limit
+              or not -limit <= right < limit):
             problems.append(f'표본 {sample} 의 quality {quality}·누계 {left}, {right} 가 계약 밖')
         elif (error < 1 or abs(steering) > 1400) if steered else (steering or error):
             problems.append(f'표본 {sample} 의 조향 {steering} mrad·오차 {error} mrad 가 quality {quality} 와 안 맞음')
@@ -298,7 +302,82 @@ def lease_problems(sensors, pi, device, epoch, sequence, start_us, cutoff_us, la
     return problems
 
 
-def run(flow, lease_us, late_us, drive, report, tof=False):
+def front_mm(flow):
+    """앞 센서가 가장 최근에 유효하다고 본 거리. 없으면 None"""
+    seen = [TOF3.unpack(payload) for payload in flow.tofs if payload[76] == 0]
+    seen = [row[15] for row in seen if row[16] == 1]
+    return seen[-1] if seen else None
+
+
+def approach_wall(flow, check, note, command, echoed, result, renew, ticks, stop_sequence, wall_mm):
+    """시뮬레이터의 앞 벽으로 다가가 근거리 제동이 걸리고, 물러나 풀리는 것을 본다. stop_sequence 는 방금 적용한 STOP 이다"""
+    def quality():
+        return flow.sensors[-1][6]
+
+    number = stop_sequence + 1  # 다음 명령의 순번. 거절된 명령은 순번을 쓰지 않는다
+    leases = iter(range(20, 60))
+
+    def fresh():
+        sequence = next(leases)
+        return renew(sequence, sequence + 30)
+
+    check(fresh(), '근거리 제동을 볼 lease 를 설치')
+    flow.listen(0.05)
+    check(not quality() & (FRONT_BLOCKED | REAR_BLOCKED), f'벽이 멀 때는 표본에 막힘 bit 가 없음 (앞 {front_mm(flow)} mm)')
+    refused, body, applied = None, None, 0
+    for attempt in range(80):
+        if attempt % 10 == 9 and not fresh():
+            break
+        body, fields = command(number, DRIVE, stop_sequence=stop_sequence, velocity=DRIVE_MMPS)
+        if fields is None or fields[6] != APPLIED:
+            refused = fields
+            break
+        applied += 1
+        number += 1
+        flow.listen(APPROACH_PERIOD_S)
+    check(refused is not None and echoed(refused, body) and refused[6] == REJECTED and refused[18] == PROXIMITY_BLOCKED,
+          f'벽에 다가가자 DRIVE 를 REJECTED PROXIMITY_BLOCKED 로 거절함 (적용된 DRIVE {applied}개 뒤, {result(refused)})')
+    flow.listen(0.1)
+    stopped = ticks()
+    check(quality() & FRONT_BLOCKED and not quality() & REAR_BLOCKED, f'표본에 앞 막힘 bit 만 켜짐 (막힌 방향: {blocked_name(quality())})')
+    flow.listen(0.1)
+    check(ticks() == stopped, '막힌 뒤에는 엔코더가 멈춰 있음')
+    left_mm = wall_mm - stopped[0] * UM_PER_TICK / 1000
+    check(STOP_MM - 40 <= left_mm < STOP_MM, f'벽 앞 {STOP_MM} mm 를 지난 지 40 mm 안에서 섬 (벽까지 {left_mm:.0f} mm, 앞 센서 {front_mm(flow)} mm)')
+    body, fields = command(number, DRIVE, stop_sequence=stop_sequence, velocity=-DRIVE_MMPS)
+    check(echoed(fields, body) and fields[6] == REJECTED and fields[18] == DIRECTION_STOP_REQUIRED,
+          f'막힌 뒤에도 반대 방향은 새 STOP 이 있어야 함 ({result(fields)})')
+    body, fields = command(number, STOP)
+    check(echoed(fields, body) and fields[6] == APPLIED, f'막힌 중의 STOP 에 APPLIED 로 답함 ({result(fields)})')
+    stop_sequence, number = number, number + 1
+    cleared, backed = False, 0
+    for attempt in range(40):
+        if attempt % 10 == 0 and not fresh():
+            break
+        body, fields = command(number, DRIVE, stop_sequence=stop_sequence, velocity=-DRIVE_MMPS)
+        if fields is None or fields[6] != APPLIED:
+            break
+        backed += 1
+        number += 1
+        flow.listen(APPROACH_PERIOD_S)
+        if not quality() & FRONT_BLOCKED:
+            cleared = True
+            break
+    flow.listen(0.1)
+    left_mm = wall_mm - ticks()[0] * UM_PER_TICK / 1000
+    check(cleared and left_mm > CLEAR_MM, f'뒤로 물러나자 앞 막힘 bit 가 꺼짐 (뒤로 가는 DRIVE {backed}개 뒤, 벽까지 {left_mm:.0f} mm)')
+    body, fields = command(number, STOP)
+    check(echoed(fields, body) and fields[6] == APPLIED, f'물러난 뒤의 STOP 에 APPLIED 로 답함 ({result(fields)})')
+    stop_sequence, number = number, number + 1
+    check(fresh(), '다시 앞으로 갈 lease 를 설치')
+    body, fields = command(number, DRIVE, stop_sequence=stop_sequence, velocity=DRIVE_MMPS)
+    check(echoed(fields, body) and fields[6] == APPLIED, f'풀린 뒤의 앞으로 가는 DRIVE 는 다시 적용됨 ({result(fields)})')
+    flow.listen(DRIVE_LIFE_US / 1e6 + 0.05)
+    body, fields = command(number + 1, STOP)
+    check(echoed(fields, body) and fields[6] == APPLIED, f'근거리 제동을 본 뒤의 STOP 에 APPLIED 로 답함 ({result(fields)})')
+
+
+def run(flow, lease_us, late_us, drive, report, tof=False, wall_mm=0):
     check, note = report.check, report.note
     peer = flow.peer
 
@@ -350,8 +429,11 @@ def run(flow, lease_us, late_us, drive, report, tof=False):
     check((r_pi, r_device, r_sequence, r_p1) == (pi, device, 1, p1), 'session·probe_sequence·p1 을 그대로 돌려줌')
     check(0 < d2 <= latch <= d3 < 2 ** 63, f'0 < d2 <= latch <= d3 (d2 {d2}, latch +{latch - d2}, d3 +{d3 - d2} us)')
     steered = quality & 6
-    check(quality & 1 and not quality & ~7 and steered != 6,
-          f'quality {quality}: 엔코더 bit 가 있고 조향은 측정·추정 가운데 하나 이하')
+    allowed = quality_bits(capabilities)
+    check(quality & 1 and not quality & ~allowed and steered != 6,
+          f'quality {quality}: 엔코더 bit 가 있고 조향은 측정·추정 가운데 하나 이하, 알린 기능 밖의 bit 가 없음')
+    if capabilities & PROXIMITY_CAP:
+        note(f'근거리 제동을 하는 장치. 지금 막힌 방향: {blocked_name(quality)}')
     check((error >= 1 and abs(steering) <= 1400) if steered else (steering == 0 and error == 0),
           f'조향 {steering} mrad, 오차 {error} mrad 가 quality 와 맞음')
     limit = 2 ** (encoder_bits - 1)
@@ -425,7 +507,8 @@ def run(flow, lease_us, late_us, drive, report, tof=False):
 
     # 6. lease 가 살아 있던 동안에는 SENSOR 가 이어졌고, 기한 뒤에는 오지 않는다
     during = list(flow.sensors)
-    problems = lease_problems(during, pi, device, epoch, 5, installed_us, terms.cutoff, late_us, encoder_bits)
+    problems = lease_problems(during, pi, device, epoch, 5, installed_us, terms.cutoff, late_us, encoder_bits,
+                              quality_bits(capabilities))
     check(not problems, f'lease 가 살아 있는 {terms.cutoff - installed_us} us 동안 그 lease 를 가리키는 SENSOR 가 '
                         f'{SENSOR_PERIOD_US + late_us} us 넘게 끊기지 않고 옴 ({len(during)}개)')
     for text in problems[:3]:
@@ -548,6 +631,11 @@ def run(flow, lease_us, late_us, drive, report, tof=False):
     check(follow and follow[-1][10] == 5 and follow[-1][11] == 0 and follow[-1][13] == 1,
           '멈춰 있는 바퀴를 엔코더로 보고 정지로 알림')
 
+    if drive and capabilities & PROXIMITY_CAP:
+        # 막힌 방향의 DRIVE 는 거절된다. 아래는 앞뒤로 다 가 보므로 두 방향이 모두 열려 있어야 한다
+        blocked = flow.sensors[-1][6] & (FRONT_BLOCKED | REAR_BLOCKED)
+        drive = check(not blocked, f'근거리 제동이 막고 있는 방향이 없음 (막힌 방향: {blocked_name(blocked)}). '
+                                   f'막혀 있으면 센서 앞 {CLEAR_MM // 10} cm 안을 비우고 다시 한다. DRIVE 는 보내지 않고 넘어간다')
     if drive:
         # DRIVE 는 출력에 걸리고, 기한이 지나면 장치가 스스로 끊는다. 엔코더 누계로 본다
         before = ticks()
@@ -626,6 +714,8 @@ def run(flow, lease_us, late_us, drive, report, tof=False):
         check(ticks() == reversed_to, '그 DRIVE 도 기한 뒤에 멈춤')
         stop, fields = command(number + 2, STOP)
         check(echoed(fields, stop) and fields[6] == APPLIED, f'마지막 STOP 에 APPLIED 로 답함 ({result(fields)})')
+        if wall_mm:
+            approach_wall(flow, check, note, command, echoed, result, renew, ticks, number + 2, wall_mm)
 
     # ToF. lease 가 살아 있는 동안 센서의 새 관측이 TOF_SAMPLE 로 온다
     if capabilities & TOF_CAP:
@@ -676,7 +766,7 @@ def main():
     flow = Flow(peer)
     try:
         run(flow, args.lease_ms * 1000, SIM_LATE_US if args.sim else BOARD_LATE_US, bool(args.sim or args.drive),
-            report, bool(args.sim or args.tof))
+            report, bool(args.sim or args.tof), args.wall_mm)
     finally:
         device.close()
     problems = stream_problems(flow.samples)

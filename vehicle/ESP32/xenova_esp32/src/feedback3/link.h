@@ -3,6 +3,7 @@
  * 살아 있는 lease 가 있는 동안 엔코더 표본을 SENSOR 로 보낸다.
  * COMMAND 의 DRIVE·STOP·HOLD_STEER 를 검사해 출력에 걸고 REPORT 로 알린다.
  * ToF 센서의 새 관측이 있으면 다른 프레임이 나갈 때가 아닐 때 TOF_SAMPLE 로 보낸다.
+ * 근거리 제동을 알린 설정에서는 그 관측으로 가까운 물체를 판단해, 막힌 방향의 출력을 끊고 그 방향의 DRIVE 를 받지 않는다.
  * 계약 docs/contracts/gateway-feedback-3.md §3·§4·§5·§6·§7·§8·§9.1.
  * 시계·센서·타이머는 port 로 받아 PC 호스트 시험에서도 그대로 돈다. */
 #ifndef XENOVA_FB3_LINK_H
@@ -71,7 +72,8 @@ struct fb3_link_port {
 	/* 비상정지 입력이 눌려 있으면 true */
 	bool (*estop)(void *ctx);
 	/* sensor 번 ToF 에 아직 넘기지 않은 관측이 있으면 out 에 채우고 true, 없으면 false. 센서를 기다리지 않는다.
-	 * 메인 루프가 돌 때마다 불린다. ToF 가 없는 빌드는 NULL 로 둔다 */
+	 * 메인 루프가 돌 때마다 불린다. ToF 가 없는 빌드는 NULL 로 둔다. 근거리 제동을 알리고 NULL 로 두면
+	 * 등록된 센서의 방향은 늘 막혀 있다 */
 	bool (*tof)(void *ctx, unsigned sensor, struct fb3_tof_reading *out);
 };
 
@@ -91,7 +93,17 @@ struct fb3_link_config {
 	uint64_t j_apply_us;        /* 출력을 거는 데 걸리는 시간의 상한. 기한까지 이보다 많이 남아야 건다 */
 	int16_t max_velocity_mmps;  /* 받아들이는 속도와 조향의 크기 */
 	int16_t max_steering_mrad;
-	struct fb3_tof_profile tof[FB3_TOF_SENSORS]; /* capabilities 에 TOF_SINGLE 이 있을 때 쓴다 */
+	struct fb3_tof_profile tof[FB3_TOF_SENSORS]; /* capabilities 에 TOF_SINGLE 이나 PROXIMITY_GUARD 가 있을 때 쓴다 */
+	/* 근거리 제동. capabilities 에 PROXIMITY_GUARD 가 있을 때 쓰고, 등록된 센서의 방향만 본다 */
+	uint16_t proximity_stop_mm;  /* 이보다 가까운 물체를 보면 그 방향을 막는다 */
+	uint16_t proximity_clear_mm; /* 이보다 멀어져야 푼다. 경계에서 막힘이 켜졌다 꺼졌다 하지 않게 stop 보다 크게 둔다 */
+	uint32_t proximity_stale_us; /* 판단에 쓸 관측이 이만큼 없으면 막는다 */
+};
+
+/* 센서 하나로 본 그 방향의 근거리 판단. 0 번 센서는 앞으로 가는 것을, 1 번 센서는 뒤로 가는 것을 막는다 */
+struct fb3_guard {
+	bool clear;         /* 마지막 판단이 "가까운 물체 없음"이다. 켜진 직후에는 false 라서 막혀 있다 */
+	uint64_t judged_us; /* 그 판단에 쓴 관측의 시각. 0 이면 아직 판단한 적이 없다 */
 };
 
 /* 센서 하나가 지금까지 보낸 관측 */
@@ -157,13 +169,19 @@ struct fb3_link {
 	bool reporting;           /* active 가 있다 */
 	bool report_due;          /* 방금 보낸 표본에 대한 REPORT 를 아직 보내지 않았다 */
 	int8_t direction;         /* 마지막 STOP 뒤로 간 방향. 아직 없으면 0 */
+	int8_t output_direction;  /* 마지막으로 출력에 건 명령이 가는 방향. 속도가 0 이었으면 0. 그 출력이 끊긴 뒤에도
+				   * 남아 있으므로, 쓸 때는 출력이 걸려 있는지를 함께 본다 */
 	bool stop_needed;         /* 비상정지가 눌렸었다. 새 STOP 을 받기 전에는 DRIVE 를 받지 않는다 */
 	bool fault_reported;      /* 타이머 고장을 REPORT 로 알렸다 */
 	uint64_t report_sequence; /* 부팅 뒤 보낸 REPORT 순번 */
 	/* ToF */
 	struct fb3_tof_source tof[FB3_TOF_SENSORS];
 	unsigned tof_next;        /* 다음에 먼저 볼 센서. 한 센서가 다른 센서를 굶기지 않게 한다 */
-	uint32_t tof_dropped[FB3_TOF_SENSORS]; /* 받았지만 보내지 않은 관측 수 */
+	bool tof_has[FB3_TOF_SENSORS]; /* 센서에서 받아 두고 아직 보내지 않은 관측이 있다 */
+	struct fb3_tof_reading tof_held[FB3_TOF_SENSORS];
+	struct fb3_guard guard[FB3_TOF_SENSORS];
+	uint32_t tof_dropped[FB3_TOF_SENSORS]; /* 보내려고 받았지만 보내지 않은 관측 수 */
+	uint32_t proximity_cuts;  /* 근거리 제동으로 걸려 있던 출력을 끊은 횟수 */
 	uint32_t refused[FB3_REASON_COUNT]; /* 받아들이지 않은 프레임 수, 이유별 */
 };
 
@@ -175,9 +193,10 @@ void fb3_link_init(struct fb3_link *link, const struct fb3_link_config *config,
 size_t fb3_link_receive(struct fb3_link *link, const struct fb3_frame *frame, uint64_t received_us,
 			uint8_t *wire, size_t cap);
 
-/* 메인 루프가 돌 때마다 부른다. 표본에 따라붙는 REPORT, 미뤄 둔 CLOCK_REPLY, 주기 표본 SENSOR 가운데
+/* 메인 루프가 돌 때마다 부른다. 먼저 ToF 의 새 관측을 받아 근거리 판단을 고치고, 막힌 방향으로 걸려 있는 출력을 끊는다.
+ * 그다음 표본에 따라붙는 REPORT, 미뤄 둔 CLOCK_REPLY, 주기 표본 SENSOR 가운데
  * 보낼 때가 된 것이 있으면 wire 에 구분자까지 쓰고 그 길이를, 아니면 0 을 돌려준다. 한 번에 프레임 하나다.
- * 그 셋 가운데 보낼 것이 없을 때에만 ToF 의 새 관측을 TOF_SAMPLE 로 보낸다 */
+ * 그 셋 가운데 보낼 것이 없을 때에만 받아 둔 ToF 관측을 TOF_SAMPLE 로 보낸다 */
 size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap);
 
 /* 그 lease 가 설치돼 있고 아직 기한 전인지 */

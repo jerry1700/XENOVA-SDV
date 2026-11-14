@@ -189,7 +189,8 @@ bool takeTof(void *, unsigned sensor, fb3_tof_reading *out) {
 uint8_t tofStatus(uint8_t native, uint16_t distanceMm) {
   switch ((native & 0x78) >> 3) {
     case 11:  // 측정 완료
-      return distanceMm >= 1 && distanceMm < 8190 ? FB3_TOF_VALID : FB3_TOF_OUT_OF_RANGE;
+      // 8190 이상은 잴 물체가 없다는 값이다. 0 은 어느 쪽인지 알 수 없어 물체 없음으로 치지 않는다
+      return distanceMm >= 8190 ? FB3_TOF_OUT_OF_RANGE : distanceMm >= 1 ? FB3_TOF_VALID : FB3_TOF_BAD_RETURN;
     case 4:   // 돌아온 신호가 약함
       return FB3_TOF_NO_TARGET;
     case 6:
@@ -341,6 +342,9 @@ void startLink() {
   memcpy(config.tof[0].calibration_sha256, TOF_FRONT_SHA256, sizeof TOF_FRONT_SHA256);
   config.tof[1].config_revision = XENOVA_TOF_REAR_REVISION;
   memcpy(config.tof[1].calibration_sha256, TOF_REAR_SHA256, sizeof TOF_REAR_SHA256);
+  config.proximity_stop_mm = XENOVA_PROXIMITY_STOP_MM;
+  config.proximity_clear_mm = XENOVA_PROXIMITY_CLEAR_MM;
+  config.proximity_stale_us = XENOVA_PROXIMITY_STALE_US;
   fb3_link_port port = {nullptr, clockNow, latchSample, driveOutput, estopPressed, takeTof};
   fb3_link_init(&gatewayLink, &config, &port, &cutoff);
 }

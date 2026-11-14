@@ -47,6 +47,8 @@ static void close_session(struct fb3_link *link)
 	link->report_due = false;
 	link->direction = 0;
 	link->stop_needed = false;
+	/* 앞 session 에 보내려고 받아 둔 ToF 관측도 버린다. 근거리 판단은 session 과 상관없이 이어진다 */
+	memset(link->tof_has, 0, sizeof link->tof_has);
 	memset(link->replies, 0, sizeof link->replies);
 	link->reply_next = 0;
 	link->has_epoch = false;
@@ -143,6 +145,97 @@ static bool sample_valid(const struct fb3_link *link, const struct fb3_sample *s
 	return true;
 }
 
+/* 그 센서로 근거리 제동을 하는 설정인지 */
+static bool guard_on(const struct fb3_link *link, unsigned sensor)
+{
+	return (link->config.capabilities & FB3_CAP_PROXIMITY_GUARD) && link->config.tof[sensor].config_revision != 0;
+}
+
+/* 그 센서 쪽 방향이 막혀 있는지. 가까운 물체 없음으로 판단한 적이 없거나, 그 판단이 오래됐으면 막혀 있다 */
+static bool way_blocked(const struct fb3_link *link, unsigned sensor, uint64_t now)
+{
+	const struct fb3_guard *guard = &link->guard[sensor];
+
+	return guard_on(link, sensor)
+		&& (!guard->clear || now < guard->judged_us || now - guard->judged_us > link->config.proximity_stale_us);
+}
+
+/* 표본의 quality 에 더할 막힘 bit */
+static uint8_t blocked_bits(const struct fb3_link *link, uint64_t now)
+{
+	return (uint8_t)((way_blocked(link, 0, now) ? FB3_QUALITY_FRONT_BLOCKED : 0u)
+			 | (way_blocked(link, 1, now) ? FB3_QUALITY_REAR_BLOCKED : 0u));
+}
+
+/* ToF 관측 하나로 그 방향의 근거리 판단을 고친다. 가까우면 막고 충분히 멀거나 잴 물체가 없으면 푼다.
+ * 두 기준 사이의 거리는 앞선 판단을 그대로 두고 판단한 시각만 새로 적는다. 그 밖의 관측은 쓰지 않는다 */
+static void judge(struct fb3_link *link, unsigned sensor, const struct fb3_tof_reading *reading, uint64_t now)
+{
+	struct fb3_guard *guard = &link->guard[sensor];
+
+	/* 지금보다 뒤이거나 앞선 판단보다 새롭지 않은 관측은 쓰지 않는다 */
+	if (reading->device_us > now || reading->device_us <= guard->judged_us) {
+		return;
+	}
+	if (reading->status == FB3_TOF_VALID) {
+		if (reading->distance_mm == 0 || reading->distance_mm == UINT16_MAX) {
+			return;
+		}
+		if (reading->distance_mm < link->config.proximity_stop_mm) {
+			guard->clear = false;
+		} else if (reading->distance_mm > link->config.proximity_clear_mm) {
+			guard->clear = true;
+		}
+	} else if (reading->status == FB3_TOF_NO_TARGET || reading->status == FB3_TOF_OUT_OF_RANGE) {
+		guard->clear = true;
+	} else {
+		return;
+	}
+	guard->judged_us = reading->device_us;
+}
+
+/* 센서의 새 관측을 받아 근거리 판단에 쓰고, 보낼 수 있는 때면 보낼 것으로 남겨 둔다.
+ * 그 뒤에 막힌 방향으로 걸려 있는 출력이 있으면 끊는다 */
+static void watch_tof(struct fb3_link *link)
+{
+	bool send = link->open && (link->config.capabilities & FB3_CAP_TOF_SINGLE);
+	uint64_t now;
+
+	if (!(link->config.capabilities & (FB3_CAP_TOF_SINGLE | FB3_CAP_PROXIMITY_GUARD))) {
+		return;
+	}
+	now = link->port.now_us(link->port.ctx);
+	for (unsigned sensor = 0; link->port.tof != NULL && sensor < FB3_TOF_SENSORS; sensor++) {
+		struct fb3_tof_reading reading;
+
+		if (link->config.tof[sensor].config_revision == 0 || (!send && !guard_on(link, sensor))
+				|| !link->port.tof(link->port.ctx, sensor, &reading)) {
+			continue;
+		}
+		if (guard_on(link, sensor)) {
+			judge(link, sensor, &reading, now);
+		}
+		if (send) {
+			/* 앞서 받아 둔 것을 보내기 전에 새 관측이 왔으면 새 것만 남긴다 */
+			if (link->tof_has[sensor]) {
+				link->tof_dropped[sensor]++;
+			}
+			link->tof_held[sensor] = reading;
+			link->tof_has[sensor] = true;
+		}
+	}
+	if (link->output_direction != 0 && way_blocked(link, link->output_direction > 0 ? 0 : 1, now)) {
+		/* 기한이 지난 명령과 같이 다룬다. 이 명령은 더 보고하지 않고, 물체가 치워져도 스스로 다시 걸지 않는다.
+		 * 기한이 먼저 지나 이미 끊긴 출력은 건드리지 않는다 */
+		if (fb3_cutoff_query(link->cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_LIVE) {
+			fb3_cutoff_cut(link->cutoff);
+			link->reporting = false;
+			link->proximity_cuts++;
+		}
+		link->output_direction = 0;
+	}
+}
+
 /* 다음 표본을 뜰 때가 됐는지. 앞 표본에서 한 주기가 지나야 한다 */
 static bool gap_passed(const struct fb3_link *link, uint64_t now)
 {
@@ -188,7 +281,7 @@ static size_t answer_probe(struct fb3_link *link, uint8_t *wire, size_t cap)
 	reply.source_sample = link->sample_sequence + 1;
 	reply.cumulative_left_ticks = sample.left_ticks;
 	reply.cumulative_right_ticks = sample.right_ticks;
-	reply.quality = sample.quality;
+	reply.quality = sample.quality | blocked_bits(link, sample.device_us);
 	reply.steering_mrad = sample.steering_mrad;
 	reply.steering_error_mrad = sample.steering_error_mrad;
 	len = fb3_encode_frame(FB3_CLOCK_REPLY_ID, payload, fb3_pack_clock_reply(&reply, payload, sizeof payload),
@@ -289,7 +382,7 @@ static size_t send_sensor(struct fb3_link *link, uint64_t now, uint8_t *wire, si
 	sensor.source_device_us = sample.device_us;
 	sensor.cumulative_left_ticks = sample.left_ticks;
 	sensor.cumulative_right_ticks = sample.right_ticks;
-	sensor.quality = sample.quality;
+	sensor.quality = sample.quality | blocked_bits(link, sample.device_us);
 	sensor.steering_mrad = sample.steering_mrad;
 	sensor.steering_error_mrad = sample.steering_error_mrad;
 	memcpy(sensor.clock_epoch, lease->install.clock_epoch, 16);
@@ -529,6 +622,30 @@ static bool apply_drive(void *arg)
 					 request->command->steering_mrad);
 }
 
+/* 그 방향으로 가는 DRIVE 를 근거리 제동이 막고 있으면 거절할 이유, 아니면 FB3_REASON_OK.
+ * PROXIMITY_BLOCKED 로 거절하는 것은 그 밖에는 걸렸을 명령뿐이다. 이 이유의 거절만 Pi 가 고장으로 보지 않으므로,
+ * 타이머 고장과 모자란 기한을 이 이유로 가리지 않는다. 기한은 fb3_cutoff_engage 와 같은 식으로 본다 */
+static enum fb3_reason proximity_refusal(struct fb3_link *link, const struct fb3_command *command, int8_t direction)
+{
+	unsigned sensor = direction > 0 ? 0 : 1;
+	uint64_t now;
+
+	if (direction == 0 || !guard_on(link, sensor)) {
+		return FB3_REASON_OK;
+	}
+	now = link->port.now_us(link->port.ctx);
+	if (!way_blocked(link, sensor, now)) {
+		return FB3_REASON_OK;
+	}
+	if (fb3_cutoff_faulted(link->cutoff)) {
+		return FB3_REASON_DEVICE_FAULT;
+	}
+	if (command->cutoff_device_us <= now || command->cutoff_device_us - now <= link->config.j_apply_us) {
+		return FB3_REASON_COMMAND_EXPIRED;
+	}
+	return FB3_REASON_PROXIMITY_BLOCKED;
+}
+
 /* DRIVE·HOLD_STEER 를 검사하고 출력에 건다. 걸었으면 FB3_REASON_OK, 아니면 받아들이지 않는 이유.
  * HOLD_STEER 는 속도 칸이 0 이어야 하는 것 말고는 DRIVE 와 같은 검사를 거친다 */
 static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_command *command)
@@ -536,6 +653,7 @@ static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_comm
 	struct drive_request request = {link, command};
 	const struct fb3_lease *lease = NULL;
 	int8_t direction = command->velocity_mmps > 0 ? 1 : command->velocity_mmps < 0 ? -1 : 0;
+	enum fb3_reason blocked;
 
 	if (command->generation < link->generation) {
 		return FB3_REASON_GENERATION_REPLAY;
@@ -576,6 +694,10 @@ static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_comm
 			|| command->cutoff_device_us > lease->install.cutoff_device_us) {
 		return FB3_REASON_DEADLINE_MISMATCH;
 	}
+	blocked = proximity_refusal(link, command, direction);
+	if (blocked != FB3_REASON_OK) {
+		return blocked;
+	}
 	switch (fb3_cutoff_engage(link->cutoff, command->cutoff_device_us, link->config.j_apply_us, apply_drive,
 				  &request)) {
 	case FB3_CUTOFF_LIVE:
@@ -588,6 +710,7 @@ static enum fb3_reason accept_drive(struct fb3_link *link, const struct fb3_comm
 	if (direction != 0) {
 		link->direction = direction;
 	}
+	link->output_direction = direction;
 	return FB3_REASON_OK;
 }
 
@@ -770,22 +893,19 @@ static size_t tof_frame(struct fb3_link *link, unsigned sensor, const struct fb3
 	return len;
 }
 
-/* 새 관측이 있는 ToF 센서 하나의 것을 보낸다. 센서를 번갈아 먼저 본다 */
+/* 받아 둔 관측이 있는 ToF 센서 하나의 것을 보낸다. 센서를 번갈아 먼저 본다 */
 static size_t send_tof(struct fb3_link *link, uint8_t *wire, size_t cap)
 {
-	if (!link->open || link->port.tof == NULL || !(link->config.capabilities & FB3_CAP_TOF_SINGLE)) {
-		return 0;
-	}
 	for (unsigned turn = 0; turn < FB3_TOF_SENSORS; turn++) {
 		unsigned sensor = (link->tof_next + turn) % FB3_TOF_SENSORS;
-		struct fb3_tof_reading reading;
 		size_t len;
 
-		if (link->config.tof[sensor].config_revision == 0 || !link->port.tof(link->port.ctx, sensor, &reading)) {
+		if (!link->tof_has[sensor]) {
 			continue;
 		}
+		link->tof_has[sensor] = false;
 		link->tof_next = (sensor + 1) % FB3_TOF_SENSORS;
-		len = tof_frame(link, sensor, &reading, wire, cap);
+		len = tof_frame(link, sensor, &link->tof_held[sensor], wire, cap);
 		if (len == 0) {
 			link->tof_dropped[sensor]++;
 		}
@@ -835,12 +955,14 @@ size_t fb3_link_poll(struct fb3_link *link, uint8_t *wire, size_t cap)
 {
 	uint64_t now;
 
+	/* 보낼 것을 고르기 전에 근거리 판단부터 고친다. 막힌 방향의 출력은 다음 표본을 기다리지 않고 끊는다 */
+	watch_tof(link);
 	/* 방금 보낸 표본에 대한 REPORT 가 그 표본 바로 뒤에 간다 */
 	if (link->report_due) {
 		link->report_due = false;
 		return report_sample(link, wire, cap);
 	}
-	/* 다음 표본을 뜰 때가 아니면 그사이에 ToF 관측을 보낸다 */
+	/* 다음 표본을 뜰 때가 아니면 그사이에 받아 둔 ToF 관측을 보낸다 */
 	now = link->port.now_us(link->port.ctx);
 	if (now < link->sensor_due_us) {
 		return send_tof(link, wire, cap);
