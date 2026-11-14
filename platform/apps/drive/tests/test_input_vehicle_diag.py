@@ -16,9 +16,9 @@ from test_engine import library, fixture, vehicle as engine_vehicle, send_vehicl
 
 PREFIX = HARNESS.split('void test_log(const char *fmt,...){',1)[0]
 PREFIX = PREFIX.replace('static unsigned clock_calls,clock_fail_call;',
-                        'static unsigned clock_calls,clock_fail_call,context_calls;')
+                        'static unsigned clock_calls,clock_fail_call,context_calls; static bool context_fail_second;')
 PREFIX = PREFIX.replace(' fake_now+=10000;if(context_rc)',
-                        ' context_calls++;fake_now+=10000;if(context_rc)')
+                        ' context_calls++;if(context_rc && !(context_fail_second && context_calls==1))')
 PREFIX = PREFIX.replace('.clock_error_us=20000,.clock_lease_us=500000};',
                         '.clock_error_us=20000,.clock_lease_us=500000,.pose_age_us=200000};')
 PREFIX = PREFIX.replace('static unsigned lock_depth,log_calls,emitted,clock_rows,map_rows,last_phase,last_map_phase;',
@@ -89,10 +89,16 @@ int main(int argc,char **argv){
  strcpy(current_clock.trust.calibration,"encoder-lab-1");
  if(!strcmp(scenario,"clock")||!strcmp(scenario,"decode-and-clock")||!strcmp(scenario,"clock-and-context"))clock_available=false;
  if(!strcmp(scenario,"context")||!strcmp(scenario,"clock-and-context"))context_rc=-EAGAIN;
+ context_fail_second=!strcmp(scenario,"context");
  if(!strcmp(scenario,"clock-read-error"))clock_fail_call=1;
  if(!strcmp(scenario,"clock-busy"))mutex_rc=-EBUSY;
  if(!strcmp(scenario,"order"))received_vehicle=7000000;
  if(!strcmp(scenario,"overflow"))current_clock.lower=current_clock.upper-(int64_t)UINT32_MAX;
+ strcpy(current_clock.vm,vm);strcpy(current_clock.execution,execution);
+ strcpy(current_clock.app_instance,instance);strcpy(current_clock.host_boot,host);
+ latest_trust=current_clock.trust;
+ guest_clocks[0].confirmed=current_clock;
+ guest_clocks[0].confirmed_valid=clock_available;
  if(!strcmp(scenario,"odom-busy"))atomic_flag_test_and_set(&engine->odometry.lock);
  if(!strncmp(scenario,"reset-",6)){
   dw_vehicle old;assert(!dw_vehicle_decode(wire,length,&old));
@@ -109,9 +115,9 @@ int main(int argc,char **argv){
   atomic_store(&engine->last_world_result,DW_TIME);maps(NULL,NULL,NULL);rc=0;
  }else if(!strcmp(scenario,"cap")||!strcmp(scenario,"filtered")||!strcmp(scenario,"drop")){
   test_log_filtered=!strcmp(scenario,"filtered");drop_logs=!strcmp(scenario,"drop");
-  clock_available=false;
+  guest_clocks[0].confirmed_valid=false;
   for(unsigned k=0;k<100;k++){fake_now=1010000;assert(vehicle_received(NULL,wire,length,INT64_MAX)==-EPROTO);}
-  clock_available=true;fake_now=1010000;assert(!vehicle_received(NULL,wire,length,INT64_MAX));
+  guest_clocks[0].confirmed_valid=true;fake_now=1010000;assert(!vehicle_received(NULL,wire,length,INT64_MAX));
   for(unsigned k=0;k<100;k++){fake_now=1010000;assert(vehicle_received(NULL,wire,length,INT64_MAX)==-EPROTO);}
   rc=0;
  }else if(!strcmp(scenario,"distinct-cap")){
@@ -126,7 +132,7 @@ int main(int argc,char **argv){
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
   vehicle_phase_count[2]=UINT64_MAX;
 #endif
-  clock_available=false;rc=vehicle_received(NULL,wire,length,INT64_MAX);
+  guest_clocks[0].confirmed_valid=false;rc=vehicle_received(NULL,wire,length,INT64_MAX);
  }else rc=vehicle_received(NULL,wire,length,INT64_MAX);
  unsigned quota=0,rquota=0;uint64_t p2=0,p10=0,p17=0;
 #if defined(CONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS)
@@ -165,7 +171,8 @@ def vehicle_native(request,tmp_path_factory):
     args=['cc','-std=c11','-O1','-g','-Wall','-Wextra','-Werror','-ffunction-sections','-fdata-sections',
           '-Wl,--gc-sections','-Wl,--wrap=dw_link_decode','-Wl,--wrap=dw_odom_add','-Wl,--wrap=dw_odom_reset','-fsanitize=undefined',
           *(['-DCONFIG_XENOVA_DRIVE_INPUT_DIAGNOSTICS=1'] if request.param else []),
-          *['-I'+str(p) for p in (include,HOME/'zephyr/src',HOME/'planner',world,world/'generated',world/'nanopb',mqtt/'include',mqtt/'third_party/jsmn')],
+          *['-I'+str(p) for p in (include,HOME/'zephyr/src',HOME/'planner',world,world/'generated',world/'nanopb',mqtt/'include',mqtt/'third_party/jsmn',
+                                  HOME.parent/'common/xenova-drive-runtime/include')],
           str(source),str(world/'world.c'),str(world/'generated/world.pb.c'),*[str(p) for p in sorted((mqtt/'src').glob('*.c'))],
           *[str(world/'nanopb'/name) for name in ('pb_common.c','pb_decode.c','pb_encode.c')],'-lm','-o',str(binary)]
     built=subprocess.run(args,capture_output=True,text=True)
@@ -180,10 +187,10 @@ def vehicle_native(request,tmp_path_factory):
 
 
 @pytest.mark.parametrize('scenario,phase,public,detail,clocks,contexts',[
-    ('clock',2,-71,-11,1,0),('clock-read-error',2,-71,-5,1,0),('clock-busy',2,-71,-16,1,0),
-    ('context',3,-71,-11,1,1),('odom-busy',14,-11,1,1,1),
-    ('reset-busy',15,-11,1,1,1),('reset-add-fail',16,-11,10,1,1),
-    ('overflow',13,-34,-34,1,1),
+    ('clock',2,-71,-11,1,1),('clock-read-error',2,-71,-5,1,1),('clock-busy',2,-71,-16,1,1),
+    ('context',3,-71,-11,1,2),('odom-busy',14,-11,1,1,2),
+    ('reset-busy',15,-11,1,1,2),('reset-add-fail',16,-11,10,1,2),
+    ('overflow',13,-34,-34,1,2),
 ])
 def test_original_clock_context_and_odom_failure_guards(vehicle_native,scenario,phase,public,detail,clocks,contexts):
     enabled,run=vehicle_native;value=run(scenario)
@@ -204,7 +211,7 @@ def test_original_clock_context_and_odom_failure_guards(vehicle_native,scenario,
 ])
 def test_actual_decoder_then_original_identity_order_and_age_guards(vehicle_native,name,field,replacement,phase):
     enabled,run=vehicle_native;body=sample();setattr(body,field,replacement);value=run(value=body)
-    assert value['rc']==-71 and value['odom_count']==0 and value['clock_calls']==value['context_calls']==1
+    assert value['rc']==-71 and value['odom_count']==0 and (value['clock_calls'],value['context_calls'])==(1,2)
     if enabled:assert value['phase']==phase and value['sv']==value['nv']==1
 
 
@@ -213,7 +220,7 @@ def test_precedence_unknown_fields_and_normal_epoch_reset_recovery(vehicle_nativ
     invalid=run('decode-and-clock',wire=b'invalid')
     assert invalid['rc']==-71 and invalid['clock_calls']==invalid['context_calls']==0
     if enabled:assert invalid['phase']==1 and invalid['sv']==invalid['nv']==invalid['seq']==invalid['err']==0
-    clock=run('clock-and-context');assert clock['rc']==-71 and clock['context_calls']==0
+    clock=run('clock-and-context');assert clock['rc']==-71 and (clock['clock_calls'],clock['context_calls'])==(0,1)
     body=sample();body.host_boot='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';body.ClearField('gateway_instance')
     if enabled:assert run(value=body)['phase']==4
     body=sample();body.ClearField('gateway_instance');missing=run(value=body)
@@ -242,7 +249,7 @@ def test_distinct_reason_quotas_counters_filter_drop_and_saturation(vehicle_nati
     for mode in ('cap','drop','filtered'):
         value=run(mode)
         assert value['rc']==0 and value['odom_count']==1
-        assert (value['clock_calls'],value['context_calls'])==(201,101)
+        assert (value['clock_calls'],value['context_calls'])==(201,302)
         if enabled:
             assert (value['quota'],value['p2'],value['p10'],value['p17'])==(3,100,100,1)
             assert value['log_calls']==(0 if mode=='filtered' else 3)
