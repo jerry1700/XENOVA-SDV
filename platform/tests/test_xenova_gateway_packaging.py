@@ -43,6 +43,11 @@ class GatewayPackagingTest(unittest.TestCase):
             self.assertFalse((dest / 'etc/xenova/gateway.env').exists())
             self.assertFalse((dest / 'srv').exists())
             self.assertTrue((dest / 'usr/share/xenova/gateway.env.example').is_file())
+            environment = (dest / 'usr/share/xenova/gateway.env.example').read_text()
+            self.assertIn('XENOVA_GATEWAY_SINK=serial', environment)
+            self.assertIn('XENOVA_GATEWAY_SERIAL_PORT=/dev/ttyUSB0', environment)
+            self.assertIn('XENOVA_GATEWAY_SERIAL_BAUD=460800', environment)
+            self.assertIn('XENOVA_GATEWAY_SERIAL_PROFILE=feedback-3', environment)
             self.assertEqual((dest / 'usr/lib/systemd/system/xenova-gateway.service').read_bytes(),
                              (recipe.parent / 'files/xenova-gateway.service').read_bytes())
             self.assertNotIn('tests', {p.name for p in installed.iterdir()})
