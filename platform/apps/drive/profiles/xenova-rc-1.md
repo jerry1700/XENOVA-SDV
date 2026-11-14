@@ -70,3 +70,14 @@ python3 -B platform/scripts/package-xenova-drive-template.py \
 - `platform/tests/test_drive_primitive_selection.py`(6개)에 CMake 선택·거절 경우를 추가했다.
 - planner C 시험(`platform/apps/drive/tests/`)은 LAB 기하와 primitive SHA를 고정해 둔 fixture라서 새 기하로는 돌리지 않았다.
 - 실보드 부팅, 수동 주행, 자동 주행은 아직 확인하지 않았다.
+
+## 실보드 결과 (2026-11-15)
+
+- 1.0.34(이 프로필, 기존 스택)는 이름이 맞은 뒤 처음 탄 탐색 경로에서 부팅 4.38초에
+  `drive-planner` 스택 8 KiB를 넘었다. 콘솔에 `Stack overflow on CPU 0`이 찍힌 뒤 `Halting system`으로 멈췄다.
+  정지 루프가 CPU 100%로 보였고, 협조 종료와 reboot도 응답하지 않았다.
+- `-fcallgraph-info=su`로 구한 최악 경로(libc·예외 frame 제외)는 planner 10832 B, MANUAL 9248 B, AUTO 8448 B, link 6528 B였다.
+  보드에서 잰 high-water는 planner 8388 B, main 7332/8192 B였다.
+- lattice 프로필의 스택을 planner·계산 worker·main 16 KiB, link 12 KiB로 늘렸다. 1.0.36(임시 로컬 번호)에서는
+  A·B 모두 정상 동작한다. 이때 CPU는 약 20%, 스택 사용률은 최대 67%(drive-v1)다.
+- `mode manual`은 아직 게이트웨이 판정에서 실패한다(수동 입력 표본·정지 증거). VM 쪽 문제와 분리해 따로 조사한다.
