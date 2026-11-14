@@ -84,6 +84,7 @@ describe('백엔드 새 코드·낡은 로그인 문구 (S15P31E110-471)', () =>
     'DISPLAY_MODE_ROLLBACK_INCOMPLETE',
     'DISPLAY_MODE_UNAVAILABLE',
     'DISPLAY_MODE_TIMEOUT',
+    'BAD_RESPONSE',
   ])('%s 는 기본 문구가 아니라 전용 한글 문구', (code) => {
     const text = errorText(new ApiError(409, { code, message: 'raw server text' }));
     expect(text).toBe(ERROR_TEXT[code]);

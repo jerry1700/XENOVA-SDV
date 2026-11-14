@@ -6,8 +6,17 @@ import styles from './layout.module.css';
  * 재연결을 멈추므로, 화면이 조용히 멈춘 것처럼 보이지 않게 알린다 (S15P31E110-469)
  */
 export function DriveSocketAlert() {
-  const { socket } = useDrive();
-  if (socket !== 'rejected') return null;
+  const { socket, invalid } = useDrive();
+  if (socket !== 'rejected') {
+    // 형식이 틀린 주행 상태 프레임은 버린다 (api/drive isDriveState). 정상 프레임이 다시 오면 내려간다
+    if (!invalid) return null;
+    return (
+      <div className={styles.liveAlert} role="alert">
+        <strong>주행 상태를 읽지 못했습니다</strong>
+        <p>서버가 보낸 주행 상태의 형식이 올바르지 않아 마지막으로 받은 상태를 보여 줍니다.</p>
+      </div>
+    );
+  }
   return (
     <div className={styles.liveAlert} role="alert">
       <strong>주행 상태 연결이 거부되었습니다</strong>

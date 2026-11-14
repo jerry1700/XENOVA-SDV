@@ -50,10 +50,18 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/** 프론트가 만드는 코드: 성공 응답 본문이 JSON 이 아님 (프록시 HTML 등). 영어 SyntaxError 대신 (S15P31E110-472) */
+export const BAD_RESPONSE = 'BAD_RESPONSE';
+
 async function parse<T>(response: Response): Promise<T> {
   if (response.status === 204) return undefined as T;
   const text = await response.text();
-  return (text ? JSON.parse(text) : undefined) as T;
+  if (!text) return undefined as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(response.status, { code: BAD_RESPONSE, message: '서버 응답을 해석하지 못했습니다.' });
+  }
 }
 
 async function send(path: string, options: RequestOptions): Promise<Response> {
@@ -98,6 +106,45 @@ if (sessionChannel) {
 
 let refreshing: Promise<boolean> | null = null;
 
+// ---- 인증 요청 시간 제한 (S15P31E110-472) -----------------------------------------------------
+// 백엔드가 응답 없이 매달리면 refresh·login 이 탭 간 잠금을 쥔 채 기다려 다른 탭까지 "연결하는 중"에 멈췄다.
+// 요청마다 10초가 지나면 끊고 실패로 처리한다 → 잠금 콜백이 끝나 잠금이 풀린다.
+
+export const AUTH_TIMEOUT_MS = 10_000;
+
+/**
+ * ms 뒤 끊기는 signal. outer 가 있으면 그쪽이 끊겨도 같이 끊긴다. done() 으로 타이머를 정리한다.
+ * (AbortSignal.timeout·any 대신 setTimeout 으로 만들어 브라우저 차이 없이 같은 동작)
+ */
+export function timeoutSignal(ms: number, outer?: AbortSignal): { signal: AbortSignal; done: () => void } {
+  const controller = new AbortController();
+  const abort = () => controller.abort(outer?.reason);
+  const timer = setTimeout(
+    () => controller.abort(new DOMException('인증 요청 시간이 지났습니다.', 'TimeoutError')),
+    ms,
+  );
+  if (outer?.aborted) abort();
+  else outer?.addEventListener('abort', abort, { once: true });
+  return {
+    signal: controller.signal,
+    done: () => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', abort);
+    },
+  };
+}
+
+/** 인증 API 한 번 (본문 읽기까지 시간 제한 안). 실패 응답이면 null, 시간 초과·연결 실패는 ApiError(0) */
+async function authCall(path: string, body?: unknown, signal?: AbortSignal): Promise<TokenResponse | null> {
+  const limit = timeoutSignal(AUTH_TIMEOUT_MS, signal);
+  try {
+    const response = await send(path, { method: 'POST', body, auth: false, signal: limit.signal });
+    return response.ok ? await parse<TokenResponse>(response) : null;
+  } finally {
+    limit.done();
+  }
+}
+
 // ---- 공용 계정 자동 로그인 ------------------------------------------------------------------
 // 콘솔은 사용자 계정 없이 누구나 쓴다. 백엔드는 여전히 토큰을 요구하므로, 화면 없이 공용 계정으로 로그인해
 // 토큰을 받는다. refresh 가 실패하면(쿠키 없음·만료·재사용 폐기) 로그인 화면 대신 다시 공용 계정으로 로그인한다.
@@ -107,21 +154,19 @@ export const SHARED_ACCOUNT = {
   password: import.meta.env.VITE_SHARED_PASSWORD || 'xenova-console',
 } as const;
 
-async function sharedLogin(): Promise<TokenResponse | null> {
-  const response = await send('/api/v1/auth/login', {
-    method: 'POST',
-    body: { username: SHARED_ACCOUNT.username, password: SHARED_ACCOUNT.password },
-    auth: false,
+function sharedLogin(): Promise<TokenResponse | null> {
+  return authCall('/api/v1/auth/login', {
+    username: SHARED_ACCOUNT.username,
+    password: SHARED_ACCOUNT.password,
   });
-  return response.ok ? parse<TokenResponse>(response) : null;
 }
 
 async function refreshOnce(seqAtStart: number): Promise<boolean> {
   // 락을 기다리는 동안 다른 탭이 재발급해 토큰을 나눴다 — 같은 쿠키로 또 보내면 재사용 판정이 난다
   if (sharedSeq !== seqAtStart && session) return true;
   try {
-    const response = await send('/api/v1/auth/refresh', { method: 'POST', auth: false });
-    const next = response.ok ? await parse<TokenResponse>(response) : await sharedLogin();
+    // 재발급은 여러 요청이 함께 기다리므로 한 요청의 signal(화면 이탈 등)로 끊지 않는다 — 시간 제한만 건다
+    const next = (await authCall('/api/v1/auth/refresh')) ?? (await sharedLogin());
     if (!next) {
       setSession(null);
       return false;

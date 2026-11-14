@@ -63,6 +63,7 @@ export const ERROR_TEXT = {
     '화면 전환에 실패했고 이전 화면으로 완전히 되돌리지 못했습니다. 보드에서 화면 서비스를 확인해 주세요.',
   DISPLAY_MODE_UNAVAILABLE: '보드의 화면 상태를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.',
   DISPLAY_MODE_TIMEOUT: '보드의 화면 전환이 시간 안에 끝나지 않았습니다. 상태를 새로 고쳐 확인해 주세요.',
+  BAD_RESPONSE: '서버 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.',
 } as const satisfies Record<KnownErrorCode, string>;
 
 const DEFAULT_TEXT = '요청을 처리하지 못했습니다.';

@@ -1,7 +1,14 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setSession } from './client';
-import { REJECTED_CLOSE_CODES, RETRY_MAX_MS, retryDelayMs, useAuthedSocket } from './drive';
+import {
+  isDriveState,
+  REJECTED_CLOSE_CODES,
+  RETRY_MAX_MS,
+  retryDelayMs,
+  useAuthedSocket,
+  useLiveDriveState,
+} from './drive';
 import type { TokenResponse } from './types';
 
 const refresh = vi.hoisted(() => ({ result: true, calls: 0 }));
@@ -161,5 +168,60 @@ describe('인증 소켓 재연결 정책 (S15P31E110-469)', () => {
     act(() => setSession(TOKEN));
     await advance(60_000);
     expect(FakeSocket.all).toHaveLength(0);
+  });
+});
+
+describe('재연결 타이머 정리 (S15P31E110-472)', () => {
+  it('토큰 없이 백오프를 걸어 둔 채 세션이 생겨 붙으면, 그 타이머가 소켓을 하나 더 열지 않는다', async () => {
+    setSession(null);
+    render();
+    act(() => setSession(TOKEN));
+    expect(FakeSocket.all).toHaveLength(1);
+    // 걸려 있던 백오프(2초)가 지나도 두 번째 소켓은 없다
+    await advance(60_000);
+    expect(FakeSocket.all).toHaveLength(1);
+  });
+});
+
+const driveFrame = (state: unknown) => ({ data: JSON.stringify({ type: 'drive.state', state }) });
+const validState = {
+  version: 1,
+  observed_at: '2026-11-15T00:00:00Z',
+  control: null,
+  vehicle: null,
+  apps: { autonomous: { app_id: 'autonomous' } },
+  perception: null,
+};
+
+describe('주행 상태 프레임 형식 검사 (S15P31E110-472)', () => {
+  it('isDriveState: apps 가 객체이고 블록이 객체·null 일 때만 통과', () => {
+    expect(isDriveState(validState)).toBe(true);
+    expect(isDriveState({ ...validState, apps: undefined })).toBe(false);
+    expect(isDriveState({ ...validState, apps: [] })).toBe(false);
+    expect(isDriveState({ ...validState, apps: { autonomous: 'running' } })).toBe(false);
+    expect(isDriveState({ ...validState, control: 'AUTO' })).toBe(false);
+    expect(isDriveState({ ...validState, vm_apps: [] })).toBe(false);
+    expect(isDriveState(null)).toBe(false);
+    expect(isDriveState('drive')).toBe(false);
+  });
+
+  it('틀린 프레임은 버리고 마지막 정상 상태를 두며 invalid 를 켜고, 정상 프레임이 오면 끈다', async () => {
+    const { result } = renderHook(() => useLiveDriveState());
+    act(() => last().authenticate());
+    act(() => last().onmessage?.(driveFrame(validState)));
+    expect(result.current.drive?.apps).toHaveProperty('autonomous');
+    expect(result.current.invalid).toBe(false);
+
+    act(() => last().onmessage?.(driveFrame({ ...validState, apps: undefined, version: 2 })));
+    expect(result.current.invalid).toBe(true);
+    expect(result.current.drive?.version).toBe(1);
+    const shown = result.current;
+    // 같은 틀린 프레임이 연달아 와도 상태가 그대로라 다시 그리지 않는다 (안내가 쌓이지 않음)
+    act(() => last().onmessage?.(driveFrame({ apps: 'x' })));
+    expect(result.current).toBe(shown);
+
+    act(() => last().onmessage?.(driveFrame({ ...validState, version: 3 })));
+    expect(result.current.invalid).toBe(false);
+    expect(result.current.drive?.version).toBe(3);
   });
 });

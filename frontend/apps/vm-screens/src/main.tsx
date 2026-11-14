@@ -3,6 +3,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from 'react-router';
 import { DevControls } from './components/DevControls';
+import { DisplayNotFound, DisplayOutput } from './components/DisplayNotFound';
 import { DisplayRouteError } from './components/DisplayRouteError';
 import { DisplayFollower } from './components/DisplayFollower';
 import { ResumeOverlay } from './components/ResumeOverlay';
@@ -74,7 +75,8 @@ const router = createBrowserRouter(
           path: '/display/combined',
           lazy: async () => ({ Component: (await import('./display/CombinedPage')).CombinedPage }),
         },
-        { path: '/display/:outputId', element: <ToCombined /> },
+        // 옛 모니터 주소(monitor-N)만 합친 화면으로, 나머지 /display/… 는 없는 화면 주소 안내 (S15P31E110-472)
+        { path: '/display/:outputId', element: <DisplayOutput /> },
         {
           element: <Root />,
           children: [
@@ -85,6 +87,8 @@ const router = createBrowserRouter(
             { path: '/sim', element: legacyPreview ? <SimPage /> : <ToCombined /> },
           ],
         },
+        // 없는 주소는 새로고침하지 않는 안내 (예전에는 오류 화면이 10초마다 새로고침을 반복했다)
+        { path: '*', element: <DisplayNotFound /> },
       ],
     },
   ],
