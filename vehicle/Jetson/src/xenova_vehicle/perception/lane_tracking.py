@@ -40,7 +40,7 @@ class LaneTrack:
 
 
 def _observed_centers(road, tape, profile):
-    tips = {s.local_id: (s.start_kind, s.end_kind) for s in tape.strips if s.observed}
+    tips = {s.local_id: (s.start_kind, s.end_kind) for s in tape.strips + tape.surface_edges if s.observed}
     centers = {}
     for h in road.hypotheses:
         inferred = any(h.inferred)

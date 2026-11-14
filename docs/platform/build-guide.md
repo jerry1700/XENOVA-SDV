@@ -361,6 +361,16 @@ A/B seed와 보관 원본의 `zephyr.bin` 해시가 같아야 한다.
 조기 부팅용 A/B에는 `CONFIG_XENOVA_DOM0LESS_BOOT=y`가 필요하다. 이 설정은
 XenStore와 VIF가 처음 연결되기를 기다리는 펌웨어를 만들어 조립기가 확인한다.
 
+실차 Pi 재부팅 검증에 사용한 공통 A/B 번들은 `warm-lattice-lab` 1.0.11이었다.
+동일 후보를 재현할 때는 아래 두 해시를 확인하고, 조립 설정의 `rtos_templates`에
+실제 게시본 경로와 `template_manifest_sha256`을 지정한다.
+다음 실차용 주행 프로필을 빌드하면 두 VM에 그 새 번들을 함께 선택하고 새 해시를 기록한다.
+
+| Pi 검증 번들 파일 | SHA-256 |
+| --- | --- |
+| `firmware.json` | `e587dbf71937e03a9d1663bbdb881bab84b87e258ba9a8c74a77c7ca9f59f392` |
+| `zephyr.bin` | `94aece19951de6557b6da5cb4065512140269d7dcfc5d82ad01781bac5b3bce7` |
+
 공용 seed/firmware에는 VM 암호가 없고 host 첫 등록에서 UUID별로 공급한다.
 `lattice-lab-1`은 시험 차량 프로필이다. ARM 빌드·패키징과 실제 보드·실차 수락은
 구분하며 고정 Zephyr·SDK, ELF/DTS·RAM·스택 검사와 source digest를 함께 보관한다.
@@ -638,6 +648,18 @@ seed에 넣지 않는다. 새 VM 계정은 이미지 재빌드 없이 `xenova-br
 주행은 VM UUID 계정, Telemetry는 `telemetry-UUID` 계정을 쓴다. Telemetry 계정은 자기 VM의
 v1 `/metrics`와 v2 텔레메트리를 발행한다. 기존 설치에 정책을 교체하면
 [브로커 ACL 갱신 절차](../../platform/deploy/mosquitto/README.md#기존-계정과-업데이트)를 따른다.
+
+실차용 이미지의 Gateway는 현재 저장소 소스에서 패키징한다. 조립 전 검사에서
+Gateway unit·운영 설정 예시·Recovery Worker 예시의 설치 바이트와 CP210x·USB serial 모듈을
+확인한다. 브로커는 `wlan0`에서 Jetson 연결을 받고 공통 ACL에서 `oak-1` 지도·시계 토픽을 허용한다.
+
+이미지 기록 및 첫 등록 후에는 [Pi 실차 Gateway 설치](../../platform/services/gateway/README.md#pi-실차-gateway-자동-시작)를 따른다.
+보드마다 `gateway.env`, `drive-rejoin.json`, USB 식별자와 MQTT 자격증명을 채운다.
+차량별 `vehicle-limits.json`, `gateway-odometry.json`, `gateway-feedback3.json`과
+feedback timeout은 장치 담당자가 확정한 값을 사용한다. 주행용 번들의 축간거리·조향
+상한을 실측값과 대조한다. Pi의 `gateway-mapper-uplink.json`과 Jetson의 JIO 프로필은
+운영 지도·시계에 같은 차량 식별자와 보정 번들을 사용한다. 정지 상태에서
+ESP32를 연결한 채 재부팅해 Gateway·A/B 바인딩을 확인하고 실시간 지도 수락을 별도로 확인한다.
 
 고정 meta-networking에는 Tailscale 1.94.2가 있지만, 현재 이미지는 보안 수정이 포함된
 공식 ARM64 정적 릴리스 1.104.2를 meta-xenova recipe로 고정한다. TS-2026-013의 수정은

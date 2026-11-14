@@ -251,6 +251,22 @@ class TapeImageTests(unittest.TestCase):
         self.assertTrue(all(all(v is not None and v >= s.error_m for v in s.endpoint_error_m)
                             for s in graph.strips))
 
+    def test_dark_board_edges_and_white_divider_form_two_measured_lanes(self):
+        image = self.np.full((256, 256, 3), 110, dtype=self.np.uint8)
+        board = self.pixels(((.1,-.285), (1.5,-.285), (1.5,.285), (.1,.285)))
+        self.cv2.fillConvexPoly(image, board, (35, 35, 35))
+        self.draw(image, ((.22,0.), (1.38,0.)))
+
+        graph = self.extract(image)
+        road = infer_road(graph)
+
+        self.assertEqual(len(graph.strips), 1)
+        self.assertEqual({edge.outer_role for edge in graph.surface_edges}, {0, 2})
+        self.assertEqual(road.status, 'VALID')
+        shape = road.hypotheses[0]
+        self.assertAlmostEqual(shape.left_outer[0][1]-shape.divider[0][1], .285, delta=.025)
+        self.assertAlmostEqual(shape.divider[0][1]-shape.right_outer[0][1], .285, delta=.025)
+
     def test_dim_tape_edge_joins_bright_core_without_joining_the_carpet(self):
         from xenova_vehicle.perception.tape import _white_band
 

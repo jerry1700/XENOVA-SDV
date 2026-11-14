@@ -1,0 +1,2 @@
+# Replace SERIAL_BY_ID with the registered /dev/serial/by-id basename.
+SUBSYSTEM=="tty", SYMLINK=="serial/by-id/SERIAL_BY_ID", TEST=="/etc/xenova/gateway.env", TAG+="systemd", ENV{SYSTEMD_WANTS}+="xenova-gateway.service"

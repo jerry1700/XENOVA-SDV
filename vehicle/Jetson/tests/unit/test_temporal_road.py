@@ -3,6 +3,7 @@
 from dataclasses import replace
 from copy import deepcopy
 import math
+from types import SimpleNamespace
 import pytest
 
 from xenova_vehicle.mapping.alignment import MapOdomAlignment
@@ -14,7 +15,9 @@ from xenova_vehicle.perception.parking_entrance import EntranceSpan
 from xenova_vehicle.perception.road import RoadGeometryLimits, RoadProfile
 from xenova_vehicle.perception.road_refit import _MarkingChord, _boundary_bounds, _heading_estimate, _position_estimate, fit_road_window
 from xenova_vehicle.perception.tape import TapeGraph, TapeProfile, TapeStrip
-from xenova_vehicle.perception.temporal_road import RoadLink, TemporalRoadMap, _bounded_candidates, _project_strips, _reobserve_run
+from xenova_vehicle.perception.temporal_road import (RoadLink, RoadSection, TemporalRoadMap, _bounded_candidates,
+    _divider_supported, _mapped_candidate, _project_strips, _reobserve_run, _section_length, _shared_forward_end,
+    stored_road_window)
 
 
 def observe(owner, sequence, x, dashed, *, lane_width=.285, extra_outer=False, error=.012):
@@ -74,6 +77,282 @@ def test_mapped_candidate_preserves_actual_sources_and_bounds():
     assert len(h.divider) == len(h.left_center) == len(h.right_center)
     assert h.error_m > .006 and h.yaw_error_rad > .001
     assert not any(h.inferred)
+
+
+def test_dash_fit_only_supports_crossings_within_its_own_interval():
+    profile = RoadProfile()
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = tuple(frozenset(((key, role),)) for role in range(3))
+    def station(x, offset=0.):
+        width = profile.missing_outer_width_m
+        return tuple((x, y + offset) for y in (width, 0., -width))
+
+    link = RoadLink(station(0.), station(.5), .01, frozenset((key,)), evidence, False, .02)
+    fitted = replace(link, boundary_normal_bounds_m=(.01,)*3, outer_chord_bounds_m=(.02,)*2)
+    shape = _mapped_candidate((fitted,), key, profile).road.hypotheses[0]
+    inferred = replace(link, start=station(.1), end=station(.4), interpolated=True, inferred_roles=(True,)*3)
+    assert _divider_supported(inferred, shape, profile)
+    assert not _divider_supported(replace(inferred, end=station(.6)), shape, profile)
+    assert not _divider_supported(replace(inferred, start=station(.1,.285), end=station(.4,.285)), shape, profile)
+    assert not _divider_supported(inferred, replace(shape, boundary_observations=None), profile)
+
+
+def test_stored_window_rejects_an_axle_outside_a_clamped_section_end():
+    profile = RoadProfile()
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = tuple(frozenset(((key, role),)) for role in range(3))
+    width = profile.missing_outer_width_m
+    def station(x):
+        return ((x, width), (x, 0.), (x, -width))
+
+    link = RoadLink(station(.2), station(.8), .01, frozenset((key,)), evidence, False, .02)
+    original = _mapped_candidate((link,), key, profile)
+    model = SimpleNamespace(road=original.road, crossing=b'\1')
+    section = RoadSection((link,))
+    pose = PoseSample('map','clock','calibration',1,.15,-width/2,0.,.003,.001)
+    request = dict(rear_m=.16, forward_m=.45)
+    assert stored_road_window((section,), model, pose, profile, **request) is None
+    inside = replace(pose, x=.4)
+    road, _ = stored_road_window((section,), model, inside, profile, **request)
+    divider = road.hypotheses[0].divider
+    assert divider[0][0] <= inside.x <= divider[-1][0]
+    demo, crossing = stored_road_window((section,), model, pose, profile, demo_course=True, **request)
+    assert demo.hypotheses[0].divider[0][0] < pose.x
+    assert crossing[0] == 0
+
+
+def test_demo_window_uses_local_agreement_for_overlapping_reconstructions():
+    profile = RoadProfile()
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = tuple(frozenset(((key, role),)) for role in range(3))
+    width = profile.missing_outer_width_m
+    def station(x, y=0.):
+        return ((x,y+width),(x,y),(x,y-width))
+    def link(a, b, y=0.):
+        return RoadLink(station(a,y),station(b,y),.01,frozenset((key,)),evidence,False,.02)
+
+    original = _mapped_candidate((link(.4,.8),), key, profile)
+    model = SimpleNamespace(road=original.road, crossing=b'\1')
+    short = RoadSection((link(.3,.7),))
+    long = RoadSection((link(-.2,.3),link(.3,.7),link(.7,1.2)))
+    pose = PoseSample('map','clock','calibration',1,.6,-width/2,0.,.003,.001)
+    request = dict(rear_m=.25, forward_m=.5)
+    assert stored_road_window((short,long), model, pose, profile, **request) is None
+    road, _ = stored_road_window((short,long), model, pose, profile, demo_course=True, **request)
+    assert road.hypotheses[0].divider[-1] == (1.2,0.)
+
+    adjacent = RoadSection((link(-.2,1.2,-width),))
+    detached = SimpleNamespace(road=_mapped_candidate((link(2.,2.4),),key,profile).road,crossing=b'\1')
+    assert stored_road_window((long,adjacent), detached, pose, profile, demo_course=True, **request) is None
+
+
+def test_demo_window_recognizes_an_overlapping_fragment_ending_inside_the_bend():
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = (frozenset(),)*3
+
+    def section(stop, lateral=0.):
+        points = [tuple((r*math.sin(i*.05), .6-r*math.cos(i*.05)+lateral)
+                        for r in (.6-width, .6, .6+width)) for i in range(stop)]
+        return RoadSection(tuple(RoadLink(a,b,.01,frozenset((key,)),evidence,True,.02)
+                                 for a,b in zip(points,points[1:])))
+
+    short, long = section(14), section(28)
+    at = _section_length(short)-.01
+    first = (0., .14, short, at)
+    assert _shared_forward_end(first, (0., .14, long, at+.05), profile)
+    assert not _shared_forward_end(first, (0., .14, section(28,width), at+.05), profile)
+    assert not _shared_forward_end(first, (0., .14, section(15), at+.02), profile)
+
+
+def test_demo_window_keeps_stored_lane_when_a_short_observation_starts_ahead():
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    key = ('camera', 'rgb', 'clock', 1)
+
+    def section(angles, offset=0.):
+        stations = [tuple((r*math.sin(a), .6-r*math.cos(a)+offset)
+                          for r in (.6-width,.6,.6+width)) for a in angles]
+        return RoadSection(tuple(RoadLink(a,b,.01,frozenset((key,)),(frozenset(),)*3,True,.02)
+                                 for a,b in zip(stations,stations[1:])))
+
+    long = section(tuple(i*.05 for i in range(38)))
+    short_angles = tuple(.75+i*.05 for i in range(8))
+    pose = PoseSample('map','clock','calibration',1,.26*math.sin(.56),.6-.26*math.cos(.56),.56,.003,.001)
+    previous = section(tuple(i*.05 for i in range(10)), 2.)
+    model = SimpleNamespace(road=_mapped_candidate(previous.links,key,profile).road,crossing=bytes(9))
+    request = dict(rear_m=.25,forward_m=.6,demo_course=True)
+    stored = stored_road_window((long,), model, pose, profile, **request)
+    assert stored is not None
+    assert stored_road_window((long,section(short_angles)), model, pose, profile, **request) == stored
+    assert stored_road_window((long,section(short_angles,.026)), model, pose, profile, **request) is None
+
+
+def test_demo_window_preserves_the_turn_in_the_wire_model():
+    from xenova_vehicle.perception.temporal_road import _fit_publication_curve
+    from xenova_vehicle.transport.world_adapter import lane_model_from_road
+
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = tuple(frozenset(((key, role),)) for role in range(3))
+    def station(angle):
+        return tuple((r*math.sin(angle), .6-r*math.cos(angle)) for r in (.6-width,.6,.6+width))
+    stations = tuple(station(i*.08) for i in range(18))
+    links = tuple(RoadLink(a,b,.14,frozenset((key,)),evidence,False,.1)
+                  for a,b in zip(stations,stations[1:]))
+    pose = PoseSample('map','clock','calibration',1,*stations[5][1],.4,.003,.001)
+    original = _mapped_candidate(links[:4],key,profile)
+    model = SimpleNamespace(road=original.road,crossing=bytes(4))
+    section = _fit_publication_curve(RoadSection(links), profile)
+    road,crossing = stored_road_window((section,), model, pose, profile,
+        rear_m=.2,forward_m=.6,demo_course=True)
+    wire = lane_model_from_road(road,lane_ids=(1,2),model_revision=1,lane_revisions=(1,1),crossing=crossing)
+    divider = tuple((p.x,p.y) for p in wire.divider)
+    assert len(divider) >= 5
+    assert all(abs(math.hypot(x,y-.6)-.6) < .01 for x,y in divider)
+    assert not any(wire.crossing)
+
+
+def test_demo_window_refits_local_observed_curve_if_the_long_fit_is_missing():
+    from xenova_vehicle.transport.world_adapter import lane_model_from_road
+
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    radius = .6
+    key = ('camera', 'rgb', 'clock', 1)
+    other = (*key[:-1], 2)
+    sources = frozenset((key, other))
+    evidence = tuple(frozenset(((key, role), (other, role))) for role in range(3))
+    stations = tuple(tuple((r*math.sin(a), radius-r*math.cos(a))
+                           for r in (radius-width,radius,radius+width))
+                     for a in (i*.08 for i in range(30)))
+    links = tuple(RoadLink(a,b,.185,sources,evidence,False,.1)
+                  for a,b in zip(stations,stations[1:]))
+    original = _mapped_candidate(links[:4],key,profile)
+    model = SimpleNamespace(road=original.road,crossing=bytes(4))
+    pose = PoseSample('map','clock','calibration',1,*stations[14][1],1.12,.003,.001)
+    # A section with no long fit and a fit whose shared chord bound cannot
+    # describe this tight bend must both recover the same observed local cut.
+    cached_links = tuple(replace(link, boundary_normal_bounds_m=(.185,)*3,
+                                 outer_chord_bounds_m=(.5,)*2) for link in links)
+    cached = RoadSection(cached_links)
+    for section in (RoadSection(links), RoadSection(links, publication_curve=cached)):
+        road,crossing = stored_road_window((section,), model, pose, profile,
+                                          rear_m=.23,forward_m=.57,demo_course=True)
+        wire = lane_model_from_road(road,lane_ids=(1,2),model_revision=1,
+                                    lane_revisions=(1,1),crossing=crossing)
+        assert len(wire.divider) >= 6
+        assert max(math.hypot(a.x-b.x,a.y-b.y) for a,b in zip(wire.divider,wire.divider[1:])) < .16
+        assert all(abs(math.hypot(p.x,p.y-radius)-radius) < .015 for p in wire.divider)
+        assert not any(wire.crossing)
+
+
+def test_demo_window_keeps_interior_knots_stable_as_the_rear_axle_advances():
+    from xenova_vehicle.perception.temporal_road import _fit_publication_curve
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = tuple(frozenset(((key, role),)) for role in range(3))
+    radius = .6
+    angles = tuple(i * .08 for i in range(30))
+    stations = tuple(tuple((r * math.sin(a), radius - r * math.cos(a))
+                           for r in (radius-width, radius, radius+width)) for a in angles)
+    links = tuple(RoadLink(a,b,.14,frozenset((key,)),evidence,False,.1)
+                  for a,b in zip(stations,stations[1:]))
+    original = _mapped_candidate(links[8:14],key,profile)
+    model = SimpleNamespace(road=original.road,crossing=bytes(6))
+    section = _fit_publication_curve(RoadSection(links), profile)
+    assert section.publication_curve is not None
+
+    curves = []
+    for index in (10, 11):
+        pose = PoseSample('map','clock','calibration',1,*stations[index][1],angles[index],.003,.001)
+        road,crossing = stored_road_window((section,),model,pose,profile,rear_m=.28,forward_m=.68,
+                                           demo_course=True)
+        lane = road.hypotheses[0]
+        curves.append(dict(zip(lane.divider, zip(lane.left_outer, lane.right_outer))))
+        assert not any(crossing)
+
+    shared = curves[0].keys() & curves[1].keys()
+    assert len(shared) >= 3 and curves[0].keys() != curves[1].keys()
+    assert all(curves[0][point] == curves[1][point] for point in shared)
+    assert all(abs(math.hypot(x,y-radius)-radius) < .01 for curve in curves for x,y in curve)
+
+
+def test_demo_map_refresh_keeps_station_axis_while_extending_both_ends():
+    from xenova_vehicle.perception.temporal_road import _fit_publication_curve
+
+    profile = RoadProfile()
+    old_key = ('camera', 'rgb', 'clock', 1)
+    new_key = ('camera', 'rgb', 'clock', 2)
+    width = profile.missing_outer_width_m
+
+    def link(a, b, key):
+        cross = lambda x: ((x,width),(x,0.),(x,-width))
+        evidence = tuple(frozenset(((key, role),)) for role in range(3))
+        return RoadLink(cross(a),cross(b),.01,frozenset((key,)),evidence,False,.01)
+
+    positions = tuple(i/20 for i in range(21))
+    links = tuple(link(a,b,old_key) for a,b in zip(positions,positions[1:]))
+    original = _fit_publication_curve(RoadSection(links),profile).publication_curve
+    extended = (link(-.17,0.,new_key), *links, link(1.,1.24,new_key))
+    updated = _fit_publication_curve(RoadSection(extended),profile,(original,),frozenset((new_key,))).publication_curve
+
+    assert updated.map_stations[0] < original.map_stations[0]
+    assert updated.map_stations[-1] > original.map_stations[-1]
+    assert all(station in updated.map_stations for station in original.map_stations[1:-1])
+    original_by_station = dict(zip(original.map_stations,original.boundaries[1]))
+    for at, point in zip(updated.map_stations,updated.boundaries[1]):
+        if .2 < at < .8:
+            assert point == original_by_station[at]
+    assert all(a.end == b.start for a,b in zip(updated.links,updated.links[1:]))
+
+
+def test_refresh_without_local_observations_preserves_curved_cross_sections():
+    from xenova_vehicle.perception.temporal_road import _fit_publication_curve
+
+    profile = RoadProfile()
+    key = ('camera', 'rgb', 'clock', 1)
+    evidence = tuple(frozenset(((key, role),)) for role in range(3))
+    width = profile.missing_outer_width_m
+    radius = .6
+    points = tuple(tuple((r*math.sin(a), radius-r*math.cos(a))
+                         for r in (radius-width,radius,radius+width))
+                   for a in (i*.08 for i in range(23)))
+
+    def section(points):
+        return RoadSection(tuple(RoadLink(a,b,.01,frozenset((key,)),evidence,False,.04)
+                                 for a,b in zip(points,points[1:])))
+
+    original = _fit_publication_curve(section(points),profile).publication_curve
+    shifted = tuple(tuple((x,y+.02) for x,y in point) for point in points)
+    refreshed = _fit_publication_curve(section(shifted),profile,(original,)).publication_curve
+    position = lambda curve: dict(zip(curve.map_stations,zip(*curve.boundaries)))
+    before, after = position(original), position(refreshed)
+    shared = before.keys() & after.keys()
+    assert len(shared) >= 5
+    assert all(before[s] == after[s] for s in shared)
+
+
+def test_wire_shortcut_rejects_cutting_a_supported_turn():
+    from xenova_vehicle.perception.temporal_road import _merge_wire_links, _wire_curve_links
+
+    profile = RoadProfile()
+    width = profile.missing_outer_width_m
+    key = ('camera', 'rgb', 'clock', 1)
+    observed = tuple(frozenset(((key, role),)) for role in range(3))
+
+    def station(x,y):
+        return tuple((x,y+offset) for offset in (width,0.,-width))
+
+    points = (station(0.,0.),station(.1,.04),station(.2,0.))
+    corner = tuple(RoadLink(a,b,.01,frozenset((key,)),observed,False,.02,
+                      boundary_normal_bounds_m=(.01,)*3,outer_chord_bounds_m=(.01,)*2)
+                   for a,b in zip(points,points[1:]))
+    assert _merge_wire_links(corner,profile) is None
+    assert tuple(link for link,_,_ in _wire_curve_links(corner,profile)) == corner
 
 
 def test_reuses_bounded_map_run_with_two_current_markings_and_original_sources():
@@ -371,6 +650,22 @@ def test_startup_projection_preserves_capture_and_stays_out_of_recent_sources():
     assert projected.captured_us == pose.captured_us
     assert projected.sample.position_error_m >= pose.sample.position_error_m+.0025
     assert projected.sample.yaw_error_rad >= pose.sample.yaw_error_rad+.005
+
+
+def test_publication_refreshes_when_a_new_marking_extends_the_reference():
+    owner = TemporalRoadMap()
+    profile = RoadProfile()
+    observe(owner, 1, 0., ((.20,.60),), error=.06)
+    observe(owner, 2, .05, ((.20,.60),), error=.06)
+    graph,stamp,pose = marking_frame(3,(.35,.1),(.60,.1))
+    previous = owner.publication_sections(profile, stamp.captured_us[0])
+    assert previous
+    revision = owner.revision
+    owner.observe(replace(graph, complete=False, reasons=('UNUSABLE_GRAPH',)),
+                  pose, profile, TapeProfile(), stamp=stamp)
+    assert owner.revision == revision
+    assert owner.publication_sections(profile,stamp.captured_us[0]+100_000) is previous
+    assert owner.publication_sections(profile,stamp.captured_us[0]+500_000) is not previous
 
 
 def test_unclassified_single_boundary_joins_only_nearby_aligned_paint():

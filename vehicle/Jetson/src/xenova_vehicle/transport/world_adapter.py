@@ -344,7 +344,51 @@ def _lane_subset_bounds(h,point_sets,converted,indices,crossing,original_bound):
     def heading(value):return _f32_up(h.yaw_error_rad if full and value==0 else _positive_up(h.yaw_error_rad+value))
     headings=[heading(turn[0])]
     headings.extend(heading(max(turn[side],turn[side+2])) for side in (1,2))
-    return wires[:3],bounds[:3],headings,bytes(map(int,states)),bytes(crossings),bounds[3:]
+    # Cover both float reconstructions used by the shared codecs. Omitted
+    # stations affect the curve error but do not move the transmitted ends.
+    chord_bounds = _stored_chord_bounds(h.error_m,point_sets,converted,wires[3:],indices)
+    return wires[:3],bounds[:3],headings,bytes(map(int,states)),bytes(crossings),bounds[3:],chord_bounds
+
+
+def _stored_chord_bounds(error, point_sets, converted, outer, indices):
+    bounds = []
+    for centers,source,wire in zip(converted[1:],point_sets[3:],outer):
+        rounding = max(max(math.dist(source[i],point),math.dist(source[i],tuple(
+            2*c-d for c,d in zip(centers[i],converted[0][i])))) for i,point in zip(indices,wire))
+        bounds.append(_f32_up(_positive_up(2*(error+rounding))))
+    return tuple(bounds)
+
+
+def _stored_stations(stations, point_sets, converted, error, max_deviation_m):
+    """Choose valid chords with the smallest maximum deviation from the mapped curve."""
+    outer = tuple(tuple(_wire_outer(c,d) for c,d in zip(line,converted[0])) for line in converted[1:])
+    bounds = _stored_chord_bounds(error,point_sets,converted,outer,range(len(stations)))
+
+    def long_enough(line, start, end, bound):
+        a,b = line[start],line[end]
+        c_length = _f32(math.hypot(*(_f32(y-x) for x,y in zip(a,b))))
+        return math.dist(a,b) > bound and c_length > bound
+
+    best = [(0.,(0,))]
+    for end in range(1,len(stations)):
+        choices = []
+        for start,previous in enumerate(best):
+            if previous is None:
+                continue
+            if not all(long_enough(line,start,end,bound) for line,bound in zip(outer,bounds)):
+                continue
+            length = stations[end]-stations[start]
+            deviation = 0.
+            for k in range(start+1,end):
+                t = (stations[k]-stations[start])/length
+                for line in point_sets:
+                    chord = tuple(a+t*(b-a) for a,b in zip(line[start],line[end]))
+                    deviation = max(deviation,math.dist(line[k],chord))
+            if deviation > max_deviation_m:
+                continue
+            choices.append((max(previous[0],deviation),previous[1]+(end,)))
+        best.append(min(choices,key=lambda row:(row[0],-len(row[1]))) if choices else None)
+    return None if best[-1] is None else best[-1][1]
 
 
 def lane_publication(basis, model):
@@ -359,7 +403,8 @@ def lane_publication(basis, model):
     return model.road, lane_model_from_road(model.road, crossing=model.crossing, **ids)
 
 
-def lane_window_publication(pipeline, basis, model, pose, stopping, observation_us, *, current_geometry):
+def lane_window_publication(pipeline, basis, model, pose, stopping, observation_us, *, current_geometry,
+                            demo_course=False):
     """Use the localized map slice, or the same-frame model while the map is still sparse."""
     from ..perception.temporal_road import stored_road_window
     body = pipeline.calibration.body
@@ -369,24 +414,37 @@ def lane_window_publication(pipeline, basis, model, pose, stopping, observation_
     travel = speed*seconds+speed**2/(2*stopping.min_braking_mps2)
     width = body.width/2
     pad = stopping.body_error_m+pose.position_error_m+pipeline.grid.spec.resolution_m
-    sections = pipeline._temporal_road.publication_sections(pipeline.profile.road,observation_us)
+    sections = pipeline._temporal_road.publication_sections(pipeline.profile.road,observation_us,demo_course=demo_course)
+    rear = math.hypot(body.rear,width)+pad
+    forward = math.hypot(body.front,width)+pad+travel
+    stored_error = None
     stored = stored_road_window(sections,model,pose,pipeline.profile.road,
-        rear_m=math.hypot(body.rear,width)+pad,forward_m=math.hypot(body.front,width)+pad+travel)
+        rear_m=rear,forward_m=forward,demo_course=demo_course)
     if stored is not None:
         road,crossing = stored
         try:
             wire = lane_model_from_road(road,crossing=crossing,lane_ids=model.lane_ids,
-                model_revision=model.model_revision,lane_revisions=model.lane_revisions)
+                model_revision=model.model_revision,lane_revisions=model.lane_revisions,
+                max_shortcut_deviation_m=pipeline.profile.road.merge_lateral_m)
             return road,wire
-        except WorldBuildError:
-            if not current_geometry:
-                raise
-    if current_geometry:
-        return lane_publication(basis,model)
+        except WorldBuildError as error:
+            stored_error = error
+    if stored_error is not None and not current_geometry:
+        raise stored_error
+    if current_geometry and basis.status == 'READY':
+        road, wire = lane_publication(basis,model)
+        divider = tuple((point.x,point.y) for point in wire.divider)
+        # Reject a forward-only fragment even when it is a valid road model.
+        # Pi needs the rear axle inside the local lane to select it.
+        for point, neighbor in ((divider[0], divider[1]), (divider[-1], divider[-2])):
+            if sum((p-q)*(r-q) for p,q,r in zip((pose.x,pose.y),point,neighbor)) < 0:
+                raise WorldBuildError('lane window does not cover the rear axle')
+        return road, wire
     raise WorldBuildError('stored road window unavailable')
 
 
-def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, crossing):
+def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, crossing,
+                         max_shortcut_deviation_m=None):
     """원 source/ID/revision을 보존해 유한 wire common station 표현만 선택한다.
 
     원 모든 station과 C outer의 원 tube가 이미 포함되면 bytes를 그대로 유지한다. 짧은 outer heading 때문에만
@@ -427,8 +485,17 @@ def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, cros
     bound, heading = _f32_up(h.error_m + quantization), _f32_up(h.yaw_error_rad)
     states = bytes(int(value) for value in h.inferred)
     stored = road.reasons == ('STORED_MAP_WINDOW',)
-    def build(points,bounds,headings,states,allowed,outer_bounds):
-        model=schema.LaneModel(revision=model_revision,crossing=allowed,divider_state=states,
+    observed_divider = None
+    if stored and h.divider_observed is not None:
+        if len(h.divider_observed) != n or any(type(value) is not bool for value in h.divider_observed):
+            raise WorldBuildError('divider evidence must match common stations')
+        observed_divider = {point for point, observed in zip(converted[0],h.divider_observed) if observed}
+
+    def build(points,bounds,headings,states,allowed,outer_bounds,chord_bounds):
+        # Crossing permissions were ANDed over the original intervals, so
+        # omitting a station cannot grant permission across an inferred gap.
+        divider_state = states if observed_divider is None else bytes(int(p not in observed_divider) for p in points[0])
+        model=schema.LaneModel(revision=model_revision,crossing=allowed,divider_state=divider_state,
             divider_position_bound_m=bounds[0],divider_heading_bound_rad=headings[0])
         for point in points[0]:model.divider.add(x=point[0],y=point[1])
         if stored:
@@ -442,12 +509,12 @@ def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, cros
                 # The outer is observed in the map. Its actual bound covers both
                 # ends without adding the uncertainty of reconstructed centers again.
                 lane.outer_normal_position_bound_m = outer_bounds[index]
-                lane.outer_chord_delta_bound_m = _f32_up(2*outer_bounds[index])
+                lane.outer_chord_delta_bound_m = chord_bounds[index]
         return model
     audit=_lane_subset_bounds(h,point_sets,converted,tuple(range(n)),crossing,bound)
     if audit is None:raise WorldBuildError('original station coverage cannot be represented')
     # full audit의 inferred OR은 직접 경로에 적용하지 않는다. 원 state/crossing 그대로다.
-    model=build(converted,audit[1],tuple(max(heading,v) for v in audit[2]),states,crossing,audit[5])
+    model=build(converted,audit[1],tuple(max(heading,v) for v in audit[2]),states,crossing,*audit[5:])
     normal, chord = h.boundary_normal_bounds_m, h.outer_chord_bounds_m
     if normal is not None or chord is not None:
         if (type(normal) is not tuple or type(chord) is not tuple
@@ -476,6 +543,23 @@ def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, cros
     # An outer chord delta applies to consecutive source stations only.
     if normal is not None:
         raise WorldBuildError('directional lane chord is unbounded') from original_error
+    if stored:
+        if max_shortcut_deviation_m is None:
+            from ..perception.road import RoadProfile
+            max_shortcut_deviation_m = RoadProfile().merge_lateral_m
+        indices = _stored_stations(h.station_s,point_sets,converted,h.error_m,max_shortcut_deviation_m)
+        if indices is not None:
+            candidate = _lane_subset_bounds(h,point_sets,converted,indices,crossing,bound)
+            if candidate is not None:
+                model = build(*candidate)
+                try:
+                    validate(model)
+                    _lane_c_heading(model)
+                except ValueError:
+                    pass
+                else:
+                    return model
+        raise WorldBuildError('stored lane shortcuts do not preserve the curve') from original_error
     for count in range(n-1,1,-1):
         indices=tuple((2*i*(n-1)+count-1)//(2*(count-1)) for i in range(count))
         candidate=_lane_subset_bounds(h,point_sets,converted,indices,crossing,bound)

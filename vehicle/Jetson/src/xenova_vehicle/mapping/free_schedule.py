@@ -59,6 +59,7 @@ class StoppingRegion:
     radius_m: float
     complete: bool
     _mask: bytes
+    _priority: bytes
     _vehicle: object
     _admission: object
     _pose: object
@@ -67,6 +68,17 @@ class StoppingRegion:
     def mask(self):
         import numpy as np
         return np.frombuffer(self._mask,dtype=np.bool_).reshape(self.spec.height,self.spec.width)
+
+    @property
+    def priority_mask(self):
+        """Read-only first-pass work within the original conservative mask."""
+        import numpy as np
+        return np.frombuffer(self._priority,dtype=np.bool_).reshape(self.spec.height,self.spec.width)
+
+    @property
+    def vehicle_stopped(self):
+        # Match the speed at which Pi can accept a fresh departure request.
+        return abs(self._vehicle.message().velocity_mps) <= .01
 
     def valid_at(self,now_us):
         if type(now_us) is not int or not self.built_us<=now_us<self.valid_until_us:return False
@@ -111,7 +123,8 @@ def stopping_region(spec,vehicle,pose,calibration,*,admission,frame_id,now_us,ma
     reaction=_uint(reaction_latency_us,maximum=10_000_000)
     cycle=_uint(cycle_bound_us,minimum=1,maximum=10_000_000)
     completion=_uint(completion_bound_us,maximum=10_000_000)
-    if abs(vehicle.message().velocity_mps)>max_speed_mps:raise ValueError('actual Vehicle exceeds admitted stopping speed')
+    sample = vehicle.message()
+    if abs(sample.velocity_mps)>max_speed_mps:raise ValueError('actual Vehicle exceeds admitted stopping speed')
     age=now_us-min(vehicle.j_interval[0],pose.captured_us[0])
     seconds=math.nextafter((age+reaction+cycle+completion)/1e6,math.inf)
     body=calibration.body
@@ -131,11 +144,40 @@ def stopping_region(spec,vehicle,pose,calibration,*,admission,frame_id,now_us,ma
     # 닫힌 sweep와 접촉하는 cell 전체가 필요하다. center sampling으로 가장자리를 누락하지 않는다.
     needed=(np.nextafter(x0,-np.inf)<=bounds[2])&(np.nextafter(x0+r,np.inf)>=bounds[0])&(
         np.nextafter(y0,-np.inf)<=bounds[3])&(np.nextafter(y0+r,np.inf)>=bounds[1])
+    priority = braking_work_mask(spec,p,body,sample,travel+braking,body_error_m,needed)
     complete=bool(ox<=bounds[0] and oy<=bounds[1] and bounds[2]<=ox+spec.width*r and bounds[3]<=oy+spec.height*r)
     return StoppingRegion(spec,frame_id,calibration.sha256,p.clock_id,p.epoch,
         (source['map_epoch'],source['frame_epoch'],source['odom_epoch']),vehicle.source_key,vehicle.wire_sha256,now_us,
         min(vehicle.valid_until_j_us,now_us+cycle+completion),cycle,completion,bounds,radius,complete,
-        needed.tobytes(),vehicle,admission,pose)
+        needed.tobytes(),priority.tobytes(),vehicle,admission,pose)
+
+
+def braking_work_mask(spec, pose, body, sample, distance, body_error, needed):
+    """Rank cells along nominal braking motion inside the all-directions envelope."""
+    import numpy as np
+    resolution = spec.resolution_m
+    rows,cols = np.indices(needed.shape,dtype=np.float64)
+    cx = spec.origin_xy[0]+(cols+.5)*resolution-pose.x
+    cy = spec.origin_xy[1]+(rows+.5)*resolution-pose.y
+    steering = sample.measured_steering_rad if sample.HasField('measured_steering_rad') else sample.estimated_steering_rad
+    curvature = math.tan(steering)/body.wheelbase
+    direction = -1. if sample.velocity_mps < 0 else 1.
+    segments = max(1,min(16,math.ceil(distance/resolution)))
+    radius = math.hypot(max(body.front,body.rear),body.width/2)
+    step_pad = distance/segments/2*(1+radius*abs(curvature))
+    padding = (body_error+pose.position_error_m+2*radius*math.sin(min(math.pi,pose.yaw_error_rad)/2)
+               +resolution/math.sqrt(2.)+step_pad)
+    priority = np.zeros_like(needed)
+    for k in range(segments+1):
+        arc = direction*distance*k/segments
+        turn = arc*curvature
+        mid = pose.yaw+turn/2
+        chord = arc*math.sin(turn/2)/(turn/2) if abs(turn)>1e-8 else arc
+        dx,dy = cx-chord*math.cos(mid),cy-chord*math.sin(mid)
+        c,s = math.cos(pose.yaw+turn),math.sin(pose.yaw+turn)
+        along,across = c*dx+s*dy,-s*dx+c*dy
+        priority |= ((along>=-body.rear-padding)&(along<=body.front+padding)&(abs(across)<=body.width/2+padding))
+    return priority & needed
 
 
 class FreeScheduler:
@@ -151,6 +193,7 @@ class FreeScheduler:
         self._previous_needed = bytes(spec.width * spec.height)
         self._required_cursor = self._surround_cursor = 0
         self._last_plan = self._cursor_before = None
+        self._departure_attempts = ()
 
     def note_attempts(self,plan,attempted_cells):
         """최신 선택의 실제 시도 prefix만 반영한다. ray budget으로 미시도한 셀을 건너뛰지 않는다.
@@ -165,6 +208,7 @@ class FreeScheduler:
         needed=self._previous_needed
         self._required_cursor,self._surround_cursor,previous=self._cursor_before
         if not attempted_cells:self._previous_needed=previous
+        self._departure_attempts = tuple(cell for cell in attempted_cells if cell in self._departure_attempts)
         for (col,row),priority in zip(attempted_cells,plan.priorities):
             index=row*self.spec.width+col
             if needed[index]:self._required_cursor=(index+1)%(self.spec.width*self.spec.height)
@@ -173,7 +217,8 @@ class FreeScheduler:
 
     def plan(self, *, context_key, needed_mask, support, permission, state, observed_us, time_known,
              now_us, capture_lower_us, max_cells, max_ray_tests, cycle_bound_us, completion_bound_us,
-             free_ttl_us=500_000, preferred_surrounding=(), visible_mask=None):
+             free_ttl_us=500_000, preferred_surrounding=(), visible_mask=None, required_proximity=None,
+             priority_mask=None, near_departure_mask=None):
         """원 live grid만 읽는다. retained mask는 받지 않으며 UNKNOWN/실패도 원 시도 예산을 쓴다.
 
         cycle/completion은 caller의 명시 상한이다. capacity_ok도 그 상한 아래의 필요조건일
@@ -206,6 +251,16 @@ class FreeScheduler:
                 or visible_mask.shape != shape):
             raise ValueError('visible priority requires an exact same-shape bool mask')
         visible = None if visible_mask is None else visible_mask.reshape(-1)
+        if priority_mask is not None and (type(priority_mask) is not np.ndarray or priority_mask.dtype != np.bool_
+                or priority_mask.shape != shape or np.any(priority_mask.reshape(-1) & ~needed)):
+            raise ValueError('priority corridor must be a subset of the required cells')
+        if near_departure_mask is not None and (type(near_departure_mask) is not np.ndarray
+                or near_departure_mask.dtype != np.bool_ or near_departure_mask.shape != shape):
+            raise ValueError('departure priority requires an exact same-shape bool mask')
+        if required_proximity is not None and (type(required_proximity) is not np.ndarray
+                or required_proximity.shape != shape or required_proximity.dtype.kind != 'f'
+                or not np.all(np.isfinite(required_proximity)) or np.any(required_proximity < 0)):
+            raise ValueError('required proximity must contain finite same-shape distances')
         previous = np.frombuffer(self._previous_needed, dtype=np.bool_)
         eligible = (support & permission).reshape(-1)
         states, observed = state.reshape(-1), observed_us.reshape(-1)
@@ -220,6 +275,9 @@ class FreeScheduler:
         first = sorted(np.flatnonzero(urgent).tolist(), key=lambda i: (int(observed[i]) + ttl,
             (i - self._required_cursor) % count))
         second = sorted(np.flatnonzero(new_or_missing).tolist(), key=lambda i: (i - self._required_cursor) % count)
+        if required_proximity is not None:
+            distance = required_proximity.reshape(-1)
+            second.sort(key=lambda i: distance[i])
         excluded = urgent | new_or_missing
         third = np.flatnonzero(eligible & ~excluded).tolist()
         if preferred_surrounding:
@@ -232,15 +290,47 @@ class FreeScheduler:
             third.sort(key=surrounding_order)
         else:
             third.sort(key=lambda i: (i-self._surround_cursor)%count)
+        if required_proximity is not None and not preferred_surrounding:
+            # When the immediate sweep is out of view, observe the nearest
+            # visible continuation instead of starting at the grid corner.
+            third.sort(key=lambda i: (fresh[i], distance[i]))
         # 같은 정렬 순서의 실제 시도 prefix만 만든다. 전체 due 분모와 cursor는
         # 아래 원 mask에서 그대로 계산하며 미선택 셀의 증거는 만들지 않는다.
         groups = (('REQUIRED_EXPIRING', first), ('REQUIRED_NEW_OR_UNPROVEN', second), ('SURROUNDING', third))
+        # The current capture already has a hit in this cell. A second test of
+        # the same full cell cannot clear it, but a newer capture still can.
+        same_capture_hit = ((states == OCCUPIED) & known & (observed >= capture_lower_us)
+                            if capture_lower_us is not None else np.zeros(count,dtype=bool))
         if visible is None:
-            ordered = ((index, priority) for priority, group in groups for index in group)
+            ordered = ((index, priority) for priority, group in groups for index in group if not same_capture_hit[index])
         else:
-            ordered = ((index, priority) for in_view in (True,False) for priority, group in groups
-                       for index in group if bool(visible[index]) == in_view)
-        selected = tuple(islice(ordered, cells)) if rays else ()
+            focus = None if priority_mask is None else priority_mask.reshape(-1)
+            if focus is None:
+                tiers = (visible, ~visible)
+            else:
+                # Preserve some work for visible cells ahead of the current
+                # corridor when its closest portion is clipped by the camera.
+                tiers = (visible & focus, visible & ~focus, focus & ~visible, ~focus & ~visible)
+            ordered = ((index, priority) for tier in tiers for priority, group in groups
+                       for index in group if tier[index] and not same_capture_hit[index])
+        selected = near = ()
+        if rays:
+            # A partly visible cell at the departure edge can have a valid
+            # witness. Keep part of the budget for the sweep beyond that edge.
+            if near_departure_mask is not None:
+                mask = near_departure_mask.reshape(-1)
+                previous_near = {row * self.spec.width + col for col, row in self._departure_attempts}
+                near_order = [(index, priority) for priority, group in groups for index in group
+                              if mask[index] and not same_capture_hit[index]]
+                # On an unchanged view, alternate candidates that still need
+                # proof so the closest blind row does not monopolize the budget.
+                near_order.sort(key=lambda item: (item[1] != 'REQUIRED_EXPIRING',
+                    item[0] in previous_near, bool(fresh[item[0]]),
+                    0. if required_proximity is None else distance[item[0]]))
+                near = tuple(near_order[:max(1, cells // 2)])
+            near_indices = {index for index, _ in near}
+            selected = near + tuple(islice((item for item in ordered if item[0] not in near_indices), cells - len(near)))
+        self._departure_attempts = tuple((index % self.spec.width, index // self.spec.width) for index, _ in near)
         self._cursor_before=(self._required_cursor,self._surround_cursor,self._previous_needed)
         required_selected = [index for index, _ in selected if needed[index]]
         surrounding_selected = [index for index, priority in selected if priority == 'SURROUNDING']

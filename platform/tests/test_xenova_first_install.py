@@ -212,6 +212,19 @@ class InputSafetyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'required Tailscale kernel module missing'):
             assemble.platform_root_ok(root)
 
+    def test_gateway_image_requires_activation_example_and_cp210x(self):
+        root = platform_root(self.base / 'gateway-root')
+        assemble.platform_root_ok(root)
+        example = root/'usr/share/xenova/90-esp32-serial.conf.example'
+        content = example.read_bytes()
+        example.unlink()
+        with self.assertRaisesRegex(ValueError, '90-esp32-serial'):
+            assemble.platform_root_ok(root)
+        example.write_bytes(content)
+        (root/'usr/lib/modules/6.18.33-v8/kernel/drivers/usb/serial/cp210x.ko.xz').unlink()
+        with self.assertRaisesRegex(ValueError, 'kernel module missing: cp210x'):
+            assemble.platform_root_ok(root)
+
     def test_shared_tailscale_state_is_rejected_behind_an_absolute_image_parent_symlink(self):
         root = platform_root(self.base / 'aliased-state-root')
         alias = root / 'image-private-var-lib'

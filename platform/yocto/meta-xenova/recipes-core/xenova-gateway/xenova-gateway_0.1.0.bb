@@ -1,7 +1,8 @@
 SUMMARY = "Xenova Gateway authority and bounded device output"
 LICENSE = "CLOSED"
-FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../services/gateway:${THISDIR}/../../../../apps/drive/world/python:${THISDIR}/files:"
-SRC_URI = "file://xenova_gateway file://xenova_drive_world file://examples file://pyproject.toml file://xenova-gateway.service file://gateway.env.example file://xenova-drive"
+FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../services/gateway:${THISDIR}/../../../../services/gateway/deploy:${THISDIR}/../../../../apps/drive/world/python:${THISDIR}/files:"
+SRC_URI = "file://xenova_gateway file://xenova_drive_world file://examples file://pyproject.toml file://xenova-gateway.service file://gateway.env.example file://xenova-drive \
+           file://90-esp32-serial.conf.example file://90-xenova-esp32.rules.example file://90-drive-rejoin.conf.example"
 S = "${UNPACKDIR}"
 
 inherit allarch python3-dir systemd
@@ -28,6 +29,9 @@ do_install() {
     done
     install -m 0644 "${S}/pyproject.toml" "${D}${datadir}/xenova/gateway-pyproject.toml"
     install -m 0644 "${S}/gateway.env.example" "${D}${datadir}/xenova/gateway.env.example"
+    for example in 90-esp32-serial.conf.example 90-xenova-esp32.rules.example 90-drive-rejoin.conf.example; do
+        install -m 0644 "${S}/$example" "${D}${datadir}/xenova/$example"
+    done
     install -m 0644 "${S}/xenova-gateway.service" "${D}${systemd_system_unitdir}/xenova-gateway.service"
     install -d "${D}${datadir}/xenova/gateway-examples"
     install -m 0644 "${S}/examples/"*.py "${D}${datadir}/xenova/gateway-examples/"

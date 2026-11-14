@@ -102,6 +102,7 @@ class LaneHypothesis:
     boundary_normal_bounds_m: tuple[float, float, float] | None = None
     outer_chord_bounds_m: tuple[float, float] | None = None
     boundary_observations: tuple | None = None
+    divider_observed: tuple[bool, ...] | None = None
 
     def descriptor(self):
         return asdict(self)
@@ -276,13 +277,13 @@ def _join_lateral(first, second, profile, first_short, second_short):
     return deviation if deviation <= profile.merge_lateral_m else None
 
 
-def _chains(graph, profile):
+def _chains(graph, profile, strips):
     usable = []
     kinds = {}
     short_dashes = set()
     work = dict(short_or_closed_strips=0, nonmonotonic_strips=0, heading_rejected_strips=0,
                 curvature_rejected_strips=0, dashed_merges=0)
-    for strip in graph.strips:
+    for strip in strips:
         points = strip.points_xy if strip.points_xy[-1][0] >= strip.points_xy[0][0] else tuple(reversed(strip.points_xy))
         start, end = ((strip.start_kind, strip.end_kind) if points is strip.points_xy
                       else (strip.end_kind, strip.start_kind))
@@ -512,7 +513,16 @@ def infer_road(graph, profile=RoadProfile()):
     """모든 잔존 가설을 유지한다. cap 미검사는 UNKNOWN, 복수 가설은 AMBIGUOUS다."""
     if type(graph) is not TapeGraph or type(profile) is not RoadProfile:
         raise ValueError('road inference requires a tape graph/profile')
-    chains, merge_ambiguous, chain_work = _chains(graph, profile)
+    paint = _infer_road(graph, profile, graph.strips)
+    if paint.status == 'VALID' or not graph.surface_edges or not graph.complete:
+        return paint
+    mixed = _infer_road(graph, profile, graph.strips + graph.surface_edges)
+    return mixed if mixed.status in ('VALID','PARTIAL') else paint
+
+
+def _infer_road(graph, profile, strips):
+    chains, merge_ambiguous, chain_work = _chains(graph, profile, strips)
+    edge_roles = {edge.local_id:edge.outer_role for edge in graph.surface_edges}
     complete = graph.complete
     reasons = list(graph.reasons)
     if merge_ambiguous:
@@ -536,6 +546,8 @@ def infer_road(graph, profile=RoadProfile()):
             work['no_x_overlap'] += 1
             continue
         ordered = sorted(three, key=lambda c: _y_at_x(c, (low + high) / 2), reverse=True)
+        if any(edge_roles.get(i,role)!=role for role,chain in enumerate(ordered) for i in chain.ids):
+            continue
         try:
             result, ambiguous = _hypothesis(*ordered, profile, len(hypotheses), work)
         except _WorkCap:
@@ -562,6 +574,8 @@ def infer_road(graph, profile=RoadProfile()):
             if profile.missing_outer_side is not None:
                 options = [options[0 if profile.missing_outer_side == 'RIGHT' else 1]]
             for roles in options:
+                if any(edge_roles.get(i,role)!=role for role,chain in enumerate(roles) if chain is not None for i in chain.ids):
+                    continue
                 if checked + missing_roles_checked >= profile.hypothesis_cap:
                     complete = False
                     reasons.append('ROAD_HYPOTHESIS_CAP')
