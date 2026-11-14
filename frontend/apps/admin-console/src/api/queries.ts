@@ -15,6 +15,8 @@ import type {
   DomainKillResponse,
   Display,
   DisplayListResponse,
+  DisplayModeName,
+  DisplayModeStatus,
   EventListResponse,
   MetricHistoryResponse,
   PhoneLinkStatus,
@@ -51,6 +53,7 @@ export const keys = {
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
   phoneLink: ['display', 'phone-link'] as const,
+  displayMode: ['display', 'mode'] as const,
   perceptionFault: (id: string) => ['drive', 'faults', 'perception-block', id] as const,
 };
 
@@ -456,6 +459,36 @@ export function useIssuePhonePairingCode() {
     retry: false,
     // 상태를 다시 읽는 것은 기다리지 않는다 (보드 왕복 동안 번호 표시가 늦어지지 않게)
     onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.phoneLink });
+    },
+  });
+}
+
+/** 표시 모드 HDMI / 휴대폰 (REST-40) */
+export function useDisplayMode() {
+  return useQuery({
+    queryKey: keys.displayMode,
+    queryFn: ({ signal }) => request<DisplayModeStatus>('/api/v1/display/mode', { signal }),
+    refetchInterval: 5000,
+    retry: false,
+  });
+}
+
+/**
+ * 표시 모드 전환 (REST-41). 휴대폰 모드는 휴대폰 중계를 켜고 HDMI 를 끈다.
+ * 보드 전환이 끝날 때까지(보통 수 초, 최악 4분) 기다리며, 겹친 전환을 막으려 재시도하지 않는다.
+ */
+export function useSetDisplayMode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: DisplayModeName) =>
+      request<DisplayModeStatus>('/api/v1/display/mode', { method: 'POST', body: { mode } }),
+    retry: false,
+    onSuccess: (status) => {
+      client.setQueryData(keys.displayMode, status);
+    },
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.displayMode });
       void client.invalidateQueries({ queryKey: keys.phoneLink });
     },
   });

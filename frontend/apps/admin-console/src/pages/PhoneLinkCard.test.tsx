@@ -108,7 +108,7 @@ describe('휴대폰 화면 연결 카드', () => {
     show({ ...listening, relay: 'stopped', url: null });
     render(<PhoneLinkCard />);
     expect(screen.getByRole('button', { name: '연결번호 발급' })).toBeDisabled();
-    expect(screen.getByRole('note')).toHaveTextContent('모바일 모드를 켜 주세요');
+    expect(screen.getByRole('note')).toHaveTextContent('휴대폰 모드 켜기');
     expect(screen.queryByRole('button', { name: '주소 복사' })).not.toBeInTheDocument();
   });
 

@@ -16,7 +16,7 @@ export function phoneLinkHint(status: PhoneLinkStatus): string | null {
     case 'starting':
       return '중계를 시작하는 중입니다. 계속되면 USB 테더링과 보드 로그를 확인해 주세요.';
     case 'stopped':
-      return '휴대폰 화면 중계가 꺼져 있습니다. 보드에서 모바일 모드를 켜 주세요 (python3 -m xenova_display.display_mode mobile).';
+      return '휴대폰 화면 중계가 꺼져 있습니다. 위의 "휴대폰 모드 켜기"를 눌러 주세요.';
     default:
       return '중계 상태를 확인할 수 없습니다. 보드의 xenova-display-mobile 서비스를 확인해 주세요.';
   }
