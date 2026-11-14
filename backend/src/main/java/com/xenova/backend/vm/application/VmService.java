@@ -262,7 +262,7 @@ public class VmService {
         VmRecord record = findRecord(vmId);
         CpuLayout layout = requireConfiguredCpuLayout(vmControlPort.cpuLayout());
         CpuLayout.VmCpuLayout vmLayout = findVmLayout(layout, vmId);
-        return resourceView(record, layout, requireUniformAffinity(vmLayout), exclusivePcpus(layout));
+        return resourceView(record, layout, requireUniformAffinity(vmLayout), exclusivePcpus(layout), null);
     }
 
     public VmResourceView updateVcpuPinning(
@@ -324,7 +324,7 @@ public class VmService {
                 .filter(placement -> "exclusive".equals(placement.mode()))
                 .flatMap(placement -> placement.pcpus().stream())
                 .distinct().sorted().toList();
-        return resourceView(record, layout, applied, exclusive);
+        return resourceView(record, layout, applied, exclusive, update.hostPreparationRequired());
     }
 
     private CpuLayout requireConfiguredCpuLayout(CpuLayout layout) {
@@ -411,7 +411,8 @@ public class VmService {
             VmRecord record,
             CpuLayout layout,
             List<CpuLayout.VcpuAffinity> pinning,
-            List<Integer> exclusive) {
+            List<Integer> exclusive,
+            Boolean hostPreparationRequired) {
         VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
         boolean fixed = record.getGuestKind() == GuestKind.ZEPHYR;
@@ -429,7 +430,8 @@ public class VmService {
                         fixed ? record.getMemoryMib() : template.minMemoryMib(),
                         fixed ? record.getMemoryMib() : 1024,
                         fixed ? 1 : 128),
-                clock.instant());
+                clock.instant(),
+                hostPreparationRequired);
     }
 
     private static List<Integer> sortedUnique(List<Integer> values) {
