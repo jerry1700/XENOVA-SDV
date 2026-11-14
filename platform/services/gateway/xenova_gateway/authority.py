@@ -12,6 +12,20 @@ class AuthorityError(RuntimeError):pass
 TRANSITION_LIMIT=32  # Bounded private records; never silently evict dedup evidence.
 TRANSITION_PHASES={'PREPARING','PREPARED','COMMITTED','CANCELLED','FAILED','ABANDONED'}
 GATEWAY_LOCK=Path('/run/lock/xenova-drive-gateway.lock')
+AUTO_RECOVERY_IDENTITY=('execution_id','boot_id','intent_revision','lifecycle_generation')
+
+def _validate_auto_recovery(value):
+    """Bounded private journal, committed with withdrawal of the old AUTO."""
+    rows=value.get('auto_recovery',{})
+    if not isinstance(rows,dict) or len(rows)>2:raise ValueError('AUTO recovery journal limit')
+    for vm,row in rows.items():
+        canonical(vm)
+        if not isinstance(row,dict) or set(row)!=set(AUTO_RECOVERY_IDENTITY)|{'instance','generation','host'}:
+            raise ValueError('AUTO recovery identity')
+        for key in ('execution_id','boot_id','host','instance'):canonical(row[key])
+        if (type(row['generation']) is not int or not 1<=row['generation']<value['generation'] or
+            any(type(row[k]) is not int or row[k]<0 for k in AUTO_RECOVERY_IDENTITY[2:])):
+            raise ValueError('AUTO recovery context')
 
 class GatewayLease:
     """The Worker's nonblocking flock ownership pattern, scoped to drive output."""
@@ -145,6 +159,7 @@ class AuthorityStore:
                 not 1<=row['generation']<=0xffffffff or type(row.get('observed_monotonic_ms')) is not int or
                 row['observed_monotonic_ms']<0):raise ValueError('distrusted VM record invalid')
         pending=value['pending']
+        _validate_auto_recovery(value)
         if pending is not None:
             canonical(pending['host_boot_id'])
             if (type(pending['generation']) is not int or pending['generation']!=value['generation'] or type(pending['deadline_ms']) is not int or
@@ -257,10 +272,12 @@ class AuthorityStore:
         with self._lock:
             value={**self.value,**fields};return self.save(value)
 
-    def issue(self,mode: Mode,owner: str,reason: str,now: float,timeout: float,*,arm: bool,manual=None,distrust=None):
-        return self.update(**self.issue_fields(mode,owner,reason,now,timeout,arm=arm,manual=manual,distrust=distrust))
+    def issue(self,mode: Mode,owner: str,reason: str,now: float,timeout: float,*,arm: bool,manual=None,distrust=None,auto_recovery=None):
+        return self.update(**self.issue_fields(mode,owner,reason,now,timeout,arm=arm,manual=manual,
+            distrust=distrust,auto_recovery=auto_recovery))
 
-    def issue_fields(self,mode: Mode,owner: str,reason: str,now: float,timeout: float,*,arm: bool,manual=None,distrust=None):
+    def issue_fields(self,mode: Mode,owner: str,reason: str,now: float,timeout: float,*,arm: bool,manual=None,distrust=None,
+                     auto_recovery=None):
         """원 issue와 같은 변경안. operator journal은 이 값과 mission/원장을 한 번 저장한다."""
         if self.error:raise AuthorityError(self.error)
         canonical(owner)
@@ -269,6 +286,9 @@ class AuthorityStore:
         if self.value['generation']==0xffffffff:raise AuthorityError('generation exhausted; no wrap/reset')
         generation=self.value['generation']+1
         fields={}
+        if auto_recovery is not None:
+            fault_vm,fault=auto_recovery
+            fields['auto_recovery']={**self.value.get('auto_recovery',{}),fault_vm:fault}
         if distrust is not None:
             rows=[row for row in self.value.get('distrusted',[]) if row['vm_id']!=distrust['vm_id']]
             fields['distrusted']=[*rows,distrust]

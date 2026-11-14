@@ -150,7 +150,8 @@ class GatewayProtection:
 
     # ---- 요청 만들기 ----
 
-    def plan(self, vm_id: UUID, view: dict[str, Any], parent_deadline_ms: int) -> dict[str, Any]:
+    def plan(self, vm_id: UUID, view: dict[str, Any], parent_deadline_ms: int, *,
+             standby_only: bool = False) -> dict[str, Any]:
         """지금 Gateway 문맥과 플랫폼 view 로 원 spec 을 만든다. 키는 여기서 한 번 만든다. 맞지 않으면 ProtectionHold."""
         try:
             context = self._gateway.context()
@@ -162,6 +163,11 @@ class GatewayProtection:
             raise ProtectionHold("Gateway context has no current host/owner/generation")
         if context.get("storage_uncertain") is not False:
             raise ProtectionHold("Gateway storage is uncertain")
+        if (standby_only and owner == str(vm_id) and context.get("mode") != "SAFE_STOP"
+                and (context.get("phase") != "APPLIED" or context.get("output_permitted") is not False)):
+            # The protection key carries this same owner/generation. A later
+            # rearm of disarmed MANUAL makes the original request stale.
+            raise ProtectionHold("target has or is applying driving authority")
         if host != view.get("host_boot_id"):
             raise ProtectionHold(f"Gateway host {host} differs from the platform host {view.get('host_boot_id')}")
         target = targets.get(str(vm_id))

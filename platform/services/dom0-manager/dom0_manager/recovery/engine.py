@@ -757,7 +757,8 @@ class RecoveryEngine:
                 raise _ProtectionFailed(f"{record.protection_requests} Gateway protection request(s) ended without protection", None)
             parent_ms = int((self._clock() + self._policy.attempt_deadline_s) * 1000)  # 이 시도의 부모 기한. 보호 기한은 이 안에 든다
             try:
-                entry = protector.plan(record.vm_id, view, parent_ms)
+                entry = protector.plan(record.vm_id, view, parent_ms,
+                    standby_only=record.reason==FailureReason.VM_UNTRUSTED.value)
             except ProtectionHold as exc:
                 return str(exc)
             with self._lock:

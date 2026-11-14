@@ -40,6 +40,7 @@ int drive_lattice_start(struct drive_controller *);
 void drive_lattice_context(const struct xd_inputs *);
 void drive_lattice_completed(const struct drive_completion *);
 int drive_lattice_reset_poll(int64_t);
+bool drive_lattice_recovery_deadline_failed(void);
 void drive_lattice_adapter(struct drive_adapter *,bool);
 int drive_lattice_join(int64_t);
 void drive_lattice_report(void);
@@ -147,6 +148,7 @@ int drive_lattice_start(struct drive_controller *c){assert(c);return 0;}
 void drive_lattice_context(const struct xd_inputs *in){assert(in);}
 void drive_lattice_completed(const struct drive_completion *work){assert(work);}
 int drive_lattice_reset_poll(int64_t end){assert(end);return 0;}
+bool drive_lattice_recovery_deadline_failed(void){return false;}
 void drive_lattice_adapter(struct drive_adapter *a,bool manual){(void)a;(void)manual;assert(0);}
 int drive_lattice_join(int64_t end){assert(end);return 0;}
 void drive_lattice_report(void){}

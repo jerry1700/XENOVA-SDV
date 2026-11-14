@@ -140,21 +140,49 @@ def test_engine_completion_provisions_current_execution_then_standby_readiness(f
             home=Path(config['receipt_dir'])/vm/record.execution_id
             receipt,_=api.private_json(home/'drive.json')
             credential,source=api.credentials(Path(credentials[vm]['drive']),vm)
-            with api.receipt_lock(home/'drive.json'):
-                rotated=api.reinitialize_app(receipt['context'],credential,source,home/'drive.json',
-                    app='autonomous',expected_instance=binding['app_instances']['autonomous'],request_id=str(uuid4()),
-                    store=Store('drive'),observe=lambda:{k:current(vm)[k] for k in receipt['context']})
+            fault={k:binding[k] for k in ('execution_id','boot_id','intent_revision','lifecycle_generation')}
+            fault.update(host=binding['host_boot_id'],instance=binding['app_instances']['autonomous'],generation=42)
+            withdrawal=dict(generation=43,mode='AUTO',owner=other,phase='PENDING',auto_recovery={vm:fault})
+            atomic_json(authority,withdrawal)
+            assert coordinator._work(vm)['app_instances']==binding['app_instances']
+            assert len(applied)==2
+            atomic_json(authority,{**withdrawal,'phase':'APPLIED','owner':vm})
+            assert coordinator._work(vm)['app_instances']==binding['app_instances']
+            assert len(applied)==2
+            atomic_json(authority,{**withdrawal,'phase':'APPLIED'})
             refreshed=coordinator._work(vm)
-            assert refreshed['app_instances']['autonomous']==rotated['instance_id']
+            rotated=refreshed['app_instances']['autonomous']
+            assert rotated!=binding['app_instances']['autonomous']
             assert refreshed['app_instances']['manual']==binding['app_instances']['manual']
-            assert refreshed['execution_id']==binding['execution_id'] and len(applied)==3
+            assert refreshed['execution_id']==binding['execution_id'] and refreshed['boot_id']==binding['boot_id']
+            assert coordinator._work(vm)['app_instances']==refreshed['app_instances']
+            assert len(applied)==3
+            coordinator._rows[vm]=refreshed;coordinator._due={vm:f.ticks+1,other:f.ticks+1};coordinator.pump()
+            def report_failure(instance,seq,phase='RESIDUAL',reason='RESOURCE_RETAINED'):
+                who=Identity(vm_id=vm,app_id='autonomous',boot_id=binding['boot_id'],agent_instance_id=instance)
+                body=dict(profile='warm-drive-1',applied_generation=43,
+                    check_seq=str(seq),progress_seq='0',phase=phase,readiness='NOT_READY',reason=reason)
+                coordinator.on_readiness(Message(topics.vm_app_events(vm,'autonomous'),build(who,'app.lifecycle',body,seq),f.ticks))
+                coordinator.pump()
+            report_failure(binding['app_instances']['autonomous'],1,'WAITING','DEADLINE')
+            assert not coordinator.app_recovery_failures()
+            report_failure(rotated,2,'WAITING','INPUT_UNAVAILABLE')
+            assert not coordinator.app_recovery_failures()
+            report_failure(rotated,3,'WAITING','DEADLINE')
+            assert coordinator.app_recovery_failures()==[{'vm_id':vm,'execution_id':record.execution_id,'scope':'vm'}]
+            report_failure(rotated,4)
+            assert coordinator.app_recovery_failures()==[{'vm_id':vm,'execution_id':record.execution_id,'scope':'vm'}]
+            atomic_json(authority,{**withdrawal,'phase':'APPLIED','owner':vm,'mode':'MANUAL'})
+            assert not coordinator.app_recovery_failures()
+            atomic_json(authority,{**withdrawal,'phase':'APPLIED','owner':vm,'mode':'MANUAL','rearm_required':True})
+            assert coordinator.app_recovery_failures()==[{'vm_id':vm,'execution_id':record.execution_id,'scope':'vm'}]
             class Broken(Store):
                 quiescent=True
                 def apply(self,*args):raise OSError('uncertain app-only Store update')
             try:
                 with api.receipt_lock(home/'drive.json'):
                     api.reinitialize_app(receipt['context'],credential,source,home/'drive.json',app='autonomous',
-                        expected_instance=rotated['instance_id'],request_id=str(uuid4()),store=Broken('drive'),
+                        expected_instance=rotated,request_id=str(uuid4()),store=Broken('drive'),
                         observe=lambda:{k:current(vm)[k] for k in receipt['context']})
             except OSError:pass
             else:raise AssertionError('uncertain effect must be reported')
@@ -166,10 +194,10 @@ def test_engine_completion_provisions_current_execution_then_standby_readiness(f
             assert len(applied)==3  # no Store replay on Worker restart
             coordinator._rows[vm]=partial;coordinator._due={vm:f.ticks+1,other:f.ticks+1};coordinator.pump()
             assert coordinator.cache.accepts(vm,partial['boot_id'],partial['app_instances']['manual'],app='manual')
-            assert not coordinator.cache.accepts(vm,partial['boot_id'],rotated['instance_id'],app='autonomous')
+            assert not coordinator.cache.accepts(vm,partial['boot_id'],rotated,app='autonomous')
         with patch.object(xenova_vm.os,'sync'):f.control('stop')
         assert coordinator._work(vm)['status']=='stopped'
-        assert len(applied)==(3 if warm else 2)  # only the explicit root app update adds one Store write
+        assert len(applied)==(3 if warm else 2)  # only the deadline-triggered app update adds one Store write
     finally:coordinator.stop();engine.shutdown()
 
 def test_missing_mount_is_rejected_before_receipt_creation(tmp_path,monkeypatch):
