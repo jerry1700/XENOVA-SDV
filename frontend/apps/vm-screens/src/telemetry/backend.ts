@@ -14,21 +14,35 @@ export function wsUrl(path: string): string {
   return origin.replace(/^http/, 'ws') + path;
 }
 
+/** 인증 요청 시간 제한 — 잠금(xenova-refresh)을 쥔 채 매달리지 않게 (관리 콘솔 api/client 와 같은 10초) */
+export const AUTH_TIMEOUT_MS = 10_000;
+
 async function token(path: string, body?: unknown): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
       credentials: 'include',
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     const json = (await response.json()) as { access_token?: string };
     return json.access_token ?? null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
+
+/**
+ * 관리 콘솔(api/client.ts)과 같은 잠금 이름 (S15P31E110-472). 같은 브라우저(같은 origin)에서 콘솔과 이 화면이
+ * 같은 refresh 쿠키로 동시에 재발급하면 서버가 재사용으로 보고 공용 계정의 토큰을 전부 폐기한다 → 한 번에 하나씩.
+ */
+export const REFRESH_LOCK = 'xenova-refresh';
 
 /**
  * 모니터 화면은 로그인 화면이 없다. 같은 브라우저에서 관리 콘솔에 로그인했으면 refresh 쿠키로 받고,
@@ -47,7 +61,12 @@ export function accessToken(fresh = false): Promise<string | null> {
 let cached: Promise<string | null> | null = null;
 let inflight = false;
 
-async function fetchToken(): Promise<string | null> {
+function fetchToken(): Promise<string | null> {
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  return locks ? locks.request(REFRESH_LOCK, fetchTokenOnce) : fetchTokenOnce();
+}
+
+async function fetchTokenOnce(): Promise<string | null> {
   const refreshed = await token('/api/v1/auth/refresh');
   if (refreshed) return refreshed;
   const username = import.meta.env.VITE_SCREEN_USERNAME;

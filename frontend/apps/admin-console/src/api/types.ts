@@ -332,7 +332,8 @@ export type KnownErrorCode =
   | 'DISPLAY_SETUP_REQUIRED'
   | 'DISPLAY_MODE_ROLLBACK_INCOMPLETE'
   | 'DISPLAY_MODE_UNAVAILABLE'
-  | 'DISPLAY_MODE_TIMEOUT';
+  | 'DISPLAY_MODE_TIMEOUT'
+  | 'BAD_RESPONSE';
 
 /** VM Agent 가 명령을 거절·실패할 때 명령 상태 error.code 로 보내는 코드 (platform vm-agent commands.py) */
 export type AgentErrorCode =
