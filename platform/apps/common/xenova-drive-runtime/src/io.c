@@ -4,9 +4,18 @@
 #include <xenova/drive_io.h>
 #include <xenova/diagnostics.h>
 #include <xenova/auto_delay.h>
+#include <xenova/auto_exit.h>
 #include <xenova/auto_input_fault.h>
+#include <xenova/auto_tx_block.h>
 #if defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
 #include <xenova/shutdown.h>
+#endif
+#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION) || defined(CONFIG_XENOVA_AUTO_TX_BLOCK_INJECTION)
+#define XD_AUTO_FAULT_COMMANDS
+#endif
+#if defined(XD_AUTO_FAULT_COMMANDS) || defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || \
+ defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+#define XD_VM_FAULT_COMMANDS
 #endif
 #include <zephyr/sys/atomic.h>
 #include <errno.h>
@@ -21,10 +30,20 @@ static struct k_thread thread;
 static atomic_t stop;
 static struct xm_zclient *client;
 static char control_topic[XM_TOPIC_MAX], input_topic[XM_TOPIC_MAX], perception_topic[XM_TOPIC_MAX];
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+#if defined(XD_VM_FAULT_COMMANDS)
 static char fault_command_topic[XM_TOPIC_MAX],fault_result_topic[XM_TOPIC_MAX];
 static bool fault_command_registered;
 static int64_t fault_last_rx=-1;
+#endif
+#if defined(XD_AUTO_FAULT_COMMANDS)
+/* Only the I/O owner accesses the active command and its cached result. */
+struct auto_fault_receipt {
+ struct xm_auto_fault_command command;
+ int64_t started_ms;
+ bool running;
+ char result[576];
+};
+static struct auto_fault_receipt auto_fault_receipts[XM_AUTO_FAULT_COUNT];
 #endif
 #if defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION)
 static bool input_fault_running,input_fault_result_valid;
@@ -251,6 +270,10 @@ static void send_command(void) {
  if(atomic_get(&stop)||!xd_owner_admit()){d.disposition=XD_STOPPED;d.rc=-ESHUTDOWN;}
  else if(!valid||!manual_candidate_current(&active)){d.disposition=XD_CONTEXT_CHANGED;d.rc=-EXDEV;}
  else if(k_uptime_get()>=active.expires_ms){d.disposition=XD_EXPIRED;d.rc=-ETIME;}
+#if defined(CONFIG_XENOVA_AUTO_TX_BLOCK_INJECTION)
+ else if(drive_auto_tx_block_active(k_uptime_get())&&app_index(active.topic)==0&&
+         drive_auto_tx_block_drop(k_uptime_get())){d.disposition=XD_INJECTED_DROP;d.rc=-ECANCELED;}
+#endif
  else {
   d.send_begin_us=clock_us();
   uint32_t before=client->message_counter;
@@ -264,7 +287,7 @@ static void send_command(void) {
  if(d.disposition==XD_CONTEXT_CHANGED)stats.context_dropped++;
  else if(d.disposition==XD_EXPIRED)stats.expired++;
  else if(d.disposition==XD_STOPPED)stats.stopped++;
- else {stats.attempted++;if(d.rc)stats.failed++;else stats.sent++;}
+ else if(d.disposition!=XD_INJECTED_DROP){stats.attempted++;if(d.rc)stats.failed++;else stats.sent++;}
  k_mutex_unlock(&exchange_lock);
  xd_delivery_record(&d);
 }
@@ -337,7 +360,92 @@ static bool same_crash_command(const struct xm_vm_crash_command *a,const struct 
   !strcmp(a->expected_boot_id,b->expected_boot_id);
 }
 #endif
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+#if defined(XD_AUTO_FAULT_COMMANDS)
+static void publish_auto_fault(const struct xm_auto_fault_command *command, const char *status,
+                               int64_t duration, uint64_t dropped, const char *error, char *cache)
+{
+ if(!command->command_id[0])return;
+ char json[sizeof(auto_fault_receipts[0].result)];
+ if(cache)cache[0]='\0';
+ int length=xm_auto_fault_result_json(json,sizeof(json),command,status,duration,dropped,error);
+ if(length<0)return;
+ if(cache)memcpy(cache,json,(size_t)length+1);
+ (void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",json);
+}
+
+static int start_auto_fault(const struct xm_auto_fault_command *command, int64_t now)
+{
+#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
+ if(command->action==XM_AUTO_FAULT_APP_EXIT)return drive_auto_exit_start();
+#endif
+#if defined(CONFIG_XENOVA_AUTO_TX_BLOCK_INJECTION)
+ if(command->action==XM_AUTO_FAULT_TX_BLOCK)return drive_auto_tx_block_start(command->duration_s,now);
+#else
+ ARG_UNUSED(now);
+#endif
+ return -ENOTSUP;
+}
+
+static bool receive_auto_fault(const struct xm_envelope *env)
+{
+ struct xm_auto_fault_command command={0};
+ int rc=xm_auto_fault_command_parse(env->payload,&command);
+ if(rc==-ENOTSUP)return false;
+
+ struct auto_fault_receipt *receipt=&auto_fault_receipts[command.action];
+ const char *error=NULL;
+ int64_t now=k_uptime_get();
+ if(xm_zclient_latest_retained(client,fault_command_topic))error="INVALID_COMMAND";
+ else if(rc)error=rc==-ERANGE?"INVALID_PARAMETERS":"INVALID_COMMAND";
+ else if(strcmp(command.expected_boot_id,client->id.boot_id))error="BOOT_MISMATCH";
+ else if(!strcmp(command.command_id,receipt->command.command_id)){
+  if(!strcmp(command.operation_id,receipt->command.operation_id)&&command.duration_s==receipt->command.duration_s){
+   if(receipt->result[0])
+    (void)xm_zclient_publish(client,fault_result_topic,"agent.command_result",receipt->result);
+   return true;
+  }
+  error="IDEMPOTENCY_CONFLICT";
+ }else{
+  rc=receipt->running?-EBUSY:start_auto_fault(&command,now);
+  if(!rc){
+   receipt->command=command;
+   receipt->started_ms=now;
+   receipt->running=true;
+   publish_auto_fault(&command,"RUNNING",-1,0,NULL,receipt->result);
+   return true;
+  }
+  error=rc==-EBUSY?"BUSY":rc==-ENOTSUP?"DEMO_DISABLED":"COMMAND_UNAVAILABLE";
+ }
+ publish_auto_fault(&command,"REJECTED",-1,0,error,NULL);
+ return true;
+}
+
+static void observe_auto_faults(bool stopping)
+{
+ int64_t now=k_uptime_get();
+ for(size_t i=0;i<ARRAY_SIZE(auto_fault_receipts);i++){
+  struct auto_fault_receipt *receipt=&auto_fault_receipts[i];
+  if(!receipt->running)continue;
+  int rc=0;
+  uint64_t dropped=0;
+#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
+  if(receipt->command.action==XM_AUTO_FAULT_APP_EXIT)rc=drive_auto_exit_status();
+#endif
+#if defined(CONFIG_XENOVA_AUTO_TX_BLOCK_INJECTION)
+  if(receipt->command.action==XM_AUTO_FAULT_TX_BLOCK){
+   if(drive_auto_tx_block_active(now))rc=-EINPROGRESS;
+   dropped=drive_auto_tx_block_dropped();
+  }
+#endif
+  if(rc==-EINPROGRESS&&!stopping)continue;
+  const char *error=rc==-ETIMEDOUT?"EXIT_TIMEOUT":rc?(stopping?"AGENT_STOPPING":"APP_UNAVAILABLE"):NULL;
+  receipt->running=false;
+  publish_auto_fault(&receipt->command,error?"FAILED":"SUCCEEDED",now-receipt->started_ms,
+                     dropped,error,receipt->result);
+ }
+}
+#endif
+#if defined(XD_VM_FAULT_COMMANDS)
 static void receive_fault_command(void)
 {
  struct xm_envelope env;int64_t age;
@@ -345,6 +453,9 @@ static void receive_fault_command(void)
  int64_t rx=0;for(size_t i=0;i<ARRAY_SIZE(client->latest);i++)if(!strcmp(client->latest[i].topic,fault_command_topic)){rx=client->latest[i].rx_ms;break;}
  if(rx==fault_last_rx)return;fault_last_rx=rx;
  if(!xm_span_eq(env.type,"agent.command"))return;
+#if defined(XD_AUTO_FAULT_COMMANDS)
+ if(receive_auto_fault(&env))return;
+#endif
 #if defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
  struct xm_vm_crash_command crash={0};int crash_rc=xm_vm_crash_command_parse(env.payload,&crash);
  if(!crash_rc){
@@ -428,7 +539,7 @@ static void owner(void *a,void *b,void *c) {
   uint64_t before=clock_us();
   if(atomic_get(&stop)||!xd_owner_admit())break;
   int rc=xd_owner_prepare(client,control_topic,input_topic);
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+#if defined(XD_VM_FAULT_COMMANDS)
   if(!rc&&!fault_command_registered){
    rc=xm_topic_vm(fault_command_topic,sizeof(fault_command_topic),client->id.vm_id,"command");
    if(rc>=0)rc=xm_topic_vm(fault_result_topic,sizeof(fault_result_topic),client->id.vm_id,"command-result");
@@ -456,7 +567,10 @@ static void owner(void *a,void *b,void *c) {
   xd_manual_bind(&manual_source,working.app_instances[1]);
   client->accept_input=accept_input;client->accept_context=NULL;
   before=clock_us();(void)xm_zclient_poll(client,0);after=clock_us();
-#if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION) || defined(CONFIG_XENOVA_AUTO_INPUT_FAULT_INJECTION) || defined(CONFIG_XENOVA_VM_CRASH_INJECTION)
+#if defined(XD_AUTO_FAULT_COMMANDS)
+  observe_auto_faults(false);
+#endif
+#if defined(XD_VM_FAULT_COMMANDS)
   receive_fault_command();
 #endif
 #if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
@@ -471,6 +585,9 @@ static void owner(void *a,void *b,void *c) {
   send_command();send_report();
   (void)k_sem_take(&io_wake,K_MSEC(10));
  }
+#if defined(XD_AUTO_FAULT_COMMANDS)
+ observe_auto_faults(true);
+#endif
 #if defined(CONFIG_XENOVA_AUTO_DELAY_INJECTION)
  if(fault_running){fault_running=false;drive_auto_delay_stop();fault_result(&fault_command,"FAILED","AGENT_STOPPING",(uint64_t)MAX(k_uptime_get()-fault_started_ms,0));}
 #endif

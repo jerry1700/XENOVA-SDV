@@ -3,6 +3,7 @@
  * lock. A stuck callback is retained and reported, never forcibly recycled. */
 #include "workers.h"
 #include <xenova/auto_delay.h>
+#include <xenova/auto_exit.h>
 #include <xenova/auto_input_fault.h>
 #include <xenova/diagnostics.h>
 #include <zephyr/kernel.h>
@@ -10,9 +11,6 @@
 #include <errno.h>
 #include <string.h>
 #include <stdatomic.h>
-#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
-#include <zephyr/shell/shell.h>
-#endif
 
 struct task {
  struct k_thread thread;
@@ -28,9 +26,6 @@ struct task {
  uint64_t restart_from;
  int restart_rc;
  bool running_live;
-#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
- bool demo_exit;
-#endif
  atomic_t running_performed;
  /* Boot-lifetime high-water survives joined application restarts. */
  uint64_t memory_peak[3], memory_read_sequence;
@@ -55,8 +50,10 @@ static bool valid(enum drive_task task) { return (unsigned)task < DRIVE_TASK_COU
 /* Called with workers_lifecycle held so the thread object cannot be replaced. */
 static bool auto_exited(enum drive_task task, struct task *t)
 {
- return IS_ENABLED(CONFIG_XENOVA_DRIVE_WARM)&&task==DRIVE_TASK_AUTO&&t->status.started&&
+ bool exited=IS_ENABLED(CONFIG_XENOVA_DRIVE_WARM)&&task==DRIVE_TASK_AUTO&&t->status.started&&
   !t->status.joining&&!drive_task_stopping(task)&&!k_thread_join(&t->thread,K_NO_WAIT);
+ if(exited)drive_auto_exit_confirm();
+ return exited;
 }
 
 static void run(void *argument, void *unused1, void *unused2)
@@ -67,9 +64,9 @@ static void run(void *argument, void *unused1, void *unused2)
   k_sem_take(&t->wake, K_FOREVER);
   k_mutex_lock(&t->exchange, K_FOREVER);
   if (atomic_get(&stopping)||atomic_get(&t->cancelled)) { t->status.pending = false; k_mutex_unlock(&t->exchange); break; }
-#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
-  if (t->demo_exit) { t->status.pending = false; k_mutex_unlock(&t->exchange); break; }
-#endif
+  if (t == &tasks[DRIVE_TASK_AUTO] && drive_auto_exit_take()) {
+   t->status.pending = false; k_mutex_unlock(&t->exchange); break;
+  }
   if (!t->status.pending) { k_mutex_unlock(&t->exchange); continue; }
   t->running = t->pending; t->status.pending = false; t->status.state = DRIVE_TASK_RUNNING;
   t->running_live=true;atomic_set(&t->running_performed,0);
@@ -160,6 +157,7 @@ int drive_workers_start(const struct drive_adapter *automatic, const struct driv
   /* Even when stop raced with creation, start only to observe the closed gate
    * and exit. Never strand an unstarted thread that join would wait forever. */
   k_thread_start(id);
+  if(i==DRIVE_TASK_AUTO)drive_auto_exit_bind(&t->wake);
  }
  k_mutex_unlock(&workers_lifecycle);
  if (result || atomic_get(&stopping)) { drive_workers_stop(); return result ? result : -ESHUTDOWN; }
@@ -280,6 +278,7 @@ int drive_workers_memory_read(struct xdr_app_region out[3],struct xdr_app_buffer
 void drive_workers_stop(void)
 {
  atomic_set(&stopping, 1);
+ drive_auto_exit_unbind();
  /* Semaphores are initialized together before any thread starts. */
  if (!atomic_get(&initialized)) return;
  for (size_t i=0; i<DRIVE_TASK_COUNT; ++i){atomic_set(&tasks[i].cancelled,1);k_sem_give(&tasks[i].wake);}
@@ -298,6 +297,7 @@ int drive_task_cancel(enum drive_task task,uint64_t lifetime,int64_t deadline)
  else{
   /* Revocation does not depend on callback return or queue capacity. */
   atomic_set(&t->cancelled,1);
+  if(task==DRIVE_TASK_AUTO)drive_auto_exit_unbind();
   if(!t->stop_deadline||deadline<t->stop_deadline)t->stop_deadline=deadline;
   k_sem_give(&t->wake);
  }
@@ -381,9 +381,6 @@ int drive_task_restart(enum drive_task task,uint64_t lifetime,const struct drive
   memset(&t->result,0,sizeof(t->result));memset(&t->resources,0,sizeof(t->resources));
   memset(&t->status,0,sizeof(t->status));t->status.lifetime=lifetime+1;
   t->running_live=false;atomic_set(&t->running_performed,0);t->memory_read_sequence=0;
-#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
-  t->demo_exit=false;
-#endif
   t->adapter=*fresh;t->stop_deadline=0;t->restart_from=lifetime;
   k_sem_reset(&t->wake);atomic_set(&t->cancelled,0);
   k_thread_stack_t *stack=task==DRIVE_TASK_AUTO?auto_stack:manual_stack;
@@ -394,6 +391,10 @@ int drive_task_restart(enum drive_task task,uint64_t lifetime,const struct drive
   else{
    t->status.started=true;t->status.state=DRIVE_TASK_WAITING;
    k_thread_name_set(id,task==DRIVE_TASK_AUTO?"drive-auto":"drive-manual");k_thread_start(id);
+   if(task==DRIVE_TASK_AUTO){
+    drive_auto_exit_bind(&t->wake);
+    if(drive_task_stopping(task))drive_auto_exit_unbind();
+   }
   }
   t->restart_rc=rc;
  }
@@ -416,23 +417,3 @@ int drive_workers_join(int64_t deadline)
  }
  return result;
 }
-
-#if defined(CONFIG_XENOVA_AUTO_EXIT_INJECTION)
-static int auto_exit_demo(const struct shell *shell, size_t argc, char **argv)
-{
- ARG_UNUSED(shell);ARG_UNUSED(argc);ARG_UNUSED(argv);
- if(k_mutex_lock(&workers_lifecycle,K_NO_WAIT))return -EBUSY;
- struct task *t=&tasks[DRIVE_TASK_AUTO];
- int rc=-EBUSY;
- if(t->status.started&&!t->status.joining&&!drive_task_stopping(DRIVE_TASK_AUTO)
-    &&k_thread_join(&t->thread,K_NO_WAIT)==-EBUSY&&!k_mutex_lock(&t->exchange,K_NO_WAIT)){
-  t->demo_exit=true;
-  k_sem_give(&t->wake);
-  k_mutex_unlock(&t->exchange);
-  rc=0;
- }
- k_mutex_unlock(&workers_lifecycle);
- return rc;
-}
-SHELL_CMD_ARG_REGISTER(xenova_auto_exit,NULL,"Exit the current AUTO worker at its next safe point",auto_exit_demo,1,0);
-#endif

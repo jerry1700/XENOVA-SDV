@@ -98,6 +98,7 @@ Linux Agent 계약에는 duty cycle이 없으므로 `load_percent`는 null이다
 
 `auto-delay` 응답은 `type`, `amount`, `load_percent` 대신 `delay_ms`를 제공한다.
 `agent-exit` 응답은 추적용 `command_id`, `operation_id`, `vm_id`, `submitted_at`, `expires_at`을 제공한다.
+`app-exit`과 `auto-tx-block`도 같은 추적 필드를 반환한다.
 
 ## 7. 명령 상태 조회
 
@@ -130,3 +131,29 @@ GET /api/v1/vms/{vmId}/commands/{commandId}
 QoS 1 동일 재전달은 상태를 바꾸지 않는다. `RUNNING → SUCCEEDED/FAILED`만 정상 실행 전이다.
 종결 상태 뒤 다른 종결 상태를 받으면 원래 종결 결과를 보존하고 `contract_violation=true`와
 `violation_detail`을 기록한다.
+
+## 8. Zephyr AUTO 스레드 종료
+
+```http
+POST /api/v1/vms/{vmId}/faults/app-exit
+Content-Type: application/json
+
+{"app_id":"autonomous"}
+```
+
+실행 중인 Zephyr VM에 MQTT `app_exit`를 보낸다. `warm-lattice-lab`에서 현재 AUTO 스레드가
+작업 경계에서 빠져나오고 커널 종료가 관측되면 `SUCCEEDED`가 된다.
+Gateway의 승계와 앱 재시작은 `app.lifecycle`의 `STOPPED / APP_EXITED` 보고에 따라 진행된다.
+
+## 9. Zephyr AUTO 주행 명령 송신 차단
+
+```http
+POST /api/v1/vms/{vmId}/faults/auto-tx-block
+Content-Type: application/json
+
+{"duration_s":5}
+```
+
+실행 중인 Zephyr VM에 MQTT `auto_tx_block`을 보낸다. `duration_s`는 1~120 정수다.
+`warm-lattice-lab`에서 지정 시간 동안 AUTO의 `drive.command` 발행을 차단한다.
+자동 해제 뒤 `SUCCEEDED`의 `result.dropped`에서 해당 실행의 차단 건수를 조회한다.

@@ -137,11 +137,19 @@ class FunctionFailureScopeTests(unittest.TestCase):
     def test_ready_progress_does_not_renew_command_gap_confirmation(self):
         w = self.w
         generation = w.m.generation
+        progress = w.progress[A, 'autonomous']
         w.tick(.26, commandless={(A, 'autonomous')})
         self.assertEqual((w.m.active_vm, w.m.generation), (A, generation))
+        self.assertTrue(w.m._ready(A, 'autonomous', w.t))
+        self.assertGreater(w.progress[A, 'autonomous'], progress)
         w.tick(.06, commandless={(A, 'autonomous')})
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
         self.assertGreater(w.m.generation, generation)
+        self.assertNotIn('auto_recovery', w.auth.value)
+        before = len(w.actions_seen)
+        w.tick(.12, commandless={(A, 'autonomous')})
+        self.assertTrue(any(isinstance(action, ForwardDrive) and action.app_id == 'autonomous'
+            and action.generation == w.m.generation for action in w.actions_seen[before:]))
 
     def test_new_valid_command_resets_only_its_own_delivery_gap(self):
         w = self.w

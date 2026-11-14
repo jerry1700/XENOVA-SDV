@@ -201,10 +201,18 @@ warm에서 root가 같은 실행의 Bootstrap 앱 instance를 바꾸면 해당 �
 명시적으로 요청한 경우에만 새 시도를 수락한다. 종료가 확인되지 않은 stack은 계속 보존한다.
 
 AUTO 작업 스레드가 예기치 않게 끝나면 감독 루프가 `k_thread_join(K_NO_WAIT)`로 종료를 확인하고
-현재 앱 인스턴스의 `STOPPED / APP_EXITED`를 보고한다. `warm-lattice-lab` 시연에서 A가 AUTO를
-담당한다면 dom0의 `xenova-vm console zephyr-drive-a`로 콘솔에 들어가 `xenova_auto_exit`를 실행한다.
-이 명령은 작업 경계에서 AUTO 스레드가 반환하게 한다. B의 AUTO 승계 뒤 A의 VM·MANUAL ID가
-유지되고 AUTO ID만 바뀌어 대기 자격을 얻는지 확인한다.
+현재 앱 인스턴스의 `STOPPED / APP_EXITED`를 보고한다. `warm-lattice-lab`에서는 시연 프론트의
+**자율주행 앱 종료** 버튼이 사용하는 [앱 종료 API](../../../docs/contracts/vm-command-api-v1.md#8-zephyr-auto-스레드-종료)로
+실행한다. 백엔드는 대상 VM에 MQTT `app_exit`를 보내고,
+작업 경계에서 AUTO 스레드가 반환하면 종료 결과를 받는다. B의 AUTO 승계 뒤 A의 VM·MANUAL ID가
+유지되고 AUTO ID가 바뀌어 대기 자격을 얻는지 확인한다.
+
+AUTO 명령 송신 장애 시연은 `warm-lattice-lab`에서 A가 AUTO를 수행하고 B가 대기 자격을
+얻은 상태로 시작한다. [송신 차단 API](../../../docs/contracts/vm-command-api-v1.md#9-zephyr-auto-주행-명령-송신-차단)에
+A의 VM ID와 `{"duration_s":5}`를 보낸다. 해당 VM의 AUTO `drive.command` 차단은 5초 뒤
+자동 해제되며, 명령 결과에서 차단 건수를 조회할 수 있다. 승계 전 A의 AUTO
+`app.lifecycle.progress_seq`가 증가하는지, 이후 Gateway가 STOP을 내보내고 `AUTO` 모드의
+`active_vm_id`를 B로 바꾸는지 확인한다. 대기 자격을 갖춘 VM이 없으면 Gateway는 안전 정지한다.
 
 Bootstrap 갱신은 별도 `drive-context` owner가 기존 Store receiver로 읽는다. 계산·v1 packet
 owner는 메모리 사본만 읽는다. 현재 설정은 100ms refresh·호출 예산 50ms·사본 300ms이며

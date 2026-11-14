@@ -79,7 +79,7 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 | MQTT-01 | `xenova/v1/vms/{vm_id}/heartbeat` | `agent.heartbeat` | 에이전트 → 백엔드 | 1 | X | `{}` (봉투만) |
 | MQTT-02 | `xenova/v1/vms/{vm_id}/inventory` | `agent.inventory` | 에이전트 → 백엔드 | 1 | **O** | `os{id, version_id, pretty_name}`, `kernel_release`, `hostname`, `interfaces[{name, mac, addresses[{address, family}]}]`, `agent_version`, `capabilities{commands[], metrics[]}` |
 | MQTT-03 | `xenova/v1/vms/{vm_id}/metrics` | `agent.metrics` | Linux Agent·Zephyr Publisher → 백엔드 | 0 | X | 공통 `window_ms`·`values[]`. Linux는 `processes[]`·`process_collection`, Zephyr는 `observed_uptime_ms`(3.1절) |
-| MQTT-04 | `xenova/v1/vms/{vm_id}/command` | `agent.command` | 백엔드 → 에이전트/drive-v1 | 1 | X | `command_id`, `operation_id`, `expected_boot_id`, `expires_at`, `action`(`stress`/`agent_exit`/`auto_delay`), `parameters` |
+| MQTT-04 | `xenova/v1/vms/{vm_id}/command` | `agent.command` | 백엔드 → 에이전트/drive-v1 | 1 | X | `command_id`, `operation_id`, `expected_boot_id`, `expires_at`, `action`(`stress`/`agent_exit`/`auto_delay`/`app_exit`/`auto_tx_block`), `parameters` |
 | MQTT-05 | `xenova/v1/vms/{vm_id}/command-result` | `agent.command_result` | 에이전트 → 백엔드 | 1 | X | `command_id`, `operation_id`, `status`(`ACCEPTED`/`RUNNING`/`SUCCEEDED`/`FAILED`/`REJECTED`), `started_at`, `finished_at`, `duration_ms`, `result`, `error` |
 
 - inventory는 retained다. 최초 기동과 OS·네트워크 정보가 바뀔 때 전체를 다시 보낸다. retained 메시지는 마지막 보고일 뿐 지금 `ONLINE`이라는 증거가 아니다. VM을 삭제하면 백엔드가 그 VM의 retained inventory를 지운다.
@@ -129,8 +129,8 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 | `operation_id` | 선택. 주면 문자열이어야 한다(아니면 `INVALID_COMMAND`). 결과에 그대로 돌려준다 |
 | `expected_boot_id` | 필수. 대상 VM 의 현재 boot_id(inventory 나 heartbeat 봉투에서 얻는다). 다르면 `BOOT_MISMATCH` |
 | `expires_at` | 필수. ISO-8601 UTC. 봉투 `sent_at` 보다 늦고 300초 이내여야 한다(`INVALID_COMMAND`). 받은 시각이 이 시각 이후면 `EXPIRED` |
-| `action` | `stress` / `agent_exit` / `auto_delay`. 그 밖은 `UNSUPPORTED_ACTION` |
-| `parameters` | 객체. Linux `stress`: `cpu_workers` 0..4, `memory_mib` 0..512, `duration_s` 1..120. `agent_exit`: 빈 객체. Zephyr `auto_delay`: `delay_ms` 1..100, `duration_s` 1..120. 모두 정수(bool·실수 불가)이며 명시되지 않은 키는 거절 |
+| `action` | `stress` / `agent_exit` / `auto_delay` / `app_exit` / `auto_tx_block` |
+| `parameters` | 객체. Linux `stress`: `cpu_workers` 0..4, `memory_mib` 0..512, `duration_s` 1..120. `agent_exit`: 빈 객체. Zephyr `auto_delay`: `delay_ms` 1..100, `duration_s` 1..120. `app_exit`: `app_id`는 `autonomous`. `auto_tx_block`: `duration_s` 1..120. 숫자는 정수이며 명시되지 않은 키는 거절 |
 
 - 시각: 에이전트는 자기 UTC 시계로 만료를 판정한다. `sent_at` 이 에이전트 시계보다 30초 넘게 앞서면 시계를 믿을 수 없다고 보고 `CLOCK_UNTRUSTED` 로 거절한다
 - retained 로 온 명령은 실행하지 않는다(`INVALID_COMMAND`). 명령은 retain 하지 않는다
@@ -155,6 +155,7 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 - 결과를 받지 못하면(만료까지) 보낸 쪽은 결과 없음으로 처리한다. 같은 `command_id` 로 다시 보내면 실행 없이 마지막 결과만 돌아온다
 - MQTT-05 는 QoS 1 이라 같은 결과가 두 번 이상 올 수 있다(재전달, 재시작 뒤 재제출). 백엔드는 `(vm_id, command_id)` 를 한 명령의 집계 키로 쓴다. 같은 `status`·같은 payload 의 재전달은 무시하고, `RUNNING` → `SUCCEEDED`/`FAILED` 는 정상 상태 전이로 처리한다. 종결 상태 뒤에 다른 종결 상태가 오면 계약 위반으로 기록한다
 - Zephyr `auto_delay`는 UTC 시계가 없으므로 `expires_at`의 형식과 상한은 명령을 발행하는 백엔드가 검증한다. drive-v1은 현재 boot 일치, retained 여부와 파라미터를 검증하고 단조 시계로 실행 시간을 제한한다. 결과의 UTC 시각 필드는 null이다.
+- `warm-lattice-lab`의 `app_exit`와 `auto_tx_block`도 같은 대상 boot와 결과 토픽을 사용한다. `app_exit`의 성공은 AUTO 스레드 종료 관측을, `auto_tx_block`의 성공은 차단 기간 만료를 뜻한다. 송신 차단의 종결 결과에는 `duration_s`와 해당 실행의 `dropped` 건수가 포함된다.
 - 현재 소스의 FW1.0.33 후보는 AUTO 지연·heap 비율을 `vm.trust`로 발행하지 않는다. 실제 AUTO 작업이 원 release deadline을 넘으면 해당 결과를 즉시 제한하고 기존 `app.lifecycle`의 NOT_READY로 보고한다. 원 errno·health failure·주입 명령의 결과는 각각 보존한다. 명령의 `SUCCEEDED`는 설정된 주입 기간의 종결이며 실제 AUTO 계산·준비·승계 성공이 아니다.
 - `AUTO_DEADLINE_MISS`의 `consecutive_misses`, `command_id`는 AUTO 기능 실패 근거다. 현재 binding·boot·app과 일치하는 비-retained 보고만 소비한다. Gateway는 해당 AUTO 자격을 제한하고 현재 후보로 승계/정지를 판단하며, Worker는 이를 진단으로 보관하고 이 보고만으로 `VM_UNTRUSTED` latch·새 복구 시도를 만들지 않는다.
 - 과거 Authority `distrusted`와 원 보호 기록은 기존 형식으로 읽고 자동 변환·삭제하지 않는다. 실제 VM 장애의 원 복구는 Gateway 보호→기존 `recover_once`→새 execution의 receipt·binding·준비 확인→정당한 protection 종결→Standby 재합류를 따른다. 현재 Active를 자동 탈환하지 않는다. 입력/기능 회복의 AUTO 재개는 현재 Active와 기존 명시 요청·카운트다운·제어 적용을 사용하고 사용자 `manual_hold`를 보존한다.
