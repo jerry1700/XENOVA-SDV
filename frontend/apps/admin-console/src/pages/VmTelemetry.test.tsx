@@ -699,7 +699,7 @@ describe('VM telemetry dashboard', () => {
   });
 
   it.each([
-    ['fresh', '유휴'],
+    ['fresh', '대기'],
     ['stale', '관측 만료'],
   ] as const)('shows the %s Interaction heartbeat on Overview and VM detail', async (status, expected) => {
     fixture();

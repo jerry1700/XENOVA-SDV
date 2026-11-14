@@ -12,6 +12,10 @@ const PHASES = {
 const READINESS = { QUALIFIED: '대기 자격 확인', READY: '계산 준비 확인', NOT_READY: '준비 미충족' };
 const HEARTBEAT = { active: '동작 중', standby: '대기', idle: '유휴', error: '오류' };
 
+function appHeartbeatLabel(appId: string, state: keyof typeof HEARTBEAT) {
+  return appId === 'interaction' && state === 'idle' ? '대기' : HEARTBEAT[state];
+}
+
 function unavailable(status: DriveSource['status']) {
   if (status === 'stale') return '관측 만료';
   if (status === 'disconnected') return '연결 끊김';
@@ -32,7 +36,7 @@ export function vmAppObservations(vmId: string, drive: DriveState | null, socket
       const heartbeat = report.heartbeat_source.status === 'fresh' ? report.heartbeat : null;
       const phaseLabel = lifecycle ? PHASES[lifecycle.phase] : unavailable(report.lifecycle_source.status);
       const heartbeatLabel = heartbeat
-        ? HEARTBEAT[heartbeat.state]
+        ? appHeartbeatLabel(appId, heartbeat.state)
         : unavailable(report.heartbeat_source.status);
       const stage = lifecycle ? `${phaseLabel} · ${READINESS[lifecycle.readiness]}` : phaseLabel;
       const reason = lifecycle?.reason ?? null;
@@ -57,7 +61,11 @@ export function vmAppObservations(vmId: string, drive: DriveState | null, socket
       .map(([appId, report]) => {
         const age = report.heartbeat_ago_ms;
         const fresh = age != null && age <= 3000 ? report.heartbeat_state : null;
-        const heartbeatLabel = fresh ? HEARTBEAT[fresh] : age != null && age > 3000 ? '관측 만료' : '미수신';
+        const heartbeatLabel = fresh
+          ? appHeartbeatLabel(appId, fresh)
+          : age != null && age > 3000
+            ? '관측 만료'
+            : '미수신';
         return {
           appId,
           appLabel: appLabel(appId),
