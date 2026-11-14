@@ -59,19 +59,37 @@ export interface VmListResponse {
   observed_at: string;
 }
 
-/** POST /api/v1/vms/synchronizations — 보드 등록 목록 ↔ DB VM 테이블 등록 동기화 결과 */
+/**
+ * POST /api/v1/vms/synchronizations — 보드 등록 목록을 기준으로 DB VM 테이블을 맞춘 결과.
+ * VM 은 vm_id(UUID)로만 짝짓는다. 버튼 한 번에 끝난다(서버 주기 실행 없음).
+ */
 export interface VmSynchronizationResult {
-  /** 보드에 등록된 VM 수 */
+  /** 보드가 돌려준 VM 수 (형식 오류 포함) */
   discovered: number;
+  /** 보드에만 있어 새로 등록 */
   registered: number;
+  /** 보드 기준으로 이름·사양·IP 갱신 */
   updated: number;
   unchanged: number;
+  /** 정리됐던 vm_id 가 보드에 다시 있어 복구 */
+  restored: number;
+  /** 보드에 없어 정리(목록에서 빠짐) */
+  retired: number;
+  /** 보드에 없지만 생성·시작·정지·삭제 진행 중이라 이번엔 건드리지 않음 */
+  skipped: number;
   conflicts: number;
   incomplete: number;
-  /** DB 에는 있는데 이번에 보드에 없던 VM (연속으로 없으면 retired) */
-  missing_from_board: number;
-  retired: number;
-  results: { vm_id: string; action: string; reason: string | null }[];
+  results: VmSynchronizationItem[];
+}
+
+export interface VmSynchronizationItem {
+  vm_id: string;
+  /** 보드 VM 은 보드의 이름, 정리된 VM 은 정리 전 이름. 보드가 이름을 주지 않으면 null */
+  name: string | null;
+  action:
+    'registered' | 'updated' | 'unchanged' | 'restored' | 'retired' | 'skipped' | 'conflict' | 'incomplete';
+  /** missing_from_board · in_operation · duplicate_name · duplicate_board_vm_id · invalid_vm_id · registration_metadata_missing */
+  reason: string | null;
 }
 
 /** §5 POST /api/v1/vms 요청 (§9 입력값 규칙) */

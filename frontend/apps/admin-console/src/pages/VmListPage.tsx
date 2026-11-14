@@ -40,10 +40,16 @@ export function VmListPage() {
   const registrationSync = useSynchronizeVms();
 
   // 보드 등록 목록 ↔ DB 등록 동기화. VM 실행 상태는 목록 자동 갱신이 따로 맡는다.
+  // 200 이어도 보류·충돌·정보 부족이 있으면 확인할 VM 과 사유를 같이, 더 오래 보인다.
   const synchronize = async () => {
     try {
       const result = await registrationSync.mutateAsync();
-      toast.show(synchronizationSummary(result), 'ok', 5000);
+      const needsAttention = synchronizationProblems(result).length > 0;
+      toast.show(
+        <SynchronizationToast result={result} />,
+        needsAttention ? 'recovering' : 'ok',
+        needsAttention ? 10000 : 5000,
+      );
     } catch (error) {
       const message = error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
       toast.show(`VM 동기화에 실패했습니다. ${message}`, 'fault', 5000);
@@ -98,7 +104,7 @@ export function VmListPage() {
             variant="secondary"
             onClick={() => void synchronize()}
             disabled={registrationSync.isPending}
-            title="보드에 등록된 VM과 서버 목록을 맞춥니다 (보드에만 있는 VM 추가, 보드에서 사라진 VM 정리)"
+            title="보드를 기준으로 VM 목록을 맞춥니다 (보드에만 있는 VM 추가·복구, 보드에 없는 VM 정리)"
           >
             {registrationSync.isPending ? '동기화 중…' : 'VM 동기화'}
           </Button>
@@ -317,15 +323,51 @@ const formatMiB = (mib: number) => `${mib.toLocaleString('ko-KR')} MiB`;
 function synchronizationSummary(result: VmSynchronizationResult): string {
   const parts = [
     result.registered && `추가 ${result.registered}`,
+    result.restored && `복구 ${result.restored}`,
     result.updated && `갱신 ${result.updated}`,
     result.retired && `정리 ${result.retired}`,
-    result.missing_from_board && `보드에 없음 ${result.missing_from_board}`,
+    result.skipped && `보류 ${result.skipped}`,
     result.conflicts && `충돌 ${result.conflicts}`,
     result.incomplete && `정보 부족 ${result.incomplete}`,
   ].filter(Boolean);
   return parts.length === 0
     ? `VM 동기화 완료: 보드 ${result.discovered}대, 바뀐 것 없음`
     : `VM 동기화 완료: 보드 ${result.discovered}대 · ${parts.join(' · ')}`;
+}
+
+const SYNC_REASON_LABEL: Record<string, string> = {
+  in_operation: '작업 진행 중이라 이번엔 정리하지 않음',
+  duplicate_name: '이미 다른 VM이 쓰는 이름',
+  duplicate_board_vm_id: '보드에 같은 UUID가 두 번 있음',
+  invalid_vm_id: 'UUID 형식이 아님',
+  registration_metadata_missing: '보드 등록 정보가 부족함',
+};
+
+/** 사용자가 확인해야 할 항목(보류·충돌·정보 부족)을 VM 이름과 사유로. 화면에 없는 VM 이라 이름이 없으면 UUID 앞부분 */
+function synchronizationProblems(result: VmSynchronizationResult): string[] {
+  return result.results
+    .filter((item) => item.action === 'skipped' || item.action === 'conflict' || item.action === 'incomplete')
+    .map((item) => {
+      const who = item.name ?? item.vm_id.slice(0, 8);
+      const why = (item.reason && SYNC_REASON_LABEL[item.reason]) ?? item.reason ?? item.action;
+      return `${who}: ${why}`;
+    });
+}
+
+function SynchronizationToast({ result }: { result: VmSynchronizationResult }) {
+  const problems = synchronizationProblems(result);
+  return (
+    <div>
+      <div>{synchronizationSummary(result)}</div>
+      {problems.length > 0 && (
+        <ul className={styles.syncProblems} aria-label="동기화 확인 필요">
+          {problems.map((problem) => (
+            <li key={problem}>{problem}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /** 서버가 dom0 목록을 받은 시각(observed_at). 읽을 수 없으면 화면이 응답을 받은 시각 */
