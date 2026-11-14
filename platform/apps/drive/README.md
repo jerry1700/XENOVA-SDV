@@ -200,6 +200,12 @@ warm에서 root가 같은 실행의 Bootstrap 앱 instance를 바꾸면 해당 �
 생성 실패 뒤 같은 root 요청으로 자동 재시도하지 않으며, 운영자가 새 instance 변경을
 명시적으로 요청한 경우에만 새 시도를 수락한다. 종료가 확인되지 않은 stack은 계속 보존한다.
 
+AUTO 작업 스레드가 예기치 않게 끝나면 감독 루프가 `k_thread_join(K_NO_WAIT)`로 종료를 확인하고
+현재 앱 인스턴스의 `STOPPED / APP_EXITED`를 보고한다. `warm-lattice-lab` 시연에서 A가 AUTO를
+담당한다면 dom0의 `xenova-vm console zephyr-drive-a`로 콘솔에 들어가 `xenova_auto_exit`를 실행한다.
+이 명령은 작업 경계에서 AUTO 스레드가 반환하게 한다. B의 AUTO 승계 뒤 A의 VM·MANUAL ID가
+유지되고 AUTO ID만 바뀌어 대기 자격을 얻는지 확인한다.
+
 Bootstrap 갱신은 별도 `drive-context` owner가 기존 Store receiver로 읽는다. 계산·v1 packet
 owner는 메모리 사본만 읽는다. 현재 설정은 100ms refresh·호출 예산 50ms·사본 300ms이며
 오류/만료에서 새 출처를 승인하지 않는다. guest boot·execution·transport 신원이나 계정이

@@ -442,9 +442,11 @@ mode를 발급하면 해당 새 세대 적용을 다시 확인한다. 상태 있
 | `applied_generation` | JSON integer, 0..4294967295 | 검증한 현재 제어 문맥. 미적용은 0 |
 | `check_seq` | 정규 uint64 십진 string, 1..18446744073709551615 | supervisor의 실제 입력·설정·소유 상태 확인 순번. 계산·송신 횟수 아님 |
 | `progress_seq` | 정규 uint64 십진 string, 0..18446744073709551615 | 앱 instance의 실제 계산 완료 순번. 무업무 대기 중 증가하지 않음 |
-| `phase` | WAITING / ACTIVATING / EXECUTING / STOPPING / RESIDUAL | 무업무 대기 / 현재 문맥의 계산 대기 / 계산 실행·결과 관측 / 종료 중 / 정리 미확정 |
+| `phase` | WAITING / ACTIVATING / EXECUTING / STOPPING / STOPPED / RESIDUAL | 무업무 대기 / 현재 문맥의 계산 대기 / 계산 실행·결과 관측 / 종료 중 / 스레드 종료 확인 / 정리 미확정 |
 | `readiness` | QUALIFIED / READY / NOT_READY | 사전 대기 자격 / 실제 계산을 확인한 활성화 준비 / 제한 상태 |
-| `reason` | QUALIFIED·READY는 null, NOT_READY는 제한 코드 | 6.2절 코드, APP_STOPPING·RESOURCE_RETAINED, 아래 lattice 계산 코드 |
+| `reason` | QUALIFIED·READY는 null, NOT_READY는 제한 코드 | 6.2절 코드, APP_STOPPING·RESOURCE_RETAINED·APP_EXITED, 아래 lattice 계산 코드 |
+
+`STOPPED / NOT_READY / APP_EXITED`는 Zephyr 감독 루프가 해당 AUTO 작업 스레드의 종료를 확인한 보고다. 세대는 1 이상이어야 하며 완료 작업은 새로 세지 않는다. Gateway는 현재 boot·앱 인스턴스·세대에 속한 신선한 보고만 사용한다. 제어권 철회 뒤 기존 AUTO 재초기화 절차를 요청한다. 자원 정리 여부는 재초기화 단계에서 확인한다.
 
 lattice 계산 코드(공통 펌웨어의 경로 계획·추종 사유. C `xm_app_lifecycle_json`·Python `xenova_mqtt.lifecycle.LATTICE_REASONS` 가 같은 집합을 받는다):
 BUSY, MAP_UNAVAILABLE, WORLD_UNAVAILABLE, POSE_UNAVAILABLE, PATH_UNAVAILABLE, PATH_INVALIDATED,

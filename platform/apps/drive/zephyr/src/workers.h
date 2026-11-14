@@ -8,7 +8,7 @@
 
 enum drive_task { DRIVE_TASK_AUTO, DRIVE_TASK_MANUAL, DRIVE_TASK_COUNT };
 enum drive_task_state { DRIVE_TASK_NOT_STARTED, DRIVE_TASK_WAITING, DRIVE_TASK_RUNNING,
- DRIVE_TASK_STOPPING, DRIVE_TASK_STOPPED, DRIVE_TASK_RESIDUAL };
+ DRIVE_TASK_STOPPING, DRIVE_TASK_STOPPED, DRIVE_TASK_RESIDUAL, DRIVE_TASK_EXITED };
 struct drive_job {
  struct xd_manual_witness manual_witness;
  uint64_t sequence, context_revision, connection_revision, release_us, deadline_us, iteration_begin_us;

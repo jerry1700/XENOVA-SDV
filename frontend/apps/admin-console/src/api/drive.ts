@@ -34,7 +34,7 @@ export interface DriveSource {
 
 export interface VmAppReport {
   lifecycle: {
-    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'RESIDUAL';
+    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'STOPPED' | 'RESIDUAL';
     readiness: 'QUALIFIED' | 'READY' | 'NOT_READY';
     reason: string | null;
   } | null;

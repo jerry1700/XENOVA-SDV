@@ -348,6 +348,19 @@ class DriveStateTrackerTest {
     }
 
     @Test
+    void scopedLifecycleShowsConfirmedAutoExit() {
+        String instance = "33333333-3333-4333-8333-333333333333";
+        String topic = "xenova/v1/vms/" + AUTO_VM + "/apps/autonomous/events";
+        tracker.accept(topic, scoped(AUTO_VM, instance, "app.lifecycle", 1, """
+                {"profile":"warm-drive-1","phase":"STOPPED","readiness":"NOT_READY","reason":"APP_EXITED",
+                 "applied_generation":3,"check_seq":"9","progress_seq":"8"}
+                """));
+        var lifecycle = tracker.snapshot().vmApps().get(AUTO_VM).get("autonomous").lifecycle();
+        assertThat(lifecycle.phase()).isEqualTo("STOPPED");
+        assertThat(lifecycle.reason()).isEqualTo("APP_EXITED");
+    }
+
+    @Test
     void versionChangesOnlyWithNewData() {
         long before = tracker.version();
         tracker.snapshot();

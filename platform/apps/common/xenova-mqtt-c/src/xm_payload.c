@@ -223,14 +223,16 @@ int xm_app_lifecycle_json(char *out,size_t n,uint32_t generation,uint64_t check,
 {
  if(!check||!phase||!state)return -EINVAL;
  bool waiting=!strcmp(phase,"WAITING"),executing=!strcmp(phase,"EXECUTING");
- if(!waiting&&!executing&&strcmp(phase,"ACTIVATING")&&strcmp(phase,"STOPPING")&&strcmp(phase,"RESIDUAL"))return -EINVAL;
+ bool stopped=!strcmp(phase,"STOPPED"),exited=reason&&!strcmp(reason,"APP_EXITED");
+ if(!waiting&&!executing&&!stopped&&strcmp(phase,"ACTIVATING")&&strcmp(phase,"STOPPING")&&strcmp(phase,"RESIDUAL"))return -EINVAL;
+ if(stopped!=exited||(stopped&&!generation))return -EINVAL;
  if(strcmp(state,"QUALIFIED")&&strcmp(state,"READY")&&strcmp(state,"NOT_READY"))return -EINVAL;
  if((!strcmp(state,"NOT_READY"))!=(reason!=NULL))return -EINVAL;
  if(!strcmp(state,"QUALIFIED")&&(!waiting||!generation))return -EINVAL;
  if(!strcmp(state,"READY")&&(!executing||!generation||!progress))return -EINVAL;
  if(reason){
   static const char *const reasons[]={"CONTROL_UNAPPLIED","INPUT_UNAVAILABLE","INPUT_STALE","INPUT_INVALID",
-   "STATE_PREPARING","CALCULATION_FAILED","OUTPUT_INVALID","APP_STOPPING","RESOURCE_RETAINED",
+   "STATE_PREPARING","CALCULATION_FAILED","OUTPUT_INVALID","APP_STOPPING","RESOURCE_RETAINED","APP_EXITED",
    "BUSY","MAP_UNAVAILABLE","WORLD_UNAVAILABLE","POSE_UNAVAILABLE","PATH_UNAVAILABLE","PATH_INVALIDATED",
    "OBSERVATION_EXPIRED","CONTEXT_CHANGED","STEERING_UNAVAILABLE","CLOCK_ERROR","SEARCH_NOT_FOUND",
    "NODE_BUDGET","WORK_BUDGET","DEADLINE","CANCELLED","NUMERIC_ERROR","COLLISION","PATH_LIMIT",

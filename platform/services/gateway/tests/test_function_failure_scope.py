@@ -52,7 +52,7 @@ class _World:
                 intent_revision=1, lifecycle_generation=1, observed_monotonic_ms=int(self.t * 1000))
                 for i, vm in enumerate((A, B)) if vm in self.alive}))
 
-    def tick(self, seconds=.02, *, reasons=None, stagnant=(), silent=(), commandless=(), bad_commands=False):
+    def tick(self, seconds=.02, *, reasons=None, stagnant=(), silent=(), commandless=(), exited=(), bad_commands=False):
         reasons = reasons or {}
         for _ in range(round(seconds / .02)):
             self.t += .02
@@ -66,12 +66,12 @@ class _World:
                     assert self.m.accept_session(vm, BOOT, self.ids[vm][app], self.t, app=app)
                     self.count[key] = self.count.get(key, 0) + 1
                     active = vm == self.m.active_vm and app == self.m.active_app
-                    if active and key not in stagnant:
+                    if active and key not in stagnant and key not in exited:
                         self.progress[key] = self.progress.get(key, 0) + 1
-                    reason = reasons.get(key)
+                    reason = 'APP_EXITED' if key in exited else reasons.get(key)
                     payload = dict(profile=PROFILE, applied_generation=self.m.generation,
                         check_seq=str(self.count[key]), progress_seq=str(self.progress.get(key, 0)),
-                        phase='EXECUTING' if active else 'WAITING',
+                        phase='STOPPED' if key in exited else 'EXECUTING' if active else 'WAITING',
                         readiness='NOT_READY' if reason else 'READY' if active else 'QUALIFIED', reason=reason)
                     accepted = self.m.on_lifecycle(app, vm, payload, self.t)
                     assert accepted or (app == 'autonomous' and
@@ -269,6 +269,77 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w.tick(.1, reasons={(A, 'autonomous'): 'DEADLINE', (B, 'autonomous'): 'OUTPUT_INVALID'})
         self.assertEqual((w.m.mode, w.m.active_vm, w.m.output_permitted), (Mode.SAFE_STOP, A, False))
         self.assertEqual(set(w.auth.read_current()['auto_recovery']), {A})
+
+    def test_one_confirmed_auto_exit_hands_over_and_rejoins_after_rotation(self):
+        w = self.w
+        key = A, 'autonomous'
+        generation, execution, old = w.m.generation, w.executions[A], dict(w.ids[A])
+        w.tick(exited={key}, bad_commands=True)
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        self.assertTrue(any(isinstance(action, ForwardStop) for action in w.actions))
+        self.assertFalse(any(isinstance(action, ForwardDrive) for action in w.actions))
+        fault = w.auth.read_current()['auto_recovery'][A]
+        self.assertEqual((fault['generation'], fault['execution_id'], fault['instance']),
+                         (generation, execution, old['autonomous']))
+        w.tick(.1, exited={key})
+        self.assertTrue(w.m.output_permitted)
+        self.assertEqual(w.auth.read_current()['auto_recovery'][A], fault)
+
+        w.ids[A]['autonomous'] = str(uuid4())
+        w.count[key] = w.progress[key] = 0
+        w.tick(3.2)
+        self.assertTrue(w.m._qualified(A, 'autonomous', w.t, held=True))
+        self.assertNotIn(A, w.auth.read_current()['auto_recovery'])
+        self.assertEqual((w.m.active_vm, w.executions[A], w.ids[A]['manual']),
+                         (B, execution, old['manual']))
+        generation = w.m.generation
+        w.tick(exited={key})
+        self.assertEqual(w.auth.read_current()['auto_recovery'][A]['instance'], w.ids[A]['autonomous'])
+        self.assertEqual((w.m.active_vm, w.m.generation), (B, generation))
+
+    def test_auto_exit_without_qualified_backup_commits_safe_stop(self):
+        w = self.w
+        w.m.qualification[B, 'autonomous'] = None
+        w.tick(exited={(A, 'autonomous')}, silent={(B, 'autonomous')})
+        self.assertEqual((w.m.mode, w.m.output_permitted), (Mode.SAFE_STOP, False))
+        self.assertIn(A, w.auth.read_current()['auto_recovery'])
+
+    def test_auto_exit_report_after_handoff_records_recovery_without_another_switch(self):
+        w = self.w
+        key = A, 'autonomous'
+        w.tick(.34, silent={key})
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        self.assertNotIn('auto_recovery', w.auth.value)
+        generation = w.m.generation
+        w.tick(.12, exited={key})
+        fault = w.auth.read_current()['auto_recovery'][A]
+        self.assertEqual((fault['generation'], fault['trigger']), (generation, 'app-exit'))
+        self.assertEqual((w.m.active_vm, w.m.generation, w.m.output_permitted), (B, generation, True))
+
+    def test_replacement_exit_before_qualification_keeps_first_attempt(self):
+        w = self.w
+        key = A, 'autonomous'
+        w.tick(exited={key})
+        fault = w.auth.read_current()['auto_recovery'][A]
+        w.ids[A]['autonomous'] = str(uuid4())
+        w.count[key] = w.progress[key] = 0
+        w.tick(.12, exited={key})
+        self.assertEqual(w.auth.read_current()['auto_recovery'][A], fault)
+        self.assertEqual((w.m.active_vm, w.m.output_permitted), (B, True))
+        self.assertFalse(w.m._qualified(A, 'autonomous', w.t, held=True))
+
+    def test_auto_exit_requires_current_generation_freshness_and_stopped_phase(self):
+        w = self.w
+        key = A, 'autonomous'
+        report = dict(profile=PROFILE, applied_generation=w.m.generation,
+                      check_seq=str(w.count[key]+1), progress_seq=str(w.progress[key]),
+                      phase='STOPPED', readiness='NOT_READY', reason='APP_EXITED')
+        self.assertFalse(w.m.on_lifecycle('autonomous', A, report, w.t-.31))
+        self.assertFalse(w.m.on_lifecycle('autonomous', A, {**report,'applied_generation':w.m.generation-1}, w.t))
+        self.assertFalse(w.m.on_lifecycle('autonomous', A, {**report,'phase':'STOPPING'}, w.t))
+        w.tick()
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, A))
+        self.assertNotIn('auto_recovery', w.auth.value)
 
     def test_late_completion_followed_by_a_stall_commits_app_restart(self):
         w = self.w

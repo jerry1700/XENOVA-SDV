@@ -81,6 +81,14 @@ config XENOVA_AUTO_INPUT_FAULT_INJECTION
 	  standby guest remain unchanged. Lifecycle supervision observes the real
 	  INPUT_UNAVAILABLE results and owns the failover decision.
 
+config XENOVA_AUTO_EXIT_INJECTION
+	bool "Test-only console command to exit the AUTO worker"
+	depends on XENOVA_DRIVE_WARM && SHELL
+	default n
+	help
+	  The console command asks the current AUTO worker to return at its
+	  next work boundary, after releasing the exchange lock.
+
 config XENOVA_DRIVE_WARM
 	bool "Explicit warm-drive-1 app lifecycle profile"
 	depends on XENOVA_DRIVE_WORKERS

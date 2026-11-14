@@ -208,7 +208,8 @@ def test_engine_completion_provisions_current_execution_then_standby_readiness(f
             assert not coordinator.app_recovery_failures()
             report_failure(rotated,3,'WAITING','DEADLINE')
             assert coordinator.app_recovery_failures()==[{'vm_id':vm,'execution_id':record.execution_id,'scope':'vm'}]
-            report_failure(rotated,4)
+            report_failure(rotated,4,'STOPPED','APP_EXITED')
+            assert coordinator.app_recovery_failures()==[{'vm_id':vm,'execution_id':record.execution_id,'scope':'vm'}]
             assert coordinator.app_recovery_failures()==[{'vm_id':vm,'execution_id':record.execution_id,'scope':'vm'}]
             atomic_json(authority,{**withdrawal,'phase':'APPLIED','owner':vm,'mode':'MANUAL'})
             assert not coordinator.app_recovery_failures()

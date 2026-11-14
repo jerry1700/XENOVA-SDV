@@ -15,6 +15,10 @@ static inline struct drive_warm_view drive_warm_classify(const struct drive_adap
  bool chosen,struct xm_span input,int64_t input_age,uint64_t context_revision,uint64_t connection_revision,
  int64_t tick,uint64_t clock,bool clock_valid){
  (void)clock;
+ if(status->state==DRIVE_TASK_EXITED)
+  return selected->control_valid?
+   (struct drive_warm_view){"STOPPED","NOT_READY","APP_EXITED",selected->generation}:
+   (struct drive_warm_view){"ACTIVATING","NOT_READY","CONTROL_UNAPPLIED",0};
  struct drive_warm_view v={chosen?"ACTIVATING":"WAITING","NOT_READY","CONTROL_UNAPPLIED",selected->control_valid?selected->generation:0};
  bool current=drive_warm_current(status,work,context_revision,connection_revision);
  if(selected->control_valid){

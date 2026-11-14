@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from .readiness import REASONS
 
 PROFILE = 'warm-drive-1'
-PHASES = frozenset({'WAITING', 'ACTIVATING', 'EXECUTING', 'STOPPING', 'RESIDUAL'})
+PHASES = frozenset({'WAITING', 'ACTIVATING', 'EXECUTING', 'STOPPING', 'STOPPED', 'RESIDUAL'})
 LATTICE_REASONS=frozenset({'BUSY','MAP_UNAVAILABLE','WORLD_UNAVAILABLE','POSE_UNAVAILABLE',
     'PATH_UNAVAILABLE','PATH_INVALIDATED','OBSERVATION_EXPIRED','CONTEXT_CHANGED','STEERING_UNAVAILABLE',
     'CLOCK_ERROR','SEARCH_NOT_FOUND','NODE_BUDGET','WORK_BUDGET','DEADLINE','CANCELLED','NUMERIC_ERROR',
@@ -37,8 +37,10 @@ def parse(payload: object) -> Lifecycle:
     phase,state,reason=payload['phase'],payload['readiness'],payload['reason']
     if phase not in PHASES or state not in ('QUALIFIED','READY','NOT_READY') or not check:
         raise ValueError('invalid lifecycle state')
-    if reason is not None and reason not in REASONS|LATTICE_REASONS|{'APP_STOPPING','RESOURCE_RETAINED'}:
+    if reason is not None and reason not in REASONS|LATTICE_REASONS|{'APP_STOPPING','RESOURCE_RETAINED','APP_EXITED'}:
         raise ValueError('invalid reason')
+    if (phase=='STOPPED') != (reason=='APP_EXITED') or (phase=='STOPPED' and not generation):
+        raise ValueError('APP_EXITED requires a stopped thread in an applied generation')
     if (state=='NOT_READY') != (reason is not None):raise ValueError('state/reason conflict')
     if state=='QUALIFIED' and (phase!='WAITING' or not generation):
         raise ValueError('qualification requires applied waiting context')
