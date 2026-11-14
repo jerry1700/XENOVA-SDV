@@ -5,10 +5,39 @@
 #include "engine.h"
 #include <xenova/drive_runtime.h>
 #include <xenova/drive_context.h>
-struct dl_clock {int64_t lower,upper;uint64_t expires_guest;char gateway[37];struct dw_trust trust;};
+struct dl_clock {bool acknowledged;int64_t lower,upper;uint64_t expires_guest,expires_pi,probe_sequence,confirmed_guest_us,support_guest_us,event_reserved_guest_us;uint8_t reply_sha256[32];
+ char gateway[37],vm[37],execution[37],app_instance[37],host_boot[37];struct dw_trust trust;};
 int dl_start(struct drive_engine *);
 void dl_context(const struct xd_inputs *);
 int dl_clock_get(struct dl_clock *,uint64_t *now_pi_upper);
+int dl_manual_clock_get(struct dl_clock *,uint64_t *now_pi_upper);
+/* 실제 fresh Reply의 현재 owner witness만 반환한다. StateCopy gate는 입력이 아니다. */
+int dl_direction_get(bool manual,xenova_drive_DirectionGateWitness *,uint64_t now_pi_us);
+/* 수신한 원 receipt만 반환한다. 이 호출/예산 결과는 출력 권위가 아니다. */
+int dl_mission_get(xenova_drive_MissionGrant *,uint64_t now_pi_us);
+int dl_mission_for_local(xenova_drive_MissionGrant *,uint64_t now_pi_us);
+int dl_budget_submit(const xenova_drive_MissionBudgetRequest *,const uint8_t canonical_request_sha256[32]);
+/* Dequeue the reply and read its current grant under one lock. A zeroed grant
+ * means no grant is current. BUSY leaves the original reply pending. */
+int dl_budget_take(xenova_drive_MissionBudgetReply *,xenova_drive_MissionGrant *,uint64_t now_pi_us);
+/* One immutable original request/result. These ports never grant phase output. */
+int dl_episode_submit(const xenova_drive_EpisodeRequest *,const uint8_t request_sha256[32]);
+int dl_episode_take(xenova_drive_EpisodeRequest *,xenova_drive_EpisodeReceipt *);
+int dl_episode_status(xenova_drive_EpisodeStatus *,uint64_t now_pi_us);
+/* Reserve the actual confirmed AUTO clock before a planner turn can create a
+ * phase. Binding accepts only that later real event, never historical input.
+ * Repeated lookup retains original seq/SHA/support/E, independently of newer
+ * P4/current authority. Zero/zero event clears the one bounded private slot. */
+int dl_episode_event_prepare(void);
+int dl_episode_event_clock(uint64_t began_guest_us,uint64_t phase_guest_us,struct dl_clock *);
+int dl_control_facts(xenova_drive_DriveControlFacts *,uint64_t now_pi_us);
+/* Current input proof only. Original confirmed P4/source/E; never mission/DRIVE readiness. */
+int dl_auto_preflight_set(const xenova_drive_AutoInputPreflight *);
+void dl_auto_preflight_clear(void);
+/* Current Pi statement, not an output grant. Absence is ENODATA, not WAIT/NONE. */
+int dl_operation_status(xenova_drive_OperationStatus *,uint64_t now_pi_us);
+/* Hint to the existing bounded owner, not a new worker or fake completion. */
+void dl_snapshot_request(void);
 /* Atomic ownership transfer of a complete accepted copy to the planner owner. */
 int dl_state_take(const dw_state **);
 void dl_state_release(int slot);
@@ -17,4 +46,5 @@ int dl_join(int64_t deadline_ms);
 const char *dl_status(void);
 /* Call only after input owners joined; no periodic console sink. */
 void dl_report(void);
+#include "lattice_route_input.h"
 #endif

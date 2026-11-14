@@ -1,6 +1,6 @@
 """서비스 전역 예외. API 계층이 HTTP 상태 코드와 계약의 Error 본문으로 변환한다.
 
-계약 8.1 장(v1.3): 400 InvalidArgument / 404 VMNotFound / 409 VMExists·InvalidState / 507 InsufficientResources /
+계약 8.1 장(v1.3): 400 InvalidArgument / 404 VMNotFound / 409 VMExists·VMNameConflict·InvalidState / 507 InsufficientResources /
 501 NotSupported / 503 PlatformUnavailable / 504 DriverTimeout / 500 DriverError. 401 Unauthorized 는 미들웨어가 낸다.
 
 platform_code 는 플랫폼 Manager 가 준 원본 코드(HOST_QUIESCING 등)다. 플랫폼 오류에만 붙고 응답 본문에 그대로 나간다.
@@ -10,7 +10,10 @@ retryable 은 플랫폼이 준 원본 값이다(코드의 고정 속성이 아�
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .models import VmOperationResult
 
 
 class Dom0ManagerError(Exception):
@@ -34,10 +37,12 @@ class Dom0ManagerError(Exception):
         self.platform_code = platform_code
         self.retryable = retryable
         self.operation = operation
+        self.context: VmOperationResult | None = None
+        self.public_message: str | None = None
 
     def body(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"code": self.code, "message": self.message}
-        if self.detail is not None:
+        out: dict[str, Any] = {"code": self.code, "message": self.public_message or self.message}
+        if self.detail is not None and self.public_message is None:
             out["detail"] = self.detail
         if self.resource is not None:
             out["resource"] = self.resource
@@ -47,6 +52,8 @@ class Dom0ManagerError(Exception):
             out["retryable"] = self.retryable
         if self.operation is not None:
             out["operation"] = self.operation
+        if self.context is not None:
+            out["context"] = self.context.model_dump(mode="json", exclude={"platform_code"})
         return out
 
 
@@ -70,6 +77,24 @@ class OperationNotFound(Dom0ManagerError):
 class VMExists(Dom0ManagerError):
     status_code = 409
     code = "VMExists"
+
+
+class VMSpecConflict(Dom0ManagerError):
+    """요청한 생성 명세가 같은 UUID의 기존 등록 또는 원 생성 작업과 충돌한다."""
+
+    status_code = 409
+    code = "VMSpecConflict"
+
+
+class VMNameConflict(Dom0ManagerError):
+    """같은 VM 이 아니라 플랫폼이 고른 식별(내부 실행 이름·UUID 예약·MAC 등)이 다른 VM 과 겹침 (409).
+
+    플랫폼 VM_NAME_CONFLICT 다. VMExists(같은 vm_id 의 VM 이 이미 있음 = 생성 재전달 성공 처리)와 섞으면 Spring 이 충돌을
+    생성 성공으로 기록하므로 별도 코드로 낸다(2026-11-06 결정). Spring 은 409 VM_NAME_CONFLICT 로 매핑한다.
+    """
+
+    status_code = 409
+    code = "VMNameConflict"
 
 
 class InvalidState(Dom0ManagerError):

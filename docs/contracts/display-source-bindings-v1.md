@@ -4,7 +4,7 @@
 
 ## 설정
 
-[시험 후보 예제](../../platform/services/display/router/examples/integration-candidate-bindings.json)는 `schema_version: 1`, `scope: candidate`, `bindings` 배열로 구성한다. 세 UUID는 합성 값이며 실제 VM 등록값이 아니다. VM1→autonomous, VM2→manual은 사용자 승인 **시험 후보**이고 실제 주·백업 배치는 담당 확인이 필요하다. VM3는 Debian/interaction/message-board 후보이며 message-board 송신 구현은 별도 의존성이다.
+[시험 후보 예제](../../platform/services/display/router/examples/integration-candidate-bindings.json)는 `schema_version: 1`, `scope: candidate`, `bindings` 배열로 구성한다. 세 UUID는 합성 값이며 실제 VM 등록값이 아니다. VM1→autonomous, VM2→manual은 사용자 승인 **시험 후보**이고 실제 주·백업 배치는 담당 확인이 필요하다. VM3는 `expected_os: debian`·`role: interaction`·`app_id: interaction` 후보이다. [MQTT 계약 4장](mqtt-contract-v1.md)에서 `interaction`은 특정 앱 이름이 아닌 인터랙션 VM의 역할 ID이며, 앱 events 토픽은 `xenova/v1/apps/interaction/events`를 사용한다. 실제 앱 송신 구현·배포·보고 수신은 별도 확인 대상이다.
 
 각 항목은 `vm_id`, `role`, `expected_os`, `app_id`, `agent_supported`를 가진다. 정확히 세 항목이 필요하고 UUID·역할·앱 ID 중복, dom0 UUID, 역할과 기대 OS 불일치를 거부한다. 기존 배열 설정은 호환되며 `binding_scope=legacy`로 표시한다. 새 형식의 `deployment`도 작성자의 분류일 뿐 실제 등록 조회에 통과했다는 증거가 아니다.
 
@@ -16,11 +16,30 @@ python -m xenova_display.bindings examples/integration-candidate-bindings.json -
 
 점검기는 네트워크·VM에 접속하지 않으며 `registry_verified: false`를 출력한다. 실제 배치 전에는 UUID와 발행 app_id를 등록 정보 및 담당자와 대조해야 한다.
 
+## 플랫폼의 초기 선택과 명시 교체 — 2026-11-11
+
+일반 VM 등록은 화면 역할을 자동 변경하지 않는다. 동일 Debian 템플릿이 여러 개여도 기존
+interaction UUID를 유지한다. 실제 표시 제공물을 선택한 새 factory만 identity plan의 Debian·A/B를
+초기 binding으로 게시한다. 완료된 설치·재부팅은 운영자 선택을 초기값으로 복원하지 않는다.
+
+root 전용 `xenova-display-setup show`는 선택 UUID만 읽으며 등록/현재 실행을 확인했다고 하지 않는다.
+`select --vm-id NEW --expected-vm-id OLD`는 계획이고 `--execute`가 설정 게시·변경 소비자 재시작이다.
+현재 선택이 OLD 또는 이미 NEW인 재전달만 허용한다. 등록된 Debian의 실제 guest_display 제공물
+receipt가 필요하며, 새 VM을 생성/기동하거나 주행 A/B·Authority를 변경하지 않는다.
+잘못된 역할/후속 UI 설정은 게시 전에 거절한다. 일반 쓰기 오류는 자기 변경을 되돌리며,
+rollback 실패와 서비스 재시작 실패는 unconfirmed다. 후자는 게시된 binding을 보존하고 같은 조건의
+`--execute --restart`로 재확인한다. 전원 단절에 대한 다중 파일 원자성은 없으며 check는
+origin/binding 불일치를 성공으로 반환하지 않는다. CLI 소비자에게 원 journal을 요구하지 않는다.
+
+설정 공급·이번 HTTP 연결·MQTT/Agent/앱의 수신·현재 readiness는 다른 단계다.
+`check --live`의 connected는 feed/relay/guest-data/UI의 HTTP 왕복과 relay 무인증 401만 확인한다.
+정확한 설치·명령·실패/회복 절차는 [제공물 README](../../platform/services/display/router/deploy/guest-display/README.md#표시-담당-선택과-설치-확인)를 따른다.
+
 ## 수신과 표시
 
 | 확인 대상 | 동작 |
 | --- | --- |
-| 구독 | 설정된 앱 events, 지원 Agent heartbeat/inventory, 별도 표시용 drive-state만 구독 |
+| 구독 | 설정된 앱 events, 지원 Agent heartbeat/inventory만 구독. 주행 상태는 MQTT가 아닌 [Gateway 읽기](display-gateway-read-v1.md)로 받음 |
 | SUBACK | 토픽별 pending/granted/denied/error/unavailable을 추적. 브로커 접속 성공만으로 구독 성공을 선언하지 않음 |
 | 식별 | 토픽·메시지 type·등록 UUID·app_id·발행 세대·증가 seq를 기존 계약과 대조. 게스트 보고에 source_id가 함께 있으면 거부 |
 | 재접속 | 새 SUBACK과 해당 연결에서 수신한 새 보고가 있어야 fresh. 이전 캐시를 정상 보고로 되살리지 않음 |

@@ -324,10 +324,14 @@ def platform_root_ok(root):
                 'usr/lib/xenova/xenova_zephyr.py': FILES / 'xenova_zephyr.py',
                 **{'usr/lib/xenova/'+n:FILES/n for n in ('xenova_resources.py','xenova_zephyr_transition.py','xenova_zephyr_control.py')},
                 'etc/systemd/journald.conf.d/20-xenova.conf': FILES / 'xenova-journald.conf',
-                'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf'}
+                'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf',
+                'usr/lib/systemd/system/var-volatile-log-journal.mount': FILES / 'var-volatile-log-journal.mount',
+                'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
-                 'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py'):
+                 'xenova_creation.py','xenova_creation_auto.py',
+                 'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
+                 'xenova_display_sync.py','xenova_display_setup.py'):
         expected['usr/lib/xenova/'+name] = FILES/name
     expected['usr/lib/xenova/xenova_broker.py']=ROOT/'platform/deploy/mosquitto/scripts/xenova_broker.py'
     expected['usr/share/xenova/mqtt/policy.json']=ROOT/'platform/deploy/mosquitto/etc/policy.json'
@@ -351,7 +355,18 @@ def platform_root_ok(root):
     for relative, source in expected.items():
         if not path(relative).is_file() or path(relative).read_bytes() != source.read_bytes():
             raise ValueError('platform source/installed contract mismatch: ' + relative)
-    for name in ['sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl']:
+    # The bind must cover the path journald actually opens on the Yocto image.
+    if path('var/log/journal') != root.resolve() / 'var/volatile/log/journal':
+        raise ValueError('dom0 journal path does not match the Yocto /var/log layout')
+    journal_backing = path('var/log-persistent/journal')
+    if journal_backing != root.resolve() / 'var/log-persistent/journal' or not journal_backing.is_dir():
+        raise ValueError('persistent dom0 journal backing directory missing')
+    flush_unit = path('usr/lib/systemd/system/systemd-journal-flush.service')
+    flush_link = 'usr/lib/systemd/system/sysinit.target.wants/systemd-journal-flush.service'
+    if (not flush_unit.is_file() or not (root / flush_link).is_symlink()
+            or path(flush_link) != flush_unit):
+        raise ValueError('required dom0 service not enabled: systemd-journal-flush.service')
+    for name in ['sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl', 'journalctl']:
         if not any(path(prefix + name).is_file() and path(prefix + name).stat().st_mode & 0o111
                    for prefix in ('usr/sbin/', 'usr/bin/', 'sbin/', 'bin/')):
             raise ValueError('required platform growth tool missing: ' + name)

@@ -8,7 +8,5 @@ public record AuthProperties(
         String jwtSecret,
         Duration accessTokenTtl,
         Duration refreshTokenTtl,
-        boolean refreshCookieSecure,
-        int maxLoginAttempts,
-        Duration loginAttemptWindow) {
+        boolean refreshCookieSecure) {
 }

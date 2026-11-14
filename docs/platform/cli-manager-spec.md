@@ -366,6 +366,16 @@ registry의 신원/경로·디스크 alias 검사와 대상 원 create의 완료
 단건 부재는 `VM_NOT_FOUND`, 지속 변경은 `TARGET_CHANGED`, 예산 만료는 `DEADLINE_EXCEEDED`다.
 부분 실패를 빈 목록으로 바꾸지 않는다. 원 실행 제어의 현재 intent/신원/기한 guard는 그대로 필요하다.
 
+Worker 내부 조회는 `Manager.call('recovery-intents', {})`를 사용한다. 이 조회도 Xen·공통
+잠금·상태 쓰기 없이 등록 집합과 각 항목을 재대조한다. 원 create의 VM UUID·operation ID·원
+명세가 공개 instance와 일치하고 작업이 준비/게시/등록 단계에 남아 있으면 그 항목에만
+`registration_pending: true`를 붙인다. 해당 항목의 의도는 `unknown`, revision은 null,
+applicable은 false이며 Worker는 `intent_known=False`로 받아 건강 관측 불가와 판정 보류를
+유지한다. 목록에서 제거하거나 중지 의도로 바꾸지 않으므로 기존 건강·복구 기록도 유지한다.
+다른 VM의 현재 의도 판정은 계속한다. 원장이 없거나 신원이 다르거나 등록부가 손상된 경우는
+기존 조회 오류로 처리한다. 공개 CLI·HTTP의 `intents` 응답에는 이 예외를 적용하지 않는다.
+이 내부 조회는 필터·execute·idempotency key를 받지 않는다.
+
 <a id="cmd-status"></a>
 ### `xenova-vm status` — list 별칭
 
@@ -480,6 +490,13 @@ xenova-vm get "$VM_ID" --json
 VM 실행 성공이 아니다. 완료 재전달에서 현재 관측만 실패하면 원 결과와
 `current=null`·`diagnostic_warnings`를 반환하고 원 성공을 유지한다.
 
+게시 후 등록의 첫 lifecycle 기록과 마지막 intent 초기화에서 `admission`이 경합하면,
+같은 호출·원 요청을 유지한 채 공통 잠금 밖에서 기다린다. 대상 lease는 유지하며 다시
+진입할 때 원장·host·instance·tombstone을 대조한다. 대기는 이번 호출 예산 안으로 제한하고,
+Linux에 아직 필요한 DHCP 효과는 원 생성 실행 기한과 정리 여유도 적용한다. 원 기한을
+연장하거나 재복사·새 요청 수락으로 바꾸지 않는다. 만료·다른 I/O 오류·신원 변경은 원
+실패와 게시 자산을 보존한다. 게시 자산을 게시 전 자동 수습 대상으로 넘기지 않는다.
+
 **오류 응답**
 
 같은 UUID의 다른 명세는 `IDEMPOTENCY_CONFLICT`(3). 버전 없음은 `TEMPLATE_VERSION_NOT_FOUND`(2), 주소 충돌 `IP_CONFLICT`(3), 용량 부족 `INSUFFICIENT_STORAGE`(4).
@@ -544,6 +561,20 @@ xenova-vm get "$VM_ID" --json
 
 `get`에서 `desired_state=running`와 실제 `domid`를 확인한다. `control-operation --operation-id`로 원 결과를 조회한다. Xen 시작 성공은 앱 준비나 운행 허가가 아니다. CPU 정책 활성 시 `cpu-layout`의 host.ready·실제 마스크도 확인한다. CPU 관련 오류와 불완전 실행 기록은 [CPU 계약](#cpu-contract)을 따른다.
 
+같은 `start` key를 재전달하면 만료된 미결합 실행도 확인할 수 있다. 원 host·VM·사용자 의도·
+lifecycle·실행 owner·구성·CPU 문맥이 같고, 원 기한 만료 뒤 Xen 부재 두 회와 해당 실행의 정확한
+소유 scope 종료가 확인된 경우에만 원 작업을 `failed`로 종결한다. 원 `XEN_EXECUTION_FAILED` 또는
+`DEADLINE_EXCEEDED`와 최초 cause·key·operation·기한을 보존하며 새 create/stop/kill은 제출하지 않는다.
+같은 key의 이후 재전달도 원 실패를 반환한다. 후속 기동은 현재 의도·신원·자원 조건을 다시 확인한
+별도의 명시 요청이다. scope가 살아 있거나 근거가 없고, 실행/의도/구성이 바뀌었거나 저장이 미확정이면
+기존 보호를 유지한다. `control-operation` 조회 자체는 이 종결을 수행하지 않는다.
+
+새 `start` 또는 복구 실행을 요청하면, 도메인이 없는 대상에서 기존 실행을 막는 만료 기록을 같은 근거로 먼저
+종결할 수 있다. Linux의 협조형 `reboot`는 이전 성공 기록이 원 Xen 실행과 재사용 scope를 연결하고,
+해당 scope와 reboot helper가 종료됐을 때만 종결한다. 이후의 `start`가 원 Xen 실행을 그대로 관측해
+다음 의도 revision을 만들었다면 그 의도를 보존한다. 종결 기록에는 원 오류·작업 ID·기한을 남기며,
+새 Xen 실행은 현재 요청의 별도 검증을 거친다.
+
 **Manager 매핑:** `start / {vm_id}`.
 
 [명령어 색인으로](#command-index)
@@ -596,6 +627,7 @@ xenova-vm get "$VM_ID" --json
 `completion=pending`으로 반환할 수 있다. 이는 실제 정지 완료가 아니다. 원 key와
 operation을 기록하고 같은 stop을 재전달한다. 기록 조회만으로 정지가 실행되지는 않는다.
 원 기한이 만료됐거나 후속 사용자 의도가 수락됐다면 먼저 원 journal과 현재 실행을 대조한다.
+실행 전 원 기한 만료는 `DEADLINE_EXCEEDED`이며 이행하지 않는다. 이미 명령이 제출된 미확정 정지는 같은 키 재전달로 늦은 종료를 확인할 수 있다. 현재 host·수명·정지 의도와 소유 프로세스 종료를 확인한 경우에 원 작업만 완료로 저장하고 최초 오류를 보존한다. 그동안 더 새 의도가 수락되면 그 의도를 유지한다. 완료된 원 정지는 같은 키로 재전달하면 보관 이후에도 과거 완료를 회수할 수 있다.
 응답 전체와 재개 조건은 [공통 수락 계약](#acceptance-contract)을 따른다.
 
 **Manager 매핑:** `stop / {vm_id,force?}`.
@@ -875,7 +907,9 @@ Linux의 확인된 원 준비 실행은 `effective_status=RUNNING`이다. 원 st
 ### `xenova-vm operation-reconcile` — 원 create의 private 실패 종결
 
 기본 호출은 읽기 전용 진단이다. 등록 VM의 retire/purge나 VM recovery-reconcile와 다르다.
-운영 자산을 임의 삭제하는 명령이 아니며, 원 기록에서 도출한 미게시 Linux workspace만 다룬다.
+운영 자산을 임의 삭제하는 명령이 아니며, 원 기록에서 도출한 미게시 workspace만 다룬다.
+Debian·Ubuntu의 디스크 준비와 Zephyr의 firmware 준비에 같은 원 신원·사용 부재·내구 종결 원칙을 적용한다.
+디스크/mount/loop와 firmware revision/staging의 허용 자산 구조는 해당 어댑터로 구분한다.
 
 `xenova-vm operation-reconcile --spec-file REQUEST.json [--execute] [--budget-ms MS] --json`
 
@@ -898,10 +932,12 @@ reservation_released=false`를 반환한다. 실행자 active/residual·다른 �
 충돌에서는 오류로 종결하며 준비 실행을 탈취하지 않는다. 빈 workspace도 원 효과/사용 부재를
 확인한 명시 종결 대상이며, 진단/일반 operation 조회는 삭제나 예약 반환을 수행하지 않는다.
 
-명시 수습은 기존 Linux 준비 슬롯 밖에서 대기열을 만들지 않는다. 슬롯을 확보하고 원 작업에
+명시 수습은 기존 준비 I/O 슬롯 밖에서 대기열을 만들지 않는다. Linux는 linux-prepare,
+Zephyr는 기존 lifecycle-io 슬롯을 사용한다. 슬롯을 확보하고 원 작업에
 `discard-private` 소유를 연결한 뒤 계획을 저장한다. 긴 열거/사용 검사/정리는 공통 잠금 밖이고
-각 삭제 직전에는 gate와 계획 inode를 재확인한다. 계획·기록·완료의 짧은 변경은 공통 잠금,
-실제 개별 unlink는 짧은 admission으로 gate와 직렬화한다. 안정 lock·원 journal·template·public
+각 삭제 직전에는 gate와 계획 inode를 재확인한다. 계획·기록·완료의 비교는 공통 잠금,
+필수 기록 fsync는 준비 슬롯을 보유한 채 공통 잠금 밖에서 수행하고 다시 대조한다.
+실제 개별 unlink는 짧은 admission으로 gate와 직렬화하며, 삭제 뒤 디렉터리 fsync는 그 밖에서 수행한다. 안정 lock·원 journal·template·public
 VM·진단 원본은 삭제하지 않는다. 계획은 고정 private topology, 최대 128항목/직렬화 128KiB로 제한한다.
 
 적용 data는 원 `operation`, `effective_status=FAILED`, `recovery_required=false`,
@@ -909,7 +945,9 @@ VM·진단 원본은 삭제하지 않는다. 계획은 고정 private topology, 
 실행하면 원 실패와 수습 기록을 error.details로 회수하며 새 복사/신원/기한을 발급하지 않는다.
 명시 신규 create는 새 key/VM 신원과 현재 IP/용량 검사로 수행한다. 원 UUID 이력은 계속 보존한다.
 
-수습 기록은 Linux 자산 journal `schema_version=1.1` 또는 선택 자원 생략을 수락한 `1.2`의 `reconciliation.version=1`이다. 1.2의 원 제출 key 존재와 저장된 확정 명세는 create 재전달 계약을 따르며 수습이 재해석하지 않는다.
+수습은 원 자산 journal의 `reconciliation.version=1`에 기록한다. 기존 Linux 1.1, Zephyr 1.0과
+선택 자원 생략을 수락한 1.2를 유지한다. 1.2의 원 제출 key 존재와 저장된 확정 명세는
+create 재전달 계약을 따르며 수습이 재해석하지 않는다.
 `request/context_sha256/plan/plan_sha256/phase/remaining/deleting/root_pending/error/release`를
 한 원자 JSON 단위로 저장한다. phase는 planned/cleaning/complete이며 원 spec_hash/최초
 error/result를 수습 결과로 덮지 않는다. cleanup 오류는 별도 reconciliation.error에 둔다.
@@ -942,6 +980,51 @@ create/retire/restore/purge의 같은 key 재전달도 완전하게 읽은 원�
 정리 기록의 별도 물리 공간 예약이 아니다. 외부 쓰기로 여유가 소진되거나 매체 EIO가 생기면
 계획/완료 저장을 실패로 반환하며, 저장소가 회복된 뒤 같은 수습을 명시 재전달한다.
 다른 VM·원장·로그를 지워 기록 공간을 자동 확보하지 않는다.
+
+<a id="automatic-private-cleanup"></a>
+#### 지원 VM 신규 생성의 기본 유한 자동 private 수습
+
+신규 Debian·Ubuntu·Zephyr create는 기본적으로 `bounded-1-plus-1` 자동 수습에 등록한다.
+별도 enable 파일이 없어도 동작한다. OS 이름은 수습 대상 자격이 아니라 자산·I/O 어댑터 선택에만 사용한다.
+`/etc/xenova/creation-reconcile-policy.json`을 별도 공급하는 경우에는 보호된
+`{"schema_version":"1.0","profile":"bounded-1-plus-1"}`을 사용한다. 기존 `trial-1-plus-1` 설정도 읽는다.
+잘못된 설정은 수락 전에 거절하며, 기존 실패 기록에는 자동 허용을 소급 등록하지 않는다.
+recipe의 `/usr/share/xenova/creation-reconcile-policy.json.example`은 설정 형식 예시이며 enable 전제조건이 아니다.
+
+실제 private 준비가 실패한 뒤 원 실패를 저장하고 준비 FD를 반환한 후, 해당 기존 준비 슬롯을
+상속하는 일회 Python 후속이 처리한다. create 응답은 정리 완료를 기다리지 않는다.
+별도 daemon·영구 큐·주기적인 전체 원장 scan은 없다. 슬롯이 busy면 대기하거나 새 관측을 소비하지 않는다.
+최초 실패와 이후 같은 원 create 재전달이 실행 기회이며, 조회는 후속을 시작하지 않는다.
+workspace 생성 전 실패는 폐기할 사본이 없으므로 기존의 같은 원 요청 재개를 유지한다.
+자동 수습을 위해 이를 임의 실패 종결하거나 원 key·기한을 새로 발급하지 않는다.
+
+유한 프로필은 최초 수습 관측 기회 1회와, 현재 소유 상태·정리 receipt·host/gate·수습 진행의 변화가
+확인될 때 추가 최대 1회를 허용한다. 횟수는 원 operation에 먼저 내구 소비하고 재시작·새 boot에도
+초기화하지 않는다. Linux는 원 작업의 `cleanup_ms`, Zephyr는 기존 명시 수습의 기본 예산 15000ms와
+원 호출 `budget_ms` 중 작은 값을 수락 시 고정한다. 이 값은 후속 정리의 예산이며 새 운영 측정값이 아니다.
+후속은 원 생성 기한을
+연장하거나 복사·게시·VM launch를 다시 실행하지 않는다. 자동 기회 2회와 삭제 직전의 필수 사용 검사는
+별개다. 파일별 Xen/mount/loop/FD 보호는 계속 수행하므로 전체 외부 조회가 2회라는 뜻은 아니다.
+
+원 준비/수습 소유자가 없다는 조건과 기존 private 진단·삭제 guard를 모두 만족해야 한다.
+mount/loop를 사용하는 Linux 어댑터는 clean 정리 receipt도 요구한다. Zephyr는 실제 firmware namespace와
+현재 asset lease·기존 lifecycle I/O 소유를 검사하며, 존재하지 않는 Linux receipt를 강제하지 않는다.
+public/등록·사용 중·신원 미확정 자산은 남긴다. 원 생성 오류·key/UUID/spec·기한은 보존하며,
+자동 수습도 원 `operation-reconcile` 계획/결과를 쓴다. 자동 수습 ID는 원 operation ID로 고정한다.
+이미 수락된 계획은 같은 요청으로만 재개한다. 같은 원 key는 수습 뒤에도 원 실패를 반환한다.
+기존 `operation` 조회의 `effective_status`와 reconciliation으로 현재 종결을 확인하고, 새 생성은
+별도 VM 신원으로 요청한다. 일반 호출자에게 내부 journal 버전 선택이나 파일 편집을 요구하지 않는다.
+
+작은 `automatic_cleanup` metadata만 원 operation에 갱신한다. 신규 metadata version 2에는 원 수습 예산
+`cleanup_ms`를 함께 고정하며, 기존 trial version 1은 원 creation 예산으로 계속 읽는다.
+일반 CLI/HTTP 소비자가 내부 버전을 선택하거나 raw journal을 해석할 필요는 없다.
+변화 없는 재전달은 추가 관측·기록·자식을
+만들지 않고, 정상 종결 표시는 기존 최종 수습 저장에 합친다. 최초/마지막 후속 오류와 원 생성 오류는
+구분해 보존한다. 자식 실행 실패는 기존 `diagnostic_warnings`의
+`AUTOMATIC_CLEANUP_LAUNCH_UNCONFIRMED`로 표시하며 미실행·미수락·취소를 단정하지 않는다.
+관측/저장 예산 만료나 중단으로 최종 저장을 못한 경우 `observing`은 과거 시작 기록이며 현재 실행/완료
+증거가 아니다. 현재 owner와 기존 수습 결과를 함께 확인한다. 2회 소진·변화 근거 부재·미확정은 보존하고
+기존 명시 수습을 사용한다. 부팅 시 일괄 폐기나 완료 원장 보존 기간/삭제는 이번 기능에 포함하지 않는다.
 
 <a id="creation-deadline"></a>
 #### Linux 생성의 세 시간과 호환
@@ -1144,12 +1227,23 @@ CPU 재배치나 새 attempt·operation·실행 신원·물리 deadline 발급�
 | stopping/그 단계 uncertain, `stop_submission`에 미제출 또는 synchronous 반환 근거, 같은 종료 대상·현재 상태·소유 scope 확인 | 미제출이면 `not_submitted`, 종료 후 부재면 `stopped_without_replacement`; 둘 다 failed |
 | 실제 managed 새 실행이 이 attempt의 owner·실행·구성·완료된 CPU 검증에 연결 | `launch_observed`; 기존 완료 요건으로 completed, 앱 준비는 unknown |
 | 해당 owner의 `launch_aborted_before_submit=true`, stopped 실행 기록·실제 부재 확인 | `not_submitted`; failed |
+| 원 기한이 만료된 미결합 launch, 현재 부재·동일 원 문맥·정확한 실행 scope의 무잔존 확인 | `stopped_without_replacement`; 원 실패를 보존해 failed. 실행 기록도 같은 원 attempt에 결합해 stopped로 종결 |
 | 종료/launch 실행자 잔존·구형 기록에 반환 근거 없음·새 실행 인과 미확인·관측 실패 | 차단 유지. 기한 경과·PID 부재·잠금 획득·domain 부재 하나만으로 종결하지 않음 |
 
 `stop_submission`은 원 호출 경계를 저장한 근거다. `not-submitted`를 먼저 내구 저장하고,
 호출 전에 `submitted`, synchronous 호출 반환 뒤 `returned`를 저장한다. 구형 기록에
 이 근거를 사후 추측해 채우지 않는다. process scope 확인은 observe-only이며 신호도 보내지 않는다.
 현재 실행·의도가 달라졌다면 과거 시도를 그 실행에 적용하지 않는다.
+
+만료한 미결합 launch의 종결에는 두 번의 현재 부재 관측, 원 host·의도·등록·CPU 정책과
+원 operation/run의 재검증, 정확한 VM/execution scope의 observe-only 무잔존 확인이 모두 필요하다.
+이 명령이 남은 domain이나 helper를 정지시키지는 않는다. 미확정 runtime 표지→원 attempt 실패→
+runtime stopped 순서로 필수 저장한다. 중간 중단은 같은 원 attempt의 명시 재호출로 회수할 수 있다.
+새 복구 실행과 원 복구의 재전달도 실행 잠금 안에서 같은 종결을 시도한다. 이전 실행 보호에 걸려
+제출 전에 거절된 것으로 확인되는 구형 복구 원장도 원 오류를 보존해 `failed/not_submitted`로 종결한다.
+제출 뒤 실패를 `launch_aborted_before_submit`로 꾸미거나 원 기한·hash를 바꾸지 않는다.
+단일 저장 실패 때는 같은 실행의 미확정 표지를 복원한다. 복원 저장도 실패하면 두 원인을 구분한
+`RECONCILE_REQUIRED`이며, 저장소가 회복된 뒤 원 결과를 다시 확인해야 한다.
 
 **실행 예시**
 
@@ -1327,6 +1421,11 @@ xenova-vm get "$VM_ID" --json
 **확인 방법**
 
 출력한 attempt ID로 `recovery-operation`을 조회하고 `get/probe`의 새 execution_id를 확인한다. 재전달은 위 Python을 다시 실행하지 않고 **원 RECOVERY_FILE로 실행 명령만 반복**한다. 새 장애는 최신 probe·새 attempt로 요청한다. 계획이 이후 실행을 예약하지 않는다. 만료한 원 파일의 deadline만 고치지 않는다.
+
+Xen 생성 응답을 잃어 실행 신원이 아직 결합되지 않았다면, 원 scope의 현재 `xl` monitor와
+도메인 생성 근거를 대조한다. 같은 실행 신원·의도·구성·CPU 정책이 확인되면 원 호출이나
+동일 요청 재전달에서 `completed`로 종결하고 원 오류를 `reconciliation.original_error`에 보존한다.
+확인 예산으로 Xen 제어 명령을 제출하지 않으며, 근거가 부족하면 원 기록을 미확정으로 유지한다.
 
 **Manager 매핑:** `recover_once / 위 8개 필드`. [중복·만료·중단 판정](#recovery-reconciliation)을 따른다.
 
@@ -1747,7 +1846,12 @@ stop/reboot/recovery·retire/restore/purge는 CPU 예약을 해제하지 않는�
 
 **사용 조건**
 
-모든 관리 게스트가 실제 정지했고 미완료 launch/reboot/control/recovery/자산 작업·uncertain 실행이 없어야 한다. 검사와 저장은 공통 잠금 안에서 진행한다. 명령이 게스트를 대신 정지하지 않는다. 미등록 도메인이 있으면 제안한 공유 집합을 이미 준수해야 한다.
+dom0 공유 집합과 Xen 풀이 같으면 유효 마스크나 전용 예약이 달라지는 VM만 실제 정지를
+확인한다. 해당 VM의 미완료 launch/reboot/control/recovery/자산 작업은 변경을 막는다.
+계속 실행하는 도메인의 실제 배치와 기존 호스트 준비 근거도 확인한다. 최초 설정이나
+호스트 배치 변경은 모든 관리 게스트의 정지와 기존 호스트 준비 절차를 요구한다.
+검사와 저장은 공통 잠금 안에서 진행한다. 정지는 운영자가 수행하며, 미등록 도메인은
+제안한 공유 집합을 이미 준수해야 한다.
 
 **실행 예시**
 
@@ -1782,9 +1886,9 @@ xenova-vm cpu-policy-set --spec-file "$REQUEST" --idempotency-key "$KEY" --execu
 
 **정상 응답**
 
-계획 data는 `{plan:true,policy:후보,host_preparation_required:true}`다. 파일·intent·affinity를 바꾸지 않고 계획 후보의 operation UUID도 저장 확정 ID가 아니다. 최초 실행 data는 `{policy:저장된_정책,host_preparation_required:true}`이며 envelope.operation_id가 publication journal을 가리킨다. 정책에는 schema_version, 단조 정수 policy_revision, operation_id, pool_name, shared_pcpus와 버전에 따른 exclusive 또는 placements가 저장된다.
+계획 data는 `{plan:true,policy:후보,host_preparation_required:bool}`이다. 파일·intent·affinity를 바꾸지 않고 계획 후보의 operation UUID도 저장 확정 ID가 아니다. 최초 실행 data는 `{policy:저장된_정책,host_preparation_required:bool}`이며 envelope.operation_id가 publication journal을 가리킨다. 기존 dom0 준비가 검증된 게스트 배치 변경은 `false`를 반환한다. 정책에는 schema_version, 단조 정수 policy_revision, operation_id, pool_name, shared_pcpus와 버전에 따른 exclusive 또는 placements가 저장된다.
 
-완료 key 재전달은 `replayed=true`, data의 policy·current_policy·historical=true로 과거 결과와 현재 정책을 구분한다. 과거 결과가 현재 정책을 덮어쓰지 않는다. 정책 저장 성공은 현재 dom0 적용 성공이 아니다.
+완료 key 재전달은 `replayed=true`, data의 policy·current_policy·historical=true로 과거 결과와 현재 정책을 구분한다. `host_preparation_required`는 그 작업의 결과이며, 현재 준비 상태는 `cpu-layout`에서 확인한다.
 
 **오류 응답**
 
@@ -1792,7 +1896,7 @@ xenova-vm cpu-policy-set --spec-file "$REQUEST" --idempotency-key "$KEY" --execu
 
 **확인 방법**
 
-`cpu-layout --json`의 policy_revision·reservations를 확인한다. 현재 host 적용은 [내부 CPU 준비](#cmd-cpu-host-prepare)에서 별도로 수행한다. 새 정책은 새 key와 최신 revision, 중단된 동일 정책은 원 spec/key로 재전달한다. journal·anchor를 삭제해 우회하지 않는다.
+`cpu-layout --json`의 policy_revision·reservations·host.ready를 확인한다. 호스트 적용이 필요하면 [내부 CPU 준비](#cmd-cpu-host-prepare)를 수행한다. 새 정책은 새 key와 최신 revision, 중단된 동일 정책은 원 spec/key로 재전달한다.
 
 **Manager 매핑:** `cpu-policy-set / {expected_policy_revision,shared_pcpus,placements}` 또는 기존 exclusive 입력. `execute`·`idempotency_key`는 call 키워드 인자.
 
@@ -2860,7 +2964,7 @@ xenova-boot-status --json
 
 **정상 응답**
 
-기본 평문은 `Xenova startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
+기본 평문은 `XENOVA startup`으로 시작하며 완료된 서비스는 `[ OK ]` 한 줄,
 진행 중인 서비스는 `[START]`, 아직 미시작인 서비스는 `[WAIT; reason unconfirmed]`로 묶어 표시한다.
 `--details`의 `COMPLETE/PROGRESS/WAITING/DELAYED/DEFERRED/FAILED/UNKNOWN/UNAVAILABLE`은
 같은 snapshot의 표시 상태다. 지연·실패·미확정은 기본 출력에도 남는다.
@@ -3852,6 +3956,8 @@ Manager action·envelope·기존 실행 신원과 복구 완료의 의미는 유
 | stopped_monotonic_ms | 종료 기록에 추가되는 시각 |
 | process_scope | 해당 실행의 dom0 지속 프로세스를 소유한 systemd scope. 구형 실행·격리 미사용 경로에는 없거나 null. Xen domain 자체가 아님 |
 | launch_aborted_before_submit | true이면 최종 guard 거절 뒤 동일 launch와 domain 부재를 확인해 제출 전 종결했다는 근거. 제출 뒤 효과 미확정에는 쓰지 않음 |
+| recovery_reconciliation | 만료한 미결합 복구 launch의 명시 종결에 사용하는 내부 원 attempt 참조. 수습 중단 뒤 같은 원 기록을 회수하는 근거이며 새 실행·기한·권한이 아님 |
+| control_reconciliation | 만료·부재·소유 scope 종료가 확인된 원 사용자 start의 종결 참조. `uncertain → 원 작업 failed 내구 저장 → stopped`의 중단을 같은 key로 수습하기 위한 내부 metadata이며 새 기동 권한이 아님 |
 | cpu_policy | configured·policy_revision·정책의 canonical SHA256·allocation·desired_hard_affinity. instance.json 해시와 별도 문맥 |
 | cpu_verification / cpu_error | 생성 후 CPU 검증 실패 시 incomplete와 원 오류. observed 실행 신원은 유지 |
 
@@ -3875,7 +3981,7 @@ cpu_policy의 policy_sha256은 key 정렬·공백 없는 UTF-8 JSON(ensure_ascii
 
 | 필드 | 값·의미 |
 |---|---|
-| `effective_status` | `SUCCEEDED`: 원 결과 내구 확정. `RUNNING`: 같은 원 Linux 준비 또는 lifecycle의 활성 실행 확인. `RECONCILING`: 원 작업에 결합된 명시 private 수습 실행 확인. `FAILED`: 원 생성 실패와 기록된 수습 완료. `RECOVERY_REQUIRED`: 미완료/미확정·실패의 재확인 필요 |
+| `effective_status` | `SUCCEEDED`: 원 결과 내구 확정. `RUNNING`: 같은 원 Linux 준비 또는 lifecycle의 활성 실행 확인. `RECONCILING`: 원 작업에 결합된 private 수습 실행 확인(명시 또는 허용된 자동 후속). `FAILED`: 원 생성 실패와 기록된 수습 완료. `RECOVERY_REQUIRED`: 미완료/미확정·실패의 재확인 필요 |
 | `recovery_required` | effective_status가 RECOVERY_REQUIRED이면 true, 나머지는 false. 자동 복구 이행·출력 허가·할당자의 내구 확인 완료를 뜻하지 않음 |
 
 RUNNING은 응답 시점의 관측이며 VM 실행·생성 완료·기한 연장이 아니다. 원 작업/host/프로세스
@@ -4020,7 +4126,7 @@ boot allowed는 boolean이며 해당 host·세대·revision에만 유효하다. 
 
 현재 Network Starter 종료 구현은 refuse 값만으로 별도 veto 분기를 만들지 않는다. force-allowed는 timeout 후 자동 force로 승격하는 정책이 아니다. 명시 --force는 Linux를 포함한 전체 대상에 적용된다.
 
-shutdown-all은 guest를 정리하고 gate를 닫아 둔다. poweroff/reboot-board는 추가로 미등록 실행 도메인·잔여 실행·신원 변경을 검사한 뒤 VM/종료/DHCP 서비스 정리 → /srv 데이터 unmount → host 전원 동작을 진행한다. 실제 제거가 확인되지 않으면 후속 host 종료를 진행하지 않는다. 사용자 stopped 의도를 모든 VM에 일괄 생성하지 않는다.
+shutdown-all은 guest를 정리하고 gate를 닫아 둔다. poweroff/reboot-board는 추가로 미등록 실행 도메인·잔여 실행·신원 변경을 검사한 뒤 UTC 제공·콘솔 증거 수집 타이머를 먼저 멈춘다. 이어 실행 중인 수집 작업과 VM/종료/DHCP 서비스를 정리하고, /srv 데이터 unmount 성공 뒤 host 전원 동작을 요청한다. 실제 제거나 마운트 해제가 확인되지 않으면 후속 host 종료를 진행하지 않는다. 사용자 stopped 의도를 모든 VM에 일괄 생성하지 않는다.
 
 종료 결과는 action, attempt_id, stopped, already_stopped, forced, graceful_shutdown_requested, instances, board_shutdown, global_force, observation을 제공한다. observation에는 samples/changed_pairs/recent_changes, VM별 결과에는 method/stage/xen_state/error 등이 있다. shutdown-requested가 있으면 단순 host-resume을 허용하지 않는다.
 
@@ -4257,79 +4363,79 @@ enable/active는 broker 종단 성공과 다르다. 실제 인증·SUBACK·신�
 |---|---|
 | INVALID_SPEC / RESOURCE_UNSUPPORTED | 400 / 입력·지원 환경 수정 |
 | VM_NOT_FOUND | 404 / 최신 UUID 확인 |
-| VM_NOT_STOPPED / IDEMPOTENCY_CONFLICT / TARGET_CHANGED | 409 / 현재 문맥 확인. 새 key로 무조건 반복 금지 |
+| VM_NOT_STOPPED / IDEMPOTENCY_CONFLICT | 409 / 현재 문맥 확인. 새 key로 무조건 반복 금지 |
+| TARGET_CHANGED (CPU GET) | 현재503/retryable=true / 새 조회로 현재 배치 재확인 |
 | OPERATION_IN_PROGRESS | 503 / retryable 응답 확인 후 제한된 backoff |
 | RECONCILE_REQUIRED / STORAGE_UNAVAILABLE / RECOVERY_REQUIRED | 503 / journal·저장소 조사 |
 | CPU_POLICY_INVALID / CPU_NOT_READY | 503 / 관리자 복구·host 준비 |
 | CPU_APPLY_INCOMPLETE | 409 / 실행 신원·실제 배치 확인, 자동 destroy·repin 금지 |
 | OBSERVATION_UNAVAILABLE / DEADLINE_EXCEEDED | 503 / 504 / 새 조회 가능, 변경은 journal 우선 |
 
-위 CPU 세 코드는 신규 매핑 인계 항목이다. 현행 mapper는 미등록 CPU 오류를 DriverError(500)로 처리한다. 원 code는 platform_code로, message는 detail로 전달하지만 retryable/details를 구조화해 보존하지 않으므로 별도 CPU 어댑터에서 보존 방식을 정해야 한다. CPU 오류의 retryable 기본값은 false다.
+CPU_POLICY_INVALID/CPU_NOT_READY/CPU_APPLY_INCOMPLETE의 위 상태코드는 권장 매핑이며 현재 공통 mapper에는 아직 없어 DriverError(500)로 반환한다. 현재 CPU GET 어댑터는 TARGET_CHANGED를 retryable=true의503, 하위가 cpu-layout을 모르는 INVALID_SPEC을501로 처리한다. API 입력 검증 실패는400이다. 원 code·message·boolean retryable은 각각 platform_code·detail·retryable로 보존한다. raw details 전체를 공개하지 않으며 key 제어의 원 작업은 허용 필드만 operation으로 투영한다. 권장 CPU 오류 매핑과 실제 운영 수락은 별도 인계 항목이다.
 
-하위 timeout_ms는 1..15000ms이고 상위 SerializedManager의 기본 최대 5초 mutex 대기는 포함하지 않는다. 현재 HTTP 조회 5초·Spring 6초 예산 안에서 상위 대기를 줄이거나 소모 시간을 빼고 남은 기한을 전달한다. ok=true인 불일치 응답을 HTTP 성공 여부만으로 배치 준수라고 판정하지 않는다.
+하위 timeout_ms는1..15000ms다. X-Request-Budget-Ms가 있으면 현재 FastAPI는 도착 시점부터의 잔여 예산에서 응답 여유를 뺀 budget_ms/timeout_ms를 지원 action에 전달한다. SerializedManager 대기는 기본5초와 잔여 예산 중 짧은 값이다. 일반 조회는 XENOVA_PLATFORM_READ_FORK=true와 하위 fork 지원 시 직렬화를 우회한다. 헤더 생략·구형 하위·기능별 예외와 Spring의 실제 호출 예산은 아래 표를 따른다. ok=true인 불일치 응답을 HTTP 성공 여부만으로 배치 준수라고 판정하지 않는다.
 
 <a id="time-budgets"></a>
 ## 호출 경로별 시간 예산과 연동 상태
 
-Q는 threadpool·VM/resource mutex의 순서 대기, S는 SerializedManager 대기,
-L은 플랫폼 잠금, E는 검증·실행, P는 필수 저장·반환, R은 기존 결과의 제한된 재확인이다.
-하위 Manager 진입 이후의 기한에 앞선 Q/S가 자동 포함되지는 않는다.
-아래 배포 관측값은 검증 보고서의 설치본에서 읽은 값이고, 현재 보드 재조회값이 아니다.
-Spring은 소스 기본값만 확인했으며 운영 배포 override는 별도 확인이 필요하다.
+이 절의 현재 구현 대조는2026-11-05 소스 기준이다. 이전 설치본의 대기·실패 측정은
+[측정 이력](../verification/platform-management-boundaries-history.md)에 보존하며 현재 연결 상태로 읽지 않는다.
+Q는 threadpool·VM/resource mutex 대기, S는 SerializedManager 대기, L은 하위 잠금,
+E는 검증·실행, P는 필수 저장·반환, R은 기존 결과의 제한된 재확인이다.
 
-| 경로·적용 위치 | 현재 적용값·계산 시작점 | 포함·제외와 현재 상태 |
+현재 HTTP의 선택 헤더 `X-Request-Budget-Ms`는1..105000ms이며 요청 도착 시점부터 잰다.
+`budget.py`의 context를 service 잠금·driver가 공유하고, 하위에는 남은 시간에서
+`Settings.response_reserve_s`(소스 기본0.5초)를 뺀 값을 전달한다. 응답 여유는 실측 전 설정값이며
+엄밀한 반환 보장값이 아니다. 헤더가 없으면 새 제한을 만들지 않고 기존 동작을 유지한다.
+원 control/recovery 기한은 재전달로 연장하지 않는다.
+
+| 경로·실제 위치 | 현재 적용·포함 범위 | 조건·남은 수락 |
 |---|---|---|
-| Manager get/list/intents/probe/execution-context 및 원 기록 조회 (`xenova_management.Manager._query`) | 진입 시점부터 기본 15초 | spec timeout_ms 1..15000ms와 호출 budget_ms 중 짧은 기한을 registry·관측 슬롯·재확인에서 공유. CLI도 두 인자를 전달. intents는 슬롯/Xen 관측 없음 |
-| probe / cpu-layout / cpu-host-prepare | timeout_ms 기본 15000, 1..15000ms. Manager 진입부터 | 선택한 잔여 기한이 하위 명령에도 적용. CPU factory 정책 등록도 같은 기한 사용 |
-| cpu-policy-set | Manager 진입부터 기본 15초 | registry·정책 검증·관측이 공유. 별도 내부 15초 재발급 없음. 공개 timeout 입력 추가 없음 |
-| start/stop/reboot/destroy | Manager 진입부터 기본 90초 | 선택 budget_ms는 물리 기한을 줄이고 R의 잔여 예산도 제한. 원 요청의 기한은 재발급하지 않음. fsync 등 필수 P를 선점하는 엄밀한 반환 상한은 아님 |
-| UUID/내부 이름 start/stop/reboot/destroy CLI | CLI 진입부터 기본 90초 | 같은 Manager 제어 경로. 파싱·이름 해석 비용을 차감한 budget_ms를 전달하며 원 실행 기한을 재발급하지 않음. syscall·필수 저장의 선점 상한은 아님 |
-| recover_once | 요청의 deadline_monotonic_ms | 최초 수락 시 미래 120초 이내, 원 host에 결합. 재전달로 갱신하지 않음. 만료 뒤 R 최대 15초는 새 실행 권한이 아님 |
-| autostart / unit | batch 전체 140초 / TimeoutStartSec 150초 | 모든 VM이 공유. 전원 부팅 전체의 상한은 아님 |
-| FastAPI `SerializedManager.call` | S 기본 5초 | 하위 Manager 진입 전이며 하위 15/90초에 포함되지 않음. 배포 관측값도 5초 |
-| FastAPI `VmService._vm_lock/create/stop` | VM/resource Q에 현재 유한 상한 없음 | 하위에서 상위의 전체 대기를 제한할 수 없음 |
-| FastAPI xl driver | query subprocess 5초, command 소스 기본/배포 관측 95초 | 별도 xl 호출 상한. platform Manager의 전체 timeout이 아님 |
-| HTTP health/stats | xl 직접 관측 및 요청별 관측 경계 5초 | 공통 Manager get/list와 다른 경로. threadpool Q는 별도 |
-| Spring `application.yml`·`Dom0ManagerProperties`·`Dom0ManagerClient.createClient` | 소스 기본 connect/query/command=2/6/100초 | 각 HTTP 시도의 대기 설정. 배포값 미확인. query와 command의 재시도 정책도 서로 다름 |
-| Recovery Worker | interval 5초, intent refresh 60초 등 관측/장애 판정 유예 | 현재 RecoveryEngine 단일 executor와 연결. 최초 실행 슬롯에서 110초 원 attempt 기한을 고정하고 재전달에는 그대로 사용 |
+| Manager get/list/intents/probe/execution-context·원 기록 조회 | Manager 진입부터 기본15초. timeout_ms1..15000과 budget_ms 중 짧은 기한 공유 | intents는 Xen 관측 없음. 조회 예산으로 과거 작업의 물리 기한을 갱신하지 않음 |
+| probe / cpu-layout / cpu-host-prepare | 하위 timeout_ms 기본15000,1..15000ms. registry·관측·하위 명령이 같은 기한 사용 | 현재 CPU HTTP의 기본 timeout_ms는5000이며 요청 예산이 있으면 더 짧은 잔여값 사용 |
+| cpu-policy-set | Manager 진입부터 기본15초. 별도 내부15초 재발급 없음 | 공개 CPU 변경은 기존 로컬 계약. CPU GET을 변경 API로 확대하지 않음 |
+| start/stop/reboot/destroy | 기본90초. 지원되는 budget_ms는 물리 실행·재확인 잔여 시간을 줄임 | 필수 P를 생략하거나 syscall을 선점하는 상한은 아님 |
+| UUID/내부 이름 control CLI | CLI 진입 기본90초에서 파싱·이름 해석 비용을 차감해 Manager에 전달 | 같은 원 key/신원/기한 유지 |
+| recover_once | 최초 수락한 host·deadline_monotonic_ms에 결합. 최초 미래120초 이내 | 만료 뒤 R 최대15초는 확인용이며 새 물리 실행 허가가 아님 |
+| autostart / unit | batch 전체140초 / TimeoutStartSec150초 | 모든 VM의 batch 예산이며 전원 부팅 전체 지연 보장은 아님 |
+| HTTP 일반 조회·SerializedManager.call | 기본 S5초. 헤더가 있으면 min(S, 잔여 예산), 하위 지원 action에 budget_ms 및 필요한 timeout_ms 전달 | read_fork는 소스 기본false. XENOVA_PLATFORM_READ_FORK=true이고 하위 fork를 지원할 때 조회별 새 Manager로 S 우회 |
+| HTTP VM/resource 잠금 | create·key 없는 control/delete는 기존 잠금 사용. 헤더가 있으면 Q도 잔여 예산으로 제한 | 헤더 생략 시 해당 잠금 대기에 새 유한 상한은 없음. threadpool 대기 소모는 도착 시점 기한에 반영 |
+| key stop·원 key 조회 | request_stop/control_operation은 플랫폼 드라이버의 요청별 fork를 사용하며 service의 VM 잠금을 기다리지 않음 | fork를 모르는 구형 Manager는 공유 직렬화를 유지. key 없는 stop과 mock/xl fallback은 기존 동기 경로 |
+| HTTP xl/xentop driver | query 소스 기본5초, command 기본95초. 헤더가 있으면 자체 한도와 응답 여유를 뺀 잔여값 중 짧은 값 | platform Manager 호출 전체 기한과 다른 subprocess 한도. healthz는 요청 예산 예외·자체5초 |
+| HTTP create·retire | 제출 전 만료 검사. 현재 call_with_budget의 budget_ms 전달 대상에는 포함되지 않음 | 수락한 긴 create는 HTTP 예산 후에도 원 생성 정책·원 기한 아래 계속될 수 있음. 생성 정책/상위 수락은 별도 |
+| Spring | 소스 기본 connect/query/command2/6/100초, query·command별 재시도 정책 별도 | 실제 배포 override·요청 헤더 공급·전체 재시도 예산은 담당 후보에서 수락 |
+| Recovery Worker | interval5초·intent refresh60초 등 판정 유예, 최초 실행 슬롯의 원 attempt110초 | 대기/장애 판정 유예와 물리 attempt 기한을 합치지 않음 |
 
-fsync·프로세스 생성·커널 I/O를 선점하는 엄밀한 wall-clock 상한이 아니다. 필수 내구
-저장은 만료됐다는 이유로 생략하지 않는다. R은 결과 확인에만 사용하고 create/reboot를
-재제출하지 않는다. 완료 요청의 현재 조회 실패는 원 결과와 분리한다.
+fsync·프로세스 생성·커널 I/O를 선점하는 엄밀한 wall-clock 상한은 아니다.
+R은 원 결과 확인에만 사용하고 create/reboot를 재제출하지 않는다. 완료 결과와 현재 관측 실패는 분리한다.
+Spring executeQuery는 전송 후 transport 실패도 최대 두 시도, executeCommand는 연결 실패만 재시도하며
+소스 기본 backoff는500ms다. 따라서 query6초가 재시도 전체 상한은 아니다.
+배포값·설치 모듈은 이번 문서 정리에서 보드 재조회하지 않았다.
 
-Spring의 `executeQuery`는 전송 후 transport 실패도 최대 두 시도까지 재시도하며,
-`executeCommand`는 연결 실패만 재시도한다. 소스 기본 backoff는 500ms다. 따라서 query의
-6초는 재시도 루프 전체 상한이 아니다. 전체 호출은 시도별 연결/응답 대기와 backoff까지
-구분해 계산해야 하며, command의 전송 후 timeout을 새 물리 요청으로 반복하면 안 된다.
+<a id="하위만으로-닫히지-않는-시간-계약"></a>
+### 이미 연결된 흐름과 남은 종단 수락
 
-CPU 시간 전달은 하위에서 수정한 현재 동작이다. registry가 14초를 쓴 정책 계획에는
-남은 1초만 전달하고, 1초 host-prepare의 factory 관측이 2초에 끝나면 게시·pin 없이
-DEADLINE_EXCEEDED로 거절한다. 검증 후 게시 직전 만료도 새 정책을 쓰지 않는다.
-이 결과는 fake clock/Xen의 회귀이며 실제 보드 지연 측정이나 HTTP 종단 해결이 아니다.
+| 경로 | 현재 소스 제공 | 실제로 남은 것 |
+|---|---|---|
+| HTTP get/list·일반 control | 기존 call_with_budget가 헤더 잔여값을 지원 하위에 전달. SerializedManager와 VM 잠금도 같은 요청 예산 소비 | caller의 헤더 공급, read_fork 설치 조건, 원 반환 여유·공유 기반 부하의 제품 종단 검증 |
+| 복구 중 key stop | Idempotency-Key 있는 POST stop은 완료200/내구 수락 pending202. request_key 조회와 허용 operation 필드 보존. VM 잠금·Manager S를 우회하는 fork 경로 구현 | Spring/화면의 key 보존·pending 표시·원 결과 회수와 운영 설치본 수락. 202를 STOPPED로 저장하지 않음 |
+| key 없는 stop | 기존204 동기 완료 계약 | key 경로의200/202 의미를 기존 호출에 몰래 적용하지 않음 |
+| Worker recover_once | 원 attempt/D 선저장·journal 우선 확인·원 host/기한 재사용 | 실제 장애 판단·출력 보호·rejoin·사용자 stop 경쟁의 제품 종단 수락 |
+| 자산 create | 원 수락/실패·자원 예약·실제 검증 복사·명시 수습 보존 | HTTP 예산과 승인 생성 정책의 연결, 부분 실패 회수, 실설치·운영 시간 수락 |
 
-### 하위만으로 닫히지 않는 시간 계약
+25초·120초의 새 HTTP 대기는 합의·적용하지 않는다. 하위 예산 전달과 key stop은 이미 제공되지만,
+모든 상위 제품·설치본·외부 지연의 종단 상한이 수락됐다는 뜻은 아니다.
 
-| 기능/호출 경로 | 현재 계약·시간 소비 | 하위 조정 또는 어려운 이유 | 최소 변경안·반환 여유·협의 |
-|---|---|---|---|
-| HTTP get/list | 조회 계약 5초, Spring query 기본 6초. 하위 기본 E/P 15초에 S 최대 5초·Q가 앞섬 | 하위 timeout_ms/budget_ms는 제공하지만 현행 FastAPI는 전달하지 않음. 기본값 일괄 축소나 관측 생략 없이 남은 기간을 선택할 수 있음 | 상위 Q/S와 반환 여유를 같은 요청 예산에 포함하고 get/list에 잔여값을 연결해야 함. 종단 연결·수락은 미완료 |
-| 일반 HTTP control | 기본 E 90초 + 기존 R 최대 15초 + P, S 최대 5초. Spring command 기본 100초 | 하위 budget_ms로 물리/재확인 잔여 예산을 제한할 수 있지만 FastAPI 전달은 미연결. 상위 Q가 무기한이면 유한 종단 보장 불가 | Q/S 소모와 반환 여유를 뺀 실제 잔여값 전달. 물리 원 기한은 연장하지 않음. 100초 caller 안에서 수습 관측이 충분한지는 제품 조건별 수락 필요 |
-| 복구 중 stop HTTP | VM Q와 S가 하위 수락보다 앞섬. 오류 details·원 key도 현재 경로에서 보존하지 않음 | 하위의 짧은 durable 수락만으로 상위 잠금을 우회할 수 없음 | 기존 stop 경로의 짧은 수락/긴 실행 분리와 요청별 Manager 상태 보호, pending/completed 응답 구분 필요. 새 HTTP API를 임의 구현하지 않음 |
-| Worker recover_once 실행 | 현재 Engine이 실행 슬롯·현재 view에서 기본 110초 spec을 선저장한 뒤 호출 | 실행 전 판단 큐/직렬화 대기는 이 실행 예산과 별도. 응답 유실은 원 attempt journal로 확인 | 같은 attempt의 원 host·절대 D를 재사용. 원 D 뒤 기존 verify_timeout_s(기본 150초)까지 결과 조회가 계속 실패하면 final RECONCILE_REQUIRED로 조정 요구. 이 확인 예산은 새 물리 실행 허가가 아님 |
-| 자산 등록 create | metadata·용량 후 검증 root 복사 1회·guest 준비·조건부 게시/등록. 후속 start는 별도 제어 | 하위는 유한 생성 정책/원 host·기한을 제공. 제어 90초·조회 15초를 생성 운영값으로 쓰지 않음 | 승인된 생성 정책 공급·잔여 호출 예산과 원 결과 회수·명시 수습을 상위에서 연결. 실제 운영 시간/HTTP/보드 수락은 별도 |
+<a id="복구-중-정지-요청-연동의-변경-지점"></a>
+### 확인한 실제 위치와 담당 수락
 
-25초·120초 HTTP 대기는 합의·적용된 계약이 아니다. 관측 최대 시간은 보장 상한이
-아니며, 특정 후보의 표본 수·정책·firmware·domain·저장소 조건은
-[측정 보고서](../verification/platform-management-boundaries-history.md)에 있다.
-현재 상위 대기·동기 계약의 불일치는 미해결이다.
-
-### 복구 중 정지 요청 연동의 변경 지점
-
-| 담당 위치 | 연결할 내용·수락 조건 |
+| 실제 위치 | 현재 책임·수락 |
 |---|---|
-| `platform/services/dom0-manager/dom0_manager/service.py:VmService._vm_lock/create/stop`, `drivers/platform.py:SerializedManager.call` | 원 요청 예산에서 Q/S 차감. 긴 복구 잠금 중 별도 stop이 durable pending으로 수락되고 요청별 Manager 상태가 섞이지 않는 HTTP 경쟁 시험 |
-| `drivers/platform.py:PlatformDriver._stop/raise_for_envelope`, `errors.py:Dom0ManagerError.body`, `api/errors.py`, `api/vms.py:stop_vm` | 원 key/operation, accepted/completion/revision/deadline 전달. 미수락 busy·pending·완료·superseded·만료 구별. 기존 204 완료를 접수 완료로 재해석하지 않음 |
-| `backend/src/main/resources/application.yml`, `backend/src/main/java/com/xenova/backend/vm/infrastructure/Dom0ManagerProperties.java`, `Dom0ManagerClient.createClient/executeQuery/executeCommand/handleError` | 실제 배포 timeout 확인, 협의한 전체 예산 반영, 응답 유실 시 원 작업 재확인. 전송 후 timeout을 새 key로 반복하지 않는 시험 |
-| `platform/services/dom0-manager/dom0_manager/recovery/worker.py:RecoveryWorker.run_once`, `recovery/__main__.py:main` | 현재 Engine 연결·원 attempt/D 선저장·journal 우선 재확인을 유지. 제품 HTTP stop 진입의 Q/S·pending 전달과 실제 보드 중단/복원은 별도 종단 수락 |
+| `dom0_manager/main.py:_install_request_budget`, `budget.py` | 헤더 검증·도착 시점 기한·context·응답 여유, healthz 예외 |
+| `service.py:VmService._vm_lock/_resource_guard/request_stop`, `drivers/platform.py:SerializedManager.call/fork/call_with_budget` | Q/S 차감·조건부 read fork·key stop의 별도 요청 객체. 구형 하위 fallback 보호 |
+| `api/vms.py:stop_vm/get_control_operation`, `drivers/platform.py:control_operation_from_envelope/control_operation_from_record/raise_for_envelope` | key stop200/202·원 key GET·accepted/completion/원 사유·허용 operation 필드. 기존 keyless204 유지 |
+| Spring `Dom0ManagerClient`·`VmService`와 화면 | 기존 제공 경로를 소비하고 실제 배포 timeout·key·전체 예산을 담당 후보로 회신 |
+| `recovery/worker.py:RecoveryWorker.run_once`, `recovery/__main__.py:main` | 원 attempt·저장·판정·재합류 책임. RAM/Telemetry의 최근 수신을 복구 허가로 바꾸지 않음 |
 
 <a id="sources"></a>
 ## 구현 근거와 유지 기준

@@ -1,6 +1,7 @@
 """관측 어댑터: 플랫폼 registry 의도(Manager intents/get) + 템플릿 capability + Xen 도메인(xl list).
 
-- 의도는 매 주기 Manager intents 로 읽는다. 저장된 의도·등록만 읽고 Xen·공통 잠금을 쓰지 않는다(cli-manager-spec cmd-intents).
+- 매 주기 Manager recovery-intents로 등록과 저장 의도를 읽는다. 검증된 등록 미완료 VM의 판정만 보류한다.
+  옛 Manager에서는 intents를 사용한다. 두 조회 모두 Xen과 공통 잠금 없이 동작한다.
   intents 를 모르는 옛 Manager(INVALID_SPEC)면 경고 뒤 list(전역 잠금 + VM 마다 Xen 관측)를 intent_refresh_s 마다 읽는다.
 - 의도를 못 읽으면 캐시된 등록은 건강 보고 대상으로만 남기고(등록 삭제로 해석해 retained 를 지우지 않는다) 관측에
   intent_known=False 를 단다. 감시기는 그동안 crashed·absent 를 포함한 모든 판정을 보류한다. 오래된 의도는 복구 허가가 아니다.
@@ -43,12 +44,19 @@ def _registrations(data: Any, action: str) -> dict[UUID, dict[str, Any]]:
     found: dict[UUID, dict[str, Any]] = {}
     for index, view in enumerate(views):
         problem = _view_problem(view)
+        if problem is None and "registration_pending" in view:
+            if (action != "recovery-intents" or view["registration_pending"] is not True
+                    or view["desired_state"] != "unknown" or view["intent_revision"] is not None
+                    or view["intent_applicable"]):
+                problem = "invalid pending registration"
         if problem is None:
             vm_id = UUID(view["vm_id"])
             if vm_id in found:
                 problem = f"duplicate vm_id {vm_id}"
             else:
                 found[vm_id] = _intent(view)
+                if view.get("registration_pending"):
+                    found[vm_id]["registration_pending"] = True
                 continue
         raise PlatformUnavailable(f"recovery {action}: registration {index} is invalid ({problem}); the whole response is ignored")
     return found
@@ -107,7 +115,7 @@ def _intent(view: dict[str, Any]) -> dict[str, Any]:
 
 class PlatformObserver:
     def __init__(self, manager: ManagerLike, xl: Xl, *, intent_refresh_s: float = 60.0, clock: Callable[[], float] = time.monotonic,
-                 drive_bindings=None,drive_vm_ids=()) -> None:
+                 drive_bindings=None,drive_vm_ids=(),intent_action="intents") -> None:
         self._manager = manager
         self._xen = XenDriver(xl)
         self._refresh_s = intent_refresh_s
@@ -118,14 +126,19 @@ class PlatformObserver:
         self._capability_errors: set[tuple[str, str]] = set()  # 잘못된 값을 이미 로그한 템플릿
         self._refreshed_at: float | None = None
         self._templates_at: float | None = None
-        self._action = "intents"  # 옛 Manager 면 list 로 바뀐다
+        self._action = intent_action
         self._intent_known = True  # 마지막 의도 조회가 성공했는가. 실패하면 캐시는 표시용이고 판정 근거가 아니다
+
+    @property
+    def intent_known(self) -> bool:
+        """마지막 의도 조회가 성공했는가(자가진단용)."""
+        return self._intent_known
 
     # ---- 주기 관측 ----
 
     def __call__(self) -> list[VmObservation]:
         now = self._clock()
-        due = self._action == "intents" or self._refreshed_at is None or now - self._refreshed_at >= self._refresh_s
+        due = self._action != "list" or self._refreshed_at is None or now - self._refreshed_at >= self._refresh_s
         if self._intents is None or due:
             try:
                 self._refresh_intents(now)
@@ -137,19 +150,27 @@ class PlatformObserver:
                                 "until intents are read again: %s", self._action, exc.message)
                 self._intent_known = False
         domains = {d.vm_id: d for d in self._xen.list_domains()}
-        return [self._merge(vm_id, intent, domains.get(vm_id), intent_known=self._intent_known) for vm_id, intent in self._intents.items()]
+        return [self._merge(vm_id, intent, domains.get(vm_id),
+                            intent_known=self._intent_known and not intent.get("registration_pending"))
+                for vm_id, intent in self._intents.items()]
 
     def _refresh_intents(self, now: float) -> None:
-        envelope = self._manager.call(self._action)
+        # 복구 실행이 공유 Manager를 점유해도 주기 조회는 독립 요청으로 검증한다.
+        fork = getattr(self._manager, "fork", None)
+        request_manager = (fork() if callable(fork) else None) or self._manager
+        envelope = request_manager.call(self._action)
+        if self._action == "recovery-intents" and not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "INVALID_SPEC":
+            self._action = "intents"
+            envelope = request_manager.call(self._action)
         if self._action == "intents" and not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "INVALID_SPEC":
             log.warning("platform manager does not support intents; falling back to list (platform lock + Xen observation) every %.0fs",
                         self._refresh_s)
             self._action = "list"
-            envelope = self._manager.call("list")
+            envelope = request_manager.call("list")
         intents = _registrations(raise_for_envelope(envelope, context=f"recovery {self._action}"), self._action)
         if self._templates_at is None or now - self._templates_at >= self._refresh_s:
             try:
-                templates = raise_for_envelope(self._manager.call("templates"), context="recovery templates").get("templates") or []
+                templates = raise_for_envelope(request_manager.call("templates"), context="recovery templates").get("templates") or []
                 self._capabilities = {
                     (str(t.get("template_id") or t.get("id") or ""), str(t.get("template_version") or t.get("version") or "")): dict(t.get("capabilities") or {})
                     for t in templates
@@ -162,7 +183,7 @@ class PlatformObserver:
         self._intents, self._refreshed_at, self._intent_known = intents, now, True
 
     def _merge(self, vm_id: UUID, intent: dict[str, Any], domain, *, intent_known: bool = True) -> VmObservation:
-        fields = {k: v for k, v in intent.items() if k != "template"}
+        fields = {k: v for k, v in intent.items() if k not in ("template", "registration_pending")}
         # 템플릿이 capability 를 선언하지 않으면 None(모름): 감시기가 armed 기록으로 정한다. 선언했으면 JSON boolean 만 믿는다.
         # "false" 같은 문자열을 bool() 로 바꾸면 True 가 되어 starter 를 앱 대상으로 재시작하게 된다
         template = intent["template"]

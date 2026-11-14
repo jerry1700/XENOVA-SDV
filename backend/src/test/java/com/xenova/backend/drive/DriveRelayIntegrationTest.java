@@ -9,6 +9,7 @@ import com.xenova.backend.event.domain.EventSeverity;
 import com.xenova.backend.event.domain.EventType;
 import com.xenova.backend.event.domain.VmEvent;
 import com.xenova.backend.event.domain.VmEventRepository;
+import com.xenova.backend.testsupport.MqttTestClients;
 import io.moquette.broker.Server;
 import io.moquette.broker.config.MemoryConfig;
 import java.io.IOException;
@@ -87,7 +88,7 @@ class DriveRelayIntegrationTest {
 
     @BeforeEach
     void connectFakeGateway() throws Exception {
-        fake = new MqttClient("tcp://127.0.0.1:" + MQTT_PORT, "fake-gateway", new MemoryPersistence());
+        fake = new MqttClient("tcp://127.0.0.1:" + MQTT_PORT, MqttTestClients.uniqueId("fake-gateway"), new MemoryPersistence());
         fake.connect();
         fake.subscribe(DriveStateTracker.PREFIX + "apps/manual/input", 0, (topic, message) ->
                 inputs.add(objectMapper.readTree(message.getPayload())));
@@ -96,9 +97,8 @@ class DriveRelayIntegrationTest {
     }
 
     @AfterEach
-    void disconnectFakeGateway() throws Exception {
-        fake.disconnect();
-        fake.close();
+    void disconnectFakeGateway() {
+        MqttTestClients.closeQuietly(fake);
     }
 
     @AfterAll
@@ -226,11 +226,11 @@ class DriveRelayIntegrationTest {
     }
 
     @Test
-    void resumeIsPublishedOnlyInAutoReadyAndTheCountdownIsRelayed() throws Exception {
+    void resumeIsRefusedOutsideResumableModesAndTheCountdownIsRelayed() throws Exception {
         String token = login();
         await(() -> {
             publish(DriveStateTracker.CONTROL_TOPIC, "dom0-gateway", null, "vehicle.control",
-                    "{\"mode\":\"MANUAL\",\"generation\":30,\"active_app\":\"manual\"}", 1, true);
+                    "{\"mode\":\"UNKNOWN_MODE\",\"generation\":30,\"active_app\":null}", 1, true);
             var control = tracker.snapshot().control();
             return control != null && control.generation() != null && control.generation() == 30;
         });
@@ -240,6 +240,14 @@ class DriveRelayIntegrationTest {
         assertThat(objectMapper.readTree(refused.getBody()).path("code").asText()).isEqualTo("NOT_AUTO_READY");
         assertThat(restTemplate.postForEntity("/api/v1/drive/resume", null, String.class).getStatusCode().value())
                 .isEqualTo(401);
+        // No countdown to cancel yet (contract v1.7).
+        ResponseEntity<String> nothingToCancel = restTemplate.exchange(
+                "/api/v1/drive/resume", HttpMethod.DELETE, new HttpEntity<>(bearer(token)), String.class);
+        assertThat(nothingToCancel.getStatusCode().value()).isEqualTo(409);
+        assertThat(objectMapper.readTree(nothingToCancel.getBody()).path("code").asText())
+                .isEqualTo("NO_RESUME_COUNTDOWN");
+        assertThat(restTemplate.exchange("/api/v1/drive/resume", HttpMethod.DELETE, HttpEntity.EMPTY, String.class)
+                .getStatusCode().value()).isEqualTo(401);
 
         await(() -> {
             publish(DriveStateTracker.CONTROL_TOPIC, "dom0-gateway", null, "vehicle.control",
@@ -256,6 +264,10 @@ class DriveRelayIntegrationTest {
         assertThat(request.path("type").asText()).isEqualTo("drive.resume.requested");
         assertThat(request.path("source_id").asText()).isEqualTo("dom0-server");
         assertThat(request.path("payload").path("requested_by").asText()).isEqualTo("drive-relay-user");
+        // Bound to the control publication the gateway made (verified profile, contract §5.2).
+        String controlMessageId = tracker.controlContext().orElseThrow().messageId();
+        assertThat(request.path("causation_id").asText()).isEqualTo(controlMessageId);
+        assertThat(request.path("payload").path("expected_generation").asLong()).isEqualTo(31);
 
         // The gateway answers with a countdown: event log + drive state.
         await(() -> {
@@ -269,9 +281,21 @@ class DriveRelayIntegrationTest {
         assertThat(state.path("resume").has("remaining_ms")).isTrue();
         assertThat(events(EventType.DRIVE_RESUME_ACCEPTED).get(0).getSeverity()).isEqualTo(EventSeverity.INFO);
 
+        // The operator cancels the countdown: same topic, same control binding, the countdown's generation.
+        ResponseEntity<String> cancel = restTemplate.exchange(
+                "/api/v1/drive/resume", HttpMethod.DELETE, new HttpEntity<>(bearer(token)), String.class);
+        assertThat(cancel.getStatusCode().value()).isEqualTo(202);
+        JsonNode cancelRequest = resumes.poll(5, TimeUnit.SECONDS);
+        assertThat(cancelRequest).isNotNull();
+        assertThat(cancelRequest.path("type").asText()).isEqualTo("drive.resume.cancel_requested");
+        assertThat(cancelRequest.path("causation_id").asText()).isEqualTo(controlMessageId);
+        assertThat(cancelRequest.path("payload").path("expected_generation").asLong()).isEqualTo(31);
+        assertThat(cancelRequest.path("payload").path("requested_by").asText()).isEqualTo("drive-relay-user");
+
         await(() -> {
             publish("xenova/v1/apps/vehicle/events", "dom0-gateway", "vehicle", "drive.resume.cancelled",
-                    "{\"reason\":\"mode_changed\"}", 1, false);
+                    "{\"reason\":\"operator_cancelled\",\"generation\":31,\"requested_by\":\"drive-relay-user\"}",
+                    1, false);
             return !events(EventType.DRIVE_RESUME_CANCELLED).isEmpty();
         });
         assertThat(tracker.snapshot().resume()).isNull();

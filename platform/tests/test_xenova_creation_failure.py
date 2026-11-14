@@ -14,6 +14,14 @@ import xenova_management as management
 
 
 class CreationFailureTest(FollowupFixture):
+    def assert_original_failure(self, op, response):
+        error = response['error']
+        details = dict(error['details'])
+        self.assertEqual(details.pop('operation_context'), {
+            'operation_id':op['operation_id'], 'accepted':True, 'phase':op['phase'], 'completion':'uncertain',
+        })
+        self.assertEqual(op['error'], {**error, 'details':details})
+
     def change(self, name):
         source = self.f.data / 'templates/source' / name
         before = source.read_bytes()
@@ -36,7 +44,7 @@ class CreationFailureTest(FollowupFixture):
         self.assertEqual(response['operation_id'], op['operation_id'])
         self.assertEqual(op['status'], 'RECOVERY_REQUIRED')
         self.assertEqual(op['phase'], 'preparing')
-        self.assertEqual(op['error'], response['error'])
+        self.assert_original_failure(op, response)
         self.assertIn('SHA-256 mismatch: root.raw',op['error']['message'])
         self.assertTrue(disk.is_file())
         self.assertFalse((self.f.data/'instances'/self.f.key).exists())
@@ -87,7 +95,7 @@ with patch.object(vm,'storage_check'), patch.object(preparation,'_copy_verified'
         stage = self.f.data/op['owned_workspace']/self.f.key
         self.assertEqual((stage/'root.raw').read_bytes(),(self.f.data/'templates/source/root.raw').read_bytes())
         self.assertTrue((stage/'Image').exists())
-        self.assertEqual(op['error'],response['error'])
+        self.assert_original_failure(op, response)
         self.assertFalse((self.f.data/'instances'/self.f.key).exists())
 
     def copy_write_failure(self, code):
@@ -108,7 +116,7 @@ with patch.object(vm,'storage_check'), patch.object(preparation,'_copy_verified'
         self.error(response,'RECOVERY_REQUIRED')
         op = self.m._operations()[0]
         self.assertEqual(written,[1])
-        self.assertEqual(op['error'],response['error'])
+        self.assert_original_failure(op, response)
         self.assertIn('errno='+str(code),op['error']['message'])
         disk = self.f.data/op['owned_workspace']/self.f.key/'root.raw'
         before = disk.stat().st_ino,disk.read_bytes()

@@ -12,10 +12,14 @@
 - 재부팅(S15P31E110-208): 키 유무와 관계없이 신규 재부팅은 실행 중인 도메인만 받는다(없으면 404, 실행 중이 아니면 409). 키 있으면
   같은 키의 원 작업을 먼저 조회해, 있으면 재전달로 보고 상태 검사 없이 하위로 보낸다. 재부팅 중에는 도메인이 잠깐 없어 상태 검사가
   재전달을 409 로 막기 때문이다. 키 없는 재부팅만 vm_id 락 안에서 동기로 기다린다
+- 자원 변경(S15P31E110-368): 정지한 Linux 의 등록 설정을 바꾸므로 Provisioner 몫이다. 같은 VM 의 create·stop·delete 와 vm_id 락으로
+  직렬화한다. 신규·재전달 구분과 실행 상태 확인은 Provisioner(플랫폼은 원 작업 조회와 하위 검사)가 한다
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 from collections import defaultdict
 from contextlib import contextmanager
@@ -24,17 +28,39 @@ from uuid import UUID
 from . import budget as request_budget
 from .config import Settings
 from .drivers.base import CreateSpec, Domain, Driver, Provisioner, StatsSample
-from .errors import InsufficientResources, InvalidArgument, InvalidState, OperationNotFound, VMExists, VMNotFound
-from .models import ControlOperation, ControlStatus, CpuLayout, CreateVmRequest, VmState
+from .errors import (Dom0ManagerError, DriverTimeout, InsufficientResources, InvalidArgument, InvalidState,
+                     OperationNotFound, VMExists, VMNotFound, VMSpecConflict)
+from .models import (ControlOperation, ControlStatus, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate,
+                     UpdateCpuPolicyRequest, UpdateResourcesRequest, VmLifecycle, VmOperationAction, VmOperationResult, VmOperationStage, VmState)
 
 
-DOM0_UUID = UUID(int=0)  # xl list -l 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
+DOM0_UUID = UUID(int=0)  # xl list -v 에서 Domain-0 의 uuid 는 00000000-0000-0000-0000-000000000000 이다
 
 
 def reject_dom0(vm_id: UUID) -> None:
     """Domain-0 은 관리 대상이 아니다. dom0 가 멈추면 제어 계층과 모든 게스트가 함께 멈추므로 어떤 경로로도 통과시키지 않는다."""
     if vm_id == DOM0_UUID:
         raise InvalidArgument("Domain-0 (nil UUID) is not a managed VM")
+
+
+@contextmanager
+def _failure_context(action: VmOperationAction, stage: VmOperationStage, *, before_submission: bool):
+    """실제로 제출하지 않은 서비스 단계와 하위 수락을 확인하지 못한 경우를 구분한다."""
+    try:
+        yield
+    except Dom0ManagerError as exc:
+        if exc.context is None:
+            rejected = before_submission or isinstance(exc, VMSpecConflict)
+            exc.context = VmOperationResult(
+                action=action, stage=stage,
+                accepted=False if rejected else None,
+                status=ControlStatus.rejected if rejected else ControlStatus.unknown,
+                next_action="fix_request" if isinstance(exc, (InvalidArgument, VMSpecConflict)) else "check_current_vm",
+                start_submitted=False if action == "start" and before_submission else None,
+            )
+            if exc.detail is not None:
+                exc.public_message = f"platform {action} failed ({exc.code})"
+        raise
 
 
 class VmService:
@@ -89,10 +115,19 @@ class VmService:
 
     # ---- 명령 ----
 
-    def create(self, request: CreateVmRequest) -> Domain:
-        reject_dom0(request.vm_id)
-        with self._vm_lock(request.vm_id):
-            if self._driver.has_domain(request.vm_id):
+    def create(self, request: CreateVmRequest, *, key: str | None = None) -> Domain | ControlOperation:
+        with _failure_context("create", "preflight", before_submission=True):
+            reject_dom0(request.vm_id)
+        with _failure_context("create", "preflight", before_submission=True), self._vm_lock(request.vm_id):
+            spec_hash = None
+            if key is not None:
+                encoded = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode("ascii")
+                spec_hash = hashlib.sha256(encoded).hexdigest()
+                original = self._driver.replay_start(request.vm_id, key=key, create_spec_sha256=spec_hash)
+                if original is not None:
+                    return original
+            if self._driver.has_domain_for_create(request.vm_id):
+                self._provisioner.check_existing_spec(request)
                 raise VMExists(f"domain {request.vm_id} already exists")
             with self._resource_guard():
                 host = self._driver.host_info()
@@ -101,38 +136,59 @@ class VmService:
                 if request.memory_mib > host.free_memory_mib:
                     raise InsufficientResources("memory_mib", request.memory_mib, host.free_memory_mib)
                 request_budget.ensure(f"registering vm {request.vm_id}")
-                instance = self._provisioner.ensure_instance(
-                    request.vm_id,
-                    request.template_id,
-                    request.template_version,
-                    name=request.name,
-                    vcpus=request.vcpus,
-                    memory_mib=request.memory_mib,
-                )
+                with _failure_context("create", "registration", before_submission=False):
+                    instance = self._provisioner.ensure_instance(
+                        request.vm_id,
+                        request.template_id,
+                        request.template_version,
+                        name=request.name,
+                        vcpus=request.vcpus,
+                        memory_mib=request.memory_mib,
+                    )
                 spec = CreateSpec(
                     vm_id=request.vm_id,
                     vcpus=request.vcpus,
                     memory_mib=request.memory_mib,
                     instance=instance,
+                    request_key=key,
+                    create_spec_sha256=spec_hash,
                 )
-                request_budget.ensure(f"starting vm {request.vm_id}")
-                return self._driver.create(spec)
+                try:
+                    with _failure_context("start", "preflight", before_submission=True):
+                        request_budget.ensure(f"starting vm {request.vm_id}")
+                    with _failure_context("start", "acceptance", before_submission=False):
+                        return self._driver.create(spec)
+                except DriverTimeout as exc:
+                    if (instance.registration_operation_id is not None and exc.context is not None
+                            and exc.context.start_submitted is False):
+                        exc.platform_code = "DEADLINE_EXCEEDED"
+                        exc.public_message = "VM registration completed; Xen start was not submitted before the request deadline"
+                        exc.context = VmOperationResult(
+                            action="create", stage="completion", accepted=True, status=ControlStatus.completed,
+                            operation_id=instance.registration_operation_id, next_action="lookup_original",
+                            start_submitted=False,
+                        )
+                    raise
 
     def stop(self, vm_id: UUID) -> None:
-        reject_dom0(vm_id)
-        with self._vm_lock(vm_id):
+        with _failure_context("stop", "preflight", before_submission=True):
+            reject_dom0(vm_id)
+        with _failure_context("stop", "preflight", before_submission=True), self._vm_lock(vm_id):
             request_budget.ensure(f"stopping vm {vm_id}")
-            self._driver.shutdown(vm_id, grace_s=self._settings.shutdown_grace_s)
+            with _failure_context("stop", "acceptance", before_submission=False):
+                self._driver.shutdown(vm_id, grace_s=self._settings.shutdown_grace_s)
 
     def request_stop(self, vm_id: UUID, key: str) -> ControlOperation | None:
         """키 있는 정지. 완료 또는 접수(pending) 상태를 돌려주고, 등록이 없으면 None.
 
         작업 기록이 없는 드라이버(mock·xen)는 기존 동기 정지를 하고 완료로 답한다(operation_id 없음, 조회 불가).
         """
-        reject_dom0(vm_id)
-        if self._driver.tracks_control_operations:
-            request_budget.ensure(f"stopping vm {vm_id}")
-            return self._driver.request_stop(vm_id, key=key)
+        with _failure_context("stop", "preflight", before_submission=True):
+            reject_dom0(vm_id)
+            if self._driver.tracks_control_operations:
+                request_budget.ensure(f"stopping vm {vm_id}")
+                with _failure_context("stop", "acceptance", before_submission=False):
+                    return self._driver.request_stop(vm_id, key=key)
         self.stop(vm_id)
         return ControlOperation(vm_id=vm_id, action="stop", request_key=key, status=ControlStatus.completed, accepted=True)
 
@@ -159,11 +215,23 @@ class VmService:
         reject_dom0(vm_id)
         return self._driver.control_operation(vm_id, key=key)
 
+    def update_resources(self, vm_id: UUID, request: UpdateResourcesRequest, key: str) -> ResourceUpdate:
+        """정지한 Linux VM 의 vCPU·메모리 변경(계약 4.12). 다음 시작부터 적용된다."""
+        reject_dom0(vm_id)
+        with self._vm_lock(vm_id):
+            request_budget.ensure(f"changing resources of vm {vm_id}")
+            return self._provisioner.update_resources(vm_id, vcpus=request.vcpus, memory_mib=request.memory_mib, key=key)
+
     def cpu_layout(self, vm_id: UUID | None = None) -> CpuLayout:
         """CPU 배치 조회(S15P31E110-353). 조회만 하므로 vm_id 락을 쓰지 않는다."""
         if vm_id is not None:
             reject_dom0(vm_id)
         return self._driver.cpu_layout(vm_id)
+
+    def update_cpu_policy(self, request: UpdateCpuPolicyRequest, key: str) -> CpuPolicyUpdate:
+        """전체 CPU 정책을 원자적으로 교체한다. 플랫폼이 모든 게스트 정지 여부와 revision을 다시 검증한다."""
+        request_budget.ensure("changing CPU policy")
+        return self._driver.update_cpu_policy(request, key=key)
 
     def _require_running(self, vm_id: UUID) -> None:
         """재부팅 전제: 등록이 있고(없으면 404) 도메인이 running 이다(꺼짐·paused·crashed·stopping 은 409). 하위 reboot 는 도메인
@@ -186,13 +254,43 @@ class VmService:
             return False
         return True
 
-    def delete(self, vm_id: UUID) -> None:
-        """계약 v1.1: 실행 중이면 409, 등록이 없으면 404, 정지된 VM 은 숨김 보관(retire). 강제 종료는 하지 않는다."""
+    def kill(self, vm_id: UUID) -> None:
+        """장애 주입 강제 종료. 등록이 없으면 404, 도메인이 없으면 409. 등록·의도·디스크는 그대로 둔다."""
         reject_dom0(vm_id)
         with self._vm_lock(vm_id):
-            if self._driver.has_domain(vm_id):
-                raise InvalidState(f"domain {vm_id} is running; stop it before delete")
             if not self._provisioner.instance_exists(vm_id):
                 raise VMNotFound(f"instance {vm_id} not registered")
+            try:
+                self._driver.kill(vm_id)
+            except VMNotFound:
+                raise InvalidState(f"vm {vm_id} has no running domain to kill") from None
+
+    def delete(self, vm_id: UUID, *, key: str | None = None, generation: int | None = None) -> None:
+        """계약 v1.1: 실행 중이면 409, 등록이 없으면 404, 정지된 VM 은 숨김 보관(retire). 강제 종료는 하지 않는다."""
+        with _failure_context("retire", "preflight", before_submission=True):
+            reject_dom0(vm_id)
+            if (key is None) != (generation is None):
+                raise InvalidArgument("Idempotency-Key and expected_lifecycle_generation must be supplied together")
+        with _failure_context("retire", "preflight", before_submission=True), self._vm_lock(vm_id):
+            if not self._provisioner.guards_retirement:
+                if self._driver.has_domain(vm_id):
+                    raise InvalidState(f"domain {vm_id} is running; stop it before delete")
+                if not self._provisioner.instance_exists(vm_id):
+                    raise VMNotFound(f"instance {vm_id} not registered")
             request_budget.ensure(f"retiring vm {vm_id}")
-            self._provisioner.delete_instance(vm_id)
+            with _failure_context("retire", "acceptance", before_submission=False):
+                if key is not None and generation is not None:
+                    self._provisioner.delete_instance_at_generation(vm_id, key=key, generation=generation)
+                else:
+                    self._provisioner.delete_instance(vm_id)
+
+    def vm_lifecycle(self, vm_id: UUID) -> VmLifecycle:
+        reject_dom0(vm_id)
+        return self._driver.vm_lifecycle(vm_id)
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction,
+                     operation_id: UUID | None = None, key: str | None = None) -> VmOperationResult:
+        reject_dom0(vm_id)
+        if key is not None:
+            return self._driver.vm_operation(vm_id, action=action, key=key)
+        return self._driver.vm_operation(vm_id, action=action, operation_id=operation_id)

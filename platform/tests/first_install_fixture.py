@@ -156,11 +156,14 @@ def platform_root(root):
                'usr/lib/xenova/xenova_runtime.py': FILES / 'xenova_runtime.py',
                'usr/lib/xenova/xenova_zephyr.py': FILES / 'xenova_zephyr.py',
                'etc/systemd/journald.conf.d/20-xenova.conf': FILES / 'xenova-journald.conf',
-               'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf'}
+               'etc/systemd/system.conf.d/20-xenova.conf': FILES / 'xenova-system.conf',
+               'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
+                 'xenova_creation.py','xenova_creation_auto.py',
                  'xenova_resources.py','xenova_zephyr_transition.py','xenova_zephyr_control.py',
-                 'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py'):
+                 'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
+                 'xenova_display_sync.py','xenova_display_setup.py'):
         mapping['usr/lib/xenova/'+name] = FILES/name
     mapping['usr/lib/xenova/xenova_broker.py']=ROOT/'platform/deploy/mosquitto/scripts/xenova_broker.py'
     mapping['usr/share/xenova/mqtt/policy.json']=ROOT/'platform/deploy/mosquitto/etc/policy.json'
@@ -184,6 +187,7 @@ def platform_root(root):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source.read_bytes())
     (root/"etc/xenova/dom0-manager.env").chmod(0o600)
+    (root/assemble.deployment_payloads.LOG_ENV).chmod(0o600)
     for dependency in ('fastapi/__init__.py', 'uvicorn/__init__.py', 'paho/mqtt/client.py',
                        'pydantic/__init__.py', 'starlette/__init__.py', 'anyio/__init__.py'):
         target=root/'usr/lib/python3.14/site-packages'/dependency
@@ -207,12 +211,24 @@ def platform_root(root):
     wants.mkdir(exist_ok=True)
     for name in ('xenova-dom0-manager.service', 'xenova-recovery-worker.service', 'xenova-host-admission.service', 'xenova-first-boot.service', 'srv-xenova.mount', 'xenova-vms.service', 'xenova-vm-shutdown.service'):
         (wants / name).symlink_to('/usr/lib/systemd/system/' + name)
+    collector = assemble.deployment_payloads.COLLECTOR
+    (wants/collector).symlink_to('/usr/lib/systemd/system/' + collector)
+    for name in ('xenova-display-feed.service', 'xenova-display-guest-relay.service', 'xenova-display-check.service'):
+        (wants/name).symlink_to('/usr/lib/systemd/system/'+name)
+    (root/'usr/sbin/xenova-display-setup').chmod(0o755)
     early = root/'etc/systemd/system/sysinit.target.wants'
     early.mkdir(parents=True, exist_ok=True)
     (early/'xenova-boot-status.service').symlink_to('/usr/lib/systemd/system/xenova-boot-status.service')
+    (root/'var/volatile/log').mkdir(parents=True)
+    (root/'var/log').symlink_to('volatile/log')
+    (root/'var/log-persistent/journal').mkdir(parents=True)
+    units = root/'usr/lib/systemd/system'
+    (units/'systemd-journal-flush.service').write_text('[Service]\nExecStart=/bin/true\n')
+    (units/'sysinit.target.wants').mkdir(exist_ok=True)
+    (units/'sysinit.target.wants/systemd-journal-flush.service').symlink_to('../systemd-journal-flush.service')
     tools = root / 'usr/bin'
     tools.mkdir(parents=True)
-    for name in ('sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'qemu-system-i386', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl', 'python3'):
+    for name in ('sfdisk', 'partx', 'blockdev', 'blkid', 'e2fsck', 'resize2fs', 'dumpe2fs', 'tune2fs', 'losetup', 'mount', 'umount', 'findmnt', 'cp', 'chroot', 'ssh-keygen', 'lsblk', 'ip', 'ss', 'timedatectl', 'qemu-system-i386', 'wpa_supplicant', 'wpa_cli', 'iw', 'networkctl', 'journalctl', 'python3'):
         (tools / name).write_text('fixture: not executed')
         (tools / name).chmod(0o755)
     for relative in ('brcm/brcmfmac43455-sdio.bin','brcm/brcmfmac43455-sdio.clm_blob',

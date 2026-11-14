@@ -10,8 +10,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.CloseStatus;
-import org.springframework.web.socket.WebSocketSession;
 
 // WS /ws/v1/drive (MQTT contract §7): input only. The console sends {"type":"input","keys":["up","left"]}
 // whenever the held keys change (browser key names are mapped by the console). The relay repeats them at 20 Hz.
@@ -47,11 +45,11 @@ public class DriveInputWebSocketHandler extends AuthenticatedSocketHandler {
         send(client, ack);
     }
 
+    // Also reached when the server closes the socket itself (expired token, oversized frame). The relay keeps
+    // repeating the held keys at 20 Hz, so a close that skipped this would leave the car driving.
     @Override
-    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        Client client = clients.get(session.getId());
-        super.afterConnectionClosed(session, status);
-        if (client != null && client.authenticated) {
+    protected void onClosed(Client client) {
+        if (client.authenticated) {
             relay.release();
         }
     }

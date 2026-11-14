@@ -6,6 +6,7 @@ monotonic fields belong to the same dom0 host_boot_id.
 """
 from __future__ import annotations
 import json,os,stat,threading,time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import UUID,uuid4
 
@@ -36,18 +37,39 @@ def atomic_json(path: Path,value: dict) -> None:
     finally:
         if temp.exists():temp.unlink()
 
-def private_json(path: Path,uid: int=0) -> dict:
-    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
-    with os.fdopen(fd) as stream:
-        s=os.fstat(stream.fileno())
-        if not stat.S_ISREG(s.st_mode) or s.st_uid!=uid or s.st_mode&0o077 or s.st_size>65536:
+@contextmanager
+def _private_json_file(path: Path,uid: int):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=uid or info.st_mode&0o077 or info.st_size>65536:
             raise ValueError('private owned regular JSON required')
+        yield fd,info
+    finally:
+        os.close(fd)
+
+
+def _load_json_object(fd: int) -> dict:
+    with os.fdopen(fd,closefd=False) as stream:
         value=json.load(stream)
     if not isinstance(value,dict):raise ValueError('JSON object required')
     return value
 
+
+def private_json(path: Path,uid: int=0) -> dict:
+    with _private_json_file(path,uid) as (fd,_):
+        return _load_json_object(fd)
+
 class BindingCache:
-    """Read-only memory copy. Failure/expiry revokes acceptance, never invents a session."""
+    """Published observations for the fixed GIL-enabled CPython target.
+
+    Writers serialize cloning/replacement; readers capture one private snapshot
+    without waiting for that work. Published trees must never be mutated.
+    Returned rows copy the three defined app maps; trusted callers must treat
+    other nested values as read-only. An overlapping reader may finish from an
+    earlier snapshot, not acquire a revocation barrier or output permission.
+    This is not a publication guarantee for free-threaded Python runtimes.
+    """
     def __init__(self,host_boot_id: str,*,clock=time.monotonic):
         self.host_boot_id=canonical(host_boot_id);self.clock=clock
         self._lock=threading.Lock();self._value=None;self.error='BINDING_UNAVAILABLE'
@@ -111,24 +133,22 @@ class BindingCache:
 
     def current(self,vm: str,now: float | None=None) -> dict | None:
         now=self.clock() if now is None else now
-        with self._lock:
-            v=self._value
-            if v is None or not v['observed_monotonic_ms']<=int(now*1000)<=v['expires_monotonic_ms']:return None
-            row=v['vms'].get(vm)
-            if not (row and row['status']=='observed' and 0<=int(now*1000)-row['observed_monotonic_ms']<=3000):return None
-            return {**row,**({'app_instances':dict(row['app_instances'])} if 'app_instances' in row else {}),
-                    **({'app_status':dict(row['app_status'])} if 'app_status' in row else {}),
-                    **({'app_state_models':dict(row['app_state_models'])} if 'app_state_models' in row else {})}
+        v=self._value
+        if v is None or not v['observed_monotonic_ms']<=int(now*1000)<=v['expires_monotonic_ms']:return None
+        row=v['vms'].get(vm)
+        if not (row and row['status']=='observed' and 0<=int(now*1000)-row['observed_monotonic_ms']<=3000):return None
+        return {**row,**({'app_instances':dict(row['app_instances'])} if 'app_instances' in row else {}),
+                **({'app_status':dict(row['app_status'])} if 'app_status' in row else {}),
+                **({'app_state_models':dict(row['app_state_models'])} if 'app_state_models' in row else {})}
 
     def observation_status(self,vm: str,now: float | None=None) -> str:
         """A bounded cache fact for reference retirement, never execution
         permission. Missing/stale/failed observation remains unavailable."""
         now=self.clock() if now is None else now
-        with self._lock:
-            value=self._value
-            if value is None or not value['observed_monotonic_ms']<=int(now*1000)<=value['expires_monotonic_ms']:
-                return 'unavailable'
-            return value['vms'].get(vm,{}).get('status','unavailable')
+        value=self._value
+        if value is None or not value['observed_monotonic_ms']<=int(now*1000)<=value['expires_monotonic_ms']:
+            return 'unavailable'
+        return value['vms'].get(vm,{}).get('status','unavailable')
 
     def accepts(self,vm: str,boot: str,instance: str,now: float | None=None,*,app: str | None=None) -> bool:
         row=self.current(vm,now)
@@ -140,10 +160,24 @@ class BindingFile(BindingCache):
     def __init__(self,path: Path,host_boot_id: str,*,clock=time.monotonic,uid=0):
         super().__init__(host_boot_id,clock=clock);self.path=Path(path);self.uid=uid
         self._stop=threading.Event();self._thread=None
+        self._loaded_file=None
 
     def refresh(self):
-        try:self.install(private_json(self.path,self.uid))
-        except (OSError,ValueError):self.invalidate()
+        try:
+            with _private_json_file(self.path,self.uid) as (fd,info):
+                version=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+                # Compare the opened file and keep its original lease. A replace
+                # racing this read is picked up at the next refresh.
+                loaded=self._loaded_file
+                if (loaded is not None and loaded[0]==version and
+                        loaded[1] is not None and loaded[1] is self._value):
+                    return
+                value=_load_json_object(fd)
+            self.install(value)
+            self._loaded_file=(version,self._value)
+        except (OSError,ValueError,KeyError,TypeError):
+            self._loaded_file=None
+            self.invalidate()
 
     def start(self):
         def read():

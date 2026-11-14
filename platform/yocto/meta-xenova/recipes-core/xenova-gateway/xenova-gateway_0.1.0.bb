@@ -1,7 +1,7 @@
 SUMMARY = "Xenova Gateway authority and bounded device output"
 LICENSE = "CLOSED"
 FILESEXTRAPATHS:prepend := "${THISDIR}/../../../../services/gateway:${THISDIR}/../../../../apps/drive/world/python:${THISDIR}/files:"
-SRC_URI = "file://xenova_gateway file://xenova_drive_world file://examples file://pyproject.toml file://xenova-gateway.service file://gateway.env.example"
+SRC_URI = "file://xenova_gateway file://xenova_drive_world file://examples file://pyproject.toml file://xenova-gateway.service file://gateway.env.example file://xenova-drive"
 S = "${UNPACKDIR}"
 
 inherit allarch python3-dir systemd
@@ -16,6 +16,8 @@ SYSTEMD_AUTO_ENABLE:${PN} = "disable"
 
 do_install() {
     install -d "${D}${PYTHON_SITEPACKAGES_DIR}/xenova_gateway" "${D}${systemd_system_unitdir}" "${D}${datadir}/xenova"
+    install -d "${D}${bindir}"
+    install -m 0755 "${S}/xenova-drive" "${D}${bindir}/xenova-drive"
     cd "${S}/xenova_gateway"
     find . -type f -name '*.py' | while IFS= read -r module; do
         install -D -m 0644 "${S}/xenova_gateway/$module" "${D}${PYTHON_SITEPACKAGES_DIR}/xenova_gateway/$module"
@@ -31,4 +33,4 @@ do_install() {
     install -m 0644 "${S}/examples/"*.py "${D}${datadir}/xenova/gateway-examples/"
 }
 
-FILES:${PN} += "${PYTHON_SITEPACKAGES_DIR}/xenova_gateway ${PYTHON_SITEPACKAGES_DIR}/xenova_drive_world ${datadir}/xenova"
+FILES:${PN} += "${PYTHON_SITEPACKAGES_DIR}/xenova_gateway ${PYTHON_SITEPACKAGES_DIR}/xenova_drive_world ${datadir}/xenova ${bindir}/xenova-drive"

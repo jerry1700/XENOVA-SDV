@@ -148,6 +148,11 @@ public class VmRecord {
         this.role = role;
     }
 
+    public void changeResources(int vcpus, int memoryMib) {
+        this.vcpus = vcpus;
+        this.memoryMib = memoryMib;
+    }
+
     public void retire() {
         lifecycle = VmLifecycle.RETIRED;
     }

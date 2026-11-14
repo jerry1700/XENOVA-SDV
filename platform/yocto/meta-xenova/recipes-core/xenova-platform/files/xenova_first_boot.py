@@ -215,7 +215,9 @@ class FirstBoot:
         with request_output(),AssetLease(platform,record['uuid'],'provision',None) as lease:
             lease.guard()
             with common.outside(platform) if common is not None else nullcontext():
-                if guest_kind(record)=='linux':apply_stopped_linux(platform,record,factory=True)
+                if guest_kind(record)=='linux':
+                    apply_stopped_linux(platform,record,factory=True,
+                        display_token_path=self.path('etc/xenova/guest-display/guest-data.token'))
                 else:ensure(self.data,record)
             lease.guard()
             if read_json(path)!=record or read_json(progress)!=before:
@@ -322,6 +324,13 @@ class FirstBoot:
                     raise ValueError('duplicate identity in factory progress')
                 seen_identities.add(item)
         completed = state['phase'] == 'complete'
+        # 실제 화면 제공물을 가진 새 factory만 초기 공급한다. 기존 설치의 선택/비밀은 복원하지 않는다.
+        display_factory = current and any(item['metadata'].get('guest_display')
+            for item in templates if item['id'] == specs[0]['record']['template'])
+        if display_factory and not completed:
+            from xenova_display_setup import prepare_token
+            prepare_token(self.path('etc/xenova'), state)
+            self.save(state_path, state)
         if getattr(self, 'display_progress', None):
             self.display_mode = 'existing-install-verification' if completed else 'initial-registration-resume'
             self.display_progress('asset-verification', mode=self.display_mode)
@@ -388,6 +397,10 @@ class FirstBoot:
             self.save(marker, desired)
         # 완료 표식보다 먼저 전체 registry의 중복/boot 계약을 확인한다.
         load_records(self.data, validate_assets=not completed)
+        if display_factory and not completed:
+            from xenova_display_setup import configure_factory
+            configure_factory(self.data, self.path('etc/xenova'), state,
+                              load_records(self.data, validate_assets=False))
         if not completed:
             from xenova_vm import Platform
             execution = Platform(self.data, self.run).execution()
@@ -404,7 +417,7 @@ class FirstBoot:
         state['phase'] = 'complete'
         self.save(state_path, state)
         self.save(self.run / 'install-ready.json', {'factory_id': factory['factory_id'], 'dom0_machine_id': mid,
-                                                 'asset_errors': asset_errors})
+                                                 'asset_errors': asset_errors, 'fresh_registration': not completed})
         if asset_errors:
             print(json.dumps({'registration': 'complete', 'asset_errors': asset_errors}))
         print('installation verified; hand off to existing VM autostart service')

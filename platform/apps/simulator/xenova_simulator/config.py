@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # MQTT 계약 v1.1 5.4: vehicle.status 는 게이트웨이가 source_id dom0-gateway 로 낸다
 SOURCE_ID = "dom0-gateway"
@@ -86,7 +86,7 @@ class SimSettings:
     input: str = "mqtt"
     frame_listen: str = "0.0.0.0:7600"            # frames 입력: 게이트웨이 시리얼 프레임을 받을 TCP 주소
     camera_listen: str | None = "0.0.0.0:8090"    # 전방 카메라 MJPEG. None 이면 카메라를 끈다
-    track_id: str = "spielberg"                   # 계약 v1.4 §11 트랙 10개 중 하나 (track.track_ids())
+    track_id: str = "spielberg"                   # 계약 §12 트랙 10개 중 하나 (track.track_ids())
     # 출발 신호 (계약 §12 sim.pose.race, 시나리오 P7). False 면 바로 go — 랩 시간만 잰다 (시험·개발용)
     start_lights: bool = True
     drivetrain: Drivetrain = field(default_factory=Drivetrain)
@@ -130,3 +130,22 @@ def parse_address(text: str) -> tuple[str, int]:
     if not sep or not host or not port.isdigit() or not 0 <= int(port) <= 65535:
         raise ValueError(f"address must be host:port, got {text!r}")
     return host, int(port)
+
+
+def camera_for_layout(camera: CameraSpec, layout: dict | None) -> CameraSpec:
+    """새 시험 코스의 잠정 extrinsic/FOV만 적용하고 출력 해상도는 보존한다."""
+    if not layout:
+        return camera
+    return replace(camera, **layout["camera"])
+
+
+def settings_for_track(settings: SimSettings, track) -> SimSettings:
+    """기존 서킷 설정을 보존하며 Jetson 코스의 미실측 차량 가정을 적용한다."""
+    if not track.layout:
+        return replace(settings, track_id=track.id)
+    vehicle = track.layout["vehicle"]
+    wheelbase = vehicle["wheelbase_m"]
+    drivetrain = replace(settings.drivetrain,
+                         max_steer_rad=math.atan(wheelbase / vehicle["min_turn_radius_m"]))
+    return replace(settings, track_id=track.id, wheelbase_m=wheelbase, drivetrain=drivetrain,
+                   camera=camera_for_layout(settings.camera, track.layout))

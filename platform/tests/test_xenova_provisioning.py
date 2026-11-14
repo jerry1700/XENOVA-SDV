@@ -35,6 +35,60 @@ ROOT=Path(__file__).resolve().parents[2]
 REAL_RUN=subprocess.run
 
 
+class DisplayProvisioningTest(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory(prefix='xenova-display-provisioning-')
+        self.addCleanup(self.temp.cleanup)
+        self.base=Path(self.temp.name);self.root=self.base/'root';self.root.mkdir()
+        (self.root/'etc/xenova').mkdir(parents=True)
+        (self.root/'etc/passwd').write_text(
+            'root:x:0:0:root:/root:/bin/bash\n'
+            'xenova-display:x:998:998::/nonexistent:/usr/sbin/nologin\n')
+        self.config=self.root/'etc/xenova/guest-display-domu.json'
+        self.config.write_text(json.dumps({
+            'web_root':'/opt/xenova/display-web','bind':'192.168.77.20','app_port':8086,
+            'allowed_clients':['192.168.77.1'],'data_host':'192.168.77.1','data_port':8085,
+            'data_token_file':'/etc/xenova/guest-display/guest-data.token','page':'/display/combined'}))
+        self.token=self.base/'relay.token';self.token.write_text('shared-secret\n');self.token.chmod(0o600)
+
+    def apply(self, address='192.168.77.6'):
+        return provision.apply_guest_display(
+            {'ipv4':address},self.root,token_path=self.token,token_owner_uid=os.geteuid())
+
+    def test_private_root_gets_actual_ip_and_relay_token(self):
+        with patch.object(provision.os,'chown') as chown:
+            result=self.apply()
+        self.assertEqual(result['bind'],'192.168.77.6')
+        self.assertEqual(json.loads(self.config.read_text())['bind'],'192.168.77.6')
+        supplied=self.root/'etc/xenova/guest-display/guest-data.token'
+        self.assertEqual(supplied.read_text(),'shared-secret\n')
+        self.assertEqual(supplied.stat().st_mode&0o777,0o600)
+        self.assertEqual((self.root/'etc/xenova/guest-display').stat().st_mode&0o777,0o700)
+        self.assertEqual(chown.call_count,2)
+
+    def test_full_private_subnet_address_is_accepted(self):
+        with patch.object(provision.os,'chown'):
+            self.assertEqual(self.apply('192.168.77.200')['bind'],'192.168.77.200')
+
+    def test_missing_or_public_token_refuses_broken_guest_without_config_mutation(self):
+        before=self.config.read_bytes();self.token.unlink()
+        with self.assertRaises(FileNotFoundError):self.apply()
+        self.assertEqual(self.config.read_bytes(),before)
+        self.token.write_text('shared-secret\n');self.token.chmod(0o644)
+        with self.assertRaisesRegex(ValueError,'root-owned mode 0600'):self.apply()
+        self.assertEqual(self.config.read_bytes(),before)
+
+    def test_gateway_and_outside_addresses_are_rejected(self):
+        for address in ('192.168.77.1','192.168.77.255','192.168.78.6','not-an-ip'):
+            with self.subTest(address=address),self.assertRaisesRegex(ValueError,'assigned private IPv4'):
+                self.apply(address)
+
+    def test_non_display_linux_guest_is_unchanged(self):
+        self.config.unlink()
+        self.assertEqual(provision.apply_guest_display({'ipv4':'192.168.77.6'},self.root,
+                         token_path=self.base/'absent'),{'state':'not-requested'})
+
+
 class ProvisioningTest(unittest.TestCase):
     def setUp(self):
         if os.geteuid()!=0:self.skipTest('root-owned local fixtures required')
@@ -156,20 +210,28 @@ class ProvisioningHooksTest(unittest.TestCase):
         shutil.copyfile(ROOT/'platform/services/vm-agent/agent/deploy/xenova-agent.service',unit)
         guest.enable(root,'xenova-agent.service')
 
+    @staticmethod
+    def declare_agent(case, source):
+        import xenova_catalog as catalog
+
+        descriptor=case.f.data/'catalog'/case.spec['template_id']/(case.spec['template_version']+'.json')
+        info=json.loads(descriptor.read_text())
+        manifest=source/'template.json'
+        meta=json.loads(manifest.read_text())
+        meta['guest_agent']={'verification':{'installed':True}}
+        manifest.chmod(0o644);manifest.write_text(json.dumps(meta));manifest.chmod(0o444)
+        info['manifest_sha256']=catalog.sha(manifest)
+        descriptor.write_text(json.dumps(info))
+
     def test_both_linux_create_hooks_use_real_preparation_supplier_and_agent_parser(self):
         from test_xenova_creation_reconcile import CreationReconcileTest
         import prepare_instance as preparation
         import prepare_rootfs as guest
         import xenova_preparation as ownership
-        import xenova_catalog as catalog
         for distribution in ('debian','ubuntu'):
             with self.subTest(os=distribution):
-                c=CreationReconcileTest('runTest');c.setUp();self.addCleanup(c.doCleanups);c.select(distribution)
-                descriptor=c.f.data/'catalog'/c.spec['template_id']/(c.spec['template_version']+'.json')
-                info=json.loads(descriptor.read_text());template=c.f.data/info['asset_directory'];manifest=template/'template.json'
-                meta=json.loads(manifest.read_text());meta['guest_agent']={'verification':{'installed':True}}
-                manifest.chmod(0o644);manifest.write_text(json.dumps(meta));manifest.chmod(0o444)
-                info['manifest_sha256']=catalog.sha(manifest);descriptor.write_text(json.dumps(info))
+                c=CreationReconcileTest('runTest');c.setUp();self.addCleanup(c.doCleanups)
+                _, source=c.select(distribution);self.declare_agent(c,source)
                 captured=[]
                 def rootfs(root,record,command):
                     self.guest(root,distribution)
@@ -193,6 +255,141 @@ class ProvisioningHooksTest(unittest.TestCase):
                     replay=c.m.fork().call('create',{k:v for k,v in c.spec.items() if k not in ('vcpus','memory_mib')},execute=True)
                 self.assertTrue(replay['ok'],replay)
                 self.assertTrue(provision.credential_file(c.f.data,c.spec['vm_id'],'agent').read_bytes()==before)
+
+    def test_linux_creation_deadlines_preserve_persistent_accounts_across_cleanup_and_replay(self):
+        from contextlib import ExitStack
+        from test_xenova_broker_accounts import fixture_hash
+        from test_xenova_creation_reconcile import CreationReconcileTest
+        import prepare_instance as preparation
+        import xenova_creation as creation
+        import xenova_preparation as ownership
+
+        # The product owns the account, supply, copy, publish and journal paths.
+        # The existing hash double replaces only the external mosquitto_passwd.
+        for distribution in ('debian','ubuntu'):
+            for boundary in ('before-publish','published','dhcp-applied','start-confirmation'):
+                with self.subTest(os=distribution,boundary=boundary), ExitStack() as stack:
+                    case=CreationReconcileTest('runTest');case.setUp();stack.callback(case.doCleanups)
+                    _, source=case.select(distribution);self.declare_agent(case,source)
+                    ticks=[10.0];case.p.clock=lambda:ticks[0]
+                    case.p.creation_policy_path.write_text(json.dumps({
+                        'schema_version':'1.0','call_ms':30000,'execution_ms':10000,'cleanup_ms':100,
+                    }))
+
+                    def prepare_guest(root,record,command):
+                        self.guest(root,distribution)
+                        (root/'etc/xenova/instance-id').write_text(record['uuid']+'\n')
+
+                    def external(argv, **kwargs):
+                        if argv[0]=='systemctl':return 'enabled\n'
+                        if argv[0]=='chroot':return '{"python":"guest-boundary","paho_mqtt":"2.1.0"}'
+                        raise AssertionError('unexpected guest command')
+
+                    def expire(phase, _):
+                        if phase==boundary:
+                            ticks[0]=21.
+                            if boundary=='dhcp-applied':
+                                creation.check(case.m,20.)
+
+                    case.m.checkpoint=expire
+                    with case.linux_boundaries(),patch.object(preparation,'prepare_instance',prepare_guest), \
+                            patch.object(ownership,'check_output',external), \
+                            patch.object(broker.subprocess,'run',side_effect=fixture_hash) as hasher, \
+                            patch.object(case.p,'prepare_dhcp',wraps=case.p.prepare_dhcp) as dhcp:
+                        initial=case.m.call('create',case.spec,execute=True)
+                    self.assertEqual(dhcp.call_count,int(boundary in ('dhcp-applied','start-confirmation')))
+                    if boundary=='start-confirmation':
+                        self.assertTrue(initial['ok'],initial)
+                    else:
+                        case.error(initial,'DEADLINE_EXCEEDED')
+                    hasher.assert_called_once()
+                    op,=case.m._operations()
+                    identity=op['vm_id']
+                    root=case.f.data/op['owned_workspace']
+                    target=case.f.data/'instances'/op['assigned']['internal_name']
+                    supply=provision.credential_file(case.f.data,identity,'agent')
+                    before=supply.read_bytes()
+                    generation=broker.load(case.f.data/'mqtt',0,self.provider.rules)
+                    self.assertEqual(supply.stat().st_mode&0o777,0o600)
+                    self.assertEqual(provision.status(case.f.data,identity)['guest_application'],'private-root-configured')
+                    self.assertIn(identity,generation['profiles'])
+                    self.assertEqual(op['creation']['deadline_monotonic_ms'],20000)
+                    if boundary=='start-confirmation':
+                        self.assertEqual(op['status'],'SUCCEEDED')
+                        case.f.xen.records=case.p.records(validate_assets=False)
+                        command=case.p.command
+                        def expire_after_start(argv, **kwargs):
+                            result=command(argv,**kwargs)
+                            if argv[:2]==['xl','create']:ticks[0]+=91.
+                            return result
+                        case.p.command=expire_after_start
+                        with patch.object(case.p,'check_xen'):
+                            start=case.m.call('start',{'vm_id':identity},idempotency_key='fixture-start')
+                        case.error(start,'RECONCILE_REQUIRED')
+                        control=case.f.data/'control-requests'/(start['operation_id']+'.json')
+                        start_record=json.loads(control.read_text())
+                        self.assertEqual(start_record['phase'],'uncertain')
+                        self.assertEqual(start_record['error']['details']['stage'],'start_confirmation')
+                        self.assertEqual(len([a for a in case.f.xen.calls if a[:2]==['xl','create']]),1)
+                    else:
+                        self.assertEqual(op['error']['code'],'DEADLINE_EXCEEDED')
+                    self.assertEqual(target.exists(),boundary!='before-publish')
+                    if boundary=='before-publish':
+                        self.assertTrue(creation.holds(case.m,op))
+                        resources=json.loads((root/'.preparation-resources.json').read_text())
+                        self.assertTrue(resources['clean'])
+                        self.assertEqual((resources['mounts'],resources['loops']),([],[]))
+                        # The mount double materializes guest-root files on the host.
+                        # A real unmount hides these in root.raw before workspace cleanup.
+                        shutil.rmtree(root/'root')
+                    else:
+                        inode=(target/'root.raw').stat().st_ino
+
+                    case.m.checkpoint=lambda *args:None
+                    with patch.object(preparation,'_copy_verified',side_effect=AssertionError('no repeat copy')), \
+                            patch.object(provision,'ensure',side_effect=AssertionError('no credential reissue')), \
+                            patch.object(case.p,'prepare_dhcp',side_effect=AssertionError('no late DHCP')):
+                        if boundary=='before-publish':
+                            with case.linux_boundaries():
+                                settled=case.m.call('operation-reconcile',case.request(op),execute=True)
+                            self.assertTrue(settled['ok'],settled)
+                            self.assertEqual(settled['data']['effective_status'],'FAILED')
+                            self.assertFalse(root.exists())
+                        elif boundary=='published':
+                            diagnostic=case.m.call('operation-reconcile',{
+                                'operation_id':op['operation_id'],'vm_id':identity,
+                                'expected_spec_sha256':op['spec_hash'],'purpose':'discard-private',
+                            })
+                            case.error(diagnostic,'TARGET_CHANGED')
+                        replay=case.m.call('create',case.spec,execute=True)
+                    current,=case.m._operations()
+                    self.assertEqual(replay['operation_id'],op['operation_id'])
+                    self.assertEqual(current['creation'],op['creation'])
+                    self.assertEqual(current['assigned'],op['assigned'])
+                    self.assertTrue(supply.read_bytes()==before)
+                    latest=broker.load(case.f.data/'mqtt',0,self.provider.rules)
+                    self.assertEqual(latest['revision'],generation['revision'])
+                    self.assertTrue(latest['secrets'][identity]==generation['secrets'][identity])
+                    if boundary=='before-publish':
+                        case.error(replay,'DEADLINE_EXCEEDED')
+                        self.assertFalse(creation.holds(case.m,current))
+                        self.assertEqual(current['error'],op['error'])
+                    elif boundary=='published':
+                        case.error(replay,'DEADLINE_EXCEEDED')
+                        self.assertTrue(creation.holds(case.m,current))
+                        self.assertEqual(current['error'],op['error'])
+                    elif boundary=='dhcp-applied':
+                        self.assertTrue(replay['ok'],replay)
+                        self.assertEqual(current['status'],'SUCCEEDED')
+                        self.assertEqual(current['first_error'],op['error'])
+                    else:
+                        self.assertTrue(replay['ok'],replay)
+                        self.assertEqual(current,op)
+                        self.assertEqual(json.loads(control.read_text()),start_record)
+                    if boundary!='before-publish':
+                        self.assertEqual((target/'root.raw').stat().st_ino,inode)
+                    self.assertEqual(len([a for a in case.f.xen.calls if a[:2]==['xl','create']]),
+                                     int(boundary=='start-confirmation'))
 
     def test_real_factory_hook_supplies_only_after_uuid_plan_and_never_on_completed_boot(self):
         from first_install_fixture import Board
@@ -224,6 +421,36 @@ class ProvisioningHooksTest(unittest.TestCase):
         descriptor={'schema_version':'1.0','template_id':'provision-drive','template_version':'1.0.0','guest_kind':'zephyr','asset_directory':'rtos-templates/provision-drive','source_template_id':'provision-drive','manifest_sha256':catalog.sha(path)}
         dest=f.p.data/'catalog/provision-drive';dest.mkdir();(dest/'1.0.0.json').write_text(json.dumps(descriptor))
         return {'vm_id':B,'name':'supplied-zephyr','template_id':'provision-drive','template_version':'1.0.0'}
+
+    def test_catalog_projects_only_declared_app_heartbeat(self):
+        import test_xenova_recovery_foundation as foundation
+        import xenova_catalog as catalog
+        import xenova_management as management
+
+        f = foundation.FoundationTest('runTest')
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        self.zephyr_template(f)
+        manager = management.Manager(f.p)
+        catalog_entry = f.p.data/'catalog/provision-drive/1.0.0.json'
+        manifest = f.p.data/'rtos-templates/provision-drive/firmware.json'
+        for app, expected in (('xenova-drive', True), ('xenova-starter', False), ('undeclared-fixture', None)):
+            with self.subTest(app=app):
+                value = json.loads(manifest.read_text())
+                value['source']['app'] = app
+                manifest.chmod(0o644)
+                manifest.write_text(json.dumps(value))
+                manifest.chmod(0o444)
+                descriptor = json.loads(catalog_entry.read_text())
+                descriptor['manifest_sha256'] = catalog.sha(manifest)
+                catalog_entry.write_text(json.dumps(descriptor))
+                response = manager.call('templates')
+                self.assertTrue(response['ok'], response)
+                row = next(t for t in response['data']['templates'] if t['template_id'] == 'provision-drive')
+                self.assertIs(row['provisioning_profile']['signals']['app_heartbeat'], expected)
+                self.assertIs(row['capabilities'].get('app_heartbeat'), expected)
+                if expected is None:
+                    self.assertNotIn('app_heartbeat', row['capabilities'])
 
     def test_zephyr_create_hash_barrier_allows_other_actual_stop_and_preserves_credentials(self):
         import test_xenova_recovery_foundation as foundation
@@ -269,6 +496,56 @@ class ProvisioningHooksTest(unittest.TestCase):
             self.assertTrue(completed['ok'],completed);self.assertEqual(copies.call_count,1)
             self.assertEqual(completed['operation_id'],original['operation_id'])
             self.assertTrue(json.loads(provision.credential_file(f.p.data,B,'drive').read_text())['password']==before)
+
+    def test_zephyr_supply_timeout_retains_published_broker_account_after_firmware_cleanup(self):
+        from test_xenova_broker_accounts import fixture_hash
+        from test_xenova_creation_reconcile import CreationReconcileTest
+        import xenova_creation as creation
+        import xenova_zephyr as zephyr
+
+        case=CreationReconcileTest('runTest');case.setUp();self.addCleanup(case.doCleanups)
+        request=self.zephyr_template(case)
+        case.m.preparer=case.m._prepare
+        ticks=[10.0];case.p.clock=lambda:ticks[0]
+        ensure=broker.ensure_accounts
+
+        def expire_after_account(*args, **kwargs):
+            result=ensure(*args,**kwargs)
+            ticks[0]=11.
+            return result
+
+        with patch.object(broker.subprocess,'run',side_effect=fixture_hash) as hasher, \
+                patch.object(broker,'ensure_accounts',expire_after_account):
+            result=case.m.call('create',request,execute=True,budget_ms=500)
+        hasher.assert_called_once()
+        case.error(result,'RECOVERY_REQUIRED')
+        original,=case.m._operations()
+        self.assertEqual(original['phase'],'preparing')
+        self.assertEqual(original['automatic_cleanup']['state'],'pending')
+        self.assertNotIn('creation',original)  # The Linux execution-deadline policy is not bound here.
+        target=case.p.data/'instances'/original['assigned']['internal_name']
+        workspace=case.p.data/original['owned_workspace']
+        self.assertFalse(target.exists())
+        self.assertTrue(workspace.exists())
+        self.assertTrue(creation.holds(case.m,original))
+        supply=provision.home(case.p.data,B)
+        self.assertEqual(list(supply.iterdir()),[])
+        generation=broker.load(case.p.data/'mqtt',0,self.provider.rules)
+        self.assertTrue({B,'telemetry-'+B}.issubset(generation['profiles']))
+        with patch.object(zephyr,'copy_revision',side_effect=AssertionError('no repeat copy')), \
+                patch.object(broker,'ensure_accounts',side_effect=AssertionError('no credential reissue')):
+            settled=case.m.call('operation-reconcile',case.request(original),execute=True)
+            self.assertTrue(settled['ok'],settled)
+            replay=case.m.call('create',request,execute=True)
+        case.error(replay,original['error']['code'])
+        self.assertEqual(replay['operation_id'],original['operation_id'])
+        self.assertFalse(workspace.exists())
+        self.assertFalse(creation.holds(case.m,case.m._operations()[0]))
+        self.assertEqual(list(supply.iterdir()),[])
+        self.assertEqual(provision.status(case.f.data,B)['state'],'not-supplied')
+        latest=broker.load(case.p.data/'mqtt',0,self.provider.rules)
+        self.assertEqual(latest['revision'],generation['revision'])
+        self.assertTrue(latest['secrets']==generation['secrets'])
 
     def drive(self):
         profile=from_manifest({'source':{'app':'xenova-drive'}},config='CONFIG_XENOVA_TELEMETRY=y\nCONFIG_XENOVA_DRIVE_WARM=y\nCONFIG_XENOVA_DRIVE_LATTICE=y')

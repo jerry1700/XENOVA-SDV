@@ -1,5 +1,6 @@
 """영구 VM 자격의 확보·private 전달. 인증 성공/실행 binding·건강 판정과는 별개다."""
 import json
+import ipaddress
 import os
 from pathlib import Path
 import stat
@@ -8,6 +9,11 @@ import time
 import xenova_broker as broker
 from xenova_guest_profile import validate
 from xenova_runtime import atomic_write
+from prepare_rootfs import inside
+
+
+DISPLAY_GUEST_TOKEN = Path('/etc/xenova/guest-display/guest-data.token')
+DISPLAY_GUEST_NETWORK = ipaddress.ip_network('192.168.77.0/24')
 
 
 def private(path, *, directory=False):
@@ -127,6 +133,89 @@ def credential_file(data, identity, channel):
     return path
 
 
+def _display_account(root):
+    """설치된 전용 계정의 숫자 신원을 guest namespace 안에서만 읽는다."""
+    matches = []
+    for line in inside(root, 'etc/passwd', create_parents=False).read_text().splitlines():
+        fields = line.split(':')
+        if fields and fields[0] == 'xenova-display':
+            matches.append(fields)
+    if len(matches) != 1:
+        raise ValueError('display guest account is missing or duplicated')
+    fields = matches[0]
+    if (len(fields) != 7 or not fields[2].isdigit() or not fields[3].isdigit()
+            or int(fields[2]) <= 0 or int(fields[3]) <= 0):
+        raise ValueError('display guest account is invalid')
+    return int(fields[2]), int(fields[3])
+
+
+def _display_secret(path, *, owner_uid=0):
+    """dom0 원본 토큰은 root 전용 단일 regular file만 허용한다."""
+    path = Path(path)
+    info = path.lstat()
+    if (info.st_uid != owner_uid or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 512):
+        raise ValueError('display guest token source must be root-owned mode 0600 regular file')
+    token = path.read_text(encoding='utf-8').strip()
+    if not token or any(character in token for character in '\r\n\0'):
+        raise ValueError('display guest token source is empty or malformed')
+    return token
+
+
+def _display_address(value):
+    if not isinstance(value, str):
+        raise ValueError('display guest requires its assigned private IPv4')
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError as error:
+        raise ValueError('display guest requires its assigned private IPv4') from error
+    gateway = DISPLAY_GUEST_NETWORK.network_address + 1
+    if (not isinstance(address, ipaddress.IPv4Address) or address not in DISPLAY_GUEST_NETWORK
+            or address in (DISPLAY_GUEST_NETWORK.network_address,
+                           DISPLAY_GUEST_NETWORK.broadcast_address, gateway)):
+        raise ValueError('display guest requires its assigned private IPv4')
+    return str(address)
+
+
+def apply_guest_display(record, root, *, token_path=DISPLAY_GUEST_TOKEN, token_owner_uid=0):
+    """display 템플릿 사본에 실제 할당 IP와 dom0 Relay 자격을 오프라인 공급한다.
+
+    일반 웹 생성 VM은 factory 예약 주소(.20)를 소유하지 않는다. 템플릿의 .20은
+    factory 기본값일 뿐이므로, 인스턴스 사본에는 registry가 확정한 주소를 쓴다.
+    토큰은 공용 템플릿에 저장하지 않고 이 private root mount에만 복사한다.
+    """
+    root = Path(root)
+    config_path = inside(root, 'etc/xenova/guest-display-domu.json',
+                         follow_final=False, create_parents=False)
+    if not config_path.exists() and not config_path.is_symlink():
+        return {'state': 'not-requested'}
+    if config_path.is_symlink() or not config_path.is_file():
+        raise ValueError('display guest config must be a regular file')
+    address = _display_address(record.get('ipv4'))
+    config = json.loads(config_path.read_text(encoding='utf-8'))
+    if (not isinstance(config, dict) or config.get('data_token_file') !=
+            '/etc/xenova/guest-display/guest-data.token'):
+        raise ValueError('display guest token destination differs from the provisioning contract')
+    uid, gid = _display_account(root)
+    token = _display_secret(token_path, owner_uid=token_owner_uid)
+    config['bind'] = address
+    atomic_write(config_path, json.dumps(config, indent=2) + '\n', mode=0o644)
+
+    directory = inside(root, 'etc/xenova/guest-display', follow_final=False)
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+        raise ValueError('display guest credential directory is unsafe')
+    directory.mkdir(mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+    os.chown(directory, uid, gid, follow_symlinks=False)
+    destination = inside(root, 'etc/xenova/guest-display/guest-data.token', follow_final=False)
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise ValueError('display guest token destination is unsafe')
+    atomic_write(destination, token + '\n', mode=0o600)
+    os.chown(destination, uid, gid, follow_symlinks=False)
+    return {'state': 'private-root-configured', 'bind': address,
+            'token_path': '/etc/xenova/guest-display/guest-data.token'}
+
+
 def receipt_directory(data,identity,execution,*,create=False):
     """기존 ProductionBootstrap의 receipt_dir/VM/execution 배치를 공유한다. 새 신원 원본은 없다."""
     broker.vm_id(identity);broker.vm_id(execution)
@@ -138,12 +227,14 @@ def receipt_directory(data,identity,execution,*,create=False):
     return parent/identity/execution
 
 
-def apply_linux(data, record, root, *, factory=False, **kwargs):
+def apply_linux(data, record, root, *, factory=False, display_token_path=DISPLAY_GUEST_TOKEN, **kwargs):
     """기존 private root mount에서만 호출. 공용 template/seed 빌드에는 호출하지 않는다."""
-    from prepare_rootfs import inside, write
+    from prepare_rootfs import write
     summary=ensure(data,record,**kwargs)
-    if 'agent' not in summary['channels']:return summary
     root=Path(root)
+    display=apply_guest_display(record,root,token_path=display_token_path)
+    if 'agent' not in summary['channels']:
+        return {**summary,'display_application':display['state']}
     if not inside(root,'usr/lib/systemd/system/xenova-agent.service',create_parents=False).is_file():
         raise ValueError('declared Agent adapter is not installed')
     if factory:
@@ -155,7 +246,9 @@ def apply_linux(data, record, root, *, factory=False, **kwargs):
     write(root,'etc/systemd/system/xenova-agent.service.d/20-xenova-provisioning.conf',
           '[Unit]\nConditionPathExists=/etc/xenova/agent.env\n',0o644)
     summary['guest_application']='private-root-configured'
-    put(home(data,record['uuid'])/'status.json',json.dumps(summary,sort_keys=True)+'\n')
+    summary['display_application']=display['state']
+    stored={key:value for key,value in summary.items() if key!='display_application'}
+    put(home(data,record['uuid'])/'status.json',json.dumps(stored,sort_keys=True)+'\n')
     return summary
 
 
@@ -188,9 +281,12 @@ def bootstrap_execution(platform, record, *, deadline, store_factory=None, obser
     api=bootstrap_api()
     fields=('vm_id','host_boot_id','execution_id','domid','xen_unique_id')
     applied=[]
+    previous_live=None
+
     def current():
         if platform.clock()>=deadline:raise TimeoutError('execution supply budget expired')
-        row=(observe or (lambda:binding(platform,record['uuid'],timeout_s=min(2,deadline-platform.clock()))))()
+        row=(observe or (lambda:binding(platform,record['uuid'],timeout_s=min(2,deadline-platform.clock()),
+                                        wait_for_live=True,previous_live=previous_live)))()
         if row.get('status')!='observed':raise ValueError('current execution is not eligible for provisioning')
         if row.get('signal_profile') is None:raise ValueError('loaded execution profile unavailable; no latest-profile inference')
         profile=validate(row['signal_profile'])
@@ -198,6 +294,7 @@ def bootstrap_execution(platform, record, *, deadline, store_factory=None, obser
         if not applied:applied.append(profile)
         return {key:row[key] for key in fields}
     context=current();profile=applied[0]
+    previous_live=context
     directory=receipt_directory(platform.data,record['uuid'],context['execution_id'],create=True)
     channels=[c for c in ('telemetry','drive') if c in profile['channels']]
     for channel in channels:

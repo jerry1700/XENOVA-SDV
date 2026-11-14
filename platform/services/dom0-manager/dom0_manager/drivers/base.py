@@ -9,8 +9,9 @@ Xen 드라이버와 Mock 드라이버가 같은 인터페이스를 구현하고,
 - 모든 메서드는 동기(blocking)다. xl 은 subprocess 이므로 API 계층이 스레드풀에서 호출한다(계약 11장).
 - shutdown/destroy 는 멱등이다. 없는 VM 에 대해 예외를 내지 않는다(계약 4.3, 4.4).
 
-v1 계약 범위 밖 메서드(reboot, set_vcpus, set_memory, pin_vcpu, set_sched_weight)는 기본 구현이 NotImplementedError 를 낸다.
-S15P31E110-208, -101 에서 채운다. collect_stats 는 xentop 원시값(S15P31E110-112, 계약 2.4·4.6)이다.
+v1 계약 범위 밖 메서드(reboot, cpu_layout 등)는 기본 구현이 501 을 낸다. collect_stats 는 xentop 원시값(S15P31E110-112, 계약 2.4·4.6)이다.
+정지한 VM 의 자원 변경은 실행 상태가 아니라 등록 설정을 바꾸므로 Provisioner.update_resources 다(S15P31E110-368). 실행 중 vCPU 핀·
+스케줄러 가중치·메모리 변경은 플랫폼이 지원하지 않는다.
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from typing import ClassVar
 from uuid import UUID
 
 from ..errors import NotSupportedByPlatform, VMNotFound
-from ..models import ControlOperation, CpuLayout, StatsSource, UnavailableReason, Vm, VmState, VmStats
+from ..models import (ControlOperation, CpuLayout, CpuPolicyUpdate, CreateVmRequest, ResourceUpdate, StatsSource, UnavailableReason,
+                      UpdateCpuPolicyRequest, Vm, VmLifecycle, VmOperationAction, VmOperationResult, VmState, VmStats)
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,8 @@ class InstancePaths:
     kernel: Path | None = None
     ramdisk: Path | None = None
     disk: Path | None = None
+    # 확인한 원 등록 작업. 기록이 없는 드라이버나 구형 등록에서는 None.
+    registration_operation_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,8 @@ class CreateSpec:
     vcpus: int
     memory_mib: int
     instance: InstancePaths
+    request_key: str | None = None
+    create_spec_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,8 +144,11 @@ class Driver(ABC):
     def has_domain(self, vm_id: UUID) -> bool:
         return any(d.vm_id == vm_id for d in self.list_domains())
 
+    def has_domain_for_create(self, vm_id: UUID) -> bool:
+        return self.has_domain(vm_id)
+
     @abstractmethod
-    def create(self, spec: CreateSpec) -> Domain:
+    def create(self, spec: CreateSpec) -> Domain | ControlOperation:
         """도메인을 만들어 실행 상태로 둔다. 이미 있으면 VMExists."""
 
     @abstractmethod
@@ -151,6 +160,11 @@ class Driver(ABC):
     def destroy(self, vm_id: UUID) -> None:
         """강제 종료. 디스크는 건드리지 않는다(디스크 삭제는 Provisioner). 멱등."""
 
+    def kill(self, vm_id: UUID) -> None:
+        """장애 주입: 도메인만 즉시 없앤다. destroy 와 달리 등록·의도(desired=running)를 바꾸지 않아 복구 워커가
+        DOMAIN_ABSENT 로 판정해 다시 띄운다. 도메인이 없으면 VMNotFound. 지원하지 않는 드라이버는 NotSupportedByPlatform."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not support kill")
+
     def request_stop(self, vm_id: UUID, *, key: str) -> ControlOperation | None:
         """키 있는 정지(S15P31E110-305). tracks_control_operations 인 드라이버만 구현한다. 등록이 없으면 None."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track control operations")
@@ -158,6 +172,18 @@ class Driver(ABC):
     def control_operation(self, vm_id: UUID, *, key: str) -> ControlOperation:
         """요청 키로 원 제어 작업 조회. 작업 기록이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not track control operations")
+
+    def replay_start(self, vm_id: UUID, *, key: str, create_spec_sha256: str) -> ControlOperation | None:
+        """같은 원 시작을 회수한다. 원 기록이 없을 때만 None을 반환한다."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not track start operations")
+
+    def vm_lifecycle(self, vm_id: UUID) -> VmLifecycle:
+        raise NotSupportedByPlatform(f"{self.name} driver does not expose VM lifecycle")
+
+    def vm_operation(self, vm_id: UUID, *, action: VmOperationAction,
+                     operation_id: UUID | None = None, key: str | None = None) -> VmOperationResult:
+        """원 작업 ID 또는 보관 키로 제한된 조회. 작업 기록이 없는 드라이버는 501."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not track VM operations")
 
     def reboot(self, vm_id: UUID) -> None:  # S15P31E110-208
         """실행 중인 도메인을 같은 디스크로 다시 시작한다(게스트 정상 재부팅, 새 실행). 제공하지 않는 드라이버는 501.
@@ -167,6 +193,10 @@ class Driver(ABC):
     def cpu_layout(self, vm_id: UUID | None = None) -> CpuLayout:  # S15P31E110-353
         """정책 CPU 배치와 실제 Xen hard affinity 조회. 플랫폼 CPU 정책이 없는 드라이버는 501."""
         raise NotSupportedByPlatform(f"{self.name} driver does not report CPU layout")
+
+    def update_cpu_policy(self, request: UpdateCpuPolicyRequest, *, key: str) -> CpuPolicyUpdate:
+        """전체 CPU 정책을 revision 조건부로 교체한다. 지원하지 않는 드라이버는 501."""
+        raise NotSupportedByPlatform(f"{self.name} driver does not update CPU policy")
 
     def request_reboot(self, vm_id: UUID, *, key: str) -> ControlOperation:
         """키 있는 재부팅(S15P31E110-208). tracks_control_operations 인 드라이버만 구현한다."""
@@ -180,20 +210,6 @@ class Driver(ABC):
     def health(self) -> bool:
         """하이퍼바이저가 응답하면 True. /healthz 가 503 을 구분하는 근거."""
 
-    # ---- v2 (별도 계약 작성 후) ----
-
-    def set_vcpus(self, vm_id: UUID, vcpus: int) -> None:  # S15P31E110-101
-        raise NotImplementedError("set_vcpus: S15P31E110-101")
-
-    def set_memory(self, vm_id: UUID, memory_mib: int) -> None:  # S15P31E110-101
-        raise NotImplementedError("set_memory: S15P31E110-101")
-
-    def pin_vcpu(self, vm_id: UUID, vcpu: int, pcpus: list[int]) -> None:  # S15P31E110-101
-        raise NotImplementedError("pin_vcpu: S15P31E110-101")
-
-    def set_sched_weight(self, vm_id: UUID, weight: int) -> None:  # S15P31E110-101
-        raise NotImplementedError("set_sched_weight: S15P31E110-101")
-
     # ---- 통계 (S15P31E110-112) ----
 
     def collect_stats(self) -> StatsSample:
@@ -204,6 +220,8 @@ class Driver(ABC):
 class Provisioner(ABC):
     """템플릿 → 인스턴스(디스크·커널·initrd) 준비. 실제 구현은 플랫폼 관리 계층(xenova_management)과 연결한다."""
 
+    guards_retirement: ClassVar[bool] = False
+
     @abstractmethod
     def ensure_instance(
         self, vm_id: UUID, template_id: str, template_version: str, *, name: str, vcpus: int, memory_mib: int
@@ -213,6 +231,17 @@ class Provisioner(ABC):
     @abstractmethod
     def instance_exists(self, vm_id: UUID) -> bool: ...
 
+    def check_existing_spec(self, request: CreateVmRequest) -> None:
+        """비교 가능한 등록 명세가 있으면 실행 중인 VM의 생성 재전달을 검증한다."""
+
     @abstractmethod
     def delete_instance(self, vm_id: UUID) -> None:
-        """디스크를 포함한 인스턴스 삭제. 없으면 아무것도 하지 않는다(계약 4.4)."""
+        """등록된 인스턴스를 보관한다. guards_retirement 구현은 대상 검증과 원 작업 회수도 맡는다."""
+
+    def delete_instance_at_generation(self, vm_id: UUID, *, key: str, generation: int) -> None:
+        raise NotSupportedByPlatform("provisioner does not support generation-guarded retirement")
+
+    def update_resources(self, vm_id: UUID, *, vcpus: int, memory_mib: int, key: str) -> ResourceUpdate:  # S15P31E110-368
+        """정지한 Linux VM 의 등록 설정에서 vCPU·메모리를 바꾼다(계약 4.12). 다음 시작부터 적용되고 게스트를 시작하지 않는다.
+        같은 키·같은 값은 원 결과, 같은 키·다른 요청은 409. 제공하지 않는 Provisioner 는 501."""
+        raise NotSupportedByPlatform(f"{type(self).__name__} does not support resource updates")

@@ -17,6 +17,23 @@ public interface VmControlPort {
     // Graceful shutdown; the domain disappears and the disk is kept. Idempotent.
     void stop(String vmId);
 
+    // Submits a tracked graceful reboot. Reusing requestKey returns the original operation instead of rebooting twice.
+    VmControlOperation requestReboot(String vmId, String requestKey);
+
+    // Reads the original tracked stop/reboot operation without executing it again.
+    VmControlOperation findControlOperation(String vmId, String requestKey);
+
+    // Updates the persisted Linux guest specification. The new resources apply on its next start.
+    VmResourceUpdate updateResources(String vmId, int vcpus, int memoryMib, String requestKey);
+
+    CpuLayout cpuLayout();
+
+    CpuPolicyUpdate updateCpuPolicy(CpuPolicyUpdate.Request request, String requestKey);
+
     // Forced shutdown and disk deletion. Idempotent.
     void destroy(String vmId);
+
+    // Fault injection: removes only the Xen domain and keeps the registration and the running intent, so the
+    // recovery worker restarts it (DOMAIN_ABSENT). Unlike stop, it is not recorded as an operator stop.
+    void kill(String vmId);
 }

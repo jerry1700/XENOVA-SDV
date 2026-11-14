@@ -4,6 +4,9 @@ New frames are sent only after selecting this profile. A handshake echoes the Pi
 session and declares a device boot session/capabilities; it never grants output.
 """
 from collections import OrderedDict
+import errno
+import math
+import os
 import struct
 import time
 from uuid import UUID, uuid4
@@ -82,31 +85,45 @@ def report(pi_session,device_session,sequence,frame,status,sample_seq,*,velocity
 class Framer:
     def __init__(self):self.buffer=bytearray();self.discard=False;self.invalid=0;self.oversize=0
     def feed(self,data):
-        completed=[]
+        return list(self.frames(data))
+
+    def frames(self,data):
+        """Yield each checked frame before decoding the rest of this bounded read."""
         for byte in data:
             if byte==0:
                 if self.discard:self.discard=False
                 elif self.buffer:
-                    try:completed.append(unpack(bytes(self.buffer)+b'\0'))
+                    try:completed=unpack(bytes(self.buffer)+b'\0')
                     except FeedbackError:self.invalid+=1
+                    else:
+                        self.buffer.clear()
+                        yield completed
                 self.buffer.clear()
             elif not self.discard:
                 if len(self.buffer)>=MAX_FRAME-1:
                     self.buffer.clear();self.discard=True;self.oversize+=1
                 else:self.buffer.append(byte)
-        return completed
 
 
 class FeedbackSerialSink(SerialSink):
     """One serial handle, polled only by OutputOwner; no RX thread/second writer."""
-    def __init__(self,port,baudrate=115200,*,timeout_ms,clock=time.monotonic,odometry=None):
+    def __init__(self,port,baudrate=115200,*,timeout_ms,clock=time.monotonic,odometry=None,development_fd=None):
         if type(timeout_ms) is not int or not 1<=timeout_ms<=2**31-1:
             raise ValueError('approved feedback timeout_ms required')
-        super().__init__(port,baudrate)
+        super().__init__(port,baudrate,development_fd=development_fd)
+        # Only the unmodified native POSIX backend has this raw-fd contract.
+        # Decide before optional trial proxies wrap the serial object. URL and
+        # custom backends retain their public read/cancel implementation.
+        self._owned_read_fd=None
+        if self._development_fd:
+            self._owned_read_fd=self._write_fd
+        elif os.name=='posix' and self._write_fd is not None:
+            from serial.serialposix import Serial
+            if type(self._serial) is Serial:self._owned_read_fd=self._write_fd
         self.clock=clock;self.timeout=timeout_ms/1000
         self.pi_session=str(uuid4());self.device_session=None;self.capabilities=0
         self.odometry=odometry;self.protocol_version=2 if odometry is not None else 1
-        self.started=None;self.ready=False;self.fault=None
+        self.started=None;self.ready=False;self.fault=None;self._sensor_blocked_reason=None
         self.framer=Framer();self.pending=OrderedDict();self.sequence=0
         self.last_sample=0;self.last_report=None;self.latest_command=None
         self.rejected=0;self.received=0;self.duplicates=0
@@ -124,13 +141,30 @@ class FeedbackSerialSink(SerialSink):
         if self.last_report is not None:result.update(self.last_report)
         result['latest_command_sequence']=self.latest_command
         if self.odometry is not None:
-            result['vehicle_sample']=None if self.fault else self.odometry.current(int(self.clock()*1000000))
+            # Command application uncertainty revokes output, not independent
+            # encoder evidence. Session/clock/quality/age checks still apply.
+            result['vehicle_sample']=(self.odometry.current(int(self.clock()*1000000))
+                if self._sensor_available() else None)
         result['report_is_latest']=bool(self.last_report and result['command_sequence']==self.latest_command)
         if (self.fault or not result['report_is_latest'] or
                 (result['observed_monotonic'] is not None and self.clock()-result['observed_monotonic']>self.timeout)):
             for key in ('accepted','applied','physical_stop','reported_velocity_mps','reported_steering_rad'):
                 result[key]=None
         return result
+
+    def _fail(self,code):
+        self.fault=self.fault or code
+        # Preserve the first command failure without hiding a later loss of
+        # sensor trust. A fresh HELLO/valid sample cannot clear this fence.
+        if code!='DEVICE_APPLY_TIMEOUT':
+            self._sensor_blocked_reason=self._sensor_blocked_reason or code
+
+    def _sensor_available(self):
+        return self._sensor_blocked_reason is None and self.fault in (None,'DEVICE_APPLY_TIMEOUT')
+
+    def link_failed(self):
+        self._fail('DEVICE_LINK_UNAVAILABLE');self.ready=False
+        self.snapshot=self._view()
 
     def _send(self,data):
         accepted=self._write_bytes(data)
@@ -158,24 +192,95 @@ class FeedbackSerialSink(SerialSink):
                              pi_session=self.pi_session,device_session=self.device_session)
         return result
 
+    def _read_owned(self,read_ready):
+        """One nonblocking native read; the owner's select owns RX waiting.
+
+        timeout=0 tty VMIN=0 can return empty bytes while idle. Only the same
+        owner's prior readable observation turns an empty read into EOF.
+        No pyserial cancellation pipe or second reader is accessed here.
+        """
+        if self._development_fd:self._serial.check_open()
+        try:data=os.read(self._owned_read_fd,4096)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN,errno.EWOULDBLOCK,errno.EALREADY,errno.EINPROGRESS,errno.EINTR):return b''
+            raise
+        if not data and read_ready:raise SinkError('feedback serial device returned EOF')
+        return data
+
+    def _poll_owned(self,now,read_ready=False):
+        # A private single-owner path only. Direct poll keeps pyserial's public
+        # cancel_read semantics, including URL/custom-backend fallback.
+        if self._owned_read_fd is None:return self.poll(now)
+        return self._poll(now,owned_ready=read_ready)
+
     def poll(self,now):
+        return self._poll(now)
+
+    def _poll_deadlines(self):
+        if self.started is None:
+            yield 0.
+            return
+        if self.fault is None:
+            if not self.ready:
+                yield self.started + self.timeout
+            for row in self.pending.values():
+                if not row['applied']:
+                    yield row['deadline']
+        view = self.snapshot
+        observed = view.get('observed_monotonic')
+        if observed is not None and view.get('applied') is not None:
+            yield math.nextafter(observed + self.timeout, math.inf)
+        if self.odometry is not None:
+            sample = view.get('vehicle_sample')
+            if sample is not None:
+                expires = sample['pi_sample_us'] + self.odometry.config.maximum_sample_age_us - sample['clock_error_us']
+                yield (expires + 1) / 1_000_000
+            if self.ready and self._sensor_available():
+                probe = self.odometry.next_probe_us()
+                if probe is not None:
+                    yield probe / 1_000_000
+
+    def _next_poll_delay(self):
+        """The native RX owner may sleep until new bytes or this timer."""
+        deadline = min(self._poll_deadlines(), default=None)
+        return None if deadline is None else max(.0001, deadline - self.clock())
+
+    def _poll(self,now,*,owned_ready=None,publish_view=True):
         if self.started is None:
             self.started=now;self._send(hello(self.pi_session,self.protocol_version))
-        data=self._serial.read(min(4096,self._serial.in_waiting))
-        for kind,payload in self.framer.feed(data):
+        # OutputOwner already waited on the native fd. Other callers retain
+        # pyserial readiness/cancel/EOF handling without an in_waiting ioctl.
+        data=self._serial.read(4096) if owned_ready is None else self._read_owned(owned_ready)
+        received=self.clock()
+        for kind,payload in self.framer.frames(data):
             self.received+=1
-            try:self._receive(kind,payload,now)
+            # Read completion bounds receipt of every complete frame in this
+            # batch. Neither the earlier poll nor later decoding lends time.
+            # A partial frame gets the timestamp of its completing read.
+            try:self._receive(kind,payload,received)
             except (FeedbackError,ValueError,struct.error):self.rejected+=1
+        now=self.clock()
         if not self.ready and now-self.started>=self.timeout:
-            self.fault=self.fault or 'DEVICE_HANDSHAKE_TIMEOUT'
+            self._fail('DEVICE_HANDSHAKE_TIMEOUT')
         for row in self.pending.values():
             if now>=row['deadline'] and not row['applied']:
-                self.fault=self.fault or 'DEVICE_APPLY_TIMEOUT'
-        if self.ready and self.odometry is not None and not self.fault:
-            from .odometry import ODOM_PROBE
-            probe=self.odometry.probe(self.pi_session,int(now*1000000))
-            if probe is not None:self._send(packet(ODOM_PROBE,probe))
-        self.snapshot=self._view()
+                self._fail('DEVICE_APPLY_TIMEOUT')
+        if self.ready and self.odometry is not None and self._sensor_available():
+            from .odometry import ODOM_PROBE,OdometryError
+            created=int(now*1000000)
+            probe=self.odometry.probe(self.pi_session,created)
+            if probe is not None:
+                wire=packet(ODOM_PROBE,probe)
+                try:
+                    submitted=self.odometry.mark_submitted(created,int(self.clock()*1000000))
+                except OdometryError as exc:
+                    # Preparation can consume the original probe lifetime.
+                    # Refuse that unsent probe; the next poll can recover.
+                    if str(exc)!='ODOM_PROBE_EXPIRED':
+                        raise SinkError('odometry submission reference invalid') from exc
+                else:
+                    if submitted:self._send(wire)
+        if publish_view:self.snapshot=self._view()
 
     def _receive(self,kind,payload,now):
         if kind==HELLO_ACK:
@@ -184,20 +289,21 @@ class FeedbackSerialSink(SerialSink):
             if version!=self.protocol_version or str(UUID(bytes=pi))!=self.pi_session or UUID(device).int==0:
                 raise FeedbackError('handshake session mismatch')
             if caps&(CAP_ACCEPT|CAP_APPLY)!=(CAP_ACCEPT|CAP_APPLY):
-                self.fault=self.fault or 'DEVICE_CAPABILITY_UNSUPPORTED';return
+                self._fail('DEVICE_CAPABILITY_UNSUPPORTED');return
             if self.device_session is not None and device!=self.device_session:
-                self.fault=self.fault or 'DEVICE_RESTARTED'
+                self._fail('DEVICE_RESTARTED')
                 self.pending.clear();self.last_report=None;self.last_sample=0
             self.device_session=device;self.capabilities=caps;self.ready=True
             if self.odometry is not None:
                 from .odometry import CAP_ODOMETRY
                 if not caps&CAP_ODOMETRY:
-                    self.fault=self.fault or 'DEVICE_ODOMETRY_UNSUPPORTED';return
+                    self._fail('DEVICE_ODOMETRY_UNSUPPORTED');return
                 self.odometry.device_session(device)
             return
         if self.odometry is not None:
             from .odometry import ODOM_REPORT
             if kind==ODOM_REPORT and self.ready:
+                if not self._sensor_available():raise FeedbackError('device sensor trust lost')
                 self.odometry.receive(self.pi_session,payload,int(now*1000000));return
         if kind!=FEEDBACK or not self.ready:raise FeedbackError('unexpected device frame')
         pi,device,sequence,generation,counter,status,sample,flags,velocity,steering,stationary=REPORT.unpack(payload)
@@ -216,7 +322,7 @@ class FeedbackSerialSink(SerialSink):
             self.duplicates+=1;return
         if status==1 and row['applied']:self.duplicates+=1;return
         self.last_sample=sample
-        if status in (3,4):self.fault=self.fault or ('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
+        if status in (3,4):self._fail('DEVICE_REJECTED' if status==3 else 'DEVICE_FAULT')
         if status in (1,2):row['accepted']=True
         if status==2:row['applied']=True
         evidence=dict(accepted=row['accepted'],applied=row['applied'],
@@ -229,7 +335,7 @@ class FeedbackSerialSink(SerialSink):
         evidence['status']=STATUS[status]
         if status==2:
             try:self.events.put_nowait(evidence)
-            except __import__('queue').Full:self.fault=self.fault or 'DEVICE_EVIDENCE_OVERFLOW'
+            except __import__('queue').Full:self._fail('DEVICE_EVIDENCE_OVERFLOW')
         # An old command's valid late report cannot replace the current device
         # view. It only updates that bounded reference's own completion.
         if sequence==self.latest_command:

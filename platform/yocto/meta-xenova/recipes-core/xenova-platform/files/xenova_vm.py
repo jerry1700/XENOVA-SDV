@@ -253,9 +253,11 @@ class Platform:
         from xenova_execution import Execution
         return Execution(self)
 
-    def request_control(self, action, record, *, force=False, idempotency_key=None, deadline=None):
+    def request_control(self, action, record, *, force=False, idempotency_key=None, deadline=None,
+                        create_spec_sha256=None, replay_only=False):
         """Caller holds operation_lock and has verified the mounted registry."""
-        return self.execution().control(action, record, force=force, key=idempotency_key, deadline=deadline)
+        return self.execution().control(action, record, force=force, key=idempotency_key, deadline=deadline,
+                                        create_spec_sha256=create_spec_sha256, replay_only=replay_only)
 
 
     @traced('platform.registry')
@@ -643,8 +645,7 @@ class Platform:
         row = self.resolve_domain(record, expected=expected, deadline=deadline)
         if action=='reboot' and self.process_isolation and guest_kind(record)=='linux':
             from xenova_guest_process import command
-            row={**row,'xen_unique_id':self.execution().unique(row,deadline)}
-            self.timed_command(command(self,record,deadline,target=row,reboot_launch=_launch),deadline)
+            self.timed_command(command(self,record,deadline,target=expected,reboot_launch=_launch),deadline)
         elif action=='reboot':
             # 대역 runner도 최종 의도 검사와 제출의 순서를 실제 admission 잠금으로 검증한다.
             from xenova_execution import short_lock, refuse
@@ -697,6 +698,8 @@ class Platform:
             state = started_state(record, existing[0])
             if _accept:
                 _accept()
+            if _result is not None:
+                _result['stage'] = 'start_confirmation'
             observation = execution.observe(record, deadline)
             state = started_state(record, observation)
             self.cpu().require(record, deadline, expected=cpu_context, present=True,
@@ -712,60 +715,67 @@ class Platform:
                 path = item.get('pdev_path')
                 if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
                     raise PlatformError(f'{disk} is already attached to domain {d["domid"]}')
+        execution.settle_expired_launch(record, deadline)
         execution.require_launch_available(record)
         owner = _accept() if _accept else _owner
+        if _result is not None:
+            _result['stage'] = 'start_prepare'
         execution.gate()
         ensure_runtime(self.runtime)
         captured = {}
         self.cpu().require(record, deadline, expected=cpu_context, capture=captured)
         launch = execution.prepare_launch(record, owner, deadline=deadline, expected_cpu=cpu_context,
                                           cpu_evidence=captured.get('evidence'))
-        config = self.runtime / (record['id'] + '.cfg')
-        atomic_write(config, text)
-        # 준비/쓰기 뒤 새 도메인·디스크 점유를 다시 확인한다. 이 검사는
-        # CPU 근거 재사용과 별개이며 외부 xl을 전역 잠금으로 막는다는 뜻이 아니다.
-        latest = self.domains(deadline=deadline)
-        if self.matching(record, latest):
-            raise DomainIdentityError('domain appeared before explicit launch')
-        for domain in latest:
-            for item in domain.get('config', {}).get('disks', []):
-                path = item.get('pdev_path')
-                if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
-                    raise PlatformError(f'{disk} became attached before launch')
-        try:
-            execution.guard_launch(record, launch, deadline)
-        except PlatformError:
-            # 아직 helper/명령을 만들지 않은 이 경계만 안전한 미제출 종결 근거다.
-            # 확인·저장 실패면 원 거절과 미확정 실행을 유지하며 성공으로 바꾸지 않는다.
-            try:
-                execution.abort_unsubmitted_launch(record, launch, deadline)
-            except (PlatformError, OSError, ValueError):
-                pass
-            raise
-        command_deadline=min(deadline,self.clock()+45)
-        remaining = command_deadline-self.clock()
-        if remaining <= 0:
-            from xenova_execution import refuse
-            refuse('DEADLINE_EXCEEDED', 'guest operation deadline exceeded')
-        def submit(argv):
-            left=command_deadline-self.clock()
-            if left<=0:
+        submitted = False
+
+        def submit(argv, command_deadline):
+            nonlocal submitted
+            left = command_deadline-self.clock()
+            if left <= 0:
                 from xenova_execution import refuse
-                refuse('DEADLINE_EXCEEDED','create submission deadline expired')
-            # create의 기존 45초 상한을 유지한다. 조회용 timed_command의 15초와 구별한다.
-            return self.command(argv,timeout=left)
-        with span('external.command', command_kind='xl.create', timeout_seconds=remaining):
+                refuse('DEADLINE_EXCEEDED', 'create submission deadline expired')
+            submitted = True
             if _result is not None:
                 _result['physical_submitted'] = True
-            if self.process_isolation:
-                from xenova_guest_process import command
-                argv=command(self,record,deadline,launch=launch)
-                submit(argv)
-            else:
-                from xenova_execution import short_lock
-                with short_lock(self.runtime,'admission'):
-                    execution.guard_launch(record,launch,deadline)
-                    submit(['xl','create',str(config)])
+                _result['stage'] = 'start_submit'
+            return self.command(argv, timeout=left)
+
+        try:
+            config = self.runtime / (record['id'] + '.cfg')
+            atomic_write(config, text)
+            # 준비/쓰기 뒤 새 도메인·디스크 점유를 다시 확인한다.
+            latest = self.domains(deadline=deadline)
+            if self.matching(record, latest):
+                raise DomainIdentityError('domain appeared before explicit launch')
+            for domain in latest:
+                for item in domain.get('config', {}).get('disks', []):
+                    path = item.get('pdev_path')
+                    if disk is not None and path and Path(path).exists() and os.path.samefile(path, disk):
+                        raise PlatformError(f'{disk} became attached before launch')
+            execution.guard_launch(record, launch, deadline)
+            # Recovery already has a bounded attempt deadline. Cutting
+            # xl off earlier can leave Xen paused before device setup finishes.
+            recovery_launch = owner and owner.get('kind') == 'recovery'
+            command_deadline = deadline if recovery_launch else min(deadline, self.clock()+45)
+            with span('external.command', command_kind='xl.create',
+                      timeout_seconds=max(0, command_deadline-self.clock())):
+                if self.process_isolation:
+                    from xenova_guest_process import command
+                    submit(command(self, record, deadline, launch=launch), command_deadline)
+                else:
+                    from xenova_execution import short_lock
+                    with short_lock(self.runtime, 'admission'):
+                        execution.guard_launch(record, launch, deadline)
+                        submit(['xl', 'create', str(config)], command_deadline)
+        except (PlatformError, OSError, ValueError):
+            if not submitted:
+                try:
+                    execution.abort_unsubmitted_launch(record, launch, deadline)
+                except (PlatformError, OSError, ValueError):
+                    pass
+            raise
+        if _result is not None:
+            _result['stage'] = 'start_confirmation'
         created = self.matching(record, self.domains(deadline=deadline))
         if not created:
             raise PlatformError(f"{record['id']}: xl create returned without a live domain")
@@ -957,12 +967,15 @@ class Platform:
             try:
                 if _result is not None:
                     _result['physical_submitted'] = True
+                    _result['stage'] = 'shutdown_submit'
                 self.control(record, 'destroy' if strategy == 'forced' else 'shutdown', row, deadline=deadline)
             except (PlatformError, OSError, ValueError, KeyError, TypeError) as exc:
                 if isinstance(exc, DomainIdentityError):
                     identity_error = exc
                 result['instances'][key].update(result='failed', error=str(exc))
             else:
+                if _result is not None:
+                    _result['stage'] = 'shutdown_confirmation'
                 result['instances'][key]['stage'] = 'request-accepted'
                 result['forced' if strategy == 'forced' else 'graceful_shutdown_requested'].append(key)
                 pending.append((record, row, strategy))
@@ -1049,7 +1062,11 @@ class Platform:
             ensure_quiet(self)
             # 내부 CLI는 marker로 새 기동을 막는다. 외부 xl과 원자적인 배제는 아니다.
             self.confirm_board_empty(self._shutdown_deadline)
-            self.command(['systemctl', 'stop', 'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-dhcp.service'], timeout=110)
+            # A timer can pull srv-xenova.mount back in through its service.
+            self.command(['systemctl', 'stop', 'xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'])
+            self.command(['systemctl', 'stop', 'xenova-vms.service', 'xenova-vm-shutdown.service',
+                          'xenova-dhcp.service', 'xenova-telemetry-clock.service',
+                          'xenova-telemetry-evidence.service'], timeout=110)
             self.confirm_board_empty(self._shutdown_deadline)
             self.command(['systemctl', 'stop', 'srv-xenova.mount'], timeout=30)
             self.command(['systemctl', action])
@@ -1060,6 +1077,54 @@ class Platform:
             result['final_check_error'] = str(exc)
             atomic_write(path, json.dumps(result, indent=2) + '\n')
             raise
+
+    def reboot_candidate(self, record, previous, deadline):
+        """Find a stable new Linux incarnation with the registered root disk."""
+        snapshot = self.removal_snapshot(deadline)
+        old = snapshot.get(previous['domid'])
+        if old and (old['uuid'] != record['uuid'] or old['name'] not in (record['name'], '(null)')):
+            raise DomainIdentityError('replacement domain appeared during reboot')
+        candidates = [row for row in snapshot.values()
+                      if row['uuid'] == record['uuid'] or row['name'] == record['name']]
+        if len(candidates) > 1:
+            raise DomainIdentityError('ambiguous reboot candidates')
+        if not candidates:
+            return None
+        row = candidates[0]
+        # A restarting libxl domain can appear before its XenStore name is available.
+        # A matching UUID and missing name only justify another observation.
+        if row['uuid'] != record['uuid'] or row['name'] not in (record['name'], '(null)'):
+            raise DomainIdentityError('replacement domain appeared during reboot')
+        if row['name'] == '(null)' or row['xen_state'] not in ('running', 'blocked'):
+            return None
+        execution = self.execution()
+        unique = execution.unique(row, deadline)
+        if unique == previous['xen_unique_id']:
+            return None
+        domains = self.domains(deadline=deadline)
+        current = self.matching(record, domains)
+        if not current or current[0]['domid'] != row['domid']:
+            raise DomainIdentityError('reboot target changed before launch binding')
+        current = current[0]
+        if current['xen_state'] == 'unknown':
+            return None
+        disk = self.data/'instances'/record['id']/'root.raw'
+        disks = current['config']['disks']
+        if (len(disks) != 1 or not disks[0].get('pdev_path')
+                or not os.path.samefile(disks[0]['pdev_path'], disk)):
+            raise DomainIdentityError('reboot candidate does not own the registered root disk')
+        for domain in domains:
+            if domain['domid'] in (0, current['domid']):
+                continue
+            for item in domain['config']['disks']:
+                path = item.get('pdev_path')
+                if path and Path(path).exists() and os.path.samefile(path, disk):
+                    raise DomainIdentityError('registered reboot disk is attached to another domain')
+        current = {**current, 'xen_unique_id':unique}
+        if execution.unique(current, deadline) != unique:
+            raise DomainIdentityError('reboot candidate incarnation changed during observation')
+        started_state(record, current)
+        return current
 
     @traced('platform.reboot')
     def reboot(self, record, timeout=90, *, force=False, _accept=None, _observed=None,
@@ -1076,46 +1141,33 @@ class Platform:
             raise PlatformError('Zephyr graceful reboot unsupported; use reboot --force')
         self.execution().require_launch_available(record)
         cpu_context = self.cpu().context(record)
-        owner = _accept() if _accept else None
         if guest_kind(record) == 'zephyr' or force:
+            owner = _accept() if _accept else None
             self.stop_many([record], timeout=timeout, force=True, deadline=deadline,
                            _observed={record['uuid']:_observed} if _observed else None, _result=_result)
             self.start(record, _owner=owner, deadline=deadline, _result=_result)
             print(json.dumps({'action': 'reboot', 'id': record['id'], 'forced': True, 'app_readiness': 'unknown'}))
             return
-        previous = rows[0]['domid']
         execution = self.execution()
+        previous = {'domid':rows[0]['domid'],
+                    'xen_unique_id':rows[0].get('xen_unique_id') or execution.unique(rows[0], deadline)}
         ensure_runtime(self.runtime)
+        owner = _accept() if _accept else None
         captured = {}
-        self.cpu().require(record, deadline, expected=cpu_context, present=True, capture=captured)
+        self.cpu().require(record, deadline, expected=cpu_context, present=True,
+                           expected_identity=previous, capture=captured)
         launch = execution.prepare_launch(record, owner, deadline=deadline, expected_cpu=cpu_context,
-                                          cpu_evidence=captured.get('evidence'), reuse_process_scope=True)
+                                          cpu_evidence=captured.get('evidence'), reuse_process_scope=True,
+                                          reboot_from=previous)
         execution.guard_launch(record, launch, deadline)
         if _result is not None:
             _result['physical_submitted'] = True
-        self.control(record, 'reboot', rows[0], deadline=deadline, _launch=launch)
+        self.control(record, 'reboot', previous, deadline=deadline, _launch=launch)
+        launch = {**launch, 'reboot_returned':True}
+        execution.write(execution._path(self.runtime, 'executions', record['uuid']), launch)
         while self.clock() < deadline:
-            # 종료 중 상세 설정은 먼저 사라질 수 있다. 새 실행이 관측된 뒤
-            # 기존의 상세 신원·디스크 검사와 launch 결합을 다시 수행한다.
-            snapshot = self.removal_snapshot(deadline)
-            old = snapshot.get(previous)
-            # xl은 상태 목록 뒤 XenStore 이름을 따로 읽는다. 옛 domid/UUID의
-            # (null)은 상태와 무관하게 제거 대기이며 부재나 새 실행으로 인정하지 않는다.
-            if old and (old['uuid'] != record['uuid'] or
-                        old['name'] not in (record['name'], '(null)')):
-                raise DomainIdentityError('replacement domain appeared during reboot')
-            candidates = [row for row in snapshot.values()
-                          if row['uuid'] == record['uuid'] or row['name'] == record['name']]
-            if any(row['uuid'] != record['uuid'] or row['name'] != record['name']
-                   for row in candidates if row['domid'] != previous):
-                raise DomainIdentityError('replacement domain appeared during reboot')
-            fresh = [row for row in candidates if row['domid'] != previous]
-            if not old and fresh and fresh[0]['xen_state'] in ('running', 'blocked'):
-                rows = self.matching(record, self.domains(deadline=deadline))
-                if not rows or rows[0]['domid'] != fresh[0]['domid']:
-                    raise DomainIdentityError('reboot target changed before launch binding')
-                current = self._settle_created_domain(record, rows[0], deadline)
-                started_state(record, current)
+            current = self.reboot_candidate(record, previous, deadline)
+            if current is not None:
                 bound = execution.bind_launch(record, launch, current, deadline)
                 if _result is not None:
                     _result['observation'] = bound['observation']
@@ -1187,9 +1239,9 @@ class Platform:
                 with short_lock(self.runtime,'admission'):
                     manager._writable()
                     atomic_write(directory/'instance.json',json.dumps(updated,indent=2)+'\n')
-        print(json.dumps({'action': 'firmware-replace' if execute else 'plan-firmware-replace',
-                          'id': record['id'], 'firmware': info, 'uuid': record['uuid'],
-                          'starts_guest': False}, indent=2))
+        return {'action': 'firmware-replace' if execute else 'plan-firmware-replace',
+                'id': record['id'], 'firmware': info, 'uuid': record['uuid'],
+                'starts_guest': False}
 
     def delete(self, record, *, execute=False, idempotency_key=None):
         """delete는 공통 retire의 보관 별칭이며 영구 삭제를 수행하지 않는다."""
@@ -1309,9 +1361,10 @@ def legacy_command(action, options, *, platform=None):
                 record=p.records(validate_assets=False).get(args.id)
                 if not record or record['uuid']!=identity:raise PlatformError('firmware target changed')
                 lease.guard()
-                p.replace_firmware(record,args.bundle,args.sha256,execute=args.execute,
-                                   _context={'asset_lease':lease,'common_fd':common})
-        return
+                result=p.replace_firmware(record,args.bundle,args.sha256,execute=args.execute,
+                                          _context={'asset_lease':lease,'common_fd':common})
+        # 정식 CLI 결과는 진단 sink와 분리하고 소유권 해제 뒤 호출자가 출력한다.
+        return result
     if args.action == 'diagnose':
         if options.get('details'):
             with operation_lock(p.runtime):

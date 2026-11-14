@@ -52,6 +52,7 @@ UBUNTU = UUID("aaaa0000-1111-4222-8333-123456789abc")  # record('ubuntu-dev') �
 DEBIAN = UUID("bbbb0000-1111-4222-8333-123456789abc")
 NEW_VM = UUID("cccc0000-1111-4222-8333-123456789abc")  # Spring 이 발급했다고 가정하는 UUID
 TEMPLATE_ID, TEMPLATE_VERSION = "ubuntu-24.04-arm64", "1.0.0"
+DEBIAN_TEMPLATE_ID = "debian-13-arm64"
 
 
 def _publish_template(data: Path) -> None:
@@ -139,12 +140,16 @@ def board():
             b.close()
 
 
-@pytest.fixture
-def client(board):
+def make_client(board):
     manager = SerializedManager(board.manager)  # 실제 조립 경로(load_manager)와 같은 포장
     driver = PlatformDriver(manager, Xl(FakeRunner({("xl", "info"): XL_INFO})))
     app = create_app(Settings(driver="platform", log_level="WARNING"), driver=driver, provisioner=PlatformProvisioner(manager))
     return TestClient(app)
+
+
+@pytest.fixture
+def client(board):
+    return make_client(board)
 
 
 def test_real_manager_list_and_get(client):
@@ -164,11 +169,247 @@ def test_real_manager_stop_then_delete(client, board):
     assert client.get(f"/api/v1/vms/{DEBIAN}").status_code == 404
 
 
+def test_delete_preserves_assets_in_use(client, board):
+    failure = management.ManagementError("ASSET_IN_USE", "test disk is in use")
+    with patch.object(board.manager, "usage_check", side_effect=failure):
+        response = client.delete(f"/api/v1/vms/{DEBIAN}")
+    assert (response.status_code, response.json()["platform_code"]) == (409, "ASSET_IN_USE")
+    assert response.json()["context"] == {
+        "action": "retire", "stage": "preflight", "accepted": False, "status": "rejected",
+        "operation_id": None, "next_action": "check_current_vm",
+    }
+    assert (board.data / "instances" / "debian-dev" / "root.raw").is_file()
+    assert not list((board.data / "operations").glob("*.json"))
+
+
+@pytest.mark.parametrize("mode", ["implicit", "legacy", "guarded"])
+@pytest.mark.parametrize("phase", ["moved", "dhcp-pending", "dhcp-applied"])
+def test_delete_resumes_original_retire_after_interruption(client, board, mode, phase):
+    spec = {"vm_id": str(DEBIAN)}
+    path = f"/api/v1/vms/{DEBIAN}"
+    source = board.data / "instances" / "debian-dev"
+    disk_inode = (source / "root.raw").stat().st_ino
+    operation_ids = []
+    options = {"headers": {"Idempotency-Key": "fixture-interrupted-retire"},
+               "params": {"expected_lifecycle_generation": 0}} if mode == "guarded" else {}
+
+    def interrupt(saved_phase, op):
+        if saved_phase == phase and not operation_ids:
+            operation_ids.append(op["operation_id"])
+            raise OSError("fixture interrupted retirement")
+
+    with patch.object(board.manager, "checkpoint", interrupt):
+        if mode == "legacy":
+            failure = board.manager.call("retire", spec, execute=True, idempotency_key=f"retire-{DEBIAN}")
+            assert not failure["ok"] and failure["error"]["code"] == "RECOVERY_REQUIRED"
+        else:
+            failure = client.delete(path, **options)
+            assert failure.status_code == 503 and failure.json()["platform_code"] == "RECOVERY_REQUIRED"
+    original, = operation_ids
+    lookup_path = f"{path}/operations/{original}"
+    original_file = board.data / "operations" / f"{original}.json"
+    original_bytes = original_file.read_bytes()
+    calls = list(board.xen.calls)
+    read = client.get(lookup_path, params={"action": "retire"})
+    stage = "network_apply" if phase == "dhcp-pending" else "archive_commit"
+    assert read.json() == {
+        "action": "retire", "stage": stage, "accepted": True, "status": "uncertain",
+        "operation_id": original, "next_action": "reconcile_original", "platform_code": "RECOVERY_REQUIRED",
+    }
+    assert read.status_code == 200
+    if mode != "legacy":
+        assert failure.json()["context"] == {k: v for k, v in read.json().items() if k != "platform_code"}
+        assert "detail" not in failure.json()
+    assert client.get(lookup_path, params={"action": "create"}).status_code == 404
+    assert client.get(f"/api/v1/vms/{UBUNTU}/operations/{original}", params={"action": "retire"}).status_code == 404
+    assert client.get(lookup_path, params={"action": "purge"}).status_code == 400
+    assert original_file.read_bytes() == original_bytes and board.xen.calls == calls
+    assert not source.exists()
+    with patch.object(board.manager, "_prepare_dhcp", wraps=board.manager._prepare_dhcp) as dhcp:
+        assert client.delete(path, **options).status_code == 204
+        assert dhcp.call_count == (0 if phase == "dhcp-applied" else 1)
+    operation_path, = (board.data / "operations").glob("*.json")
+    op = json.loads(operation_path.read_text())
+    assert (op["operation_id"], op["status"], op["phase"]) == (original, "SUCCEEDED", "complete")
+    assert (board.data / op["target"] / "root.raw").stat().st_ino == disk_inode
+    assert client.get(lookup_path, params={"action": "retire"}).json()["status"] == "completed"
+
+
+@pytest.mark.parametrize("parent", ["instances", "tombstones", "operations"])
+def test_delete_reconfirms_failed_parent_sync(client, board, parent):
+    import errno
+    import artifact_io
+    import xenova_runtime
+
+    path = f"/api/v1/vms/{DEBIAN}"
+    source = board.data / "instances" / "debian-dev"
+    sync = xenova_runtime.sync_directory
+    if parent == "instances":
+        def rename_then_fail(*args, **kwargs):
+            publish(*args, **kwargs)
+            raise OSError(errno.EIO, "archive parent sync unconfirmed")
+
+        publish = artifact_io.publish
+        fault = patch.object(management, "publish", side_effect=rename_then_fail)
+    else:
+        def fail_sync(directory):
+            if directory == board.data / parent:
+                record = directory / f"{DEBIAN}.json" if parent == "tombstones" else next(directory.glob("*.json"))
+                if record.exists() and json.loads(record.read_text()).get("status") in (None, "SUCCEEDED"):
+                    raise OSError(errno.EIO, "record parent sync unconfirmed")
+            sync(directory)
+
+        fault = patch.object(xenova_runtime, "sync_directory", side_effect=fail_sync)
+    with fault:
+        assert client.delete(path).status_code == 503
+    assert not source.exists()
+    original_path, = (board.data / "operations").glob("*.json")
+    def fail_retry_sync(directory):
+        if directory == board.data / parent:
+            raise OSError(errno.EIO, "parent sync still failing")
+        sync(directory)
+
+    with patch.object(management, "sync_directory", side_effect=fail_retry_sync) as retry_sync:
+        assert client.delete(path).status_code == 503
+        retry_sync.assert_any_call(board.data / parent)
+    assert client.delete(path).status_code == 204
+    assert list((board.data / "operations").glob("*.json")) == [original_path]
+    assert json.loads(original_path.read_text())["status"] == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("legacy_key", [False, True])
+def test_delete_after_lost_response_and_after_restore(client, board, legacy_key):
+    spec = {"vm_id": str(NEW_VM)}
+    body = {**spec, "name": "retire-restore", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
+            "vcpus": 1, "memory_mib": 512}
+    path = f"/api/v1/vms/{NEW_VM}"
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    running = client.delete(path)
+    assert (running.status_code, running.json()["platform_code"]) == (409, "VM_NOT_STOPPED")
+    assert client.post(path + "/stop").status_code == 204
+    source = board.data / "instances" / management.internal_name(str(NEW_VM))
+    disk_inode = (source / "root.raw").stat().st_ino
+
+    # The caller does not consume the first success. A new service instance reads the same journal.
+    if legacy_key:
+        assert board.manager.call("retire", spec, execute=True, idempotency_key=f"retire-{NEW_VM}")["ok"]
+    else:
+        async def lose_response(scope, receive, send):
+            async def drop(message):
+                if message["type"] == "http.response.start":
+                    assert message["status"] == 204
+                    raise ConnectionResetError("fixture lost delete response")
+
+            await client.app(scope, receive, drop)
+
+        with pytest.raises(ConnectionResetError, match="fixture lost delete response"):
+            TestClient(lose_response).delete(path)
+    first_path, = [p for p in (board.data / "operations").glob("*.json") if json.loads(p.read_text())["action"] == "retire"]
+    first_bytes = first_path.read_bytes()
+    first = json.loads(first_bytes)
+    board.manager = board.manager.fork()
+    with patch.object(management, "publish", side_effect=AssertionError("completed retire must not move assets again")):
+        retry_client = make_client(board)
+        assert retry_client.delete(path).status_code == 204
+    assert first_path.read_bytes() == first_bytes
+    assert not source.exists()
+    assert (board.data / first["target"] / "root.raw").stat().st_ino == disk_inode
+
+    restored = board.manager.call("restore", spec, execute=True, idempotency_key="restore-before-next-delete")
+    assert restored["ok"], restored
+    second = retry_client.delete(path)
+    assert second.status_code == 204, second.text
+    view = board.manager.call("get", spec)["data"]["vm"]
+    assert (view["lifecycle"], view["generation"]) == ("RETIRED", 3)
+    assert not source.exists()
+    retires = [json.loads(p.read_text()) for p in (board.data / "operations").glob("*.json")]
+    retires = [op for op in retires if op["action"] == "retire"]
+    assert len(retires) == 2
+    latest, = [op for op in retires if op["expected_generation"] == 2]
+    assert latest["operation_id"] != first["operation_id"] and latest["status"] == "SUCCEEDED"
+    assert (board.data / latest["target"] / "root.raw").stat().st_ino == disk_inode
+    assert first_path.read_bytes() == first_bytes
+
+
+def test_delete_does_not_report_success_if_completed_archive_is_missing(client, board):
+    path = f"/api/v1/vms/{DEBIAN}"
+    assert client.delete(path).status_code == 204
+    operation_path, = (board.data / "operations").glob("*.json")
+    op = json.loads(operation_path.read_text())
+    archive = board.data / op["target"]
+    archive.rename(archive.with_name(".fixture-hidden"))
+    assert client.delete(path).status_code == 503
+    assert json.loads(operation_path.read_text()) == op
+
+
+def test_guarded_delete_recovers_lost_result_and_blocks_old_generation_after_restore(client, board):
+    path = f"/api/v1/vms/{NEW_VM}"
+    spec = {"vm_id": str(NEW_VM)}
+    body = {**spec, "name": "guarded-retire", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
+            "vcpus": 1, "memory_mib": 512}
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    assert client.post(path + "/stop").status_code == 204
+    registration, = (board.data / "operations").glob("*.json")
+    old = {"Idempotency-Key": "retire-before-restore"}
+    generation = client.get(path + "/lifecycle")
+    assert generation.json() == {**spec, "lifecycle": "REGISTERED", "generation": 0}
+    assert client.delete(path, headers=old).status_code == 400
+    assert client.delete(path, params={"expected_lifecycle_generation": 0}).status_code == 400
+    assert client.delete(path, headers=old, params={"expected_lifecycle_generation": -1}).status_code == 400
+    assert list((board.data / "operations").glob("*.json")) == [registration]
+
+    async def lose_response(scope, receive, send):
+        async def drop(message):
+            if message["type"] == "http.response.start":
+                assert message["status"] == 204
+                raise ConnectionResetError("fixture lost guarded DELETE response")
+
+        await client.app(scope, receive, drop)
+
+    with pytest.raises(ConnectionResetError, match="lost guarded DELETE response"):
+        TestClient(lose_response).delete(path, headers=old, params={"expected_lifecycle_generation": 0})
+    board.manager = board.manager.fork()
+    client = make_client(board)
+    journal, = [p for p in (board.data / "operations").glob("*.json") if p != registration]
+    original = journal.read_bytes()
+    with patch.object(management, "publish", side_effect=AssertionError("same DELETE cannot move twice")):
+        found = client.get(path + "/operations", params={"request_key": old["Idempotency-Key"]})
+        assert found.status_code == 200 and found.json()["status"] == "completed"
+        assert found.json()["operation_id"] == journal.stem
+        assert client.delete(path, headers=old, params={"expected_lifecycle_generation": 0}).status_code == 204
+        assert client.delete(path).status_code == 204
+    assert journal.read_bytes() == original
+    restored = board.manager.call("restore", spec, execute=True, idempotency_key="fixture-restore")
+    assert restored["ok"], restored
+    current = client.get(path + "/lifecycle").json()
+    assert current == {**spec, "lifecycle": "REGISTERED", "generation": 2}
+
+    with patch.object(management, "publish", side_effect=AssertionError("old generation cannot move assets")):
+        for key in (old["Idempotency-Key"], "old-delete-that-never-arrived"):
+            refused = client.delete(path, headers={"Idempotency-Key": key}, params={"expected_lifecycle_generation": 0})
+            assert (refused.status_code, refused.json()["platform_code"]) == (409, "TARGET_CHANGED")
+        conflict = client.delete(path, headers=old, params={"expected_lifecycle_generation": 2})
+        assert (conflict.status_code, conflict.json()["platform_code"]) == (409, "IDEMPOTENCY_CONFLICT")
+    assert len(list((board.data / "operations").glob("*.json"))) == 3  # Registration, original retire and restore.
+    assert client.get(path + "/operations", params={"request_key": old["Idempotency-Key"]}).json() == found.json()
+    assert client.get(path + "/lifecycle").json() == current
+    new = {"Idempotency-Key": "new-delete"}
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    running = client.delete(path, headers=new, params={"expected_lifecycle_generation": 2})
+    assert (running.status_code, running.json()["platform_code"]) == (409, "VM_NOT_STOPPED")
+    assert client.post(path + "/stop").status_code == 204
+    assert client.delete(path, headers=new, params={"expected_lifecycle_generation": 2}).status_code == 204
+    assert client.get(path + "/lifecycle").json() == {**spec, "lifecycle": "RETIRED", "generation": 3}
+    assert journal.read_bytes() == original
+
+
 def test_real_manager_restart_registered_vm(client, board):
     """등록만 된 VM 에 POST /vms 가 오면 create 없이 start 만 한다 (디스크 재사용)."""
-    body = {"vm_id": str(DEBIAN), "name": "다시 요청한 표시 이름", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
     debian = board.records["debian-dev"]
-    body.update(vcpus=debian["vcpus"], memory_mib=debian["memory_mib"])
+    body = restart_body(debian["vcpus"], debian["memory_mib"])
+    wrong_template = client.post("/api/v1/vms", json={**body, "template_id": TEMPLATE_ID})
+    assert (wrong_template.status_code, wrong_template.json()["code"]) == (409, "VMSpecConflict")
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
     restarted = client.post("/api/v1/vms", json=body)
     assert restarted.status_code == 201, restarted.text
     assert restarted.json()["vm_id"] == str(DEBIAN)
@@ -212,6 +453,387 @@ def test_create_retransmission_does_not_rename_existing_instance(client, board):
     assert (directory / "root.raw").stat().st_ino == disk_inode
 
 
+def test_create_conflicts_are_distinct_from_running_replay(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "create-spec-conflict", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+    original, = (board.data / "operations").glob("*.json")
+    registered = original.read_bytes()
+    physical_calls = len([call for call in board.xen.calls if call[:2] == ["xl", "create"]])
+    conflicts = {"template_id": "debian-13-arm64", "template_version": "1.0.1", "vcpus": 2, "memory_mib": 768}
+
+    for field, value in conflicts.items():
+        response = client.post("/api/v1/vms", json={**body, field: value})
+        assert (response.status_code, response.json()["code"]) == (409, "VMSpecConflict")
+        assert field in response.json()["message"]
+    replay = client.post("/api/v1/vms", json={**body, "name": "다른 표시 이름"})
+    assert (replay.status_code, replay.json()["code"]) == (409, "VMExists")
+
+    assert client.post(f"/api/v1/vms/{NEW_VM}/stop").status_code == 204
+    conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
+    assert (conflict.status_code, conflict.json()["code"]) == (409, "VMSpecConflict")
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == physical_calls
+    assert original.read_bytes() == registered
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+
+
+def test_create_conflict_uses_original_unregistered_request(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "incomplete-create", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    with patch.object(board.manager, "preparer", side_effect=OSError("fixture interrupted before workspace")):
+        assert client.post("/api/v1/vms", json=body).status_code == 503
+    original, = (board.data / "operations").glob("*.json")
+    before = original.read_bytes()
+    conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
+    assert conflict.status_code == 409
+    assert (conflict.json()["code"], conflict.json()["platform_code"]) == ("VMSpecConflict", "IDEMPOTENCY_CONFLICT")
+    assert conflict.json()["context"]["operation_id"] is None
+    assert conflict.json()["context"]["accepted"] is False
+    assert list((board.data / "operations").glob("*.json")) == [original]
+    assert original.read_bytes() == before
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+    assert client.post("/api/v1/vms", json=body).status_code == 201
+
+
+def test_registration_save_failure_does_not_report_acceptance(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "record-save-error", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    write = board.manager._write
+
+    def fail_operation_save(path, value):
+        if path.parent == board.data / "operations":
+            raise OSError("fixture/private/path")
+        return write(path, value)
+
+    with patch.object(board.manager, "_write", side_effect=fail_operation_save):
+        response = client.post("/api/v1/vms", json=body)
+    assert response.status_code == 503
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == ("create", "acceptance", None, "unknown")
+    assert "start_submitted" not in context
+    assert context["next_action"] == "lookup_original" and context["operation_id"]
+    assert "fixture/private/path" not in response.text and "detail" not in response.json()
+    missing = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "create"})
+    assert missing.status_code == 404 and missing.json()["code"] == "OperationNotFound"
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+
+
+def test_xen_start_failure_is_separate_from_successful_registration(client, board):
+    body = {"vm_id": str(NEW_VM), "name": "start-error", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    board.xen.fail_create = True
+    response = client.post("/api/v1/vms", json=body)
+    assert response.status_code == 503, response.text
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == ("start", "start_submit", True, "uncertain")
+    assert "start_submitted" not in context
+    original, = (board.data / "operations").glob("*.json")
+    registered = client.get(f"/api/v1/vms/{NEW_VM}/operations/{original.stem}", params={"action": "create"})
+    assert registered.json()["status"] == "completed"
+    started = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "start"})
+    assert started.json()["status"] == "uncertain"
+    assert started.json()["platform_code"] == response.json()["platform_code"] == "RECONCILE_REQUIRED"
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
+@pytest.mark.parametrize("condition", ["normal", "start-budget-expired", "new-stop-intent"])
+def test_create_replay_after_dhcp_deadline_finishes_original_registration(client, board, condition):
+    """The same HTTP request can finish registration before a distinct start."""
+    from contextlib import ExitStack
+
+    from xenova_execution import short_lock
+
+    from dom0_manager import budget
+
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    body = {"vm_id": str(NEW_VM), "name": "registration-deadline", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    with ExitStack() as held:
+        def expire(phase, _):
+            if phase == "dhcp-applied":
+                held.enter_context(short_lock(board.run, "admission"))
+                now[0] = 3800.
+
+        with patch.object(board.manager, "checkpoint", expire):
+            failed = client.post("/api/v1/vms", json=body)
+    assert failed.status_code == 504, failed.text
+    context = failed.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"]) == ("create", "registration", True)
+    journal = board.data / "operations" / f"{context['operation_id']}.json"
+    original = json.loads(journal.read_text())
+    assert original["phase"] == "dhcp-applied"
+    assert original["error"]["code"] == "DEADLINE_EXCEEDED"
+    assert now[0] * 1000 >= original["creation"]["deadline_monotonic_ms"]
+    disk = board.data / "instances" / original["assigned"]["internal_name"] / "root.raw"
+    inode = disk.stat().st_ino
+    credential = board.data / "provisioning" / str(NEW_VM) / "agent.env"
+    credential.parent.mkdir(parents=True, mode=0o700)
+    credential.write_bytes(b"fixture private supply\n")
+    credential.chmod(0o600)
+    supply_before = credential.read_bytes()
+    supply_stat = credential.stat()
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+    lookup = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "create"})
+    assert lookup.json()["status"] == "uncertain"
+    original_bytes = journal.read_bytes()
+    pending = client.get(f"/api/v1/vms/{NEW_VM}")
+    assert (pending.status_code, pending.json()["platform_code"]) == (409, "TARGET_CHANGED")
+    assert "pending_registration" not in pending.text
+    unmanaged = domain(board.records[original["assigned"]["internal_name"]], disk, 91)
+    board.xen.rows.append(unmanaged)
+    try:
+        refused = client.post("/api/v1/vms", json=body)
+        assert (refused.status_code, refused.json()["platform_code"]) == (409, "TARGET_CHANGED")
+        assert journal.read_bytes() == original_bytes
+    finally:
+        board.xen.rows.remove(unmanaged)
+    conflict = client.post("/api/v1/vms", json={**body, "memory_mib": 768})
+    assert (conflict.status_code, conflict.json()["code"]) == (409, "VMSpecConflict"), conflict.text
+    assert journal.read_bytes() == original_bytes
+
+    if condition == "new-stop-intent":
+        record = board.records[original["assigned"]["internal_name"]]
+        execution = board.platform.execution()
+        execution.accept(record, {"vm_id": str(NEW_VM), "action": "stop", "force": False},
+                         key="fixture-new-stop", deadline=now[0] + 10.)
+        intent = execution.intent(record)
+        refused = client.post("/api/v1/vms", json=body)
+        assert (refused.status_code, refused.json()["platform_code"]) == (409, "TARGET_CHANGED")
+        assert execution.intent(record) == intent and intent["desired_state"] == "stopped"
+        assert journal.read_bytes() == original_bytes
+        assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+        return
+
+    real_budget = budget.start
+    save_tomb = board.manager._save_tomb
+    with patch.object(board.manager, "preparer", side_effect=AssertionError("must reuse published disk")), \
+            patch.object(board.manager, "_prepare_dhcp", side_effect=AssertionError("must reuse applied DHCP")), \
+            patch.object(budget, "start", side_effect=lambda ms, **kwargs: real_budget(ms, clock=lambda: now[0], **kwargs)):
+        headers = {"X-Request-Budget-Ms": "10000"}
+        with ExitStack() as held:
+            def stall_registration(*args, **kwargs):
+                held.enter_context(short_lock(board.run, "admission"))
+                now[0] += 3601.  # The lower create call keeps its own policy budget.
+                return save_tomb(*args, **kwargs)
+
+            with patch.object(board.manager, "_save_tomb", side_effect=stall_registration):
+                delayed = client.post("/api/v1/vms", json=body, headers=headers)
+        assert delayed.status_code == 504, delayed.text
+        assert delayed.json()["context"]["operation_id"] == original["operation_id"]
+        assert journal.read_bytes() == original_bytes
+
+        def expire_before_start(phase, _):
+            if phase == "complete":
+                now[0] += 11.
+
+        if condition == "start-budget-expired":
+            with patch.object(board.manager, "checkpoint", expire_before_start):
+                registration_only = client.post("/api/v1/vms", json=body, headers=headers)
+            assert registration_only.status_code == 504, registration_only.text
+            context = registration_only.json()["context"]
+            assert (context["status"], context["operation_id"], context["start_submitted"]) == (
+                "completed", original["operation_id"], False,
+            )
+            assert json.loads(journal.read_text())["status"] == "SUCCEEDED"
+            assert not list((board.data / "control-requests").glob("*.json"))
+            assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+        recovered = client.post("/api/v1/vms", json=body, headers=headers)
+        assert recovered.status_code == 201, recovered.text
+
+        completed = client.get(f"/api/v1/vms/{NEW_VM}/operations/{original['operation_id']}", params={"action": "create"})
+        assert completed.json()["status"] == "completed"
+    finished = json.loads(journal.read_text())
+    assert finished["status"] == "SUCCEEDED" and finished["first_error"] == original["error"]
+    assert finished["creation"] == original["creation"]
+    assert finished["assigned"] == original["assigned"]
+    assert disk.stat().st_ino == inode
+    assert credential.read_bytes() == supply_before
+    assert (credential.stat().st_ino, credential.stat().st_mtime_ns) == (supply_stat.st_ino, supply_stat.st_mtime_ns)
+    assert len(list((board.data / "operations").glob("*.json"))) == 1
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
+def test_create_start_timeout_preserves_registration_and_never_launches_over_a_live_domain(client, board):
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    body = {"vm_id": str(NEW_VM), "name": "start-deadline", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+
+    def timeout_after_create(argv, *args, **kwargs):
+        result = board.xen(argv, *args, **kwargs)
+        if argv[:2] == ["xl", "create"]:
+            now[0] += 91.
+        return result
+
+    board.platform.command = timeout_after_create
+    failed = client.post("/api/v1/vms", json=body)
+    assert failed.status_code == 503, failed.text
+    context = failed.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == (
+        "start", "start_confirmation", True, "uncertain",
+    )
+    assert failed.json()["platform_code"] == "RECONCILE_REQUIRED"
+    asset, = (board.data / "operations").glob("*.json")
+    record = json.loads(asset.read_text())
+    assert record["status"] == "SUCCEEDED"
+    before = asset.read_bytes()
+    start = board.data / "control-requests" / f"{context['operation_id']}.json"
+    start_before = start.read_bytes()
+    lookup = client.get(f"/api/v1/vms/{NEW_VM}/operations/{context['operation_id']}", params={"action": "start"})
+    assert lookup.json()["status"] == "uncertain"
+    disk = board.data / "instances" / record["assigned"]["internal_name"] / "root.raw"
+    inode = disk.stat().st_ino
+    replay = client.post("/api/v1/vms", json=body)
+    assert replay.status_code == 409 and replay.json()["code"] == "VMExists", replay.text
+    assert asset.read_bytes() == before and start.read_bytes() == start_before
+    assert disk.stat().st_ino == inode
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
+@pytest.mark.parametrize("lost_result", ["completed", "uncertain", "unbound", "replaced", "newer-intent"])
+def test_keyed_create_recovers_original_start_after_lost_response(client, board, lost_result):
+    path = f"/api/v1/vms/{NEW_VM}"
+    body = {"vm_id": str(NEW_VM), "name": "tracked-start", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    headers = {"Idempotency-Key": "fixture-original-start"}
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+
+    if lost_result in ("uncertain", "replaced", "newer-intent"):
+        def expire_after_binding(phase, _):
+            if phase == "launch-observed":
+                now[0] += 91.
+
+        board.platform.execution_checkpoint = expire_after_binding
+    elif lost_result == "unbound":
+        def expire_after_create(argv, *args, **kwargs):
+            result = board.xen(argv, *args, **kwargs)
+            if argv[:2] == ["xl", "create"]:
+                now[0] += 91.
+            return result
+
+        board.platform.command = expire_after_create
+
+    async def lose_response(scope, receive, send):
+        async def drop(message):
+            if message["type"] == "http.response.start":
+                assert message["status"] == (201 if lost_result == "completed" else 503 if lost_result == "unbound" else 500)
+                raise ConnectionResetError("fixture lost start response")
+
+        await client.app(scope, receive, drop)
+
+    with pytest.raises(ConnectionResetError, match="lost start response"):
+        TestClient(lose_response).post("/api/v1/vms", json=body, headers=headers)
+    board.manager = board.manager.fork()
+    client = make_client(board)
+    journal, = (board.data / "control-requests").glob("*.json")
+    asset, = (board.data / "operations").glob("*.json")
+    registration = asset.read_bytes()
+    original = journal.read_bytes()
+    calls = list(board.xen.calls)
+
+    def lookup(vm_id=NEW_VM):
+        return client.get(f"/api/v1/vms/{vm_id}/control-operations", params={"request_key": headers["Idempotency-Key"]})
+
+    found = lookup()
+    assert found.status_code == 200 and found.json()["status"] == ("completed" if lost_result == "completed" else "uncertain")
+    assert (found.json()["action"], found.json()["operation_id"]) == ("start", journal.stem)
+    assert lookup(DEBIAN).status_code == 404
+    assert journal.read_bytes() == original and board.xen.calls == calls
+    changed = client.post("/api/v1/vms", json={**body, "memory_mib": 768}, headers=headers)
+    assert (changed.status_code, changed.json()["code"]) == (409, "VMSpecConflict")
+    other = client.post("/api/v1/vms", json={**body, "vm_id": str(DEBIAN)}, headers=headers)
+    assert (other.status_code, other.json()["code"]) == (409, "VMSpecConflict")
+
+    if lost_result == "replaced":
+        # Same domid/name/UUID, different Xen incarnation.
+        board.xen.rows[-1] = dict(board.xen.rows[-1])
+    if lost_result == "newer-intent":
+        assert client.post(path + "/stop", headers={"Idempotency-Key": "newer-stop"}).status_code == 200
+
+    with patch.object(board.manager, "preparer", side_effect=AssertionError("must not prepare a new disk")):
+        replay = client.post("/api/v1/vms", json=body, headers=headers)
+    if lost_result in ("unbound", "replaced", "newer-intent"):
+        expected_error = (409, "TARGET_CHANGED") if lost_result == "newer-intent" else (503, "RECONCILE_REQUIRED")
+        assert (replay.status_code, replay.json()["platform_code"]) == expected_error
+        assert replay.json()["context"]["operation_id"] == journal.stem
+        assert lookup().json()["status"] == "uncertain"
+        assert journal.read_bytes() == original and asset.read_bytes() == registration
+        assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+        return
+    assert replay.status_code == 200, replay.text
+    assert (replay.json()["operation_id"], replay.json()["status"]) == (journal.stem, "completed")
+    assert lookup().json()["status"] == "completed"
+    assert client.get(path + f"/operations/{journal.stem}", params={"action": "start"}).json()["status"] == "completed"
+    after = json.loads(journal.read_bytes())
+    before = json.loads(original)
+    for field in ("operation_id", "request", "intent_revision", "deadline_monotonic_ms"):
+        assert after[field] == before[field]
+    if lost_result == "uncertain":
+        assert after["reconciliation"]["original_error"] == before["error"]
+    assert asset.read_bytes() == registration
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+    assert client.post(path + "/stop").status_code == 204
+    assert client.post("/api/v1/vms", json=body, headers=headers).json()["operation_id"] == journal.stem
+    assert client.get(path).status_code == 404
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
+@pytest.mark.parametrize("expiry", ["after-registration", "before-manager-start"])
+def test_create_http_budget_can_expire_after_registration_before_xen_start(board, expiry):
+    from dom0_manager import budget
+
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    real_budget = budget.start
+    body = {"vm_id": str(NEW_VM), "name": "start-not-submitted", "template_id": TEMPLATE_ID,
+            "template_version": TEMPLATE_VERSION, "vcpus": 1, "memory_mib": 512}
+    with make_client(board) as client, patch.object(
+        budget, "start", side_effect=lambda ms, **kwargs: real_budget(ms, clock=lambda: now[0], **kwargs),
+    ):
+        def expire(phase, _):
+            if phase == "complete" and expiry == "after-registration":
+                now[0] += 11.
+
+        call = SerializedManager.call
+
+        def wait_for_manager(manager, action, *args, **kwargs):
+            if action == "start" and expiry == "before-manager-start":
+                now[0] += 11.
+            return call(manager, action, *args, **kwargs)
+
+        with patch.object(board.manager, "checkpoint", expire), \
+                patch.object(SerializedManager, "call", wait_for_manager), \
+                patch.object(board.manager, "call", wraps=board.manager.call) as manager_call:
+            failed = client.post("/api/v1/vms", json=body, headers={"X-Request-Budget-Ms": "10000"})
+        assert [entry.args[0] for entry in manager_call.call_args_list] == ["get", "get", "create"]
+        assert failed.status_code == 504, failed.text
+        assert not list((board.data / "control-requests").glob("*.json"))
+        assert not [call for call in board.xen.calls if call[:2] == ["xl", "create"]]
+        journal, = (board.data / "operations").glob("*.json")
+        original = journal.read_bytes()
+        assert json.loads(original)["status"] == "SUCCEEDED"
+        error = failed.json()
+        assert (error["code"], error["platform_code"]) == ("DriverTimeout", "DEADLINE_EXCEEDED")
+        assert error["context"] == {
+            "action": "create", "stage": "completion", "accepted": True, "status": "completed",
+            "operation_id": journal.stem, "next_action": "lookup_original", "start_submitted": False,
+        }
+        completed = client.get(f"/api/v1/vms/{NEW_VM}/operations/{journal.stem}", params={"action": "create"})
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["status"] == "completed"
+        assert "start_submitted" not in completed.json()
+        wrong_action = client.get(f"/api/v1/vms/{NEW_VM}/operations/{journal.stem}", params={"action": "start"})
+        assert wrong_action.status_code == 404
+        with patch.object(board.manager, "preparer", side_effect=AssertionError("registered disk must not be copied again")):
+            recovered = client.post("/api/v1/vms", json=body, headers={"X-Request-Budget-Ms": "10000"})
+        assert recovered.status_code == 201, recovered.text
+    assert journal.read_bytes() == original
+    assert len([call for call in board.xen.calls if call[:2] == ["xl", "create"]]) == 1
+
+
 # ---- 정지 요청 추적 (S15P31E110-305): 실제 Manager.fork·budget_ms·control-operation ----
 
 
@@ -225,6 +847,80 @@ def lookup(client, vm_id, key):
 
 def shutdowns(board):
     return [call for call in board.xen.calls if call[:2] == ["xl", "shutdown"]]
+
+
+def test_stop_admission_failure_after_durable_intent_is_not_a_rejection(client, board):
+    from xenova_execution import Execution
+
+    with patch.object(Execution, "set_admission", side_effect=OSError("fixture/private/admission")):
+        response = keyed_stop(client, UBUNTU, "stop-admission-error")
+    assert response.status_code == 503, response.text
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == (
+        "stop", "acceptance", True, "uncertain",
+    )
+    assert context["operation_id"] and shutdowns(board) == []
+    assert "fixture/private/admission" not in response.text
+    original = lookup(client, UBUNTU, "stop-admission-error").json()
+    assert (original["operation_id"], original["phase"]) == (context["operation_id"], "accepted")
+
+
+@pytest.mark.parametrize("key", [None, "stop-timeout"])
+def test_shutdown_timeout_reports_confirmation_and_original_id(client, board, key):
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    board.platform.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+    board.xen.hang_shutdown = True
+    response = client.post(f"/api/v1/vms/{UBUNTU}/stop", headers={"Idempotency-Key": key} if key else {})
+    assert response.status_code == 503, response.text
+    context = response.json()["context"]
+    assert (context["action"], context["stage"], context["accepted"], context["status"]) == (
+        "stop", "shutdown_confirmation", True, "uncertain",
+    )
+    operation_id = context["operation_id"]
+    assert context["next_action"] == "lookup_original" and operation_id
+    read = client.get(f"/api/v1/vms/{UBUNTU}/operations/{operation_id}", params={"action": "stop"})
+    assert read.json()["status"] == "uncertain" and read.json()["operation_id"] == operation_id
+    if key:
+        assert lookup(client, UBUNTU, key).json()["operation_id"] == operation_id
+    assert len(shutdowns(board)) == 1
+
+
+@pytest.mark.parametrize("key", [None, "late-stop"])
+def test_late_shutdown_is_settled_by_replaying_the_original_stop(client, board, key):
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    board.platform.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+    board.xen.hang_shutdown = True
+    path = f"/api/v1/vms/{UBUNTU}/stop"
+    headers = {"Idempotency-Key": key} if key else {}
+    failed = client.post(path, headers=headers)
+    assert failed.status_code == 503, failed.text
+    operation_id = failed.json()["context"]["operation_id"]
+    journal = board.data / "control-requests" / f"{operation_id}.json"
+    before = json.loads(journal.read_text())
+    intent = board.data / "control" / f"{UBUNTU}.json"
+    original_intent = intent.read_bytes()
+    if key:
+        present = client.post(path, headers=headers)
+        assert present.status_code == 503 and present.json()["context"]["status"] == "uncertain"
+    board.xen.rows.clear()  # Xen fixture: the already-issued shutdown takes effect after its deadline.
+    read = client.get(f"/api/v1/vms/{UBUNTU}/operations/{operation_id}", params={"action": "stop"})
+    assert read.json()["status"] == "uncertain"
+    assert json.loads(journal.read_text()) == before
+    recovered = client.post(path, headers=headers)
+    assert recovered.status_code == (200 if key else 204), recovered.text
+    if key:
+        assert (recovered.json()["operation_id"], recovered.json()["status"]) == (operation_id, "completed")
+        assert lookup(client, UBUNTU, key).json()["status"] == "completed"
+    after = json.loads(journal.read_text())
+    assert after["phase"] == "completed"
+    assert after["reconciliation"]["original_error"] == before["error"]
+    assert all(after[field] == before[field] for field in (
+        "operation_id", "idempotency_key", "request_hash", "intent_revision", "deadline_monotonic_ms",
+    ))
+    assert intent.read_bytes() == original_intent and len(shutdowns(board)) == 1
+    assert not [call for call in board.xen.calls if call[:2] == ["xl", "destroy"]]
 
 
 def test_real_keyed_stop_replay_lookup_and_conflict(client, board):
@@ -246,6 +942,85 @@ def test_real_keyed_stop_replay_lookup_and_conflict(client, board):
     conflict = keyed_stop(client, DEBIAN, "stop-ubuntu-1")  # 같은 키를 다른 VM 에
     assert conflict.status_code == 409 and conflict.json()["platform_code"] == "IDEMPOTENCY_CONFLICT"
     assert lookup(client, UBUNTU, "never-sent").status_code == 404
+
+
+def test_lost_stop_response_can_be_recovered_after_retirement(client, board):
+    stopped = keyed_stop(client, UBUNTU, "stop-before-archive")
+    assert stopped.status_code == 200, stopped.text
+    assert client.delete(f"/api/v1/vms/{UBUNTU}").status_code == 204
+    operation_id = lookup(client, UBUNTU, "stop-before-archive").json()["operation_id"]
+    count = len(board.xen.calls)
+    replayed = keyed_stop(client, UBUNTU, "stop-before-archive")
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["operation_id"] == operation_id
+    assert replayed.json()["status"] == "completed"
+    assert len(board.xen.calls) == count and len(shutdowns(board)) == 1
+
+
+def test_completed_stop_replay_requires_verified_storage(client, board):
+    stopped = keyed_stop(client, UBUNTU, "completed-before-storage-error")
+    assert stopped.status_code == 200, stopped.text
+    with patch.object(vm, "storage_check", side_effect=OSError("test storage unavailable")):
+        replay = keyed_stop(client, UBUNTU, "completed-before-storage-error")
+    assert replay.status_code == 503, replay.text
+    assert replay.json()["context"]["status"] == "uncertain"
+    assert replay.json()["context"]["operation_id"] == stopped.json()["operation_id"]
+    assert len(shutdowns(board)) == 1
+
+
+@pytest.mark.parametrize("lock_still_held", [False, True])
+def test_expired_pending_stop_does_not_return_202_again(client, board, lock_still_held):
+    from contextlib import nullcontext
+    from xenova_runtime import operation_lock
+
+    now = [100.]
+    board.platform.clock = lambda: now[0]
+    with operation_lock(board.run):
+        pending = keyed_stop(client, UBUNTU, "expires-before-dispatch")
+    assert pending.status_code == 202, pending.text
+    now[0] += 91.
+    with operation_lock(board.run) if lock_still_held else nullcontext():
+        response = keyed_stop(client, UBUNTU, "expires-before-dispatch")
+    assert response.status_code == 504, response.text
+    body = response.json()
+    assert body["platform_code"] == "DEADLINE_EXCEEDED"
+    assert body["operation"]["execution_deadline_expired"] is True
+    assert body["context"]["operation_id"] == pending.json()["operation_id"]
+    assert lookup(client, UBUNTU, "expires-before-dispatch").json()["execution_deadline_expired"] is True
+    assert shutdowns(board) == []
+
+
+def test_keyed_stop_can_be_found_during_an_in_flight_http_response(client, board):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+
+    entered, release = Event(), Event()
+
+    def hold_command(argv, *args, **kwargs):
+        if argv[:2] == ["xl", "shutdown"]:
+            entered.set()
+            assert release.wait(5)
+        return board.xen(argv, *args, **kwargs)
+
+    board.platform.command = hold_command
+    key = "response-still-in-flight"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        original = pool.submit(keyed_stop, client, UBUNTU, key)
+        try:
+            assert entered.wait(5)
+            with pytest.raises(TimeoutError):
+                original.result(timeout=.01)
+            pending = lookup(client, UBUNTU, key)
+            assert pending.status_code == 200, pending.text
+            body = pending.json()
+            assert (body["phase"], body["status"]) == ("executing", "pending")
+        finally:
+            release.set()
+        assert original.result(timeout=5).status_code == 200
+    recovered = keyed_stop(client, UBUNTU, key)
+    assert (recovered.status_code, recovered.json()["status"]) == (200, "completed")
+    assert recovered.json()["operation_id"] == body["operation_id"]
+    assert len(shutdowns(board)) == 1
 
 
 def test_real_keyed_stop_is_accepted_while_a_long_operation_holds_the_execution_lock(client, board):
@@ -286,8 +1061,7 @@ def test_real_reboot_of_a_vm_that_is_not_running_is_409_with_or_without_a_key(cl
 
 def test_real_keyed_reboot_starts_a_new_execution_and_replays_without_repeating(client, board):
     debian = board.records["debian-dev"]  # 플랫폼이 시작한(관리하는) 실행에서 재부팅한다
-    body = {"vm_id": str(DEBIAN), "name": "debian", "template_id": TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
-            "vcpus": debian["vcpus"], "memory_mib": debian["memory_mib"]}
+    body = restart_body(debian["vcpus"], debian["memory_mib"])
     assert client.post("/api/v1/vms", json=body).status_code == 201
     before = board.manager.call("get", {"vm_id": str(DEBIAN)})["data"]["vm"]
     assert before["execution_id"]
@@ -311,6 +1085,64 @@ def test_real_reboot_of_a_stopped_or_unregistered_vm(client, board):
     assert response.status_code == 409, response.text
     assert client.post(f"/api/v1/vms/{NEW_VM}/reboot").status_code == 404
     assert reboots(board) == []
+
+
+# ---- 자원 변경 (S15P31E110-368): 실제 update-resources·operation·control-operation ----
+
+
+def resize(client, vm_id, key, vcpus, memory_mib, **headers):
+    return client.put(f"/api/v1/vms/{vm_id}/resources", json={"vcpus": vcpus, "memory_mib": memory_mib},
+                      headers={"Idempotency-Key": key, **headers})
+
+
+def restart_body(vcpus, memory_mib):
+    return {"vm_id": str(DEBIAN), "name": "debian", "template_id": DEBIAN_TEMPLATE_ID, "template_version": TEMPLATE_VERSION,
+            "vcpus": vcpus, "memory_mib": memory_mib}
+
+
+def test_real_resource_update_replays_refuses_other_keys_and_restarts_with_the_new_values(client, board):
+    debian = board.records["debian-dev"]
+    assert client.post("/api/v1/vms", json=restart_body(debian["vcpus"], debian["memory_mib"])).status_code == 201
+    running = resize(client, DEBIAN, "resize-while-running", 2, 768)
+    assert (running.status_code, running.json()["code"]) == (409, "InvalidState")
+    assert client.post(f"/api/v1/vms/{DEBIAN}/stop").status_code == 204
+    before = board.manager.call("get", {"vm_id": str(DEBIAN)})["data"]["vm"]
+    creates = sum(c[:2] == ["xl", "create"] for c in board.xen.calls)
+
+    first = resize(client, DEBIAN, "resize-debian-1", 2, 768, **{"X-Request-Budget-Ms": "20000"})  # 하위는 budget_ms 를 받지 않는다
+    assert first.status_code == 200, first.text
+    result = first.json()
+    assert result["before"] == {"vcpus": debian["vcpus"], "memory_mib": debian["memory_mib"]}
+    assert result["after"] == {"vcpus": 2, "memory_mib": 768} and result["operation_id"] and result["applies_on_next_start"] is True
+    after = board.manager.call("get", {"vm_id": str(DEBIAN)})["data"]["vm"]
+    assert (after["configuration"]["vcpus"], after["configuration"]["memory_mib"]) == (2, 768)
+    assert after["configuration_sha256"] != before["configuration_sha256"]
+    assert (after["generation"], after["initial_spec"], after["domid"]) == (before["generation"], before["initial_spec"], None)
+    assert sum(c[:2] == ["xl", "create"] for c in board.xen.calls) == creates  # 게스트를 시작하지 않는다
+
+    again = resize(client, DEBIAN, "resize-debian-1", 2, 768)  # 응답을 잃었다고 보고 같은 키·같은 본문
+    assert again.status_code == 200, again.text
+    assert again.json() == result  # 설정 해시가 바뀌었어도 원 요청으로 재전달해 원 결과
+    other = resize(client, DEBIAN, "resize-debian-1", 1, 512)
+    assert (other.status_code, other.json()["code"]) == (409, "VMExists")
+
+    assert keyed_stop(client, UBUNTU, "stop-then-resize").status_code == 200
+    reused = resize(client, DEBIAN, "stop-then-resize", 2, 768)  # 제어 원장의 키
+    assert (reused.status_code, reused.json()["code"]) == (409, "VMExists")
+    current = board.manager.call("get", {"vm_id": str(DEBIAN)})["data"]["vm"]
+    assert current["configuration_sha256"] == after["configuration_sha256"]
+
+    old = client.post("/api/v1/vms", json=restart_body(debian["vcpus"], debian["memory_mib"]))
+    assert (old.status_code, old.json()["code"]) == (409, "VMSpecConflict")
+    restarted = client.post("/api/v1/vms", json=restart_body(2, 768))
+    assert restarted.status_code == 201, restarted.text
+    assert (restarted.json()["vcpus"], restarted.json()["memory_mib"]) == (2, 768)
+
+
+def test_real_resource_update_of_unregistered_or_never_stopped_vm(client, board):
+    assert resize(client, NEW_VM, "resize-missing", 2, 768).status_code == 404
+    legacy = resize(client, DEBIAN, "resize-no-stopped-intent", 2, 768)  # 등록만 된 옛 VM 은 stopped 의도가 없다
+    assert (legacy.status_code, legacy.json()["platform_code"]) == (409, "INTENT_MISMATCH")
 
 
 def test_real_budget_exhausted_submits_nothing(board):

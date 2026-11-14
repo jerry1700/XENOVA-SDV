@@ -3,10 +3,15 @@ package com.xenova.backend.vm.api;
 import com.xenova.backend.agent.application.AgentDataService;
 import com.xenova.backend.agent.domain.AgentInventory;
 import com.xenova.backend.agent.domain.AgentStatus;
+import com.xenova.backend.event.application.VmSyncService;
 import com.xenova.backend.vm.application.VmService;
 import com.xenova.backend.vm.application.VmService.CreateResult;
 import com.xenova.backend.vm.domain.Vm;
+import com.xenova.backend.vm.domain.VmControlOperation;
 import com.xenova.backend.vm.domain.VmRole;
+import com.xenova.backend.vm.domain.VmResourceUpdate;
+import com.xenova.backend.vm.domain.VmResourceView;
+import com.xenova.backend.vm.domain.CpuLayout;
 import jakarta.validation.Valid;
 import java.net.URI;
 import java.time.Clock;
@@ -17,8 +22,11 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -26,20 +34,23 @@ import org.springframework.web.bind.annotation.RestController;
 public class VmController {
 
     private final VmService vmService;
+    private final VmSyncService vmSyncService;
     private final AgentDataService agentDataService;
     private final Clock clock;
 
-    public VmController(VmService vmService, AgentDataService agentDataService, Clock clock) {
+    public VmController(
+            VmService vmService, VmSyncService vmSyncService, AgentDataService agentDataService, Clock clock) {
         this.vmService = vmService;
+        this.vmSyncService = vmSyncService;
         this.agentDataService = agentDataService;
         this.clock = clock;
     }
 
     @GetMapping
     public VmListResponse list() {
+        var vms = vmSyncService.sync();
         Instant now = clock.instant();
-        VmService.VmList list = vmService.listObserved();
-        return new VmListResponse(list.vms().stream().map(vm -> withAgentStatus(vm, now)).toList(), list.observedAt());
+        return new VmListResponse(vms.stream().map(vm -> withAgentStatus(vm, now)).toList(), now);
     }
 
     // 201 for a new VM, 200 when the same name and spec were already created (retry).
@@ -70,6 +81,49 @@ public class VmController {
     @PostMapping("/{vmId}/stop")
     public Vm stop(@PathVariable String vmId) {
         return vmService.stop(vmId);
+    }
+
+    @PostMapping("/{vmId}/reboot")
+    public ResponseEntity<VmControlOperation> reboot(
+            @PathVariable String vmId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String requestKey) {
+        VmControlOperation operation = vmService.reboot(vmId, requestKey);
+        return "pending".equals(operation.status())
+                ? ResponseEntity.accepted().body(operation)
+                : ResponseEntity.ok(operation);
+    }
+
+    @GetMapping("/{vmId}/control-operations")
+    public VmControlOperation controlOperation(
+            @PathVariable String vmId,
+            @RequestParam(value = "request_key", required = false) String requestKey) {
+        return vmService.controlOperation(vmId, requestKey);
+    }
+
+    @PutMapping("/{vmId}/resources")
+    public VmResourceUpdate updateResources(
+            @PathVariable String vmId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String requestKey,
+            @Valid @RequestBody UpdateVmResourcesRequest request) {
+        return vmService.updateResources(vmId, request.vcpus(), request.memoryMib(), requestKey);
+    }
+
+    @GetMapping("/{vmId}/resources")
+    public VmResourceView resources(@PathVariable String vmId) {
+        return vmService.resources(vmId);
+    }
+
+    @PutMapping("/{vmId}/resources/vcpu-pinning")
+    public VmResourceView updateVcpuPinning(
+            @PathVariable String vmId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String requestKey,
+            @Valid @RequestBody UpdateVcpuPinningRequest request) {
+        return vmService.updateVcpuPinning(
+                vmId,
+                request.mappings().stream()
+                        .map(mapping -> new CpuLayout.VcpuAffinity(mapping.vcpu(), mapping.pcpus()))
+                        .toList(),
+                requestKey);
     }
 
     @DeleteMapping("/{vmId}")

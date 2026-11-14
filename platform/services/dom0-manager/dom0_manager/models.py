@@ -57,6 +57,34 @@ class CreateVmRequest(BaseModel):
         return value
 
 
+class UpdateResourcesRequest(BaseModel):
+    """정지한 Linux VM 의 자원 변경(S15P31E110-368). 다음 시작부터 적용된다. true·2.0·"2" 를 정수로 바꾸지 않는다."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    vcpus: int = Field(ge=1, le=4)
+    memory_mib: int = Field(ge=128, le=1024, description="플랫폼 하한 128, API 상한 1024. 템플릿별 하한은 Spring 이 검사한다")
+
+
+class VmResources(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    vcpus: int = Field(ge=1)
+    memory_mib: int = Field(ge=1)
+
+
+class ResourceUpdate(BaseModel):
+    """자원 변경 결과. 같은 키 재전송도 원 결과(같은 operation_id·before·after)다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm_id: UUID
+    operation_id: UUID | None = Field(description="하위 원 자산 작업. 작업 기록이 없는 드라이버(mock)면 null")
+    before: VmResources
+    after: VmResources
+    applies_on_next_start: bool = Field(description="항상 true. 실행 중인 게스트를 바꾸지 않고 다음 시작부터 적용된다")
+
+
 class ResourceName(str, Enum):
     vcpus = "vcpus"
     memory_mib = "memory_mib"
@@ -74,7 +102,9 @@ class ResourceError(BaseModel):
 class ErrorCode(str, Enum):
     InvalidArgument = "InvalidArgument"
     VMNotFound = "VMNotFound"
-    VMExists = "VMExists"
+    VMExists = "VMExists"  # 409 같은 vm_id 의 VM 이 이미 있음(생성 재전달) 또는 같은 키가 다른 요청의 원 작업
+    VMSpecConflict = "VMSpecConflict"
+    VMNameConflict = "VMNameConflict"  # 409 플랫폼 VM_NAME_CONFLICT: 다른 VM 과 내부 이름·UUID 예약·MAC 이 겹침. 생성 성공이 아니다
     InsufficientResources = "InsufficientResources"
     InvalidState = "InvalidState"  # 현재 생명주기에서 수행할 수 없음 (실행 중 VM 의 DELETE, 플랫폼 VM_NOT_STOPPED 등)
     # 드라이버·플랫폼 실패. HTTP 상태와 1:1 로 둔다 (Spring 이 code 로 매핑하므로 상태만으로 구분하지 않는다)
@@ -104,7 +134,7 @@ class ControlOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vm_id: UUID
-    action: str = Field(description="stop 또는 reboot")
+    action: str = Field(description="start, stop 또는 reboot")
     request_key: str | None = Field(default=None, description="최초 제출 전에 호출자가 정한 Idempotency-Key")
     operation_id: UUID | None = Field(default=None, description="하위 원 제어 작업. 수락 전 거절·작업 기록 없는 드라이버면 null")
     status: ControlStatus
@@ -120,6 +150,50 @@ class ControlOperation(BaseModel):
     warnings: list[str] = Field(default_factory=list, description="진단 경고 코드(DIAGNOSTIC_UNAVAILABLE 등). 결과를 바꾸지 않는다")
 
 
+VmOperationAction = Literal["create", "start", "stop", "retire"]
+
+
+class VmLifecycle(BaseModel):
+    """등록 수명 조회. 현재 Xen 실행 상태와 독립적이다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm_id: UUID
+    lifecycle: Literal["REGISTERED", "RETIRED", "PURGING", "PURGED"]
+    generation: int = Field(ge=0)
+
+
+VmOperationStage = Literal[
+    "preflight", "acceptance", "asset_preparation", "registration", "network_apply",
+    "start_prepare", "start_submit", "start_confirmation", "shutdown_submit", "shutdown_confirmation",
+    "archive_move", "archive_commit", "completion",
+]
+
+
+class VmOperationResult(BaseModel):
+    """실패 응답과 원 작업 조회에 쓰는 제한된 관측값."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: VmOperationAction
+    stage: VmOperationStage | None = None
+    accepted: bool | None = None
+    status: ControlStatus
+    operation_id: UUID | None = None
+    next_action: Literal["fix_request", "check_current_vm", "lookup_original", "reconcile_original"] | None = None
+    platform_code: str | None = None
+    start_submitted: Literal[False] | None = Field(
+        default=None, description="이 HTTP 호출에서 시작 미제출이 확인되면 false. 그 외에는 생략",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unobserved_start(self, handler):
+        result = handler(self)
+        if self.start_submitted is None:
+            result.pop("start_submitted", None)
+        return result
+
+
 class Error(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -133,6 +207,7 @@ class Error(BaseModel):
     )
     retryable: bool | None = Field(default=None, description="플랫폼이 준 원본 재시도 가능 여부. 코드만으로 재시도 정책을 만들지 않는다")
     operation: ControlOperation | None = Field(default=None, description="제어 요청이 받아들여진 뒤의 오류에만 있다. 원 작업 문맥")
+    context: VmOperationResult | None = Field(default=None, description="생성·시작·정지·보관 실패에서 확인한 작업 문맥")
 
 
 class HealthStatus(str, Enum):
@@ -276,6 +351,59 @@ class RecoveryEventsResponse(BaseModel):
     gap: bool = Field(description="after_event_id 가 보관 범위 밖이거나 커서 뒤의 보관 줄이 손상돼 그 이후 이력을 잃었을 수 있음")
 
 
+# ---- USB 휴대폰 화면 중계 (계약 4.13) ----
+
+
+class PhoneRelayState(str, Enum):
+    listening = "listening"  # 실행 중이고 접속 주소가 있음
+    waiting_link = "waiting_link"  # 실행 중이지만 쓸 수 있는 USB 링크가 없음(케이블·테더링·주소)
+    starting = "starting"  # 시작 중 또는 실패 뒤 자동 재시작 대기
+    stopped = "stopped"  # 꺼짐. 재부팅 뒤 기본값(opt-in)
+    failed = "failed"
+    unknown = "unknown"
+
+
+class PhoneUsbLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    interface: str
+    present: bool = Field(description="USB 네트워크 장치가 있는가(테더링 켜짐)")
+    ipv4: list[str] = Field(description="보드 쪽 주소(주소/접두어). 휴대폰 DHCP 가 준 값")
+    gateway: str | None = Field(default=None, description="DHCP 기본 경로의 게이트웨이 = 휴대폰 주소. 없으면 null")
+
+
+class PhonePairingStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    active: bool = Field(description="아직 쓰지 않았고 만료되지 않은 연결번호가 있음. 번호 값은 담지 않는다")
+    expires_at: datetime | None = None
+
+
+class PhoneLinkStatus(BaseModel):
+    """계약 4.13. 연결번호 값은 담지 않는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool = Field(description="중계 설정 파일이 있음")
+    relay: PhoneRelayState
+    url: str | None = Field(default=None, description="휴대폰 브라우저에서 열 주소. relay 가 listening 일 때만")
+    usb: PhoneUsbLink
+    configured_phone_ipv4: str | None = Field(default=None, description="중계 설정의 휴대폰 주소")
+    subnet_mismatch: bool | None = Field(
+        default=None, description="보드 USB 주소가 설정된 휴대폰 대역 밖(휴대폰이 테더링 대역을 바꿈). 판단할 수 없으면 null")
+    pairing: PhonePairingStatus
+    observed_at: datetime
+
+
+class PhonePairingCode(BaseModel):
+    """새로 발급한 연결번호. 이 응답에만 번호가 있다(저장·로그 금지)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(pattern=r"^[0-9]{6}$")
+    expires_at: datetime
+
+
 # ---- CPU 배치 조회 (S15P31E110-353, 계약 4.11) ----
 # 플랫폼 cpu-layout 응답의 공개 필드만 옮긴다(모르는 필드는 버린다). null 은 '해당 없음·모름'이며 true/false 로 채우지 않는다.
 
@@ -387,3 +515,70 @@ class CpuLayout(_CpuModel):
     reservations: list[CpuReservation]
     vms: list[VmCpuLayout] = Field(description="전체 조회면 등록된 모든 VM, 한 VM 조회면 그 VM 하나")
     issues: list[CpuIssue]
+
+
+class CpuPlacement(BaseModel):
+    """한 VM의 모든 vCPU에 동일하게 적용할 물리 CPU 집합."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vm_id: UUID
+    mode: Literal["shared", "exclusive"]
+    pcpus: list[int] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _valid_pcpus(self):
+        if any(type(cpu) is not int or not 0 <= cpu < 4 for cpu in self.pcpus):
+            raise ValueError("pcpus must contain Raspberry Pi 4 CPU numbers 0..3")
+        if len(set(self.pcpus)) != len(self.pcpus):
+            raise ValueError("pcpus must not contain duplicates")
+        self.pcpus.sort()
+        return self
+
+
+class UpdateCpuPolicyRequest(BaseModel):
+    """전체 CPU 정책 교체 요청. expected revision으로 잃어버린 갱신을 막는다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_policy_revision: int | None = Field(ge=1)
+    shared_pcpus: list[int] = Field(min_length=1)
+    placements: list[CpuPlacement]
+
+    @model_validator(mode="after")
+    def _valid_policy(self):
+        if any(type(cpu) is not int or not 0 <= cpu < 4 for cpu in self.shared_pcpus):
+            raise ValueError("shared_pcpus must contain Raspberry Pi 4 CPU numbers 0..3")
+        if len(set(self.shared_pcpus)) != len(self.shared_pcpus):
+            raise ValueError("shared_pcpus must not contain duplicates")
+        self.shared_pcpus.sort()
+        identities: set[UUID] = set()
+        exclusive: set[int] = set()
+        shared = set(self.shared_pcpus)
+        for placement in self.placements:
+            if placement.vm_id.int == 0 or placement.vm_id in identities:
+                raise ValueError("placements must contain unique non-nil VM UUIDs")
+            identities.add(placement.vm_id)
+            mask = set(placement.pcpus)
+            if placement.mode == "shared" and not mask <= shared:
+                raise ValueError("shared placement pcpus must be a subset of shared_pcpus")
+            if placement.mode == "exclusive":
+                if mask & (shared | exclusive):
+                    raise ValueError("exclusive placement pcpus must not overlap shared or exclusive pcpus")
+                exclusive |= mask
+        self.placements.sort(key=lambda placement: str(placement.vm_id))
+        return self
+
+
+class CpuPolicy(_CpuModel):
+    schema_version: Literal["2.0"]
+    operation_id: UUID
+    policy_revision: int = Field(ge=1)
+    pool_name: str
+    shared_pcpus: list[int]
+    placements: list[CpuPlacement]
+
+
+class CpuPolicyUpdate(_CpuModel):
+    policy: CpuPolicy
+    host_preparation_required: bool = True

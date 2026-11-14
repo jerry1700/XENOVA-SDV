@@ -59,6 +59,15 @@ public class EventRecorder {
         return event;
     }
 
+    /** 장애 주입 요청을 보냈다 (demo.command.sent). 결과(꺼짐·복구)는 상태 동기화·복구 이벤트가 따로 남긴다 */
+    public void faultInjected(String vmId, String name, String command) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("name", name);
+        payload.put("command", command);
+        payload.put("requested_by", "operator");
+        record(EventType.DEMO_COMMAND_SENT, EventSeverity.WARNING, vmId, null, payload);
+    }
+
     public void vmCreated(VmRecord record) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("name", record.getName());
@@ -70,6 +79,14 @@ public class EventRecorder {
     public void vmDeleted(String vmId, String name) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("name", name);
+        record(EventType.VM_DELETED, EventSeverity.INFO, vmId, null, payload);
+    }
+
+    // source tells a delete seen on the board (a platform tool removed the registration) apart from one Spring asked for.
+    public void vmDeleted(String vmId, String name, String source) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("name", name);
+        payload.put("source", source);
         record(EventType.VM_DELETED, EventSeverity.INFO, vmId, null, payload);
     }
 

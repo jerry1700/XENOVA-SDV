@@ -9,12 +9,13 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.xenova.backend.agent.application.AgentInventoryCleaner;
 import com.xenova.backend.event.application.EventRecorder;
 import com.xenova.backend.event.application.VmStateTracker;
+import com.xenova.backend.template.application.FixedTemplateCatalog;
 import com.xenova.backend.template.application.TemplateCatalog;
 import com.xenova.backend.template.domain.GuestKind;
 import com.xenova.backend.template.domain.VmTemplate;
-import com.xenova.backend.template.infrastructure.TemplateCatalogProperties;
 import com.xenova.backend.vm.domain.CreateVmCommand;
 import com.xenova.backend.vm.domain.Vm;
 import com.xenova.backend.vm.domain.VmControlPort;
@@ -46,12 +47,11 @@ class VmServiceRuntimeCacheTest {
     void setUp() {
         port = mock(VmControlPort.class);
         repository = mock(VmRecordRepository.class);
-        TemplateCatalog templates = new TemplateCatalog(new TemplateCatalogProperties(
-                List.of(new VmTemplate("alpine", "1.2.0", "Alpine 1.2.0", 128, GuestKind.LINUX))));
+        TemplateCatalog templates = FixedTemplateCatalog.of(new VmTemplate("alpine", "1.2.0", "Alpine 1.2.0", 128, GuestKind.LINUX));
         VmRuntimeCache cache = new VmRuntimeCache(
                 port, new VmRuntimeCacheProperties(true, Duration.ofSeconds(1), Duration.ofSeconds(10)), clock);
         service = new VmService(port, repository, templates, mock(EventRecorder.class), mock(VmStateTracker.class),
-                cache, clock);
+                cache, mock(AgentInventoryCleaner.class), clock);
         record = new VmRecord("vm-1", new CreateVmCommand("alpine-1", "alpine", "1.2.0", 1, 256), GuestKind.LINUX, START);
         when(repository.findAllByLifecycleOrLifecycleIsNullOrderByCreatedAtAsc(VmLifecycle.REGISTERED))
                 .thenReturn(List.of(record));

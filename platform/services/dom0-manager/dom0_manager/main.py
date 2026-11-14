@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
 from . import __version__
-from .api import console, cpu, health, logs, recovery, registrations, stats, vms
+from .api import console, cpu, health, logs, phone_link, recovery, registrations, stats, templates, vms
 from .api.errors import install_error_handlers
 from .config import Settings
 from .console import ConsoleSession
@@ -35,11 +35,24 @@ def create_app(
     driver = driver or build_driver(settings)
     provisioner = provisioner or build_provisioner(settings, driver)
 
-    app = FastAPI(title="Xenova dom0 manager API", version="1.0.0", description=DESCRIPTION)
+    # 문서 경로(/docs·/redoc·/openapi.json)는 기본으로 열지 않는다(계약: 모든 엔드포인트 토큰 검사, 2026-11-06 결정).
+    # XENOVA_DOM0_API_DOCS=1 은 개발용이며, 켜도 서비스 토큰이 설정돼 있으면 아래 미들웨어가 토큰을 검사한다.
+    # 계약 시험은 경로가 아니라 app.openapi() 를 직접 부르므로 경로를 꺼도 스키마 비교는 그대로다
+    docs = settings.api_docs
+    app = FastAPI(
+        title="Xenova dom0 manager API",
+        version="1.0.0",
+        description=DESCRIPTION,
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
+    )
     app.state.settings = settings
     app.state.driver = driver
     app.state.service = VmService(driver, provisioner, settings)
     app.state.console_factory = ConsoleSession
+    from .phone_link import PhoneLink
+    app.state.phone_link = PhoneLink(settings.phone_runtime_dir, settings.phone_config)
     from .registration_sender import RegistrationSender
     app.state.registration_sender = RegistrationSender(settings)
     # 예상된 등록 입력 거절의 유한 부가 진단. 원 operation/등록 기록을 대체하지 않는다.
@@ -66,6 +79,8 @@ def create_app(
     app.include_router(recovery.router, prefix="/api/v1")
     app.include_router(logs.router, prefix="/api/v1")
     app.include_router(registrations.router, prefix="/api/v1")
+    app.include_router(templates.router, prefix="/api/v1")
+    app.include_router(phone_link.router, prefix="/api/v1")
     install_error_handlers(app)
     _install_request_budget(app, settings.response_reserve_s)
     if settings.service_token:
@@ -74,9 +89,6 @@ def create_app(
 
     logging.getLogger(__name__).info("dom0-manager %s driver=%s", __version__, driver.name)
     return app
-
-
-_PUBLIC_PATHS = ("/docs", "/redoc", "/openapi.json")
 
 
 def _install_request_budget(app: FastAPI, reserve_s: float) -> None:
@@ -114,7 +126,8 @@ def _install_bearer_auth(app: FastAPI, token: str) -> None:
 
     @app.middleware("http")
     async def require_service_token(request, call_next):
-        if request.url.path in _PUBLIC_PATHS or request.url.path == "/api/v1/logs/ingest":
+        # 문서 경로도 예외가 아니다. 예외는 자체 토큰으로 인증하는 로그 수신 하나뿐이다
+        if request.url.path == "/api/v1/logs/ingest":
             # Log producers authenticate with their own source-scoped token in the route.
             # They must never receive the root dom0 control service token.
             return await call_next(request)

@@ -23,25 +23,30 @@ class DeploymentPayloadTest(unittest.TestCase):
     def install_recipe(self,name,project,package):
         recipe=payloads.RECIPES/name/(name+"_0.1.0.bb")
         source=self.base/("unpack-"+name);source.mkdir()
-        text=recipe.read_text()
-        extra=re.search(r'FILESEXTRAPATHS:prepend := "([^"]+)"',text).group(1)
-        extra=extra.replace(chr(36)+"{THISDIR}",str(recipe.parent))
-        search=[Path(p) for p in extra.split(":") if p]+[recipe.parent/"files"]
+        fragments=[recipe, *sorted(recipe.parent.glob(name+'_*.bbappend'))]
         selected={}
-        for name in re.findall(r"file://([^ ;\"]+)",re.search(r'SRC_URI = "([^"]+)"',text).group(1)):
-            matches=[p/name for p in search if (p/name).exists()]
-            self.assertTrue(matches,"recipe fetch source missing: "+name)
-            selected[name]=matches[0]
-            if matches[0].is_dir():
-                shutil.copytree(matches[0],source/name)
-            else:
-                shutil.copyfile(matches[0],source/name)
+        bodies=[]
+        for fragment in fragments:
+            text=fragment.read_text()
+            extra=re.search(r'FILESEXTRAPATHS:prepend := "([^"]+)"',text).group(1)
+            extra=extra.replace("${THISDIR}",str(recipe.parent))
+            search=[Path(p) for p in extra.split(":") if p]+[recipe.parent/"files"]
+            for uri in re.findall(r'^SRC_URI \+?= "([^"]+)"',text,re.M):
+                for filename in re.findall(r'file://([^ ;"]+)',uri):
+                    matches=[p/filename for p in search if (p/filename).exists()]
+                    self.assertTrue(matches,"recipe fetch source missing: "+filename)
+                    selected[filename]=matches[0]
+                    if matches[0].is_dir():
+                        shutil.copytree(matches[0],source/filename)
+                    else:
+                        shutil.copyfile(matches[0],source/filename)
+            bodies.append(re.search(r'do_install(?::append)?\(\) \{\n(.*?)\n\}',text,re.S).group(1))
         self.assertEqual(selected[package].resolve(),(project/package).resolve())
-        body=text.split("do_install() {\n",1)[1].split("\n}",1)[0]
+        body="\n".join(bodies)
         for key,value in {"D":str(self.root),"S":str(source),
                           "PYTHON_SITEPACKAGES_DIR":"/usr/lib/python3.14/site-packages",
                           "systemd_system_unitdir":"/usr/lib/systemd/system",
-                          "sysconfdir":"/etc","datadir":"/usr/share"}.items():
+                          "sysconfdir":"/etc","datadir":"/usr/share","bindir":"/usr/bin"}.items():
             body=body.replace("${"+key+"}",value)
         self.assertNotIn("${",body)
         subprocess.run(["bash","-eu","-c",body],check=True,capture_output=True,text=True)
@@ -49,6 +54,7 @@ class DeploymentPayloadTest(unittest.TestCase):
     def install_apps(self):
         self.install_recipe("xenova-dom0-manager",payloads.API,"dom0_manager")
         self.install_recipe("xenova-mqtt-client",payloads.MQTT,"xenova_mqtt")
+        self.install_recipe("xenova-gateway",payloads.GATEWAY,"xenova_gateway")
 
     def test_actual_recipe_installs_both_source_trees_and_safe_server_config(self):
         self.install_apps()
@@ -83,6 +89,54 @@ class DeploymentPayloadTest(unittest.TestCase):
         for source in payloads.source_files("usr/lib/python3/site-packages").values():
             self.assertIn(str(source.relative_to(ROOT)),inputs)
 
+    def test_gate_rejects_each_missing_runtime_log_installation(self):
+        platform_root(self.root)
+        collector = payloads.COLLECTOR
+        for relative in (
+            "usr/lib/systemd/system/" + collector,
+            "etc/systemd/system/multi-user.target.wants/" + collector,
+            "usr/lib/systemd/system/xenova-dom0-manager.service.d/30-runtime-logs.conf",
+            payloads.LOG_ENV,
+        ):
+            with self.subTest(relative=relative):
+                original = self.root/relative
+                backup = original.with_suffix(original.suffix + ".fixture-backup")
+                original.rename(backup)
+                try:
+                    with self.assertRaisesRegex(ValueError, re.escape(original.name)):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    backup.rename(original)
+        assemble.platform_root_ok(self.root)
+
+    def test_gate_rejects_missing_journal_persistence(self):
+        platform_root(self.root)
+        for relative in (
+            "var/log",
+            "var/log-persistent/journal",
+            "usr/lib/systemd/system/var-volatile-log-journal.mount",
+            "usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf",
+            "usr/lib/systemd/system/sysinit.target.wants/systemd-journal-flush.service",
+        ):
+            with self.subTest(relative=relative):
+                original = self.root/relative
+                backup = original.with_name(original.name + ".fixture-backup")
+                original.rename(backup)
+                try:
+                    with self.assertRaisesRegex(ValueError, "journal"):
+                        assemble.platform_root_ok(self.root)
+                finally:
+                    backup.rename(original)
+        assemble.platform_root_ok(self.root)
+
+    def test_gate_rejects_collector_link_to_another_unit(self):
+        platform_root(self.root)
+        link = self.root/"etc/systemd/system/multi-user.target.wants"/payloads.COLLECTOR
+        link.unlink()
+        link.symlink_to("/usr/lib/systemd/system/xenova-dom0-manager.service")
+        with self.assertRaisesRegex(ValueError, "collector.service"):
+            assemble.platform_root_ok(self.root)
+
     def test_gate_rejects_missing_api_or_mqtt_without_accepting_marker_alone(self):
         for package in ("dom0_manager","xenova_mqtt"):
             with self.subTest(package=package):
@@ -91,14 +145,16 @@ class DeploymentPayloadTest(unittest.TestCase):
                 with self.assertRaises(ValueError):assemble.platform_root_ok(root)
 
     def test_gate_rejects_modified_api_and_mqtt_source(self):
-        for relative in ("dom0_manager/api/vms.py","xenova_mqtt/client.py"):
+        for index,relative in enumerate(("dom0_manager/api/vms.py","xenova_mqtt/client.py",
+                         "dom0_manager/recovery/rejoin.py","xenova_gateway/drive_link.py",
+                         "xenova_drive_world/codec.py")):
             with self.subTest(relative=relative):
-                root=self.base/relative.split("/")[0];platform_root(root)
+                root=self.base/str(index);platform_root(root)
                 (root/"usr/lib/python3.14/site-packages"/relative).write_text("# stale payload\n")
                 with self.assertRaisesRegex(ValueError,"source/installed"):assemble.platform_root_ok(root)
 
     def test_source_contract_refuses_missing_source_package(self):
-        for field in ("API","MQTT"):
+        for field in ("API","MQTT","GATEWAY","WORLD"):
             with self.subTest(field=field),patch.object(payloads,field,self.base/"missing-source"):
                 with self.assertRaisesRegex(ValueError,"source package missing"):
                     payloads.source_files("usr/lib/python3.14/site-packages")
@@ -148,12 +204,24 @@ class DeploymentPayloadTest(unittest.TestCase):
         python=self.root/"usr/bin/python3";python.write_text("#!/bin/sh\nexit 0\n");python.chmod(0o755)
         worker=self.root/"usr/lib/systemd/system/xenova-recovery-worker.service"
         worker.write_bytes((payloads.API/"deploy"/worker.name).read_bytes())
+        config=unit.with_name("xenova-recovery-config.service")
+        config.write_bytes((payloads.API/"deploy"/config.name).read_bytes())
         self.assertNotIn("network-online.target",worker.read_text())
         self.assertIn("network.target",worker.read_text())
-        self.assertIn("ReadWritePaths=/srv/xenova /run/xenova /var/lib/xen",worker.read_text())
+        self.assertIn("ReadWritePaths=/srv/xenova /run/xenova /var/lib/xen /run/xen /var/log/xen",
+                      worker.read_text().splitlines())
         for source in (payloads.RECIPES/"xenova-platform/files").glob("*.service"):
             (self.root/"usr/lib/systemd/system"/source.name).write_bytes(source.read_bytes())
-        normal=verify(self.root,unit.name,worker.name)
+        # The target fstab mounts this tmpfs above the new journal bind.
+        (self.root/"var/volatile/log").mkdir(parents=True)
+        (self.root/"var/log").symlink_to("volatile/log")
+        volatile = self.root/"usr/lib/systemd/system/var-volatile.mount"
+        volatile.write_text("[Mount]\nWhat=tmpfs\nWhere=/var/volatile\nType=tmpfs\n")
+        requires = self.root/"etc/systemd/system/local-fs.target.requires"
+        requires.mkdir(exist_ok=True)
+        (requires/volatile.name).symlink_to("/usr/lib/systemd/system/"+volatile.name)
+        normal=verify(self.root,unit.name,worker.name,config.name,
+                      "systemd-journal-flush.service")
         self.assertEqual(normal.returncode,0,normal.stdout+normal.stderr)
         for text in ("Found ordering cycle","deleted to break ordering cycle","Ordering cycle found, skipping"):
             self.assertNotIn(text,normal.stdout+normal.stderr)

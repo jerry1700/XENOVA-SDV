@@ -15,7 +15,7 @@
 | 기본 CPU 배치 | Zephyr A→pCPU 1, B→2, dom0·일반 VM의 모든 vCPU→{0,3}. Credit2·기존 vCPU 수 유지 |
 | 외부 레이어 | [layers.lock](../../platform/yocto/layers.lock)의 8개 URL·commit |
 | Linux 원본 | [sources.lock.json](../../platform/guests/sources.lock.json)의 Ubuntu·Debian cloud image |
-| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.3, 실제 drive warm-lattice-lab 1.0.0-lab.1. Network Starter는 과거 지원 입력으로 유지 |
+| 기본 선택 | [default-templates.lock.json](../../platform/guests/default-templates.lock.json): Ubuntu·Debian 1.0.4, 실제 drive warm-lattice-lab 1.0.8. Network Starter는 과거 지원 입력으로 유지 |
 | 기본 VM | Debian Interaction 1대 + Zephyr A/B 2대 |
 | Linux 게스트 | Paho·공용 MQTT 클라이언트·Agent, 8GiB root 디스크 |
 | Zephyr 게스트 | 1 vCPU·16MiB·GICv2, Xen Ethernet·DHCP·ICMP·협조형 stop/reboot |
@@ -144,11 +144,16 @@ cp -a "$REPO/frontend" "$RUN/frontend-build"
 )
 mkdir "$RUN/display-web-input"
 cp -a "$RUN/frontend-build/apps/vm-screens/dist" "$RUN/display-web-input/display-web"
+DISPLAY_WEB_REVISION="$(git -C "$REPO" rev-parse --verify HEAD)"
 printf '\nXENOVA_DISPLAY_WEB_ASSETS = "%s"\n' "$RUN/display-web-input" \
   >> "$YOCTO_BUILD_DIR/conf/local.conf"
 ```
 
 원본·lockfile·완성 자산 해시를 보관하고, 생성한 dist는 Git에 넣지 않는다.
+같은 dist를 Debian Interaction 템플릿에 넣을 때는 템플릿 생성 명령에
+`--display-web-assets "$RUN/display-web-input/display-web"`와
+`--display-web-revision "$DISPLAY_WEB_REVISION"`을 함께 전달한다. 템플릿 manifest에는
+프론트 커밋, 파일별 SHA-256과 전체 트리 SHA-256이 기록된다.
 xenova-display 패키지는 피드·웹 자산·키오스크와 송신기의 user unit을 설치한다.
 피드는 /etc/xenova/display-bindings.json과 root 전용 display.env를 준비한 경우에만
 시작한다. 실제 UUID·EDID·좌표·X11 인증·비-root 그래픽 세션을 설정한 뒤
@@ -311,7 +316,7 @@ run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
 
 run drive-template-package python3 -B \
   "$REPO/platform/scripts/package-xenova-drive-template.py" \
-  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate"
+  --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version 1.0.8
 ```
 
 포장 도구는 현재 source fingerprint·ARM payload·실제 앱 profile과
@@ -536,12 +541,29 @@ bzcat "$WIC" >"$RUN/dom0.wic"
 
 빌드 진행은 다른 WSL 창에서 `tail -f "$RUN/logs/dom0-build.stdout"`로 확인한다. 같은 `RUN` 경로를 지정하면 전체 로그를 이어서 볼 수 있다.
 
-부분 패키징은 같은 빌드 환경에서 `bitbake xenova-platform xen-rpi-u-boot-scr`로
-실행할 수 있다. 플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
-`xenova-boot-status.service`와 sysinit enablement를 확인한다. 기존 agetty의
-`/run/issue.d`·reload 기능을 사용하며 새 그래픽 런타임은 필요하지 않다.
-고정 이미지의 getty가 agetty인지도 패키지 manifest와 실제 unit에서 대조한다.
+부분 검증은 같은 빌드 환경에서 아래처럼 대상 task를 지정한다. 일반 `do_build`는
+runtime 의존성 전체의 QEMU·kernel 빌드까지 이어질 수 있다.
+
+```bash
+bitbake -c deploy rpi-config xen-rpi-u-boot-scr
+bitbake -c package_qa xenova-platform xenova-dom0-manager xenova-gateway
+bitbake -c package_write_rpm xenova-platform xenova-dom0-manager xenova-gateway
+```
+
+플랫폼 패키지의 `/usr/sbin/xenova-boot-status`, 두 표시 모듈,
+`xenova-boot-status.service`와 sysinit enablement를 확인한다. Xen 이미지의 로그인
+배너는 기존 agetty가 표시하고, 부팅 상태는 상세 명령에서 조회한다. 이미지 rootfs에서
+`serial-getty@hvc0.service` 활성화 링크와 `serial-getty@ttyS0.service` 링크의 부재를 확인한다.
 다른 renderer를 쓰는 설치본의 화면 인계는 [부팅 표시](management-boot-boundaries.md#부팅-진행지연실패-표시)를 따른다.
+
+Pi 4의 기본 부팅 프로필은 Xen `dom0_max_vcpus=2`와 firmware `force_turbo=1`이다.
+전자는 `boot.cmd.xen.in`, 후자는 `recipes-bsp/bootfiles/rpi-config_%.bbappend`에서 공급한다.
+`dom0_vcpus_pin`은 추가하지 않으며 기존 CPU 정책의 dom0·Linux→{0,3}, Zephyr A→1/B→2를 유지한다.
+최대 ARM 주파수·전압·온도/저전압 보호는 firmware 기본값을 따른다. 보드별 CPUFreq 등록 여부와
+실제 클럭·온도·전원 상태는 실측으로 확인한다. `check-xenova-wic.py`는 최종 FAT에서 두 기본값의
+누락·충돌을 거절한다. `assemble.platform_root_ok()`는 API/MQTT뿐 아니라 Gateway/world의 전체
+Python 소스도 현재 빌드 소스와 대조한다. 따라서 rejoin·codec·drive_link 최적화가 빠진 오래된
+패키지를 재사용하면 조립이 실패한다. 원본 소스에서 세 모듈을 별도 patch 파일로 중복 공급하지 않는다.
 
 생성된 `boot.cmd`/`boot.scr`에서 dom0의 `console=hvc0 loglevel=4`,
 `systemd.show_status=error`와 journal target을 확인한다. Xen의 dtuart·메모리 인자는
@@ -665,6 +687,9 @@ try:
     work.mount(dev+"p2", root, readonly=True)
     installed = assemble.platform_root_ok(root)
     check(bool(installed), "actual dom0 source, units, cfg, Wi-Fi, identity")
+    getty = root/"etc/systemd/system/getty.target.wants"
+    check((getty/"serial-getty@hvc0.service").is_symlink(), "Xen dom0 hvc0 login enabled")
+    check(not os.path.lexists(getty/"serial-getty@ttyS0.service"), "Xen dom0 ttyS0 login disabled")
     check((root/"usr/bin/systemd-run").is_file(), "per-execution scope tool systemd-run")
     broker_sources = {
         "platform/deploy/mosquitto/scripts/xenova_broker.py": "usr/lib/xenova/xenova_broker.py",
@@ -1066,6 +1091,14 @@ CPU 정책이 없는 기존 설치의 활성화는 모든 관리 게스트가 �
 
 공통 이미지에는 HTTP 토큰·MQTT 암호·개인 Wi-Fi 설정을 넣지 않는다. 설치 후 `xenova-dom0-manager.service`가 `dom0_manager.service_token`을 실행해 `/etc/xenova/dom0-manager-token.env`를 0600으로 준비한다. `/etc/xenova/dom0-manager.env`의 기존 서비스 토큰은 우선하며 자동 회전하지 않는다. worker는 `/etc/xenova/recovery-worker.env`의 `XENOVA_RECOVERY_*` 설정을 읽고, broker 연결 문제로 VM 자동 시작이나 host admission을 외부 online 대기에 묶지 않는다.
 
+Debian·Ubuntu 게스트의 내부 DHCP는 `192.168.77.1`을 NTP 서버로 전달한다. `xenova-guest-ntp.service`는 `xenbr0`에서만 듣고, dom0의 `systemd-timesyncd`가 첫 동기화를 마치고 커널의 UTC 오차 한도를 확인한 뒤 응답한다. 게스트 자동 시작은 이 동기화를 기다리지 않는다. 보드에서는 `ss -lun 'sport = :123'`, 게스트에서는 `timedatectl timesync-status`와 `timedatectl show -p NTPSynchronized`로 확인한다. Zephyr는 실행별 XenStore UTC 대응을 사용한다.
+
+Zephyr UTC 저널은 `journalctl -b -u xenova-telemetry-clock.service`로 확인한다.
+dom0 시계가 미동기화 상태이면 `CLOCK_SYNC_PENDING`을 남기고 기존 타이머가 다음
+회차에 다시 확인한다. 동기화 뒤 `responses`가 1 이상이면 그 회차에 XenStore에
+응답을 저장한 건수다. 종료로 호스트 접근이 닫히면 `HOST_QUIESCING`으로 건너뛰며,
+시계 오류, 잘못된 요청, 저장 실패는 계속 서비스 오류로 기록한다.
+
 pinning 기능 수락과 성능 효과는 나누어 기록한다. 동일 펌웨어·입력·broker 설정에서 pinning 전/후 × Debian 부하 유무를 비교하고, guest 계산 주기와 Gateway 지연 각각의 p95/p99·관측 최대·deadline miss·오류/손실을 보관한다. 실제 주행 앱이 없는 경우 타이밍 harness 결과로 범위를 명시한다.
 
 ## 10. XenStore G1 시험 인계물
@@ -1152,3 +1185,24 @@ Connected·ring-ref·도메인 루트 권한을 대신 써 넣어 통과시키�
 
 G1은 Store·권한·transaction·watch·회수를 검증한다. Ethernet packet 송수신·DHCP·
 MQTT·앱 준비는 Network Starter와 해당 앱의 별도 수락 근거로 기록한다.
+
+
+## 2026-11-04 앱 메모리 제공물: 수동 버퍼와 RAM 요약
+
+선택 주행 프로필의 로컬 제공 및 다음 이미지 기본 선택 버전은 `1.0.8`이다. `build-xenova-drive-app.py`의
+`--app drive --profile warm-lattice-lab`과 `package-xenova-drive-template.py --version 1.0.8`을
+사용하며 출력은 기존 release와 다른 새 디렉터리로 지정한다. 기존 source receipt 검증을 유지한다.
+
+이 펌웨어는 기존 AUTO 4영역과 MANUAL 입력·대기·실행·보관 결과 4영역을 같은
+Diagnostics provider로 수집한다. 상단 관리 RAM은 기존 memory 봉투의 total/free를 조합한다.
+[정식 계약](../../platform/guests/zephyr/telemetry/contract/CONTRACT.md)과
+[소비 예제](../../platform/guests/zephyr/telemetry/contract/docs/CONSUMER_HANDOFF.md),
+[최종 후보·명령·실제 대역과 한계](../verification/recovery-scenario-closure-20261030.md)를 함께 확인한다.
+
+새 C 코드와 metadata는 firmware에 링크되며 새 target Python 의존성·daemon·unit은 없다.
+기존 템플릿 선택을 자동 변경하지 않는다. 부분 firmware 포장은 정규 전체 이미지·실보드 설치·
+Spring 저장/화면 수락과 구분한다. 스택 발행 계약은 유지하고 화면 적용은 보류한다.
+
+RAM 상단은 최근 유효 관측과 원 관측 시각을 표시한다. 독립 실행 조회 없이 같은 memory 봉투로 계산하며, 6초 원 lease·같은 표본의 오류/상충 보류·boot/publisher별 그래프 분리를 유지한다. 최신 계약·참조 도구는 `ram-recent-observation-contract-2.1-20261104.tar.gz`로 별도 제공한다. 이번 후속에는 링크되는 C/H·설정 변경이 없으므로 새 firmware 버전을 발급하거나 기존 `1.0.8` manifest를 수정하지 않는다. 자세한 변경·검증은 [최근 관측 후속](../verification/recovery-scenario-closure-20261030.md#ram-recent-observation-20261104)에 기록한다.
+
+2026-11-05에는 검증한 1.0.8 manifest(SHA256 47c8eaedb7032c93bbfb58e003d7bde4fd07b3de8506ccbed76912912b61649a)를 기본 lock·factory A/B·조립 예시에 함께 선택했다. 기존 Linux 선택은 1.0.4다. 실제 release root에 같은 불변 1.0.8 디렉터리를 공급한 뒤 resolve/조립 검사를 수행한다. 전체 이미지 빌드·보드 설치는 별도이며 [선택 검증](../verification/recovery-scenario-closure-20261030.md#image-default108-20261105)에 근거를 둔다.

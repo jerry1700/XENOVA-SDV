@@ -1,0 +1,1489 @@
+"""지도에 배치된 선 관측에서 같은 방향 두 차로의 후보 구간을 연결한다.
+
+관측 capture와 보간 구간을 남긴다. 차로 카탈로그 후보에는 현재 영상이 참여한
+구간만 올린다. 통행 가능 공간과 현재 위치의 자격은 별도로 판정한다.
+"""
+
+from collections import deque
+from dataclasses import dataclass, replace
+from itertools import combinations
+import math
+from statistics import median
+
+from .inputs import FrameStamp
+from .parking_approach import refit_approach
+from .parking_entrance import entrance_spans, observe_entrances, parking_approach_contacts
+from .road import LaneHypothesis, RoadResult
+from .road_normals import ReferenceObservations, heading_error, normal_samples, wheel_aligned_strips
+from .road_refit import fit_road_window
+from .tape import TapeStrip
+from ..mapping.odometry import PoseEstimate
+from ..mapping.registration import segment_distance, transform_point, wrap_yaw
+from ..mapping.wheel_motion import relative_wheel_bounds
+
+
+_FRAME_LIMIT = 12
+_MAP_FRAME_LIMIT = 32
+_PARKING_HISTORY_US = 3_000_000
+_STRIP_LIMIT = 16
+_MAP_BAND_LIMIT = 32
+_LINK_LIMIT = 512
+_MARKING_LIMIT = 512
+_STATION_STEP_M = .05
+_PUBLICATION_MAP_REFRESH_US = 500_000
+_BAND_SPREAD_M = .055
+_DIRECTION_MATCH_RAD = .30
+_ENTRANCE_RECHECK_FRAMES = 8
+_REUSE_RUN_LIMIT = 16
+_REFIT_SEED_LIMIT = 12
+_REFIT_LOOKAHEAD_M = .95
+
+
+@dataclass(frozen=True)
+class _Strip:
+    points: tuple
+    error_m: float
+    source: tuple
+    identity: int
+    heading_errors: tuple
+    original: TapeStrip
+    pose_yaw_error_rad: float
+    stamp: FrameStamp | None = None
+    capture_pose: PoseEstimate | None = None
+    historical: bool = False
+    mapped_pose: PoseEstimate | None = None
+
+    def section_error(self, index, heading, frame_yaw):
+        """해당 단면에 닿는 선분의 투영 오차와 공통 차체 오차를 사용한다."""
+        if self.mapped_pose is None or not self.original.segment_error_xy:
+            return self.error_m/math.cos(heading)
+        sample = self.mapped_pose.sample
+        c, s = math.cos(heading+frame_yaw-sample.yaw), math.sin(heading+frame_yaw-sample.yaw)
+        ex, ey = self.original.segment_error_xy[index]
+        radius = max(math.hypot(*p) for p in self.original.points_xy[index:index+2])+math.hypot(ex,ey)
+        normal_error = abs(s)*ex + abs(c)*ey + sample.position_error_m
+        normal_error += 2*radius*math.sin(min(math.pi,sample.yaw_error_rad)/2)
+        return normal_error/math.cos(heading)
+
+
+@dataclass(frozen=True)
+class StartupMarkings:
+    """정합 이전의 RGB 식별자, 촬영 좌표 선 조각과 원 odom."""
+
+    stamp: FrameStamp
+    pose: PoseEstimate | None
+    strips: tuple[TapeStrip, ...]
+    usable_for_matching: bool
+
+
+@dataclass(frozen=True)
+class MarkingJoin:
+    points: tuple
+    error_m: float
+    sources: tuple
+
+
+@dataclass(frozen=True)
+class _Band:
+    y: float
+    heading: float
+    error_m: float
+    sources: frozenset
+    strips: frozenset
+    role: int | None
+    yaw_error_rad: float
+    inferred: bool = False
+
+
+@dataclass(frozen=True)
+class RoadLink:
+    """왼쪽 경계·중앙 점선·오른쪽 경계 순서의 지도 단면. 미관측 경계는 None이다."""
+
+    start: tuple
+    end: tuple
+    error_m: float
+    sources: frozenset
+    observations: tuple
+    interpolated: bool
+    heading_worst_case_rad: float
+    inferred_roles: tuple = (False,False,False)
+    placement_m: float = 0.
+    placement_rad: float = 0.
+    heading_estimate_rad: float | None = None
+    position_estimate_m: float | None = None
+    boundary_normal_bounds_m: tuple[float, float, float] | None = None
+    outer_chord_bounds_m: tuple[float, float] | None = None
+
+    @property
+    def heading_for_admission_rad(self):
+        return self.heading_worst_case_rad if self.heading_estimate_rad is None else self.heading_estimate_rad
+
+
+@dataclass(frozen=True)
+class RoadSection:
+    """지도 좌표에서 이어진 두 차로. 각 구간의 보간 표시와 원 관측을 보존한다."""
+
+    links: tuple[RoadLink, ...]
+
+    @property
+    def boundaries(self):
+        stations = (self.links[0].start, *(link.end for link in self.links))
+        return tuple(zip(*stations))
+
+    @property
+    def centers(self):
+        left, divider, right = self.boundaries
+        return tuple(tuple(((a[0]+b[0])/2, (a[1]+b[1])/2) for a,b in zip(divider,outer))
+                     for outer in (left,right))
+
+
+@dataclass(frozen=True)
+class MappedRoad:
+    """현재 RGB와 이전 원 관측에 연결된 지도 좌표의 차로 형상."""
+
+    road: RoadResult
+    sources: frozenset
+    # road에는 저장·발행에 필요한 지도 좌표 오차가 들어 있다.
+    shape_bounds: tuple[float, float] | None = None
+    heading_estimate_rad: float | None = None
+    position_estimate_m: float | None = None
+
+    @property
+    def admission_errors(self):
+        shape = self.road.hypotheses[0]
+        position,yaw = self.shape_bounds or (shape.error_m,shape.yaw_error_rad)
+        if self.position_estimate_m is not None:
+            position = self.position_estimate_m
+        return position,yaw if self.heading_estimate_rad is None else self.heading_estimate_rad
+
+    def within(self, profile):
+        position,yaw = self.admission_errors
+        return position <= profile.max_position_error_m and yaw <= profile.max_yaw_error_rad
+
+
+def _usable_graph(graph):
+    return (graph.calibration_qualified and (graph.complete or set(graph.reasons) == {'NO_MEASURED_TAPE_WIDTH'}))
+
+
+def _observed_strips(graph):
+    return tuple(s for s in graph.strips if s.observed
+                 and 'predicted' not in (s.start_kind,s.end_kind))
+
+
+def _project_strips(strips, pose, source, *, stamp=None, capture_pose=None, historical=False):
+    sample = pose.sample
+    transform = sample.x,sample.y,sample.yaw
+    result = []
+    for strip in strips:
+        radius = max(math.hypot(*point) for point in strip.points_xy)
+        error = strip.error_m + sample.position_error_m + 2*radius*math.sin(sample.yaw_error_rad/2)
+        errors = strip.point_error_xy or ((strip.error_m,strip.error_m),)*len(strip.points_xy)
+        headings = tuple(heading_error(a,b,ea,eb)+sample.yaw_error_rad
+                         for a,b,ea,eb in zip(strip.points_xy,strip.points_xy[1:],errors,errors[1:]))
+        result.append(_Strip(tuple(transform_point(point,transform) for point in strip.points_xy),
+                             error,source,strip.local_id,headings,strip,sample.yaw_error_rad,stamp,capture_pose,historical,pose))
+    return tuple(result)
+
+
+def _matching_strips(strips):
+    return tuple(sorted((s for s in strips if not s.original.closed),
+                        key=lambda s: (-s.original.length_m,s.identity))[:_STRIP_LIMIT])
+
+
+def _marking_ends(strip):
+    points = strip.points
+    ends = strip.original.start_kind,strip.original.end_kind
+    raw = strip.original.points_xy
+    if raw[-1][0] < raw[0][0]:
+        points = tuple(reversed(points))
+        ends = ends[::-1]
+    result = []
+    for start,ordered in ((True,points),(False,points[::-1])):
+        a = ordered[0]
+        b = next((p for p in ordered[1:] if math.dist(a,p)>=2*_STATION_STEP_M),ordered[-1])
+        dx,dy = b[0]-a[0],b[1]-a[1]
+        result.append((a,math.atan2(dy,dx) if start else math.atan2(-dy,-dx)))
+    return result[0],result[1],ends
+
+
+def _paint_gap(first, second, profile):
+    (a,h),(b,k) = first,second
+    dx,dy = b[0]-a[0],b[1]-a[1]
+    gap = math.hypot(dx,dy)
+    delta = wrap_yaw(k-h)
+    return (0. < gap <= profile.max_gap_m
+            and abs(delta) <= min(.65,profile.merge_heading_rad+profile.max_curvature_1pm*gap)
+            and abs(wrap_yaw(math.atan2(dy,dx)-h-delta/2)) <= profile.merge_heading_rad)
+
+
+def _role_continuation(seed, seed_ends, old, old_ends, profile):
+    tolerance = max(profile.merge_lateral_m,profile.missing_outer_width_error_m)
+    points = old.points if old.original.points_xy[0][0]<=old.original.points_xy[-1][0] else old.points[::-1]
+    for point,heading in seed_ends[:2]:
+        for a,b in zip(points,points[1:]):
+            if (segment_distance(point,a,b)<=tolerance
+                    and abs(wrap_yaw(heading-math.atan2(b[1]-a[1],b[0]-a[0])))<=_DIRECTION_MATCH_RAD):
+                return True
+    return _paint_gap(old_ends[1],seed_ends[0],profile) or _paint_gap(seed_ends[1],old_ends[0],profile)
+
+
+def _join_markings(strips, roles, profile):
+    """서로 다른 RGB의 방향·간격이 맞는 짧은 단일 선 연결만 돌려준다."""
+    gap_limit = min(profile.max_gap_m,2*_STATION_STEP_M)
+    if gap_limit <= 0:
+        return ()
+    ends = tuple(_marking_ends(strip) for strip in strips)
+    starts = {}
+    for i,((p,_),_,kinds) in enumerate(ends):
+        if kinds[0] != 'physical_junction':
+            key = tuple(math.floor(v/gap_limit) for v in p)
+            starts.setdefault(key,[]).append(i)
+    proposals = {}
+    for i,(_, (a,heading),kinds) in enumerate(ends):
+        if kinds[1] == 'physical_junction':
+            continue
+        x,y = (math.floor(v/gap_limit) for v in a)
+        choices = []
+        for sx in range(x-1,x+2):
+            for sy in range(y-1,y+2):
+                for j in starts.get((sx,sy),()):
+                    if strips[i].source == strips[j].source:
+                        continue
+                    first_roles = roles.get((strips[i].source,strips[i].identity),set())
+                    second_roles = roles.get((strips[j].source,strips[j].identity),set())
+                    if first_roles and second_roles and len(first_roles|second_roles) != 1:
+                        continue
+                    b,next_heading = ends[j][0]
+                    dx,dy = b[0]-a[0],b[1]-a[1]
+                    gap = math.hypot(dx,dy)
+                    if (not profile.station_error_m < gap <= gap_limit
+                            or abs(wrap_yaw(heading-next_heading)) > profile.merge_heading_rad
+                            or abs(wrap_yaw(math.atan2(dy,dx)-heading)) > profile.merge_heading_rad
+                            or abs(-dx*math.sin(heading)+dy*math.cos(heading)) > profile.merge_lateral_m):
+                        continue
+                    choices.append((gap,j,b))
+        if choices:
+            gap,j,b = min(choices)
+            if all(math.dist(b,p)<=profile.merge_lateral_m for _,_,p in choices):
+                proposals.setdefault(j,[]).append((gap,i,a,b))
+    output = []
+    for j,choices in proposals.items():
+        gap,i,a,b = min(choices)
+        if not all(math.dist(a,p)<=profile.merge_lateral_m for _,_,p,_ in choices):
+            continue
+        first,second = strips[i],strips[j]
+        error = max(first.error_m,second.error_m)+profile.max_curvature_1pm*gap**2/8
+        output.append(MarkingJoin((a,b),error,((first.source,first.identity),(second.source,second.identity))))
+    return tuple(output)
+
+
+def _bands(samples, known_roles, *, map_geometry=False):
+    groups = []
+    for sample in sorted(samples, key=lambda s: s[0]):
+        if not groups or sample[0] - groups[-1][0][0] > _BAND_SPREAD_M:
+            groups.append([])
+        groups[-1].append(sample)
+    if map_geometry:
+        # 같은 위치에 있는 굽은 끝과 평행한 선을 한 방향으로 평균하지 않는다.
+        directional_groups = []
+        for group in groups:
+            by_heading = []
+            for sample in sorted(group,key=lambda s:s[1]):
+                if not by_heading or sample[1]-by_heading[-1][0][1] > _DIRECTION_MATCH_RAD:
+                    by_heading.append([])
+                by_heading[-1].append(sample)
+            directional_groups.extend(by_heading)
+        groups = directional_groups
+    result = []
+    for group in groups:
+        sources = frozenset(s[3] for s in group)
+        if len(sources) < 2 and not map_geometry:
+            continue
+        heading = median(s[1] for s in group)
+        if any(abs(s[1] - heading) > _DIRECTION_MATCH_RAD for s in group):
+            continue
+        y = median(s[0] for s in group)
+        # 각 관측의 오차와 단면 중앙값에서 떨어진 정도를 보존한다.
+        error = max(s[2]+abs(s[0]-y) for s in group)
+        strips = frozenset((s[3],s[4]) for s in group)
+        roles = set().union(*(known_roles.get(key,()) for key in strips))
+        if len(roles) > 1:
+            continue
+        yaw_error = max(s[5]+abs(s[1]-heading) for s in group)
+        result.append(_Band(y, heading, error, sources, strips,
+                            next(iter(roles),None),yaw_error))
+    return sorted(result,key=lambda band:band.y) if map_geometry else result
+
+
+def _road_section(bands, width_bounds):
+    lower, upper = width_bounds
+    matches = []
+    for right, divider, left in combinations(bands, 3):
+        if any(b.role not in (None,i) for i,b in enumerate((left,divider,right))):
+            continue
+        if max(b.heading for b in (left, divider, right)) - min(b.heading for b in (left, divider, right)) > _DIRECTION_MATCH_RAD:
+            continue
+        scale = math.cos(divider.heading)
+        widths = ((left.y-divider.y)*scale, (divider.y-right.y)*scale)
+        if all(lower <= width <= upper for width in widths):
+            matches.append((left, divider, right))
+            if len(matches) > 1:
+                return None, True
+    if matches:
+        return matches[0], False
+
+    # 한쪽 역할이 이미 확인됐으면 한 차로 폭 떨어진 관측의 역할도 확인할 수 있다.
+    for right, left in combinations(bands, 2):
+        if abs(left.heading-right.heading) > _DIRECTION_MATCH_RAD:
+            continue
+        width = (left.y-right.y)*math.cos((left.heading+right.heading)/2)
+        if not lower <= width <= upper:
+            continue
+        left_lane = right.role == 1 or left.role == 0
+        right_lane = left.role == 1 or right.role == 2
+        if left_lane and left.role in (None,0) and right.role in (None,1):
+            matches.append((left,right,None))
+        if right_lane and left.role in (None,1) and right.role in (None,2):
+            matches.append((None,left,right))
+        if len(matches) > 1:
+            return None, True
+    return (matches[0], False) if matches else (None, False)
+
+
+def _section_from_outers(bands, profile):
+    """두 차로 폭만큼 떨어진 바깥 경계에서 중앙선을 추정한다."""
+    lower,upper = profile.missing_outer_width_bounds_m
+    result = None
+    for right,left in combinations(bands,2):
+        if right.role not in (None,2) or left.role not in (None,0) or abs(left.heading-right.heading) > _DIRECTION_MATCH_RAD:
+            continue
+        heading = (left.heading+right.heading)/2
+        scale = math.cos(heading)
+        if not 2*lower <= (left.y-right.y)*scale <= 2*upper:
+            continue
+        if result is not None:
+            return None,True
+        if right.role is None and left.role is None and any(
+                lower <= max(right.y-other.y,other.y-left.y)*scale <= upper for other in bands):
+            # 바깥에 한 차로 폭만큼 떨어진 평행 관측이 있으면 어느 쌍인지 더 봐야 한다.
+            return None,True
+        # 두 차로의 폭 차이와 각 원 바깥 경계의 오차를 중앙선에 포함한다.
+        divider = _Band((left.y+right.y)/2,heading,
+            max(left.error_m,right.error_m)+profile.missing_outer_width_error_m/scale,
+            left.sources|right.sources,frozenset(),1,
+            max(left.yaw_error_rad,right.yaw_error_rad)+abs(left.heading-right.heading)/2,True)
+        result = left,divider,right
+    return result,False
+
+
+def _fill_boundaries(section, profile):
+    observed = [(role,band) for role,band in enumerate(section) if band is not None]
+    result = list(section)
+    for role,band in enumerate(section):
+        if band is not None:
+            continue
+        origin,base = min(observed,key=lambda item: abs(item[0]-role))
+        if base.yaw_error_rad > profile.max_heading_rad:
+            return None
+        width = (origin-role)*profile.missing_outer_width_m
+        scale = math.cos(base.heading)
+        error = (abs(origin-role)*profile.missing_outer_width_error_m
+                 + 2*abs(width)*math.sin(min(math.pi,base.yaw_error_rad)/2))/scale
+        result[role] = _Band(base.y+width/scale,base.heading,base.error_m+error,
+                             base.sources,frozenset(),role,base.yaw_error_rad,True)
+    return tuple(result)
+
+
+def _map_cross_section(bands, profile):
+    section,ambiguous = _road_section(bands,profile.missing_outer_width_bounds_m)
+    if ambiguous:
+        return None,True
+    if section is not None and all(section):
+        return section,False
+    outer_pair,ambiguous = _section_from_outers(bands,profile)
+    if ambiguous:
+        return None,True
+    if outer_pair is not None:
+        return outer_pair,False
+    if section is not None:
+        return _fill_boundaries(section,profile),False
+    established = [band for band in bands if band.role is not None]
+    if len(established) == 1:
+        anchor = established[0]
+        return _fill_boundaries(tuple(anchor if i == anchor.role else None for i in range(3)),profile),False
+    return None,len(established)>1
+
+
+def _normal_station(point, heading, bands):
+    x,y = point
+    nx,ny = -math.sin(heading),math.cos(heading)
+    return tuple((x+nx*b.y,y+ny*b.y) for b in bands),heading,bands
+
+
+def _normal_link(before, after, profile):
+    start,a_heading,left_bands = before
+    end,b_heading,right_bands = after
+    dx,dy = end[1][0]-start[1][0],end[1][1]-start[1][1]
+    length = math.hypot(dx,dy)
+    if length < profile.station_error_m or length <= 1e-9:
+        return None
+    heading = math.atan2(dy,dx)
+    if max(abs(wrap_yaw(heading-h)) for h in (a_heading,b_heading)) > .55:
+        return None
+    gap = max(math.dist(a,b) for a,b in zip(start,end))
+    if gap > profile.max_gap_m or any((b[0]-a[0])*dx+(b[1]-a[1])*dy <= 0 for a,b in zip(start,end)):
+        return None
+    inferred = tuple(a.inferred or b.inferred or not a.strips&b.strips or length>2*_STATION_STEP_M
+                     for a,b in zip(left_bands,right_bands))
+    bands = left_bands+right_bands
+    error = max(b.error_m for b in bands)+profile.max_curvature_1pm*gap**2/8+profile.station_error_m
+    yaw = max(b.yaw_error_rad for b in bands)+max(abs(wrap_yaw(heading-h)) for h in (a_heading,b_heading))
+    if any(inferred):
+        yaw += profile.max_curvature_1pm*gap
+    return RoadLink(start,end,error,frozenset().union(*(b.sources for b in bands)),
+        tuple(a.strips|b.strips for a,b in zip(left_bands,right_bands)),any(inferred),min(math.pi,yaw),inferred)
+
+
+def _link(first, second, pose, profile):
+    x0, start = first
+    x1, end = second
+    dx = x1-x0
+    pairs = tuple((a,b) for a,b in zip(start,end) if a is not None and b is not None)
+    if len(pairs) < 2:
+        return None
+    gap = max(math.hypot(dx, b.y-a.y) for a,b in pairs)
+    inferred_roles = tuple(a is not None and b is not None and (a.inferred or b.inferred
+        or dx > 1.5*_STATION_STEP_M or not (a.strips & b.strips)) for a,b in zip(start,end))
+    interpolated = any(inferred_roles)
+    if gap > profile.max_gap_m:
+        return None
+    curve_pad = profile.max_curvature_1pm * gap**2 / 8
+    lateral_limit = min(profile.missing_outer_width_m / 4, profile.merge_lateral_m + curve_pad)
+    for a, b in pairs:
+        expected_y = dx * math.tan((a.heading+b.heading)/2)
+        if (abs(b.y-a.y-expected_y) > lateral_limit
+                or abs(b.heading-a.heading) > min(.65, profile.merge_heading_rad + profile.max_curvature_1pm*gap)):
+            return None
+    mapped_start = tuple(transform_point((x0,a.y),pose) if a is not None and b is not None else None
+                         for a,b in zip(start,end))
+    mapped_end = tuple(transform_point((x1,b.y),pose) if a is not None and b is not None else None
+                       for a,b in zip(start,end))
+    used = tuple(b for pair in pairs for b in pair)
+    observations = tuple(a.strips | b.strips if a is not None and b is not None else frozenset()
+                         for a,b in zip(start,end))
+    chord = math.atan2(end[1].y-start[1].y,dx)
+    yaw = max(b.yaw_error_rad+abs(b.heading-chord) for b in (start[1],end[1]))
+    if interpolated:
+        yaw += profile.max_curvature_1pm*gap
+    return RoadLink(mapped_start, mapped_end, max(b.error_m for b in used)+curve_pad,
+                    frozenset().union(*(b.sources for b in used)), observations, interpolated,min(math.pi,yaw),inferred_roles)
+
+
+def _candidate_window(run, key):
+    first_current = next((i for i,link in enumerate(run) if key in link.sources),None)
+    if first_current is None:
+        return ()
+    start = max(0,first_current-30)
+    return tuple(run[start:start+31])
+
+
+def _mapped_candidate(run, key, profile, *, stored=False):
+    if not stored:
+        run = _candidate_window(run,key)
+    if not run:
+        return None
+    stations = (run[0].start, *(link.end for link in run))
+    left, divider, right = map(tuple,zip(*stations))
+    lengths = [0.]
+    for a,b in zip(divider,divider[1:]):
+        lengths.append(lengths[-1]+math.dist(a,b))
+    if lengths[-1] < profile.min_usable_length_m:
+        return None
+    sources = frozenset().union(*(link.sources for link in run))
+    roles = tuple(tuple(sorted({i for link in run for source,i in link.observations[role] if source == key}))
+                  for role in range(3))
+    if sum(map(len,roles)) > 32:
+        return None
+    error = max(link.error_m+link.placement_m for link in run)+profile.station_error_m
+    yaw = max(link.heading_worst_case_rad+link.placement_rad for link in run)
+    shape_bounds = ((max(link.error_m for link in run)+profile.station_error_m,
+                     max(link.heading_worst_case_rad for link in run))
+                    if any(link.placement_m or link.placement_rad for link in run) else None)
+    heading_estimate = (max(link.heading_for_admission_rad for link in run)
+                        if any(link.heading_estimate_rad is not None for link in run) else None)
+    position_estimate = (max(link.position_estimate_m if link.position_estimate_m is not None
+                             else link.error_m + profile.station_error_m for link in run)
+                         if any(link.position_estimate_m is not None for link in run) else None)
+    centers = tuple(tuple(((a[0]+b[0])/2,(a[1]+b[1])/2) for a,b in zip(divider,outer))
+                    for outer in (left,right))
+    directions = tuple((b[0]-a[0],b[1]-a[1]) for a,b in zip(divider,divider[1:]))
+    if any((b[0]-a[0])*dx+(b[1]-a[1])*dy <= 0
+           for center in centers for (a,b),(dx,dy) in zip(zip(center,center[1:]),directions)):
+        return None
+    intervals = []
+    for outer in (left,right):
+        widths = []
+        for i,(a,b) in enumerate(zip(divider,outer)):
+            j = min(i,len(divider)-2)
+            dx = divider[j+1][0]-divider[j][0]
+            dy = divider[j+1][1]-divider[j][1]
+            widths.append(abs(dx*(b[1]-a[1])-dy*(b[0]-a[0]))/math.hypot(dx,dy))
+        direction_pad = 2*max(math.dist(a,b) for a,b in zip(divider,outer))*math.sin(yaw/2)
+        pad = 2*error+direction_pad
+        intervals.append((max(0.,min(widths)-pad),max(widths)+pad))
+    inferred = (run[0].interpolated, *(link.interpolated for link in run))
+    normal_bounds = chord_bounds = None
+    boundary_observations = None
+    if len(run) == 1:
+        normal_bounds = run[0].boundary_normal_bounds_m
+        chord_bounds = run[0].outer_chord_bounds_m
+        if chord_bounds is not None and not any(inferred):
+            boundary_observations = tuple(tuple(sorted(role)) for role in run[0].observations)
+    hypothesis = LaneHypothesis(0,roles,tuple(lengths),divider,left,right,*centers,inferred,tuple(intervals),error,yaw,
+                                boundary_normal_bounds_m=normal_bounds,outer_chord_bounds_m=chord_bounds,
+                                boundary_observations=boundary_observations)
+    return MappedRoad(RoadResult('PARTIAL' if any(inferred) else 'VALID',(hypothesis,),True,
+                                 ('MULTI_FRAME_TAPE',),key,True),sources,shape_bounds,heading_estimate,position_estimate)
+
+
+def _bounded_candidates(run, key, profile, limits, sources):
+    """잘 관측된 연속 구간을 떼어 내고 그 구간의 원 RGB만 남긴다."""
+    segment = []
+    retained = frozenset()
+    for link in (*run, None):
+        eligible = (link is not None and all(point is not None for point in (*link.start,*link.end))
+                and link.error_m+profile.station_error_m <= limits.max_position_error_m
+                and link.heading_for_admission_rad <= limits.max_yaw_error_rad
+                and link.sources <= sources and len(link.sources) < _FRAME_LIMIT)
+        if eligible and len(segment) < 31 and len(retained|link.sources) < _FRAME_LIMIT:
+            segment.append(link)
+            retained |= link.sources
+            continue
+        if segment:
+            candidate = _mapped_candidate(segment,key,profile)
+            if candidate is not None and len(candidate.sources) >= 2:
+                yield candidate, tuple(segment)
+        segment = [link] if eligible else []
+        retained = link.sources if eligible else frozenset()
+
+
+def _reobserve_run(run, strips, pose, profile, limits):
+    """현재 흰선이 같은 방향·같은 경계에 대응한 보존 구간만 다시 사용한다."""
+    sample = pose.sample
+    width = profile.missing_outer_width_m
+    if not strips or sample.position_error_m >= width/3 or sample.yaw_error_rad >= _DIRECTION_MATCH_RAD:
+        return None
+    key = strips[0].source
+    if any(source[:-1] != key[:-1] or source[-1] >= key[-1] for link in run for source in link.sources):
+        return None
+    match_distance = max(math.hypot(*p) for strip in strips for p in strip.original.points_xy)
+    c,s = math.cos(sample.yaw),math.sin(sample.yaw)
+    proven = []
+    for link in run:
+        a = link.start[1]
+        heading = _link_heading(link)
+        dx,dy = a[0]-sample.x,a[1]-sample.y
+        if (abs(wrap_yaw(heading-sample.yaw)) > profile.max_heading_rad or math.hypot(dx,dy) > match_distance
+                or dx*c+dy*s < -width):
+            proven.append(link)
+            continue
+        observations = list(link.observations)
+        midpoints = tuple(((p[0]+q[0])/2,(p[1]+q[1])/2) for p,q in zip(link.start,link.end))
+        map_error = link.error_m+link.placement_m
+        for strip in strips:
+            roles = set()
+            for index,(u,v) in enumerate(zip(strip.points,strip.points[1:])):
+                if u == v:
+                    continue
+                direction = math.atan2(v[1]-u[1],v[0]-u[0])
+                angle = abs(wrap_yaw(direction-heading))
+                if min(angle,math.pi-angle)+sample.yaw_error_rad > _DIRECTION_MATCH_RAD:
+                    continue
+                error = strip.section_error(index,0.,direction)
+                # 각 경계와의 일치 가능성을 직접 확인한다. 추정 경계도
+                # 모호함을 검사하되, 재관측을 입증하는 데는 원 관측만 쓴다.
+                roles.update(i for i,point in enumerate(midpoints)
+                             if segment_distance(point,u,v) <= map_error+error)
+                if len(roles) > 1:
+                    break
+            if len(roles) == 1:
+                i, = roles
+                if not link.inferred_roles[i] and observations[i]:
+                    observations[i] = observations[i] | {(key,strip.identity)}
+        matches = [{identity for source,identity in role if source == key} for role in observations]
+        if any(a and b and len(a | b) >= 2 for a,b in combinations(matches,2)):
+            proven.append(replace(link,sources=link.sources|{key},observations=tuple(observations)))
+        else:
+            proven.append(link)
+    if not any(key in link.sources for link in proven):
+        return None
+    candidate = _mapped_candidate(proven,key,profile)
+    if candidate is None or len(candidate.sources) > _FRAME_LIMIT or not candidate.within(limits):
+        return None
+    return replace(candidate,road=replace(candidate.road,reasons=('REOBSERVED_MAP_TAPE',)))
+
+
+def _mapped_parking_approach(sections, span, source_key, road_profile, geometry_limits):
+    """Use the local turn already traced in the map at a confirmed shared edge."""
+    role = span.edge_role
+    matches = []
+    for section in sections:
+        for run in _observed_approach_runs(section.links, role, road_profile, geometry_limits):
+            if not any(source == source_key for link in run for source, _ in link.observations[role]):
+                continue
+            edge = (run[0].start[role], *(link.end[role] for link in run))
+            if parking_approach_contacts(span, edge) is None:
+                continue
+            candidate = _mapped_candidate(run, source_key, road_profile)
+            if candidate is not None and len(candidate.sources) >= 2 and candidate.within(geometry_limits):
+                shape = candidate.road.hypotheses[0]
+                fitted_edge = shape.left_outer if role == 0 else shape.right_outer
+                if parking_approach_contacts(span, fitted_edge) is not None:
+                    road = replace(candidate.road, reasons=('MAPPED_PARKING_APPROACH_CURVE',))
+                    matches.append(replace(candidate, road=road))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _observed_approach_runs(links, role, road_profile, geometry_limits):
+    run = []
+    for link in (*links, None):
+        if (link is not None and not link.inferred_roles[role] and link.observations[role]
+                and any(seen for i, seen in enumerate(link.observations) if i != role)
+                and all(point is not None for point in (*link.start, *link.end))
+                and link.error_m + road_profile.station_error_m <= geometry_limits.max_position_error_m
+                and link.heading_worst_case_rad <= geometry_limits.max_yaw_error_rad):
+            run.append(link)
+            continue
+        if run:
+            yield tuple(run)
+            run.clear()
+
+
+def _link_heading(link):
+    a,b = link.start[1],link.end[1]
+    return math.atan2(b[1]-a[1],b[0]-a[0])
+
+
+def _matching_station(station, link, tolerance):
+    fractions = []
+    shifts = []
+    for point,a,b in zip(station,link.start,link.end):
+        dx,dy = b[0]-a[0],b[1]-a[1]
+        length2 = dx*dx+dy*dy
+        if length2 <= 1e-18:
+            return None
+        fraction = ((point[0]-a[0])*dx+(point[1]-a[1])*dy)/length2
+        fractions.append(fraction)
+        t = min(1.,max(0.,fraction))
+        shifts.append(math.hypot(point[0]-a[0]-t*dx,point[1]-a[1]-t*dy))
+    if not -1e-9 <= fractions[1] <= 1+1e-9:
+        return None
+    shift = max(shifts)
+    if shift <= tolerance:
+        return min(1.,max(0.,fractions[1])),shift
+
+
+def _join_link(neighbor, incoming, prepend, profile, tolerance):
+    if abs(wrap_yaw(_link_heading(incoming)-_link_heading(neighbor))) > _DIRECTION_MATCH_RAD:
+        return None
+    station = neighbor.start if prepend else neighbor.end
+    match = _matching_station(station,incoming,tolerance)
+    if match is None:
+        return None
+    t,shift = match
+    if (t if prepend else 1-t)*math.dist(incoming.start[1],incoming.end[1]) <= max(1e-9,profile.station_error_m):
+        return None
+    start,end = (incoming.start,station) if prepend else (station,incoming.end)
+    dx,dy = end[1][0]-start[1][0],end[1][1]-start[1][1]
+    if any((b[0]-a[0])*dx+(b[1]-a[1])*dy <= 0 for a,b in zip(start,end)):
+        return None
+    yaw = incoming.heading_worst_case_rad+abs(wrap_yaw(math.atan2(dy,dx)-_link_heading(incoming)))
+    inferred = tuple(a or b and shift>1e-9 for a,b in zip(incoming.inferred_roles,neighbor.inferred_roles))
+    return RoadLink(start,end,incoming.error_m+shift,
+        neighbor.sources|incoming.sources,tuple(a|b for a,b in zip(neighbor.observations,incoming.observations)),
+        any(inferred),min(math.pi,yaw),inferred)
+
+
+def _end_heading(section, at_start):
+    links = section.links if at_start else tuple(reversed(section.links))
+    fixed = links[0].start[1] if at_start else links[0].end[1]
+    for link in links:
+        other = link.end[1] if at_start else link.start[1]
+        if math.dist(fixed,other) >= 2*_STATION_STEP_M:
+            break
+    a,b = (fixed,other) if at_start else (other,fixed)
+    return math.atan2(b[1]-a[1],b[0]-a[0])
+
+
+def _gap_links(before, after, heading_a, heading_b, profile):
+    start,end = before.end,after.start
+    dx,dy = end[1][0]-start[1][0],end[1][1]-start[1][1]
+    length = math.hypot(dx,dy)
+    heading = math.atan2(dy,dx)
+    delta = wrap_yaw(heading_b-heading_a)
+    if (length <= 1e-9 or length > profile.max_gap_m
+            or sum(bool(a and b) for a,b in zip(before.observations,after.observations)) < 2
+            or abs(delta) > min(.85,profile.merge_heading_rad+profile.max_curvature_1pm*length)
+            or abs(wrap_yaw(heading-heading_a-delta/2)) > _DIRECTION_MATCH_RAD):
+        return ()
+    directions = (math.cos(heading_a),math.sin(heading_a)),(math.cos(heading_b),math.sin(heading_b))
+    distances = tuple(math.dist(a,b) for a,b in zip(start,end))
+    count = max(1,math.ceil(length/_STATION_STEP_M))
+    stations = [start]
+    deviation = 0.
+    for i in range(1,count):
+        t = i/count
+        u,v = t*(1-t)**2,t*t*(t-1)
+        weight = t*t*(3-2*t)
+        station = tuple(tuple(a[k]+weight*(b[k]-a[k])+d*(u*directions[0][k]+v*directions[1][k])
+                              for k in (0,1)) for a,b,d in zip(start,end,distances))
+        deviation = max(deviation,*(math.dist(p,tuple(a[k]+t*(b[k]-a[k]) for k in (0,1)))
+                                    for p,a,b in zip(station,start,end)))
+        stations.append(station)
+    stations.append(end)
+    low,high = profile.missing_outer_width_bounds_m
+    pad = profile.merge_lateral_m
+    for i,station in enumerate(stations):
+        direction = heading_a+delta*i/count
+        nx,ny = -math.sin(direction),math.cos(direction)
+        middle = station[1]
+        if any(not low-pad <= side*((point[0]-middle[0])*nx+(point[1]-middle[1])*ny) <= high+pad
+               for point,side in ((station[0],1),(station[2],-1))):
+            return ()
+    for a,b in zip(stations,stations[1:]):
+        cx,cy = b[1][0]-a[1][0],b[1][1]-a[1][1]
+        if cx*dx+cy*dy <= 0 or any((q[0]-p[0])*cx+(q[1]-p[1])*cy <= 0 for p,q in zip(a,b)):
+            return ()
+    curve = profile.max_curvature_1pm*max(distances)**2/8
+    yaw = max(before.heading_worst_case_rad,after.heading_worst_case_rad)+profile.max_curvature_1pm*length
+    error = max(before.error_m,after.error_m)+curve+deviation
+    observations = tuple(a|b for a,b in zip(before.observations,after.observations))
+    return tuple(RoadLink(a,b,error,before.sources|after.sources,observations,True,min(math.pi,yaw),(True,True,True))
+                 for a,b in zip(stations,stations[1:]))
+
+
+def _connect_sections(sections, profile):
+    # 관측 경계 둘 이상과 진행 방향이 맞는 짧은 이음만 연결한다.
+    joins = {}
+    predecessors = {}
+    headings = [(_end_heading(section,True),_end_heading(section,False)) for section in sections]
+    for i,before in enumerate(sections):
+        for j,after in enumerate(sections):
+            if i != j and (bridge := _gap_links(before.links[-1],after.links[0],headings[i][1],headings[j][0],profile)):
+                distance = math.dist(bridge[0].start[1],bridge[-1].end[1])
+                joins.setdefault(i,[]).append((distance,j,bridge))
+                predecessors.setdefault(j,[]).append((distance,i))
+    successors = {}
+    for i,choices in joins.items():
+        distance,j,bridge = min(choices)
+        if min(predecessors[j])[1] != i:
+            continue
+        if any(other!=j and gap<=distance+_STATION_STEP_M
+               and math.dist(bridge[-1].end[1],alternative[-1].end[1])>_STATION_STEP_M
+               for gap,other,alternative in choices):
+            continue
+        successors[i] = j,bridge
+    downstream = {j for j,_ in successors.values()}
+    result = []
+    consumed = set()
+    for i,section in enumerate(sections):
+        if i in downstream:
+            continue
+        links = list(section.links)
+        consumed.add(i)
+        while i in successors:
+            i,bridge = successors[i]
+            links.extend(bridge)
+            links.extend(sections[i].links)
+            consumed.add(i)
+        result.append(RoadSection(tuple(links)))
+    result.extend(section for i,section in enumerate(sections) if i not in consumed)
+    return tuple(result)
+
+
+def _extend_reference(section, observations, profile, *, backward, occupied):
+    """관측으로 지지되는 만큼 중앙 기준선을 따라 다음 단면을 만든다."""
+    width = profile.missing_outer_width_m
+    sign = -1 if backward else 1
+    seed = section.links[0] if backward else section.links[-1]
+    station = seed.start if backward else seed.end
+    heading = _end_heading(section, backward)
+    error, yaw = seed.error_m, seed.heading_worst_case_rad
+    anchor_sources = seed.sources
+    support = seed.observations
+    curvature = 0.
+    result = []
+    visited = []
+    supported = 0
+    gap = 0.
+    step = _STATION_STEP_M
+    max_turn = min(.20, profile.max_curvature_1pm*step, .9*step/width)
+    for _ in range(_LINK_LIMIT):
+        previous_error, previous_yaw = error, yaw
+        previous_gap = gap
+        turn = sign * curvature * step
+        direction = heading + turn
+        x, y = station[1]
+        point = (x + sign*step*math.cos(heading + turn/2),
+                 y + sign*step*math.sin(heading + turn/2))
+        matched = observations.at(point, direction, width)
+        if matched:
+            residual = median(item[0] for item in matched.values())
+            angle = median(item[1] for item in matched.values())
+            direction = heading + max(-max_turn, min(max_turn, turn+.40*angle))
+            curvature = .5*curvature + .5*wrap_yaw(direction-heading)/(sign*step)
+            nx, ny = -math.sin(direction), math.cos(direction)
+            center = point[0] + nx*residual, point[1] + ny*residual
+            next_support = tuple(matched[role][4] if role in matched else frozenset() for role in range(3))
+            error = max(item[2] + abs(item[0]-residual) for item in matched.values())
+            if 1 not in matched:
+                error += profile.missing_outer_width_error_m
+            yaw = max(item[3] + abs(item[1]-angle) for item in matched.values())
+            gap = 0.
+        else:
+            gap += step
+            if gap > profile.max_gap_m:
+                break
+            center = point
+            next_support = (frozenset(),)*3
+        nx, ny = -math.sin(direction), math.cos(direction)
+        next_station = tuple((center[0]+offset*nx,center[1]+offset*ny) for offset in (width,0.,-width))
+        start, end = (next_station,station) if backward else (station,next_station)
+        dx, dy = end[1][0]-start[1][0], end[1][1]-start[1][1]
+        if any((b[0]-a[0])*dx+(b[1]-a[1])*dy <= 0 for a,b in zip(start,end)):
+            break
+        # 한 바퀴를 돌아 같은 방향의 기준선을 만나면 같은 도로를 다시 따라가지 않는다.
+        if any(math.dist(center,p) < 1.5*step and abs(wrap_yaw(direction-h)) < _DIRECTION_MATCH_RAD
+               for p,h in (*occupied,*visited[:-2])):
+            break
+        inferred = tuple(not bool(a & b) for a,b in zip(support,next_support))
+        new_sources = frozenset(source for group in next_support for source,_ in group)
+        sources = anchor_sources | new_sources
+        if new_sources:
+            anchor_sources = new_sources
+        unsupported_distance = max(gap,previous_gap)
+        shape_error = (max(error,previous_error)+profile.station_error_m
+                       +profile.max_curvature_1pm*unsupported_distance**2/8)
+        result.append(RoadLink(start,end,shape_error,sources,tuple(a|b for a,b in zip(support,next_support)),
+                               any(inferred),min(math.pi,max(yaw,previous_yaw)+abs(wrap_yaw(direction-heading))+
+                                               profile.max_curvature_1pm*unsupported_distance),inferred))
+        visited.append((center,direction))
+        if matched:
+            supported = len(result)
+        station, heading, support = next_station, direction, next_support
+    links = result[:supported]
+    return tuple(reversed(links)) if backward else tuple(links)
+
+
+def _follow_reference(seed, observations, profile):
+    after = _extend_reference(seed,observations,profile,backward=False,
+        occupied=tuple((link.start[1],_link_heading(link)) for link in seed.links
+                       if math.dist(link.start[1],seed.links[-1].end[1]) > _STATION_STEP_M))
+    before = _extend_reference(seed,observations,profile,backward=True,
+        occupied=tuple((link.end[1],_link_heading(link)) for link in (*seed.links,*after)
+                       if math.dist(link.end[1],seed.links[0].start[1]) > _STATION_STEP_M))
+    return RoadSection(before+seed.links+after) if before or after else seed
+
+
+def _section_length(section):
+    return sum(math.dist(link.start[1],link.end[1]) for link in section.links)
+
+
+def _section_station(section, point, heading, max_distance, max_heading):
+    """Project onto a nearby directed divider, retaining distance for ambiguity checks."""
+    offset, matches = 0., []
+    for link in section.links:
+        a,b = link.start[1],link.end[1]
+        span = math.dist(a,b)
+        if not span:
+            continue
+        dx,dy = (b[0]-a[0])/span,(b[1]-a[1])/span
+        station = min(span,max(0.,(point[0]-a[0])*dx+(point[1]-a[1])*dy))
+        distance = math.hypot(point[0]-a[0]-station*dx,point[1]-a[1]-station*dy)
+        if distance <= max_distance and abs(wrap_yaw(heading-math.atan2(dy,dx))) <= max_heading:
+            matches.append((distance,offset+station))
+        offset += span
+    if not matches:
+        return None
+    best = min(matches)
+    if any(distance <= best[0]+max_distance/4 and abs(station-best[1]) > 2*max_distance
+           for distance,station in matches):
+        return None
+    return best
+
+
+def stored_road_window(sections, model, pose, profile, *, rear_m, forward_m):
+    """Cut the connected mapped section tied to the original lane IDs."""
+    original = model.road.hypotheses[0]
+    a,b = original.divider[:2]
+    heading = math.atan2(b[1]-a[1],b[0]-a[0])
+    anchor = ((a[0]+b[0])/2,(a[1]+b[1])/2)
+    width = profile.missing_outer_width_m
+    matches = []
+    for section in sections:
+        identity = _section_station(section,anchor,heading,width/3,profile.max_heading_rad/2)
+        if identity is None:
+            continue
+        nearest = _section_station(section,(pose.x,pose.y),pose.yaw,1.5*width,profile.max_heading_rad)
+        if nearest is not None:
+            matches.append((identity[0],nearest[0],section,nearest[1]))
+    if not matches:
+        return None
+    closest_anchor = min(row[0] for row in matches)
+    matches = [row for row in matches if row[0] <= closest_anchor+profile.merge_lateral_m]
+    matches.sort(key=lambda row:(row[1],row[0]))
+    identity,distance,section,station = matches[0]
+    if any(d <= distance+profile.merge_lateral_m and
+           i <= identity+profile.merge_lateral_m and
+           min(math.dist(section.links[0].start[1],other.links[0].start[1]),
+               math.dist(section.links[-1].end[1],other.links[-1].end[1])) > width
+           for i,d,other,_ in matches[1:]):
+        return None
+    lower, upper = max(0.,station-rear_m), station+forward_m
+    offset, run = 0., []
+    for link in section.links:
+        end = offset+math.dist(link.start[1],link.end[1])
+        if end > lower and offset < upper and end > offset:
+            run.append(link)
+        offset = end
+    if not run:
+        return None
+    # Keep the map's original stations, rounding the requested extent outward.
+    # If the wire cap is reached, keep the rear coverage and expose the shorter forward range.
+    run = tuple(run[:31])
+    if any(a.end != b.start for a,b in zip(run,run[1:])):
+        return None
+    geometry = _mapped_candidate(run,model.road.source_key,profile,stored=True)
+    if geometry is None:
+        return None
+    # A map read cannot extend a mixed crossing policy to new intervals.
+    crossing = bytes([int(all(model.crossing))])*len(run)
+    return replace(geometry.road,reasons=('STORED_MAP_WINDOW',)),crossing
+
+
+class TemporalRoadMap:
+    """최근 관측의 공통 단면을 찾고 지도 좌표의 구간을 유한 개수로 보관한다."""
+
+    def __init__(self, *, parking_entrance_diagnostics=True):
+        self._parking_entrance_diagnostics = parking_entrance_diagnostics
+        self.clear()
+
+    def clear(self, *, keep_startup=False):
+        self._frames = deque(maxlen=_MAP_FRAME_LIMIT)
+        self._recent_sources = deque(maxlen=_FRAME_LIMIT)
+        self._parking_sources = deque(maxlen=_MAP_FRAME_LIMIT)
+        if not keep_startup:
+            self._startup = deque(maxlen=_MAP_FRAME_LIMIT)
+        self._markings = deque(maxlen=_MARKING_LIMIT)
+        self._startup_seeds = deque()
+        self._links = {}
+        self._roles = {}
+        self._map_roles = {}
+        self._normal_traces = {}
+        self._reusable_runs = deque(maxlen=_REUSE_RUN_LIMIT)
+        self._last_source = None
+        self.parking_branches = ()
+        self.approach_fit = None
+        self.road_candidate_status = 'NO_CURRENT_OBSERVATION'
+        self._entrance_recheck = 0
+        self.revision = 0
+        self._publication_sections = None
+
+    def __deepcopy__(self, memo):
+        # frame/strip/link는 불변이다. 후보 코어는 owner의 가변 컨테이너만 복제한다.
+        clone = type(self).__new__(type(self))
+        memo[id(self)] = clone
+        clone._frames = self._frames.copy()
+        clone._recent_sources = self._recent_sources.copy()
+        clone._parking_sources = self._parking_sources.copy()
+        clone._startup = self._startup.copy()
+        clone._markings = self._markings.copy()
+        clone._startup_seeds = self._startup_seeds.copy()
+        clone._links = self._links.copy()
+        clone._roles = {key:roles.copy() for key,roles in self._roles.items()}
+        clone._map_roles = {key:roles.copy() for key,roles in self._map_roles.items()}
+        clone._normal_traces = self._normal_traces.copy()
+        clone._reusable_runs = self._reusable_runs.copy()
+        clone._last_source = self._last_source
+        clone._parking_entrance_diagnostics = self._parking_entrance_diagnostics
+        clone.parking_branches = self.parking_branches
+        clone.approach_fit = self.approach_fit
+        clone.road_candidate_status = self.road_candidate_status
+        clone._entrance_recheck = self._entrance_recheck
+        clone.revision = self.revision
+        clone._publication_sections = self._publication_sections
+        return clone
+
+    def publication_sections(self, profile, observation_us):
+        """Reuse the joined map between bounded refreshes on the compute owner."""
+        cached = self._publication_sections
+        if (cached is None or cached[0] != profile or observation_us < cached[2]
+                or cached[1] != self.revision and observation_us-cached[2] >= _PUBLICATION_MAP_REFRESH_US):
+            self._publication_sections = (profile,self.revision,observation_us,self.sections(profile))
+        return self._publication_sections[3]
+
+    @property
+    def links(self):
+        return tuple(self._links.values())
+
+    @property
+    def startup_markings(self):
+        return tuple(self._startup)
+
+    @property
+    def markings(self):
+        return tuple(self._markings)
+
+    def marking_joins(self, profile):
+        return _join_markings(tuple(s for s in self._markings if not s.original.closed),self._roles,profile)
+
+    def collect_startup(self, graph, stamp, pose):
+        if graph is None or graph.source_key != stamp.key or not graph.calibration_qualified:
+            return
+        if self._startup and self._startup[-1].stamp.key[:-1] != stamp.key[:-1]:
+            self._startup.clear()
+        strips = _observed_strips(graph)
+        if strips:
+            self._startup.append(StartupMarkings(stamp,pose,strips,_usable_graph(graph)))
+
+    def place_startup(self, alignment, *, stamp):
+        """원 RGB 자료를 첫 정합으로 배치하고 누적 지도에만 사용한다."""
+        if not alignment.has_metadata:
+            return
+        while self._startup:
+            original = self._startup.popleft()
+            if (original.stamp.key[:-1] != stamp.key[:-1] or original.pose is None
+                    or original.pose.sample.context != alignment.context):
+                continue
+            if original.pose.captured_us[1] > alignment.observed_j_interval[0]:
+                continue
+            try:
+                mapped = alignment.project_history(original.pose)
+            except ValueError:
+                continue
+            strips = _project_strips(original.strips,mapped,original.stamp.key,
+                stamp=original.stamp,capture_pose=original.pose,historical=True)
+            self._markings.extend(strips)
+            if original.usable_for_matching:
+                matching = _matching_strips(strips)
+                self._frames.append(matching)
+                self._startup_seeds.extend(matching[:2])
+
+    def sections(self, profile):
+        """확인된 단면을 시작점으로 원 선 관측을 따라 지도 기준선을 연장한다."""
+        pending = sorted((link for link in self.links if all(p is not None for p in link.start)),
+                         key=lambda link: (sum(link.inferred_roles),link.error_m))
+        tolerance = max(profile.merge_lateral_m,profile.missing_outer_width_error_m)
+        sections = []
+        while pending:
+            section = deque([pending.pop(0)])
+            for prepend in (False,True):
+                while pending:
+                    neighbor = section[0] if prepend else section[-1]
+                    choices = [(i,joined) for i,incoming in enumerate(pending)
+                               if (joined := _join_link(neighbor,incoming,prepend,profile,tolerance)) is not None]
+                    if not choices:
+                        break
+                    i,link = min(choices,key=lambda item: (sum(item[1].inferred_roles),
+                        -math.dist(item[1].start[1],item[1].end[1]),item[1].error_m))
+                    pending.pop(i)
+                    (section.appendleft if prepend else section.append)(link)
+            sections.append(RoadSection(tuple(section)))
+            # 중첩 관측은 원 링크에 남긴다. 양끝이 이미 포함된 조각은 중복 차로가 아니다.
+            pending = [incoming for incoming in pending if not all(any(
+                abs(wrap_yaw(_link_heading(link)-_link_heading(incoming))) <= _DIRECTION_MATCH_RAD
+                and _matching_station(station,link,tolerance) is not None for link in section)
+                for station in (incoming.start,incoming.end))]
+        sections = tuple(section for section in _connect_sections(sections,profile)
+                         if _section_length(section) >= profile.min_usable_length_m)
+        if not sections or not self._markings:
+            return sections
+        roles = {key: set(self._roles.get(key,())) | set(self._map_roles.get(key,()))
+                 for key in self._roles.keys() | self._map_roles.keys()}
+        observations = ReferenceObservations(self._markings,roles,profile,trace_cache=self._normal_traces)
+        # 새로 생긴 긴 단면 하나가 기존 코너의 지도를 밀어내지 않도록 몇 개의 시작점을 비교한다.
+        seeds = sorted(sections,key=_section_length,reverse=True)[:3]
+        seed,reference = max(((seed,_follow_reference(seed,observations,profile)) for seed in seeds),
+                             key=lambda pair: _section_length(pair[1]))
+        if reference is seed:
+            return sections
+        return (reference,*(section for section in sections if section is not seed))
+
+    @property
+    def source_keys(self):
+        retained = {frame[0].source for frame in self._frames if frame}
+        return frozenset(key for key in self._recent_sources if key in retained)
+
+    @property
+    def evidence_keys(self):
+        return self.source_keys | frozenset(source for run in self._reusable_runs for link in run for source in link.sources)
+
+    def _remember_run(self, run, profile):
+        midpoint = run[len(run)//2].start[1]
+        heading = _link_heading(run[len(run)//2])
+        for i,old in enumerate(self._reusable_runs):
+            center = old[len(old)//2]
+            if (math.dist(midpoint,center.start[1]) <= profile.min_usable_length_m/2
+                    and abs(wrap_yaw(heading-_link_heading(center))) <= _DIRECTION_MATCH_RAD):
+                # 채택된 구간은 재관측할 때 원 좌표와 카탈로그 ID를 찾아야 한다.
+                if center.heading_estimate_rad is not None:
+                    return
+                if (max(link.error_m+link.placement_m for link in run),
+                    max(link.heading_worst_case_rad+link.placement_rad for link in run)) < (
+                        max(link.error_m+link.placement_m for link in old),
+                        max(link.heading_worst_case_rad+link.placement_rad for link in old)):
+                    self._reusable_runs[i] = run
+                return
+        self._reusable_runs.append(run)
+
+    def _refit_visible_run(self, key, profile, limits, history):
+        aligned,anchor = wheel_aligned_strips(history,key)
+        if anchor is None:
+            return None
+        c,s = math.cos(anchor.yaw),math.sin(anchor.yaw)
+        seeds = []
+        for link in self.links:
+            if any(p is None for p in (*link.start,*link.end)) or sum(bool(x) for x in link.observations) < 2:
+                continue
+            if abs(wrap_yaw(_link_heading(link)-anchor.yaw)) > profile.max_heading_rad:
+                continue
+            a,b = link.start[1],link.end[1]
+            x,y = (a[0]+b[0])/2-anchor.x,(a[1]+b[1])/2-anchor.y
+            distance = math.hypot(x,y)
+            if distance <= _REFIT_LOOKAHEAD_M and x*c+y*s > 0.:
+                seeds.append((distance,link))
+        seeds.sort(key=lambda row:row[0])
+        matches = []
+        for _,seed in seeds[:_REFIT_SEED_LIMIT]:
+            fitted = fit_road_window(aligned,seed.start,seed.end,profile,anchor,key,self._map_roles,
+                                     max_sources=_FRAME_LIMIT-1)
+            if fitted is None:
+                continue
+            inferred = tuple(not bool(role) for role in fitted.observations)
+            # 점선 양쪽의 실제 테이프와 연속 실선 두 개로 지지된 구간이다.
+            # 보이는 경계가 없어 폭으로 만든 구간에만 추정 상태를 부여한다.
+            link = RoadLink(*fitted.stations,fitted.position_m,fitted.sources,fitted.observations,
+                            any(inferred),fitted.heading_worst_case_rad,inferred,
+                            fitted.placement_m,fitted.placement_rad,fitted.heading_estimate_rad,
+                            fitted.position_estimate_m,fitted.normal_bounds_m,fitted.outer_chord_bounds_m)
+            candidate = _mapped_candidate((link,),key,profile)
+            if candidate is not None and candidate.within(limits):
+                candidate = replace(candidate,road=replace(candidate.road,reasons=('REFIT_MAP_TAPE',)))
+                matches.append((candidate,link))
+            elif candidate is not None:
+                self.road_candidate_status = 'GEOMETRY_ENVELOPE_TOO_WIDE'
+        if not matches:
+            return None
+        candidate,link = max(matches,key=lambda row: math.dist(row[1].start[1],row[1].end[1]))
+        tolerance = profile.missing_outer_width_m/4
+        if any(not all(min(segment_distance(p,a,b),segment_distance(q,a,b),
+                           segment_distance(a,p,q),segment_distance(b,p,q)) <= tolerance
+                       for a,b,p,q in zip(link.start,link.end,other.start,other.end))
+               for _,other in matches if other is not link):
+            self.road_candidate_status = 'MULTIPLE_SUPPORTED_RUNS'
+            return None
+        return candidate,(link,)
+
+    def parking_tape_history(self, source):
+        """Recent original strips in the current capture's body frame."""
+        active = self.parking_source_keys
+        frames = {frame[0].source: frame for frame in self._frames if frame and frame[0].source in active}
+        current = frames.get(source)
+        if current is None or current[0].capture_pose is None:
+            return ()
+        anchor = current[0].capture_pose
+        x, y, yaw = anchor.sample.x, anchor.sample.y, anchor.sample.yaw
+        c, s = math.cos(yaw), math.sin(yaw)
+        recent = [(key, frame) for key,frame in frames.items() if key[:-1] == source[:-1]
+                  and key[-1] < source[-1] and frame[0].capture_pose is not None
+                  and 0 <= anchor.captured_us[0]-frame[0].capture_pose.captured_us[0] <= _PARKING_HISTORY_US]
+        if len(recent) > 11:
+            # Keep the newest views and spread the rest over the approach so the
+            # rear paint seen before the mouth can still be used.
+            older = recent[:-4]
+            recent = [older[i*(len(older)-1)//6] for i in range(7)]+recent[-4:]
+        history = []
+        for key, frame in recent:
+            capture = frame[0].capture_pose
+            bounds = relative_wheel_bounds(anchor, capture)
+            if bounds is None:
+                continue
+            dx, dy = capture.sample.x-x, capture.sample.y-y
+            transform = (c*dx+s*dy, -s*dx+c*dy, wrap_yaw(capture.sample.yaw-yaw))
+            strips = []
+            for projected in frame:
+                strip = projected.original
+                radius = max(math.hypot(*point) for point in strip.points_xy)
+                pad = bounds[0]+2*radius*math.sin(bounds[1]/2)
+                strips.append(replace(strip, points_xy=tuple(transform_point(p,transform) for p in strip.points_xy),
+                    error_m=strip.error_m+pad, point_error_xy=(), segment_error_xy=(),
+                    endpoint_error_m=tuple(None if e is None else e+pad for e in strip.endpoint_error_m)))
+            history.append((key,tuple(strips)))
+        return tuple(history)
+
+    @property
+    def parking_source_keys(self):
+        return frozenset(self._parking_sources)
+
+    def observe(self, graph, pose, road_profile, tape_profile, *, stamp=None, capture_pose=None, qualified=True,
+                geometry_limits=None):
+        self.approach_fit = None
+        self.road_candidate_status = 'NO_CURRENT_OBSERVATION'
+        if (graph is None or graph.source_key is None or graph.source_key == self._last_source
+                or not graph.calibration_qualified):
+            return
+        sample = pose.sample
+        transform = (sample.x, sample.y, sample.yaw)
+        projected = _project_strips(_observed_strips(graph),pose,graph.source_key,
+            stamp=stamp,capture_pose=capture_pose)
+        self._last_source = graph.source_key
+        self._markings.extend(projected)
+        if not _usable_graph(graph):
+            return
+        strips = _matching_strips(projected)
+        self._frames.append(strips)
+        if qualified:
+            self._recent_sources.append(graph.source_key if strips else None)
+            if strips and self._parking_entrance_diagnostics:
+                self._parking_sources.append(graph.source_key)
+        active = {(s.source,s.identity) for frame in self._frames for s in frame}
+        self._roles = {key:roles for key,roles in self._roles.items() if key in active}
+        self._map_roles = {key:roles for key,roles in self._map_roles.items() if key in active}
+        if not strips:
+            return
+        self.road_candidate_status = 'POSE_UNQUALIFIED' if not qualified else 'NO_SUPPORTED_RUN'
+        normal_runs = self._collect_map_geometry(strips,road_profile,
+            collect_candidates=qualified and geometry_limits is not None)
+        if not qualified:
+            return
+
+        first = max(-5, math.ceil((tape_profile.x_min_m-.40)/_STATION_STEP_M))
+        last = min(40, math.floor(tape_profile.x_max_m/_STATION_STEP_M))
+        lateral_range = min(max(abs(tape_profile.y_min_m),abs(tape_profile.y_max_m)),
+                            2.5*road_profile.missing_outer_width_m)
+        stations = {i: [] for i in range(first,last+1)}
+        recent_sources = self.source_keys
+        c,s = math.cos(sample.yaw),math.sin(sample.yaw)
+        for frame in self._frames:
+            if not frame or frame[0].source not in recent_sources:
+                continue
+            for strip in frame:
+                offsets = ((x-sample.x,y-sample.y) for x,y in strip.points)
+                local = tuple((c*x+s*y,-s*x+c*y) for x,y in offsets)
+                trace = self._normal_traces.get((strip.source,strip.identity))
+                reverse = strip.original.points_xy[-1][0] < strip.original.points_xy[0][0]
+                for index,(a,b,yaw_error) in enumerate(zip(local,local[1:],strip.heading_errors)):
+                    if a[0] > b[0]:
+                        a,b = b,a
+                    dx = b[0]-a[0]
+                    if dx <= 1e-6:
+                        continue
+                    begin = max(first, math.ceil(a[0]/_STATION_STEP_M))
+                    end = min(last, math.floor(b[0]/_STATION_STEP_M))
+                    if begin > end:
+                        continue
+                    dy = b[1]-a[1]
+                    heading = math.atan2(dy,dx)
+                    if abs(heading) > road_profile.max_heading_rad:
+                        continue
+                    if trace is not None:
+                        path = trace[2]
+                        i = len(path.headings)-1-index if reverse else index
+                        direction = wrap_yaw(path.headings[i]-sample.yaw)
+                        if abs(direction) <= road_profile.max_heading_rad:
+                            yaw_error = min(yaw_error,path.errors[i]+abs(wrap_yaw(direction-heading)))
+                    error = strip.section_error(index,heading,sample.yaw)
+                    for i in range(begin,end+1):
+                        y = a[1]+dy*(i*_STATION_STEP_M-a[0])/dx
+                        if abs(y) <= lateral_range:
+                            stations[i].append((y,heading,error,strip.source,strip.identity,yaw_error))
+        previous = None
+        run = []
+        candidates, interpolated = [], []
+        for index,samples in stations.items():
+            current, ambiguous = _road_section(_bands(samples,self._roles), road_profile.missing_outer_width_bounds_m)
+            if ambiguous:
+                self._retain(run,road_profile,graph.source_key,candidates,interpolated)
+                previous,run = None,[]
+            if current is None:
+                continue
+            candidate = (index*_STATION_STEP_M,current)
+            link = None if previous is None else _link(previous,candidate,transform,road_profile)
+            if link is None:
+                self._retain(run,road_profile,graph.source_key,candidates,interpolated)
+                run = []
+            else:
+                run.append(link)
+            previous = candidate
+        self._retain(run,road_profile,graph.source_key,candidates,interpolated)
+        sections = None
+        if self._parking_entrance_diagnostics:
+            self.parking_branches = observe_entrances(self.parking_branches, projected, self.links)
+            if not self._entrance_recheck:
+                # 코너의 진입선이 먼저 보이고 차로 기준선이 뒤늦게 이어질 수 있다.
+                history = tuple(strip for frame in self._frames for strip in frame
+                                if strip.source in recent_sources)
+                sections = self.sections(road_profile)
+                self.parking_branches = observe_entrances(self.parking_branches, history,
+                    (link for section in sections for link in section.links), followed=True)
+            self._entrance_recheck = (self._entrance_recheck+1) % _ENTRANCE_RECHECK_FRAMES
+        candidates = candidates or interpolated
+        candidate, candidate_run = candidates[0] if len(candidates) == 1 else (None, ())
+        if len(candidates) > 1:
+            self.road_candidate_status = 'MULTIPLE_SUPPORTED_RUNS'
+        elif candidate is not None:
+            self.road_candidate_status = 'GEOMETRY_ENVELOPE_TOO_WIDE'
+        if candidate is not None and (geometry_limits is None or candidate.within(geometry_limits)):
+            if geometry_limits is not None and 2 <= len(candidate.sources) < _FRAME_LIMIT:
+                self._remember_run(candidate_run,road_profile)
+            self.road_candidate_status = 'MULTI_FRAME_TAPE'
+            return candidate
+        if len(candidates) <= 1 and geometry_limits is not None:
+            reused = tuple(item for run in self._reusable_runs if (item := _reobserve_run(
+                run,strips,pose,road_profile,geometry_limits)) is not None)
+            if len(reused) == 1:
+                self.road_candidate_status = 'REOBSERVED_MAP_TAPE'
+                return reused[0]
+            admitted = tuple(item for run in normal_runs for item in _bounded_candidates(
+                run,graph.source_key,road_profile,geometry_limits,recent_sources))
+            if len(admitted) == 1:
+                item, run = admitted[0]
+                self._remember_run(run,road_profile)
+                self.road_candidate_status = 'MULTI_FRAME_TAPE'
+                return item
+            if len(admitted) == 0 and len(reused) == 0:
+                history = tuple(strip for frame in self._frames for strip in frame if strip.source in recent_sources)
+                fitted = self._refit_visible_run(graph.source_key,road_profile,geometry_limits,history)
+                if fitted is not None:
+                    item, run = fitted
+                    self._remember_run(run,road_profile)
+                    self.road_candidate_status = 'REFIT_MAP_TAPE'
+                    return item
+            if len(reused) > 1 or len(admitted) > 1:
+                self.road_candidate_status = 'MULTIPLE_SUPPORTED_RUNS'
+        if len(candidates) <= 1 and self._parking_entrance_diagnostics:
+            nearby = tuple(span for span in entrance_spans(self.parking_branches)
+                           if math.dist(transform[:2], span.endpoints[0]) <= tape_profile.x_max_m)
+            if nearby and geometry_limits is not None and graph.complete:
+                if sections is None:
+                    sections = self.sections(road_profile)
+                curves = tuple(curve for span in nearby if (curve := _mapped_parking_approach(
+                    sections, span, graph.source_key, road_profile, geometry_limits)) is not None)
+                if len(curves) == 1:
+                    self.road_candidate_status = 'MAPPED_PARKING_APPROACH_CURVE'
+                    return curves[0]
+            if candidate is None and nearby:
+                history = tuple(strip for frame in self._frames for strip in frame if strip.source in recent_sources)
+                fits = tuple(fit for span in nearby
+                             if (fit := refit_approach(span,history,graph.source_key,road_profile)) is not None)
+                if len(fits) == 1:
+                    self.approach_fit = fits[0]
+                    parking_candidate = MappedRoad(fits[0].road,fits[0].sources)
+                    self.road_candidate_status = ('PARKING_APPROACH_TAPE' if geometry_limits is None or
+                        parking_candidate.within(geometry_limits) else 'GEOMETRY_ENVELOPE_TOO_WIDE')
+                    return parking_candidate
+        return candidate
+
+    def _retain(self, run, profile, key, candidates, interpolated):
+        qualified_run = sum(math.dist(link.start[1],link.end[1]) for link in run) >= profile.min_usable_length_m
+        complete = []
+        observed = []
+        for link in (*run,None) if qualified_run else ():
+            full = link is not None and all(p is not None for p in link.start)
+            if full:
+                complete.append(link)
+                if not link.interpolated:
+                    observed.append(link)
+                    continue
+            candidate = _mapped_candidate(observed,key,profile)
+            if candidate is not None:
+                candidates.append((candidate,_candidate_window(observed,key)))
+            observed = []
+            if full:
+                continue
+            if any(link.interpolated for link in complete):
+                candidate = _mapped_candidate(complete,key,profile)
+                if candidate is not None:
+                    interpolated.append((candidate,_candidate_window(complete,key)))
+            complete = []
+        retained = []
+        for link in run:
+            if qualified_run:
+                for role, observations in enumerate(link.observations):
+                    for identity in observations:
+                        self._roles.setdefault(identity,set()).add(role)
+            elif link.interpolated or any(point is None for point in link.start):
+                continue
+            retained.append(link)
+        self._store(retained)
+
+    def _collect_map_geometry(self, strips, profile, *, collect_candidates=False):
+        # 선의 국소 방향으로 단면을 만들어 차량 yaw에서 멀어지는 코너도 관측한다.
+        seeds = tuple(self._startup_seeds.popleft() for _ in range(min(2,len(self._startup_seeds))))+strips[:6]
+        history = tuple(strip for frame in self._frames for strip in frame)
+        known = [(strip,_marking_ends(strip),role) for strip in history
+                 if len(role:=self._map_roles.get((strip.source,strip.identity),()))==1]
+        for seed in seeds:
+            key = seed.source,seed.identity
+            if key in self._map_roles:
+                continue
+            ends = _marking_ends(seed)
+            roles = set().union(*(role for old,old_ends,role in known
+                                 if _role_continuation(seed,ends,old,old_ends,profile)))
+            if len(roles)==1:
+                self._map_roles[key] = roles
+        sections = normal_samples(history,seeds,width_m=profile.missing_outer_width_m,
+            radius_m=3*profile.missing_outer_width_bounds_m[1]+_BAND_SPREAD_M,
+            step_m=_STATION_STEP_M,heading_limit=.55,curvature=profile.max_curvature_1pm,trace_cache=self._normal_traces)
+        runs = []
+        for seed,stations in sections:
+            previous = None
+            run = []
+            for point,heading,samples in stations:
+                bands = _bands(samples,self._map_roles,map_geometry=True)
+                section,ambiguous = ((None,True) if len(bands)>_MAP_BAND_LIMIT else _map_cross_section(bands,profile))
+                if ambiguous:
+                    self._retain_map_run(run,profile)
+                    if collect_candidates and run:
+                        runs.append(run)
+                    previous,run = None,[]
+                    continue
+                if section is None or not any(seed in band.strips for band in section):
+                    continue
+                candidate = _normal_station(point,heading,section)
+                link = None if previous is None else _normal_link(previous,candidate,profile)
+                if link is None:
+                    self._retain_map_run(run,profile)
+                    if collect_candidates and run:
+                        runs.append(run)
+                    run = []
+                else:
+                    run.append(link)
+                previous = candidate
+            self._retain_map_run(run,profile)
+            if collect_candidates and run:
+                runs.append(run)
+        return runs
+
+    def _retain_map_run(self, run, profile):
+        if sum(math.dist(link.start[1],link.end[1]) for link in run) >= profile.min_usable_length_m:
+            for link in run:
+                for role,observations in enumerate(link.observations):
+                    for identity in observations:
+                        self._map_roles.setdefault(identity,set()).add(role)
+            self._store(run)
+
+    def _store(self, links):
+        changed = False
+        for link in links:
+            key = tuple(round(value/_STATION_STEP_M) for point in (link.start[1],link.end[1]) for value in point)
+            old = self._links.get(key)
+            quality = (sum(p is None for p in link.start),sum(link.inferred_roles),link.error_m)
+            if old is not None and (sum(p is None for p in old.start),sum(old.inferred_roles),old.error_m) <= quality:
+                continue
+            if old is None and len(self._links) >= _LINK_LIMIT:
+                self._links.pop(next(iter(self._links)))
+            self._links[key] = link
+            changed = True
+        if changed:
+            self.revision += 1
