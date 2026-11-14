@@ -11,7 +11,9 @@ Wants=network-online.target
 Type=simple
 # 선택: XENOVA_AGENT_BROKER_HOST/PORT, XENOVA_AGENT_BROKER_USERNAME/PASSWORD, XENOVA_AGENT_METRICS_INTERVAL(초, 기본 2),
 # XENOVA_AGENT_TOP_PROCESSES(0~50, 기본 10), XENOVA_AGENT_LOG_LEVEL. heartbeat 주기는 계약값 5초라 설정할 수 없다(넣으면 시작 거부).
-# XENOVA_AGENT_DEMO_COMMANDS=1 이면 MQTT-04 데모 명령(stress·agent_exit)을 실행한다. 기본은 꺼짐(명령을 DEMO_DISABLED 로 거절)
+# MQTT-04 데모 명령(stress·agent_exit)은 시연·QA 에서 늘 쓰므로 이 유닛으로 만든 이미지는 항상 켠다(2026-11-14).
+# 끄려면 /etc/xenova/agent.env 에 XENOVA_AGENT_DEMO_COMMANDS=0 (EnvironmentFile 이 Environment 보다 우선한다)
+Environment=XENOVA_AGENT_DEMO_COMMANDS=1
 EnvironmentFile=-/etc/xenova/agent.env
 # 설치 경로는 install_into_rootfs.py 와 같다. xenova_mqtt(mqtt-client)와 xenova_agent 두 패키지가 보여야 한다
 Environment=PYTHONPATH=/opt/xenova/mqtt-client:/opt/xenova/agent

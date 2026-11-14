@@ -1,8 +1,9 @@
 // Xenova ESP32 펌웨어 (Arduino-ESP32 3.x, 보드 ESP32 Dev Module).
 // 게이트웨이와 USB 시리얼로 feedback-3 프레임을 주고받는다.
 // 세션(HELLO)과 시각 설치(CLOCK)에 답하고, lease 가 살아 있는 동안 엔코더 표본(SENSOR)을 20 ms 마다 보낸다.
-// DRIVE·STOP 명령을 모터와 서보에 걸고 REPORT 로 알리며, 명령의 기한이 지나면 타이머가 모터 출력을 끊는다.
+// DRIVE·STOP·HOLD_STEER 명령을 모터와 서보에 걸고 REPORT 로 알리며, 명령의 기한이 지나면 타이머가 모터 출력을 끊는다.
 #include <driver/gptimer.h>
+#include <driver/mcpwm_prelude.h>
 #include <esp_app_desc.h>
 #include <esp_random.h>
 
@@ -23,9 +24,7 @@ const int32_t FULL_DUTY_MMPS = 1150;
 // 조향을 서보 펄스로 바꾸는 값. 한계는 조립 안내서 단계 K 에서 찾은 것이고, 기울기와 부호는 맞추기 전이다
 const int32_t SERVO_CENTER_US = 1500, SERVO_MIN_US = 900, SERVO_MAX_US = 2100;
 const int32_t SERVO_US_PER_RAD = 637;
-// LEDC 는 앞서 쓴 값이 자리 잡기 전에 다시 쓰면 그때까지 멈춰서 기다린다. 이 보드에서 재 보니 PWM 두 주기였고,
-// 50 Hz 인 서보 채널에서는 40 ms 다. 그래서 서보에는 이 간격을 두고 loop 에서만 쓴다
-const uint64_t SERVO_WRITE_GAP_US = 50000;
+const uint32_t SERVO_PERIOD_US = 20000;  // 50 Hz
 
 const uint8_t VEHICLE_CONFIG_SHA256[32] = XENOVA_VEHICLE_CONFIG_SHA256;
 
@@ -87,33 +86,69 @@ void cutOutput(void *) {
   ledcWrite(PWM2, 0);
 }
 
-int32_t servoWantedUs = 0;   // 서보에 낼 펄스. 0 이면 아직 내지 않는다
-int32_t servoWrittenUs = 0;  // 서보 채널에 마지막으로 쓴 펄스
-uint64_t servoWrittenAtUs = 0;
+// 서보 펄스는 MCPWM 으로 낸다. 폭을 바꾸는 것은 비교값 레지스터를 쓰는 일이라 기다리지 않고, 다음 주기부터 그 폭으로
+// 나간다. LEDC 는 앞서 쓴 값이 자리 잡기 전에 다시 쓰면 PWM 두 주기(50 Hz 에서 40 ms)를 멈춰 기다려서, 타이머
+// 인터럽트를 막은 채로는 쓸 수 없다
+mcpwm_cmpr_handle_t servoCompare = nullptr;
+mcpwm_gen_handle_t servoGenerator = nullptr;
+bool servoOn = false;  // 펄스를 내고 있다. 켜진 뒤 첫 명령 전에는 핀을 LOW 로 잡아 둔다
 
-// 속도를 모터에 걸고 조향은 낼 펄스만 적어 둔다. cutoff 의 lock 을 쥔 채, 곧 타이머 인터럽트를 막은 채 불린다.
-// 여기서 서보 채널에 쓰면 길게는 40 ms 동안 기한의 alarm 이 밀린다
+bool startServo() {
+  mcpwm_timer_handle_t timer = nullptr;
+  mcpwm_oper_handle_t oper = nullptr;
+  mcpwm_timer_config_t timerConfig = {};
+  timerConfig.group_id = 0;
+  timerConfig.clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT;
+  timerConfig.resolution_hz = 1000000;  // 비교값이 곧 us
+  timerConfig.count_mode = MCPWM_TIMER_COUNT_MODE_UP;
+  timerConfig.period_ticks = SERVO_PERIOD_US;
+  mcpwm_operator_config_t operConfig = {};
+  operConfig.group_id = 0;
+  mcpwm_comparator_config_t compareConfig = {};
+  compareConfig.flags.update_cmp_on_tez = true;  // 새 폭은 주기의 처음에 바뀐다. 펄스 중간에 바뀌지 않는다
+  mcpwm_generator_config_t generatorConfig = {};
+  generatorConfig.gen_gpio_num = SERVO;
+  mcpwm_gen_timer_event_action_t rise = {};
+  rise.direction = MCPWM_TIMER_DIRECTION_UP;
+  rise.event = MCPWM_TIMER_EVENT_EMPTY;
+  rise.action = MCPWM_GEN_ACTION_HIGH;
+  mcpwm_gen_compare_event_action_t fall = {};
+  fall.direction = MCPWM_TIMER_DIRECTION_UP;
+  fall.action = MCPWM_GEN_ACTION_LOW;
+  if (mcpwm_new_timer(&timerConfig, &timer) != ESP_OK || mcpwm_new_operator(&operConfig, &oper) != ESP_OK
+      || mcpwm_operator_connect_timer(oper, timer) != ESP_OK
+      || mcpwm_new_comparator(oper, &compareConfig, &servoCompare) != ESP_OK
+      || mcpwm_new_generator(oper, &generatorConfig, &servoGenerator) != ESP_OK) {
+    return false;
+  }
+  fall.comparator = servoCompare;
+  return mcpwm_comparator_set_compare_value(servoCompare, SERVO_CENTER_US) == ESP_OK
+         && mcpwm_generator_set_action_on_timer_event(servoGenerator, rise) == ESP_OK
+         && mcpwm_generator_set_action_on_compare_event(servoGenerator, fall) == ESP_OK
+         && mcpwm_generator_set_force_level(servoGenerator, 0, true) == ESP_OK
+         && mcpwm_timer_enable(timer) == ESP_OK
+         && mcpwm_timer_start_stop(timer, MCPWM_TIMER_START_NO_STOP) == ESP_OK;
+}
+
+// 속도를 모터에, 조향을 서보에 건다. true 를 돌려줄 때는 두 출력이 모두 그 값으로 바뀌어 있다.
+// cutoff 의 lock 을 쥔 채, 곧 타이머 인터럽트를 막은 채 불리므로 기다리는 호출을 넣으면 안 된다
 bool driveOutput(void *, int16_t velocityMmps, int16_t steeringMrad) {
   bool forward = velocityMmps >= 0;
   int32_t speed = forward ? velocityMmps : -static_cast<int32_t>(velocityMmps);
   uint32_t top = (1u << MOTOR_BITS) - 1;
   uint32_t duty = static_cast<uint32_t>(speed) * top / FULL_DUTY_MMPS;
-  int32_t pulseUs = SERVO_CENTER_US + steeringMrad * SERVO_US_PER_RAD / 1000;
-  servoWantedUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
+  // 조향은 왼쪽이 + 이고(MQTT 계약 v1), 이 차의 서보는 펄스가 짧을수록 왼쪽이다(조립 안내서 9.2)
+  int32_t pulseUs = SERVO_CENTER_US - steeringMrad * SERVO_US_PER_RAD / 1000;
+  pulseUs = constrain(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
+  bool ok = mcpwm_comparator_set_compare_value(servoCompare, static_cast<uint32_t>(pulseUs)) == ESP_OK;
+  if (ok && !servoOn) {
+    ok = mcpwm_generator_set_force_level(servoGenerator, -1, true) == ESP_OK;
+    servoOn = ok;
+  }
   digitalWrite(DIR1, forward ? LOW : HIGH);
   digitalWrite(DIR2, forward ? HIGH : LOW);  // 마주 보고 달린 모터라 반대다
-  bool ok = ledcWrite(PWM1, duty > top ? top : duty);
+  ok = ledcWrite(PWM1, duty > top ? top : duty) && ok;
   return ledcWrite(PWM2, duty > top ? top : duty) && ok;
-}
-
-// 적어 둔 펄스가 바뀌었으면 서보 채널에 쓴다. 앞서 쓴 지 SERVO_WRITE_GAP_US 가 지난 뒤에만 쓴다
-void serviceServo() {
-  if (servoWantedUs == servoWrittenUs) return;
-  uint64_t now = clockNow(nullptr);
-  if (servoWrittenUs != 0 && now - servoWrittenAtUs < SERVO_WRITE_GAP_US) return;
-  ledcWrite(SERVO, static_cast<uint32_t>(servoWantedUs) * 16383 / 20000);  // 50 Hz, 14비트
-  servoWrittenUs = servoWantedUs;
-  servoWrittenAtUs = now;
 }
 
 // NC 접점을 13번과 GND 사이에 잇는다. 누르거나 선이 빠지면 HIGH
@@ -161,17 +196,16 @@ void startLink() {
 }
 
 void setup() {
-  // 켜지면 모터 PWM 은 0 이고 서보에는 펄스를 내지 않는다. 첫 DRIVE 가 올 때 서보가 움직인다
+  // 켜지면 모터 PWM 은 0 이고 서보에는 펄스를 내지 않는다. 첫 DRIVE 나 HOLD_STEER 가 올 때 서보가 움직인다
   pinMode(DIR1, OUTPUT);
   pinMode(DIR2, OUTPUT);
   digitalWrite(DIR1, LOW);
   digitalWrite(DIR2, LOW);
   ledcAttach(PWM1, MOTOR_HZ, MOTOR_BITS);
   ledcAttach(PWM2, MOTOR_HZ, MOTOR_BITS);
-  ledcAttach(SERVO, 50, 14);
   ledcWrite(PWM1, 0);
   ledcWrite(PWM2, 0);
-  ledcWrite(SERVO, 0);
+  bool servoReady = startServo();
   pinMode(ESTOP, INPUT_PULLUP);
   for (int pin : {ENC_LA, ENC_LB, ENC_RA, ENC_RB}) pinMode(pin, INPUT_PULLUP);
   delay(1);  // 풀업이 자리 잡은 뒤에 읽는다
@@ -183,8 +217,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_RA), onRight, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENC_RB), onRight, CHANGE);
 
-  // 시계를 못 켜면 아무 프레임에도 답하지 않는다
-  linkReady = startClock();
+  // 시계나 서보 출력을 못 켜면 아무 프레임에도 답하지 않는다
+  linkReady = servoReady && startClock();
   if (linkReady) startLink();
   fb3_framer_init(&framer);
   Serial.setRxBufferSize(1024);  // begin 전에 정해야 한다
@@ -204,7 +238,6 @@ void loop() {
     if (length > 0) Serial.write(txWire, length);
   }
   if (!linkReady) return;
-  serviceServo();
   // 미뤄 둔 CLOCK_REPLY 나 주기 표본을 보낼 때가 됐으면 보낸다
   size_t length = fb3_link_poll(&gatewayLink, txWire, sizeof txWire);
   if (length > 0) Serial.write(txWire, length);

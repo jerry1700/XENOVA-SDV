@@ -549,11 +549,13 @@ class ResidentMapperProcessor:
                 localization_valid_for_us=config.localization.registration_valid_for_us,
                 localization_position_drift_mps=config.localization.position_drift_mps,
                 localization_yaw_drift_rps=config.localization.yaw_drift_rps)
+            parking_clearance = (() if self._mapping_draft is None else
+                                 self._mapping.catalogs.parking_clearance_targets(self.clock()))
             result=candidate.process(observation,now_us=self.clock(),pose=inputs.pose,
                 checkpoint=checkpoint,completed_clock=self.clock,
                 motion_qualified=config.motion_qualified and config.localization_configured,
                 needed_region_factory=needed,cycle_bound_us=config.stopping.cycle_bound_us,
-                completion_bound_us=config.stopping.completion_bound_us,
+                completion_bound_us=config.stopping.completion_bound_us,parking_clearance=parking_clearance,
                 **({} if self._mapping_draft is None else dict(evidence_observer=self._mapping_draft.observer,
                     roi_reframe=self._mapping_draft.roi_reframe)),**localization)
             if self._mapping_draft is not None:
@@ -585,13 +587,14 @@ class ResidentMapperProcessor:
         from xenova_drive_world import decode,schema
         from .mapper_world import build_mapping_world
         from .mapper_publication import PublicationReport
-        state=draft.catalog_draft.state;basis=state.view.road_basis
+        state=draft.catalog_draft.state;basis=state.road_basis.snapshot()
         completed=self.clock();published=self.clock()
         from .tof_obstacles import TofObstacleOverlay
         if not hasattr(self,'_tof_obstacles'):self._tof_obstacles=TofObstacleOverlay()
         built=build_mapping_world(draft,state,basis,context=draft.context,source=inputs.source,
             calibration=draft.pipeline.calibration,sensors=sensors.sensors,current_vehicle=inputs.vehicle,
             clock_lease=lease,sequence=self._frame_sequence+1,completed_j_us=completed,published_j_us=published,
+            stopping=self._config.stopping,
             scene_draft=None if frame_state is None else frame_state.scene,
             hazard_draft=None if frame_state is None else frame_state.hazard,atlas_owner=self._mapping._atlas,
             tof_overlay=self._tof_obstacles,sensor_snapshot=sensors)

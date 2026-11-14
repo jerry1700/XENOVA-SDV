@@ -124,7 +124,7 @@ def test_trust_failures_still_invalidate_a_fresh_sample_immediately(case, code):
     elif case == 'encoder':
         values.update(left=1000, right=1000)
     elif case == 'ackermann':
-        values.update(left=1, right=3)
+        values.update(left=0, right=4)
     elif case == 'future_echo':
         now = echo-1
     elif case == 'unknown_future_echo':

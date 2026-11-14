@@ -64,7 +64,7 @@ def extract(root):
             for match in re.finditer(r'^Exec\w*=[-+!:@]*([^\s;]+)', path.read_text(), re.M):
                 if match[1].startswith('/'):
                     commands.add(match[1])
-    commands.update(('/usr/sbin/sshd', '/usr/bin/mkdir', '/usr/sbin/xenova-vm'))
+    commands.update(('/usr/sbin/sshd', '/usr/bin/mkdir', '/usr/bin/journalctl', '/usr/sbin/xenova-vm'))
     for name in commands:
         path = root / name.lstrip('/')
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +154,7 @@ def install_policy(root, *, replay_recipe=False):
                    'CC': os.environ.get('XENOVA_TEST_CC', 'cc'), 'CFLAGS': '-O2', 'LDFLAGS': '',
                    'sbindir': '/usr/sbin', 'libexecdir': '/usr/libexec',
                    'libdir': '/usr/lib', 'datadir': '/usr/share', 'sysconfdir': '/etc',
+                   'localstatedir': '/var',
                    'systemd_system_unitdir': '/usr/lib/systemd/system'}
             if 'do_compile() {\n' in recipe_text:
                 compile_body = recipe_text.split('do_compile() {\n', 1)[1].split('\n}\n', 1)[0]

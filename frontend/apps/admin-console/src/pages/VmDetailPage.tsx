@@ -23,7 +23,10 @@ const FRESH_HEARTBEAT = new Set(['동작 중', '대기', '유휴', '오류']);
 /** lifecycle 이 신선하지 않을 때 phaseLabel 로 오는 문구 */
 const PHASE_UNAVAILABLE = new Set(['미수신', '관측 만료', '연결 끊김']);
 
-/** 운영 상태 타일 중 앱 상태. 라벨은 "앱 상태 · manual" (앱 ID는 작은 회색 글자), 앱이 여럿이면 앱마다 한 줄 */
+/**
+ * 운영 상태 타일 중 앱 상태. 앱마다 한 줄, 줄 앞에 앱 한글 라벨 ("자율주행 · 대기 · 준비 미충족 · 상태 준비 중").
+ * 사유는 한글로 보이고 원문 코드는 title 로 남긴다.
+ */
 function AppStateTile({
   vmId,
   drive,
@@ -36,20 +39,25 @@ function AppStateTile({
   const reports = vmAppObservations(vmId, drive, socket);
   return (
     <div>
-      <span>
-        앱 상태
-        {reports.length > 0 && <small> · {reports.map((report) => report.appId).join(' · ')}</small>}
-      </span>
+      <span>앱 상태</span>
       {reports.length > 0 ? (
-        reports.map(({ appId, state, phaseLabel, heartbeatLabel }) =>
+        reports.map(({ appId, appLabel, stage, reason, reasonLabel, phaseLabel, heartbeatLabel }) =>
           // 단계(lifecycle)가 없고 heartbeat 가 신선하면 heartbeat 문구로 대신 보이고 출처를 작게 적는다
           PHASE_UNAVAILABLE.has(phaseLabel) && FRESH_HEARTBEAT.has(heartbeatLabel) ? (
-            <strong key={appId}>
-              {heartbeatLabel}
+            <strong key={appId} data-app={appId}>
+              {appLabel} · {heartbeatLabel}
               <small className={styles.detailTileNote}>heartbeat 기준 · 단계 {phaseLabel}</small>
             </strong>
           ) : (
-            <strong key={appId}>{state}</strong>
+            <strong key={appId} data-app={appId}>
+              {appLabel} · {stage}
+              {reason && (
+                <>
+                  {' · '}
+                  <span title={reason}>{reasonLabel}</span>
+                </>
+              )}
+            </strong>
           ),
         )
       ) : (

@@ -56,7 +56,8 @@ def _interval(value):
     return value[0] <= value[1]
 
 
-def _bind(stamp, calibration, pose, input_kind, motion_qualified, capture_interval):
+def bind_motion_pose(stamp, calibration, pose, input_kind, motion_qualified, capture_interval):
+    """원 노출 구간의 pose 계약만 확인한다. 광선 배열은 읽거나 만들지 않는다."""
     if type(stamp) is not FrameStamp or type(calibration) is not CalibrationProfile:
         raise ValueError('motion requires original FrameStamp and CalibrationProfile')
     if input_kind not in ('LIVE', 'REPLAY', 'SYNTHETIC') or type(motion_qualified) is not bool:
@@ -84,19 +85,22 @@ def _bind(stamp, calibration, pose, input_kind, motion_qualified, capture_interv
     return pose
 
 
-def widen_motion_rays(rays, stamp, calibration, pose, *, input_kind, motion_qualified=False, capture_interval=None):
+def widen_motion_rays(rays, stamp, calibration, pose, *, input_kind, motion_qualified=False,
+                      capture_interval=None, relative_to_capture_midpoint=False):
     """최대8192 원 행을 반환한다. 시간/pose/프로필 미수락이면 모든 FREE 자격이 False다.
 
     PoseBuffer.at의 전체 구간 bound 또는 동등하게 수락한 PoseEstimate만 사용한다.
     scalar tuple도 호환하지만 정상 batch 경로는 RayBundle8192개를 펼치지 않는다.
-    원점과 방향의 상관을 풀어 넓어진 interval은 충분조건을 약하게 할 뿐 증거를 늘리지 않는다.
+    relative_to_capture_midpoint는 호출자가 실제 midpoint 자세의 MAP 오차를
+    셀에 반영한 경우에만 사용한다. 원 버퍼의 노출 구간 운동 상한이 없으면
+    기존 절대 자세 상한으로 돌아간다.
     """
     import numpy as np
     if type(rays) is tuple:
         rays = RayBundleBatch.from_rays(rays)
     if type(rays) is not RayBundleBatch:
         raise ValueError('expected bounded original ray batch or tuple')
-    bound = _bind(stamp, calibration, pose, input_kind, motion_qualified, capture_interval)
+    bound = bind_motion_pose(stamp, calibration, pose, input_kind, motion_qualified, capture_interval)
     qualified = np.zeros(len(rays), dtype=bool)
     if bound is None:
         return _copy(rays, qualified)
@@ -106,6 +110,10 @@ def widen_motion_rays(rays, stamp, calibration, pose, *, input_kind, motion_qual
     qualified = rays.qualified & matching
     sample = bound.sample
     position, angle = sample.position_error_m, sample.yaw_error_rad
+    if relative_to_capture_midpoint and bound.exposure_motion is not None:
+        position, angle = bound.exposure_motion
+        if not math.isfinite(position) or not math.isfinite(angle) or position < 0 or not 0 <= angle <= math.pi:
+            return _copy(rays, np.zeros(len(rays), dtype=bool))
     if position == angle == 0.:
         values = rays.numbers
         directions = np.maximum(-1., values[:, 6:9]), np.minimum(1., values[:, 9:12])

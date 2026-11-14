@@ -406,6 +406,15 @@ with patch.object(vm,'storage_check'):
         self.assertEqual(child.returncode,0,child.stderr)
         self.error(json.loads(child.stdout),'OPERATION_IN_PROGRESS')
 
+    def test_two_cpu_dom0_bounds_whole_registry_reads_and_leaves_target_reads_available(self):
+        identity = self.other_vm()
+        with patch.object(runtime.os, 'cpu_count', return_value=2):
+            with runtime.observation_slot(self.p.runtime, deadline=self.p.clock()+10, clock=self.p.clock):
+                self.error(self.m.fork().call('list', budget_ms=2000), 'OPERATION_IN_PROGRESS')
+                self.assertTrue(self.m.fork().call('get', {'vm_id': identity}, budget_ms=2000)['ok'])
+                self.assertTrue(self.m.fork().call('recovery-intents', budget_ms=2000)['ok'])
+            self.assertTrue(self.m.fork().call('list', budget_ms=2000)['ok'])
+
     def test_S4_T12_owner_exit_keeps_helper_slot_until_actual_exit_then_recovers(self):
         identity=self.other_vm()
         ready_read,ready_write=os.pipe();release_read,release_write=os.pipe()
@@ -578,6 +587,43 @@ with patch.object(vm,'storage_check'):
             finally:release.set();worker.join(5)
         self.assertFalse(worker.is_alive());self.error(replies[0],'OBSERVATION_UNAVAILABLE')
         self.assertEqual(path.read_bytes(),newer_cache)
+
+    def test_failed_read_that_started_before_a_verified_sample_does_not_force_a_retry(self):
+        ticks = [10.0]
+        self.p.clock = lambda: ticks[0]
+        identity = self.other_vm()
+        started_ms = int(self.p.clock() * 1000)
+        ticks[0] += .1
+        rounds = []
+        validate = management.ReadContext.validate
+
+        def record_delayed_failure(read):
+            rounds.append(read.observed_ms[identity])
+            if len(rounds) == 1:
+                ticks[0] += .1
+                read.e.probe_error(identity, 'DEADLINE_EXCEEDED', _started_ms=started_ms)
+            return validate(read)
+
+        with patch.object(management.ReadContext, 'validate', record_delayed_failure):
+            reply = self.m.fork().call('list', budget_ms=2000)
+        self.assertTrue(reply['ok'], reply)
+        self.assertEqual(len(rounds), 1)
+        self.assertIsNone(self.p.execution().snapshot(identity, 2000)['last_error'])
+
+    def test_list_does_not_write_per_vm_diagnostics_after_deadline(self):
+        ticks = [10.0]
+        self.p.clock = lambda: ticks[0]
+        self.other_vm()
+
+        def expire(owner, records, deadline, **kwargs):
+            ticks[0] = deadline
+            execution.refuse('DEADLINE_EXCEEDED', 'injected list timeout')
+
+        with (patch.object(execution.Execution, '_observe_many', expire),
+              patch.object(execution.Execution, 'note_probe_error') as diagnostic):
+            reply = self.m.fork().call('list', budget_ms=2000)
+        self.error(reply, 'DEADLINE_EXCEEDED')
+        diagnostic.assert_not_called()
 
     def test_S4_T13_malformed_or_truncated_identity_never_falls_back_to_cached_success(self):
         identity=self.other_vm();command=self.p.command

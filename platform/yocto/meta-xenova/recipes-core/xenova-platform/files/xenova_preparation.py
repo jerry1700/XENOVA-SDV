@@ -290,7 +290,8 @@ class AssetLease:
         os.write(self.fd, raw); os.ftruncate(self.fd, len(raw))
 
     def bind(self, op):
-        self.value.update(operation_id=op['operation_id'], spec_hash=op['spec_hash'],
+        self.value.update(idempotency_key=op['idempotency_key'],
+                          operation_id=op['operation_id'], spec_hash=op['spec_hash'],
                           expected_generation=op['expected_generation'])
         self._record()
 

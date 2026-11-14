@@ -15,6 +15,8 @@ from .geometry import timing_start, timing_finish
 
 
 ENDPOINT_KINDS = frozenset(('physical_junction', 'observed_paint_end', 'FOV_clip', 'occluded', 'predicted'))
+_EDGE_VALUE_MIN = 150
+_MAX_TAPE_GAP_M = .01 * math.sqrt(2)
 
 
 @dataclass(frozen=True)
@@ -27,11 +29,12 @@ class TapeProfile:
     y_max_m: float = 1.2
     cell_m: float = 0.005
     saturation_max: int = 85
-    value_min: int = 150
+    value_min: int = 185
     contrast_min: int = 25
     tape_width_min_m: float = 0.010
     tape_width_max_m: float = 0.045
-    min_strip_length_m: float = 0.08
+    # 4~5cm 점선은 중심선을 가늘게 만들 때 끝이 짧아질 수 있다.
+    min_strip_length_m: float = 0.02
     simplify_error_m: float = 0.004
     extraction_error_m: float = 0.005
     max_projection_error_m: float = 0.10
@@ -188,8 +191,14 @@ _THIN_KERNEL=struct.pack('<9f',128,1,2,64,0,4,32,16,8)
 def _thin(np, mask, limit):
     """원 bool mask의 Zhang-Suen predicate/반복 한도를 정수 이웃 코드로 평가한다."""
     import cv2
-    image = mask.copy()
-    if not image.size and limit>0:return image,True,1
+    result = mask.copy()
+    if limit <= 0:
+        return result, False, limit
+    x, y, width, height = cv2.boundingRect(result.view(np.uint8)) if result.size else (0, 0, 0, 0)
+    if not width or not height:
+        return result, True, 1
+    # The input outside this rectangle is already zero, and thinning only deletes pixels.
+    image = result[y:y+height, x:x+width]
     kernel=np.frombuffer(_THIN_KERNEL,dtype='<f4').reshape(3,3)
     lookup=tuple(np.frombuffer(table,dtype=np.bool_) for table in _THIN_REMOVE)
     for iteration in range(limit):
@@ -202,8 +211,8 @@ def _thin(np, mask, limit):
                 image[remove] = False
                 changed = True
         if not changed:
-            return image, True, iteration + 1
-    return image, False, limit
+            return result, True, iteration + 1
+    return result, False, limit
 
 
 def _readonly(np, value):
@@ -323,8 +332,12 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
     for path, start, end in paths:
         points = [(profile.x_min_m + p[0] * profile.cell_m, profile.y_min_m + p[1] * profile.cell_m) for p in path]
         length = sum(math.dist(a, b) for a, b in zip(points, points[1:]))
-        if length < profile.min_strip_length_m:
+        if length + 1e-9 < profile.min_strip_length_m:
             work['short_paths'] += 1
+            continue
+        short_dash = length + 1e-9 < .08
+        if short_dash and (start == end or kinds[start] != 'observed_paint_end'
+                           or kinds[end] != 'observed_paint_end'):
             continue
         widths = []
         center_pad = 0.
@@ -335,11 +348,12 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
         arc = [0.]
         for a, b in zip(points, points[1:]):
             arc.append(arc[-1] + math.dist(a, b))
-        for index in range(2, len(path) - 2):
+        tangent_step = 1 if len(path) < 5 else 2
+        for index in range(tangent_step, len(path) - tangent_step):
             if ((kinds[start] == 'physical_junction' and arc[index] < 2 * profile.tape_width_max_m)
                     or (kinds[end] == 'physical_junction' and length - arc[index] < 2 * profile.tape_width_max_m)):
                 continue
-            first, last = path[index - 2], path[index + 2]
+            first, last = path[index - tangent_step], path[index + tangent_step]
             dy, dx = last[0] - first[0], last[1] - first[1]
             norm = math.hypot(dx, dy)
             if norm <= 1e-9:
@@ -385,7 +399,8 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
                 if 'internal' in causes:
                     work['edge_pair_internal'] += 1
                     internal_sections += 1
-                    complete = False
+                    if not short_dash:
+                        complete = False
                 else:
                     work['edge_pair_censored'] += 1
                     censored_sections += 1
@@ -393,6 +408,8 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
             work['edge_budget_exhausted'] = 1
             complete = False
             break
+        if short_dash and (not widths or internal_sections or censored_sections):
+            continue
         if not widths:
             work['no_width_paths'] += 1
             complete = False
@@ -450,6 +467,60 @@ def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projectio
     return strips, junctions, complete
 
 
+def _white_band(np, cv2, hsv, visible, profile):
+    """Recover dim tape edges next to bright paint when the local band is narrow."""
+    values = hsv[..., 2]
+    eligible = visible & (hsv[..., 1] <= profile.saturation_max)
+    strong = eligible & (values >= profile.value_min)
+    weak = eligible & (values >= _EDGE_VALUE_MIN) & ~strong
+    if profile.value_min <= _EDGE_VALUE_MIN or not strong.any() or not weak.any():
+        return strong
+    # Only an immediately adjacent pixel can extend the bright core.
+    connected = cv2.dilate(strong.astype(np.uint8), np.ones((3, 3), np.uint8)) != 0
+    weak &= connected
+    if not weak.any():
+        return strong
+
+    # Opening across the strip estimates the brightness around a narrow band.
+    # Unobserved pixels must never supply a dark background at a clipped edge.
+    luminance = np.where(visible, values, 255).astype(np.uint8)
+    background = luminance.copy()
+    half_width_cells = profile.tape_width_max_m / (2 * profile.cell_m)
+    horizontal = np.ones((1, 2 * int(half_width_cells) + 3), dtype=np.uint8)
+    diagonal = np.eye(2 * int(half_width_cells / math.sqrt(2)) + 3, dtype=np.uint8)
+    for kernel in (horizontal, horizontal.T, diagonal, np.fliplr(diagonal).copy()):
+        opened = cv2.morphologyEx(luminance, cv2.MORPH_OPEN, kernel)
+        np.minimum(background, opened, out=background)
+    return strong | (weak & (cv2.subtract(values, background) >= profile.contrast_min))
+
+
+def _close_tape_gaps(white, eligible, cell_m):
+    """Fill bracketed runs up to one 1cm-grid diagonal, inside visible ground."""
+    axial = int((_MAX_TAPE_GAP_M + 1e-12) / cell_m)
+    if not axial:
+        return white
+    diagonal = int((_MAX_TAPE_GAP_M + 1e-12) / (math.sqrt(2) * cell_m))
+    restored = white.copy()
+    directions = ((white, eligible, restored, 0, axial), (white.T, eligible.T, restored.T, 0, axial),
+                  (white, eligible, restored, 1, diagonal),
+                  (white[:, ::-1], eligible[:, ::-1], restored[:, ::-1], 1, diagonal))
+    for seed, visible, output, column_step, max_gap in directions:
+        for gap in range(1, max_gap+1):
+            span = gap+1
+            height = seed.shape[0]-span
+            width = seed.shape[1]-span*column_step
+            if height <= 0 or width <= 0:
+                break
+            candidates = seed[:height, :width] & seed[span:, span*column_step:]
+            interior = [(slice(step, step+height), slice(step*column_step, step*column_step+width))
+                        for step in range(1, span)]
+            for cells in interior:
+                candidates &= visible[cells] & ~seed[cells]
+            for cells in interior:
+                output[cells] |= candidates
+    return restored
+
+
 def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None, nn_candidates=None, diagnostics=None):
     """원 RGB만으로 white-band 후보를 만들고 가림/경계 tip을 보존한다. NN은 mask gate가 아니다."""
     timing=timing_start(diagnostics,'tape.birdview_remap')
@@ -477,7 +548,9 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
     timing_finish(diagnostics,timing)
     timing=timing_start(diagnostics,'tape.mask')
     hsv = cv2.cvtColor(warped, cv2.COLOR_BGR2HSV)
-    white = valid & ~occ & (hsv[..., 1] <= profile.saturation_max) & (hsv[..., 2] >= profile.value_min)
+    visible = valid & ~occ
+    white = _white_band(np, cv2, hsv, visible, profile)
+    white = _close_tape_gaps(white, visible & (hsv[..., 1] <= profile.saturation_max), profile.cell_m)
     work = dict(grid_cells=int(white.size), components=0, component_cells=0, thin_iterations=0,
                 graph_pixels=0, projection_checks=0, projection_batches=0,
                 projection_unbounded=0, projection_limited=0, edge_tests=0)
@@ -493,7 +566,8 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
             bx, by, width, height, area = (int(v) for v in stats[index])
             work['components'] += 1
             if area < 4:
-                white[labels == index] = False
+                bounds = (slice(by, by+height), slice(bx, bx+width))
+                white[bounds][labels[bounds] == index] = False
                 continue
             x0, x1 = max(0, bx - 4), min(white.shape[1], bx + width + 4)
             y0, y1 = max(0, by - 4), min(white.shape[0], by + height + 4)
@@ -507,7 +581,7 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
             ring &= valid[y0:y1, x0:x1] & ~white[y0:y1, x0:x1]
             values = hsv[y0:y1, x0:x1, 2]
             if not np.any(ring) or float(np.median(values[part])) - float(np.median(values[ring])) < profile.contrast_min:
-                white[labels == index] = False
+                white[y0:y1, x0:x1][part] = False
     distance = cv2.distanceTransform(white.astype(np.uint8), cv2.DIST_L2, 5)
     # T/X 교차부의 내접 원은 단일 band 반폭보다 크다. 그 영역을 넓은 물체로
     # 지우면 실제 분기가 네 개의 가림 tip으로 바뀌므로 더 깊은 white core만 격리한다.

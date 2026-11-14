@@ -225,9 +225,11 @@ paths:
       description: >-
         vm_id 의 디스크가 있으면 재사용하고 없으면 template_id/template_version 으로 새로 만든다.
         디스크 경로는 vm_id 에서 파생한다. 꺼진 VM 의 재시작은 같은 vm_id 로 이 엔드포인트를
-        다시 호출하는 것이며 별도 start 엔드포인트는 없다.
+        다시 호출하는 것이며 별도 start 엔드포인트는 없다. 선택 Idempotency-Key로 시작을 추적한다.
+        같은 키와 같은 본문의 재전달은 원 시작 결과를 회수한다.
         Spring 불변조건: 같은 vm_id 에는 항상 같은 생성 명세를 보낸다.
-        실행 도메인이 있으면 명세 비교 없이 409 VMExists 를 반환하며 Spring 이 자기 명세와 대조한다.
+        실행 도메인이 있으면 기존 등록의 명세를 확인한 뒤 409 VMExists 를 반환한다.
+        같은 UUID에 다른 명세가 등록돼 있거나 원 생성과 충돌하면 409 VMSpecConflict 를 반환한다.
         플랫폼 VM_NAME_CONFLICT(발급한 내부 이름·UUID 예약·MAC 이 다른 VM 과 겹침)는 409 VMNameConflict 이며
         같은 VM 이 아니므로 생성 성공으로 바꾸지 않는다 (기준 문서 4.2·8.1).
         플랫폼 공통 create 는 정지 등록이므로 실제 도메인 시작은 별도 start 연결이 필요하다.
@@ -235,6 +237,10 @@ paths:
       x-driver-timeout-seconds: 30
       parameters:
         - $ref: '#/components/parameters/RequestBudget'
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
       requestBody:
         required: true
         content:
@@ -244,6 +250,12 @@ paths:
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 같은 키의 원 시작 결과
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControlOperation'
         '201':
           description: 도메인 생성됨 (state 는 running)
           content:
@@ -254,7 +266,8 @@ paths:
           $ref: '#/components/responses/InvalidArgument'
         '409':
           description: >-
-            VMExists — 같은 vm_id 의 VM 이 이미 있음(실행 중 또는 정지 등록에 다른 명세). VMNameConflict — 플랫폼
+            VMExists — 같은 vm_id 의 실행 도메인이 이미 있음. VMSpecConflict — 같은 UUID의 등록 또는 원 생성과 명세가 충돌.
+            VMNameConflict — 플랫폼
             VM_NAME_CONFLICT, 다른 VM 과 내부 이름·UUID 예약·MAC 충돌(생성 성공 아님)
           content:
             application/json:
@@ -308,9 +321,19 @@ paths:
       description: >-
         실행 중인 VM 은 409 로 거부한다. 정지된 VM 은 retire 생명주기로 숨김 보관하며
         tombstone 과 generation 을 유지한다. 같은 디스크를 restore 하면 기존 vm_id 를 유지한다.
+        선택 헤더와 세대 쿼리는 함께 지정한다. 이전 세대 요청은 409 TARGET_CHANGED로 거절한다.
       x-driver-timeout-seconds: 90
       parameters:
         - $ref: '#/components/parameters/RequestBudget'
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
+        - name: expected_lifecycle_generation
+          in: query
+          schema:
+            type: integer
+            minimum: 0
       responses:
         '401':
           $ref: '#/components/responses/Unauthorized'
@@ -320,6 +343,71 @@ paths:
           $ref: '#/components/responses/VMNotFound'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/lifecycle:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [VMs]
+      operationId: getVmLifecycle
+      summary: VM 등록 상태와 세대 조회
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: 등록 수명과 세대
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmLifecycle'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
+        '409':
+          $ref: '#/components/responses/InvalidState'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/kill:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    post:
+      tags: [VMs]
+      operationId: killVm
+      summary: "장애 주입: 도메인 즉시 소멸 (등록·의도 유지 → 복구 워커가 다시 띄움)"
+      description: >-
+        시연·검증용 장애 주입이다. xl destroy 로 도메인만 즉시 없애고 등록·디스크·의도(desired=running)는 바꾸지 않는다.
+        그래서 정지(stop, 의도를 stopped 로 기록)와 달리 복구 워커가 DOMAIN_ABSENT(60초 유예) 로 판정해 다시 띄운다.
+        도메인이 없으면 409, 등록이 없으면 404, Domain-0 은 400. 키·재전달 추적은 없다(한 번 누르면 한 번 소멸).
+      x-driver-timeout-seconds: 90
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '204':
+          description: 도메인을 없앴다. 등록·의도·디스크는 그대로
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/VMNotFound'
         '409':
           $ref: '#/components/responses/InvalidState'
         '500':
@@ -344,7 +432,9 @@ paths:
         호출은 동기 방식이며 최대 90초까지 소멸을 기다린다. 일반 stop 은 시간 초과 시
         자동으로 강제 종료하지 않는다. 강제 종료는 명시적인 force 정책에서만 수행한다.
         Idempotency-Key 가 있으면 요청 추적 모드다 (기준 문서 4.3.1): VM 잠금·직렬화를 기다리지 않고 정지 의도를 먼저
-        내구 수락하며, 완료면 200, 수락했지만 실행이 남았으면 202 로 ControlOperation 을 돌려준다.
+        내구 수락하며, 완료면 200, 수락했고 원 기한 안에 실행이 남았으면 202 로 ControlOperation 을 돌려준다.
+        실행 전 원 기한 만료는 504, 제출 뒤 종료를 확인하지 못하면 원 작업의 결과 미확정이다.
+        같은 키로 확인된 과거 완료를 회수하거나, 새 종료 명령 없이 늦게 끝난 원 작업을 마감할 수 있다.
         2xx 를 정지 완료로 보지 않는다(status 를 본다). 키 없는 호출의 응답은 바뀌지 않는다.
       x-driver-timeout-seconds: 90
       parameters:
@@ -365,7 +455,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ControlOperation'
         '202':
-          description: 키 있음. 정지 의도를 내구 수락했고 실행이 남음 (status=pending). 같은 키로 재전달하거나 조회한다
+          description: 키 있음. 정지 의도를 내구 수락했고 원 기한 안에 실행이 남음 (status=pending). 같은 키로 재전달하거나 조회한다
           content:
             application/json:
               schema:
@@ -536,6 +626,85 @@ paths:
           $ref: '#/components/responses/PlatformUnavailable'
         '504':
           $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/operations:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+    get:
+      tags: [VMs]
+      operationId: getVmRetireOperationByKey
+      summary: 요청 키로 원 보관 결과 조회
+      parameters:
+        - name: request_key
+          in: query
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: 원 보관 작업 상태
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmOperationResult'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperationNotFound'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
+  /api/v1/vms/{vm_id}/operations/{operation_id}:
+    parameters:
+      - $ref: '#/components/parameters/VmId'
+      - name: operation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      tags: [VMs]
+      operationId: getVmOperation
+      summary: 작업 ID로 원 생성·시작·정지·보관 결과 조회
+      description: 원장의 기록을 제한적으로 조회한다. 작업을 실행하지 않는다. 404는 조회 시점의 검색 부재다.
+      x-driver-timeout-seconds: 5
+      parameters:
+        - name: action
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [create, start, stop, retire]
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '200':
+          description: 원 작업 관측
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VmOperationResult'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/OperationNotFound'
+        '500':
+          $ref: '#/components/responses/DriverError'
+        '501':
+          $ref: '#/components/responses/NotSupported'
+        '503':
+          $ref: '#/components/responses/PlatformUnavailable'
+        '504':
+          $ref: '#/components/responses/DriverTimeout'
   /api/v1/stats:
     get:
       tags: [Stats]
@@ -593,6 +762,43 @@ paths:
           $ref: '#/components/responses/PlatformUnavailable'
         '504':
           $ref: '#/components/responses/DriverTimeout'
+  /api/v1/cpu-policy:
+    put:
+      tags: [Resources]
+      operationId: updateCpuPolicy
+      summary: 전체 VM CPU 핀닝 정책 변경
+      description: >-
+        배치나 전용 예약이 바뀌는 VM을 정지한 뒤 전체 정책을 revision 조건부로 교체한다. 최초 설정이나 dom0 공유 집합·Xen 풀
+        변경에는 모든 관리 VM의 정지가 필요하다. host_preparation_required가 true이면 VM을 시작하기 전에 cpu-host-prepare가 필요하다.
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UpdateCpuPolicyRequest'}
+      responses:
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '200':
+          description: 게시된 CPU 정책과 호스트 준비 필요 여부
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CpuPolicyUpdate'}
+        '400': {$ref: '#/components/responses/InvalidArgument'}
+        '404': {$ref: '#/components/responses/VMNotFound'}
+        '409':
+          description: 정책 revision 변경, 멱등 키 충돌 또는 실행 중 VM 존재
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '500': {$ref: '#/components/responses/DriverError'}
+        '501': {$ref: '#/components/responses/NotSupported'}
+        '503': {$ref: '#/components/responses/PlatformUnavailable'}
+        '504': {$ref: '#/components/responses/DriverTimeout'}
   /api/v1/vms/{vm_id}/cpu-layout:
     parameters:
       - $ref: '#/components/parameters/VmId'
@@ -759,6 +965,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+  /api/v1/templates:
+    get:
+      tags:
+      - Templates
+      summary: 보드에 공개된 템플릿 목록(버전별 전부)
+      description: 보드 카탈로그를 변환 없이 버전별로 전부 돌려준다. 같은 template_id 의 여러 버전이 함께 나온다. platform
+        드라이버 전용(그 외 501)
+      operationId: listTemplates
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Template'
+                type: array
+                title: Response Listtemplates
+        '401':
+          description: 'Unauthorized: Bearer 서비스 토큰 없음·불일치 (미들웨어)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: 'DriverError: 분류되지 않은 실행 오류'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 'PlatformUnavailable: registry·저장소·Xen 일시 장애 (재시도 가능)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: 'DriverTimeout: xl·플랫폼 호출 시한 초과'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '501':
+          description: 'NotSupported: 드라이버·플랫폼이 제공하지 않는 동작'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - $ref: '#/components/parameters/RequestBudget'
   /api/v1/vm-registrations:
     get:
       tags:
@@ -980,6 +1236,67 @@ components:
       properties:
         accepted: {type: integer}
         duplicates: {type: integer}
+    Template:
+      properties:
+        template_id:
+          type: string
+          title: Template Id
+        template_version:
+          type: string
+          title: Template Version
+        guest_kind:
+          type: string
+          enum:
+          - linux
+          - zephyr
+          title: Guest Kind
+        default_resources:
+          $ref: '#/components/schemas/TemplateResources'
+        resource_limits:
+          $ref: '#/components/schemas/TemplateResourceLimits'
+        capabilities:
+          additionalProperties: true
+          type: object
+          title: Capabilities
+      type: object
+      required:
+      - template_id
+      - template_version
+      - guest_kind
+      - default_resources
+      - resource_limits
+      - capabilities
+      title: Template
+    TemplateResources:
+      properties:
+        vcpus:
+          type: integer
+          title: Vcpus
+        memory_mib:
+          type: integer
+          title: Memory Mib
+      type: object
+      required:
+      - vcpus
+      - memory_mib
+      title: TemplateResources
+    TemplateResourceLimits:
+      properties:
+        vcpus:
+          items:
+            type: integer
+          type: array
+          title: Vcpus
+        memory_mib:
+          items:
+            type: integer
+          type: array
+          title: Memory Mib
+      type: object
+      required:
+      - vcpus
+      - memory_mib
+      title: TemplateResourceLimits
     Registration:
       properties:
         vm_id:
@@ -1193,11 +1510,13 @@ components:
             드라이버·플랫폼 실패는 HTTP 상태와 1:1 이다: DriverError 500 / DriverTimeout 504 / PlatformUnavailable 503 /
             NotSupported 501. Spring 은 이 code 를 같은 상태로 전달해야 한다 (vm-api-contract-v1.md 8.2 변환표).
             Unauthorized 401 은 Bearer 서비스 토큰 없음·불일치이며 /healthz 를 포함한 모든 엔드포인트에서 난다.
-            VMExists 409 는 같은 VM 이 이미 있음, VMNameConflict 409 는 플랫폼 VM_NAME_CONFLICT(다른 VM 과 식별 충돌)이다.
+            생성의 VMExists 409 는 같은 실행 도메인이 이미 있음을 뜻한다. VMSpecConflict 409 는 같은 UUID의 명세 충돌이다.
+            VMNameConflict 409 는 플랫폼 VM_NAME_CONFLICT(다른 VM 과 식별 충돌)이다.
           enum:
             - InvalidArgument
             - VMNotFound
             - VMExists
+            - VMSpecConflict
             - VMNameConflict
             - InsufficientResources
             - InvalidState
@@ -1228,6 +1547,59 @@ components:
             - $ref: '#/components/schemas/ControlOperation'
             - type: 'null'
           description: 키 있는 제어 요청의 오류에만 있다. 원 작업 문맥(status=failed·uncertain·superseded·unknown·rejected)
+        context:
+          oneOf:
+            - $ref: '#/components/schemas/VmOperationResult'
+            - type: 'null'
+          description: 생성·시작·정지·보관 실패에서 확인한 작업 문맥. 원 오류 코드는 Error.platform_code에 있다
+    VmLifecycle:
+      type: object
+      additionalProperties: false
+      required: [vm_id, lifecycle, generation]
+      properties:
+        vm_id:
+          type: string
+          format: uuid
+        lifecycle:
+          type: string
+          enum: [REGISTERED, RETIRED, PURGING, PURGED]
+        generation:
+          type: integer
+          minimum: 0
+    VmOperationResult:
+      type: object
+      additionalProperties: false
+      required: [action, status]
+      properties:
+        action:
+          type: string
+          enum: [create, start, stop, retire]
+        stage:
+          type: [string, 'null']
+          enum: [preflight, acceptance, asset_preparation, registration, network_apply, start_prepare, start_submit, start_confirmation, shutdown_submit, shutdown_confirmation, archive_move, archive_commit, completion, null]
+          description: 실패 처리 위치 또는 마지막 작업 단계. 단계만으로 부작용의 유무를 확정하지 않는다
+        accepted:
+          type: [boolean, 'null']
+          description: 하위 작업 수락 여부. 확인하지 못했으면 null
+        status:
+          $ref: '#/components/schemas/ControlStatus'
+        operation_id:
+          type: [string, 'null']
+          format: uuid
+          description: 원 작업 ID. ID가 있어도 수락 여부는 accepted로 확인한다
+        next_action:
+          type: [string, 'null']
+          enum: [fix_request, check_current_vm, lookup_original, reconcile_original, null]
+          description: 다음 확인·조사 범위. 새 명령을 실행할 수 있는 권한을 부여하지 않는다
+        platform_code:
+          type: [string, 'null']
+          description: 조회에서 원 기록에 보존된 오류 코드. 실패 응답은 바깥쪽 Error.platform_code 사용
+        start_submitted:
+          description: 이 HTTP 호출에서 Xen 시작 미제출이 확인되면 false. 그 외에는 생략
+          oneOf:
+            - type: boolean
+              const: false
+            - type: 'null'
     ControlStatus:
       type: string
       description: >-
@@ -1246,7 +1618,7 @@ components:
           format: uuid
         action:
           type: string
-          description: stop 또는 reboot
+          description: start, stop 또는 reboot
         request_key:
           type: [string, 'null']
         operation_id:
@@ -1636,6 +2008,46 @@ components:
           items: {$ref: '#/components/schemas/VmCpuLayout'}
           description: 전체 조회면 등록된 모든 VM, 한 VM 조회면 그 VM 하나
         issues: {type: array, items: {$ref: '#/components/schemas/CpuIssue'}}
+    CpuPlacement:
+      type: object
+      additionalProperties: false
+      required: [vm_id, mode, pcpus]
+      properties:
+        vm_id: {type: string, format: uuid}
+        mode: {type: string, enum: [shared, exclusive]}
+        pcpus:
+          type: array
+          minItems: 1
+          items: {type: integer, minimum: 0, maximum: 3}
+    UpdateCpuPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_policy_revision, shared_pcpus, placements]
+      properties:
+        expected_policy_revision: {type: [integer, 'null'], minimum: 1}
+        shared_pcpus:
+          type: array
+          minItems: 1
+          items: {type: integer, minimum: 0, maximum: 3}
+        placements:
+          type: array
+          items: {$ref: '#/components/schemas/CpuPlacement'}
+    CpuPolicy:
+      type: object
+      required: [schema_version, operation_id, policy_revision, pool_name, shared_pcpus, placements]
+      properties:
+        schema_version: {type: string, enum: ['2.0']}
+        operation_id: {type: string, format: uuid}
+        policy_revision: {type: integer, minimum: 1}
+        pool_name: {type: string}
+        shared_pcpus: {type: array, items: {type: integer}}
+        placements: {type: array, items: {$ref: '#/components/schemas/CpuPlacement'}}
+    CpuPolicyUpdate:
+      type: object
+      required: [policy, host_preparation_required]
+      properties:
+        policy: {$ref: '#/components/schemas/CpuPolicy'}
+        host_preparation_required: {type: boolean}
   responses:
     InvalidArgument:
       description: 형식 또는 범위 오류 (FastAPI 422 를 400 으로 정규화). 경로의 vm_id 가 UUID 가 아니거나 nil UUID(Domain-0)인 경우 포함
@@ -1650,7 +2062,7 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     OperationNotFound:
-      description: 요청 키로 원 제어 작업을 찾지 못함. 조회 시점의 검색 부재이며 미수락·미실행의 증거가 아니다
+      description: 요청 키 또는 작업 ID로 원 기록을 찾지 못함. 조회 시점의 검색 부재이며 미수락·미실행의 증거가 아니다
       content:
         application/json:
           schema:

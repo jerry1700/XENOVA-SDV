@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import type { VmEvent } from '../api/types';
 import { DetailEvents } from './VmDetailEvents';
@@ -22,7 +22,7 @@ const event = (
 });
 
 describe('VM 상세 이벤트 한 줄 표시', () => {
-  it('shows time without milliseconds, a severity dot, a kind label and Korean state text without the VM name', () => {
+  it('shows time, warning/error as small colored words, Korean text only, kind and notes in the title', () => {
     render(
       <DetailEvents
         pending={false}
@@ -42,28 +42,45 @@ describe('VM 상세 이벤트 한 줄 표시', () => {
     expect(time).toHaveAttribute('title');
 
     expect(screen.getByText('일시정지 → 실행 중')).toBeInTheDocument();
-    expect(screen.getByText('VM 상태')).toBeInTheDocument();
     expect(screen.queryByText('도메인 상태')).not.toBeInTheDocument();
     expect(screen.queryByText('복구 서비스')).not.toBeInTheDocument();
     expect(screen.queryByText(/INFO|WARNING|ERROR/)).not.toBeInTheDocument();
-
-    // 사유 코드는 아는 것만 한글, 모르는 것은 원문 고정폭
-    expect(screen.getByText('도메인 없음')).toBeInTheDocument();
-    expect(screen.queryByText('DOMAIN_ABSENT')).not.toBeInTheDocument();
-    expect(screen.getByText('XEN_TIMEOUT').tagName).toBe('CODE');
     expect(screen.getByText('연결됨 → 응답 늦음')).toBeInTheDocument();
-
-    // 심각도는 색 점 + aria-label
-    expect(screen.getAllByRole('img', { name: '심각도 정보' })).toHaveLength(2);
-    // 종류 라벨과 같은 문구는 내용에서 반복하지 않는다
-    expect(screen.getByText('장애 감지')).toBeInTheDocument();
     expect(screen.getByText('명령 끊김')).toBeInTheDocument();
     expect(screen.getByText('강제 종료')).toBeInTheDocument();
-    expect(screen.queryByText('운영자 시연 조작')).not.toBeInTheDocument();
-    expect(screen.getAllByRole('img', { name: '심각도 경고' })).toHaveLength(3);
-    expect(screen.getByRole('img', { name: '심각도 오류' })).toBeInTheDocument();
-    const row = screen.getByText('복구 실패').closest('div')!;
-    expect(within(row).getByText('자동 복구')).toHaveAttribute('data-tone', 'error');
+
+    // 종류 라벨·보조 글(사유)·원문 코드는 줄에서 빼고 행 title 툴팁으로
+    for (const hidden of [
+      'VM 상태',
+      '자동 복구',
+      '장애 감지',
+      '도메인 없음',
+      'XEN_TIMEOUT',
+      '운영자 시연 조작',
+    ])
+      expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+    const rowOf = (text: string) => screen.getByText(text).closest('[title]:not(time)')!;
+    expect(rowOf('일시정지 → 실행 중')).toHaveAttribute('title', expect.stringContaining('VM 상태'));
+    expect(rowOf('재시작')).toHaveAttribute(
+      'title',
+      expect.stringContaining('자동 복구 · 재시작 · 도메인 없음'),
+    );
+    expect(rowOf('복구 실패')).toHaveAttribute('title', expect.stringContaining('XEN_TIMEOUT'));
+    expect(screen.queryByText('DOMAIN_ABSENT')).not.toBeInTheDocument();
+
+    // 상태 칸: 경고·오류만 작은 색 글자, 정보는 빈 칸. aria-label 에는 정보를 포함한 심각도와 종류
+    const info = screen.getByRole('img', { name: '심각도 정보 · VM 상태' });
+    expect(info).toHaveTextContent(/^$/);
+    expect(info.querySelector('i')).toBeNull();
+    expect(screen.getByRole('img', { name: '심각도 경고 · 장애 감지' })).toBeInTheDocument();
+    expect(screen.getAllByRole('img', { name: /^심각도 경고/ })).toHaveLength(3);
+    const failed = screen.getByRole('img', { name: '심각도 오류 · 자동 복구' });
+    expect(failed).toHaveAttribute('data-tone', 'error');
+    expect(failed).toHaveTextContent(/^오류$/);
+    expect(screen.getByRole('img', { name: '심각도 경고 · 장애 감지' })).toHaveTextContent(/^경고$/);
+    // 맨 위 열 제목 줄 (VM 상세는 대상 열 없음)
+    const head = document.querySelector('[data-head]')!;
+    expect([...head.children].map((cell) => cell.textContent)).toEqual(['시각', '상태', '내용']);
   });
 
   it('keeps the empty and error messages', () => {

@@ -84,6 +84,7 @@ xenova.drive.LaneModel.divider_state max_size:32
 xenova.drive.WorldSnapshot.parking_slots max_count:8
 xenova.drive.ParkingSlot.corners max_count:4
 xenova.drive.WorldSnapshot.drivable_permission max_size:512
+xenova.drive.WorldSnapshot.boundary_cell_free4_le max_size:512
 xenova.drive.SceneAdmissionRef.admission_id max_size:16
 xenova.drive.SceneAdmissionRef.survey_id max_size:16
 xenova.drive.SceneAdmissionRef.coverage_profile_sha256 max_size:32

@@ -4,7 +4,7 @@ import { ApiError } from '../api/client';
 import { useAuthedSocket } from '../api/drive';
 import { useUpdateVcpuPinning, useVmResources } from '../api/queries';
 import type { MetricSample, PcpuStatus, VcpuPinning, Vm } from '../api/types';
-import { mappingLabel, normalizePinning, pinningEqual, togglePcpu } from '../domain/vcpuPinning';
+import { mappingLabel, normalizePinning, pinningEqual, toggleVmPcpu } from '../domain/vcpuPinning';
 import styles from './pages.module.css';
 
 const MOCK = import.meta.env.VITE_MOCK === 'true';
@@ -61,6 +61,12 @@ function errorMessage(error: unknown): string {
   if (error.status === 404 || error.code === 'VM_CONTROL_NOT_SUPPORTED') {
     return '리소스 제어 API가 아직 연결되지 않았습니다. 백엔드 107 연동 후 실제 매핑이 표시됩니다.';
   }
+  if (error.code === 'CPU_PLACEMENT_CONFLICT') {
+    return '선택한 코어는 dom0 공유 영역이거나 다른 VM이 전용으로 사용 중입니다. 최신 배치를 다시 확인해 주세요.';
+  }
+  if (error.code === 'INVALID_VM_STATE') {
+    return 'CPU 핀닝을 변경하려면 모든 VM을 먼저 정지해야 합니다.';
+  }
   return `${error.message} (${error.code})`;
 }
 
@@ -85,10 +91,22 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
   const pcpuStatuses = resources.data?.pcpus ?? [];
   const { loads, live } = usePcpuLoads(vm.vm_id, pcpuStatuses);
   const dirty = !pinningEqual(current, draft);
-  const changedVcpus = draft.filter((mapping) => {
-    const before = current.find((item) => item.vcpu === mapping.vcpu);
-    return !before || !pinningEqual([before], [mapping]);
-  });
+  const currentMapping = current[0];
+  const draftMapping = draft[0];
+  const stopped = vm.state === 'stopped';
+  const exclusiveVm = vm.guest_kind === 'zephyr';
+  const ownExclusive = new Set(exclusiveVm ? (currentMapping?.pcpus ?? []) : []);
+  const otherExclusive = new Set(
+    (resources.data?.exclusive_pcpus ?? []).filter((pcpu) => !ownExclusive.has(pcpu)),
+  );
+  const sharedPcpus = new Set(resources.data?.shared_pcpus ?? []);
+
+  const unavailableReason = (pcpu: number): string | null => {
+    if (otherExclusive.has(pcpu)) return '다른 VM이 전용으로 사용 중입니다.';
+    if (exclusiveVm && sharedPcpus.has(pcpu)) return 'dom0와 공유 VM이 사용하는 코어입니다.';
+    if (!exclusiveVm && !sharedPcpus.has(pcpu)) return '이 VM은 공유 pCPU 집합 안에서만 배치할 수 있습니다.';
+    return null;
+  };
 
   const apply = async () => {
     const requested = normalizePinning(draft);
@@ -104,7 +122,10 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
         return;
       }
       setDraftOverride(null);
-      setFeedback({ tone: 'ok', message: '실제 매핑을 다시 조회해 적용 결과를 확인했습니다.' });
+      setFeedback({
+        tone: 'ok',
+        message: 'CPU 정책을 저장했습니다. 호스트 준비가 끝난 뒤 VM을 시작할 수 있습니다.',
+      });
       toast.show(`${vm.name}: vCPU 핀닝 적용 완료`, 'ok');
     } catch (error) {
       setDraftOverride(null);
@@ -124,8 +145,8 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
         <div>
           <strong>해당 VM의 vCPU가 사용할 물리 CPU 코어를 선택합니다.</strong>
           <p>
-            선택한 pCPU는 해당 vCPU의 Xen hard affinity로 적용됩니다. 각 vCPU에는 하나 이상의 pCPU를 지정해야
-            합니다.
+            플랫폼 정책에 따라 이 VM의 모든 vCPU에 같은 pCPU 집합이 적용됩니다. 다른 VM의 전용 코어와 dom0
+            공유 영역은 선택할 수 없습니다.
           </p>
         </div>
         {resources.data && (
@@ -143,6 +164,12 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
           <span>{errorMessage(resources.error)}</span>
         </div>
       )}
+      {resources.data && !stopped && (
+        <div className={styles.pinningState} data-tone="waiting" role="status">
+          <strong>실행 중에는 CPU 핀닝을 변경할 수 없습니다.</strong>
+          <span>대상 VM을 포함해 모든 VM을 정지한 뒤 변경하세요.</span>
+        </div>
+      )}
 
       {resources.data && (
         <>
@@ -154,55 +181,76 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
                     <span>VM CPU (vCPU)</span>
                   </th>
                   {Array.from({ length: resources.data.pcpu_count }, (_, pcpu) => {
-                    const exclusive = resources.data.exclusive_pcpus.includes(pcpu);
+                    const reason = unavailableReason(pcpu);
+                    const own = ownExclusive.has(pcpu);
+                    const shared = sharedPcpus.has(pcpu);
                     const load = loads.get(pcpu);
                     return (
-                      <th key={pcpu} scope="col" data-exclusive={exclusive || undefined}>
+                      <th
+                        key={pcpu}
+                        scope="col"
+                        data-core-state={
+                          reason ? 'unavailable' : own ? 'current' : shared ? 'shared' : 'free'
+                        }
+                      >
                         <span>pCPU {pcpu}</span>
                         <small>{load == null ? '부하 미수신' : `${load.toFixed(1)}%`}</small>
-                        {exclusive && <em>전용 코어</em>}
+                        {reason ? (
+                          <em>선택 불가</em>
+                        ) : own ? (
+                          <em>현재 전용</em>
+                        ) : shared ? (
+                          <em>공유 코어</em>
+                        ) : (
+                          <em>사용 가능</em>
+                        )}
                       </th>
                     );
                   })}
                 </tr>
               </thead>
               <tbody>
-                {draft.map((mapping) => {
-                  const before = current.find((item) => item.vcpu === mapping.vcpu);
-                  return (
-                    <tr key={mapping.vcpu}>
-                      <th scope="row">
-                        <span>vCPU {mapping.vcpu}</span>
-                        <small>허용 코어 {mapping.pcpus.length}개</small>
-                      </th>
-                      {Array.from({ length: resources.data.pcpu_count }, (_, pcpu) => {
-                        const selected = mapping.pcpus.includes(pcpu);
-                        const wasSelected = before?.pcpus.includes(pcpu) ?? false;
-                        const lastSelected = selected && mapping.pcpus.length === 1;
-                        return (
-                          <td key={pcpu}>
-                            <button
-                              type="button"
-                              className={styles.pinningCell}
-                              aria-label={`vCPU ${mapping.vcpu} · pCPU ${pcpu}`}
-                              aria-pressed={selected}
-                              data-selected={selected || undefined}
-                              data-changed={selected !== wasSelected || undefined}
-                              disabled={update.isPending || lastSelected}
-                              title={lastSelected ? '각 vCPU에는 최소 한 개의 pCPU가 필요합니다.' : undefined}
-                              onClick={() => {
-                                setFeedback(null);
-                                setDraftOverride((value) => togglePcpu(value ?? current, mapping.vcpu, pcpu));
-                              }}
-                            >
-                              <span aria-hidden="true">{selected ? '✓' : ''}</span>
-                            </button>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
+                {draftMapping && (
+                  <tr>
+                    <th scope="row">
+                      <span>VM 전체</span>
+                      <small>
+                        {resources.data.vcpus} vCPU · 허용 코어 {draftMapping.pcpus.length}개
+                      </small>
+                    </th>
+                    {Array.from({ length: resources.data.pcpu_count }, (_, pcpu) => {
+                      const selected = draftMapping.pcpus.includes(pcpu);
+                      const wasSelected = currentMapping?.pcpus.includes(pcpu) ?? false;
+                      const lastSelected = selected && draftMapping.pcpus.length === 1;
+                      const reason = unavailableReason(pcpu);
+                      const disabled = update.isPending || !stopped || lastSelected || reason !== null;
+                      const title = !stopped
+                        ? 'VM을 정지한 뒤 변경할 수 있습니다.'
+                        : (reason ?? (lastSelected ? '최소 한 개의 pCPU가 필요합니다.' : undefined));
+                      return (
+                        <td key={pcpu}>
+                          <button
+                            type="button"
+                            className={styles.pinningCell}
+                            aria-label={`VM 전체 vCPU · pCPU ${pcpu}`}
+                            aria-pressed={selected}
+                            data-selected={selected || undefined}
+                            data-changed={selected !== wasSelected || undefined}
+                            data-unavailable={reason !== null || undefined}
+                            disabled={disabled}
+                            title={title}
+                            onClick={() => {
+                              setFeedback(null);
+                              setDraftOverride((value) => toggleVmPcpu(value ?? current, pcpu));
+                            }}
+                          >
+                            <span aria-hidden="true">{selected ? '✓' : reason ? '×' : ''}</span>
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -212,17 +260,12 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
               <span>{dirty ? '변경 미리보기' : '현재 적용값'}</span>
               {dirty ? (
                 <ul>
-                  {changedVcpus.map((mapping) => {
-                    const before = current.find((item) => item.vcpu === mapping.vcpu);
-                    return (
-                      <li key={mapping.vcpu}>
-                        <strong>vCPU {mapping.vcpu}</strong>
-                        <span>{before ? mappingLabel(before) : '미설정'}</span>
-                        <b aria-hidden="true">→</b>
-                        <span>{mappingLabel(mapping)}</span>
-                      </li>
-                    );
-                  })}
+                  <li>
+                    <strong>전체 {resources.data.vcpus} vCPU</strong>
+                    <span>{currentMapping ? mappingLabel(currentMapping) : '미설정'}</span>
+                    <b aria-hidden="true">→</b>
+                    <span>{draftMapping ? mappingLabel(draftMapping) : '미설정'}</span>
+                  </li>
                 </ul>
               ) : (
                 <p>서버에서 조회한 실제 매핑과 화면 선택값이 일치합니다.</p>
@@ -231,7 +274,7 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
             <div className={styles.pinningActions}>
               <Button
                 variant="secondary"
-                disabled={!dirty || update.isPending}
+                disabled={!dirty || update.isPending || !stopped}
                 onClick={() => {
                   setDraftOverride(null);
                   setFeedback(null);
@@ -239,7 +282,7 @@ export function VcpuPinningPanel({ vm, accent }: VcpuPinningPanelProps) {
               >
                 변경 취소
               </Button>
-              <Button disabled={!dirty || update.isPending} onClick={() => void apply()}>
+              <Button disabled={!dirty || update.isPending || !stopped} onClick={() => void apply()}>
                 {update.isPending ? '적용 중…' : '핀닝 적용'}
               </Button>
             </div>

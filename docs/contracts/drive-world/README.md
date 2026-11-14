@@ -51,10 +51,19 @@ Pi 제어·차량 상태 연결까지 막는 전역 readiness gate가 아니다.
   LaneModel을 사용하며, global outer의 평균으로 생성하지 않는다. basis의 원 prefix는
   유지하고 실제 끝 연장만 reference revision을 올린다. 차로 선택·관측/ROI 변화로 원점과
   prefix를 바꾸지 않는다. legacy0/1의 reference별 좌우 방향 검사는 유지한다.
+- 관측 구간에는 divider와 양쪽 outer의 지도상 횡방향 위치 상한을 보낼 수 있다.
+  이때 양쪽 outer의 연속 station 쌍별 현 벡터 오차 중 최댓값도 함께 보낸다. 같은 자세에서
+  비롯된 평행이동은 양끝의 차를 계산할 때 상쇄되며 연결부 변위와 회전·반올림 오차는 남는다.
+  Python과 C는 필드 묶음이 완전할 때 모든 연속 station 쌍을 이 상한으로 검증한다. 구 형식에는
+  기존 검증식을 적용한다. 기존 위치·방향 상한은 차량과 경로의 여유 계산에 유지한다.
 - 최대 grid는 64×64, road 배열은 각각 2~64점이다. occupancy는 0~100 또는 255(unknown),
   flag bit는 valid=1/static-retained=2/expired=4, age는 cell별 little-endian uint32 ms다.
   unknown/만료/무효 셀은 통행 가능으로 바꾸지 않는다. 보관 셀의 오래된 원 age와 새 관측의
   live age는 다르다. 재발행만으로 observation sequence나 원 관측 시각을 새로 만들지 않는다.
+- Jetson은 현재 위치와 이어지는 누적 차로에서 차체 뒤쪽과 전방 제동 여유가 필요한 구간을
+  선택한다. 같은 map epoch의 차로 ID와 reference prefix를 유지한다. 원래 관측한 차로 범위가
+  더 짧으면 있는 범위만 표현한다. 셀의 원 관측 시각으로 발행 직전 유효성을 판정한다.
+  기본 Jetson 격자에서 FREE는 0.5초, OCCUPIED는 5초가 지나면 UNKNOWN이다.
 - mapper boot/instance·map/frame/odom/clock epoch와 vehicle/configuration/calibration/primitive
   문맥은 신뢰 프로필과 대조한다. `primitive`는 생성 asset SHA-256이다. 이름만 맞는
   다른 곡선·차량 모델을 받아들이지 않는다. 새 출처는 신뢰 설정의 명시 갱신이 필요하다.
@@ -278,6 +287,17 @@ wire_bytes = candidate.payload
 
 내부 UNKNOWN0/FREE1/OCCUPIED2는 wire255/0/100으로 명시 변환한다. age는 원 uint32 ms를
 little-endian row-major로 보존한다. whole-cell permission bit와 선호 도로 중심 bit는 독립이다.
+
+`WorldSnapshot.boundary_cell_free4_le`는 minor 2 지도에 추가할 수 있는 선택 항목이다.
+최대 128개의 레코드를 셀 번호 순서로 보낸다. 레코드는 row-major 셀 번호 uint16과
+관측으로 전체가 비어 있음을 확인한 4×4 하위 셀 비트마스크 uint16을 각각 little-endian으로
+저장한다. 비트 0은 격자 로컬 좌표에서 x와 y가 가장 작은 하위 셀이다. 번호는 x부터 증가한다.
+점유 셀만 대상으로 하며, 마스크는 최소 한 칸을 막힌 상태로 보존한다. 비트가 0인 곳은 점유와
+미관측을 모두 포함한다. 발행자는 지도와 같은 좌표계, 시각 및 오차 한계로 자유 공간을 보수적으로
+확인해야 한다. 원 셀이 만료됐거나 통행 권한이 없거나 retained 상태라면 이 항목으로 통과를 허용하지
+않는다. 항목이나 레코드가 없으면 셀 전체를 검사한다. 이전 소비자는 이 항목을 무시하고 기존
+점유 셀 전체를 검사한다. 주행 프로파일의 5cm 격자와 32KiB 메시지 상한은 유지된다.
+
 frame-local 이름과 원 clock label을 wire epoch에 명시 결박하는 책임은 caller에 남는다.
 `simulation:<UUID>` 같은 원 label을 잘라 쓰거나 J 시각으로 재발급하지 않는다. legacy0/1은
 비영점 capture 구간을 표현하지 못하므로 거절하며,11/15는 localization의 timestamp 반폭을 검사한다.

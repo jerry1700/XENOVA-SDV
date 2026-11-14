@@ -138,19 +138,34 @@ describe('web console with an offline WebSocket server', () => {
       Array.from(new TextEncoder().encode('mock guest output\r\n')),
     );
     expect(terminal.options.disableStdin).toBe(false);
-    expect(frames.input).toHaveLength(0); // Connecting to Zephyr sends no guest input.
-    act(() => terminal.input?.('offline-input'));
+    // Connecting sends one Enter so the guest prompt shows up (Zephyr shell just redraws it).
     await waitFor(() => expect(frames.input).toHaveLength(1));
+    expect(Array.from(frames.input[0]!)).toEqual([13]);
+    act(() => terminal.input?.('offline-input'));
+    await waitFor(() => expect(frames.input).toHaveLength(2));
     fireEvent.click(screen.getByRole('button', { name: '연결 해제' }));
     await waitFor(() => expect(screen.getByRole('button', { name: '연결' })).toBeEnabled());
     expect(terminal.options.disableStdin).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: '연결' }));
     await waitFor(() => expect(frames.auth).toHaveLength(2));
     await waitFor(() => expect(screen.getByText('연결됨', { exact: true })).toBeInTheDocument());
-    expect(frames.input).toHaveLength(1);
+    // Only the new connection's Enter is sent; the earlier typed input is not replayed.
+    await waitFor(() => expect(frames.input).toHaveLength(3));
+    expect(Array.from(frames.input[2]!)).toEqual([13]);
   });
 
-  it.each([4401, 4404, 4409, 1011])('shows rejection %s and leaves manual retry available', async (code) => {
+  it('a login rejection (4401) renews once, then shows the error and leaves manual retry available', async () => {
+    const frames = mockConsole({ reject: 4401 });
+    render(<ConsolePanel vm={vm} />);
+    fireEvent.click(screen.getByRole('button', { name: '연결' }));
+    await waitFor(() => expect(screen.getByText('연결 오류', { exact: true })).toBeInTheDocument());
+    expect(screen.getByRole('button', { name: '연결' })).toBeEnabled();
+    expect(terminals.instances[0]!.options.disableStdin).toBe(true);
+    expect(frames.opened).toBe(2); // the original attempt plus one renewal, never a loop
+    expect(frames.input).toHaveLength(0);
+  });
+
+  it.each([4404, 4409, 1011])('shows rejection %s and leaves manual retry available', async (code) => {
     const frames = mockConsole({ reject: code });
     render(<ConsolePanel vm={vm} />);
     fireEvent.click(screen.getByRole('button', { name: '연결' }));
@@ -179,7 +194,7 @@ describe('web console with an offline WebSocket server', () => {
     await waitFor(() => expect(screen.getByText('연결됨', { exact: true })).toBeInTheDocument());
     expect(terminals.instances[0]!.write).not.toHaveBeenCalled();
     expect(screen.getByText(/새 로그가 없으면 화면이 비어/)).toBeInTheDocument();
-    expect(frames.input).toHaveLength(0);
+    await waitFor(() => expect(frames.input).toHaveLength(1)); // the prompt-nudging Enter only
   });
 
   it('rejects a second connection without disturbing the original output context', async () => {

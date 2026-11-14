@@ -51,6 +51,7 @@ class PoseEstimate:
     captured_us: tuple[int, int]
     bracket_us: tuple[int, int]
     wheel_capture: WheelCapture | None = None
+    exposure_motion: tuple[float, float] | None = None
 
     @property
     def prior(self):
@@ -149,4 +150,9 @@ class PoseBuffer:
                     self.speed*duration+math.hypot(x-endpoint.x,y-endpoint.y),
                     self.yaw_rate*duration+abs(wrap_yaw(yaw-endpoint.yaw))))
             capture = min(candidates,key=lambda item: (item.position_pad_m,item.yaw_pad_rad))
-        return PoseEstimate(sample,stamp.captured_us,(left.at_us,right.at_us),capture)
+        # Relative travel from the true midpoint pose to any instant of this
+        # exposure does not include the accumulated absolute encoder drift.
+        duration = max(middle-lo,hi-middle)/1e6
+        exposure = (math.nextafter(self.speed*duration, math.inf),
+                    min(math.pi,math.nextafter(self.yaw_rate*duration, math.inf)))
+        return PoseEstimate(sample,stamp.captured_us,(left.at_us,right.at_us),capture,exposure)

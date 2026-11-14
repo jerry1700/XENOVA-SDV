@@ -1,8 +1,8 @@
-# 차량 표시(HDMI 1대 / 휴대폰) 운영 인계 — 초안 2026-11-12
+# 차량 표시(HDMI 1대 / 휴대폰) 운영 인계 — 2026-11-12
 
 > S15P31E110-394. 표시를 처음 맡는 팀원이 **켜기·확인·전환·장애 점검·되돌리기**를 이 문서만 보고 할 수 있게 정리했다.
 > 비밀번호·토큰·연결번호는 이 문서와 채팅·로그·Git에 남기지 않는다.
-> "확인 대기"로 표시한 항목은 보드 이미지 반영 후 실물 확인이 남은 것이다(맨 아래 표).
+> "확인 대기"로 표시한 항목은 아직 실물 확인이 남은 것이다(맨 아래 표).
 
 ## 1. 한눈에
 
@@ -28,21 +28,43 @@ dom0 feed (127.0.0.1:8082) ─▶ dom0 guest data (192.168.77.1:8085, 토큰) �
 | 화면 앱 응답 | dom0에서 `curl -s -o /dev/null -w '%{http_code}\n' http://<VM IP>:8086/display/combined` → `200` | dom0에서만 접근된다 |
 | dom0 feed | `systemctl is-active xenova-display-feed` → `active` | |
 
-### 설정 파일 (모두 root 전용, 이미지에 포함)
+### 설정 파일 (root 전용, **보드마다 따로 만든다**)
 
-| 위치 | 파일 | 표시 관련 값 |
-| --- | --- | --- |
-| dom0 | `/etc/xenova/display-runtime.json` | HDMI 1대 출력, `ui_origin: http://<VM IP>:8086`, `page`. 예: `examples/single-hdmi-plan-a-runtime.json` |
-| dom0 | `/etc/xenova/display-mobile.json` | `usb_interface`, `phone_ipv4`, `port: 8084`, `ui_origin`. `phone_ipv4`는 폰 대역이 바뀌어도 자동으로 따라간다(!594) |
-| dom0 | `/etc/xenova/guest-display.json`, `/etc/xenova/guest-display/guest-data.token` | dom0→VM 데이터 전달. 토큰은 **다시 만들지 않는다** |
-| VM | `/etc/xenova/guest-display-domu.json`, 같은 토큰 | VM 화면 앱. 템플릿 담당 |
+이미지에는 코드·서비스·**예제**만 들어 있다. 아래 dom0 표시 설정은 이미지에 들어 있지 않고, 첫 부팅 때 자동으로 만들어지지도 않는다. 새 이미지를 굽거나 새 보드를 쓰면 아래 "처음 설정"을 한 번 실행한다.
+
+| 위치 | 파일 | 표시 관련 값 | 누가 만드나 |
+| --- | --- | --- | --- |
+| dom0 | `/etc/xenova/display-runtime.json` | HDMI 1대 출력(연결된 모니터의 EDID·해상도), `ui_origin: http://<VM IP>:8086`, `page: /display/combined` | `board_setup` |
+| dom0 | `/etc/xenova/display-Xorg.conf` | 예제 `display-Xorg.conf.example` 그대로 | `board_setup` |
+| dom0 | `/etc/xenova/display-kiosk.env` (0600) | feed와 같은 `XENOVA_DISPLAY_TOKEN` 한 줄 | `board_setup` (feed 설정에서 복사, 출력하지 않음) |
+| dom0 | `/etc/xenova/display-mobile.json` (0600) | `usb_interface`, `phone_ipv4`, `port: 8084`, `ui_origin`. `phone_ipv4`는 폰 대역이 바뀌어도 자동으로 따라간다(!594) | 있으면 `board_setup`이 `ui_origin`만 맞춤. 없으면 `--phone-ipv4`로 만듦 |
+| dom0 | `/etc/xenova/guest-display.json`, `/etc/xenova/guest-display/guest-data.token` | dom0→VM 데이터 전달. 토큰은 **다시 만들지 않는다** | 이미지·relay 담당 |
+| VM | `/etc/xenova/guest-display-domu.json`, 같은 토큰 | VM 화면 앱 | 템플릿 담당 |
+
+HDMI 서비스는 `display-runtime.json`·`display-Xorg.conf`·`display-kiosk.env` 중 하나라도 없으면 시작하지 않는다(조건부 시작이라 오류 없이 꺼져 있다).
+
+### 처음 설정 (새 이미지·새 보드, 한 번)
+
+1. HDMI 모니터를 연결하고, 관리 콘솔에서 Interaction VM을 켜고 **예약 IPv4**를 확인한다.
+2. 미리 보기(아무것도 쓰지 않음):
+   ```sh
+   sudo python3 -m xenova_display.board_setup --vm-ip <VM IP> --dry-run
+   ```
+3. 적용:
+   ```sh
+   sudo python3 -m xenova_display.board_setup --vm-ip <VM IP>
+   sudo python3 -m xenova_display.display_mode hdmi
+   ```
+   - 휴대폰 설정이 아직 없으면 폰을 USB 테더링으로 연결한 뒤 `--phone-ipv4 <폰 주소>`를 더한다(폰 주소: `sudo grep SERVER_ADDRESS /run/systemd/netif/leases/$(cat /sys/class/net/usb0/ifindex)`. 보드에는 폰을 거치는 경로가 없어 route로는 보이지 않는다. 이후 대역이 바뀌어도 자동으로 따라간다).
+   - 이미 있는 파일은 지우거나 덮어쓰지 않고 `ui_origin`만 맞춘다. 서비스는 다시 시작하지 않는다.
+4. VM을 다른 템플릿으로 바꿔 IP가 달라졌으면 2~3을 새 IP로 다시 실행한다.
 
 자세한 설치: `platform/services/display/router/deploy/guest-display/README.md`, `deploy/mobile-access/mobile-access.README.md`, `deploy/mobile/display-mode.README.md`.
 
 ## 3. HDMI 모드 (기본)
 
 ### 켜기
-- 부팅하면 HDMI가 기본이다(`xenova-display-hdmi.service`). **확인 대기: 이미지 반영 후 재부팅 기본값(390).**
+- 부팅하면 HDMI가 기본이다(`xenova-display-hdmi.service`, 390에서 재부팅으로 확인). 위 "처음 설정"이 끝나 있어야 한다.
 - 휴대폰 모드에서 돌아올 때: `sudo python3 -m xenova_display.display_mode hdmi`
 
 ### 정상 확인
@@ -63,7 +85,7 @@ dom0 feed (127.0.0.1:8082) ─▶ dom0 guest data (192.168.77.1:8085, 토큰) �
 ```sh
 sudo python3 -m xenova_display.display_mode mobile
 ```
-HDMI는 꺼지고 휴대폰 서비스(`xenova-display-mobile`)만 켜진다. **확인 대기: 제품 명령 왕복(390/351).**
+HDMI는 꺼지고 휴대폰 서비스(`xenova-display-mobile`)만 켜진다. 실패하면(폰 미연결 등) 전환하지 않고 HDMI를 그대로 둔다(390).
 
 ### 폰 연결 순서
 1. 폰을 USB 케이블로 보드에 연결하고 **USB 테더링**을 켠다.
@@ -104,17 +126,19 @@ HDMI는 꺼지고 휴대폰 서비스(`xenova-display-mobile`)만 켜진다. **�
 | 폰 통합 화면 (가로) | 확인 | 350·387 (11/12) |
 | 폰 10분 안정성·자원 | 확인 | 392 |
 | 폰 케이블·브라우저·인증 끊김 안내와 복귀, 제어/VM 영향 없음 | 확인 | 393 (11/11) |
-| 연결번호 처음 한 번만 | 확인(임시 설치) | !581, 11/11 실보드 |
-| 폰 대역이 바뀌어도 자동으로 폰 찾기 | 확인(임시 설치) | !594, 11/12 실보드 |
+| 연결번호 처음 한 번만 | 확인 | !581, 11/11 실보드(임시 설치), 11/12 정식 경로 배포 |
+| 폰 대역이 바뀌어도 자동으로 폰 찾기 | 확인 | !594, 11/12 실보드(임시 설치), 11/12 정식 경로 배포 |
 | HDMI 1대 10분 연속·분리 복귀 | 확인(임시 세션) | 380, `docs/verification/display-380-hdmi-acceptance-20261111.md` |
 | HDMI·폰 자원·갱신 성능 | 확인 | 379 |
 | 외부 웹과 표시 화면 UUID·상태 일치 | 확인 | 375 |
 | 상태 수집 최신성 | 확인 | 374·253 |
 | HDMI 분리·복귀 때 VM·주행 무영향 | 확인 | 377 (11/11) |
-| 제품 명령으로 HDMI↔폰 왕복·실패 복원 | **확인 대기** | 390/351 — 이미지 반영 후 |
-| 재부팅 후 HDMI 기본 | **확인 대기** | 390 — 이미지 반영 후 |
-| 이미지에 !581·!594 포함 | **확인 대기** | 이미지 담당 빌드 |
-| 이미지의 `/etc/xenova/display-mobile.json`·`display-runtime.json`에 `ui_origin`(Interaction VM 주소)이 있음 | **확인 대기** | 없으면 폰·HDMI가 VM 화면 대신 예전 dom0 화면을 연다. 실물 시험은 `/run` 임시 설정으로 `ui_origin`을 넣어 했다 |
+| 제품 명령으로 HDMI↔폰 왕복·실패 복원 | 확인 | 390/351 (11/12, 정식 경로: hdmi 39 s, mobile 13 s, hdmi 29 s, 폰 미연결 시 mobile 거부·HDMI 유지) |
+| 재부팅 후 HDMI 기본 | 확인 | 390 (11/12) |
+| HDMI 모니터 재조사를 연결 변화 때만 | 확인 | !622 (11/12): Xorg CPU 약 4.9% → 0.7%, 분리 감지 0.5 s 안, 복귀 8.7 s |
+| 보드 표시 코드가 platform 최신과 같음 | 확인 | 11/12 정식 경로 배포(`/root/xenova-display-deploy-20261112/`에 백업). 새 이미지 빌드에는 platform 그대로 들어간다 |
+| dom0 표시 설정(`display-runtime.json` 등) | **보드마다 만듦** | 이미지·첫 부팅이 만들지 않는다. 새 이미지 후 2절 "처음 설정" 실행 |
+| relay 코드 경로 | 참고 | 현재 보드의 relay는 `/usr/lib/xenova-display-guest-relay/<cohort>/` 사본을 쓴다(사본 내용은 정식 경로와 같고 `mobile_upstream.py`만 예전 판). platform의 새 relay·feed 서비스 파일은 `xenova-first-boot.service`가 있어야 시작되므로 새 이미지와 함께 바뀐다 |
 | 외부 웹 끊김 때 표시 영향 없음 | **확인 대기** | 377 기준 1 |
 | 주행 모드·활성 VM·출력 허가·복구 알림 변화 표시 | **확인 대기** | 376 |
 

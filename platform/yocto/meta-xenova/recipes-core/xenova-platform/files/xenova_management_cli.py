@@ -105,6 +105,8 @@ def _validate(args):
         raise ManagementError('INVALID_SPEC','budget_ms is outside the supported call range')
     if action in ('control-operation','operation') and sum(k in args for k in ('operation_id','idempotency_key'))!=1:
         raise ManagementError('INVALID_SPEC','exactly one operation ID or original key is required')
+    if action == 'retire' and 'idempotency_key' not in args:
+        raise ManagementError('INVALID_SPEC', 'retire requires --idempotency-key')
     if action=='destroy' and not args.get('force'):
         raise ManagementError('INVALID_SPEC','destroy requires --force')
     if action in ('autostart-set','board-shutdown-set'):
@@ -197,7 +199,11 @@ def main(argv=None, manager=None):
     entered=clock()
     request_id=uuid4();args={}
     try:
-        args=vars(_parser().parse_intermixed_args(sys.argv[1:] if argv is None else argv))
+        tokens = sys.argv[1:] if argv is None else list(argv)
+        if len(tokens) == 2 and tokens[0] in ('list', 'status') and tokens[1] == '--json':
+            args = {'action': tokens[0], 'json': True}
+        else:
+            args = vars(_parser().parse_intermixed_args(tokens))
         action=_validate(args)
         if action in LEGACY:
             result=vm.legacy_command(action,args,platform=manager.p if manager is not None else None)

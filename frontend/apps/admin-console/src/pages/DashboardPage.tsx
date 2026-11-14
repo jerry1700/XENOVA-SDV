@@ -12,8 +12,8 @@ import {
   useToast,
 } from '@xenova/ui';
 import type { Health } from '@xenova/ui';
-import type { CSSProperties } from 'react';
-import { Link } from 'react-router';
+import { useId, type CSSProperties } from 'react';
+import { Link, useNavigate } from 'react-router';
 import type { DriveState, SocketState } from '../api/drive';
 import { useEvents, useMetrics, useTelemetryHeartbeat, LIVE_POLL_MS, useVms } from '../api/queries';
 import { restartSimRace, selectSimTrack, useSimState, type SimView } from '../api/sim';
@@ -558,6 +558,8 @@ function VmOverviewCard({
   vmStatusError: boolean;
   latestEvent: VmEvent | undefined;
 }) {
+  const navigate = useNavigate();
+  const titleId = useId();
   const role = roleOf(vm, drive);
   const linux = vm.guest_kind === 'linux';
   // 현재값 카드에는 Memory 탭과 같은 짧은 이력·조회 주기를 사용한다.
@@ -601,12 +603,27 @@ function VmOverviewCard({
   const driving = role ? role.driving : vm.guest_kind === 'zephyr';
 
   const style = { '--vm-accent': role?.color ?? UNASSIGNED_COLOR } as CSSProperties;
+  const detailPath = `/dashboard/vms/${vm.vm_id}`;
   return (
-    <Link className={styles.vmCard} style={style} to={`/dashboard/vms/${vm.vm_id}`}>
+    // 카드 어디를 눌러도 상세로 간다. 키보드는 제목 링크(Tab·Enter). 안쪽 이벤트 링크와 중첩되지 않게 카드 자체는 링크가 아니다
+    <article
+      className={styles.vmCard}
+      style={style}
+      data-linked="true"
+      aria-labelledby={titleId}
+      onClick={(event) => {
+        if ((event.target as Element).closest('a') || window.getSelection()?.toString()) return;
+        navigate(detailPath);
+      }}
+    >
       <div className={styles.vmCardTop}>
         <div>
           <span className={styles.vmKicker}>{role?.title ?? '역할 미지정'}</span>
-          <h3>{vm.name}</h3>
+          <h3 id={titleId}>
+            <Link className={styles.vmCardTitleLink} to={detailPath}>
+              {vm.name}
+            </Link>
+          </h3>
           <p>
             {driving ? 'Drive' : 'Infotainment'} · {osLabel(vm)}
           </p>
@@ -662,11 +679,19 @@ function VmOverviewCard({
       <div className={styles.vmCardFoot}>
         <div>
           <span>RECENT SIGNAL</span>
-          <p>{eventSummary}</p>
+          <p>
+            <Link
+              className={styles.vmCardEventLink}
+              to={`/dashboard/events?vm=${encodeURIComponent(vm.vm_id)}`}
+              title={`${vm.name} 이벤트 보기`}
+            >
+              {eventSummary}
+            </Link>
+          </p>
         </div>
         <strong>View details ↗</strong>
       </div>
-    </Link>
+    </article>
   );
 }
 
@@ -787,7 +812,7 @@ function overviewAppSignal(
   const labels = new Set(reports.map((report) => report[field]));
   if (labels.size === 0) return '미확인';
   if (labels.size === 1) return reports[0]![field];
-  return reports.map((report) => `${report.appId}: ${report[field]}`).join(' · ');
+  return reports.map((report) => `${report.appLabel}: ${report[field]}`).join(' · ');
 }
 
 function overviewMetricUnavailable(pending: boolean, sampleCount: number): string | null {

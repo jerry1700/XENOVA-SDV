@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "pb_encode.h"
 #include "pb_decode.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -113,6 +114,17 @@ int probe_episode_station(int split,float bounds[2]){
  }
  return db_station_bounds(&basis,pose,.0016f,&lp_selected_config,&bounds[0],&bounds[1]);
 }
+int probe_episode_seam(int large_gap,float out[6]){
+ struct tr_basis basis={.bound=true,.count=6,.points={{.9f,0},{3,0},{3,3},{0,3},{0,0},{.85f,0}}};
+ if(large_gap)basis.points[0].x=1.8f;
+ struct lp_config c=lp_selected_config;
+ c.front=.28f;c.rear=.10f;c.half_width=.105f;
+ struct db_blocker blocker={.lower={.82f,-.02f},.upper={.96f,.02f}};
+ if(!db_blocker_locate(&basis,&blocker,.001f))return 0;
+ out[4]=blocker.station_lower;out[5]=blocker.station_upper;
+ return db_station_bounds_near(&basis,basis.count,(dw_pose){.86f,0,0},.001f,&c,11.8f,false,&out[0],&out[1])&&
+        db_station_bounds_near(&basis,basis.count,(dw_pose){.97f,0,0},.001f,&c,out[0],false,&out[2],&out[3]);
+}
 int probe_observed_blocker(void *pointer){
  struct probe *p=pointer;struct db_blocker blocker;struct tr_intent task={true,false,1,1,1,0};
  if(p->decoded||!db_blocker_observe(&p->snapshot.world,&task,(dw_pose){4.9f,1.2f,0},1.5f,&p->config,&blocker))return -1;
@@ -127,6 +139,14 @@ uint32_t probe_round(void *pointer,void *behavior,int action,uint32_t id){
  return dp_round_next(&b->round);
 }
 int probe_decoded(void *pointer) { return ((struct probe *)pointer)->decoded; }
+int probe_boundary_cell(void *pointer,float y,int indexed,uint64_t *subcells){
+ struct probe *p=pointer;uint64_t now;
+ if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_metrics metrics={0};
+ const struct lp_budget budget={now+100000,clock_us,NULL,NULL,indexed?&p->collision_index:NULL};
+ enum lp_result rc=lp_footprint(&p->snapshot.world,(dw_pose){2,y,0},0,&p->config,&metrics,&budget);
+ *subcells=metrics.subcells;return rc;
+}
 int probe_plan(void *pointer,float x,float y,float yaw,float steer,float gx,float gy,float gyaw,
  unsigned nodes,unsigned collisions,uint64_t cancel_after,unsigned budget_ms,float width) {
  struct probe *p=pointer;if(p->decoded)return LP_INPUT;
@@ -178,6 +198,15 @@ int probe_valid(void *pointer) {
  if(clock_us(NULL,&now))return LP_CLOCK;
  struct lp_budget b={now+1000000,clock_us,NULL,NULL,&p->collision_index};
  return lp_validate_path(&p->path,&p->snapshot.world,&p->config,&m,&b);
+}
+int probe_recheck_suffix(void *pointer,unsigned index){
+ struct probe *p=pointer;uint64_t now;
+ if(index>=p->path.count||!lp_prepare_tracking(&p->path,&p->config,&p->tracking_geometry))return LP_INPUT;
+ if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_tracker progress={.initialized=true,.index=index,.progress=p->tracking_geometry.arc[index]};
+ struct lp_metrics metrics={0};
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
+ return lp_recheck_suffix(&p->path,&p->tracking_geometry,&p->snapshot.world,&p->config,&metrics,&budget,&progress);
 }
 /* One bounded test owner retains the Vehicle/path/World witness from the same
  * successful calculation. Prepared geometry inspection has no completed calc. */
@@ -340,14 +369,69 @@ int engine_force_node_limit(void *pointer,uint64_t now){
 }
 /* 새 내부 차로 소비 경계의 actual C 시험 ABI다. 운영 wire나 임무 발급이 아니다. */
 uint32_t probe_task_lane(void *pointer,float x,float y,float yaw,float error){
- struct probe *p=pointer;return tr_unique_lane(&p->snapshot.world,(dw_pose){x,y,yaw},error,&p->config);
+ struct probe *p=pointer;
+ const dw_world *w=&p->snapshot.world;
+ dw_pose pose={x,y,yaw};
+ uint32_t direct=tr_live_lane(w,pose,error,&p->config,NULL);
+ lp_index_build(&p->search.collision_index,w,&p->config);
+ uint32_t indexed=tr_live_lane(w,pose,error,&p->config,&p->search.collision_index);
+ return direct==indexed?direct:UINT32_MAX;
 }
 void probe_task_tape(void *pointer,float half_width){
- ((struct probe *)pointer)->config.lane_tape_half_width_m=half_width;
+ struct probe *p=pointer;p->config.lane_tape_half_width_m=half_width;
+ lp_index_build(&p->collision_index,&p->snapshot.world,&p->config);
+}
+int probe_lane_guide(void *pointer,uint32_t from,uint32_t to,float y,float goal_y){
+ struct probe *p=pointer;const dw_world *w=&p->snapshot.world;
+ if(p->decoded||!tr_basis_accept(&p->basis,w))return LP_INPUT;
+ struct tr_intent task={true,true,to,from,from,0};
+ uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,NULL};
+ struct lp_metrics metrics={0};
+ return lp_lane_guide(&p->search,&p->path,w,(dw_pose){.6f,y,0},0,0,(dw_pose){2.f,goal_y,0},
+  &p->config,budget,&task,&p->basis,&metrics,NULL,(struct lp_lane_guide_options){.inset_scale=1.0f});
+}
+static bool fixture_forward_lane(struct probe *p){
+ const dw_world *w=&p->snapshot.world;
+ if(!tr_basis_accept(&p->basis,w))return false;
+ struct lp_path *path=&p->path;
+ path->task=(struct tr_intent){true,false,1,1,1,0};
+ path->basis=p->basis;path->world_features=w->required_features;
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ return true;
+}
+int probe_prepare_forward_lane(void *pointer){
+ struct probe *p=pointer;if(!fixture_forward_lane(p))return LP_INPUT;
+ struct lp_path *path=&p->path;
+ path->count=301;
+ for(size_t i=0;i<path->count;i++)path->points[i].pose=(dw_pose){.5f+.01f*i,1.2f,0};
+ path->goal=path->points[path->count-1].pose;
+ return probe_valid(p);
+}
+int probe_lane_continuation(void *pointer){
+ struct probe *p=pointer;const dw_world *w=&p->snapshot.world;
+ if(!fixture_forward_lane(p))return LP_INPUT;
+ struct lp_path *path=&p->path;path->count=2;
+ path->points[0].pose=(dw_pose){1.995f,1.45f,0};
+ path->points[1].pose=(dw_pose){2.f,1.45f,0};
+ path->goal=path->points[1].pose;
+ p->config.margin=.002f;p->config.tracking_guard=.0025f;p->config.primitive_duration=.3f;
+ lp_index_build(&p->collision_index,w,&p->config);
+ uint64_t now;if(clock_us(NULL,&now))return LP_CLOCK;
+ struct lp_budget budget={now+1000000,clock_us,NULL,NULL,&p->collision_index};
+ struct lp_metrics metrics={0};
+ enum lp_result rc=lp_validate_path(path,w,&p->config,&metrics,&budget);
+ if(rc!=LP_PATH_FOUND)return -(int)rc;
+ return lp_continue_lane(path,w,&p->config,&metrics,&budget,false);
 }
 int probe_task_contains(void *pointer,uint32_t from,uint32_t to,int change,float x,float y,float yaw,float error){
  struct probe *p=pointer;struct tr_intent task={true,change!=0,to,from,from,0};struct tr_view view;
- return tr_open(&p->snapshot.world,&task,&view)&&tr_contains(&view,(dw_pose){x,y,yaw},error,&p->config);
+ const dw_world *world=&p->snapshot.world;dw_pose pose={x,y,yaw};
+ bool indexed=tr_open_indexed(world,&task,&p->collision_index,&view)&&tr_contains(&view,pose,error,&p->config);
+ bool original=tr_open(world,&task,&view)&&tr_contains(&view,pose,error,&p->config);
+ assert(indexed==original);
+ return indexed;
 }
 int probe_lane_change_terminal_path(void *pointer,float y){
  struct probe *p=pointer;
@@ -463,7 +547,7 @@ int probe_parking_cusp_fixture(void *pointer,unsigned strategy){
 bool probe_prepare_tracking(void *pointer){
  struct probe *p=pointer;
  p->parking_cache.ready=false;
- p->use_prepared_tracking=lp_prepare_tracking(&p->path,&p->tracking_geometry);
+ p->use_prepared_tracking=lp_prepare_tracking(&p->path,&p->config,&p->tracking_geometry);
  return p->use_prepared_tracking;
 }
 int probe_track_sample(void *pointer,unsigned index,uint64_t stamp,float velocity,float *out){

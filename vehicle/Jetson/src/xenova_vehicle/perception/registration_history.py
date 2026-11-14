@@ -21,7 +21,7 @@ class RegistrationObservation:
     ends: tuple
 
 
-def _in_current_frame(earlier, current):
+def in_current_frame(earlier, current):
     previous = earlier.odometry.sample
     now = current.odometry.sample
     dx, dy = previous.x-now.x, previous.y-now.y
@@ -52,13 +52,17 @@ def _in_current_frame(earlier, current):
     return tuple(points),ends
 
 
-def combined_constraints(history, current, reference, prior, profile, *, position_radius_m,
-                         max_lateral_match_m, max_age_us):
-    """자기 관측을 제외한 frozen map에 현재·이전 관측을 각각 대응시킨다."""
-    previous = tuple(frame for frame in history if frame.stream == current.stream
+def recent_observations(history, current, max_age_us):
+    return tuple(frame for frame in history if frame.stream == current.stream
         and frame.odometry.sample.context == current.odometry.sample.context
         and frame.odometry.captured_us[1] < current.odometry.captured_us[0]
         and current.odometry.captured_us[1]-frame.odometry.captured_us[0] <= max_age_us)
+
+
+def combined_constraints(history, current, reference, prior, profile, *, position_radius_m,
+                         max_lateral_match_m, max_age_us):
+    """자기 관측을 제외한 frozen map에 현재·이전 관측을 각각 대응시킨다."""
+    previous = recent_observations(history,current,max_age_us)
     if not previous:
         return (),reference
     captures = {current.capture,*(frame.capture for frame in previous)}
@@ -66,7 +70,7 @@ def combined_constraints(history, current, reference, prior, profile, *, positio
                                                  if segment.capture_id not in captures))
     selected = []
     for frame in (current,*reversed(previous)):
-        points,ends = (frame.points,dict(frame.ends)) if frame is current else _in_current_frame(frame,current)
+        points,ends = (frame.points,dict(frame.ends)) if frame is current else in_current_frame(frame,current)
         common = overlapping_points(points,reference,prior,profile,observed_ends=ends,
             position_radius_m=position_radius_m,max_lateral_match_m=max_lateral_match_m,include_endpoints=True)
         if frame is current and not common:

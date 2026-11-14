@@ -9,6 +9,7 @@ from xenova_gateway.feedback3 import Feedback3SerialSink
 def sink(kind):
     value=object.__new__(kind)
     value.started=0.;value.ready=False;value.timeout=.5;value.clock=lambda:0.1
+    value.fault=None;value.hello_sent_us=100000
     value.pending=OrderedDict();value.odometry=None
     value.framer=SimpleNamespace(invalid=0,oversize=0,frames=lambda raw:())
     value._serial=SimpleNamespace(read=lambda size:b'')

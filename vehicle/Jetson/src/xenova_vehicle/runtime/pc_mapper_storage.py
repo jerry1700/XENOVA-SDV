@@ -417,24 +417,30 @@ class PcMapperStorage:
         record=ProvenanceRecord(identity,PROVENANCE.pack(bytes.fromhex(record_context.sha256),3,0,4,0,
             UUID(self.context.pi_host_boot).bytes,lo,hi,observation.rgb.stamp.sequence,0,0,0,0,
             b''.join(struct.pack('<16sQQ',UUID(stream).bytes,seq,at) for stream,seq,at in keys),0,bytes(16)))
-        recent={k:pair for k,pair in self._recent_rgb.items() if k in result.temporal_rgb_sources}
-        if key in result.temporal_rgb_sources:recent[key]=record,record_context
+        active=result.temporal_rgb_sources | result.parking_rgb_sources
+        recent={k:pair for k,pair in self._recent_rgb.items() if k in active}
+        if key in active:recent[key]=record,record_context
         contexts={c.sha256:c for c in self._evidence.contexts};contexts[record_context.sha256]=record_context
         records={r.provenance_id:r for r in self._evidence.provenance};records[identity]=record
-        temporal_root=None
-        temporal=result.mapped_road
-        if (temporal is not None and prior_qualified and self._crossing is not None
-                and temporal.within(self.profile.pipeline.registration) and temporal.sources.issubset(recent)
-                and self._next+(len(temporal.sources)+1)//3<=self._grant.end_exclusive):
+        def temporal_root_for(sources):
+            if (key not in sources or not 2<=len(sources)<=12 or not sources.issubset(recent)
+                    or self._next+(len(sources)+1)//3>self._grant.end_exclusive):
+                return None
             originals=[]
-            for source in sorted(temporal.sources-{key}):
+            for source in sorted(sources-{key}):
                 parent,parent_context=recent[source];originals.append(parent)
                 records[parent.provenance_id]=parent;contexts[parent_context.sha256]=parent_context
             def allocate(_parents):
                 identity=self._next;self._next+=1
                 return identity
             for aggregate in aggregate_rgb_provenance(record,originals,allocate):
-                temporal_root=aggregate.provenance_id;records[temporal_root]=aggregate
+                records[aggregate.provenance_id]=aggregate
+            return aggregate.provenance_id
+        temporal=result.mapped_road
+        temporal_root=(temporal_root_for(temporal.sources) if temporal is not None and prior_qualified
+                       and self._crossing is not None and temporal.within(self.profile.pipeline.road_limits) else None)
+        parking_root=(temporal_root_for(frozenset((key,*(source for source,_ in result.parking_tape_history))))
+                      if prior_qualified and result.parking_tape_history else None)
         try:evidence=EvidenceTable(tuple(records[k] for k in sorted(records)),tuple(contexts[k] for k in sorted(contexts)))
         except ValueError as error:raise PcStorageNotReady('ORIGINAL_PC_EVIDENCE_CAPACITY') from error
         metric=MetricEvidence((observation.rgb.stamp.key,observation.depth.stamp.key),self.context.pi_host_boot,
@@ -451,10 +457,12 @@ class PcMapperStorage:
                 method_manifest_sha256=self.profile.sha256,input_kind='SYNTHETIC',calibration_profile=self.motion_profile.bound_calibration,
                 parking_aisles=self.profile.parking_aisles,
                 aisle_lane_indices=None if self.profile.catalog_policy is None else self.profile.catalog_policy.aisle_lane_indices,
-                crossing=self._crossing,lane_profile=self.profile.pipeline.registration,clock_us=self.clock)
+                crossing=self._crossing,lane_profile=self.profile.pipeline.registration,
+                road_geometry_limits=self.profile.pipeline.road_limits,clock_us=self.clock)
             if self._head is not None:self.catalogs.observe_heads(*self._head,now_us=now_us)
         draft=self.catalogs.prepare_pc(proof,result,capture_prior=capture_prior,registration_revision=registration_revision,
-            prior_qualified=prior_qualified,now_us=now_us,roi_bounds=roi_bounds,temporal_provenance_id=temporal_root)
+            prior_qualified=prior_qualified,now_us=now_us,roi_bounds=roi_bounds,temporal_provenance_id=temporal_root,
+            parking_provenance_id=parking_root)
         self._staged=PcStorageDraft(proof,draft,recent)
         return self._staged
 

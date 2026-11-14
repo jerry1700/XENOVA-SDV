@@ -27,6 +27,8 @@ xenova_platform_policy() {
     # Xen의 기본 저장/복원·자동 시작과 Xenova의 중복 실행을 막는다.
     install -d "${IMAGE_ROOTFS}${sysconfdir}/systemd/system"
     ln -snf /dev/null "${IMAGE_ROOTFS}${sysconfdir}/systemd/system/xendomains.service"
+    # Xen이 UART를 소유하므로 dom0는 아래에서 활성화하는 hvc0로 로그인한다.
+    rm -f "${IMAGE_ROOTFS}${sysconfdir}/systemd/system/getty.target.wants/serial-getty@ttyS0.service"
     # 공통 SD에서 PID1이 부팅 초기에 machine-id를 확정한다. 런타임에 ID를 교체하지 않는다.
     printf 'uninitialized\n' > "${IMAGE_ROOTFS}${sysconfdir}/machine-id"
     install -d "${IMAGE_ROOTFS}${localstatedir}/lib/dbus"

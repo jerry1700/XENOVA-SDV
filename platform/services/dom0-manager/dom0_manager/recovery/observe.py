@@ -155,19 +155,22 @@ class PlatformObserver:
                 for vm_id, intent in self._intents.items()]
 
     def _refresh_intents(self, now: float) -> None:
-        envelope = self._manager.call(self._action)
+        # 복구 실행이 공유 Manager를 점유해도 주기 조회는 독립 요청으로 검증한다.
+        fork = getattr(self._manager, "fork", None)
+        request_manager = (fork() if callable(fork) else None) or self._manager
+        envelope = request_manager.call(self._action)
         if self._action == "recovery-intents" and not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "INVALID_SPEC":
             self._action = "intents"
-            envelope = self._manager.call(self._action)
+            envelope = request_manager.call(self._action)
         if self._action == "intents" and not envelope.get("ok") and (envelope.get("error") or {}).get("code") == "INVALID_SPEC":
             log.warning("platform manager does not support intents; falling back to list (platform lock + Xen observation) every %.0fs",
                         self._refresh_s)
             self._action = "list"
-            envelope = self._manager.call("list")
+            envelope = request_manager.call("list")
         intents = _registrations(raise_for_envelope(envelope, context=f"recovery {self._action}"), self._action)
         if self._templates_at is None or now - self._templates_at >= self._refresh_s:
             try:
-                templates = raise_for_envelope(self._manager.call("templates"), context="recovery templates").get("templates") or []
+                templates = raise_for_envelope(request_manager.call("templates"), context="recovery templates").get("templates") or []
                 self._capabilities = {
                     (str(t.get("template_id") or t.get("id") or ""), str(t.get("template_version") or t.get("version") or "")): dict(t.get("capabilities") or {})
                     for t in templates

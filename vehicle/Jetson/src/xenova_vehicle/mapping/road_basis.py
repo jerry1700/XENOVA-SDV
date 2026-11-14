@@ -5,13 +5,14 @@ ego lane·회피 path·등록 FrozenReference가 아니며 scene/metric/이동 �
 모호함·재방문·64점 상한은 명시 section handoff가 필요한 HOLD로 보존한다.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction as F
 import math
 import struct
 from uuid import UUID
 
-from .lane_catalog import LaneCatalog,LaneModelCandidates
+from .lane_catalog import (LaneCatalog, LaneModelCandidates, _reobserved_boundary_overlap,
+                           _shared_boundary_overlap)
 from ..perception.inputs import FrameStamp
 from ..storage.contracts import StorageContext,canonical,json_bytes,uint
 from ..storage.records import PROVENANCE
@@ -105,12 +106,91 @@ class RoadBasisSnapshot:
     latest_lane_source: object
     latest_model_revision: int
     roots: tuple
+    lane_geometry: tuple = ()
 
     @property
     def points(self):return tuple(POINT.iter_unpack(self.points_f32))
 
     @property
     def geometry_error_m(self):return max((*self.point_error_m,*self.segment_error_m),default=0.)
+
+    def publication_lane(self, model):
+        """현재 구간과 같은 ID로 채택된 연속 관측만 한 차로 메시지에 합친다."""
+        if self.status != 'READY' or self.lane_ids != model.lane_ids:
+            return model.road, model.crossing
+        h = model.road.hypotheses[0]
+        if not _publication_chord(h):
+            return model.road, model.crossing
+        best = h
+        for prior in reversed(self.lane_geometry):
+            p = prior.road.hypotheses[0]
+            if prior is model or prior.crossing != model.crossing or not _publication_chord(p):
+                continue
+            if not _publication_overlap(h, p):
+                continue
+            combined = _join_publication_chords(p, h)
+            if combined.station_s[-1] > best.station_s[-1]:
+                best = combined
+        if best is h:
+            return model.road, model.crossing
+        return replace(model.road,hypotheses=(best,)), model.crossing*(len(best.divider)-1)
+
+
+def _publication_chord(shape):
+    return (len(shape.divider) == 2 and not any(shape.inferred)
+            and shape.outer_chord_bounds_m is not None and shape.boundary_normal_bounds_m is not None)
+
+
+def _publication_overlap(current, prior):
+    return (_shared_boundary_overlap(current, prior, minimum_overlap=.08,max_lateral=.025,max_angle=.10)
+            or _reobserved_boundary_overlap(current, prior, minimum_overlap=.15,max_lateral=.025,max_angle=.10))
+
+
+def _join_publication_chords(prior, current):
+    """Split overlapping observations at a common station and bound the seam displacement."""
+    a, b = prior.divider
+    c = current.divider[0]
+    if (c[0]-a[0])*(b[0]-a[0])+(c[1]-a[1])*(b[1]-a[1]) < 0.:
+        prior, current = current, prior
+    a, b = prior.divider
+    length = math.dist(a,b)
+    axis = ((b[0]-a[0])/length,(b[1]-a[1])/length)
+    start, end = (sum((p[i]-a[i])*axis[i] for i in (0,1)) for p in current.divider)
+    if start <= 0.:
+        return max((prior,current),key=lambda h:h.station_s[-1])
+    if end <= length:
+        return prior
+    seam = (start+length)/2
+    old_t, new_t = seam/length, (seam-start)/(end-start)
+    def point(edge,t):
+        return tuple(u+(v-u)*t for u,v in zip(*edge))
+    edges, pads, turns = [], [], []
+    for name in ('left_outer','divider','right_outer'):
+        old, new = getattr(prior,name), getattr(current,name)
+        old_seam, new_seam = point(old,old_t), point(new,new_t)
+        gap = math.dist(old_seam,new_seam)
+        old_span = math.dist(old[0],old_seam)
+        if old_span <= gap:
+            return max((prior,current),key=lambda h:h.station_s[-1])
+        edges.append((old[0],new_seam,new[1]))
+        pads.append(gap)
+        turns.append(math.asin(gap/old_span))
+    left, divider, right = edges
+    spans = (math.dist(*divider[:2]),math.dist(*divider[1:]))
+    chord = tuple(math.nextafter(max(prior.outer_chord_bounds_m[i]+pads[2*i],
+                                    current.outer_chord_bounds_m[i]),math.inf) for i in range(2))
+    if min(spans) <= 0 or any(
+            math.dist(a,b) <= chord[i] for i,edge in enumerate((left,right)) for a,b in zip(edge,edge[1:])):
+        return max((prior,current),key=lambda h:h.station_s[-1])
+    centers = tuple(tuple(point((a,b),.5) for a,b in zip(divider,edge)) for edge in (left,right))
+    # Rotating the first chord also rotates the direction in which its normal bound applies.
+    normal = tuple(math.nextafter(max(v+pad+prior.error_m*math.sin(turn),w),math.inf)
+        for v,w,pad,turn in zip(prior.boundary_normal_bounds_m,current.boundary_normal_bounds_m,pads,turns))
+    return replace(current,station_s=(0.,spans[0],sum(spans)),divider=divider,left_outer=left,right_outer=right,
+        left_center=centers[0],right_center=centers[1],inferred=(False,)*3,
+        error_m=math.nextafter(max(prior.error_m+max(pads),current.error_m),math.inf),
+        yaw_error_rad=math.nextafter(max(prior.yaw_error_rad+max(turns),current.yaw_error_rad),math.inf),
+        boundary_normal_bounds_m=normal,outer_chord_bounds_m=chord,boundary_observations=None)
 
 
 class RoadBasis:
@@ -141,11 +221,63 @@ class RoadBasis:
         origin=None if not self._events else self._events[0][0].source
         return RoadBasisSnapshot(self._status,self._reason,None if not self._ids else _id(self._scope['map_epoch'],self._ids),
             self.revision,self._raw,self._errors,self._segments,self._ids,origin,None if self._latest is None else self._latest.source,
-            0 if self._latest is None else self._latest.model_revision,self.roots)
+            0 if self._latest is None else self._latest.model_revision,self.roots,
+            tuple(event[0] for event in self._events))
+
+    def publication_model(self, catalog):
+        """Return the admitted geometry for the open basis, without renewing its source."""
+        model = self._latest
+        if (self._status == 'READY' and self._scope == _scope(catalog)
+                and model is not None and model.lane_ids == self._ids
+                and model.source.qualified and model.road.calibration_qualified
+                and model.original_context_sha256 == catalog.context.sha256
+                and catalog.durable_hwm is not None and all(i < catalog.durable_hwm for i in self._ids)):
+            return model
+        return None
 
     def _hold(self,model,resolution,reason):
         if self._handoff is None:self._handoff=(model,resolution,reason)
         self._status='SECTION_HANDOFF_REQUIRED';self._reason=self._handoff[2]
+
+    def _append_observed_chord(self, model, resolution, old, raw, points, errors):
+        """공유 실선 관측으로 같은 구간 끝이 확인된 경우 기존 prefix를 연장한다."""
+        previous = self._events[-1][0]
+        current, prior = model.road.hypotheses[0], previous.road.hypotheses[0]
+        if (model.crossing != previous.crossing or len(points) != 2
+                or not (_shared_boundary_overlap(current, prior, minimum_overlap=2*resolution,
+                        max_lateral=resolution/2, max_angle=.10)
+                        or _reobserved_boundary_overlap(current, prior, minimum_overlap=3*resolution,
+                            max_lateral=resolution/2, max_angle=.10))):
+            return False
+        if old[-1] != POINT.unpack(POINT.pack(*prior.divider[-1])):
+            return False
+        a,b = points
+        length = math.dist(a,b)
+        ux,uy = (b[0]-a[0])/length,(b[1]-a[1])/length
+        x,y = old[-1][0]-a[0],old[-1][1]-a[1]
+        along, across = x*ux+y*uy, abs(y*ux-x*uy)
+        # 현재 창이 기존 prefix 안쪽에서 끝나면 확인된 끝점을 보존한다.
+        if along >= length:
+            self._status='READY';self._reason=None
+            return True
+        if along < 0. or across > resolution/2:
+            return False
+        if length-along > resolution/2:
+            if len(old) == 64:
+                self._hold(model,resolution,'POINT_CAP')
+                return True
+            combined = old+(b,)
+            point_errors = self._errors+(errors[-1],)
+            segment_errors = self._segments+(math.nextafter(max(self._errors[-1],*errors)+across,math.inf),)
+            if _revisit(combined,point_errors,resolution,segment_errors):
+                self._hold(model,resolution,'CLOSED_OR_REVISITED_ROAD')
+                return True
+            self._raw += raw[-POINT.size:]
+            self._errors,self._segments = point_errors,segment_errors
+            self._events.append((model,resolution))
+            self.revision += 1
+        self._status='READY';self._reason=None
+        return True
 
     def _apply(self,model,resolution):
         h=model.road.hypotheses[0];raw,points,errors=_pack(h.divider,h.error_m)
@@ -158,6 +290,10 @@ class RoadBasis:
             self._status='READY';self._reason=None;return
         old=tuple(POINT.iter_unpack(self._raw))
         if model.lane_ids!=self._ids:self._hold(model,resolution,'DIFFERENT_LANE_PAIR');return
+        if model.road.reasons == ('REOBSERVED_MAP_TAPE',) and raw == self._raw and errors == self._errors:
+            # 같은 차로의 원 좌표를 현재 RGB로 다시 확인했다. 이어붙일 새 구간이 없다.
+            self._status='READY';self._reason=None;return
+        if self._append_observed_chord(model,resolution,old,raw,points,errors):return
         pairs=[(i,j) for i in range(len(old)-1) for j in range(len(points)-1)
             if _contact(old[i],old[i+1],points[j],points[j+1],self._segments[i]+max(errors[j:j+2]))]
         groups=_components(pairs)

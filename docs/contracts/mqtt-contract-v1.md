@@ -119,7 +119,7 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 <a id="demo-commands"></a>
 ### 3.2 데모 명령 (MQTT-04·05)
 
-격리·자동 복구 시연용 명령이다. Linux의 `stress`·`agent_exit`는 에이전트 설정 `XENOVA_AGENT_DEMO_COMMANDS=1`일 때만 실행한다. Zephyr drive-v1은 같은 VM command 토픽에서 `auto_delay`를 실행한다. CPU 사용률과 주행 deadline 장애 시연은 AUTO 스레드가 busy wait하는 `auto_delay`로 수행한다.
+격리·자동 복구 시연용 명령이다. Linux의 `stress`·`agent_exit`는 에이전트 설정 `XENOVA_AGENT_DEMO_COMMANDS=1`일 때만 실행한다. 배포 유닛(`xenova-agent.service`)이 이 값을 항상 1로 두므로, 그 유닛으로 만든 템플릿 이미지에서는 기본으로 켜져 있다(2026-11-14). Zephyr drive-v1은 같은 VM command 토픽에서 `auto_delay`를 실행한다. CPU 사용률과 주행 deadline 장애 시연은 AUTO 스레드가 busy wait하는 `auto_delay`로 수행한다.
 
 **명령 (MQTT-04)**: 봉투는 2장 예외(`boot_id`·`agent_instance_id`·`seq` 없음)이고 `vm_id` 는 대상 VM, `type` 은 `agent.command` 다. 에이전트는 command 토픽에 온 다른 type 은 실행하지 않고 버린다. payload:
 
@@ -610,7 +610,7 @@ VM 간 메시지 지연은 왕복 시간(RTT)으로 잰다. 일방향 지연이�
 | 각 VM (username = `vm_id`. Linux 에이전트와 공통 Zephyr 직접 MQTT 가 같은 계정 규칙) | v1 `xenova/v1/vms/{자기 vm_id}/heartbeat`·`inventory`·`metrics`·`command-result`, `xenova/v1/vms/{자기 vm_id}/apps/autonomous/events`·`.../apps/manual/events`(verified 앱 이벤트), `xenova/v1/vms/{자기 vm_id}/drive/link/out`(DriveLink, [drive-world](drive-world/README.md)), `xenova/v1/probes/#`, v2 `xenova/v2/vms/{자기 vm_id}/telemetry/inventory`·`heartbeat`·`metrics`·`events`·`snapshot`. Zephyr 앱 이벤트는 토픽과 봉투 VM/app 를 대조하고 현재 실행은 root 바인딩으로 확인 |
 | legacy 앱 계정 (`autonomous`·`manual`·`interaction`) | `xenova/v1/apps/{자기 app_id}/events`, `xenova/v1/probes/#`. `message-board` 계정은 정책에 남아 있으나 기본 생성하지 않는다(`default: false`) |
 | 젯슨 (`perception`) | `xenova/v1/apps/perception/events`, `xenova/v1/probes/#` |
-| 게이트웨이 (`gateway`) | `xenova/v1/vehicle/control`, `xenova/v1/vehicle/status`, `xenova/v1/vehicle/state.pb`([drive-world](drive-world/README.md)), `xenova/v1/apps/vehicle/events`, `xenova/v1/vms/+/drive/link/in`, `xenova/v1/probes/#` |
+| 게이트웨이 (`gateway`) | `xenova/v1/vehicle/control`, `xenova/v1/vehicle/status`, `xenova/v1/vehicle/state.pb`([drive-world](drive-world/README.md)), `xenova/v1/apps/manual/input`(중립 준비와 수동 입력), `xenova/v1/apps/vehicle/events`, `xenova/v1/vms/+/drive/link/in`, `xenova/v1/probes/#` |
 | 백엔드 (`backend`) | `xenova/v1/apps/manual/input`, `xenova/v1/vms/+/command`, `xenova/v1/vms/+/inventory` (VM 삭제 때 retained 지우기, 3장), `xenova/v1/console/resume`, `xenova/v1/sim/command` (12장), `xenova/v1/probes/#` |
 | 시뮬레이터 (`simulator`, 시뮬레이터 구성만) | `xenova/v1/sim/pose`·`sim/world`·`sim/result`. 구독은 `xenova/v1/sim/command` 만. `vehicle.status` 는 게이트웨이 대역으로 `gateway` 계정을 따로 쓴다 (12장) |
 | VM 별 Telemetry (`telemetry-{vm_id}`) | `xenova/v1/vms/{자기 vm_id}/metrics`, v2 `xenova/v2/vms/{자기 vm_id}/telemetry/inventory`·`heartbeat`·`metrics`·`events`·`snapshot`. 읽기 없음 |

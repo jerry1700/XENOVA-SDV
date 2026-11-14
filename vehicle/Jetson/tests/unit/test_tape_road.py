@@ -109,6 +109,40 @@ class RoadHypothesisTests(unittest.TestCase):
         self.assertFalse(result.complete)
         self.assertIn('DASH_CHAIN_AMBIGUOUS', result.reasons)
 
+    def test_adjacent_short_dashes_can_agree_on_direction_across_raster_steps(self):
+        graph = TapeGraph((
+            strip(0, ((.2, .3), (1.2, .3))), strip(1, ((.2, -.3), (1.2, -.3))),
+            strip(2, ((.36, -.05), (.39, -.04))), strip(3, ((.43, -.03), (.46, -.04))),
+            strip(4, ((.50, -.04), (.52, -.04))), strip(5, ((.57, -.04), (.84, -.05)))),
+            profile=TapeProfile(cell_m=.01))
+
+        result = infer_road(graph)
+
+        self.assertEqual(result.status, 'PARTIAL')
+        self.assertEqual(result.hypotheses[0].strip_ids[1], (2, 3, 4, 5))
+        self.assertTrue(any(result.hypotheses[0].inferred))
+
+    def test_outer_line_keeps_forward_span_when_tail_turns_sideways(self):
+        graph = TapeGraph((strip(0, ((.2, .3), (1.2, .3))), strip(1, ((.2, 0.), (1.2, 0.))),
+            strip(2, ((.2, -.3), (.85, -.3), (.86, -.5), (.82, -.65)), end='FOV_clip')))
+
+        result = infer_road(graph)
+
+        self.assertEqual(result.status, 'VALID')
+        self.assertEqual(result.hypotheses[0].strip_ids, ((0,), (1,), (2,)))
+        self.assertLessEqual(result.hypotheses[0].right_outer[-1][0], .85)
+
+    def test_uncertain_heading_at_end_preserves_the_supported_common_run(self):
+        divider = replace(strip(1, ((.2, 0.), (.8, 0.), (.85, .025)), error=.03),
+                          point_error_xy=((.02, .02),) * 3)
+        graph = TapeGraph((strip(0, ((.2, .3), (1.2, .3))), divider, strip(2, ((.2, -.3), (1.2, -.3)))))
+
+        result = infer_road(graph)
+
+        self.assertEqual(result.status, 'VALID')
+        self.assertLessEqual(result.hypotheses[0].divider[-1][0], .8)
+        self.assertGreater(result.hypotheses[0].divider[-1][0], .6)
+
     def test_32_choose_3_does_not_become_unique_after_only_4096_combinations(self):
         graph = straight_graph(tuple(-.05 + i * .003 for i in range(32)))
         result = infer_road(graph)
@@ -216,6 +250,83 @@ class TapeImageTests(unittest.TestCase):
         self.assertLessEqual(graph.work['edge_tests'], self.profile.edge_work_cap)
         self.assertTrue(all(all(v is not None and v >= s.error_m for v in s.endpoint_error_m)
                             for s in graph.strips))
+
+    def test_dim_tape_edge_joins_bright_core_without_joining_the_carpet(self):
+        from xenova_vehicle.perception.tape import _white_band
+
+        np = self.np
+        hsv = np.zeros((32, 40, 3), dtype=np.uint8)
+        hsv[..., 2] = 35
+        hsv[5:27, 4:6, 2] = (165, 245)
+        hsv[4:28, 20:34, 2] = 170
+        hsv[5:27, 19, 2] = 245
+        hsv[5:27, 37, 2] = 165
+        visible = np.ones(hsv.shape[:2], dtype=np.bool_)
+        visible[15, 4] = False
+
+        mask = _white_band(np, self.cv2, hsv, visible, replace(self.profile, cell_m=.01))
+
+        self.assertTrue(mask[16, 4])
+        self.assertTrue(mask[16, 5])
+        self.assertTrue(mask[16, 19])
+        self.assertFalse(mask[16, 20])
+        self.assertFalse(mask[16, 37])
+        self.assertFalse(mask[15, 4])
+
+    def test_closing_respects_metric_gap_length_and_the_entire_occlusion_mask(self):
+        from xenova_vehicle.perception.tape import _close_tape_gaps
+
+        np = self.np
+        white = np.zeros((20, 25), dtype=np.bool_)
+        white[[2, 5], 2] = True
+        white[[2, 5], 7] = True
+        white[[2, 6], 12] = True
+        white[10, [2, 5]] = True
+        white[[12, 14], [12, 14]] = True
+        white[[12, 14], [22, 20]] = True
+        eligible = np.ones_like(white)
+        eligible[3, 7] = False
+
+        filled = _close_tape_gaps(white, eligible, .005)
+
+        expected = white.copy()
+        expected[3:5, 2] = expected[10, 3:5] = True
+        expected[13, [13, 21]] = True
+        np.testing.assert_array_equal(filled, expected)
+        self.assertFalse(white[3, 2])
+
+        white[17, [2, 4]] = True
+        one_cm_grid = _close_tape_gaps(white, eligible, .01)
+        self.assertTrue(one_cm_grid[17, 3])
+        self.assertTrue(one_cm_grid[13, 13])
+        self.assertFalse(one_cm_grid[3:5, 2].any())
+        np.testing.assert_array_equal(_close_tape_gaps(white, eligible, .02), white)
+
+    def test_four_and_five_cm_dash_tape_survives_and_forms_a_divider(self):
+        from xenova_vehicle.perception.calibration import CameraModel
+
+        np = self.np
+        # Independent pinhole renderer for 12mm tape, with the 1cm live birdview grid.
+        camera = CameraModel(640, 360, ((400., 0., 320.), (0., 400., 180.), (0., 0., 1.)),
+            self.camera.rotation, (.8, 0., 1.), pixel_error=0.)
+        forward = .8 + (180 - np.arange(360))[:, None] / 400.
+        lateral = (320 - np.arange(640))[None, :] / 400.
+        white = (forward >= .43) & (forward <= 1.17) & (abs(abs(lateral) - .285) <= .006)
+        for start, length in zip((.48, .59, .70, .81, .92, 1.03), (.04, .05) * 3):
+            white |= (forward >= start) & (forward <= start + length) & (abs(lateral) <= .006)
+        white |= (forward >= .55) & (forward <= .60) & (abs(lateral - .14) <= .006)
+        image = np.repeat(np.where(white, 245, 30).astype(np.uint8)[:, :, None], 3, axis=2)
+        graph = extract_tape(image, camera, self.plane,
+            TapeProfile(x_min_m=.36, x_max_m=1.24, y_min_m=-.5, y_max_m=.5, cell_m=.01))
+        divider = [s for s in graph.strips if all(abs(y) < .04 for _, y in s.points_xy)]
+        self.assertEqual(len(divider), 6)
+        isolated = [s for s in graph.strips if all(.1 < y < .2 for _, y in s.points_xy)]
+        self.assertEqual(len(isolated), 1)
+        road = infer_road(graph)
+        self.assertEqual(road.status, 'PARTIAL')
+        self.assertEqual(set(road.hypotheses[0].strip_ids[1]), {s.local_id for s in divider})
+        self.assertTrue(any(road.hypotheses[0].inferred))
+        self.assertTrue(all(isolated[0].local_id not in ids for ids in road.hypotheses[0].strip_ids))
 
     def test_t_and_x_junctions_are_split_instead_of_fit_as_one_line(self):
         for cross in (False, True):

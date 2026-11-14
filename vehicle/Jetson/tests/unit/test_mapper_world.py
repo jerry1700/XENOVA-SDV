@@ -5,12 +5,13 @@
 """
 
 from dataclasses import replace
+import math
 import struct
 import unittest
 
 import test_mapper_sensor_state as sensors_fixture
 import test_world_adapter as road_fixture
-from xenova_drive_world import schema, decode
+from xenova_drive_world import schema, decode, encode
 from xenova_vehicle.mapping.alignment import MapOdomAlignment
 from xenova_vehicle.mapping.lane_catalog import LaneCatalog, LaneSource
 from xenova_vehicle.mapping.local_map import EvidenceGrid, GridSpec
@@ -26,6 +27,8 @@ from xenova_vehicle.runtime.mapper_catalogs import CatalogDraft, CatalogView, Ma
 from xenova_vehicle.runtime.mapper_compute import MapperInput
 from xenova_vehicle.runtime.mapper_mapping import MappingFrameDraft
 from xenova_vehicle.runtime.mapper_world import build_mapping_world
+from xenova_vehicle.runtime.mapper_profile import StoppingLimits
+from xenova_vehicle.perception.temporal_road import RoadLink
 from xenova_vehicle.runtime.parking_bridge import ParkingBridge, ParkingPublication
 from xenova_vehicle.runtime.resident_samples import CaptureSample
 from xenova_vehicle.runtime.scene import SceneEvidenceScope
@@ -109,7 +112,8 @@ class MapperWorldTests(unittest.TestCase):
         summary = dict(kind='LIVE', calibration_id=self.calibration.sha256, rgb_source_key=stamp.key,
             now_us=self.now, localization_qualified=True, quarantined=False, alignment_metadata=self.alignment.fields())
         result = PerceptionResult(summary, TapeGraph((), source_key=stamp.key), road, None, None,
-            self.grid.snapshot(self.now, clock_id=stamp.clock_id), None)
+            self.grid.snapshot(self.now, clock_id=stamp.clock_id), None,
+            mapped_odometry=self.alignment.apply(self.inputs.pose))
         catalog = CatalogDraft(self.item, self.context, 0, self.state)
         self.draft = MappingFrameDraft(self.item, self.context, self.pipeline, None, self.inputs, frame,
             None, 0, True, 'READY', catalog, result)
@@ -144,6 +148,7 @@ class MapperWorldTests(unittest.TestCase):
         self.assertEqual((loc.registration_revision, loc.observed_mapper_us, loc.valid_for_us, loc.timestamp_error_us),
             (9, 1_000_000, 100_000, 200))
         self.assertGreaterEqual(loc.anchor_position_bound_m, expected.position_error_m)
+        self.assertAlmostEqual(loc.anchor_position_bound_m, expected.position_error_m, places=7)
         self.assertGreaterEqual(loc.position_drift_bound_mps, self.alignment.position_drift_mps)
         self.assertEqual(value.calibration, self.calibration.vehicle_bundle_sha256)
         self.assertEqual(built.source.calibration_id, self.calibration.sha256)
@@ -166,6 +171,75 @@ class MapperWorldTests(unittest.TestCase):
         self.assertGreaterEqual(value.left_boundary[-1].x, x0+value.width*value.resolution_m)
         self.assertGreaterEqual(value.left_boundary[0].y, y0+value.height*value.resolution_m)
         self.assertNotAlmostEqual(value.left_boundary[0].y, self.model.road.hypotheses[0].left_outer[0][1])
+
+    def test_current_pose_publishes_prior_lanes_and_does_not_refresh_cell_age(self):
+        from xenova_vehicle.mapping.local_map import FREE, OCCUPIED
+        self.grid.state[0,0],self.grid.state[0,1] = FREE,OCCUPIED
+        self.grid.time_known[0,:2] = True
+        self.grid.observed_us[0,0] = self.now-self.grid.free_ttl_us
+        self.grid.observed_us[0,1] = self.now-30_000
+        points = lambda x: ((x,.3),(x,0.),(x,-.3))
+        self.pipeline._temporal_road._store(tuple(
+            RoadLink(points(a),points(b),.001,frozenset(),(frozenset(),)*3,False,.002)
+            for a,b in ((-.5,0.),(0.,.5),(.5,1.))))
+        state = replace(self.state,view=replace(self.state.view,lane_status='UNKNOWN',lane=None,
+            road_basis=replace(self.basis,status='WAIT_CURRENT')))
+        result = replace(self.draft.result,tape=None,road=None)
+        draft = replace(self.draft,result=result,catalog_draft=replace(self.draft.catalog_draft,state=state))
+        value = self.build(draft=draft,state=state,stopping=StoppingLimits(.5,1.,10_000,50_000,30_000,.005)).message()
+        self.assertEqual(value.observation_seq,71)
+        self.assertEqual(tuple(l.lane_id for l in value.lane_model.lanes),(101,102))
+        self.assertLess(value.lane_model.divider[0].x,-.2)
+        self.assertGreaterEqual(value.lane_model.divider[-1].x,.5)
+        self.assertEqual(list(value.occupancy[:2]),[255,100])
+        self.assertEqual(struct.unpack_from('<II',value.age_le32),(500,30))
+
+    def test_corrected_capture_is_carried_to_the_original_vehicle_sample(self):
+        raw = self.inputs.pose.sample
+        vehicle = self.vehicle.pose_sample
+        mapped = replace(raw,x=raw.x+.02,y=raw.y-.01,yaw=raw.yaw+.025,
+                         position_error_m=.018,yaw_error_rad=.02)
+        result = replace(self.draft.result,mapped_odometry=replace(self.inputs.pose,sample=mapped),
+                         yaw_bias={'applied':True})
+        value = self.build(draft=replace(self.draft,result=result)).message()
+        dx,dy = vehicle.x-raw.x,vehicle.y-raw.y
+        c,s = math.cos(.025),math.sin(.025)
+        self.assertAlmostEqual(value.reference_vehicle_pose.x,mapped.x+c*dx-s*dy,places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.y,mapped.y+s*dx+c*dy,places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.yaw,vehicle.yaw+.025,places=7)
+        self.assertEqual(value.reference_odom_seq,self.vehicle.anchor.sequence)
+        self.assertEqual(value.localization.observed_mapper_us,1_000_000)
+        self.assertEqual(value.localization.valid_for_us,100_000)
+        self.assertGreaterEqual(value.localization.anchor_position_bound_m,.018)
+
+    def test_uncorrected_capture_uses_the_same_earlier_anchor_as_the_grid(self):
+        latest = replace(self.alignment, position_error_m=.045, yaw_error_rad=.01)
+        earlier = replace(latest, pose=(latest.pose[0]-.025, *latest.pose[1:]),
+                          position_error_m=.035, yaw_error_rad=.002,
+                          registration_revision=latest.registration_revision-1)
+        self.pipeline._alignment = latest
+        self.pipeline._propagation_anchor = earlier
+        _, mapped_capture = self.pipeline._propagate_odometry(self.inputs.pose)
+        self.assertEqual(mapped_capture, earlier.apply(self.inputs.pose))
+        bias = self.pipeline._yaw_bias.summary()
+        self.assertFalse(bias['applied'])
+        summary = dict(self.draft.result.summary, alignment_metadata=latest.fields())
+        result = replace(self.draft.result, summary=summary, mapped_odometry=mapped_capture, yaw_bias=bias)
+        value = self.build(draft=replace(self.draft, result=result)).message()
+        wire_sample = PoseEstimate(self.vehicle.pose_sample, self.vehicle.j_interval, self.vehicle.j_interval)
+        expected = earlier.apply(wire_sample).sample
+        self.assertAlmostEqual(latest.apply(wire_sample).sample.x-expected.x, .025, places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.x, expected.x, places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.y, expected.y, places=7)
+        self.assertAlmostEqual(value.reference_vehicle_pose.yaw, expected.yaw, places=7)
+        self.assertAlmostEqual(value.localization.anchor_position_bound_m, expected.position_error_m, places=7)
+        self.assertEqual(value.reference_odom_seq, self.vehicle.anchor.sequence)
+        self.assertEqual(value.localization.registration_revision, latest.registration_revision)
+        self.assertEqual(value.localization.valid_for_us, latest.valid_for_us)
+
+    def test_missing_capture_pose_holds_world_publication(self):
+        result = replace(self.draft.result, mapped_odometry=None)
+        self.assertIsNone(self.build(draft=replace(self.draft, result=result)))
 
     def test_original_alignment_expiry_and_completion_order_cannot_be_renewed(self):
         self.assertIsNone(self.build(published_j_us=self.alignment.observed_j_interval[0]+self.alignment.valid_for_us))
@@ -232,7 +306,9 @@ class MapperWorldTests(unittest.TestCase):
             self.source['clock_epoch'], self.context)
         state = replace(self.state, view=replace(self.state.view, parking=inventory))
         draft = replace(self.draft, catalog_draft=replace(self.draft.catalog_draft, state=state))
-        value = self.build(draft=draft, state=state).message()
+        built = self.build(draft=draft, state=state)
+        self.assertEqual(built.payload, encode(inventory.apply(baseline)))
+        value = built.message()
         self.assertEqual(value.required_features, 15)
         self.assertEqual(value.parking_set, meta)
         self.assertFalse(value.HasField('scene'))

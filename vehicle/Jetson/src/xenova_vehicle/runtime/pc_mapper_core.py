@@ -74,8 +74,7 @@ class PcMapperCore:
         self.motion_profile,self.profile,self.binding,self.context,self.storage=motion_profile,mapper_profile,binding,context,storage
         self.calibration,self.clock,self._source_bytes=motion_profile.bound_calibration,clock,source_bytes
         self._pc_owner_token=pc_owner_token;self._thread=get_ident()
-        self._pipeline=PerceptionPipeline(self.calibration,mapper_profile.pipeline,targets=mapper_profile.targets,
-                                          parking_entrance_diagnostics=False)
+        self._pipeline=PerceptionPipeline(self.calibration,mapper_profile.pipeline,targets=mapper_profile.targets)
         self._staged=self._retired=None;self._terminal_token=None;self._world_sequence=0
 
     def _owner(self):
@@ -162,9 +161,12 @@ class PcMapperCore:
             return _development_stopping(grid,pose,snapshot,config.stopping,at_us,current_sensors=current_sensors)
         draft=None;world=None;world_lease=None;reasons=[]
         try:
+            catalogs = self.storage.catalogs
+            parking_clearance = () if catalogs is None else catalogs.parking_clearance_targets(self.clock())
             result=core.process(frame.observation,pose=inputs.pose,now_us=self.clock(),completed_clock=self.clock,
                 checkpoint=checkpoint,motion_qualified=config.motion_qualified,needed_region_factory=needed,
-                cycle_bound_us=config.stopping.cycle_bound_us,completion_bound_us=config.stopping.completion_bound_us,**args)
+                cycle_bound_us=config.stopping.cycle_bound_us,completion_bound_us=config.stopping.completion_bound_us,
+                parking_clearance=parking_clearance,**args)
             refresh();now=self.clock()
             if checkpoint is not None:checkpoint('PC_CATALOG_PREPARE')
             if result.summary.get('rgb_updated') is not True:reasons.append('DUPLICATE_RGB')
@@ -189,7 +191,9 @@ class PcMapperCore:
                     draft=self.storage.prepare_frame(frame,snapshot,result,current_pc_view=current_pc_view,
                         capture_prior=mapped,registration_revision=0 if alignment is None else alignment.registration_revision,
                         prior_qualified=qualified,now_us=self.clock(),roi_bounds=(low[0],low[1],high[2],high[3]),current_sensors=current_sensors)
-                    view=draft.catalog.view;model=view.lane;basis=view.road_basis
+                    view=draft.catalog.view;state=draft.catalog.state
+                    model=state.road_basis.publication_model(state.lane)
+                    basis=state.road_basis.snapshot()
                     reasons.extend(view.reasons)
                     if model is None:
                         association=draft.catalog.state.lane.current_association
@@ -202,7 +206,8 @@ class PcMapperCore:
                         self._world_sequence+=1
                         world=build_development_world(core,model,basis,snapshot,inputs,context=self.context,
                             calibration=self.calibration,source_bytes=self._source_bytes,
-                            sequence=self._world_sequence,now_us=self.clock(),current_sensors=current_sensors,pc_owner_token=self._pc_owner_token)
+                            sequence=self._world_sequence,now_us=self.clock(),current_sensors=current_sensors,
+                            pc_owner_token=self._pc_owner_token,parking=view.parking,stopping=config.stopping)
                         world_lease=current_sensors.clock_lease
                 except (PcStorageNotReady,CatalogNotReady,DevelopmentMappingNotReady,WorldBuildError) as error:
                     reasons.append(str(error))

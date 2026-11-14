@@ -73,6 +73,11 @@ static int terminate(void *p,unsigned reason) {
  BUILD_ASSERT(SHUTDOWN_poweroff==0&&SHUTDOWN_reboot==1,"fixed Xen shutdown ABI");
  return HYPERVISOR_sched_op(SCHEDOP_shutdown,&op);
 }
+int xshutdown_crash(void) {
+ int rc=terminate(NULL,SHUTDOWN_crash);
+ /* A successful crash shutdown never returns to the guest. */
+ return rc?rc:-EIO;
+}
 static void watcher(void *a,void *b,void *c) {
  ARG_UNUSED(a);ARG_UNUSED(b);ARG_UNUSED(c);
  /* All paths after creation release this barrier, including publication failure. */
@@ -133,6 +138,7 @@ int xshutdown_start(xshutdown_hook hook,void *context) {
  launched=true;
  k_thread_create(&thread,shutdown_stack,K_THREAD_STACK_SIZEOF(shutdown_stack),watcher,
                  NULL,NULL,NULL,CONFIG_XENOVA_SHUTDOWN_THREAD_PRIORITY,0,K_NO_WAIT);
+ (void)k_thread_name_set(&thread,"xen-shutdown");
  char feature[XS_PATH_LIMIT];
  atomic_set(&features_possible,1); /* Error can follow a successful remote write. */
  snprintf(feature,sizeof(feature),"%s/control/feature-poweroff",domain_path);

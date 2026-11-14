@@ -289,8 +289,8 @@ static bool probe(struct bench *b, const uint8_t *pi, const uint8_t *device, uin
 		if (!b->link.probe_held) {
 			return false;
 		}
-		if (b->hw.now < b->link.sample_us + FB3_SAMPLE_GAP_US) {
-			fake_run(&b->hw, b->link.sample_us + FB3_SAMPLE_GAP_US);
+		if (b->hw.now < b->link.sample_us + FB3_SENSOR_PERIOD_US) {
+			fake_run(&b->hw, b->link.sample_us + FB3_SENSOR_PERIOD_US);
 		}
 		if (!spin(b, &out)) {
 			return false;
@@ -1100,12 +1100,12 @@ static void test_sensor_period(void)
 	struct fb3_sensor s, extra;
 	uint64_t at, last;
 
-	current = "sensor: CLOCK_REPLY 의 표본에서 반 주기 뒤에 첫 표본";
+	current = "sensor: CLOCK_REPLY 의 표본에서 한 주기 뒤에 첫 표본";
 	start(&b);
 	at = open_with_lease(&b, 900000);
-	CHECK(quiet_until(&b, at + FB3_SENSOR_PERIOD_US / 2 - 1));
-	fake_run(&b.hw, at + FB3_SENSOR_PERIOD_US / 2);
-	CHECK(sensor(&b, &s) && s.source_sample == 2 && s.source_device_us == at + FB3_SENSOR_PERIOD_US / 2);
+	CHECK(quiet_until(&b, at + FB3_SENSOR_PERIOD_US - 1));
+	fake_run(&b.hw, at + FB3_SENSOR_PERIOD_US);
+	CHECK(sensor(&b, &s) && s.source_sample == 2 && s.source_device_us == at + FB3_SENSOR_PERIOD_US);
 
 	current = "sensor: 그 뒤로 20 ms 마다, 순번은 하나씩";
 	for (unsigned i = 0; i < 5; i++) {
@@ -1155,22 +1155,22 @@ static void test_sensor_shares_samples_with_reply(void)
 
 	start(&b);
 	at = open_with_lease(&b, 900000);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.source_sample == 2);
-	fake_run(&b.hw, at + 30000);
+	fake_run(&b.hw, at + 40000);
 	CHECK(sensor(&b, &s) && s.source_sample == 3);
 
 	current = "sensor: CLOCK_REPLY 가 같은 순번을 이어 씀";
-	fake_run(&b.hw, at + 42000);
+	fake_run(&b.hw, at + 62000);
 	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
-	CHECK(reply.source_sample == 4 && reply.d2_device_receive_us == at + 42000
-	      && reply.latch_device_us == at + 42000);
+	CHECK(reply.source_sample == 4 && reply.d2_device_receive_us == at + 62000
+	      && reply.latch_device_us == at + 62000);
 
-	current = "sensor: CLOCK_REPLY 뒤에는 그 표본에서 반 주기 뒤에";
-	CHECK(quiet_until(&b, at + 42000 + FB3_SENSOR_PERIOD_US / 2 - 1));
-	fake_run(&b.hw, at + 42000 + FB3_SENSOR_PERIOD_US / 2);
-	CHECK(sensor(&b, &s) && s.source_sample == 5 && s.source_device_us == at + 52000 && s.clock_sequence == 1);
-	CHECK(quiet_until(&b, at + 52000 + FB3_SENSOR_PERIOD_US - 1));
+	current = "sensor: CLOCK_REPLY 뒤에도 그 표본에서 한 주기 뒤에";
+	CHECK(quiet_until(&b, at + 62000 + FB3_SENSOR_PERIOD_US - 1));
+	fake_run(&b.hw, at + 62000 + FB3_SENSOR_PERIOD_US);
+	CHECK(sensor(&b, &s) && s.source_sample == 5 && s.source_device_us == at + 82000 && s.clock_sequence == 1);
+	CHECK(quiet_until(&b, at + 82000 + FB3_SENSOR_PERIOD_US - 1));
 }
 
 static void test_probe_close_to_sample(void)
@@ -1184,32 +1184,32 @@ static void test_probe_close_to_sample(void)
 	struct fb3_sensor s;
 	uint64_t at, last;
 
-	current = "간격: 앞 표본에 붙어 온 probe 에는 간격이 찬 뒤에 답함";
+	current = "간격: 앞 표본에서 한 주기가 지나기 전에 온 probe 에는 다음 표본 자리에서 답함";
 	start(&b);
 	at = open_with_lease(&b, 900000);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.source_sample == 2);
 	last = s.source_device_us;
 	pass(&b, 1000);
 	CHECK(!push_probe(&b, PI_A, 2, &out) && b.link.probe_held);
 	CHECK(b.link.sample_sequence == 2 && b.link.probe_fence == 1);
-	CHECK(quiet_until(&b, last + FB3_SAMPLE_GAP_US - 1) && b.link.probe_held);
-	fake_run(&b.hw, last + FB3_SAMPLE_GAP_US);
+	CHECK(quiet_until(&b, last + FB3_SENSOR_PERIOD_US - 1) && b.link.probe_held);
+	fake_run(&b.hw, last + FB3_SENSOR_PERIOD_US);
 	memset(&reply, 0, sizeof reply);
 	CHECK(spin(&b, &out) && out.id == FB3_CLOCK_REPLY_ID
 	      && fb3_unpack_clock_reply(out.payload, out.length, &reply));
 	CHECK(reply.probe_sequence == 2 && reply.d2_device_receive_us == last + 1000);
-	CHECK(reply.latch_device_us == last + FB3_SAMPLE_GAP_US && reply.d3_device_send_us == reply.latch_device_us);
+	CHECK(reply.latch_device_us == last + FB3_SENSOR_PERIOD_US && reply.d3_device_send_us == reply.latch_device_us);
 	CHECK(reply.source_sample == 3 && !b.link.probe_held && b.link.probe_fence == 2);
 
-	current = "간격: 그 응답의 표본에서 반 주기 뒤에 SENSOR";
+	current = "간격: 그 자리에 SENSOR 를 더 보내지 않고, 응답의 표본에서 한 주기 뒤에 SENSOR";
 	last = reply.latch_device_us;
-	CHECK(quiet_until(&b, last + FB3_SENSOR_PERIOD_US / 2 - 1));
-	fake_run(&b.hw, last + FB3_SENSOR_PERIOD_US / 2);
-	CHECK(sensor(&b, &s) && s.source_sample == 4);
+	CHECK(quiet_until(&b, last + FB3_SENSOR_PERIOD_US - 1) && b.link.sample_sequence == 3);
+	fake_run(&b.hw, last + FB3_SENSOR_PERIOD_US);
+	CHECK(sensor(&b, &s) && s.source_sample == 4 && s.source_device_us == last + FB3_SENSOR_PERIOD_US);
 
-	current = "간격: 간격이 지난 뒤에 온 probe 에는 곧바로 답함";
-	last = s.source_device_us + FB3_SAMPLE_GAP_US;
+	current = "간격: 한 주기가 지난 뒤에 온 probe 에는 곧바로 답함";
+	last = s.source_device_us + FB3_SENSOR_PERIOD_US;
 	fake_run(&b.hw, last);
 	memset(&reply, 0, sizeof reply);
 	CHECK(push_probe(&b, PI_A, 3, &out) && out.id == FB3_CLOCK_REPLY_ID
@@ -1223,7 +1223,7 @@ static void test_probe_close_to_sample(void)
 	CHECK(!push_probe(&b, PI_A, 5, &out) && b.link.probe_held);
 	CHECK(!push_probe(&b, PI_A, 4, &out) && !push_probe(&b, PI_A, 5, &out));
 	CHECK(b.link.refused[FB3_REASON_SEQUENCE_REPLAY] == 2 && b.link.probe_held);
-	fake_run(&b.hw, last + FB3_SAMPLE_GAP_US);
+	fake_run(&b.hw, last + FB3_SENSOR_PERIOD_US);
 	memset(&reply, 0, sizeof reply);
 	CHECK(spin(&b, &out) && out.id == FB3_CLOCK_REPLY_ID
 	      && fb3_unpack_clock_reply(out.payload, out.length, &reply));
@@ -1237,7 +1237,7 @@ static void test_probe_close_to_sample(void)
 	pass(&b, 1000);
 	b.hw.sensor_dead = true;
 	CHECK(!push_probe(&b, PI_A, 6, &out) && b.link.probe_held);
-	fake_run(&b.hw, last + FB3_SAMPLE_GAP_US);
+	fake_run(&b.hw, last + FB3_SENSOR_PERIOD_US);
 	CHECK(!spin(&b, &out) && !b.link.probe_held);
 	CHECK(b.link.refused[FB3_REASON_SENSOR_UNAVAILABLE] == 1 && b.link.probe_fence == 5 && b.link.sample_sequence == 6);
 	b.hw.sensor_dead = false;
@@ -1250,7 +1250,7 @@ static void test_probe_close_to_sample(void)
 	pass(&b, 1000);
 	CHECK(!push_probe(&b, PI_A, 7, &out) && b.link.probe_held);
 	CHECK(hello(&b, PI_B, CONFIG, &hello_ack) && !b.link.probe_held);
-	fake_run(&b.hw, last + FB3_SAMPLE_GAP_US);
+	fake_run(&b.hw, last + FB3_SENSOR_PERIOD_US);
 	CHECK(!spin(&b, &out) && b.link.sample_sequence == 7);
 }
 
@@ -1278,7 +1278,7 @@ static void test_sensor_lease_choice(void)
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
 	in = lease(PI_A, 2, 2, near);
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.source_sample == 3 && s.clock_sequence == 2);
 	fake_run(&b.hw, near - 1);
 	CHECK(sensor(&b, &s) && s.clock_sequence == 2 && s.source_device_us == near - 1);
@@ -1296,21 +1296,22 @@ static void test_sensor_lease_choice(void)
 	current = "lease: 새 lease 를 설치하면 다음 표본부터 그 lease 를 가리킴";
 	start(&b);
 	at = open_with_lease(&b, 900000);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.clock_sequence == 1);
 	fake_run(&b.hw, at + 22000);
 	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
 	in = lease(PI_A, 2, 2, at + 1200000);
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
-	fake_run(&b.hw, at + 32000);
+	CHECK(reply.latch_device_us == at + 40000);
+	fake_run(&b.hw, at + 60000);
 	CHECK(sensor(&b, &s) && s.clock_sequence == 2 && s.source_sample == 4);
 
 	current = "lease: 표본을 뜨는 사이 기한이 되면 보내지 않음";
 	start(&b);
 	at = open_and_probe(&b, 1);
-	in = lease(PI_A, 1, 1, at + 10014);
+	in = lease(PI_A, 1, 1, at + 20014);
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	b.hw.step = 7;
 	CHECK(!sensor(&b, &s) && b.link.sample_sequence == 1);
 	b.hw.step = 0;
@@ -1319,20 +1320,20 @@ static void test_sensor_lease_choice(void)
 	current = "lease: 표본 시각이 기한과 같으면 보내지 않음";
 	start(&b);
 	at = open_and_probe(&b, 1);
-	in = lease(PI_A, 1, 1, at + 10001);
+	in = lease(PI_A, 1, 1, at + 20001);
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
-	fake_run(&b.hw, at + 10000);
-	b.hw.sample.device_us = at + 10001;
+	fake_run(&b.hw, at + 20000);
+	b.hw.sample.device_us = at + 20001;
 	CHECK(!sensor(&b, &s) && b.link.sample_sequence == 1 && fb3_link_lease_live(&b.link, EPOCH, 1));
 
 	current = "lease: 기한 바로 앞의 표본은 보냄";
 	start(&b);
 	at = open_and_probe(&b, 1);
-	in = lease(PI_A, 1, 1, at + 10022);
+	in = lease(PI_A, 1, 1, at + 20022);
 	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	b.hw.step = 7;
-	CHECK(sensor(&b, &s) && s.source_device_us == at + 10014 && s.source_sample == 2);
+	CHECK(sensor(&b, &s) && s.source_device_us == at + 20014 && s.source_sample == 2);
 	b.hw.step = 0;
 }
 
@@ -1415,7 +1416,7 @@ static void test_sensor_stops(void)
 	current = "멈춤: lease 가 만료되면";
 	start(&b);
 	at = open_with_lease(&b, 100000);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.source_sample == 2);
 	fake_run(&b.hw, at + 100000);
 	CHECK(quiet_until(&b, at + 400000) && b.link.sample_sequence == 2 && b.cutoff.expired == 1);
@@ -1429,7 +1430,7 @@ static void test_sensor_stops(void)
 	current = "멈춤: 새 pi_session 이 오면 그 session 의 lease 가 생길 때까지";
 	start(&b);
 	at = open_with_lease(&b, 900000);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.source_sample == 2);
 	CHECK(hello(&b, PI_B, CONFIG, &hello_ack));
 	CHECK(quiet_until(&b, b.hw.now + 100000));
@@ -1464,12 +1465,12 @@ static void test_sensor_skips_bad_sample(void)
 	current = "건너뜀: 센서를 못 읽으면 순번을 쓰지 않고 한 주기 뒤에 다시 봄";
 	start(&b);
 	at = open_with_lease(&b, 900000);
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	b.hw.sensor_dead = true;
 	CHECK(!sensor(&b, &s) && b.link.sample_sequence == 1);
 	b.hw.sensor_dead = false;
-	CHECK(quiet_until(&b, at + 10000 + FB3_SENSOR_PERIOD_US - 1));
-	fake_run(&b.hw, at + 10000 + FB3_SENSOR_PERIOD_US);
+	CHECK(quiet_until(&b, at + 20000 + FB3_SENSOR_PERIOD_US - 1));
+	fake_run(&b.hw, at + 20000 + FB3_SENSOR_PERIOD_US);
 	CHECK(sensor(&b, &s) && s.source_sample == 2);
 
 	current = "건너뜀: 계약 밖 표본";
@@ -1637,6 +1638,15 @@ static struct fb3_command drive_command(uint64_t sequence, uint64_t stop_sequenc
 	c.stop_command_sequence = stop_sequence;
 	c.velocity_mmps = velocity;
 	c.steering_mrad = steering;
+	return c;
+}
+
+static struct fb3_command hold_command(uint64_t sequence, uint64_t stop_sequence, uint64_t clock_sequence,
+				       uint64_t cutoff, int16_t steering)
+{
+	struct fb3_command c = drive_command(sequence, stop_sequence, clock_sequence, cutoff, 0, steering);
+
+	c.command_kind = FB3_COMMAND_HOLD_STEER;
 	return c;
 }
 
@@ -2079,7 +2089,7 @@ static void test_drive_faults(void)
 	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_IDLE);
 
 	current = "비상정지: 끊긴 DRIVE 를 걸려 있는 것처럼 알리지 않음";
-	CHECK(sensor(&b, &s) && s.source_device_us < drive.cutoff_device_us - FB3_SAMPLE_GAP_US);
+	CHECK(sensor(&b, &s) && s.source_device_us < drive.cutoff_device_us - FB3_REPORT_MARGIN_US);
 	CHECK(!spin(&b, &frame) && !b.link.reporting);
 
 	current = "비상정지: 눌려 있는 동안의 DRIVE 는 거절";
@@ -2117,7 +2127,7 @@ static void test_reports_follow_samples(void)
 	start(&b);
 	at = ready_to_drive(&b);
 	CHECK(!spin(&b, &frame));
-	fake_run(&b.hw, at + 10000);
+	fake_run(&b.hw, at + 20000);
 	CHECK(sensor(&b, &s) && s.source_sample == 2);
 	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_APPLIED && r.command_sequence == 1);
 	CHECK(r.command_kind == FB3_COMMAND_STOP && r.report_sequence == 2);
@@ -2126,41 +2136,41 @@ static void test_reports_follow_samples(void)
 	CHECK(!spin(&b, &frame));
 
 	current = "보고: 누계가 100 ms 동안 그대로면 멈춘 것으로 알림";
-	for (unsigned i = 0; i < 4; i++) {
-		fake_run(&b.hw, at + 30000 + 20000 * i);
+	for (unsigned i = 0; i < 3; i++) {
+		fake_run(&b.hw, at + 40000 + 20000 * i);
 		CHECK(sensor(&b, &s) && next_report(&b, &r) && r.source_sample == 3 + i && r.stationary == 0);
 	}
-	fake_run(&b.hw, at + 110000);
-	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.source_sample == 7 && r.stationary == 1);
-	CHECK(r.report_sequence == 7);
+	fake_run(&b.hw, at + 100000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.source_sample == 6 && r.stationary == 1);
+	CHECK(r.report_sequence == 6);
 
 	current = "보고: 누계가 바뀌면 그 속도를 싣고 멈춘 시간을 다시 잼";
 	b.hw.sample.left_ticks += 100;
 	b.hw.sample.right_ticks += 100;
-	fake_run(&b.hw, at + 130000);
+	fake_run(&b.hw, at + 120000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.velocity_mmps == 820 && r.stationary == 0);
 	b.hw.sample.left_ticks -= 50;
-	fake_run(&b.hw, at + 150000);
+	fake_run(&b.hw, at + 140000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.velocity_mmps == -205 && r.stationary == 0);
 	for (unsigned i = 0; i < 4; i++) {
-		fake_run(&b.hw, at + 170000 + 20000 * i);
+		fake_run(&b.hw, at + 160000 + 20000 * i);
 		CHECK(sensor(&b, &s) && next_report(&b, &r) && r.velocity_mmps == 0 && r.stationary == 0);
 	}
-	fake_run(&b.hw, at + 250000);
+	fake_run(&b.hw, at + 240000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 1);
 
 	current = "보고: 한쪽 누계만 바뀌어도 멈춘 것이 아님";
 	b.hw.sample.right_ticks += 1;
-	fake_run(&b.hw, at + 270000);
+	fake_run(&b.hw, at + 260000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0 && r.velocity_mmps == 4);
 	b.hw.sample.left_ticks -= 1;
-	fake_run(&b.hw, at + 290000);
+	fake_run(&b.hw, at + 280000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0);
 	for (unsigned i = 0; i < 4; i++) {
-		fake_run(&b.hw, at + 310000 + 20000 * i);
+		fake_run(&b.hw, at + 300000 + 20000 * i);
 		CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 0);
 	}
-	fake_run(&b.hw, at + 390000);
+	fake_run(&b.hw, at + 380000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.stationary == 1);
 	at += 140000;
 
@@ -2190,14 +2200,301 @@ static void test_reports_follow_samples(void)
 
 	current = "보고: 기한이 5 ms 안으로 남은 DRIVE 는 알리지 않음";
 	last = s.source_device_us;
-	drive = drive_command(3, 1, 1, last + 20000 + FB3_SAMPLE_GAP_US, 300, 0);
+	drive = drive_command(3, 1, 1, last + 20000 + FB3_REPORT_MARGIN_US, 300, 0);
 	CHECK(applied(&b, &drive));
 	fake_run(&b.hw, last + 20000);
 	CHECK(sensor(&b, &s) && b.hw.output_on && !spin(&b, &frame) && !b.link.reporting);
-	drive = drive_command(4, 1, 1, last + 40000 + FB3_SAMPLE_GAP_US + 1, 300, 0);
+	drive = drive_command(4, 1, 1, last + 40000 + FB3_REPORT_MARGIN_US + 1, 300, 0);
 	CHECK(applied(&b, &drive));
 	fake_run(&b.hw, last + 40000);
 	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 4);
+}
+
+/* 정지 조향을 한다고 알리는 설정으로 시작한다 */
+static void start_steering(struct bench *b)
+{
+	start(b);
+	b->link.config.capabilities |= FB3_CAP_STATIONARY_STEER;
+}
+
+static void test_hold_steer(void)
+{
+	struct bench b;
+	struct fb3_hello_ack hello_ack;
+	struct fb3_clock_reply reply;
+	struct fb3_clock_install in;
+	struct fb3_clock_ack ack;
+	struct fb3_command hold, drive, stop;
+	struct fb3_report r;
+	struct fb3_sensor s;
+	struct fb3_frame frame;
+	uint8_t first[FB3_MAX_WIRE];
+	size_t first_len;
+	unsigned cuts;
+	uint64_t at, cutoff, last;
+
+	current = "hold: 정지 조향을 알리지 않은 설정에서는 받지 않음";
+	start(&b);
+	ready_to_drive(&b);
+	hold = hold_command(2, 1, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_UNSUPPORTED_PROFILE) && b.hw.drives == 0 && b.link.command_fence == 1);
+
+	current = "hold: 조향을 건 뒤 APPLIED 로 알림";
+	start_steering(&b);
+	at = ready_to_drive(&b);
+	cutoff = b.hw.now + 80000;
+	hold = hold_command(2, 1, 1, cutoff, 150);
+	CHECK(command(&b, &hold, &r));
+	CHECK(r.status == FB3_REPORT_APPLIED && r.reason == FB3_REASON_OK && echoes(&r, &hold));
+	CHECK(r.command_kind == FB3_COMMAND_HOLD_STEER && r.report_sequence == 2 && r.source_sample == 1
+	      && r.source_device_us == at);
+	CHECK(r.flags == FB3_REPORT_STATIONARY && r.stationary == 0 && r.velocity_mmps == 0 && r.steering_mrad == 0);
+	CHECK(b.hw.velocity == 0 && b.hw.steering == 150 && b.hw.drives == 1 && !b.hw.drive_unlocked);
+	CHECK(b.hw.alarm_set && b.hw.alarm_at == cutoff && b.link.command_fence == 2);
+
+	current = "hold: 같은 명령이 다시 와도 다시 걸지 않고 기한을 늘리지 않음";
+	first_len = b.response_len;
+	memcpy(first, b.response, first_len);
+	pass(&b, 30000);
+	CHECK(command(&b, &hold, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(b.hw.drives == 1 && b.hw.alarm_at == cutoff && b.link.report_sequence == 2);
+	drive = hold;
+	drive.steering_mrad = 160;
+	CHECK(turned_down(&b, &drive, FB3_REASON_IDEMPOTENCY_CONFLICT));
+	CHECK(b.hw.steering == 150 && b.hw.drives == 1 && b.hw.alarm_at == cutoff);
+
+	current = "hold: 기한이 되면 타이머가 출력의 기한을 끝내고, 다시 온 명령이 되살리지 않음";
+	fake_run(&b.hw, cutoff - 1);
+	cuts = b.hw.cuts;
+	CHECK(b.hw.output_on && fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_LIVE);
+	fake_run(&b.hw, cutoff);
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1);
+	CHECK(fb3_cutoff_query(&b.cutoff, FB3_CUTOFF_OUTPUT) == FB3_CUTOFF_EXPIRED && !b.cutoff.fault);
+	CHECK(command(&b, &hold, &r) && b.response_len == first_len && memcmp(b.response, first, first_len) == 0);
+	CHECK(!b.hw.output_on && b.hw.drives == 1);
+
+	current = "hold: 속도 칸이 0 이 아니면 거절";
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, 150);
+	hold.velocity_mmps = 1;
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold.velocity_mmps = -1;
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	CHECK(b.hw.drives == 1 && b.link.command_fence == 2);
+
+	current = "hold: STOP 참조·범위·lease·기한 검사는 DRIVE 와 같음";
+	hold = hold_command(3, 9, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	hold = hold_command(3, 0, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, 501);
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, -501);
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, 150);
+	hold.expires_pi_us = hold.issued_pi_us + FB3_COMMAND_LIFE_US + 1;
+	CHECK(turned_down(&b, &hold, FB3_REASON_RANGE));
+	hold = hold_command(3, 1, 2, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_CLOCK_UNAVAILABLE));
+	hold = hold_command(3, 1, 1, at + 900001, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DEADLINE_MISMATCH));
+	hold = hold_command(3, 1, 1, b.hw.now + 200, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_COMMAND_EXPIRED));
+	CHECK(b.hw.drives == 1 && b.link.command_fence == 2 && !b.hw.output_on);
+
+	current = "hold: 가던 방향으로 치지 않음";
+	hold = hold_command(3, 1, 1, b.hw.now + 80000, -200);
+	CHECK(applied(&b, &hold) && b.hw.steering == -200 && b.hw.drives == 2 && b.link.direction == 0);
+	drive = drive_command(4, 1, 1, b.hw.now + 80000, -300, -200);
+	CHECK(applied(&b, &drive) && b.hw.velocity == -300 && b.link.direction == -1);
+
+	current = "hold: 걸려 있던 DRIVE 의 모터 출력을 내리고 기한을 제 것으로 바꿈";
+	hold = hold_command(5, 1, 1, b.hw.now + 60000, 100);
+	CHECK(applied(&b, &hold));
+	CHECK(b.hw.velocity == 0 && b.hw.steering == 100 && b.hw.drives == 4 && b.hw.alarm_at == hold.cutoff_device_us);
+
+	current = "hold: 뒤에도 방향을 바꾸려면 새 STOP 이 있어야 함";
+	drive = drive_command(6, 1, 1, b.hw.now + 50000, 300, 0);
+	CHECK(turned_down(&b, &drive, FB3_REASON_DIRECTION_STOP_REQUIRED) && b.hw.velocity == 0 && b.hw.drives == 4);
+	stop = stop_command(PI_A, 6, 1);
+	CHECK(applied(&b, &stop) && !b.hw.output_on);
+	hold = hold_command(7, 1, 1, b.hw.now + 80000, 0);
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED));
+	hold = hold_command(7, 6, 1, b.hw.now + 80000, 0);
+	CHECK(applied(&b, &hold) && b.hw.steering == 0);
+	drive = drive_command(8, 6, 1, b.hw.now + 80000, 300, 0);
+	CHECK(applied(&b, &drive) && b.hw.velocity == 300);
+
+	current = "hold: 표본마다 그 표본을 가리켜 알리고 기한까지만 알림";
+	start_steering(&b);
+	at = ready_to_drive(&b);
+	hold = hold_command(2, 1, 1, at + 50000, 150);
+	CHECK(applied(&b, &hold));
+	fake_run(&b.hw, at + 20000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 2 && r.command_kind == FB3_COMMAND_HOLD_STEER);
+	CHECK(r.status == FB3_REPORT_APPLIED && echoes(&r, &hold) && r.source_sample == s.source_sample
+	      && r.source_device_us == s.source_device_us);
+	fake_run(&b.hw, at + 40000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 2 && r.source_sample == s.source_sample);
+	fake_run(&b.hw, at + 60000);
+	CHECK(!b.hw.output_on && sensor(&b, &s));
+	CHECK(!spin(&b, &frame) && !b.link.reporting);
+	fake_run(&b.hw, at + 80000);
+	CHECK(sensor(&b, &s) && !spin(&b, &frame));
+
+	current = "hold: 기한이 5 ms 안으로 남았으면 알리지 않음";
+	last = s.source_device_us;
+	hold = hold_command(3, 1, 1, last + 20000 + FB3_REPORT_MARGIN_US, 150);
+	CHECK(applied(&b, &hold));
+	fake_run(&b.hw, last + 20000);
+	CHECK(sensor(&b, &s) && b.hw.output_on && !spin(&b, &frame) && !b.link.reporting);
+	hold = hold_command(4, 1, 1, last + 40000 + FB3_REPORT_MARGIN_US + 1, 150);
+	CHECK(applied(&b, &hold));
+	fake_run(&b.hw, last + 40000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r) && r.command_sequence == 4);
+
+	current = "hold: 걸려 있는 HOLD_STEER 가 쓰는 lease 는 새 lease 가 밀어내지 않음";
+	start_steering(&b);
+	CHECK(hello(&b, PI_A, CONFIG, &hello_ack) && (hello_ack.capabilities & FB3_CAP_STATIONARY_STEER));
+	pass(&b, 1000);
+	CHECK(probe(&b, PI_A, BOOT, 1, 900000, &reply));
+	pass(&b, 6000);
+	CHECK(probe(&b, PI_A, BOOT, 2, 1100000, &reply));
+	at = reply.latch_device_us;
+	in = lease(PI_A, 1, 1, at + 800000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	in = lease(PI_A, 2, 2, at + 900000);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	stop = stop_command(PI_A, 1, 1);
+	CHECK(applied(&b, &stop));
+	hold = hold_command(2, 1, 1, at + 80000, 150);
+	CHECK(applied(&b, &hold));
+	pass(&b, 6000);
+	CHECK(probe(&b, PI_A, BOOT, 3, 1300000, &reply));
+	in = lease(PI_A, 3, 3, at + 1000000);
+	CHECK(install(&b, &in, &ack) && rejected(&ack, FB3_REASON_CLOCK_UNAVAILABLE));
+	CHECK(fb3_link_lease_live(&b.link, EPOCH, 1) && fb3_link_lease_live(&b.link, EPOCH, 2) && b.hw.output_on);
+	fake_run(&b.hw, at + 80000);
+	CHECK(!b.hw.output_on);
+	CHECK(install(&b, &in, &ack) && ack.status == FB3_CLOCK_INSTALLED);
+	CHECK(!fb3_link_lease_live(&b.link, EPOCH, 1) && fb3_link_lease_live(&b.link, EPOCH, 3));
+
+	current = "hold: 비상정지가 눌려 있으면 거절하고, 풀어도 새 STOP 이 있어야 함";
+	start_steering(&b);
+	ready_to_drive(&b);
+	b.hw.estop = true;
+	hold = hold_command(2, 1, 1, b.hw.now + 80000, 150);
+	CHECK(turned_down(&b, &hold, FB3_REASON_E_STOP) && b.hw.drives == 0);
+	b.hw.estop = false;
+	CHECK(turned_down(&b, &hold, FB3_REASON_DIRECTION_STOP_REQUIRED) && b.hw.drives == 0);
+	stop = stop_command(PI_A, 2, 1);
+	CHECK(applied(&b, &stop));
+
+	current = "hold: 조향을 걸지 못하면 FAULT 로 알림";
+	b.hw.drive_fails = true;
+	cuts = b.hw.cuts;
+	hold = hold_command(3, 2, 1, b.hw.now + 80000, 150);
+	CHECK(command(&b, &hold, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
+	CHECK(echoes(&r, &hold) && r.flags == 0);
+	CHECK(!b.hw.output_on && b.hw.cuts == cuts + 1 && b.link.command_fence == 2 && !b.cutoff.fault);
+	b.hw.drive_fails = false;
+	CHECK(applied(&b, &hold) && b.hw.steering == 150);
+}
+
+static void test_samples_keep_one_period_apart(void)
+{
+	struct bench b;
+	struct fb3_frame out;
+	struct fb3_clock_reply reply;
+	struct fb3_sensor s;
+	struct fb3_report r;
+	uint64_t at, previous, received, slot;
+	unsigned replies, sensors;
+
+	/* SENSOR 가 흐르는 동안 CLOCK_PROBE 를 주기의 여러 자리에 넣는다. 1 ms 마다 메인 루프를 돌린다 */
+	for (unsigned offset = 0; offset < 20; offset++) {
+		current = "간격: 종류와 상관없이 이웃한 표본은 한 주기보다 가깝지 않음";
+		start(&b);
+		at = open_with_lease(&b, 900000);
+		previous = at;
+		received = 0;
+		replies = sensors = 0;
+		for (unsigned ms = 1; ms <= 120; ms++) {
+			fake_run(&b.hw, at + 1000 * ms);
+			if (ms == 40 + offset) {
+				received = b.hw.now;
+				slot = b.link.sample_us + FB3_SENSOR_PERIOD_US;
+				if (push_probe(&b, PI_A, 2, &out)) {
+					/* 표본 자리에 딱 맞춰 왔을 때만 곧바로 답한다 */
+					CHECK(offset == 0 && fb3_unpack_clock_reply(out.payload, out.length, &reply));
+					CHECK(reply.latch_device_us == previous + FB3_SENSOR_PERIOD_US);
+					previous = reply.latch_device_us;
+					replies++;
+				} else {
+					CHECK(b.link.probe_held && slot > received && slot - received < FB3_SENSOR_PERIOD_US);
+				}
+			}
+			while (spin(&b, &out)) {
+				if (out.id == FB3_SENSOR_ID) {
+					CHECK(fb3_unpack_sensor(out.payload, out.length, &s));
+					CHECK(s.source_device_us == previous + FB3_SENSOR_PERIOD_US);
+					previous = s.source_device_us;
+					sensors++;
+				} else {
+					CHECK(out.id == FB3_CLOCK_REPLY_ID && fb3_unpack_clock_reply(out.payload, out.length, &reply));
+					CHECK(reply.latch_device_us == previous + FB3_SENSOR_PERIOD_US);
+					CHECK(reply.d2_device_receive_us == received && reply.probe_sequence == 2);
+					previous = reply.latch_device_us;
+					replies++;
+				}
+			}
+		}
+		/* 120 ms 에 표본 자리는 여섯이고, 그 가운데 하나를 CLOCK_REPLY 가 차지한다 */
+		CHECK(replies == 1 && sensors == 5 && b.link.sample_sequence == 7 && !b.link.probe_held);
+	}
+
+	current = "간격: 한 주기에 1 us 모자랄 때 온 probe 도 미룸";
+	start(&b);
+	at = open_with_lease(&b, 900000);
+	fake_run(&b.hw, at + FB3_SENSOR_PERIOD_US - 1);
+	CHECK(!push_probe(&b, PI_A, 2, &out) && b.link.probe_held);
+	fake_run(&b.hw, at + FB3_SENSOR_PERIOD_US);
+	CHECK(spin(&b, &out) && out.id == FB3_CLOCK_REPLY_ID && fb3_unpack_clock_reply(out.payload, out.length, &reply));
+	CHECK(reply.latch_device_us == at + FB3_SENSOR_PERIOD_US
+	      && reply.d2_device_receive_us == at + FB3_SENSOR_PERIOD_US - 1);
+
+	current = "간격: 미뤄 둔 probe 가 있어도 앞 표본의 REPORT 는 그 표본 바로 뒤에 감";
+	start(&b);
+	at = ready_to_drive(&b);
+	fake_run(&b.hw, at + 20000);
+	CHECK(sensor(&b, &s) && s.source_sample == 2);
+	CHECK(!push_probe(&b, PI_A, 2, &out) && b.link.probe_held);
+	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_APPLIED && r.source_sample == 2 && b.link.probe_held);
+	CHECK(quiet_until(&b, at + 40000 - 1) && b.link.probe_held);
+	fake_run(&b.hw, at + 40000);
+	CHECK(spin(&b, &out) && out.id == FB3_CLOCK_REPLY_ID && fb3_unpack_clock_reply(out.payload, out.length, &reply));
+	CHECK(reply.source_sample == 3 && reply.latch_device_us == at + 40000);
+	CHECK(next_report(&b, &r) && r.source_sample == 3 && r.source_device_us == at + 40000);
+	CHECK(!spin(&b, &out));
+
+	current = "간격: 미뤄 둔 probe 가 있어도 그 자리에서 비상정지를 알아채 먼저 알림";
+	fake_run(&b.hw, at + 41000);
+	CHECK(!push_probe(&b, PI_A, 3, &out) && b.link.probe_held);
+	b.hw.estop = true;
+	CHECK(quiet_until(&b, at + 60000 - 1));
+	fake_run(&b.hw, at + 60000);
+	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_E_STOP && b.link.probe_held);
+	CHECK(spin(&b, &out) && out.id == FB3_CLOCK_REPLY_ID && fb3_unpack_clock_reply(out.payload, out.length, &reply));
+	CHECK(reply.probe_sequence == 3 && reply.source_sample == 4 && reply.latch_device_us == at + 60000);
+
+	current = "간격: 미뤄 둔 probe 가 있어도 그 자리에서 타이머 고장을 알아채 먼저 알림";
+	start(&b);
+	at = ready_to_drive(&b);
+	fake_run(&b.hw, at + 20000);
+	CHECK(sensor(&b, &s) && next_report(&b, &r));
+	CHECK(!push_probe(&b, PI_A, 2, &out) && b.link.probe_held);
+	b.hw.timer_dead = true;
+	fake_run(&b.hw, at + 900000 + FB3_CUTOFF_LATE_US + 1);
+	CHECK(next_report(&b, &r) && r.status == FB3_REPORT_FAULT && r.reason == FB3_REASON_DEVICE_FAULT);
 }
 
 static void test_command_session_and_lease(void)
@@ -2408,6 +2705,8 @@ int main(void)
 	test_drive_rejects();
 	test_drive_faults();
 	test_reports_follow_samples();
+	test_hold_steer();
+	test_samples_keep_one_period_apart();
 	test_command_session_and_lease();
 	test_vectors();
 	printf("feedback-3 link: %d checks, %d failures\n", checks, failures);

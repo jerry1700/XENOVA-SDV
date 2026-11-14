@@ -227,6 +227,19 @@ def build_world(snapshot, template, *, source, preferred_road=None, static_retai
                   age_le32=age.astype('<u4', copy=False).tobytes(order='C'))
     if result.required_features in (11, 15):
         fields['drivable_permission'] = np.packbits((support & permission).reshape(-1), bitorder='little').tobytes()
+    boundary = arrays.get('boundary_free4')
+    if 'boundary_cell_free4_le' in result.DESCRIPTOR.fields_by_name:
+        if result.HasField('boundary_cell_free4_le'):
+            raise WorldBuildError('template carries an unmanaged boundary subcell proof')
+        if boundary is not None and result.minor == 2 and result.required_features in (11, 15):
+            import struct
+            boundary = _layer(boundary, shape, 'u2', 'boundary_free4')
+            valid = ((state == 2) & support & permission & ~retained & ~old
+                     & (age != 0xffffffff) & (boundary != 0) & (boundary != 0xffff))
+            flat = boundary.reshape(-1)
+            records = b''.join(struct.pack('<HH', index, flat[index]) for index in np.flatnonzero(valid)[:128])
+            if records:
+                fields['boundary_cell_free4_le'] = records
     for name, value in fields.items():
         if result.HasField(name) and getattr(result, name) != value:
             raise WorldBuildError('template carries different managed grid field: ' + name)
@@ -274,8 +287,11 @@ def _lane_c_heading(model):
     for lane in model.lanes:
         if any(abs(v)>=1e6 for p in lane.centerline for v in (p.x,p.y)):
             raise ValueError('converted lane coordinate outside C domain')
-        error=_f32(_f32(2*lane.position_bound_m)+model.divider_position_bound_m)
-        limit=_f32(2*error)
+        if lane.HasField('outer_chord_delta_bound_m'):
+            limit = lane.outer_chord_delta_bound_m
+        else:
+            error = _f32(_f32(2*lane.position_bound_m)+model.divider_position_bound_m)
+            limit = _f32(2*error)
         points=[_wire_outer((p.x,p.y),(d.x,d.y)) for p,d in zip(lane.centerline,model.divider)]
         if any(abs(v)>=1e6 for p in points for v in p):
             raise ValueError('converted lane coordinate outside C domain')
@@ -328,7 +344,46 @@ def _lane_subset_bounds(h,point_sets,converted,indices,crossing,original_bound):
     def heading(value):return _f32_up(h.yaw_error_rad if full and value==0 else _positive_up(h.yaw_error_rad+value))
     headings=[heading(turn[0])]
     headings.extend(heading(max(turn[side],turn[side+2])) for side in (1,2))
-    return wires[:3],bounds[:3],headings,bytes(map(int,states)),bytes(crossings)
+    return wires[:3],bounds[:3],headings,bytes(map(int,states)),bytes(crossings),bounds[3:]
+
+
+def lane_publication(basis, model):
+    """Prefer the connected view when the original wire checks accept it."""
+    road, crossing = basis.publication_lane(model)
+    ids = dict(lane_ids=model.lane_ids, model_revision=model.model_revision, lane_revisions=model.lane_revisions)
+    if road != model.road:
+        try:
+            return road, lane_model_from_road(road, crossing=crossing, **ids)
+        except WorldBuildError:
+            pass
+    return model.road, lane_model_from_road(model.road, crossing=model.crossing, **ids)
+
+
+def lane_window_publication(pipeline, basis, model, pose, stopping, observation_us, *, current_geometry):
+    """Use the localized map slice, or the same-frame model while the map is still sparse."""
+    from ..perception.temporal_road import stored_road_window
+    body = pipeline.calibration.body
+    # Account for the time before a replacement result can take effect, then brake.
+    seconds = (stopping.reaction_latency_us+stopping.cycle_bound_us+stopping.completion_bound_us)/1e6
+    speed = stopping.max_speed_mps
+    travel = speed*seconds+speed**2/(2*stopping.min_braking_mps2)
+    width = body.width/2
+    pad = stopping.body_error_m+pose.position_error_m+pipeline.grid.spec.resolution_m
+    sections = pipeline._temporal_road.publication_sections(pipeline.profile.road,observation_us)
+    stored = stored_road_window(sections,model,pose,pipeline.profile.road,
+        rear_m=math.hypot(body.rear,width)+pad,forward_m=math.hypot(body.front,width)+pad+travel)
+    if stored is not None:
+        road,crossing = stored
+        try:
+            wire = lane_model_from_road(road,crossing=crossing,lane_ids=model.lane_ids,
+                model_revision=model.model_revision,lane_revisions=model.lane_revisions)
+            return road,wire
+        except WorldBuildError:
+            if not current_geometry:
+                raise
+    if current_geometry:
+        return lane_publication(basis,model)
+    raise WorldBuildError('stored road window unavailable')
 
 
 def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, crossing):
@@ -371,28 +426,56 @@ def lane_model_from_road(road, *, lane_ids, model_revision, lane_revisions, cros
                        for point, wire in zip(points, wires))
     bound, heading = _f32_up(h.error_m + quantization), _f32_up(h.yaw_error_rad)
     states = bytes(int(value) for value in h.inferred)
-    def build(points,bounds,headings,states,allowed):
+    stored = road.reasons == ('STORED_MAP_WINDOW',)
+    def build(points,bounds,headings,states,allowed,outer_bounds):
         model=schema.LaneModel(revision=model_revision,crossing=allowed,divider_state=states,
             divider_position_bound_m=bounds[0],divider_heading_bound_rad=headings[0])
         for point in points[0]:model.divider.add(x=point[0],y=point[1])
+        if stored:
+            model.divider_normal_position_bound_m = bounds[0]
         for index in range(2):
             lane=model.lanes.add(lane_id=lane_ids[index],adjacent_lane_id=lane_ids[1-index],
                 revision=lane_revisions[index],travel_direction=1,position_bound_m=bounds[index+1],
                 heading_bound_rad=headings[index+1],point_state=states)
             for point in points[index+1]:lane.centerline.add(x=point[0],y=point[1])
+            if stored:
+                # The outer is observed in the map. Its actual bound covers both
+                # ends without adding the uncertainty of reconstructed centers again.
+                lane.outer_normal_position_bound_m = outer_bounds[index]
+                lane.outer_chord_delta_bound_m = _f32_up(2*outer_bounds[index])
         return model
     audit=_lane_subset_bounds(h,point_sets,converted,tuple(range(n)),crossing,bound)
     if audit is None:raise WorldBuildError('original station coverage cannot be represented')
     # full audit의 inferred OR은 직접 경로에 적용하지 않는다. 원 state/crossing 그대로다.
-    model=build(converted,audit[1],tuple(max(heading,v) for v in audit[2]),states,crossing)
+    model=build(converted,audit[1],tuple(max(heading,v) for v in audit[2]),states,crossing,audit[5])
+    normal, chord = h.boundary_normal_bounds_m, h.outer_chord_bounds_m
+    if normal is not None or chord is not None:
+        if (type(normal) is not tuple or type(chord) is not tuple
+                or len(normal) != 3 or len(chord) != 2 or any(
+                    type(value) not in (int, float) or not math.isfinite(value) or value < 0
+                    for value in normal + chord)):
+            raise WorldBuildError('complete directional bounds required')
+        divider_roundoff = max(math.dist(p, q) for p, q in zip(h.divider, converted[0]))
+        model.divider_normal_position_bound_m = _f32_up(_positive_up(normal[1] + divider_roundoff))
+        for index, (lane, original) in enumerate(zip(model.lanes, point_sets[3:])):
+            outer = tuple(_wire_outer(c, d) for c, d in zip(converted[index+1], converted[0]))
+            # Also cover Python's double subtraction of float32 coordinates.
+            decoded = tuple(tuple(2*v-d for v, d in zip(c, point))
+                            for c, point in zip(converted[index+1], converted[0]))
+            roundoff = max(math.dist(p, q) for wire in (outer, decoded) for p, q in zip(original, wire))
+            lane.outer_normal_position_bound_m = _f32_up(_positive_up(normal[2*index] + roundoff))
+            lane.outer_chord_delta_bound_m = _f32_up(_positive_up(chord[index] + 2*roundoff))
     try:
         validate(model)
         _lane_c_heading(model)
     except ValueError as error:
-        if str(error)!='unbounded reconstructed lane heading':
+        if not stored and str(error)!='unbounded reconstructed lane heading':
             raise WorldBuildError('invalid shared lane model: '+str(error)) from error
         original_error=error
     else:return model
+    # An outer chord delta applies to consecutive source stations only.
+    if normal is not None:
+        raise WorldBuildError('directional lane chord is unbounded') from original_error
     for count in range(n-1,1,-1):
         indices=tuple((2*i*(n-1)+count-1)//(2*(count-1)) for i in range(count))
         candidate=_lane_subset_bounds(h,point_sets,converted,indices,crossing,bound)

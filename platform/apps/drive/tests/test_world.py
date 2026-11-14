@@ -145,6 +145,68 @@ def modern_world():
 
 
 
+def test_boundary_cell_wire_validates_cell_index_mask_and_order(probe):
+    world=modern_world()
+    world.occupancy=bytes((100,100))+world.occupancy[2:]
+    world.boundary_cell_free4_le=struct.pack('<HHHH',0,0x0001,1,0x8000)
+    wire=encode(world)
+    assert decode(wire)==world and product(probe,wire)['result']=='OK'
+    for invalid in (b'',b'x',struct.pack('<HH',0,0),struct.pack('<HH',0,65535),
+                    struct.pack('<HH',2,1),struct.pack('<HH',world.width*world.height,1),
+                    struct.pack('<HHHH',0,1,0,2),struct.pack('<HHHH',1,1,0,2)):
+        world.boundary_cell_free4_le=invalid
+        with pytest.raises(ValueError,match='boundary cell'):encode(world)
+        assert product(probe,world.SerializeToString())['result']=='ARRAY'
+
+
+def test_short_outer_chord_uses_relative_bound_in_python_and_pi(probe):
+    world = modern_world()
+    model = world.lane_model
+    del model.divider[2:]
+    model.divider[1].x = .24
+    model.crossing = b'\x01'
+    model.divider_state = bytes(2)
+    model.divider_position_bound_m = .09
+    for lane in model.lanes:
+        del lane.centerline[2:]
+        lane.centerline[1].x = .24
+        lane.point_state = bytes(2)
+        lane.position_bound_m = .09
+    with pytest.raises(ValueError, match='unbounded reconstructed lane heading'):
+        encode(world)
+    assert product(probe, world.SerializeToString())['result'] == 'GEOMETRY'
+    model.divider_normal_position_bound_m = .06
+    for lane in model.lanes:
+        lane.outer_normal_position_bound_m = .07
+        lane.outer_chord_delta_bound_m = .11
+    assert product(probe, encode(world))['result'] == 'OK'
+    model.lanes[0].outer_chord_delta_bound_m = .25
+    with pytest.raises(ValueError, match='unbounded reconstructed lane heading'):
+        encode(world)
+    assert product(probe, world.SerializeToString())['result'] == 'GEOMETRY'
+    model.lanes[0].ClearField('outer_chord_delta_bound_m')
+    with pytest.raises(ValueError, match='incomplete directional lane bounds'):
+        encode(world)
+    assert product(probe, world.SerializeToString())['result'] == 'ARRAY'
+
+
+def test_directional_lane_validates_every_connected_chord(probe):
+    world = modern_world()
+    model = world.lane_model
+    model.divider_normal_position_bound_m = .03
+    for lane in model.lanes:
+        lane.outer_normal_position_bound_m = .03
+        lane.outer_chord_delta_bound_m = .11
+    assert len(model.divider) > 2
+    assert product(probe, encode(world))['result'] == 'OK'
+    model.divider[-1].x = model.divider[-2].x + .1
+    for lane in model.lanes:
+        lane.centerline[-1].x = lane.centerline[-2].x + .1
+    with pytest.raises(ValueError, match='unbounded reconstructed lane heading'):
+        encode(world)
+    assert product(probe, world.SerializeToString())['result'] == 'GEOMETRY'
+
+
 def parking_world(*,width=64,height=32):
     """고정 fixture다. 두 lane/slot 후보를 수락 권위로 승격하지 않는다."""
     value=fixture.world(width=width,height=height)

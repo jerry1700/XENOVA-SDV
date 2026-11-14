@@ -171,13 +171,16 @@ def test_accepted_stop_errors_carry_the_original_operation(client, manager, resp
     assert body["code"] == code and body["platform_code"] == response_env["error"]["code"]
     assert body["retryable"] == response_env["error"]["retryable"]
     assert (body["operation"]["status"], body["operation"]["accepted"], body["operation"]["operation_id"]) == (op_status, True, OP)
+    assert (body["context"]["status"], body["context"]["accepted"], body["context"]["operation_id"]) == (op_status, True, OP)
 
 
 def test_not_accepted_stop_is_rejected_or_unknown(client, manager):
     manager.responses["stop"] = failure("OPERATION_IN_PROGRESS", retryable=True, lock="admission", acceptance="not-checked")
     body = stop(client).json()
     assert body["code"] == "PlatformUnavailable" and body["retryable"] is True
-    assert (body["operation"]["status"], body["operation"]["accepted"], body["operation"]["operation_id"]) == ("rejected", False, None)
+    assert (body["operation"]["status"], body["operation"]["accepted"], body["operation"]["operation_id"]) == ("unknown", None, None)
+    assert (body["context"]["status"], body["context"]["accepted"]) == ("unknown", None)
+    assert body["context"]["next_action"] == "lookup_original"
     manager.responses["stop"] = failure("STORAGE_UNAVAILABLE", acceptance="unconfirmed")
     body = stop(client).json()
     assert (body["operation"]["status"], body["operation"]["accepted"]) == ("unknown", None)  # 수락 저장 미확인: 미수락으로 추측하지 않는다
@@ -475,11 +478,29 @@ def test_create_is_not_submitted_after_the_budget_ran_out(manager):
 
 
 def test_retire_is_not_submitted_after_the_budget_ran_out(manager):
-    manager.responses["get"] = slow_second_get(sleep_s=0.4, registered=True)  # 정지된 등록 VM: 도메인 없음, 등록 있음
-    client = TestClient(app_for(manager, response_reserve_s=0))
-    response = client.delete(f"/api/v1/vms/{VM_A}", headers={"X-Request-Budget-Ms": "300"})
-    assert response.status_code == 504 and response.json()["code"] == "DriverTimeout"  # 서비스의 변경 직전 검사가 먼저 막는다
-    assert [c["action"] for c in manager.calls] == ["get", "get"]  # 보관(retire) 없음
+    import threading
+
+    app = app_for(manager, response_reserve_s=0)
+    # A prior request for the same VM holds the service lock past this request's budget.
+    service = app.state.service
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold():
+        with service._vm_lock(VM_A):
+            locked.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert locked.wait(5)
+        response = TestClient(app).delete(f"/api/v1/vms/{VM_A}", headers={"X-Request-Budget-Ms": "200"})
+        assert response.status_code == 504 and response.json()["code"] == "DriverTimeout"
+        assert manager.calls == []
+    finally:
+        release.set()
+        thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("submit", [
