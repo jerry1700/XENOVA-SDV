@@ -609,19 +609,33 @@ class VmServiceTest {
     }
 
     @Test
-    void retiredVmIsHiddenAndItsNameRemainsReserved() {
-        VmRecord retired = record("vm-1", "alpine-sensor");
+    void retiredVmIsHiddenAndGivesItsNameBack() {
+        VmRecord retired = record("850e8400-e29b-41d4-a716-446655440009", "alpine-sensor");
         retired.retire();
-        when(vmRecordRepository.findById("vm-1")).thenReturn(Optional.of(retired));
-        when(vmRecordRepository.findByName("alpine-sensor")).thenReturn(Optional.of(retired));
+        when(vmRecordRepository.findById(retired.getVmId())).thenReturn(Optional.of(retired));
 
-        assertThatThrownBy(() -> service.get("vm-1"))
+        assertThatThrownBy(() -> service.get(retired.getVmId()))
                 .isInstanceOfSatisfying(ApiException.class, exception ->
                         assertThat(exception.getCode()).isEqualTo("VM_NOT_FOUND"));
-        assertThatThrownBy(() -> service.create(ALPINE))
-                .isInstanceOfSatisfying(ApiException.class, exception ->
-                        assertThat(exception.getCode()).isEqualTo("VM_NAME_CONFLICT"));
-        verify(vmControlPort, never()).launch(anyString(), any());
+        assertThat(retired.getName()).isEqualTo("alpine-sensor~850e8400");
+
+        // Retiring twice does not stack suffixes; a 63-character name is cut to keep the suffix.
+        retired.retire();
+        assertThat(retired.getName()).isEqualTo("alpine-sensor~850e8400");
+        VmRecord longName = record("850e8400-e29b-41d4-a716-446655440010", "a".repeat(63));
+        longName.retire();
+        assertThat(longName.getName()).isEqualTo("a".repeat(54) + "~850e8400").hasSize(63);
+    }
+
+    @Test
+    void deleteEventKeepsTheNameTheVmHadBeforeItWasRetired() {
+        VmRecord record = record("850e8400-e29b-41d4-a716-446655440011", "web-test");
+        when(vmRecordRepository.findById(record.getVmId())).thenReturn(Optional.of(record));
+
+        service.destroy(record.getVmId());
+
+        assertThat(record.getName()).isEqualTo("web-test~850e8400");
+        verify(eventRecorder).vmDeleted(record.getVmId(), "web-test");
     }
 
     @Test
