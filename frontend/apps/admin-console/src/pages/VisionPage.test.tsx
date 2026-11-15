@@ -6,13 +6,18 @@ import { FRAME_INTERVAL_MS, RETRY_INTERVAL_MS } from './useVisionStream';
 const auth = vi.hoisted(() => ({ getSession: vi.fn(), refreshSession: vi.fn() }));
 vi.mock('../api/client', () => auth);
 
-const jpeg = () =>
-  new Response(new Blob([new Uint8Array([0xff, 0xd8, 1])], { type: 'image/jpeg' }), {
-    status: 200,
-    headers: { 'Content-Type': 'image/jpeg' },
-  });
-const error = (code: string, status = 503) =>
-  new Response(JSON.stringify({ code }), { status, headers: { 'Content-Type': 'application/json' } });
+// Plain fake responses: `new Response(new Blob())` mixes jsdom's Blob with Node's fetch
+// classes and fails on some Node versions (CI: "object.stream is not a function").
+type FakeResponse = Pick<Response, 'ok' | 'status' | 'headers' | 'blob' | 'json'>;
+const fake = (status: number, contentType: string, body: unknown): FakeResponse => ({
+  ok: status >= 200 && status < 300,
+  status,
+  headers: new Headers({ 'Content-Type': contentType }),
+  blob: async () => body as Blob,
+  json: async () => body,
+});
+const jpeg = () => fake(200, 'image/jpeg', { size: 3, type: 'image/jpeg' });
+const error = (code: string, status = 503) => fake(status, 'application/json', { code });
 
 describe('Vision page camera', () => {
   const fetchMock = vi.fn();
