@@ -66,7 +66,7 @@ class ThinRasterTests(unittest.TestCase):
         self.assertTrue(self.np.array_equal(mask,before));self.assertIsNot(actual[0],mask)
         self.assertEqual(actual[0].dtype,self.np.bool_)
 
-    def test_filter16s_codes_preserve_neighbor_orientation_all_states_and_zero_border(self):
+    def test_filter8u_codes_preserve_neighbor_orientation_all_states_and_zero_border(self):
         np,cv2=self.np,self.cv2;image=np.zeros((48,48),dtype=np.uint8)
         offsets=((-1,0),(-1,1),(0,1),(1,1),(1,0),(1,-1),(0,-1),(-1,-1))
         centers=[]
@@ -74,11 +74,11 @@ class ThinRasterTests(unittest.TestCase):
             r,c=(code//16)*3+1,(code%16)*3+1;centers.append((r,c));image[r,c]=1
             for bit,(dy,dx) in enumerate(offsets):image[r+dy,c+dx]=(code>>bit)&1
         kernel=np.frombuffer(tape._THIN_KERNEL,dtype='<f4').reshape(3,3)
-        codes=cv2.filter2D(image,cv2.CV_16S,kernel,borderType=cv2.BORDER_CONSTANT)
-        self.assertEqual(codes.dtype,np.int16)
+        codes=cv2.filter2D(image,cv2.CV_8U,kernel,borderType=cv2.BORDER_CONSTANT)
+        self.assertEqual(codes.dtype,np.uint8)
         self.assertEqual([int(codes[p]) for p in centers],list(range(256)))
         border=np.asarray(((1,0,1,0,1),(1,1,0,1,0),(0,1,0,0,1)),dtype=np.uint8)
-        actual=cv2.filter2D(border,cv2.CV_16S,kernel,borderType=cv2.BORDER_CONSTANT)
+        actual=cv2.filter2D(border,cv2.CV_8U,kernel,borderType=cv2.BORDER_CONSTANT)
         for r in range(border.shape[0]):
             for c in range(border.shape[1]):
                 expected=sum(1<<bit for bit,(dy,dx) in enumerate(offsets)

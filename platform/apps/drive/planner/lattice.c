@@ -390,6 +390,47 @@ enum lp_result lp_footprint(const dw_world *w,dw_pose pose,float extra,const str
  return footprint(w,pose,extra,c,m,b,false,NULL,NULL,NULL);
 }
 
+/* Initial R45 trial bounds. The same speed profile survives State export. */
+static const float startup_distance_m=.10f,startup_speed_mps=.08f,startup_straight_rad=.03f;
+
+bool lp_startup_straight(const struct lp_path *path,const struct lp_config *c){
+ if(!path->task.active||path->task.changing||path->direction||path->has_route||
+    path->space.parking||path->space.exiting||path->count<2||path->count>LP_PATH)return false;
+ float speed=path->points[0].velocity_mps;
+ if(speed<=0||speed>startup_speed_mps||speed>=c->primitive_speed)return false;
+ /* A two-point path is not required: keep the normal swept edge spacing. */
+ dw_pose inverse=dw_inverse(path->points[0].pose);
+ for(size_t i=0;i<path->count;i++){
+  const xenova_drive_PathPoint *point=&path->points[i];dw_pose local=dw_compose(inverse,point->pose);
+  if(point->velocity_mps!=(i+1==path->count?0:speed)||point->steering_rad||
+     fabsf(local.y)>1e-5f||fabsf(local.yaw)>1e-5f||local.x < -1e-5f||local.x>startup_distance_m+1e-5f)return false;
+ }
+ return true;
+}
+
+enum lp_result lp_plan_startup_straight(const dw_world *w,dw_pose pose,const dw_vehicle *v,const struct lp_config *c,
+ const struct tr_intent *task,const struct tr_basis *basis,struct lp_path *path,struct lp_metrics *metrics,const struct lp_budget *budget){
+ if(!task->active||task->changing||!w->complete||w->truncated||dw_world_retained(w)||w->has_route_view||
+    !isfinite(v->velocity_mps)||fabsf(v->velocity_mps)>.01f||!v->has_steering_error_rad||
+    !isfinite(v->steering_error_rad)||v->steering_error_rad<0)return LP_INPUT;
+ float steer=v->has_measured_steering_rad?v->measured_steering_rad:v->has_estimated_steering_rad?v->estimated_steering_rad:NAN;
+ /* The swept body check decides whether a straight line fits in the lane.
+  * The estimated tangent at a clipped lane end need not be precise. */
+ if(!isfinite(steer)||fabsf(steer)+v->steering_error_rad>startup_straight_rad)return LP_INPUT;
+ float speed=fminf(startup_speed_mps,c->max_velocity),spacing=fminf(.01f,c->primitive_speed*c->primitive_duration/16);
+ if(!(spacing>0)||speed<c->min_control_speed||speed>=c->primitive_speed||lp_stopping_distance(c,speed)>=startup_distance_m)return LP_INPUT;
+ unsigned edges=(unsigned)ceilf(startup_distance_m/spacing);
+ if(edges>=LP_PATH)return LP_INPUT;
+ memset(path,0,sizeof(*path));path->task=*task;path->basis=*basis;path->world_features=w->required_features;
+ strcpy(path->frame,w->frame_epoch);strcpy(path->odom,w->odom_epoch);
+ strcpy(path->configuration,w->configuration);strcpy(path->reference,w->reference_id);
+ path->count=edges+1;
+ for(unsigned i=0;i<=edges;i++)path->points[i]=(xenova_drive_PathPoint){
+  .pose=dw_compose(pose,(dw_pose){startup_distance_m*i/edges,0,0}),.velocity_mps=i==edges?0:speed};
+ path->goal=path->merge_goal=path->points[edges].pose;
+ return lp_validate_path(path,w,c,metrics,budget);
+}
+
 static bool reference(const dw_world *w,const struct tr_intent *task,const dw_point **points,unsigned *count){
  if(task&&task->active)return tr_centerline(w,task,points,count);
  else{*points=w->reference;*count=w->reference_count;}
@@ -1759,6 +1800,7 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
     vehicle->steering_error_rad>c->max_steering_error||vehicle->quality!=3||path->world_features!=w->required_features||
     strcmp(path->frame,w->frame_epoch)||strcmp(path->odom,w->odom_epoch)||strcmp(path->configuration,w->configuration)||strcmp(path->reference,w->reference_id))return LP_INPUT;
  if((w->required_features&DW_LANE_MODEL)&&(!path->task.active||!tr_basis_compatible(&path->basis,w)))return LP_INPUT;
+ bool startup=lp_startup_straight(path,c);
  if(path->space.exiting&&(!path->execution.present||path->execution.mission.kind!=3||
     !path->execution.mission.has_route_binding))return LP_INPUT;
  float steering=vehicle->has_measured_steering_rad?vehicle->measured_steering_rad:vehicle->has_estimated_steering_rad?vehicle->estimated_steering_rad:NAN;
@@ -1773,6 +1815,7 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
  dw_pose goal=path->points[segment.last_index].pose;
  if(tracker->segment+1==path_segments(path))goal=path->goal;
  float goal_distance=c->goal_distance,goal_heading=c->goal_heading;
+ if(startup){goal_distance=fminf(goal_distance,.015f);goal_heading=fminf(goal_heading,startup_straight_rad);}
  if(path->execution.present&&path->execution.mission.kind==2&&path->execution.mission.has_goal_position_bound_m&&
     tracker->segment+1==path_segments(path)&&path->space.parking){
   goal_distance=fminf(goal_distance,path->execution.mission.goal_position_bound_m);
@@ -1853,6 +1896,7 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
  }
  delta=steering+clamp(delta-steering,-c->steer_rate*dt,c->steer_rate*dt);
  float speed=gear>0?c->max_velocity:c->max_reverse_velocity;
+ if(startup){delta=0;speed=path->points[0].velocity_mps;}
  if(narrow&&c->narrow_lane_speed_mps>0)speed=fminf(speed,c->narrow_lane_speed_mps);
  if(parking_entry)speed=fminf(speed,LP_PARKING_TRACK_SPEED_MPS);
  if(fabsf(out->curvature)>1e-6f)speed=fminf(speed,sqrtf(c->max_lateral_accel/fabsf(out->curvature)));
@@ -1864,12 +1908,15 @@ static enum lp_result track_path(struct lp_tracker *tracker,const struct lp_path
   if(slope>1e-6f)speed=fminf(speed,c->steer_rate/slope);
  }
  float reaction=fabsf(vehicle->velocity_mps)*c->reaction_s+.5f*c->max_accel*c->reaction_s*c->reaction_s;
+ if(startup)reaction=fmaxf(fabsf(vehicle->velocity_mps),path->points[0].velocity_mps)*c->reaction_s;
  bool can_creep=parking_final&&remaining>vehicle->position_error_m&&speed>=c->min_control_speed;
  speed=fminf(speed,sqrtf(2*c->max_brake*fmaxf(0,remaining-reaction-vehicle->position_error_m)));
+ if(startup&&speed<c->min_control_speed){out->emergency=true;return out->result=LP_STOP;}
  if(can_creep)speed=fmaxf(speed,c->min_control_speed);
  if(path->space.parking&&speed<c->min_control_speed)return out->result=LP_INPUT;
  enum lp_result rc=project(w,pose,vehicle->velocity_mps,steering,gear*speed,delta,uncertainty,vehicle->steering_error_rad,c,m,b,&known,&live_task,NULL,NULL,&path->space,parking);
  if(rc!=LP_PATH_FOUND&&rc!=LP_COLLISION)return out->result=rc;
+ if(startup&&rc==LP_COLLISION)return out->result=rc;
  /* A failed fast sweep can still have a safe slower command. Each candidate
   * covers reaction and braking, and the acceleration-limited command below
   * is checked again before publishing. */

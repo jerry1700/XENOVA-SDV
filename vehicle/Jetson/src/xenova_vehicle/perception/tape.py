@@ -8,14 +8,16 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 import math
 import struct
+from threading import local
 from typing import Any
 
 from .inputs import FrameStamp
-from .geometry import timing_start, timing_finish
+from .geometry import project_ground_bounds_many, timing_start, timing_finish
 
 
 ENDPOINT_KINDS = frozenset(('physical_junction', 'observed_paint_end', 'FOV_clip', 'occluded', 'predicted'))
 _EDGE_VALUE_MIN = 150
+_SURFACE_STEP_VALUE = 8
 _MAX_TAPE_GAP_M = .01 * math.sqrt(2)
 
 
@@ -156,6 +158,7 @@ class TapeGraph:
     valid_mask: Any = field(default=None, repr=False, compare=False)
     nn_candidates: Any = field(default=None, repr=False, compare=False)
     surface_edges: tuple[TapeStrip, ...] = ()
+    paint_roles: tuple[tuple[int, int], ...] = ()
 
     def __post_init__(self):
         if (type(self.strips) is not tuple or len(self.strips) > 32
@@ -170,6 +173,13 @@ class TapeGraph:
                 or any(type(s) is not TapeStrip or s.outer_role is None for s in self.surface_edges)
                 or len({s.local_id for s in self.strips + self.surface_edges}) != len(self.strips + self.surface_edges)):
             raise ValueError('invalid bounded road surface edges')
+        paint_ids = {strip.local_id for strip in self.strips}
+        if (type(self.paint_roles) is not tuple or len(self.paint_roles) > len(paint_ids)
+                or any(type(row) is not tuple or len(row) != 2 or type(row[0]) is not int
+                       or row[0] not in paint_ids or type(row[1]) is not int or row[1] not in (0, 1, 2)
+                       for row in self.paint_roles)
+                or len({row[0] for row in self.paint_roles}) != len(self.paint_roles)):
+            raise ValueError('paint roles must reference unique observed strips')
 
     def descriptor(self):
         return dict(status=self.status, complete=self.complete, reasons=list(self.reasons),
@@ -207,13 +217,14 @@ def _thin(np, mask, limit):
         return result, True, 1
     # The input outside this rectangle is already zero, and thinning only deletes pixels.
     image = result[y:y+height, x:x+width]
+    binary = image.view(np.uint8)
     kernel=np.frombuffer(_THIN_KERNEL,dtype='<f4').reshape(3,3)
     lookup=tuple(np.frombuffer(table,dtype=np.bool_) for table in _THIN_REMOVE)
     for iteration in range(limit):
         changed = False
         for step in (0, 1):
-            # 0/1×정수 kernel의 합은0..255라 float32 합과 CV_16S 변환도 정수로 exact하다.
-            codes=cv2.filter2D(image.astype(np.uint8),cv2.CV_16S,kernel,borderType=cv2.BORDER_CONSTANT)
+            # 0/1 입력의 이웃 코드가 0..255라 8비트 출력으로도 합을 그대로 보존한다.
+            codes=cv2.filter2D(binary,cv2.CV_8U,kernel,borderType=cv2.BORDER_CONSTANT)
             remove = image & lookup[step][codes]
             if np.any(remove):
                 image[remove] = False
@@ -240,6 +251,60 @@ def _birdview_map(camera, plane, profile):
     margin = camera.pixel_error + 1.0
     valid = valid & (u - margin >= x0) & (u + margin < x1) & (v - margin >= y0) & (v + margin < y1)
     return _readonly(np, u), _readonly(np, v), _readonly(np, valid)
+
+
+class _TapeProjectionCache:
+    """한 호출 스레드에서 최근 보정·격자 하나의 고정 투영만 재사용한다."""
+
+    def __init__(self, key):
+        self.key = key
+        self.valid_source = self.valid_mask = None
+        self.offsets = self.status = None
+
+    def visible_grid(self, np, cv2, u, v, inside, valid_rgb):
+        if valid_rgb is None:
+            return inside.copy()
+        if valid_rgb is self.valid_source:
+            return self.valid_mask.copy()
+        valid = inside & (cv2.remap(valid_rgb, u, v, cv2.INTER_NEAREST,
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0) != 0)
+        # 임의 배열은 다음 프레임에서 제자리 수정될 수 있다. bytes 저장소만 키로 보유한다.
+        owner = valid_rgb
+        while isinstance(owner, np.ndarray):
+            owner = owner.base
+        if isinstance(owner, bytes):
+            self.valid_source, self.valid_mask = valid_rgb, valid
+            return valid.copy()
+        return valid
+
+    def point_offsets(self, np, u, v, rows, columns, diagnostics):
+        camera, plane, profile = self.key
+        if self.offsets is None:
+            self.offsets = np.empty(u.shape + (2,), dtype=np.float64)
+            self.status = np.zeros(u.shape, dtype=np.uint8)
+        missing = self.status[rows, columns] == 0
+        if np.any(missing):
+            rr, cc = rows[missing], columns[missing]
+            lower, upper, bounded = project_ground_bounds_many(u[rr, cc], v[rr, cc],
+                camera, plane, pixel_error=camera.pixel_error + 1.0, diagnostics=diagnostics)
+            nominal = np.column_stack((profile.x_min_m + rr * profile.cell_m,
+                                       profile.y_min_m + cc * profile.cell_m))
+            self.offsets[rr, cc] = np.maximum(np.abs(lower[:, :2] - nominal),
+                                               np.abs(upper[:, :2] - nominal))
+            self.status[rr, cc] = 1 + bounded.astype(np.uint8)
+        return self.offsets[rows, columns], self.status[rows, columns] == 2
+
+
+# 최대 262,144셀 × (float64 2개 + 상태 1B + 유효 mask 1B) = 4.5MiB / 호출 스레드.
+_TAPE_PROJECTION = local()
+
+
+def _tape_projection(camera, plane, profile):
+    key = camera, plane, profile
+    cache = getattr(_TAPE_PROJECTION, 'cache', None)
+    if cache is None or cache.key != key:
+        cache = _TAPE_PROJECTION.cache = _TapeProjectionCache(key)
+    return cache
 
 
 def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projection_xy, profile, work):
@@ -529,10 +594,98 @@ def _close_tape_gaps(white, eligible, cell_m):
     return restored
 
 
-def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, first_id):
-    """Trace the outward dark-to-light transition on both sides of the board."""
-    from .geometry import project_ground_bounds_many
+def _outer_paint(np, cv2, hsv, visible, profile):
+    """Find paint that is brighter than the board beside an observed floor shoulder."""
+    near = max(1, round(.010 / profile.cell_m))
+    far = max(2 * near + 1, round(.035 / profile.cell_m))
+    span = hsv.shape[1] - 2 * far
+    if span <= 0:
+        return np.zeros((2, *visible.shape), dtype=np.bool_)
+    saturation, value = (hsv[..., i] for i in (1, 2))
+    window = np.ones((1, 2 * far + 1), dtype=np.uint8)
+    seen = cv2.erode(visible.view(np.uint8), window)[:, far:far + span] != 0
 
+    def sample(channel, offset):
+        start = far + offset
+        return channel[:, start:start + span]
+
+    paint_v, paint_s = sample(value, 0), sample(saturation, 0)
+    masks = np.zeros((2, *visible.shape), dtype=np.bool_)
+    for index, side in enumerate((1, -1)):
+        inside_v = cv2.addWeighted(sample(value, -side * near), .5,
+                                  sample(value, -side * 2 * near), .5, 0)
+        board_s, floor_s = sample(saturation, -side * far), sample(saturation, side * far)
+        board_v, floor_v = sample(value, -side * far), sample(value, side * far)
+        # 방향은 밝은 바닥 쪽이다. 재질의 채도가 다르면 약한 밝기 차이도 쓸 수 있다.
+        floor_lift = cv2.subtract(floor_v, board_v)
+        floor_side = ((floor_lift >= profile.contrast_min)
+                      | ((floor_lift >= _SURFACE_STEP_VALUE)
+                         & (cv2.absdiff(floor_s, board_s) >= profile.contrast_min)))
+        # 도색과 바닥 사이에 관측된 경계가 있어야 밝은 바닥 자체를 테이프로 읽지 않는다.
+        floor_edge = ((cv2.absdiff(floor_s, paint_s) >= _SURFACE_STEP_VALUE)
+                      | (cv2.absdiff(paint_v, floor_v) >= _SURFACE_STEP_VALUE))
+        paint_color = ((paint_s <= profile.saturation_max)
+                       | (cv2.subtract(paint_s, board_s) <= profile.contrast_min))
+        masks[index, :, far:far + span] = (seen & floor_side & floor_edge & paint_color
+            & (paint_v >= profile.value_min) & (cv2.subtract(paint_v, inside_v) >= profile.contrast_min))
+        masks[index] = _close_tape_gaps(masks[index], visible, profile.cell_m)
+    return masks
+
+
+def _paint_roles(np, strips, values, visible, profile, outer_paint):
+    """Inspect the ground on both sides of observed paint, away from the tape itself."""
+    origin = np.array((profile.x_min_m, profile.y_min_m))
+    offsets = max(.026, profile.tape_width_max_m / 2 + profile.cell_m) + np.array((0., .018))
+    roles = []
+    for strip in strips:
+        if strip.closed or not strip.observed or not strip.width_complete:
+            continue
+        points = np.asarray(strip.points_xy)
+        if points[0, 0] > points[-1, 0]:
+            points = points[::-1]
+        edges = np.diff(points, axis=0)
+        lengths = np.hypot(*edges.T)
+        stations = np.cumsum(lengths)
+        length = stations[-1]
+        count = min(16, int(length / .015))
+        if count < 2:
+            continue
+        along = (np.arange(count) + .5) * (length / count)
+        segments = np.searchsorted(stations, along, side='right')
+        tangent = edges[segments] / lengths[segments, None]
+        middle = points[segments + 1] + tangent * (along - stations[segments])[:, None]
+        normal = np.column_stack((-tangent[:, 1], tangent[:, 0]))
+        shoulders = middle[:, None, None, :] + (normal[:, None, None, :]
+                    * np.stack((offsets, -offsets))[None, :, :, None])
+        pixels = np.rint((shoulders - origin) / profile.cell_m).astype(int)
+        inside = ((pixels >= 0) & (pixels < visible.shape)).all(axis=(1, 2, 3)) & (tangent[:, 0] > .3)
+        rows, columns = pixels[inside].transpose(3, 0, 1, 2)
+        seen = visible[rows, columns].all(axis=(1, 2))
+        shoulders_v = values[rows[seen], columns[seen]].astype(np.int16)
+        if len(shoulders_v) < 2:
+            continue
+        dark = (shoulders_v < _EDGE_VALUE_MIN).all(axis=2)
+        difference = shoulders_v.min(axis=2) - shoulders_v[:, ::-1, :].max(axis=2)
+        left = (difference[:, 0] >= profile.contrast_min) & dark[:, 1] & ~dark[:, 0]
+        right = (difference[:, 1] >= profile.contrast_min) & dark[:, 0] & ~dark[:, 1]
+        center = dark.all(axis=1) & (np.abs(difference).max(axis=1) < profile.contrast_min)
+        row, column = np.rint((middle[inside][seen] - origin) / profile.cell_m).astype(int).T
+        confirmed_left, confirmed_right = outer_paint[:, row, column]
+        outer_votes = np.count_nonzero((confirmed_left & ~confirmed_right,
+                                        confirmed_right & ~confirmed_left), axis=1)
+        outer = np.flatnonzero(outer_votes * 4 >= len(shoulders_v) * 3)
+        if len(outer) == 1:
+            roles.append((strip.local_id, 2 * int(outer[0])))
+            continue
+        votes = np.count_nonzero((left, center, right), axis=1)
+        accepted = np.flatnonzero(votes * 4 >= len(shoulders_v) * 3)
+        if len(accepted) == 1 and np.count_nonzero(votes) == 1:
+            roles.append((strip.local_id, int(accepted[0])))
+    return tuple(roles)
+
+
+def _surface_edges(np, cv2, hsv, visible, white, u, v, cache, profile, first_id, diagnostics):
+    """Trace the outward dark-to-light transition on both sides of the board."""
     step = max(1, round(.025 / profile.cell_m))
     shoulder = max(2, round(.035 / profile.cell_m))
     if first_id == 32 or hsv.shape[1] <= 2 * shoulder:
@@ -542,23 +695,25 @@ def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, f
     snap = max(1,round(.025/profile.cell_m))
     max_step = max(2,round(.045/profile.cell_m))
     candidates = []
-    samples = []
-    for row in range(0, len(hsv), step):
-        band = slice(max(0,row-1),row+2)
-        value = np.median(hsv[band,:,2],axis=0)
-        observed = visible[band].all(axis=0)
-        valid = np.logical_and.reduce([observed[i:i+width] for i in range(2*shoulder+1)])
-        samples.append((row,value,valid))
+    rows = np.arange(0, len(hsv), step)
+    before, after = np.maximum(rows - 1, 0), np.minimum(rows + 1, len(hsv) - 1)
+    channel = hsv[..., 2]
+    first, middle, last = channel[before], channel[rows], channel[after]
+    values = np.maximum(np.minimum(first, middle), np.minimum(np.maximum(first, middle), last)).astype(np.float64)
+    border = (before == rows) | (after == rows)
+    values[border] = (first[border].astype(np.float64) + last[border]) * .5
+    observed = cv2.erode(visible.astype(np.uint8), np.ones((3, 2 * shoulder + 1), np.uint8),
+                         borderType=cv2.BORDER_CONSTANT, borderValue=1)
+    valid_rows = observed[rows, shoulder:shoulder + width] != 0
     for role, side in ((0, 1), (2, -1)):
+        inside, outside = columns - side * shoulder, columns + side * shoulder
         run = []
-        for row,value,valid in samples:
+        for row,value,valid in zip(rows, values, valid_rows):
             # Both shoulders must be visible. The far sample ignores narrow tape
             # and the near sample places the boundary at the material or tape edge.
-            inside = columns-side*shoulder
-            outside = columns+side*shoulder
             change = value[columns+side]-value[columns-side]
             options = columns[valid & (value[inside] < _EDGE_VALUE_MIN)
-                & (value[outside]-value[inside] >= profile.contrast_min) & (change >= 8)]
+                & (value[outside]-value[inside] >= profile.contrast_min) & (change >= _SURFACE_STEP_VALUE)]
             if run:
                 previous = run[-1][1]
                 options = options[abs(options-previous) <= max_step]
@@ -586,9 +741,7 @@ def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, f
         points = np.column_stack((profile.x_min_m+rows*profile.cell_m,profile.y_min_m+columns*profile.cell_m))
         contour = cv2.approxPolyDP(points.astype(np.float32), .006, False).reshape(-1, 2)
         keep = [int(np.argmin(np.sum((points-point)**2,axis=1))) for point in contour]
-        lower,upper,bounded = project_ground_bounds_many(u[rows,columns],v[rows,columns],camera,plane,
-            pixel_error=camera.pixel_error+1.)
-        pad = np.maximum(abs(lower[:,:2]-points),abs(upper[:,:2]-points))
+        pad, bounded = cache.point_offsets(np, u, v, rows, columns, diagnostics)
         errors = np.hypot(pad[:,0],pad[:,1])
         if (len(keep) < 2 or len(keep) > profile.max_points_per_strip or not bounded.all()
                 or np.max(errors) > profile.max_projection_error_m):
@@ -603,25 +756,32 @@ def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, f
     return tuple(result)
 
 
-def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None, nn_candidates=None, diagnostics=None):
+def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None,
+                 valid_rgb=None, nn_candidates=None, diagnostics=None):
     """RGB에서 흰 테이프와 어두운 도로 바깥 경계를 별도 관측으로 뽑는다."""
     timing=timing_start(diagnostics,'tape.birdview_remap')
     if type(profile) is not TapeProfile or stamp is not None and type(stamp) is not FrameStamp:
         raise ValueError('expected tape profile and optional original FrameStamp')
     import numpy as np
     import cv2
-    from .geometry import project_ground_bounds_many
-
     if (not isinstance(bgr, np.ndarray) or bgr.dtype != np.uint8
             or bgr.shape != (camera.height, camera.width, 3)):
         raise ValueError('tape input differs from camera BGR shape')
     if occlusion_mask is not None and (not isinstance(occlusion_mask, np.ndarray)
             or occlusion_mask.shape != bgr.shape[:2] or occlusion_mask.dtype not in (np.bool_, np.uint8)):
         raise ValueError('occlusion mask must be bool/uint8 in original RGB coordinates; nonzero is blocked')
-    u, v, valid = _birdview_map(camera, plane, profile)
+    u, v, inside = _birdview_map(camera, plane, profile)
     warped = cv2.remap(bgr, u, v, cv2.INTER_LINEAR,
                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    valid = np.asarray(valid, dtype=np.bool_).copy()
+    timing_finish(diagnostics,timing)
+    timing=timing_start(diagnostics,'tape.validity_remap')
+    if valid_rgb is not None:
+        if valid_rgb.shape != bgr.shape[:2] or valid_rgb.dtype != np.uint8:
+            raise ValueError('valid_rgb must describe the rectified RGB grid')
+    cache = _tape_projection(camera, plane, profile)
+    valid = cache.visible_grid(np, cv2, u, v, inside, valid_rgb)
+    timing_finish(diagnostics,timing)
+    timing=timing_start(diagnostics,'tape.occlusion_remap')
     occ = np.zeros(valid.shape, dtype=np.bool_)
     if occlusion_mask is not None:
         footprint = cv2.dilate((occlusion_mask != 0).astype(np.uint8), np.ones((3, 3), np.uint8))
@@ -633,6 +793,9 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
     visible = valid & ~occ
     white = _white_band(np, cv2, hsv, visible, profile)
     white = _close_tape_gaps(white, visible & (hsv[..., 1] <= profile.saturation_max), profile.cell_m)
+    outer_paint = _outer_paint(np, cv2, hsv, visible, profile)
+    outer_white = outer_paint.any(axis=0)
+    white |= outer_white
     work = dict(grid_cells=int(white.size), components=0, component_cells=0, thin_iterations=0,
                 graph_pixels=0, projection_checks=0, projection_batches=0,
                 projection_unbounded=0, projection_limited=0, edge_tests=0)
@@ -663,7 +826,7 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
             ring &= valid[y0:y1, x0:x1] & ~white[y0:y1, x0:x1]
             values = hsv[y0:y1, x0:x1, 2]
             if not np.any(ring) or float(np.median(values[part])) - float(np.median(values[ring])) < profile.contrast_min:
-                white[y0:y1, x0:x1][part] = False
+                white[y0:y1, x0:x1][part & ~outer_white[y0:y1, x0:x1]] = False
     distance = cv2.distanceTransform(white.astype(np.uint8), cv2.DIST_L2, 5)
     # T/X 교차부의 내접 원은 단일 band 반폭보다 크다. 그 영역을 넓은 물체로
     # 지우면 실제 분기가 네 개의 가림 tip으로 바뀌므로 더 깊은 white core만 격리한다.
@@ -695,12 +858,9 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
         rows, columns = np.nonzero(skeleton)
         work['projection_checks'] = len(rows)
         if len(rows):
+            # Work counts observations. TimingDiagnostics separately counts actual bound calculations.
             work['projection_batches'] = 1
-            lower, upper, bounded = project_ground_bounds_many(u[rows, columns], v[rows, columns],
-                camera, plane, pixel_error=camera.pixel_error + 1.0,diagnostics=diagnostics)
-            nominal = np.column_stack((profile.x_min_m + rows * profile.cell_m,
-                                       profile.y_min_m + columns * profile.cell_m))
-            pad = np.maximum(np.abs(lower[:, :2] - nominal), np.abs(upper[:, :2] - nominal))
+            pad, bounded = cache.point_offsets(np, u, v, rows, columns, diagnostics)
             errors = np.nextafter(np.hypot(pad[:, 0], pad[:, 1]), np.inf)
             projection_error[rows, columns] = errors
             projection_xy[rows, columns] = np.nextafter(pad, np.inf)
@@ -728,9 +888,12 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
                     ('strip_cap_exhausted', 'STRIP_COUNT_CAP'), ('junction_cap_exhausted', 'JUNCTION_COUNT_CAP')):
                 if work[key]:
                     reasons.append(reason)
-    surface_edges = _surface_edges(np,cv2,hsv,visible,white,u,v,camera,plane,profile,len(strips))
+    timing=timing_start(diagnostics,'tape.surface_edges')
+    surface_edges = _surface_edges(np,cv2,hsv,visible,white,u,v,cache,profile,len(strips),diagnostics)
+    timing_finish(diagnostics,timing)
+    paint_roles = _paint_roles(np, strips, hsv[..., 2], visible, profile, outer_paint)
     work['surface_edges'] = len(surface_edges)
     return TapeGraph(tuple(strips), junctions, 'UNKNOWN' if not complete else 'VALID' if strips else 'EMPTY',
         complete, tuple(reasons), None if stamp is None else stamp.key,
         bool(camera.qualified and plane.qualified), work, profile,
-        _readonly(np, white), _readonly(np, skeleton), _readonly(np, valid), nn_candidates, surface_edges)
+        _readonly(np, white), _readonly(np, skeleton), _readonly(np, valid), nn_candidates, surface_edges, paint_roles)

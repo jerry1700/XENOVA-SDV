@@ -13,7 +13,6 @@ from time import perf_counter_ns
 
 from .inputs import PerceptionInput, FrameStamp
 from .tape import TapeProfile, extract_tape
-from .rectify import rgb_view
 from .road import RoadGeometryLimits, RoadProfile, infer_road
 from .lane_tracking import mapped_lane_ahead, track_lane
 from .mapped_registration import MappedRegistration
@@ -24,6 +23,9 @@ from .temporal_road import MappedRoad, TemporalRoadMap
 from .parking_entrance import EntranceSpan, entrance_spans, entrance_summary
 from .parking import parking_clearance_cells
 from .depth import DepthConfig
+from .geometry import timing_start, timing_finish
+from .rectify import rgb_view
+from .rgb_rectification import tape_rgb_geometry
 from ..mapping.local_map import EvidenceGrid, GridSpec, OCCUPIED, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
     RegistrationProfile,transform_point,segment_distance,wrap_yaw)
@@ -35,6 +37,25 @@ from ..mapping.free_schedule import FreeScheduler,StoppingRegion
 _MIN_REGISTRATION_STRIP_M = .08
 _BOUNDARY_PARENTS_PER_FRAME = 2
 _BOUNDARY_RAY_TESTS_PER_FRAME = 2048
+
+
+def _select_mapped_road(road, temporal, limits):
+    if temporal is None or road is None:
+        return temporal
+    if road.status == 'UNKNOWN' and len(road.hypotheses) <= 1 and set(road.reasons) <= {
+            'NO_MEASURED_TAPE_WIDTH', 'NO_SUPPORTED_ROAD', 'GEOMETRY_ERROR_BUDGET'}:
+        return temporal
+    if (road.status != 'PARTIAL' or not road.complete or len(road.hypotheses) != 1
+            or temporal.road.source_key != road.source_key or road.source_key not in temporal.sources
+            or len(temporal.sources) < 2 or not temporal.within(limits)):
+        return None
+    observations = temporal.road.hypotheses[0].boundary_observations
+    if observations is not None:
+        current_roles = {strip: role for role, ids in enumerate(road.hypotheses[0].strip_ids) for strip in ids}
+        if any(key == road.source_key and current_roles.get(strip, role) != role
+               for role, evidence in enumerate(observations) for key, strip in evidence):
+            return None
+    return temporal
 
 
 def _digest(value):
@@ -182,9 +203,7 @@ class PerceptionPipeline:
         if type(calibration) is not CalibrationProfile:
             raise ValueError('pipeline requires CalibrationProfile')
         self.calibration = calibration
-        # 왜곡 계수가 있는 RGB 는 편 영상과 무왜곡 모델로 흰선·가림·NN 후보를 처리한다. 없으면 None 이다.
-        self._rgb_view = rgb_view(calibration.rgb)
-        self._rgb_camera = calibration.rgb if self._rgb_view is None else self._rgb_view.camera
+        self._tape_camera, _, _ = tape_rgb_geometry(calibration.rgb)
         self.profile = PipelineProfile() if profile is None else profile
         if type(self.profile) is not PipelineProfile or type(targets) is not tuple or len(targets)>4:
             raise ValueError('invalid pipeline or target profile')
@@ -404,9 +423,12 @@ class PerceptionPipeline:
             self._domain_cache=(support,permission)
         grid.set_domain(support,permission)
 
-    def _occlusion(self, evidence):
+    def _occlusion(self, evidence, camera):
         from .occlusion import box_occlusion
-        return box_occlusion(() if evidence is None else evidence.hit_boxes,self._rgb_camera)
+        boxes = () if evidence is None else evidence.hit_boxes
+        if evidence is not None and evidence.occlusion_boxes is not None:
+            boxes = evidence.occlusion_boxes
+        return box_occlusion(boxes, camera)
 
     def _uses_observed_support(self, graph):
         return (self.reference is not None and self.reference.feature_policy=='OBSERVED_STRIP_SUPPORT_V1'
@@ -606,7 +628,7 @@ class PerceptionPipeline:
             nn_new=self.nn_gate.accept(nn_stamp,hashlib.sha256(packet.payload).hexdigest())
             if nn_new:
                 from .neural import build_neural_layer
-                self._last_neural=build_neural_layer(observation,self.calibration,rgb_view=self._rgb_view)
+                self._last_neural=build_neural_layer(observation,self.calibration,rgb_view=rgb_view(self.calibration.rgb))
         self.counts['rgb']+=int(rgb_new); self.counts['depth']+=int(depth_new); self.counts['nn']+=int(nn_new)
         self.counts['duplicate_rgb']+=int(not rgb_new)
         self.counts['duplicate_depth']+=int(observation.depth is not None and not depth_new)
@@ -667,8 +689,8 @@ class PerceptionPipeline:
                 and (raw_pose.wheel_capture is not None or localization_position_drift_mps or localization_yaw_drift_rps)):
             initial = self._startup_odometry
             if initial is None or initial.sample.context != raw_pose.sample.context:
-                self._startup_odometry = raw_pose
-            elif raw_pose.captured_us[1] >= initial.captured_us[1]:
+                initial = self._startup_odometry = raw_pose
+            if raw_pose.captured_us[1] >= initial.captured_us[1]:
                 registration_pose = pose = MapOdomAlignment.project_startup(initial, raw_pose,
                     position_drift_mps=localization_position_drift_mps,
                     yaw_drift_rps=localization_yaw_drift_rps)
@@ -683,6 +705,8 @@ class PerceptionPipeline:
         evidence=None
         ray_inputs=None
         motion_pose=None
+        # 고정 보정 배열은 compute 후보를 복사할 때 함께 복사하지 않는다.
+        _, rgb_maps, valid_rgb = tape_rgb_geometry(self.calibration.rgb) if rgb_new else (None, None, None)
         targets_qualified=bool(self.targets and all(target.qualified for target in self.targets))
         if depth_new:
             if not instantaneous_synthetic and capture_interval is not None and motion_qualified and raw_pose is not None:
@@ -695,6 +719,7 @@ class PerceptionPipeline:
             evidence=analyze_depth(observation.depth.array(),self.calibration.right,self.calibration.plane,
                 stamp=observation.depth.stamp,calibration_id=self.calibration.sha256,
                 input_kind=observation.kind,profile=self.calibration,config=config,defer_patches=True,
+                collect_occlusion=rgb_maps is not None,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
             evidence,ray_inputs=evidence.take_ray_inputs()
         depth_done=perf_counter_ns()
@@ -702,9 +727,18 @@ class PerceptionPipeline:
         if rgb_new:
             self._last_rgb_key,self._last_capture=observation.rgb.stamp.key,capture
             self._last_rgb=observation.rgb.array()
-            tape_rgb=self._last_rgb if self._rgb_view is None else self._rgb_view.image(self._last_rgb)
-            self._last_tape=extract_tape(tape_rgb,self._rgb_camera,self.calibration.plane,self.profile.tape,
-                stamp=observation.rgb.stamp,occlusion_mask=self._occlusion(evidence),nn_candidates=observation.nn,
+            tape_rgb = self._last_rgb
+            if rgb_maps is not None:
+                import cv2
+                timing = timing_start(diagnostics, 'rgb.rectification')
+                tape_rgb = cv2.remap(tape_rgb, *rgb_maps, cv2.INTER_LINEAR)
+                timing_finish(diagnostics, timing)
+            timing = timing_start(diagnostics, 'rgb.depth_occlusion')
+            occlusion = self._occlusion(evidence, self._tape_camera)
+            timing_finish(diagnostics, timing)
+            self._last_tape=extract_tape(tape_rgb,self._tape_camera,self.calibration.plane,self.profile.tape,
+                stamp=observation.rgb.stamp,occlusion_mask=occlusion,
+                valid_rgb=valid_rgb,nn_candidates=observation.nn,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
             self._last_road=infer_road(self._last_tape,self.profile.road)
         if self._last_neural is not None and self._last_road is not None and (rgb_new or nn_new):
@@ -722,7 +756,8 @@ class PerceptionPipeline:
         registration_method=None
         normal_points=0
         visual_conflict=False
-        geometry_qualified=(self.calibration.metric_qualified and self.calibration.time_qualified
+        geometry_qualified=(self.calibration.metric_qualified and self._tape_camera.qualified
+                            and self.calibration.time_qualified
                             and observation.capture_interval is not None)
         unqualified_reference=(self.reference is not None
             and self.reference.feature_policy not in ('PHYSICAL_STRIP_ENDPOINTS_V1','OBSERVED_STRIP_SUPPORT_V1'))
@@ -1087,10 +1122,7 @@ class PerceptionPipeline:
                 geometry_limits=self.profile.road_limits)
             approach_fit = self._temporal_road.approach_fit
             # 현재 영상이 여러 도로를 가리키거나 탐색을 끝내지 못했다면 후보를 승격하지 않는다.
-            if (self._last_road is None or (self._last_road.status == 'UNKNOWN'
-                    and len(self._last_road.hypotheses) <= 1 and set(self._last_road.reasons) <= {
-                        'NO_MEASURED_TAPE_WIDTH','NO_SUPPORTED_ROAD','GEOMETRY_ERROR_BUDGET'})):
-                mapped_road = temporal
+            mapped_road = _select_mapped_road(self._last_road, temporal, self.profile.road_limits)
         lane_section = None
         if lane_status == 'HELD' and lane_pose is not None:
             lane_section = mapped_lane_ahead(self._current_lane, lane_pose, self.profile.road)

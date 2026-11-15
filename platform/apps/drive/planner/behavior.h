@@ -14,7 +14,7 @@ struct db_limits {
 };
 /* Normalized original Pi evidence; the transport validates identity/expiry. */
 struct db_facts {
- bool valid,meter_valid,stop_applied,stationary,steering_settled;
+ bool valid,meter_valid,stop_applied,stationary,steering_settled,front_blocked;
  uint64_t expires_pi_us,vehicle_sequence,meter_revision,meter_ticks;double metres_per_tick;
  uint64_t sampled_pi_us,clock_error_us;
  uint64_t stop_calculation,stop_serial,control_generation,plan_revision,phase_revision;

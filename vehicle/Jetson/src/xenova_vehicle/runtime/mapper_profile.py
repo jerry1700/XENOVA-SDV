@@ -14,6 +14,7 @@ import math
 from ..mapping.local_map import GridSpec
 from ..mapping.map_lattice import GridWindow,RollingPolicy
 from ..mapping.registration import RegistrationProfile
+from ..mapping.wheel_motion import WheelMotionProfile
 from ..perception.adapters import CaptureTiming
 from ..perception.calibration import CalibrationProfile
 from ..perception.depth import DepthConfig
@@ -123,6 +124,7 @@ class SensorLimits:
     max_gap_us: int
     capacity: int
     tof_sources: tuple
+    wheel_odometry: WheelMotionProfile | None = None
 
     def __post_init__(self):
         for name in ('vehicle_max_age_us','tof_max_age_us','max_gap_us'): _uint(getattr(self,name),1,1_000_000)
@@ -130,6 +132,8 @@ class SensorLimits:
         for name in ('max_speed_mps','max_yaw_rate_rps'):
             if not _finite(getattr(self,name)): raise MapperProfileError('positive sensor motion bound required')
         if type(self.tof_sources) is not tuple or len(self.tof_sources)>2: raise MapperProfileError('at most2 explicit ToF sources')
+        if self.wheel_odometry is not None and type(self.wheel_odometry) is not WheelMotionProfile:
+            raise MapperProfileError('explicit wheel odometry calibration required')
         sensors=set(); names=set()
         for entry in self.tof_sources:
             if type(entry) is not tuple or len(entry)!=2 or type(entry[1]) is not TofLeaf: raise MapperProfileError('typed external ToF leaf required')
@@ -144,7 +148,9 @@ class SensorLimits:
 
     @classmethod
     def from_dict(cls,value):
-        if type(value) is not dict or set(value)!={f.name for f in fields(cls)} or type(value['tof_sources']) is not list:
+        names = {f.name for f in fields(cls)}
+        if (type(value) is not dict or not names-{'wheel_odometry'} <= set(value) <= names
+                or type(value['tof_sources']) is not list):
             raise MapperProfileError('exact SensorLimits fields required')
         if len(value['tof_sources'])>2: raise MapperProfileError('ToF inventory exceeds2')
         leaves=[]
@@ -153,7 +159,9 @@ class SensorLimits:
             try: leaf=TofLeaf.from_dict(row['leaf'])
             except (ValueError,TypeError,OverflowError) as error: raise MapperProfileError('invalid original ToF leaf') from error
             leaves.append((row['external_leaf_name'],leaf))
-        return cls(**{**value,'tof_sources':tuple(leaves)})
+        wheel = value.get('wheel_odometry')
+        return cls(**{**value,'tof_sources':tuple(leaves),
+                      'wheel_odometry':None if wheel is None else _typed(WheelMotionProfile,wheel)})
 
 
 @dataclass(frozen=True)

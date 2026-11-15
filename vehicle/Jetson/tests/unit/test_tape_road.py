@@ -90,6 +90,20 @@ class RoadHypothesisTests(unittest.TestCase):
         for divider, outer in zip(partial.hypotheses[0].divider, partial.hypotheses[0].right_outer):
             self.assertAlmostEqual(math.dist(divider, outer), .285)
 
+    def test_observed_black_shoulders_disambiguate_both_sides_without_changing_error_limit(self):
+        for ys, roles, expected in (((.3, 0.), ((0, 0), (1, 1)), ((0,), (1,), ())),
+                                    ((0., -.3), ((0, 1), (1, 2)), ((), (0,), (1,)))):
+            with self.subTest(roles=roles):
+                graph = straight_graph(ys)
+                self.assertEqual(infer_road(replace(graph, paint_roles=((0, 1), (1, 1)))).status, 'AMBIGUOUS')
+                marked = replace(graph, paint_roles=roles)
+                result = infer_road(marked)
+                self.assertEqual(result.status, 'PARTIAL')
+                self.assertEqual(result.hypotheses[0].strip_ids, expected)
+                result = infer_road(marked, RoadProfile(max_geometry_error_m=.001))
+                self.assertEqual(result.status, 'UNKNOWN')
+                self.assertIn('GEOMETRY_ERROR_BUDGET', result.reasons)
+
     def test_unique_dashed_chain_marks_unobserved_gap_stations_as_inferred(self):
         graph = TapeGraph((strip(0, ((.2, .3), (1.4, .3))), strip(1, ((.2, -.3), (1.4, -.3))),
                            strip(2, ((.2, 0.), (.65, 0.))), strip(3, ((.75, 0.), (1.4, 0.)))))
@@ -180,6 +194,61 @@ class RoadHypothesisTests(unittest.TestCase):
         uncertain_both_axes = TapeGraph(tuple(replace(s, point_error_xy=(), segment_error_xy=()) for s in strips))
         self.assertEqual(infer_road(uncertain_both_axes).status, 'UNKNOWN')
 
+    def test_station_normal_bounds_keep_the_r45_like_two_line_straight(self):
+        def lines(error_xy, outer_y):
+            return TapeGraph(tuple(replace(strip(i, ((.4, y), (.85, y)), error=.1226),
+                point_error_xy=(error_xy,) * 2, segment_error_xy=(error_xy,))
+                for i, y in enumerate((outer_y, 0.))), paint_roles=((0, 0), (1, 1)))
+
+        profile = RoadProfile(lane_width_min_m=.26, lane_width_max_m=.31)
+        result = infer_road(lines((.10, .036), .285), profile)
+        self.assertEqual(result.status, 'PARTIAL')
+        hypothesis = result.hypotheses[0]
+        self.assertGreater(hypothesis.error_m, .23)
+        self.assertLess(max(result.local_normal_bounds_m[0]), .12)
+        left, divider, inferred_right = result.local_normal_bounds_m[0]
+        self.assertGreaterEqual(left, .036)
+        self.assertGreaterEqual(divider, .036)
+        self.assertGreaterEqual(inferred_right, divider + .025 - 1e-9)
+        self.assertEqual(infer_road(lines((.10, .12), .285), profile).status, 'UNKNOWN')
+        self.assertFalse(infer_road(lines((.10, .003), .45), profile).hypotheses)
+
+    def test_dashed_divider_join_keeps_longitudinal_error_out_of_its_normal_bound(self):
+        def measured(number, points):
+            return replace(strip(number, points, error=.131),
+                           point_error_xy=((.13, .006),) * 2, segment_error_xy=((.13, .006),))
+
+        edge = measured(0, ((.2, .285), (.95, .285)))
+        dashes = tuple(measured(i + 1, ((x, 0.), (x + .05, 0.)))
+                       for i, x in enumerate((.25, .36, .47, .58, .69, .80)))
+        roles = ((0, 0),) + tuple((dash.local_id, 1) for dash in dashes)
+        result = infer_road(TapeGraph((edge, *dashes), paint_roles=roles),
+                            RoadProfile(lane_width_min_m=.255, lane_width_max_m=.315))
+        self.assertEqual(result.status, 'PARTIAL')
+        self.assertEqual(result.hypotheses[0].strip_ids[1], tuple(dash.local_id for dash in dashes))
+        self.assertGreater(result.hypotheses[0].error_m, .12)
+        self.assertLess(max(result.local_normal_bounds_m[0]), .12)
+
+    def test_curved_boundary_normal_bound_covers_independently_shifted_tape(self):
+        # R45 inner boundary and two matching arcs. Shift source points in X
+        # and Y, then evaluate their normal distance using the unshifted arcs.
+        radii = (.45, .735, 1.02)
+        dx, dy = .034, -.008
+        strips = []
+        for i, radius in enumerate(radii):
+            arc = tuple((.3 + radius * math.sin(angle), .735 - radius * math.cos(angle))
+                for angle in (0.05 + .06 * j for j in range(14)))
+            shifted = tuple((x + dx, y + dy) for x, y in arc)
+            strips.append(replace(strip(i, shifted, error=.04), point_error_xy=((dx, abs(dy)),) * len(arc),
+                                 segment_error_xy=((dx, abs(dy)),) * (len(arc) - 1)))
+        result = infer_road(TapeGraph(tuple(strips)), RoadProfile(lane_width_min_m=.26, lane_width_max_m=.31))
+        self.assertEqual(result.status, 'VALID')
+        h = result.hypotheses[0]
+        for edge, radius, bound in zip((h.left_outer, h.divider, h.right_outer), radii, result.local_normal_bounds_m[0]):
+            error = max(abs(math.hypot(x - .3, y - .735) - radius) for x, y in edge)
+            self.assertGreater(error, abs(dy))
+            self.assertLessEqual(error, bound)
+
     def test_missing_outer_alternatives_survive_an_unrelated_extra_paint_line(self):
         graph = straight_graph((.3, 0., 1.2))
         result = infer_road(graph)
@@ -266,6 +335,38 @@ class TapeImageTests(unittest.TestCase):
         shape = road.hypotheses[0]
         self.assertAlmostEqual(shape.left_outer[0][1]-shape.divider[0][1], .285, delta=.025)
         self.assertAlmostEqual(shape.divider[0][1]-shape.right_outer[0][1], .285, delta=.025)
+
+    def test_outer_paint_uses_the_board_side_when_the_floor_has_a_different_color(self):
+        from xenova_vehicle.perception.calibration import CameraModel
+
+        np = self.np
+        camera = CameraModel(640, 360, ((400., 0., 320.), (0., 400., 180.), (0., 0., 1.)),
+                             self.camera.rotation, (.8, 0., 1.), pixel_error=0.)
+        y = (320 - np.arange(640)) / 400.
+        profile = TapeProfile(x_min_m=.40, x_max_m=1.20, y_min_m=-.45, y_max_m=.45, saturation_max=25)
+        for sign, role in ((1, 0), (-1, 2)):
+            with self.subTest(side=sign):
+                hsv = np.empty((360, 640, 3), dtype=np.uint8)
+                hsv[:] = (0, 14, 80)
+                hsv[:, (sign * y > .19) & (sign * y <= .285)] = (100, 53, 154)
+                hsv[:, sign * y > .285] = (20, 14, 176)
+                hsv[:, abs(y) <= .006] = (0, 7, 238)
+                edge = (sign * y > .279) & (sign * y <= .291)
+                hsv[:, edge] = (0, 29, 214)
+                bgr = self.cv2.cvtColor(hsv, self.cv2.COLOR_HSV2BGR)
+                graph = extract_tape(bgr, camera, self.plane, profile)
+                outer = [strip for strip in graph.strips if dict(graph.paint_roles).get(strip.local_id) == role]
+                self.assertEqual(len(outer), 1)
+                self.assertGreater(outer[0].length_m, .70)
+                result = infer_road(graph, RoadProfile(lane_width_min_m=.255, lane_width_max_m=.315))
+                self.assertEqual(result.status, 'PARTIAL')
+                self.assertEqual(result.hypotheses[0].strip_ids[role], (outer[0].local_id,))
+
+                hsv[:, edge & (sign * y <= .285)] = (100, 53, 154)
+                hsv[:, edge & (sign * y > .285)] = (20, 14, 176)
+                bare = extract_tape(self.cv2.cvtColor(hsv, self.cv2.COLOR_HSV2BGR), camera, self.plane, profile)
+                self.assertFalse(any(kind == role for _, kind in bare.paint_roles))
+                self.assertFalse(any(abs(strip.points_xy[0][1]) > .25 for strip in bare.strips))
 
     def test_dim_tape_edge_joins_bright_core_without_joining_the_carpet(self):
         from xenova_vehicle.perception.tape import _white_band
@@ -392,17 +493,37 @@ class TapeImageTests(unittest.TestCase):
         self.assertTrue(self.np.array_equal(without.mask, with_auxiliary.mask))
 
     def test_reusing_static_camera_projection_does_not_reuse_the_previous_image(self):
+        from xenova_vehicle.perception.geometry import TimingDiagnostics
+
         image = self.image()
         for y in (-.3, 0., .3):
             self.draw(image, ((.3, y), (1.3, y)))
         observed = self.extract(image)
         empty = self.extract(self.image())
-        observed_again = self.extract(image)
+        timing = TimingDiagnostics()
+        observed_again = self.extract(image, diagnostics=timing)
         self.assertEqual(empty.status, 'EMPTY')
         self.assertFalse(empty.strips)
         self.assertEqual(observed.strips, observed_again.strips)
         self.assertEqual(observed.work['projection_batches'], 1)
         self.assertEqual(empty.work['projection_batches'], 0)
+        self.assertNotIn('geometry.ground_prepare', timing.snapshot()['phases'])
+
+    def test_projection_cache_respects_calibration_and_mutable_validity(self):
+        image = self.image()
+        self.draw(image, ((.3, 0.), (1.3, 0.)))
+        mutable = self.np.ones(image.shape[:2], dtype=self.np.uint8)
+        frozen = self.np.frombuffer(mutable.tobytes(), dtype=mutable.dtype).reshape(mutable.shape)
+        original = self.extract(image, valid_rgb=frozen)
+        self.assertTrue(original.strips)
+        self.assertEqual(original.strips, self.extract(image, valid_rgb=mutable).strips)
+        mutable[:, :] = 0
+        self.assertFalse(self.extract(image, valid_rgb=mutable).strips)
+        self.assertEqual(original.strips, self.extract(image, valid_rgb=frozen).strips)
+        more_uncertain = replace(self.camera, pixel_error=.5)
+        changed = extract_tape(image, more_uncertain, self.plane, self.profile, valid_rgb=frozen)
+        self.assertGreater(changed.strips[0].error_m, original.strips[0].error_m)
+        self.assertEqual(original.strips, self.extract(image, valid_rgb=frozen).strips)
 
     def traced_raster(self, boundary=None, internal=False):
         # 제어한 raster로 edge 탐색 분류만 검사한다. renderer/실물 영상의 양성 주장은 아니다.

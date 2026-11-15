@@ -41,6 +41,10 @@ static bool tof_automatic(const xenova_drive_MissionGrant *mission,const xenova_
   if(!front){k_mutex_unlock(&tof_lock);return false;}
   struct de_reference handle;const struct lp_path *path;
   if(de_path_acquire(&engine,&handle,&path)){out->reason="TOF_PATH_UNAVAILABLE";k_mutex_unlock(&tof_lock);return true;}
+  if(lp_startup_straight(path,engine.config)){
+   /* The startup tracker holds stopped on this original ToF report. */
+   (void)de_path_release(&engine,handle);k_mutex_unlock(&tof_lock);return false;
+  }
   /* The interrupted committed path supplies the existing mission/phase
    * identity for both original direction gates. */
   bool eligible=engine.local_owner&&engine.episode_handoff==DE_EPISODE_IDLE&&

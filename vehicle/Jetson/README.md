@@ -130,6 +130,8 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
 
+새 지도 시작 시 상대 오도메트리를 쓰려면 `sensors.wheel_odometry`에 차량과 일치하는 `encoder_bits`, `metres_per_tick`, `metres_per_tick_upper`, `track_width_m`, `distance_error_ratio`, `heading_error_per_m`를 명시한다. 같은 엔코더 세션의 짧은 누락은 `sensors.max_gap_us` 안에서 이동 오차에 포함한다. 긴 공백이나 엔코더 세션 변경 시 상대 이동 증거가 끊긴다.
+
 RGB 보정에 렌즈 왜곡 계수가 있으면 M은 흰선 추출·가림 마스크·NN 후보 투영에 편 영상과 같은 K의 무왜곡 모델을 쓴다. 편 영상의 각 픽셀이 원 영상의 어느 자리에서 왔는지는 정방향 왜곡 모델로 계산하고, 원 ROI 안에서 온 픽셀만 편 영상의 ROI에 둔다. NN 표본의 픽셀은 편 좌표로 옮겨 투영하되 기록은 원 좌표로 남긴다. 보정의 식별자와 오차 값은 바뀌지 않으며, 계수가 모두 0인 보정은 이전과 같은 경로로 처리한다. 진단 overlay와 yaw 편향 추정은 원 영상을 그대로 쓴다.
 
 흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
