@@ -6,10 +6,10 @@ import java.util.Set;
 
 /** Interprets scoped app reports for observation only, using the v1 MQTT payload contract. */
 final class VmAppReport {
-    private static final Set<String> PHASES = Set.of("WAITING", "ACTIVATING", "EXECUTING", "STOPPING", "RESIDUAL");
+    private static final Set<String> PHASES = Set.of("WAITING", "ACTIVATING", "EXECUTING", "STOPPING", "STOPPED", "RESIDUAL");
     private static final Set<String> REASONS = Set.of("CONTROL_UNAPPLIED", "INPUT_UNAVAILABLE", "INPUT_STALE",
             "INPUT_INVALID", "STATE_PREPARING", "CALCULATION_FAILED", "OUTPUT_INVALID",
-            "APP_STOPPING", "RESOURCE_RETAINED");
+            "APP_STOPPING", "RESOURCE_RETAINED", "APP_EXITED");
     private static final Set<String> HEARTBEAT_STATES = Set.of("active", "standby", "idle", "error");
 
     private VmAppReport() {
@@ -30,8 +30,10 @@ final class VmAppReport {
             case "NOT_READY" -> reason.isTextual() && REASONS.contains(reason.textValue());
             default -> false;
         };
+        boolean stopped = "STOPPED".equals(phase);
         if (payload.size() != 7 || !"warm-drive-1".equals(profile) || !PHASES.contains(phase)
                 || !generation.isIntegralNumber() || !generation.canConvertToLong()
+                || stopped != "APP_EXITED".equals(reason.textValue()) || (stopped && applied == 0)
                 || applied < 0 || applied > 0xffff_ffffL || "0".equals(check) || !validReadiness) {
             throw new IllegalArgumentException("invalid app.lifecycle payload");
         }

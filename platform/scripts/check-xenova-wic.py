@@ -20,6 +20,12 @@ def digest(path):
     return value.hexdigest()
 
 
+def pi4_kms_enabled(config):
+    """Pi4 부팅에서 KMS overlay와 64MiB CMA가 한 번만 선택됐는지 확인한다."""
+    selected = re.findall(r"^\s*dtoverlay\s*=\s*(vc4-f?kms-v3d[^#\s]*)", config, re.M)
+    return selected == ["vc4-kms-v3d-pi4,cma-64"]
+
+
 def check_dom0_profile(config, script):
     """실제 FAT의 값이 승인한 Pi 4 프로필과 일치하는지 검사한다."""
     turbo = []
@@ -85,9 +91,10 @@ def inspect(deploy, image, output):
     (output / 'fat-directory.log').write_text(listing.stdout + listing.stderr)
 
     def extract(name):
-        if not re.fullmatch(r'[A-Za-z0-9_.-]+', name):
+        if any(part in ('', '.', '..') or not re.fullmatch(r'[A-Za-z0-9_.-]+', part)
+               for part in name.split('/')):
             raise ValueError(f'Unsafe FAT filename: {name}')
-        target = output / (name + '.from-wic')
+        target = output / (name.replace('/', '__') + '.from-wic')
         result = subprocess.run(['mcopy', '-i', volume, '::' + name, str(target)], text=True, capture_output=True)
         check(result.returncode == 0, f'actual WIC FAT contains {name}: {result.stderr.strip()}')
         return target
@@ -105,6 +112,11 @@ def inspect(deploy, image, output):
         compare('xen', 'xen-' + metadata['MACHINE'])
         compare('Image', 'Image')
         config = extract('config.txt').read_text()
+        check(pi4_kms_enabled(config), 'WIC config explicitly selects Pi4 KMS with 64MiB CMA')
+        overlay = compare('overlays/vc4-kms-v3d-pi4.dtbo', 'vc4-kms-v3d-pi4.dtbo').read_bytes()
+        check(len(overlay) >= 40 and struct.unpack_from('>I', overlay)[0] == 0xd00dfeed
+              and struct.unpack_from('>I', overlay, 4)[0] == len(overlay),
+              'WIC Pi4 KMS overlay has a complete flattened device tree header')
         explicit = re.findall(r'^\s*kernel\s*=\s*([^#\s]+)', config, re.M)
         loader = explicit[-1].strip('"') if explicit else metadata['SDIMG_KERNELIMAGE']
         compare(loader, 'u-boot.bin')

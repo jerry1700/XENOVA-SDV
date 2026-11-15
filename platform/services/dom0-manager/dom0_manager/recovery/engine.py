@@ -24,9 +24,10 @@
   · APP_HEARTBEAT_LOST: Zephyr 만. 동료 채널 증거가 있어야 UNHEALTHY 다(S15P31E110-335)
   · graceful 실패 승격: 실패했던 실행이 지금도 돌고 있고 최초 사유와 같은 현재 증거일 때만. force 여부 자체도 현재 view·실행으로 정한다
     (Zephyr, 지금 crashed, 같은 실행의 graceful 실패). 옛 실행의 crash·graceful 실패를 새 실행의 force 근거로 쓰지 않는다
-  · 실행 대조: 주행 VM 은 binding execution_id 가 반드시 있어야 하고 view 와 같아야 한다. 주행이 아닌 VM 은 관측에 execution_id 가 없어
-    domid 로 대조한다(Xen 은 한 host 부팅 안에서 domid 를 다시 쓰지 않는다. 제한 정책)
-  · 주행 VM 은 현재 Gateway 보호도 있어야 한다. drive 분류를 모르면(drive config 없음) Zephyr force 는 모두 보류한다
+  · 실행 대조: 주행 VM의 live 실행에는 같은 binding execution_id가 필요하다. crash로 binding이 제거된 경우에는 domid를 대조하고,
+    플랫폼의 recover-once가 managed execution_id와 crash 상태를 다시 검증한다.
+  · 주행 VM의 live 실행은 Gateway 보호가 필요하다. crash 전용 경로는 binding이 제거되고 출력 권한이 철회된 뒤 실행한다.
+    drive 분류를 모르면(drive config 없음) Zephyr force는 모두 보류한다.
   근거가 부족하면 attempt 를 소비하지 않고 recovery.started 도 내지 않은 채 잠시 뒤 다시 본다. 플랫폼 per-VM force 승인은 플랫폼이 최종 확인한다
 - 주행 VM 의 Gateway 보호 수명주기(S15P31E110-346, protection.py): 키·원 spec 을 저장한 뒤 submit 하고, 같은 실행에 대해 PROTECTED 가
   확인된 뒤에만 attempt 를 시작한다. 응답을 잃으면 같은 키로 다시 묻는다. 보호를 더 쓰지 않게 되면(완료·취소·회복·다른 실행) 새 실행
@@ -430,7 +431,13 @@ class RecoveryEngine:
             raise _NotEligible(f"desired_state={view.get('desired_state')} applicable={view.get('intent_applicable')}")
         hold = self._evidence_hold(record, view)
         drive = hold is None and self._drive_force(record, view)
-        if drive:
+        crashed = drive and view.get("xen_state") == "crashed"
+        if crashed:
+            try:
+                self._check_crash_withdrawal(record, view)
+            except ProtectionHold as exc:
+                hold = str(exc)
+        elif drive:
             hold = self._protect(record, view)  # Gateway I/O 는 엔진 잠금 밖에서 한다
             if hold is None:
                 # 보호를 얻는 동안 Manager 쪽이 바뀌었을 수 있다: 지금 view 로 대상·의도·실행을 다시 보고, 보호가 그 실행의 것인지 아래에서 확인한다
@@ -438,13 +445,13 @@ class RecoveryEngine:
                 if view.get("lifecycle") != "REGISTERED" or view.get("desired_state") != "running" or not view.get("intent_applicable"):
                     raise _NotEligible(f"after protection: lifecycle={view.get('lifecycle')} desired_state={view.get('desired_state')} "
                                        f"applicable={view.get('intent_applicable')}")
-                if not self._drive_force(record, view):
-                    hold = "after protection the platform view no longer calls for a force-restart"
+                if not self._drive_force(record, view) or view.get("xen_state") == "crashed":
+                    hold = "after protection the platform view no longer calls for a live force-restart"
         with self._lock:
             if record.cancel_requested or not record.open:
                 raise _Cancelled()
             hold = hold or self._evidence_hold(record, view)  # 보호를 확보하는 동안 현재 증거가 바뀌었을 수 있다
-            if hold is None and drive and not self._protected_for(record, view):
+            if hold is None and drive and not crashed and not self._protected_for(record, view):
                 hold = "drive VM without a current Gateway protection for this execution"
             if hold is not None:
                 raise _Held(hold)
@@ -453,7 +460,7 @@ class RecoveryEngine:
                 raise _BudgetHeld(budget_reason)
             self._held.pop(record.recovery_id, None)
             now = self._clock()
-            spec = self._build_spec(record, view, now)  # ValueError: 관측으로는 spec 을 만들 수 없음 → 최종 실패
+            spec = self._build_spec(record, view, now, restart_crashed=crashed)
             budget_present = record.vm_id in self._store.vm_budget_used
             budget_before = self._budget_used(record.vm_id)
             if self._store.budget_tracking:
@@ -521,6 +528,12 @@ class RecoveryEngine:
                 raise _Recovered(f"VM became healthy before the platform accepted attempt {record.attempt}")
             if health is not None and health.intent_known and (health.state == HealthState.STOPPED or health.desired_state != "running"):
                 raise _NotEligible(f"desired_state={health.desired_state}, state={health.state.value}")
+        if (spec["mode"] == "restart-crashed" and self._clock()*1000 < spec["deadline_monotonic_ms"]
+                and (attempt is None or attempt.get("phase") == "accepted")):
+            try:
+                self._check_crash_withdrawal(record, {"host_boot_id": spec["expected_host_boot_id"]})
+            except ProtectionHold as exc:
+                raise DriverTimeout(str(exc)) from exc
         # 의도를 못 읽은 건강 스냅샷으로는 취소하지 않는다. 원 spec 의 expected_intent_revision 을 플랫폼이 다시 확인한다
         try:
             return self._platform.recover_once(spec, execute=True)
@@ -665,7 +678,7 @@ class RecoveryEngine:
                 log.warning("vm %s: recovery %s attempt %d completed although a cancel was requested meanwhile", record.vm_id, record.recovery_id, record.attempt)
             self._on_result(record, result, now)
 
-    def _build_spec(self, record: RecoveryRecord, view: dict[str, Any], now: float) -> dict[str, Any]:
+    def _build_spec(self, record: RecoveryRecord, view: dict[str, Any], now: float, *, restart_crashed: bool = False) -> dict[str, Any]:
         present = view.get("domid") is not None
         if not present:
             revision = view.get("observation_revision")
@@ -676,7 +689,11 @@ class RecoveryEngine:
             execution_id = view.get("execution_id")
             if not execution_id:
                 raise ValueError("domain present but not a managed execution (no execution_id); recovery would not be correlated")
-            mode, expected = ("force-restart" if self._wants_force(record, view) else "graceful-restart"), {"execution_id": str(execution_id)}
+            expected = {"execution_id": str(execution_id)}
+            if restart_crashed:
+                mode = "restart-crashed"
+            else:
+                mode = "force-restart" if self._wants_force(record, view) else "graceful-restart"
         for name in ("host_boot_id", "generation", "intent_revision"):
             if view.get(name) is None:
                 raise ValueError(f"platform view lacks {name}")
@@ -718,6 +735,9 @@ class RecoveryEngine:
         if health.state != HealthState.UNHEALTHY or health.reason is None:
             return f"current health is {health.state.value}, not UNHEALTHY"
         evidence = health.reason
+        drive = self._drive_force(record, view)
+        if drive and view.get("xen_state") == "crashed" and evidence != FailureReason.DOMAIN_CRASHED:
+            return "waiting for current Xen crash evidence"
         if evidence == FailureReason.DOMAIN_CRASHED:
             if view.get("xen_state") != "crashed":
                 return f"crash evidence but the platform now observes {view.get('xen_state')}"
@@ -726,14 +746,20 @@ class RecoveryEngine:
             return f"current evidence {evidence.value} does not justify force-restart"
         if health.domid != view.get("domid"):
             return f"evidence is for domid {health.domid}, platform runs domid {view.get('domid')}"
-        drive = self._drive_vm_ids is not None and str(record.vm_id) in self._drive_vm_ids
-        if drive and (not health.execution_id or health.execution_id != view.get("execution_id")):
-            return f"drive VM evidence for execution {health.execution_id}, platform runs {view.get('execution_id')}"
-        if not drive and health.execution_id is not None and health.execution_id != view.get("execution_id"):
+        if drive and evidence != FailureReason.DOMAIN_CRASHED and not health.execution_id:
+            return "current drive VM evidence has no binding execution"
+        if drive and not view.get("execution_id"):
+            return "current drive VM observation has no managed execution"
+        if health.execution_id is not None and health.execution_id != view.get("execution_id"):
             return f"evidence for execution {health.execution_id}, platform runs {view.get('execution_id')}"
         return None
 
     # ---- Gateway 보호 (S15P31E110-346) ----
+
+    def _check_crash_withdrawal(self, record: RecoveryRecord, view: dict[str, Any]) -> None:
+        if self._protection is None:
+            raise ProtectionHold("drive VM without a Gateway protection provider")
+        self._protection.check_crash_withdrawal(record.vm_id, view)
 
     def _protect(self, record: RecoveryRecord, view: dict[str, Any]) -> str | None:
         """주행 VM force 직전: 이 실행의 보호를 확보한다. 보류 사유 또는 None. 기록 전이는 잠금 안에서 저장한 뒤에만 Gateway 를 부른다."""
@@ -757,7 +783,8 @@ class RecoveryEngine:
                 raise _ProtectionFailed(f"{record.protection_requests} Gateway protection request(s) ended without protection", None)
             parent_ms = int((self._clock() + self._policy.attempt_deadline_s) * 1000)  # 이 시도의 부모 기한. 보호 기한은 이 안에 든다
             try:
-                entry = protector.plan(record.vm_id, view, parent_ms)
+                entry = protector.plan(record.vm_id, view, parent_ms,
+                    standby_only=record.reason==FailureReason.VM_UNTRUSTED.value)
             except ProtectionHold as exc:
                 return str(exc)
             with self._lock:

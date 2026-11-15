@@ -73,7 +73,7 @@ class VehicleAdmission:
 
 @dataclass(frozen=True)
 class VehicleBracket:
-    """PoseBuffer가 실제 사용한 양 끝 원본. endpoint가 같으면 한 원본만 가진다."""
+    """PoseBuffer가 사용한 촬영 구간의 원 Vehicle 수락 기록."""
     pose: object
     originals: tuple
 
@@ -295,8 +295,8 @@ class MapperSensorState:
     def _bracket(self,pose):
         if pose is None:return None
         originals=[]
-        for endpoint in dict.fromkeys(pose.bracket_us):
-            record=self._vehicles.get(endpoint)
+        for time_us in pose.support_us or tuple(dict.fromkeys(pose.bracket_us)):
+            record=self._vehicles.get(time_us)
             if record is None or record.evidence.pose_sample.context!=pose.sample.context:
                 raise ValueError('original Vehicle bracket admission was not retained')
             originals.append(record)

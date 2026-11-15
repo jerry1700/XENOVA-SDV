@@ -480,7 +480,9 @@ def _validate_one(message):
         _positive(message,'control_generation','vehicle_sequence','valid_until_pi_us')
         _positive(message.gate,'gate_revision')
         _source_uuid(message.pi_session);_source_uuid(message.device_session)
-        if message.segment_index>=3 or message.cusp_index>=512:
+        recovery=(message.producer_role==1 and message.segment_index==message.cusp_index and
+                  (message.segment_index,message.gate.requested_direction) in ((16,-1),(17,1)))
+        if not recovery and (message.segment_index>=3 or message.cusp_index>=512):
             raise ValueError('direction gate transition range')
         if message.producer_role==1:
             _positive(message,'calculation_sequence','plan_revision','phase_revision','mission_revision','grant_revision')
@@ -506,6 +508,8 @@ def _validate_one(message):
             raise ValueError('clock receipt acknowledgement')
         if message.HasField('direction_gate'):
             proof=message.direction_gate;vehicle=message.vehicle
+            if proof.segment_index>=3 and not message.probe.supports_proximity_facts:
+                raise ValueError('recovery direction gate requires declared support')
             if proof.gate.state and (proof.vehicle_sequence>vehicle.sequence
                     or proof.device_session!=vehicle.device_session or not vehicle.HasField('pi_session')
                     or proof.pi_session!=vehicle.pi_session or vehicle.host_boot!=message.host_boot

@@ -58,9 +58,6 @@ xenova:
       enabled: false
       refresh-delay: 1s
       stale-limit: 10s
-    registration-sync:
-      missing-threshold: 2
-      creation-grace: 20m
   event:
     # Tests call AgentStatusWatcher.check() and VmStateWatcher.check() themselves.
     agent-status-check-interval-ms: 3600000

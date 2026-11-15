@@ -259,7 +259,7 @@ static struct state_slot copies[2];
 static char in_topic[XM_TOPIC_MAX],out_topic[XM_TOPIC_MAX];
 static struct k_thread map_thread,link_thread;
 K_THREAD_STACK_DEFINE(map_stack,8192);
-K_THREAD_STACK_DEFINE(link_stack,8192);
+K_THREAD_STACK_DEFINE(link_stack,12288);
 K_MUTEX_DEFINE(input_context_lock);
 K_MUTEX_DEFINE(applied_lock);
 struct guest_clock_slot {
@@ -1204,6 +1204,7 @@ static void state_step(void){
       /* Codec knowledge does not install the route status/State/apply consumer. */
       if(!role){p->has_supported_state_features=true;
        p->supported_state_features=DW_STATE_FEATURES|DW_TASK_REFERENCE|DW_EPISODE|DW_OPERATION;
+       p->has_supports_proximity_facts=true;p->supports_proximity_facts=true;
        #if defined(CONFIG_XENOVA_DRIVE_ROUTE)
        if(dl_route_installed())p->supported_state_features|=DW_ROUTE_STATE;
        #endif

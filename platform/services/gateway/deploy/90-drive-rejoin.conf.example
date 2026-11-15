@@ -1,0 +1,2 @@
+[Service]
+Environment=XENOVA_RECOVERY_DRIVE_CONFIG=/etc/xenova/drive-rejoin.json

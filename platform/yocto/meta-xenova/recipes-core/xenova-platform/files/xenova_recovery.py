@@ -1,4 +1,5 @@
 """조건을 다시 확인하는 일회성 복구 실행. 감시·정책·반복 실행 서비스는 아니다."""
+import json
 from subprocess import TimeoutExpired
 
 from first_install_contract import uuid4
@@ -29,7 +30,7 @@ def validate_request(spec):
         spec["expected_execution"] = {"execution_id":normalize_uuid(expected["execution_id"])}
     elif set(expected) != {"absent_observation_revision"} or type(expected.get("absent_observation_revision")) is not int or expected["absent_observation_revision"] < 1:
         refuse("INVALID_SPEC", "execution_id or absent_observation_revision is required")
-    if spec["mode"] not in ("start-if-absent", "graceful-restart", "force-restart"):
+    if spec["mode"] not in ("start-if-absent", "graceful-restart", "force-restart", "restart-crashed"):
         refuse("INVALID_SPEC", "unsupported recovery mode")
     if (spec["mode"] == "start-if-absent") != ("absent_observation_revision" in expected):
         refuse("INVALID_SPEC", "recovery mode and expected presence disagree")
@@ -121,13 +122,28 @@ class Recovery:
                     refuse("TARGET_CHANGED", "expected absent observation was superseded")
             elif observation["execution_status"] != "managed" or observation["execution_id"] != expected["execution_id"]:
                 refuse("TARGET_CHANGED", "expected managed execution changed", details={"reason":"EXECUTION_CHANGED"})
+            elif spec["mode"] == "restart-crashed" and observation["xen_state"] != "crashed":
+                refuse("TARGET_CHANGED", "expected Xen execution is no longer crashed")
         return record, records, observation
+
+    def factory_drive(self, record):
+        if vm.guest_kind(record) != "zephyr" or record["id"] not in ("zephyr-drive-a", "zephyr-drive-b"):
+            return False
+        path = self.p.data/".first-install-state.json"
+        if not path.exists() and not path.is_symlink():
+            return False
+        state = json.loads(catalog.plain(path).read_text())
+        return (state.get("schema") == 1 and state.get("phase") == "complete"
+                and state["identities"].get(record["id"], {}).get("uuid") == record["uuid"])
 
     def mode_allowed(self, spec, record):
         if spec["mode"] == "graceful-restart" and not vm.cooperative(record):
             refuse("RECOVERY_MODE_UNSUPPORTED", "this guest has no cooperative shutdown")
         if spec["mode"] == "force-restart" and record["uuid"] not in self.e.policy()["force_restart_vm_ids"]:
             refuse("RECOVERY_MODE_UNSUPPORTED", "force recovery has no per-VM administrator approval")
+        if (spec["mode"] == "restart-crashed" and not self.factory_drive(record)
+                and record["uuid"] not in self.e.policy()["force_restart_vm_ids"]):
+            refuse("RECOVERY_MODE_UNSUPPORTED", "crash recovery requires a factory drive VM or per-VM approval")
 
     @traced('recovery.complete')
     def complete(self, op, observation):
@@ -596,6 +612,8 @@ class Recovery:
                 self.save(op, "accepted")
         owner = {"kind":"recovery", "recovery_attempt_id":identity}
         confirmed = {}
+        crash_only = spec["mode"] == "restart-crashed"
+        stop_result = {}
         try:
             if not resume_removed and observation["presence"] == "present":
                 op['stop_submission'] = {'state':'not-submitted', 'target':{
@@ -605,10 +623,12 @@ class Recovery:
                 op['stop_submission']['state'] = 'submitted'
                 self.save(op, 'stopping')
                 try:
-                    self.p.stop_many([record], force=spec["mode"] == "force-restart", deadline=deadline,
-                                     _expected_runs={record["uuid"]:observation["xen_unique_id"]})
+                    self.p.stop_many([record], force=crash_only or spec["mode"] == "force-restart", deadline=deadline,
+                                     _expected_runs={record["uuid"]:observation["xen_unique_id"]},
+                                     _required_state="crashed" if crash_only else None, _result=stop_result)
                 except (PlatformError, OSError, ValueError):
-                    op['stop_submission']['state'] = 'returned'
+                    op['stop_submission']['state'] = (
+                        'not-submitted' if crash_only and not stop_result.get('physical_submitted') else 'returned')
                     raise
                 op['stop_submission']['state'] = 'returned'
                 self.save(op, 'stopping')
@@ -635,6 +655,10 @@ class Recovery:
             # A submitted shutdown can remove the old domain before its response
             # is lost. Keep that owner unresolved just like a submitted launch.
             uncertain = op["phase"] in ("stopping", "observed")
+            if crash_only and op["phase"] == "stopping" and op["stop_submission"]["state"] == "not-submitted":
+                uncertain = False
+                if isinstance(error, vm.DomainIdentityError):
+                    code = "TARGET_CHANGED"
             if op["phase"] == "launching":
                 # A failed write/read of launch ownership must leave the durable
                 # launching phase in place. A prior attempt's run is not ours.

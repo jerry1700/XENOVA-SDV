@@ -68,6 +68,14 @@ def test_input_waiting_is_reported_as_waiting_not_as_healthy_or_failed(warm):
     assert decision["kind"] == "app_preparing" and decision["tone"] == "warning"
 
 
+def test_stopped_auto_is_reported_while_vm_is_running(warm):
+    assert put(warm, phase="STOPPED", readiness="NOT_READY", reason="APP_EXITED")[0]
+    store = warm[0]
+    decision = DisplayPolicy(store.settings, store.epoch).presentation(store.snapshot())["decisions"][vm(store)["vm_id"]]
+    assert decision["kind"] == "app_stopping"
+    assert decision["label"] == "자율주행 스레드 종료 · VM 실행 중"
+
+
 def test_verified_profile_does_not_silently_accept_warm_profile(rig):
     topic, envelope = lifecycle(rig)
     assert not rig[0].ingest(topic, envelope)

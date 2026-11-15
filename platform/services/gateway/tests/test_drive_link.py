@@ -14,6 +14,7 @@ from test_state_transport import broker,until
 from test_verified import A,B
 from test_odometry import config,observe
 from xenova_gateway.odometry import VehicleOdometry
+from xenova_gateway.machine import Mode
 
 
 def trust(w):
@@ -42,6 +43,19 @@ def snapshot(w,t):
     s.segments.add(first_index=0,last_index=1,signed_direction=1)
     s.direction_gate.CopyFrom(schema.DirectionGateRef(gate_revision=0,stop_command_sequence=0,state=0,requested_direction=0))
     return link
+
+
+def test_state_copy_can_reach_auto_in_vm_owning_manual(tmp_path):
+    w=StateWorld(tmp_path/'authority');t=trust(w)
+    io=DriveLinkIO('127.0.0.1',1,None,None,(A,B),clock=lambda:w.t)
+    provider=DriveLinkProvider(w.runner,io,t,str(uuid4()))
+    offered=snapshot(w,t)
+    assert w.m.active_vm==A and w.m.active_app=='autonomous'
+    assert provider.receive(A,offered,w.t,io.prepare_snapshot(offered))
+    assert (inbound(A),'state') not in io.pending
+    w.m._change(Mode.MANUAL,A,'manual_requested',w.t)
+    provider._send_copy(A)
+    assert (inbound(A),'state') in io.pending
 
 
 def lane_mission(w,t,provider):

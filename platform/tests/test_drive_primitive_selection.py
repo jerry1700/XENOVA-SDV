@@ -12,7 +12,7 @@ APP = ROOT / 'platform/apps/drive/zephyr'
 
 
 class DrivePrimitiveSelectionTest(unittest.TestCase):
-    def check_selection(self, development, expected):
+    def check_selection(self, development, expected, vehicle=None, fails=False):
         cmake = os.environ.get('CMAKE_EXECUTABLE') or shutil.which('cmake')
         if not cmake:
             self.skipTest('existing CMake executable required; no dependency installation')
@@ -65,9 +65,14 @@ message(STATUS "selected primitive: ${actual}")
                 '-DAPP_CMAKE_FILE='+app_file.as_posix(), '-DEXPECTED_SOURCE='+expected.as_posix()]
             if development is not None:
                 command.append('-DXENOVA_DRIVE_DEVELOPMENT_PROFILE='+development)
+            if vehicle is not None:
+                command.append('-DXENOVA_DRIVE_VEHICLE_PROFILE='+vehicle)
             result = subprocess.run([*command, '-P', str(script)], capture_output=True,
                 text=True, timeout=15)
-            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            if fails:
+                self.assertNotEqual(result.returncode, 0, result.stdout+result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
 
     def test_unset_profile_selects_original_lab_source(self):
         self.check_selection(None, ROOT / 'platform/apps/drive/planner/generated/primitives.c')
@@ -77,6 +82,17 @@ message(STATUS "selected primitive: ${actual}")
 
     def test_explicit_on_selects_existing_development_source(self):
         self.check_selection('ON', ROOT / 'platform/apps/drive/profiles/course-development-1/primitives.c')
+
+    def test_explicit_vehicle_selects_measured_vehicle_source(self):
+        self.check_selection(None, ROOT / 'platform/apps/drive/profiles/xenova-rc-1/primitives.c', 'xenova-rc-1')
+
+    def test_vehicle_with_development_bundle_is_rejected(self):
+        self.check_selection('ON', ROOT / 'platform/apps/drive/profiles/xenova-rc-1/primitives.c', 'xenova-rc-1', fails=True)
+
+    def test_missing_or_path_vehicle_is_rejected(self):
+        for name in ('no-such-vehicle', '../planner/generated'):
+            with self.subTest(name=name):
+                self.check_selection(None, ROOT / 'platform/apps/drive/planner/generated/primitives.c', name, fails=True)
 
 
 if __name__ == '__main__':

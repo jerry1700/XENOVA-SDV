@@ -152,6 +152,9 @@ def test_installed_unit_graph_passes_actual_systemd_loader(image):
     units = image / 'usr/lib/systemd/system'
     for name in ['sysinit.target', 'basic.target', 'shutdown.target', 'network.target', 'multi-user.target']:
         (units / name).write_text('[Unit]\nDescription=Isolated target\n')
+    # The Display feed requires the platform package's first-boot unit.
+    (units / 'xenova-first-boot.service').write_text(
+        '[Service]\nType=oneshot\nExecStart=/usr/bin/python3\nRemainAfterExit=yes\n')
     python = image / 'usr/bin/python3'
     python.parent.mkdir(parents=True)
     python.write_text('#!/bin/sh\nexit 0\n')

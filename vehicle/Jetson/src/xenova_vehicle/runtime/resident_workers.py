@@ -143,7 +143,7 @@ def mapper_sensor_owner(boot, binding):
         tof_leaves=limits.tof_leaves,vehicle_max_age_us=limits.vehicle_max_age_us,tof_max_age_us=limits.tof_max_age_us,
         max_speed_mps=limits.max_speed_mps,max_yaw_rate_rps=limits.max_yaw_rate_rps,
         max_gap_us=limits.max_gap_us,capacity=limits.capacity,mapper_worker=boot.peer.worker_instance,
-        mapper_instance=boot.mapper_instance)
+        mapper_instance=boot.mapper_instance,wheel_profile=limits.wheel_odometry)
     return config,owner
 
 
@@ -255,7 +255,9 @@ def _hold_device_lease(device_id):
 class _Actor:
     def __init__(self, endpoint, boot):
         from .resident_profile import runtime_artifacts
-        actual = runtime_artifacts(boot.profile,boot.perception_profile_bytes,getattr(boot,'mapper_profile_bytes',None))
+        # S 는 영상 옵션에 따라 JPEG 를 넣은 graph·format manifest 를 등록한다. 같은 선택으로 다시 계산해 비교한다.
+        actual = runtime_artifacts(boot.profile,boot.perception_profile_bytes,getattr(boot,'mapper_profile_bytes',None),
+            jpeg_enabled=boot.raw_profile.jpeg_enabled)
         if (actual['release_sha256'] != boot.peer.release_sha256
                 or any(actual[name] != value for name, value in boot.raw_profile.refs.items())
                 or boot.profile.device_mxid != boot.raw_profile.device_id):

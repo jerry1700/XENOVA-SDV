@@ -65,6 +65,18 @@ generation 변경만으로 새 clock·시간 예산이나 재arm을 강제하지
 
 ## 실제 DirectionGateWitness
 
+`ClockProbe.supports_proximity_facts`를 광고한 AUTO의 `ClockReply.control_facts`에는
+`proximity`를 포함할 수 있다. 방향 차단은 같은 Vehicle을 만든 SENSOR/CLOCK_REPLY
+표본에 결합한다. 전방 거리는 제동 중 원 센서와 Vehicle 시각의 오차를 포함해
+50ms 안에서만 결합한다. 후방 거리는 원 만료를 포함하며 `65535`는 센서의 no-return이다.
+후방 차체 통과 공간은 별도로 현재 World에서 검사한다. 거리와 방향 차단의 부재는
+복구 시작이나 재출발을 허가하지 않는다.
+
+ToF 복구는 기존 AUTO 미션·계획·단계에 결합한 두 번의 STOP 확인을 사용한다.
+후진 요청의 segment/cusp는16이고 후진 DRIVE는17이다. 전진 요청은17이고 전진
+DRIVE는18이다. 두 요청 모두 원 STOP APPLIED와 실측 정지, HOLD_STEER의 조향
+확인을 소비한다. 번호16~18은 이 일시 복구 명령에만 쓰며 StateCopy의 경로 segment가 아니다.
+
 Reply.direction_gate9는 실제 Pi feedback owner의 원 STOP/APPLIED·양 wheel 정지·steer
 settle 판정이다. GateRef.stop_command_sequence는 Pi serial STOP seq이며 VM의 원 STOP
 calculation_sequence는 별도다. 원 A7 control generation/role/calculation/plan/phase/segment/

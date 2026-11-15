@@ -314,6 +314,22 @@ class BootUnitBoundaryTest(unittest.TestCase):
         self.assertIn('xenova-data-prepare.service', files['srv-xenova.mount']['Unit']['Requires'].split())
         self.assertIn('srv-xenova.mount', files['xenova-first-boot.service']['Unit']['Requires'].split())
 
+    def test_optional_telemetry_requires_completed_registration_without_blocking_autostart(self):
+        boot = self.unit('xenova-first-boot.service')
+        self.assertEqual(boot['Service']['Type'], 'oneshot')
+        self.assertEqual(boot['Service']['RemainAfterExit'], 'yes')
+        vms = self.unit('xenova-vms.service')
+        for name in ('xenova-telemetry-clock', 'xenova-telemetry-evidence'):
+            service = self.unit(name + '.service')
+            self.assertIn('xenova-first-boot.service', service['Unit']['Requisite'].split())
+            self.assertIn('xenova-first-boot.service', service['Unit']['After'].split())
+            self.assertIn('/srv/xenova', service['Unit']['RequiresMountsFor'].split())
+            for relation in ('Requires', 'Wants', 'After', 'BindsTo', 'PartOf'):
+                self.assertNotIn(name + '.service', vms['Unit'].get(relation, '').split())
+            timer = self.unit(name + '.timer')
+            self.assertEqual(timer['Timer']['Unit'], name + '.service')
+            self.assertEqual(timer['Timer']['OnUnitInactiveSec'], '1')
+
     def test_cpu_ordering_does_not_propagate_cpu_service_stop_into_guests(self):
         vms = self.unit('xenova-vms.service')
         self.assertIn('xenova-cpu-prepare.service', vms['Unit']['Wants'].split())

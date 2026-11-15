@@ -11,7 +11,7 @@
 
 | 요청서 | 담당 | 요청 | 상태 |
 | --- | --- | --- | --- |
-| [ToF 근거리 제동·지도 연결](2026-11-10-tof-vl53l0x-gateway-jetson.md) | 플랫폼·Gateway, Jetson(지도) | feedback-3 에 근거리 정지 알림, 단일 존 ToF 전송, 관련 문서 수정 | 요청 작성, 회신 전 |
+| [ToF 근거리 제동·지도 연결](2026-11-10-tof-vl53l0x-gateway-jetson.md) | 플랫폼·Gateway, Jetson(지도) | feedback-3 에 근거리 정지 알림, 단일 존 ToF 전송, 관련 문서 수정 | 단일 존 ToF 전송은 반영됨(2026-11-10 계약, 2026-11-12 펌웨어). 근거리 정지 알림은 차량 쪽이 정함(2026-11-12, 요청서 2.1), 게이트웨이·펌웨어 반영 전 |
 
 2026-11-02 자격 공급·등록-only 통지·현재 적용 프로필의 실제 제공물은
 [공통 계약](../contracts/vm-provisioning-v1.md)과 [후보별 결과](../verification/recovery-scenario-closure-20261030.md#vm-provisioning-integration)에 있다.

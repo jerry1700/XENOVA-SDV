@@ -15,6 +15,10 @@ static inline struct drive_warm_view drive_warm_classify(const struct drive_adap
  bool chosen,struct xm_span input,int64_t input_age,uint64_t context_revision,uint64_t connection_revision,
  int64_t tick,uint64_t clock,bool clock_valid){
  (void)clock;
+ if(status->state==DRIVE_TASK_EXITED)
+  return selected->control_valid?
+   (struct drive_warm_view){"STOPPED","NOT_READY","APP_EXITED",selected->generation}:
+   (struct drive_warm_view){"ACTIVATING","NOT_READY","CONTROL_UNAPPLIED",0};
  struct drive_warm_view v={chosen?"ACTIVATING":"WAITING","NOT_READY","CONTROL_UNAPPLIED",selected->control_valid?selected->generation:0};
  bool current=drive_warm_current(status,work,context_revision,connection_revision);
  if(selected->control_valid){
@@ -25,6 +29,9 @@ static inline struct drive_warm_view drive_warm_classify(const struct drive_adap
    /* A newer running job has not replaced this completed fact. Its deadline
     * miss cannot invalidate the previous completion before its own lease. */
    if(!clock_valid||tick<work->finished_ms||tick-work->finished_ms>=300)v.reason="CALCULATION_FAILED";
+   else if(v.reason&&!strcmp(v.reason,"DEADLINE")&&
+      work->health.failure!=XDH_NONE&&work->health.failure!=XDH_DEADLINE)
+    v.reason="CALCULATION_FAILED"; /* A clock/resource/worker error cannot authorize deadline recovery. */
    if(!v.reason)v.state="READY";
   }else if(!v.reason)v.reason="STATE_PREPARING";
  }

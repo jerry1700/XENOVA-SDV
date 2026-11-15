@@ -37,7 +37,7 @@ export const VEHICLE_RANGE = {
 export interface DriveAppReport {
   heartbeat: { state: 'active' | 'standby' | 'error'; uptime_s: number } | null;
   lifecycle: {
-    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'RESIDUAL';
+    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'STOPPED' | 'RESIDUAL';
     readiness: 'QUALIFIED' | 'READY' | 'NOT_READY';
     reason: string | null;
     applied_generation: number;
@@ -107,7 +107,7 @@ function report(v: unknown): DriveAppReport | null {
         : null,
     lifecycle:
       object(lc) &&
-      ['WAITING', 'ACTIVATING', 'EXECUTING', 'STOPPING', 'RESIDUAL'].includes(String(lc.phase)) &&
+      ['WAITING', 'ACTIVATING', 'EXECUTING', 'STOPPING', 'STOPPED', 'RESIDUAL'].includes(String(lc.phase)) &&
       ['QUALIFIED', 'READY', 'NOT_READY'].includes(String(lc.readiness)) &&
       Number.isSafeInteger(lc.applied_generation)
         ? {
@@ -177,6 +177,8 @@ export function driveAppStatus(
   if (xen) return xen;
   if (!apps) return { label: '앱 보고 미수신', tone: 'muted' };
   const list = [apps.autonomous, apps.manual].filter((a): a is DriveAppReport => a !== null);
+  if (apps.autonomous?.source.status === 'fresh' && apps.autonomous.lifecycle?.phase === 'STOPPED')
+    return { label: '자율주행 스레드 종료', tone: 'warning' };
   if (!list.length || list.every((a) => a.source.status !== 'fresh' || !a.heartbeat))
     return { label: '응답 없음', tone: 'danger' };
   const fresh = list.filter((a) => a.source.status === 'fresh');

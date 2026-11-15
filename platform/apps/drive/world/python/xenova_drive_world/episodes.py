@@ -188,6 +188,14 @@ def validate_clock(reply):
     if not reply.HasField('control_facts'):return
     facts=reply.control_facts;vehicle=reply.vehicle
     if facts.meter.vehicle_sequence!=vehicle.sequence:raise ValueError('meter/parent Vehicle exact sequence')
+    if facts.HasField('proximity'):
+        p=facts.proximity
+        front=p.HasField('front_range_mm');rear=p.HasField('rear_range_mm')
+        if (not reply.probe.supports_proximity_facts or not facts.valid_until_pi_us or not vehicle.HasField('pi_session') or
+                front!=p.HasField('front_vehicle_sequence') or rear!=p.HasField('rear_valid_until_pi_us') or
+                front and (not p.front_blocked or p.front_vehicle_sequence!=vehicle.sequence or not 0<p.front_range_mm<150) or
+                rear and (not 0<p.rear_range_mm<=65535 or not 0<p.rear_valid_until_pi_us<=facts.valid_until_pi_us)):
+            raise ValueError('proximity/parent Vehicle and range expiry')
     if facts.meter.valid and (vehicle.quality!=3 or not vehicle.HasField('pi_session') or
             not vehicle.HasField('gateway_instance') or vehicle.gateway_instance!=reply.gateway_instance or vehicle.host_boot!=reply.host_boot):
         raise ValueError('meter/parent source')

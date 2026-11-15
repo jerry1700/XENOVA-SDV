@@ -93,6 +93,9 @@ PB_BIND(xenova_drive_StopFacts, xenova_drive_StopFacts, 2)
 PB_BIND(xenova_drive_DriveControlFacts, xenova_drive_DriveControlFacts, 2)
 
 
+PB_BIND(xenova_drive_ProximityFacts, xenova_drive_ProximityFacts, AUTO)
+
+
 PB_BIND(xenova_drive_LaneGeometry, xenova_drive_LaneGeometry, 2)
 
 

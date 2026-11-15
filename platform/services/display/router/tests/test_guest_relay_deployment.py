@@ -25,7 +25,10 @@ def test_regular_recipe_installs_canonical_enabled_relay_without_active_configur
     assert unit.stat().st_mode & 0o777 == 0o644
     text = unit.read_text()
     assert 'Requires=xenova-bridge.service' in text
-    assert 'After=xenova-bridge.service xenova-display-feed.service' in text
+    assert 'Requisite=xenova-first-boot.service' in text
+    after = next(line.removeprefix('After=').split()
+                 for line in text.splitlines() if line.startswith('After='))
+    assert {'xenova-first-boot.service', 'xenova-bridge.service', 'xenova-display-feed.service'} <= set(after)
     assert '[Install]\nWantedBy=multi-user.target' in text
     recipe = (ROOT / 'platform/yocto/meta-xenova/recipes-core/xenova-display/xenova-display_0.1.0.bb').read_text()
     assert builder.UNIT in recipe.split('SYSTEMD_SERVICE:${PN} = ')[1].split('\n')[0]
@@ -92,9 +95,11 @@ def test_relay_unit_requires_bridge_and_can_load_in_isolated_systemd_graph(tmp_p
     units = image / 'usr/lib/systemd/system'
     bridge = ROOT / 'platform/yocto/meta-xenova/recipes-core/xenova-bringup/files/xenova-bridge.service'
     (units / 'xenova-bridge.service').write_text(bridge.read_text().replace('@SBINDIR@', '/usr/sbin'))
-    for name in ['sysinit.target', 'basic.target', 'shutdown.target', 'network.target', 'multi-user.target',
-                 'systemd-udev-settle.service']:
+    for name in ['sysinit.target', 'basic.target', 'shutdown.target', 'network.target', 'multi-user.target']:
         (units / name).write_text('[Unit]\nDescription=Isolated dependency\n')
+    for name in ['systemd-udev-settle.service', 'xenova-first-boot.service']:
+        (units / name).write_text('[Unit]\nDescription=Isolated dependency\n[Service]\nType=oneshot\n'
+                                 'ExecStart=/usr/bin/python3\nRemainAfterExit=yes\n')
     for name in ['usr/bin/python3', 'usr/sbin/xenova-bridge-up']:
         command = image / name
         command.parent.mkdir(parents=True, exist_ok=True)

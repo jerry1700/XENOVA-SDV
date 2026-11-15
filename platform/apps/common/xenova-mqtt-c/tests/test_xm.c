@@ -469,10 +469,33 @@ static void test_vm_crash_command(void)
 	      "vm crash failed result %s", out);
 }
 
+static void test_auto_input_fault_command(void)
+{
+	struct xm_auto_input_fault_command command;
+	const char *valid="{\"command_id\":\"input-1\",\"operation_id\":\"op-1\",\"expected_boot_id\":\"boot\",\"expires_at\":\"2026-11-13T00:00:00Z\",\"action\":\"auto_input_unavailable\",\"parameters\":{\"duration_s\":10}}";
+	CHECK(xm_auto_input_fault_command_parse(sp(valid),&command)==0&&command.duration_s==10&&
+	      !strcmp(command.command_id,"input-1")&&!strcmp(command.operation_id,"op-1"),"AUTO input fault command");
+	CHECK(xm_auto_input_fault_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_input_unavailable\",\"parameters\":{\"duration_s\":0}}"),&command)==-ERANGE,
+	      "AUTO input fault lower bound");
+	CHECK(xm_auto_input_fault_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_input_unavailable\",\"parameters\":{\"duration_s\":121}}"),&command)==-ERANGE,
+	      "AUTO input fault upper bound");
+	CHECK(xm_auto_input_fault_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_input_unavailable\",\"parameters\":{\"duration_s\":10,\"extra\":1}}"),&command)==-ERANGE,
+	      "AUTO input fault closed parameters");
+	CHECK(xm_auto_input_fault_command_parse(sp("{\"command_id\":\"c\",\"expected_boot_id\":\"b\",\"expires_at\":\"t\",\"action\":\"auto_input_unavailable\",\"parameters\":{\"duration_s\":10},\"extra\":1}"),&command)==-EINVAL,
+	      "AUTO input fault closed root");
+	char out[512];
+	CHECK(xm_auto_input_fault_command_parse(sp(valid),&command)==0,"AUTO input fault result fixture");
+	CHECK(xm_auto_input_fault_result_json(out,sizeof(out),&command,"RUNNING",0,NULL)>0&&
+	      strstr(out,"\"duration_s\":10")&&strstr(out,"\"error\":null"),"AUTO input fault result %s",out);
+}
+
 static void test_lifecycle(void)
 {
  char out[256];
  CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"WAITING","QUALIFIED",NULL)>0,"waiting qualification");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"STOPPED","NOT_READY","APP_EXITED")>0,"confirmed exit");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"STOPPING","NOT_READY","APP_EXITED")==-EINVAL,"exit requires STOPPED");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),0,1,0,"STOPPED","NOT_READY","APP_EXITED")==-EINVAL,"exit requires generation");
  CHECK(strstr(out,"\"progress_seq\":\"0\"")&&strstr(out,"\"profile\":\"warm-drive-1\""),"distinct supervision %s",out);
  CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"EXECUTING","READY",NULL)==-EINVAL,"no fabricated progress");
  CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,1,"WAITING","READY",NULL)==-EINVAL,"waiting is not activation");
@@ -492,6 +515,7 @@ int main(int argc, char **argv)
 	test_payloads();
 	test_auto_delay_closed_keys();
 	test_auto_delay_pair_bounds();
+	test_auto_input_fault_command();
 	test_vm_crash_command();
 	test_uuid();
 	test_lifecycle();

@@ -1,0 +1,17 @@
+[Match]
+Driver=rndis_host cdc_ncm cdc_ether
+
+[Link]
+RequiredForOnline=no
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCPv4]
+UseGateway=no
+UseRoutes=no
+UseDNS=no
+UseNTP=no
+UseDomains=no

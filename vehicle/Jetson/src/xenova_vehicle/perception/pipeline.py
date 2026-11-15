@@ -23,6 +23,9 @@ from .temporal_road import MappedRoad, TemporalRoadMap
 from .parking_entrance import EntranceSpan, entrance_spans, entrance_summary
 from .parking import parking_clearance_cells
 from .depth import DepthConfig
+from .geometry import timing_start, timing_finish
+from .rectify import rgb_view
+from .rgb_rectification import tape_rgb_geometry
 from ..mapping.local_map import EvidenceGrid, GridSpec, OCCUPIED, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
     RegistrationProfile,transform_point,segment_distance,wrap_yaw)
@@ -34,6 +37,25 @@ from ..mapping.free_schedule import FreeScheduler,StoppingRegion
 _MIN_REGISTRATION_STRIP_M = .08
 _BOUNDARY_PARENTS_PER_FRAME = 2
 _BOUNDARY_RAY_TESTS_PER_FRAME = 2048
+
+
+def _select_mapped_road(road, temporal, limits):
+    if temporal is None or road is None:
+        return temporal
+    if road.status == 'UNKNOWN' and len(road.hypotheses) <= 1 and set(road.reasons) <= {
+            'NO_MEASURED_TAPE_WIDTH', 'NO_SUPPORTED_ROAD', 'GEOMETRY_ERROR_BUDGET'}:
+        return temporal
+    if (road.status != 'PARTIAL' or not road.complete or len(road.hypotheses) != 1
+            or temporal.road.source_key != road.source_key or road.source_key not in temporal.sources
+            or len(temporal.sources) < 2 or not temporal.within(limits)):
+        return None
+    observations = temporal.road.hypotheses[0].boundary_observations
+    if observations is not None:
+        current_roles = {strip: role for role, ids in enumerate(road.hypotheses[0].strip_ids) for strip in ids}
+        if any(key == road.source_key and current_roles.get(strip, role) != role
+               for role, evidence in enumerate(observations) for key, strip in evidence):
+            return None
+    return temporal
 
 
 def _digest(value):
@@ -181,6 +203,7 @@ class PerceptionPipeline:
         if type(calibration) is not CalibrationProfile:
             raise ValueError('pipeline requires CalibrationProfile')
         self.calibration = calibration
+        self._tape_camera, _, _ = tape_rgb_geometry(calibration.rgb)
         self.profile = PipelineProfile() if profile is None else profile
         if type(self.profile) is not PipelineProfile or type(targets) is not tuple or len(targets)>4:
             raise ValueError('invalid pipeline or target profile')
@@ -309,7 +332,7 @@ class PerceptionPipeline:
             points=[transform_point(v,(p.x,p.y,p.yaw)) for v in points]
         return min(v[0] for v in points)-error,min(v[1] for v in points)-error,max(v[0] for v in points)+error,max(v[1] for v in points)+error
 
-    def _free_visibility(self, grid, pose):
+    def _free_visibility(self, grid, pose, *, prioritize_departure=False):
         """현재 depth 영상 안의 셀을 먼저 시도한다. FREE 증명은 별도로 수행한다."""
         import numpy as np
         camera, plane = self.calibration.right, self.calibration.plane
@@ -325,26 +348,42 @@ class PerceptionPipeline:
             c, s = math.cos(p.yaw), math.sin(p.yaw)
             x, y = c*x+s*y, -s*x+c*y
         z = -(plane.normal[0]*x+plane.normal[1]*y+plane.offset)/plane.normal[2]
-        z += min(t.base_height_m[0]+t.core_height_m/2 for t in self.targets)
         xyz = np.stack((x,y,z),axis=-1)-camera.translation
         transform = np.asarray(camera.rotation) @ np.asarray(camera.rectification).T
         optical = xyz @ transform
         projection = transform @ np.asarray(camera.k).T
         image = xyz @ projection
         left, top, right, bottom = camera.roi
-        # A cell can contain the edge of an obstacle whose core is outside the cell.
-        # Prefer cells whose whole nominal core-placement area is in the depth FOV.
+        # Rank likely certificates by testing the target placements around each
+        # cell. This only schedules work. The actual ray proof is unchanged.
         extent = max(t.max_extent_m for t in self.targets)+resolution/math.sqrt(2.)
         def margin(direction):
-            return extent*(abs(direction[0]-plane.normal[0]*direction[2]/plane.normal[2])
-                           +abs(direction[1]-plane.normal[1]*direction[2]/plane.normal[2]))
+            return extent * math.hypot(direction[0]-plane.normal[0]*direction[2]/plane.normal[2],
+                                       direction[1]-plane.normal[1]*direction[2]/plane.normal[2])
         depth_margin = margin(transform[:,2])
         visible = ((optical[...,2] >= camera.near_m+depth_margin)
                    & (optical[...,2] <= camera.far_m-depth_margin))
         for axis, lower, upper in ((0,left,right),(1,top,bottom)):
             visible &= image[...,axis]-lower*image[...,2] >= margin(projection[:,axis]-lower*projection[:,2])
             visible &= upper*image[...,2]-image[...,axis] > margin(upper*projection[:,2]-projection[:,axis])
-        return visible
+        ahead = x-self.calibration.body.front
+        # Reserve new observations for the upcoming sweep. Cells now under the
+        # body keep the certificate earned when they were still ahead of it.
+        distance = np.hypot(ahead,y) + np.where(ahead < 0.,camera.far_m,0.)
+        if not prioritize_departure:
+            return visible, distance, None
+        # Pi's departure exception ends at most 10 cm beyond the bumper.
+        # Give the next two rows a chance even when a cone could partly sit
+        # outside the depth image. The ray certificate still checks that case.
+        center_visible = ((optical[..., 2] >= camera.near_m) & (optical[..., 2] <= camera.far_m)
+            & (image[..., 0] >= left * image[..., 2]) & (image[..., 0] < right * image[..., 2])
+            & (image[..., 1] >= top * image[..., 2]) & (image[..., 1] < bottom * image[..., 2]))
+        half_cell = resolution * (abs(c) + abs(s)) / 2 if pose is not None else resolution / 2
+        departure_edge_m = .10
+        near_departure = (center_visible & (ahead + half_cell >= departure_edge_m)
+            & (ahead - half_cell < departure_edge_m + 2 * resolution)
+            & (np.abs(y) - half_cell <= self.calibration.body.width / 2))
+        return visible, distance, near_departure
 
     def _domain(self, pose, grid):
         import numpy as np
@@ -384,9 +423,12 @@ class PerceptionPipeline:
             self._domain_cache=(support,permission)
         grid.set_domain(support,permission)
 
-    def _occlusion(self, evidence):
+    def _occlusion(self, evidence, camera):
         from .occlusion import box_occlusion
-        return box_occlusion(() if evidence is None else evidence.hit_boxes,self.calibration.rgb)
+        boxes = () if evidence is None else evidence.hit_boxes
+        if evidence is not None and evidence.occlusion_boxes is not None:
+            boxes = evidence.occlusion_boxes
+        return box_occlusion(boxes, camera)
 
     def _uses_observed_support(self, graph):
         return (self.reference is not None and self.reference.feature_policy=='OBSERVED_STRIP_SUPPORT_V1'
@@ -586,7 +628,7 @@ class PerceptionPipeline:
             nn_new=self.nn_gate.accept(nn_stamp,hashlib.sha256(packet.payload).hexdigest())
             if nn_new:
                 from .neural import build_neural_layer
-                self._last_neural=build_neural_layer(observation,self.calibration)
+                self._last_neural=build_neural_layer(observation,self.calibration,rgb_view=rgb_view(self.calibration.rgb))
         self.counts['rgb']+=int(rgb_new); self.counts['depth']+=int(depth_new); self.counts['nn']+=int(nn_new)
         self.counts['duplicate_rgb']+=int(not rgb_new)
         self.counts['duplicate_depth']+=int(observation.depth is not None and not depth_new)
@@ -647,8 +689,8 @@ class PerceptionPipeline:
                 and (raw_pose.wheel_capture is not None or localization_position_drift_mps or localization_yaw_drift_rps)):
             initial = self._startup_odometry
             if initial is None or initial.sample.context != raw_pose.sample.context:
-                self._startup_odometry = raw_pose
-            elif raw_pose.captured_us[1] >= initial.captured_us[1]:
+                initial = self._startup_odometry = raw_pose
+            if raw_pose.captured_us[1] >= initial.captured_us[1]:
                 registration_pose = pose = MapOdomAlignment.project_startup(initial, raw_pose,
                     position_drift_mps=localization_position_drift_mps,
                     yaw_drift_rps=localization_yaw_drift_rps)
@@ -663,6 +705,8 @@ class PerceptionPipeline:
         evidence=None
         ray_inputs=None
         motion_pose=None
+        # 고정 보정 배열은 compute 후보를 복사할 때 함께 복사하지 않는다.
+        _, rgb_maps, valid_rgb = tape_rgb_geometry(self.calibration.rgb) if rgb_new else (None, None, None)
         targets_qualified=bool(self.targets and all(target.qualified for target in self.targets))
         if depth_new:
             if not instantaneous_synthetic and capture_interval is not None and motion_qualified and raw_pose is not None:
@@ -675,6 +719,7 @@ class PerceptionPipeline:
             evidence=analyze_depth(observation.depth.array(),self.calibration.right,self.calibration.plane,
                 stamp=observation.depth.stamp,calibration_id=self.calibration.sha256,
                 input_kind=observation.kind,profile=self.calibration,config=config,defer_patches=True,
+                collect_occlusion=rgb_maps is not None,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
             evidence,ray_inputs=evidence.take_ray_inputs()
         depth_done=perf_counter_ns()
@@ -682,8 +727,18 @@ class PerceptionPipeline:
         if rgb_new:
             self._last_rgb_key,self._last_capture=observation.rgb.stamp.key,capture
             self._last_rgb=observation.rgb.array()
-            self._last_tape=extract_tape(self._last_rgb,self.calibration.rgb,self.calibration.plane,self.profile.tape,
-                stamp=observation.rgb.stamp,occlusion_mask=self._occlusion(evidence),nn_candidates=observation.nn,
+            tape_rgb = self._last_rgb
+            if rgb_maps is not None:
+                import cv2
+                timing = timing_start(diagnostics, 'rgb.rectification')
+                tape_rgb = cv2.remap(tape_rgb, *rgb_maps, cv2.INTER_LINEAR)
+                timing_finish(diagnostics, timing)
+            timing = timing_start(diagnostics, 'rgb.depth_occlusion')
+            occlusion = self._occlusion(evidence, self._tape_camera)
+            timing_finish(diagnostics, timing)
+            self._last_tape=extract_tape(tape_rgb,self._tape_camera,self.calibration.plane,self.profile.tape,
+                stamp=observation.rgb.stamp,occlusion_mask=occlusion,
+                valid_rgb=valid_rgb,nn_candidates=observation.nn,
                 **({} if diagnostics is None else dict(diagnostics=diagnostics)))
             self._last_road=infer_road(self._last_tape,self.profile.road)
         if self._last_neural is not None and self._last_road is not None and (rgb_new or nn_new):
@@ -701,7 +756,8 @@ class PerceptionPipeline:
         registration_method=None
         normal_points=0
         visual_conflict=False
-        geometry_qualified=(self.calibration.metric_qualified and self.calibration.time_qualified
+        geometry_qualified=(self.calibration.metric_qualified and self._tape_camera.qualified
+                            and self.calibration.time_qualified
                             and observation.capture_interval is not None)
         unqualified_reference=(self.reference is not None
             and self.reference.feature_policy not in ('PHYSICAL_STRIP_ENDPOINTS_V1','OBSERVED_STRIP_SUPPORT_V1'))
@@ -929,12 +985,16 @@ class PerceptionPipeline:
                     self._free_scheduler=scheduler
                 else:scheduler=self._free_scheduler
                 parking_cells = {cell for bay in parking_clearance for cell in parking_clearance_cells(bay, grid.spec)} if can_free else ()
-                visible = self._free_visibility(grid, pose) if can_free else None
+                view = (self._free_visibility(grid, pose, prioritize_departure=region.vehicle_stopped)
+                        if can_free and region is not None else None)
+                visible, proximity, near_departure = (None, None, None) if view is None else view
                 plan=scheduler.plan(context_key=schedule_context,needed_mask=needed,support=grid.support,permission=grid.permission,
                     state=grid.state,observed_us=grid.observed_us,time_known=grid.time_known,now_us=now_us,
                     capture_lower_us=None if capture_interval is None else capture_interval[0],max_cells=self.profile.max_free_cells,
                     max_ray_tests=remaining,cycle_bound_us=cycle_bound_us,completion_bound_us=completion_bound_us,
-                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells,visible_mask=visible)
+                    free_ttl_us=self.profile.free_ttl_us,preferred_surrounding=parking_cells,visible_mask=visible,
+                    required_proximity=proximity,priority_mask=None if region is None else region.priority_mask,
+                    near_departure_mask=near_departure)
                 selected=plan.cells
                 if not plan.needed_count:can_free=False
                 if scheduling_status not in ('NEEDED_REGION_OUTSIDE_GRID','NEEDED_REGION_EXPIRED','NEEDED_POSE_CHANGED'):scheduling_status=plan.status
@@ -1062,10 +1122,7 @@ class PerceptionPipeline:
                 geometry_limits=self.profile.road_limits)
             approach_fit = self._temporal_road.approach_fit
             # 현재 영상이 여러 도로를 가리키거나 탐색을 끝내지 못했다면 후보를 승격하지 않는다.
-            if (self._last_road is None or (self._last_road.status == 'UNKNOWN'
-                    and len(self._last_road.hypotheses) <= 1 and set(self._last_road.reasons) <= {
-                        'NO_MEASURED_TAPE_WIDTH','NO_SUPPORTED_ROAD','GEOMETRY_ERROR_BUDGET'})):
-                mapped_road = temporal
+            mapped_road = _select_mapped_road(self._last_road, temporal, self.profile.road_limits)
         lane_section = None
         if lane_status == 'HELD' and lane_pose is not None:
             lane_section = mapped_lane_ahead(self._current_lane, lane_pose, self.profile.road)

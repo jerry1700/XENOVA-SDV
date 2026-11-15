@@ -212,6 +212,19 @@ class InputSafetyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'required Tailscale kernel module missing'):
             assemble.platform_root_ok(root)
 
+    def test_gateway_image_requires_activation_example_and_cp210x(self):
+        root = platform_root(self.base / 'gateway-root')
+        assemble.platform_root_ok(root)
+        example = root/'usr/share/xenova/90-esp32-serial.conf.example'
+        content = example.read_bytes()
+        example.unlink()
+        with self.assertRaisesRegex(ValueError, '90-esp32-serial'):
+            assemble.platform_root_ok(root)
+        example.write_bytes(content)
+        (root/'usr/lib/modules/6.18.33-v8/kernel/drivers/usb/serial/cp210x.ko.xz').unlink()
+        with self.assertRaisesRegex(ValueError, 'kernel module missing: cp210x'):
+            assemble.platform_root_ok(root)
+
     def test_shared_tailscale_state_is_rejected_behind_an_absolute_image_parent_symlink(self):
         root = platform_root(self.base / 'aliased-state-root')
         alias = root / 'image-private-var-lib'
@@ -300,9 +313,19 @@ class AssemblyPipelineTest(unittest.TestCase):
         def seed(args):
             source = board.data / 'seeds' / args.id
             shutil.copytree(source, args.data_root / 'seeds' / args.id)
+        fat = {}
         def command(args, **_kwargs):
             if args[0] == 'cp':
                 shutil.copyfile(args[-2],args[-1])
+            elif args[0] == 'mcopy':
+                if str(args[-2]).startswith('::'):
+                    Path(args[-1]).write_bytes(fat[args[-2]])
+                else:
+                    fat[args[-1]] = Path(args[-2]).read_bytes()
+                    volume = Path(args[2].split('@@')[0])
+                    with volume.open('r+b') as stream:
+                        stream.seek(512)
+                        stream.write(b'DOM0LESS-FAT')
             elif args[0] != 'mkfs.ext4':
                 raise AssertionError('unexpected command: ' + repr(args))
         # 소스 스냅샷에도 Git 작업 트리는 없을 수 있다. 출처 조회도 외부 경계다.
@@ -324,7 +347,22 @@ class AssemblyPipelineTest(unittest.TestCase):
         final = output / 'xenova-first-install.img'
         data = final.read_bytes()
         self.assertEqual(data[:478],content[:478])
-        self.assertEqual(data[494:2048],content[494:2048])
+        self.assertEqual(data[494:512],content[494:512])
+        self.assertEqual(data[512:524],b'DOM0LESS-FAT')
+        self.assertEqual(data[1024:2048],content[1024:2048])
+        self.assertEqual(set(fat), {'::debian.img', '::debian.rd', '::drive-a.img',
+                                    '::drive-b.img', '::xenova-guests.scr'})
+        self.assertEqual(fat['::drive-a.img'], fat['::drive-b.img'])
+        guests = manifest['factory']['dom0less']['guests']
+        self.assertNotEqual(guests['zephyr-drive-a']['boot_id'], guests['zephyr-drive-b']['boot_id'])
+        script = fat['::xenova-guests.scr'][72:].decode()
+        self.assertEqual(script.count('compatible "xen,domain"'), 3)
+        self.assertIn('reg <0x10000000 0x', script)
+        self.assertIn('root=/dev/xvda rw xenova.early-root=1', script)
+        self.assertIn(b'scripts/init-premount/xenova-root\0', fat['::debian.rd'])
+        ramdisk = guests['debian-dev']['assets']['ramdisk']
+        self.assertEqual(ramdisk['sha256'], hashlib.sha256(fat['::debian.rd']).hexdigest())
+        self.assertNotEqual(ramdisk['source_sha256'], ramdisk['sha256'])
         self.assertTrue(assemble.verify(final,manifest)['verified'])
         self.assertEqual(manifest['layout']['disk_id'],'1234abcd')
         self.assertEqual({s['record']['id'] for s in manifest['factory']['firmware_instances']}, {'zephyr-drive-a','zephyr-drive-b'})

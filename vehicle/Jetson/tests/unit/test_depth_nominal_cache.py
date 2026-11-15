@@ -111,6 +111,40 @@ class DepthNominalCacheTests(unittest.TestCase):
             self.assertFalse(actual.metric_qualified)
             self.assertEqual(actual.mode, 'UNKNOWN')
 
+    def test_flat_height_fast_path_and_threshold_fallback_preserve_depth_evidence(self):
+        np = self.np
+        model = replace(camera(48, 36), pixel_error=0., ray_error_rad=0.,
+                        rotation_error_rad=0., translation_error_m=0.)
+        plane = Plane()
+        config = module.DepthConfig(max_hit_boxes=614, max_patches=64)
+        data = np.full((36, 48), 1000.)
+        data[10:26, 10:26] = 800.
+        args = dict(config=config, collect_occlusion=True)
+        with patch.object(module, '_flat_height_bounds', return_value=None):
+            baseline = module.analyze_depth(data, model, plane, **args)
+        actual = module.analyze_depth(data, model, plane, **args)
+        self.assertEqual(snapshot(baseline), snapshot(actual))
+        self.assertGreater(len(actual.occlusion_boxes), 30)
+
+        flat_height_bounds = module._flat_height_bounds
+        def require_boundary_fallback(*args):
+            result = flat_height_bounds(*args)
+            self.assertIsNone(result)
+            return result
+
+        # 양 끝점의 높이 불확실성은 이 보정에서 2nm다. 판정 경계 바로 위/아래를 만든다.
+        for height in (-config.floor_tolerance_m + 2e-9, config.floor_tolerance_m - 2e-9,
+                       config.obstacle_min_height_m - 2e-9, config.obstacle_min_height_m + 2e-9,
+                       config.obstacle_max_height_m + 2e-9):
+            depth_at_boundary = (model.translation[2] - height) * 1000.
+            data[0, :2] = (np.nextafter(depth_at_boundary, 0.), np.nextafter(depth_at_boundary, np.inf))
+            with patch.object(module, '_flat_height_bounds', return_value=None):
+                baseline = module.analyze_depth(data, model, plane, **args)
+            with patch.object(module, '_flat_height_bounds', side_effect=require_boundary_fallback) as probe:
+                actual = module.analyze_depth(data, model, plane, **args)
+            probe.assert_called_once()
+            self.assertEqual(snapshot(baseline), snapshot(actual))
+
     def test_one_camera_cache_uses_immutable_bytes_and_exact_documented_payload_budget(self):
         model = camera(640, 480)
         norm, error = module._nominal_terms(model)

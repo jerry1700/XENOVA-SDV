@@ -12,6 +12,7 @@ import unittest
 from xenova_vehicle.perception.calibration import CameraModel, IDENTITY, synthetic_calibration
 from xenova_vehicle.perception.geometry import PointBounds, project_point
 from xenova_vehicle.perception.occlusion import MAX_BOXES, box_occlusion
+from xenova_vehicle.perception.rgb_rectification import tape_rgb_geometry
 
 
 def corners(box):
@@ -19,6 +20,24 @@ def corners(box):
 
 
 class OcclusionTests(unittest.TestCase):
+    def test_rectified_rgb_mask_stays_local_and_excludes_native_padding(self):
+        import numpy as np
+        native = CameraModel(240, 200, ((100., 0., 120.), (0., 100., 100.), (0., 0., 1.)),
+                             IDENTITY, (0., 0., 0.), roi=(50., 20., 190., 180.),
+                             distortion=(.15, 0., 0., 0.), qualified=True)
+        camera, (map_x, map_y), valid = tape_rgb_geometry(native)
+        self.assertTrue(native.distortion)
+        self.assertFalse(camera.distortion or camera.qualified)
+        self.assertTrue(valid[100, 120])
+        self.assertFalse(valid[:, :50].any())
+        self.assertTrue(np.all(map_x[valid != 0] >= 50))
+        self.assertTrue(np.all(map_y[valid != 0] < 179))
+        box = PointBounds((-.1, -.1, 1.), (.1, .1, 1.2), True)
+        mask = box_occlusion((box,), camera)
+        self.assertTrue(mask[100, 120])
+        self.assertFalse(mask[100, 170])
+        self.assertLess(mask.sum(), 600)
+
     def test_all_scalar_visible_corners_are_inside_and_box_cap_does_not_overflow_union(self):
         import numpy as np
         camera = synthetic_calibration().rgb

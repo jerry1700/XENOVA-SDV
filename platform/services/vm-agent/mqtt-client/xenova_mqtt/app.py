@@ -39,6 +39,7 @@ class AppHeartbeat:
         client: Publisher,
         app_id: str,
         *,
+        vm_id: str | None = None,
         clock: Callable[[], float] = time.monotonic,
         watchdog: Callable[[], bool] = systemd.watchdog,
         watchdog_interval_s: Any = _FROM_ENV,
@@ -48,7 +49,7 @@ class AppHeartbeat:
         if interval is not None and not interval > 0:
             raise ValueError(f"watchdog interval must be positive, got {interval!r}")
         self._client = client
-        self._topic = topics.app_events(app_id)
+        self._topic = topics.vm_app_events(vm_id, app_id) if vm_id is not None else topics.app_events(app_id)
         self._clock = clock
         self._watchdog = watchdog
         self._watchdog_every = None if interval is None else interval / 2

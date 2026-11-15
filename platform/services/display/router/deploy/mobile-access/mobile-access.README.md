@@ -115,6 +115,8 @@ cat /run/xenova-display-mobile/pairing-code
 - `GET /api/v1/display/phone-link`: 실행 상태, `endpoint.json`의 URL, `usb0` 실제 주소와 휴대폰(게이트웨이) 주소,
   휴대폰 대역 불일치, 번호 남은 시간. 번호 값은 담지 않는다.
 - `POST /api/v1/display/phone-link/pairing-code`: 위의 `systemctl kill ... USR1` 과 같다. 새 번호를 그 응답에만 담는다.
+- `GET`·`POST /api/v1/display/mode`(계약 4.14, 2026-11-14): `python3 -m xenova_display.display_mode <status|hdmi|mobile>` 을
+  그대로 실행한다. 웹에서 이 서비스를 켜고(휴대폰 모드) 끌(HDMI 모드) 수 있다.
 
 번호를 로그인한 운영자에게 웹으로 보여 주는 것은 허용한다. 운영자는 이미 SSH로 같은 파일을 읽을 수 있고, 번호는
 USB로 연결된 휴대폰에서만 2분·5회 안에 쓸 수 있기 때문이다. 대신 dom0-manager·Spring·브라우저 어디에도 저장하거나

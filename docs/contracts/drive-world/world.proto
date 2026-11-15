@@ -159,6 +159,7 @@ message ClockProbe {
   optional uint32 supported_state_features = 7;
   // Non-authoritative current input check. Absence/expiry never blocks clock bootstrap.
   optional AutoInputPreflight auto_input_preflight = 8;
+  optional bool supports_proximity_facts = 9;
 }
 // Receipt of one exact original stamped Reply; arrival does not renew its lease.
 message GuestClockReceipt {
@@ -489,6 +490,18 @@ message DriveControlFacts {
   required PiAbsoluteMeter meter = 2;
   optional StopFacts stop = 3;
   required uint64 valid_until_pi_us = 4;
+  optional ProximityFacts proximity = 5;
+}
+// Directional inhibition from the original SENSOR/CLOCK_REPLY sample.
+// A range is optional and has its own original expiry. A rear no-return is
+// encoded by 65535 and requires independent mapped free space for recovery.
+message ProximityFacts {
+  required bool front_blocked = 1;
+  required bool rear_blocked = 2;
+  optional uint64 front_vehicle_sequence = 3;
+  optional uint32 front_range_mm = 4;
+  optional uint32 rear_range_mm = 5;
+  optional uint64 rear_valid_until_pi_us = 6;
 }
 
 message LaneGeometry {

@@ -162,8 +162,12 @@ HTTP/WebSocket의 기존 DTO·상태 코드는 별도 계약이다. CLI 추가�
 | [`xenova-vm delete`](#cmd-retire) | retire 별칭 |
 | [`xenova-vm restore`](#cmd-restore) | 보관 자산 복원 |
 | [`xenova-vm purge`](#cmd-purge) | 보관 자산 영구 제거 |
-| [`xenova-wifi configure`](#cmd-wifi-configure) | SSID·PSK와 국가 저장 |
-| [`xenova-wifi activate`](#cmd-wifi-activate) | 저장한 Wi-Fi 활성화 |
+| [`xenova-wifi configure`](#cmd-wifi-configure) | SSID·PSK 저장 및 자동 연결 활성화 |
+| [`xenova-wifi activate`](#cmd-wifi-activate) | 저장한 Wi-Fi 설정 다시 적용 |
+| [`xenova-wifi list`](#cmd-wifi-list) | 저장된 Wi-Fi 목록 조회 |
+| [`xenova-wifi scan`](#cmd-wifi-scan) | 주변 Wi-Fi 검색 |
+| [`xenova-wifi connect`](#cmd-wifi-connect) | 저장한 Wi-Fi를 지정해 연결 |
+| [`xenova-wifi forget`](#cmd-wifi-forget) | 저장한 Wi-Fi 삭제 |
 | [`xenova-wifi status`](#cmd-wifi-status) | 인증·주소·내부망 중복 조회 |
 | [`xenova-broker`](#cmd-broker) | MQTT 최초 설정·계정 추가/삭제·조회·전달·무결성 확인 |
 | [`tailscale up/status/ip`](#cmd-tailscale) | 최초 Tailnet 인증·원격 관리 주소 확인 |
@@ -1033,9 +1037,13 @@ public/등록·사용 중·신원 미확정 자산은 남긴다. 원 생성 오�
 정확한 key는 `schema_version="1.0", call_ms, execution_ms, cleanup_ms`다. 정수 양수이며
 call_ms>cleanup_ms여야 한다. call/실행의 직렬화 입력 상한은 86460000ms,
 cleanup_ms 상한은 60000ms다. 이는 운영 기본값·보드 지연 보장이 아니다.
-recipe는 값이 null인 예시를 `/usr/share/xenova/creation-policy.json.example`로만 설치한다.
-승인된 보드 정책을 별도로 공급하기 전 새 Linux create는 수락 전 RECONCILE_REQUIRED,
-accepted=false다. 완료 replay·조회·기한 불명 작업의 명시 수습은 이 설정 부재로 막지 않는다.
+이미지는 승인된 기본 정책을 `/etc/xenova/creation-policy.json`에 root:root·0600으로 설치한다.
+기본값은 `call_ms=1200000`(20분), `execution_ms=1140000`(19분), `cleanup_ms=30000`(30초)다.
+정리는 호출 예산 안에서 확보하며, 잠금·순서 대기에 시간이 쓰이면 실제 실행 여유는 아래 식에 따라 줄어든다.
+이 값은 하위 Linux 생성의 상한이며 HTTP·Spring·클라이언트의 응답 대기를 자동으로 늘리지 않는다.
+정책은 CONFFILES로 관리한다. RPM 갱신에서 벤더 기본값도 달라지면 운영 수정본이 `.rpmsave`로 이동할 수 있으므로 갱신 후 활성값과 보존본을 확인한다. null 예시는 기존 `/usr/share/xenova/creation-policy.json.example`에 별도로 남긴다.
+정책 부재·무효에서는 새 Linux create를 수락 전 RECONCILE_REQUIRED, accepted=false로 거절한다.
+완료 replay·조회·기한 불명 작업의 명시 수습은 이 설정 부재로 막지 않는다.
 Zephyr의 기존 bundle·독립 factory seed 준비 계약은 유지한다.
 
 | 시간 | 현재 의미 |
@@ -1337,7 +1345,7 @@ Gateway의 정상 권위 원본은 별도 [로컬 진단·재확인](../../platf
 | `expected_lifecycle_generation` | probe의 `lifecycle_generation`, 정수 ≥0 |
 | `expected_intent_revision` | probe의 `intent_revision`, 정수 ≥1 |
 | `expected_execution` | 아래 mode별 객체. 여분 필드 없음 |
-| `mode` | 아래 세 값 중 하나 |
+| `mode` | 아래 표의 값 중 하나 |
 | `deadline_monotonic_ms` | 같은 host 부팅의 절대 단조 ms. 새 실행 판정 시 미래이며 120초 이내 |
 
 | mode | expected_execution | 추가 조건 |
@@ -1345,6 +1353,7 @@ Gateway의 정상 권위 원본은 별도 [로컬 진단·재확인](../../platf
 | `start-if-absent` | `{"absent_observation_revision":2}` | 최신 성공 probe가 실제 absent이며 revision이 일치 |
 | `graceful-restart` | `{"execution_id":"UUID"}` | managed 실행 ID 일치·협조형 종료 지원 |
 | `force-restart` | `{"execution_id":"UUID"}` | managed 실행 ID 일치·정책 `force_restart_vm_ids`에 해당 UUID 승인 |
+| `restart-crashed` | `{"execution_id":"UUID"}` | managed 실행 ID 일치·Xen에서 `crashed` 확인·최초 설치에 등록된 Zephyr A/B 또는 `force_restart_vm_ids`에 해당 UUID 승인 |
 
 
 <a id="cmd-recover-once"></a>
@@ -1363,6 +1372,8 @@ Gateway의 정상 권위 원본은 별도 [로컬 진단·재확인](../../platf
 **사용 조건**
 
 REGISTERED·동일 세대·유효 running 의도·정확한 revision·동일 host의 allowed admission·열린 host gate·정상 기존 자산이 필요하다. 아래 예시는 **현재 running 의도인 협조형 시험 VM**용이다. 정지 의도를 복구로 우회하지 않는다.
+
+Recovery Worker가 주행 VM에 `restart-crashed`를 요청하려면 같은 host의 Gateway에서 해당 VM의 바인딩이 제거되고 출력 권한이 철회됐음을 확인해야 한다. 플랫폼은 제거 직전에도 같은 Xen 실행과 `crashed` 상태를 확인한다. 새 실행의 바인딩과 앱 준비 상태는 기존 대기 후보 합류 절차에서 다시 검증한다.
 
 **실행 예시**
 
@@ -2243,7 +2254,7 @@ get의 lifecycle·generation과 operation journal을 비교한다. 완료마다 
 <a id="access"></a>
 ## 9. Wi-Fi·MQTT·Tailscale·콘솔·SSH
 
-Wi-Fi 구성·활성화·조회는 각각 독립 명령이다. 관리 Wi-Fi를 재활성화하면 SSH가 끊길 수 있으므로 configure/activate는 UART 등 복귀 경로를 확보한 상태에서 실행한다. 실제 PSK를 명령행·로그·Git에 넣지 않는다.
+`configure`는 설정을 저장하고 Wi-Fi 서비스를 시작하거나 재시작한다. `activate`는 저장한 설정만 다시 적용한다. 두 명령 모두 관리 Wi-Fi의 SSH 연결을 잠시 끊을 수 있으므로 UART 등 복귀 경로를 확보한 상태에서 실행한다. 실제 PSK를 명령행·로그·Git에 넣지 않는다.
 
 <a id="cmd-mqtt-init"></a>
 <a id="cmd-broker"></a>
@@ -2605,7 +2616,7 @@ daemon 시작과 재복원을 거절한다. LAN/UART에서 데몬을 중지한 �
 [명령어 색인으로](#command-index)
 
 <a id="cmd-wifi-configure"></a>
-### `xenova-wifi configure` — SSID·PSK와 국가 저장
+### `xenova-wifi configure` — SSID·PSK 저장 및 자동 연결 활성화
 
 **기본 사용**
 
@@ -2615,7 +2626,9 @@ daemon 시작과 재복원을 거절한다. LAN/UART에서 데몬을 중지한 �
 
 **인자**
 
-`--interface NAME` 기본 wlan0. `--country CC` 기본 KR, 대문자 두 자리. SSID/PSK는 명령행 인자가 아닌 **대화형 입력**.
+`--interface NAME` 기본 wlan0. `--country CC`는 대문자 두 자리다. 생략하면 기존 설정을 따르며, 첫 등록은 KR이다. SSID/PSK는 명령행 인자가 아닌 **대화형 입력**.
+
+`configure`를 SSID마다 한 번 실행해 같은 인터페이스에 여러 WPA2 네트워크를 저장한다. 같은 SSID를 다시 입력하면 해당 PSK만 갱신한다. 국가는 인터페이스 전체에 적용한다.
 
 **사용 조건**
 
@@ -2637,27 +2650,34 @@ xenova-wifi configure
 {
   "configured": true,
   "interface": "wlan0",
+  "authentication": "SCANNING",
+  "ipv4": [],
+  "internal_subnet_overlap": false,
+  "errors": [],
+  "activation": {"action": "start", "result": "requested", "stage": "complete"},
   "credentials": "stored root-only",
-  "activation_required": true
+  "activation_required": false
 }
 ```
 
-저장 완료이며 아직 AP 연결을 요청한 것은 아니다.
+저장한 목록 전체로 연결을 시도하고 다음 부팅 때도 Wi-Fi 서비스가 시작되도록 등록한다. 장소를 옮겨 부팅하면 저장된 후보를 자동으로 탐색한다. `requested`는 서비스 적용 요청이 완료됐다는 뜻이며 AP 인증과 DHCP는 이후에 완료될 수 있다.
 
 **오류 응답**
 
 입력 길이·TTY·파일/인터페이스 오류: stderr `[xenova-wifi] operation failed; check interface, root-only configuration and service status`, 종료 `1`. argparse 오류 `2`. Manager envelope 없음.
 
+저장 후 활성화가 실패하면 자격증명을 보존하고 `configured: true`, `activation_required: true`, 실패 단계가 담긴 `activation`을 출력하며 종료 `1`을 반환한다. 오류를 해결한 뒤 `activate`로 다시 적용할 수 있다.
+
 **확인 방법**
 
-`xenova-wifi status`에서 configured를 확인한다. 실제 연결은 activate 후 authentication=COMPLETED와 IPv4를 확인한다. conf 전체/PSK를 출력하지 않는다. [저장 형식·입력 제약](#wifi-contract).
+`xenova-wifi status`에서 설정 저장 여부와 실제 인증 상태 `COMPLETED`, IPv4 주소를 확인한다. 설정 파일 전체나 PSK를 출력하지 않는다. [저장 형식·입력 제약](#wifi-contract).
 
 **Manager 매핑:** Wi-Fi 전용 CLI.
 
 [명령어 색인으로](#command-index)
 
 <a id="cmd-wifi-activate"></a>
-### `xenova-wifi activate` — 저장한 Wi-Fi 활성화
+### `xenova-wifi activate` — 저장한 Wi-Fi 설정 다시 적용
 
 **기본 사용**
 
@@ -2696,6 +2716,30 @@ Status에 `"activation":{"action":"start","result":"requested","stage":"complete
 status의 `authentication=COMPLETED`·비어 있지 않은 ipv4·errors를 확인한다. requested만으로 SSH 접속 가능을 판정하지 않는다. 진단은 `journalctl -b -u xenova-wifi@wlan0.service --no-pager`. 비밀번호 재입력/모듈 재적재를 자동 재시도로 수행하지 않는다.
 
 **Manager 매핑:** Wi-Fi 전용 CLI. service enable → start/restart → networkctl reload → 대상 인터페이스 reconfigure.
+
+[명령어 색인으로](#command-index)
+
+<a id="cmd-wifi-list"></a>
+### `xenova-wifi list` — 저장된 Wi-Fi 목록 조회
+
+`xenova-wifi list --interface wlan0`는 설정 파일에 저장된 SSID를 JSON의 `ssids` 배열로 반환한다. 기본 인터페이스는 wlan0이며, 설정이 없으면 빈 배열을 반환한다. Wi-Fi 서비스가 꺼져 있어도 root 셸에서 조회할 수 있다. 출력에는 인터페이스 이름과 SSID만 담긴다.
+
+[명령어 색인으로](#command-index)
+
+<a id="cmd-wifi-scan"></a>
+### `xenova-wifi scan` — 주변 Wi-Fi 검색
+
+`xenova-wifi scan --interface wlan0`는 현재 잡히는 AP의 SSID·BSSID·주파수·신호 세기를 JSON으로 반환한다. 저장된 Wi-Fi가 없어도 root 셸에서 실행할 수 있다. 인터페이스가 내려가 있으면 검색하는 동안만 올린다.
+
+<a id="cmd-wifi-connect"></a>
+### `xenova-wifi connect SSID` — 저장한 Wi-Fi를 지정해 연결
+
+`xenova-wifi connect "휴대폰 핫스팟"`은 저장된 SSID의 인증을 확인한다. 연결을 시도하는 동안만 해당 SSID의 우선순위를 높인다. 성공하거나 실패하면 기존 우선순위로 돌리며, 다른 저장 프로필은 자동 연결 후보로 남는다. IPv4 할당은 `xenova-wifi status`로 확인한다.
+
+<a id="cmd-wifi-forget"></a>
+### `xenova-wifi forget SSID` — 저장한 Wi-Fi 삭제
+
+`xenova-wifi forget "휴대폰 핫스팟"`은 해당 SSID와 자격증명을 저장 목록에서 제거한다. 서비스가 실행 중이면 다시 읽도록 재시작한다. 마지막 프로필을 삭제하면 목록이 비고 다음 `configure`에서 다시 등록할 수 있다. `connect`와 `forget`은 관리 Wi-Fi의 SSH 연결을 끊을 수 있다.
 
 [명령어 색인으로](#command-index)
 
@@ -4144,7 +4188,7 @@ Wi-Fi 입력/저장 계약:
 | 항목 | 제약·저장 |
 |---|---|
 | interface | 영숫자로 시작하는 1..15자리 영숫자/_.- |
-| country | 두 자리 대문자, 기본 KR |
+| country | 두 자리 대문자, 생략 시 저장된 국가 또는 첫 등록 KR |
 | SSID | C0 제어문자 없는 1..32 UTF-8 bytes |
 | PSK | 8..63 printable ASCII 또는 64자리 hex |
 | 프롬프트 | SSID/PSK 입력 문자 표시. 실제 값을 argv·로그·Git에 남기지 않음 |
@@ -4152,7 +4196,9 @@ Wi-Fi 입력/저장 계약:
 | supplicant | WPA-PSK/RSN, disable_scan_offload=1 |
 | /etc/systemd/network/25-xenova-wifi.network | 0644, IPv4 DHCP, RouteMetric=600, IPv6AcceptRA=no, RequiredForOnline=routable |
 
-저장 conf·enablement가 다음 부팅에 사용되며 무선 SDIO PIO·CYW 모듈·feature_disable=0x2000도 이미지 부팅 경로에 포함된 설정을 따른다. 현재 연결 성공만으로 다음 이미지의 자동 연결까지 검증됐다고 선언하지 않는다. country/interface/PSK를 외부망 연결을 위한 영구 VM 신원으로 쓰지 않는다.
+활성화된 서비스는 부팅 때 저장 conf를 읽는다. 네트워크별 우선순위는 기본값이 같으며, `wpa_supplicant`가 스캔 결과와 신호 세기 등을 바탕으로 저장된 후보에 연결한다. 연결이 끊기면 저장된 후보를 다시 탐색한다. Wi-Fi 인증과 IPv4 주소 할당은 `status`에서 각각 확인한다.
+
+무선 SDIO PIO·CYW 모듈·feature_disable=0x2000은 이미지 부팅 경로에 포함된 설정을 따른다. country/interface/PSK를 외부망 연결을 위한 영구 VM 신원으로 쓰지 않는다.
 
 ### D.5 저장 경로와 잠금
 
@@ -4473,6 +4519,10 @@ null/무효 옵션·새 key는 허용하지 않는다. 전체 계약/오류 단�
 <a id="cmd-registration-notify"></a>
 <a id="cmd-registrations"></a>
 ## 현재 등록 명세 조회
+
+최초 설치는 로컬 VM 등록에서 완료하며 서버에 자동 통지하지 않는다.
+네트워크와 필요한 Tailnet 접속·Spring 자격을 준비한 뒤 아래 조회로 UUID를 확인하고,
+기존 인증된 수동 notify API를 사용한다. 조회·API 재시작·완료 first-boot가 자동 전송을 시작하지 않는다.
 
 `xenova-vm registrations [UUID] [--timeout-ms MS] [--budget-ms MS] [--json]`.
 단건은 `data.registration`, 목록은 `data.registrations`다. JSON은 포맷만 바꾼다.

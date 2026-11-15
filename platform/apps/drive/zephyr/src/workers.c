@@ -3,6 +3,8 @@
  * lock. A stuck callback is retained and reported, never forcibly recycled. */
 #include "workers.h"
 #include <xenova/auto_delay.h>
+#include <xenova/auto_exit.h>
+#include <xenova/auto_input_fault.h>
 #include <xenova/diagnostics.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/atomic.h>
@@ -45,6 +47,15 @@ static void memory_busy(void)
 
 static bool valid(enum drive_task task) { return (unsigned)task < DRIVE_TASK_COUNT; }
 
+/* Called with workers_lifecycle held so the thread object cannot be replaced. */
+static bool auto_exited(enum drive_task task, struct task *t)
+{
+ bool exited=IS_ENABLED(CONFIG_XENOVA_DRIVE_WARM)&&task==DRIVE_TASK_AUTO&&t->status.started&&
+  !t->status.joining&&!drive_task_stopping(task)&&!k_thread_join(&t->thread,K_NO_WAIT);
+ if(exited)drive_auto_exit_confirm();
+ return exited;
+}
+
 static void run(void *argument, void *unused1, void *unused2)
 {
  ARG_UNUSED(unused1); ARG_UNUSED(unused2);
@@ -53,6 +64,9 @@ static void run(void *argument, void *unused1, void *unused2)
   k_sem_take(&t->wake, K_FOREVER);
   k_mutex_lock(&t->exchange, K_FOREVER);
   if (atomic_get(&stopping)||atomic_get(&t->cancelled)) { t->status.pending = false; k_mutex_unlock(&t->exchange); break; }
+  if (t == &tasks[DRIVE_TASK_AUTO] && drive_auto_exit_take()) {
+   t->status.pending = false; k_mutex_unlock(&t->exchange); break;
+  }
   if (!t->status.pending) { k_mutex_unlock(&t->exchange); continue; }
   t->running = t->pending; t->status.pending = false; t->status.state = DRIVE_TASK_RUNNING;
   t->running_live=true;atomic_set(&t->running_performed,0);
@@ -74,6 +88,10 @@ static void run(void *argument, void *unused1, void *unused2)
    struct xm_span control = {t->running.control, t->running.control_length};
    struct xm_span input = {t->running.input, t->running.input_length};
    if (!t->running.input_length) { input.p = NULL; }
+   /* Keep reception and MANUAL intact; fault only this guest's AUTO calculation. */
+   if (t == &tasks[DRIVE_TASK_AUTO] && drive_auto_input_fault_active()) {
+    input=(struct xm_span){0};age=-1;
+   }
    result.rc = drive_adapter_run_until(&t->adapter, control, input, age,
      &t->running.manual_witness,t->running.app_instance,t->running.deadline_us,&result.sample);
 	if (t == &tasks[DRIVE_TASK_AUTO] && drive_auto_delay_active()) {
@@ -139,6 +157,7 @@ int drive_workers_start(const struct drive_adapter *automatic, const struct driv
   /* Even when stop raced with creation, start only to observe the closed gate
    * and exit. Never strand an unstarted thread that join would wait forever. */
   k_thread_start(id);
+  if(i==DRIVE_TASK_AUTO)drive_auto_exit_bind(&t->wake);
  }
  k_mutex_unlock(&workers_lifecycle);
  if (result || atomic_get(&stopping)) { drive_workers_stop(); return result ? result : -ESHUTDOWN; }
@@ -187,6 +206,7 @@ int drive_workers_read(enum drive_task task, uint64_t revision, struct drive_com
   if (atomic_get(&t->cancelled)||atomic_get(&stopping)) rc=-ESHUTDOWN;
   else if (!t->status.completed_sequence) rc = -ENODATA;
   else if (t->result.context_revision != revision) rc = -EXDEV;
+  else if (auto_exited(task,t)) rc=-ESHUTDOWN;
   else { *out = t->result;t->memory_read_sequence=t->result.sequence; }
   k_mutex_unlock(&t->exchange);
  }
@@ -198,6 +218,12 @@ int drive_workers_status(enum drive_task task, struct drive_task_status *out)
  if (!valid(task) || !out) return -EINVAL;
  if (k_mutex_lock(&workers_lifecycle, K_NO_WAIT)) return -EBUSY;
  struct task *t = &tasks[task]; int rc = 0;
+ if (auto_exited(task,t)) {
+  /* The kernel confirms termination even if the owner left its exchange locked. */
+  *out=(struct drive_task_status){.state=DRIVE_TASK_EXITED,.lifetime=t->status.lifetime,.started=true};
+  k_mutex_unlock(&workers_lifecycle);
+  return 0;
+ }
  if (!t->status.started) { *out = t->status; }
  else if (k_mutex_lock(&t->exchange, K_NO_WAIT)) rc = -EBUSY;
  else { *out = t->status; k_mutex_unlock(&t->exchange); }
@@ -252,6 +278,7 @@ int drive_workers_memory_read(struct xdr_app_region out[3],struct xdr_app_buffer
 void drive_workers_stop(void)
 {
  atomic_set(&stopping, 1);
+ drive_auto_exit_unbind();
  /* Semaphores are initialized together before any thread starts. */
  if (!atomic_get(&initialized)) return;
  for (size_t i=0; i<DRIVE_TASK_COUNT; ++i){atomic_set(&tasks[i].cancelled,1);k_sem_give(&tasks[i].wake);}
@@ -270,6 +297,7 @@ int drive_task_cancel(enum drive_task task,uint64_t lifetime,int64_t deadline)
  else{
   /* Revocation does not depend on callback return or queue capacity. */
   atomic_set(&t->cancelled,1);
+  if(task==DRIVE_TASK_AUTO)drive_auto_exit_unbind();
   if(!t->stop_deadline||deadline<t->stop_deadline)t->stop_deadline=deadline;
   k_sem_give(&t->wake);
  }
@@ -299,6 +327,15 @@ int drive_task_join(enum drive_task task,uint64_t lifetime,int64_t deadline)
  k_mutex_unlock(&workers_lifecycle);return rc?-ETIMEDOUT:0;
 }
 
+/* A forced exit can leave callback resources or the exchange mutex owned. */
+static bool task_quiescent(struct task *t)
+{
+ if(k_mutex_lock(&t->exchange,K_NO_WAIT))return false;
+ bool quiescent=!t->running_live;
+ k_mutex_unlock(&t->exchange);
+ return quiescent;
+}
+
 int drive_task_join_poll(enum drive_task task,uint64_t lifetime)
 {
  if(!valid(task)||!lifetime)return -EINVAL;
@@ -306,15 +343,23 @@ int drive_task_join_poll(enum drive_task task,uint64_t lifetime)
  struct task *t=&tasks[task];int rc=0;
  if(t->status.lifetime!=lifetime)rc=-EXDEV;
  else if(!atomic_get(&t->cancelled)||!t->stop_deadline)rc=-EINVAL;
- else if(!t->status.started||t->status.joined){k_mutex_unlock(&workers_lifecycle);return 0;}
+ else if(!t->status.started||t->status.joined){
+  rc=task_quiescent(t)?0:-EIO;k_mutex_unlock(&workers_lifecycle);return rc;
+ }
  else if(t->status.joining)rc=-EBUSY;
  if(rc){k_mutex_unlock(&workers_lifecycle);return rc;}
  t->status.joining=true;k_mutex_unlock(&workers_lifecycle);
  rc=k_thread_join(&t->thread,K_NO_WAIT);
  k_mutex_lock(&workers_lifecycle,K_FOREVER);t->status.joining=false;
- if(!rc){t->status.joined=true;t->status.state=DRIVE_TASK_STOPPED;}
+ if(!rc){
+  t->status.joined=true;t->status.state=DRIVE_TASK_STOPPED;
+  rc=task_quiescent(t)?0:-EIO;
+ }
  else if(k_uptime_get()>=t->stop_deadline){
-  k_mutex_lock(&t->exchange,K_FOREVER);t->status.state=DRIVE_TASK_RESIDUAL;k_mutex_unlock(&t->exchange);rc=-ETIMEDOUT;
+  if(!k_mutex_lock(&t->exchange,K_NO_WAIT)){
+   t->status.state=DRIVE_TASK_RESIDUAL;k_mutex_unlock(&t->exchange);
+  }
+  rc=-ETIMEDOUT;
  }else rc=-EAGAIN;
  k_mutex_unlock(&workers_lifecycle);return rc;
 }
@@ -330,6 +375,7 @@ int drive_task_restart(enum drive_task task,uint64_t lifetime,const struct drive
    t->adapter.calculate==fresh->calculate&&t->adapter.calculate_until==fresh->calculate_until&&t->adapter.context==fresh->context?t->restart_rc:-EXDEV;
  }else if(!atomic_get(&t->cancelled)||(t->status.started&&!t->status.joined)||t->status.joining)rc=-EBUSY;
  else if(lifetime==UINT64_MAX)rc=-EOVERFLOW;
+ else if(!task_quiescent(t))rc=-EIO;
  else{
   memset(&t->pending,0,sizeof(t->pending));memset(&t->running,0,sizeof(t->running));
   memset(&t->result,0,sizeof(t->result));memset(&t->resources,0,sizeof(t->resources));
@@ -345,6 +391,10 @@ int drive_task_restart(enum drive_task task,uint64_t lifetime,const struct drive
   else{
    t->status.started=true;t->status.state=DRIVE_TASK_WAITING;
    k_thread_name_set(id,task==DRIVE_TASK_AUTO?"drive-auto":"drive-manual");k_thread_start(id);
+   if(task==DRIVE_TASK_AUTO){
+    drive_auto_exit_bind(&t->wake);
+    if(drive_task_stopping(task))drive_auto_exit_unbind();
+   }
   }
   t->restart_rc=rc;
  }

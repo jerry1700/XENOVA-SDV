@@ -7,6 +7,7 @@
 from dataclasses import replace
 import math
 import struct
+from types import SimpleNamespace
 import unittest
 
 import test_mapper_sensor_state as sensors_fixture
@@ -14,14 +15,16 @@ import test_world_adapter as road_fixture
 from xenova_drive_world import schema, decode, encode
 from xenova_vehicle.mapping.alignment import MapOdomAlignment
 from xenova_vehicle.mapping.lane_catalog import LaneCatalog, LaneSource
-from xenova_vehicle.mapping.local_map import EvidenceGrid, GridSpec
+from xenova_vehicle.mapping.local_map import EvidenceGrid, GridSpec, FREE, OCCUPIED, UNKNOWN
 from xenova_vehicle.mapping.odometry import PoseEstimate
 from xenova_vehicle.mapping.registration import PoseBox
 from xenova_vehicle.mapping.road_basis import RoadBasis
 from xenova_vehicle.oak.frames import RawFrame
 from xenova_vehicle.perception.inputs import FrameStamp, ImageFrame, PerceptionInput
 from xenova_vehicle.perception.pipeline import PerceptionPipeline, PerceptionResult
+from xenova_vehicle.perception.free_space import TargetClass
 from xenova_vehicle.perception.tape import TapeGraph
+from xenova_vehicle.runtime.demo_occupancy import fill_demo_road
 from xenova_vehicle.runtime.map_checkpoint import FrameEvidence
 from xenova_vehicle.runtime.mapper_catalogs import CatalogDraft, CatalogView, MappingState
 from xenova_vehicle.runtime.mapper_compute import MapperInput
@@ -38,6 +41,42 @@ from xenova_vehicle.storage.records import EvidenceTable, CheckpointPayload
 
 def uid(number):
     return '30000000-0000-4000-8000-%012x' % number
+
+
+class DemoOccupancyTests(unittest.TestCase):
+    def test_fill_reserves_a_current_or_expired_cone_and_its_shadow(self):
+        import numpy as np
+
+        spec = GridSpec(32, 32, .05, (0., -.8))
+        state = np.zeros((32, 32), dtype=np.uint8)
+        age = np.full(state.shape, np.iinfo(np.uint32).max, dtype=np.uint32)
+        allowed = np.ones(state.shape, dtype=bool)
+        allowed[13, 9] = False
+        road = np.zeros_like(allowed)
+        road[12:20, 4:28] = True
+        camera_hits = np.zeros_like(allowed)
+        camera_hits[16, 16] = True
+        camera_hits[16, 17] = True
+        state[16, 16] = OCCUPIED
+        age[16, 16], age[16, 17] = 50, 600
+        state[16, 26] = FREE  # A farther cell was free before the cone.
+        state[12, 8] = OCCUPIED  # ToF hit, does not cast an OAK shadow.
+        age[12, 8] = 40
+        snapshot = dict(spec=spec, arrays=dict(state=state, age_ms=age,
+            support=np.ones_like(allowed), permission=allowed))
+        result = fill_demo_road(snapshot, road, pose=SimpleNamespace(x=0., y=0., yaw=0.),
+            camera=SimpleNamespace(translation=(.2, .025, .14)),
+            targets=(TargetClass(.09, .18, .1273),), camera_hits=camera_hits)
+        outbound, ages = result['arrays']['state'], result['arrays']['age_ms']
+        self.assertEqual((outbound[16, 16], ages[16, 16]), (OCCUPIED, 50))
+        self.assertEqual((outbound[16, 17], ages[16, 17]), (UNKNOWN, 600))
+        self.assertEqual(outbound[16, 26], UNKNOWN)
+        self.assertEqual(outbound[12, 8], OCCUPIED)
+        self.assertEqual((outbound[12, 9], ages[12, 9]), (FREE, 0))
+        self.assertEqual(outbound[8, 9], FREE)  # Grid coverage around the lane cut.
+        self.assertEqual(outbound[7, 9], UNKNOWN)
+        self.assertEqual(outbound[13, 9], UNKNOWN)
+        self.assertEqual(state[16, 26], FREE)
 
 
 class MapperWorldTests(unittest.TestCase):
@@ -193,6 +232,43 @@ class MapperWorldTests(unittest.TestCase):
         self.assertGreaterEqual(value.lane_model.divider[-1].x,.5)
         self.assertEqual(list(value.occupancy[:2]),[255,100])
         self.assertEqual(struct.unpack_from('<II',value.age_le32),(500,30))
+
+    def test_short_basis_overlap_can_publish_a_stored_window_covering_the_vehicle(self):
+        limits = StoppingLimits(.5,1.,10_000,50_000,30_000,.005)
+        points = lambda x: ((x,.3),(x,0.),(x,-.3))
+        basis = self.state.road_basis
+        basis._hold(self.model,.05,'OVERLAP_SPAN_UNRESOLVED')
+        held = basis.snapshot()
+        self.assertIsNone(self.build(basis=held,stopping=limits))
+        self.pipeline._temporal_road._store(tuple(
+            RoadLink(points(a),points(b),.001,frozenset(),(frozenset(),)*3,False,.002)
+            for a,b in ((-.5,0.),(0.,.5),(.5,1.))))
+        self.pipeline._temporal_road.revision += 1
+        built = self.build(basis=held,stopping=limits)
+        self.assertIsNotNone(built)
+        value = built.message()
+        self.assertLess(value.lane_model.divider[0].x,value.reference_vehicle_pose.x)
+        self.assertEqual(value.reference_revision,held.reference_revision)
+
+    def test_demo_fill_is_only_in_the_published_world(self):
+        self.pipeline.targets = (TargetClass(.09, .18, .1273),)
+        def station(x):
+            return ((x,.3),(x,0.),(x,-.3))
+        self.pipeline._temporal_road._store(tuple(
+            RoadLink(station(a),station(b),.001,frozenset(),(frozenset(),)*3,False,.002)
+            for a,b in ((-.5,0.),(0.,.5),(.5,1.))))
+        stopping = StoppingLimits(.5,1.,10_000,50_000,30_000,.005)
+        ordinary = self.build(stopping=stopping).message()
+        demo = self.build(stopping=stopping,demo_road_fill=True).message()
+        self.assertEqual(set(ordinary.occupancy), {255})
+        self.assertEqual(set(demo.occupancy), {0,255})
+        self.assertEqual(ordinary.drivable_permission, demo.drivable_permission)
+        self.assertTrue((self.grid.state == UNKNOWN).all())
+        fixed = self.build(stopping=stopping,demo_road_fill=True,demo_pose_bounds=(.001,.002)).message()
+        self.assertAlmostEqual(fixed.localization.anchor_position_bound_m,.001,places=7)
+        self.assertAlmostEqual(fixed.localization.anchor_heading_bound_rad,.002,places=7)
+        self.assertEqual(fixed.reference_vehicle_pose,demo.reference_vehicle_pose)
+        self.assertEqual(fixed.localization.valid_for_us,demo.localization.valid_for_us)
 
     def test_corrected_capture_is_carried_to_the_original_vehicle_sample(self):
         raw = self.inputs.pose.sample

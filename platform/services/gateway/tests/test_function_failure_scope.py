@@ -23,13 +23,14 @@ BOOT = '22222222-2222-4222-8222-222222222222'
 
 
 class _World:
-    def __init__(self, path):
+    def __init__(self, path, *, stateful=()):
         self.t = 100.
         self.alive = {A, B}
         self.ids = {vm: {app: str(uuid4()) for app in ('autonomous', 'manual')} for vm in (A, B)}
         self.executions = {vm: str(uuid4()) for vm in (A, B)}
         self.count = {}
         self.progress = {}
+        self.stateful = set(stateful)
         self.auth = AuthorityStore(path, HOST, uid=os.geteuid(), mountpoint=None)
         self.auth.initialize(A)
         self.auth.update(mode='AUTO', generation=42, phase='DISARMED')
@@ -46,11 +47,12 @@ class _World:
             observed_monotonic_ms=int(self.t * 1000), expires_monotonic_ms=int(self.t * 1000) + 3000,
             vms={vm: dict(status='observed', profile=PROFILE, execution_id=self.executions[vm], boot_id=BOOT,
                 app_instance_id=self.ids[vm]['autonomous'], app_instances=self.ids[vm], domid=i + 1,
-                xen_unique_id=str(i + 1), app_state_models={'autonomous': 'stateless', 'manual': 'stateless'},
+                xen_unique_id=str(i + 1), app_state_models={
+                    'autonomous': 'stateful' if vm in self.stateful else 'stateless', 'manual': 'stateless'},
                 intent_revision=1, lifecycle_generation=1, observed_monotonic_ms=int(self.t * 1000))
                 for i, vm in enumerate((A, B)) if vm in self.alive}))
 
-    def tick(self, seconds=.02, *, reasons=None, stagnant=(), commandless=(), bad_commands=False):
+    def tick(self, seconds=.02, *, reasons=None, stagnant=(), silent=(), commandless=(), exited=(), bad_commands=False):
         reasons = reasons or {}
         for _ in range(round(seconds / .02)):
             self.t += .02
@@ -59,17 +61,21 @@ class _World:
             for vm in self.alive:
                 for app in ('autonomous', 'manual'):
                     key = vm, app
+                    if key in silent:
+                        continue
                     assert self.m.accept_session(vm, BOOT, self.ids[vm][app], self.t, app=app)
                     self.count[key] = self.count.get(key, 0) + 1
                     active = vm == self.m.active_vm and app == self.m.active_app
-                    if active and key not in stagnant:
+                    if active and key not in stagnant and key not in exited:
                         self.progress[key] = self.progress.get(key, 0) + 1
-                    reason = reasons.get(key)
+                    reason = 'APP_EXITED' if key in exited else reasons.get(key)
                     payload = dict(profile=PROFILE, applied_generation=self.m.generation,
                         check_seq=str(self.count[key]), progress_seq=str(self.progress.get(key, 0)),
-                        phase='EXECUTING' if active else 'WAITING',
+                        phase='STOPPED' if key in exited else 'EXECUTING' if active else 'WAITING',
                         readiness='NOT_READY' if reason else 'READY' if active else 'QUALIFIED', reason=reason)
-                    assert self.m.on_lifecycle(app, vm, payload, self.t)
+                    accepted = self.m.on_lifecycle(app, vm, payload, self.t)
+                    assert accepted or (app == 'autonomous' and
+                        self.auth.value['auto_recovery'][vm]['instance'] == self.ids[vm][app])
                     if active and key not in commandless and (not reason or bad_commands):
                         self.m.on_command(app, vm, dict(generation=self.m.generation, v_mps=.1, steer_rad=0), self.t,
                             dict(message_id=str(uuid4()), received_monotonic=self.t))
@@ -94,7 +100,7 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w = self.w
         generation = w.m.generation
         original_command = w.m.nodes[A]['autonomous'].last_command_t
-        w.tick(reasons={(A, 'autonomous'): 'CALCULATION_FAILED'})
+        w.tick(reasons={(A, 'autonomous'): 'DEADLINE'})
         self.assertEqual(w.m.prepared[A, 'autonomous'].state, 'NOT_READY')
         self.assertFalse(any(isinstance(action, ForwardDrive) for action in w.actions))
         self.assertEqual((w.m.mode, w.m.active_vm, w.m.generation), (Mode.AUTO, A, generation))
@@ -102,6 +108,7 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w.tick()
         self.assertTrue(any(isinstance(action, ForwardDrive) for action in w.actions))
         self.assertEqual((w.m.active_vm, w.m.generation), (A, generation))
+        self.assertNotIn('auto_recovery', w.auth.value)
 
     def test_repeated_rejections_do_not_renew_original_command(self):
         w = self.w
@@ -130,11 +137,19 @@ class FunctionFailureScopeTests(unittest.TestCase):
     def test_ready_progress_does_not_renew_command_gap_confirmation(self):
         w = self.w
         generation = w.m.generation
+        progress = w.progress[A, 'autonomous']
         w.tick(.26, commandless={(A, 'autonomous')})
         self.assertEqual((w.m.active_vm, w.m.generation), (A, generation))
+        self.assertTrue(w.m._ready(A, 'autonomous', w.t))
+        self.assertGreater(w.progress[A, 'autonomous'], progress)
         w.tick(.06, commandless={(A, 'autonomous')})
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
         self.assertGreater(w.m.generation, generation)
+        self.assertNotIn('auto_recovery', w.auth.value)
+        before = len(w.actions_seen)
+        w.tick(.12, commandless={(A, 'autonomous')})
+        self.assertTrue(any(isinstance(action, ForwardDrive) and action.app_id == 'autonomous'
+            and action.generation == w.m.generation for action in w.actions_seen[before:]))
 
     def test_new_valid_command_resets_only_its_own_delivery_gap(self):
         w = self.w
@@ -216,9 +231,160 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w.tick(.02, reasons=reasons)
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
         self.assertGreater(w.m.generation, generation)
+        self.assertNotIn('auto_recovery', w.auth.value)
         self.assertEqual(w.executions, executions)
         w.tick(.1, reasons=reasons)
         self.assertTrue(w.m.output_permitted)
+
+    def test_deadlines_commit_auto_only_withdrawal_then_new_state_can_rejoin(self):
+        w = self.w
+        generation = w.m.generation
+        old = dict(w.ids[A])
+        reasons = {(A, 'autonomous'): 'DEADLINE'}
+        w.tick(.08, reasons=reasons)
+        self.assertNotIn('auto_recovery', w.auth.value)
+        w.tick(.02, reasons=reasons)
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        fault = w.auth.read_current()['auto_recovery'][A]
+        self.assertEqual((fault['instance'], fault['generation'], fault['execution_id']),
+            (old['autonomous'], generation, w.executions[A]))
+        w.tick(.1)
+        self.assertFalse(w.m._qualified(A, 'autonomous', w.t))
+        self.assertTrue(w.m._qualified(A, 'manual', w.t))
+
+        w.ids[A]['autonomous'] = str(uuid4())
+        w.count[A, 'autonomous'] = 0
+        w.progress[A, 'autonomous'] = 0
+        w.stateful.add(A)
+        w.tick(.1)
+        self.assertFalse(w.m.accept_session(A, BOOT, old['autonomous'], w.t, app='autonomous'))
+        self.assertFalse(w.m._qualified(A, 'autonomous', w.t))  # Lifecycle alone is insufficient.
+        payload = dict(profile='drive-state-1', execution_id=w.executions[A], intent_revision=1,
+            lifecycle_generation=1, copy_message_id=None, state_revision='1', origin='rebuilt', phase='APPLIED',
+            context=dict(frame='1', configuration='2', maneuver='3', odom_epoch=BOOT,
+                road_revision='4', route_revision='5'))
+        report = SimpleNamespace(retained=False, type='app.state.applied', payload=payload,
+            envelope=dict(vm_id=A, app_id='autonomous', boot_id=BOOT, agent_instance_id=w.ids[A]['autonomous']))
+        self.assertTrue(w.m.states.receive(report))
+        w.tick(3.2)
+        self.assertTrue(w.m._qualified(A, 'autonomous', w.t, held=True))
+        self.assertEqual(w.ids[A]['manual'], old['manual'])
+        self.assertEqual(w.m.active_vm, B)
+        self.assertTrue(w.m.output_permitted)
+
+    def test_repeated_deadlines_without_qualified_backup_commit_safe_stop(self):
+        w = self.w
+        w.tick(.1, reasons={(A, 'autonomous'): 'DEADLINE', (B, 'autonomous'): 'OUTPUT_INVALID'})
+        self.assertEqual((w.m.mode, w.m.active_vm, w.m.output_permitted), (Mode.SAFE_STOP, A, False))
+        self.assertEqual(set(w.auth.read_current()['auto_recovery']), {A})
+
+    def test_one_confirmed_auto_exit_hands_over_and_rejoins_after_rotation(self):
+        w = self.w
+        key = A, 'autonomous'
+        generation, execution, old = w.m.generation, w.executions[A], dict(w.ids[A])
+        w.tick(exited={key}, bad_commands=True)
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        self.assertTrue(any(isinstance(action, ForwardStop) for action in w.actions))
+        self.assertFalse(any(isinstance(action, ForwardDrive) for action in w.actions))
+        fault = w.auth.read_current()['auto_recovery'][A]
+        self.assertEqual((fault['generation'], fault['execution_id'], fault['instance']),
+                         (generation, execution, old['autonomous']))
+        w.tick(.1, exited={key})
+        self.assertTrue(w.m.output_permitted)
+        self.assertEqual(w.auth.read_current()['auto_recovery'][A], fault)
+
+        w.ids[A]['autonomous'] = str(uuid4())
+        w.count[key] = w.progress[key] = 0
+        w.tick(3.2)
+        self.assertTrue(w.m._qualified(A, 'autonomous', w.t, held=True))
+        self.assertNotIn(A, w.auth.read_current()['auto_recovery'])
+        self.assertEqual((w.m.active_vm, w.executions[A], w.ids[A]['manual']),
+                         (B, execution, old['manual']))
+        generation = w.m.generation
+        w.tick(exited={key})
+        self.assertEqual(w.auth.read_current()['auto_recovery'][A]['instance'], w.ids[A]['autonomous'])
+        self.assertEqual((w.m.active_vm, w.m.generation), (B, generation))
+
+    def test_auto_exit_without_qualified_backup_commits_safe_stop(self):
+        w = self.w
+        w.m.qualification[B, 'autonomous'] = None
+        w.tick(exited={(A, 'autonomous')}, silent={(B, 'autonomous')})
+        self.assertEqual((w.m.mode, w.m.output_permitted), (Mode.SAFE_STOP, False))
+        self.assertIn(A, w.auth.read_current()['auto_recovery'])
+
+    def test_auto_exit_report_after_handoff_records_recovery_without_another_switch(self):
+        w = self.w
+        key = A, 'autonomous'
+        w.tick(.34, silent={key})
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        self.assertNotIn('auto_recovery', w.auth.value)
+        generation = w.m.generation
+        w.tick(.12, exited={key})
+        fault = w.auth.read_current()['auto_recovery'][A]
+        self.assertEqual((fault['generation'], fault['trigger']), (generation, 'app-exit'))
+        self.assertEqual((w.m.active_vm, w.m.generation, w.m.output_permitted), (B, generation, True))
+
+    def test_replacement_exit_before_qualification_keeps_first_attempt(self):
+        w = self.w
+        key = A, 'autonomous'
+        w.tick(exited={key})
+        fault = w.auth.read_current()['auto_recovery'][A]
+        w.ids[A]['autonomous'] = str(uuid4())
+        w.count[key] = w.progress[key] = 0
+        w.tick(.12, exited={key})
+        self.assertEqual(w.auth.read_current()['auto_recovery'][A], fault)
+        self.assertEqual((w.m.active_vm, w.m.output_permitted), (B, True))
+        self.assertFalse(w.m._qualified(A, 'autonomous', w.t, held=True))
+
+    def test_auto_exit_requires_current_generation_freshness_and_stopped_phase(self):
+        w = self.w
+        key = A, 'autonomous'
+        report = dict(profile=PROFILE, applied_generation=w.m.generation,
+                      check_seq=str(w.count[key]+1), progress_seq=str(w.progress[key]),
+                      phase='STOPPED', readiness='NOT_READY', reason='APP_EXITED')
+        self.assertFalse(w.m.on_lifecycle('autonomous', A, report, w.t-.31))
+        self.assertFalse(w.m.on_lifecycle('autonomous', A, {**report,'applied_generation':w.m.generation-1}, w.t))
+        self.assertFalse(w.m.on_lifecycle('autonomous', A, {**report,'phase':'STOPPING'}, w.t))
+        w.tick()
+        self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, A))
+        self.assertNotIn('auto_recovery', w.auth.value)
+
+    def test_late_completion_followed_by_a_stall_commits_app_restart(self):
+        w = self.w
+        key = (A, 'autonomous')
+        w.tick(.02, reasons={key: 'DEADLINE'})
+        w.tick(.26, reasons={key: 'DEADLINE'}, stagnant={key})
+        self.assertEqual(w.m.active_vm, A)
+        self.assertNotIn('auto_recovery', w.auth.value)
+        w.tick(.06, reasons={key: 'CALCULATION_FAILED'}, stagnant={key})
+        self.assertEqual(w.m.active_vm, B)
+        self.assertEqual(w.auth.value['auto_recovery'][A]['instance'], w.ids[A]['autonomous'])
+
+    def test_late_completion_then_silence_also_commits_restart(self):
+        w = self.w
+        key = (A, 'autonomous')
+        w.tick(.02, reasons={key: 'DEADLINE'})
+        w.tick(.32, silent={key})
+        self.assertEqual(w.m.active_vm, B)
+        self.assertIn(A, w.auth.value['auto_recovery'])
+
+    def test_healthy_result_breaks_the_five_consecutive_misses(self):
+        w = self.w
+        reasons = {(A, 'autonomous'): 'DEADLINE'}
+        w.tick(.08, reasons=reasons)
+        w.tick()
+        w.tick(.08, reasons=reasons)
+        self.assertEqual(w.m.active_vm, A)
+        self.assertNotIn('auto_recovery', w.auth.value)
+        w.tick(.02, reasons=reasons)
+        self.assertEqual(w.m.active_vm, B)
+        self.assertIn(A, w.auth.value['auto_recovery'])
+
+    def test_repeated_bad_output_is_not_a_deadline_recovery(self):
+        w = self.w
+        w.tick(.1, reasons={(A, 'autonomous'): 'OUTPUT_INVALID'})
+        self.assertEqual(w.m.active_vm, B)
+        self.assertNotIn('auto_recovery', w.auth.value)
 
     def test_no_qualified_b_stops_then_prepares_disarmed_manual(self):
         w = self.w
@@ -262,6 +428,10 @@ class FunctionFailureScopeTests(unittest.TestCase):
                     w.arm()
                 w.tick(.1,reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
                 self.assertEqual((w.m.mode, w.m.active_vm), (Mode.MANUAL, A))
+                if reason=='WORLD_UNAVAILABLE':
+                    self.assertEqual(w.m.jetson_fallback[:2],(A,w.m.generation))
+                else:
+                    self.assertIsNone(w.m.jetson_fallback)
                 w.tick(.2, reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
                 self.assertEqual((w.m.mode, w.m.active_vm), (Mode.MANUAL, A))
 
@@ -269,12 +439,29 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w = self.w
         w.tick(.1,reasons={(A, 'autonomous'): 'WORLD_UNAVAILABLE'})
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        self.assertIsNone(w.m.jetson_fallback)
 
     def test_real_binding_loss_still_selects_b_immediately(self):
         w = self.w
+        old_instance = w.ids[A]['autonomous']
         w.alive.remove(A)
         w.tick()
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        w.tick(.1)
+        self.assertTrue(w.m.output_permitted)
+        generation = w.m.generation
+
+        w.alive.add(A)
+        w.executions[A] = str(uuid4())
+        w.ids[A] = {app: str(uuid4()) for app in ('autonomous', 'manual')}
+        w.tick(silent={(A, 'autonomous'), (A, 'manual')})
+        self.assertFalse(w.m.accept_session(A, BOOT, old_instance, w.t, app='autonomous'))
+        self.assertFalse(w.m._qualified(A, 'autonomous', w.t))
+
+        w.tick(w.m.timing.ready_hold_s + .1)
+        self.assertTrue(w.m._qualified(A, 'autonomous', w.t, held=True))
+        self.assertTrue(w.m.output_permitted)
+        self.assertEqual((w.m.mode, w.m.active_vm, w.m.generation), (Mode.AUTO, B, generation))
 
     def test_rejected_work_preserves_applied_state_without_creating_readiness(self):
         w = self.w

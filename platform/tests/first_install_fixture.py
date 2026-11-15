@@ -148,6 +148,7 @@ def platform_root(root):
     root = Path(root)
     mapping = {'usr/lib/xenova/xenova_vm.py': FILES / 'xenova_vm.py',
                'etc/xenova/defaults.json': FILES / 'defaults.json',
+               'etc/xenova/creation-policy.json': FILES / 'creation-policy.json',
                'usr/lib/xenova/xenova_first_boot.py': FILES / 'xenova_first_boot.py',
                'usr/lib/xenova/first_install_contract.py': ROOT / 'platform/first-install/first_install_contract.py',
                'usr/sbin/xenova-first-boot': FILES / 'xenova-first-boot',
@@ -160,6 +161,7 @@ def platform_root(root):
                'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
+                 'xenova_dom0less.py',
                  'xenova_creation.py','xenova_creation_auto.py',
                  'xenova_resources.py','xenova_zephyr_transition.py','xenova_zephyr_control.py',
                  'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
@@ -179,7 +181,7 @@ def platform_root(root):
     mapping['usr/lib/xenova/update_guest_ssh.py'] = ROOT / 'platform/scripts/update-xenova-guest-ssh.py'
     for name in ('prepare_instance.py', 'prepare_rootfs.py', 'guest_identity.py'):
         mapping['usr/lib/xenova/' + name] = ROOT / 'platform/guests/common' / name
-    for path in [*FILES.glob('*.service'), *FILES.glob('*.mount')]:
+    for path in [*FILES.glob('*.service'), *FILES.glob('*.mount'), *FILES.glob('*.timer')]:
         mapping['usr/lib/systemd/system/' + path.name] = path
     mapping.update(assemble.deployment_payloads.source_files('usr/lib/python3.14/site-packages'))
     for relative, source in mapping.items():
@@ -196,6 +198,10 @@ def platform_root(root):
     library = root/'usr/lib/libxenmanage.so.1'
     library.parent.mkdir(parents=True, exist_ok=True)
     library.write_text('packaging fixture: not a target binary')
+    helper = root/'usr/lib/xen/bin/init-dom0less'
+    helper.parent.mkdir(parents=True)
+    helper.write_text('packaging fixture: not a target binary')
+    helper.chmod(0o755)
     cap = root / 'usr/share/xenova/first-install-capabilities.json'
     cap.parent.mkdir(parents=True, exist_ok=True)
     cap.write_text(json.dumps(contract.FEATURES))
@@ -211,6 +217,10 @@ def platform_root(root):
     wants.mkdir(exist_ok=True)
     for name in ('xenova-dom0-manager.service', 'xenova-recovery-worker.service', 'xenova-host-admission.service', 'xenova-first-boot.service', 'srv-xenova.mount', 'xenova-vms.service', 'xenova-vm-shutdown.service'):
         (wants / name).symlink_to('/usr/lib/systemd/system/' + name)
+    timers = root/'etc/systemd/system/timers.target.wants'
+    timers.mkdir(parents=True, exist_ok=True)
+    for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+        (timers/name).symlink_to('/usr/lib/systemd/system/' + name)
     collector = assemble.deployment_payloads.COLLECTOR
     (wants/collector).symlink_to('/usr/lib/systemd/system/' + collector)
     for name in ('xenova-display-feed.service', 'xenova-display-guest-relay.service', 'xenova-display-check.service'):
@@ -236,8 +246,13 @@ def platform_root(root):
         target=root/'usr/lib/firmware'/relative
         target.parent.mkdir(parents=True,exist_ok=True)
         target.write_bytes(b'fixture: not real firmware')
-    for relative in ('brcmfmac.ko.xz', 'cyw/brcmfmac-cyw.ko.xz'):
-        target = root/'usr/lib/modules/6.18.33-v8/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac'/relative
+    for relative in (
+        'net/wireless/broadcom/brcm80211/brcmfmac/brcmfmac.ko.xz',
+        'net/wireless/broadcom/brcm80211/brcmfmac/cyw/brcmfmac-cyw.ko.xz',
+        'usb/serial/usbserial.ko.xz',
+        'usb/serial/cp210x.ko.xz',
+    ):
+        target = root/'usr/lib/modules/6.18.33-v8/kernel/drivers'/relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b'packaging fixture: not a kernel module')
     for name, text in [('qemu-config-host.h', '#define CONFIG_VNC 1\n#define CONFIG_XEN_BACKEND 1\n'),
@@ -283,8 +298,13 @@ def starter_bundle(target):
     from test_xenova_lifecycle import application_bundle, bundle
     target = Path(target)
     source = application_bundle(bundle(target.parent / (target.name + '-diagnostic')), target)
+    config = source / 'zephyr.config'
+    config.chmod(0o644)
+    config.write_text(config.read_text() + '\nCONFIG_XENOVA_DOM0LESS_BOOT=y\n')
+    config.chmod(0o444)
     manifest = source / 'firmware.json'
     meta = json.loads(manifest.read_text())
+    meta['files'][config.name] = {'sha256': assemble.sha(config), 'bytes': config.stat().st_size}
     lock = json.loads((ROOT / 'platform/guests/zephyr/starter.lock.json').read_text())
     meta.update(id=lock['id'], kind='zephyr-xen-firmware', version=lock['version'])
     meta['source'].update({k: lock[k] for k in ('app','app_files','app_source_sha256','zephyr_commit','sdk_version')})

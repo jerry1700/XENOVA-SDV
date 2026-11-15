@@ -4,7 +4,8 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from uuid import UUID
 
 from first_install_fixture import Board, FILES, ROOT, assemble, contract, vm
 from test_xenova_lifecycle import Xen, application_bundle, bundle
@@ -47,10 +48,10 @@ class DefaultDeploymentTest(unittest.TestCase):
     def test_debian_interaction_selection_matches_published_display_template(self):
         selected = json.loads((ROOT / "platform/guests/default-templates.lock.json").read_text())["templates"]
         entry = next(e for e in selected if e["template_id"] == "debian-13-arm64")
-        self.assertEqual(entry["version"], "1.0.8")
-        self.assertEqual(entry["directory"], "linux/debian-13-20261015/1.0.8")
+        self.assertEqual(entry["version"], "1.0.9")
+        self.assertEqual(entry["directory"], "linux/debian-13-20261015/1.0.9")
         self.assertEqual(entry["manifest_sha256"],
-                         "69b5d0677090f57f2ecc2d8aa245c4385a1abbe892e20d5b18209e57ff13b36e")
+                         "3c58d26655ae73e271ae85b1f691eed014ac7da48b9abc11f31a7730d7aba91a")
         example = json.loads((ROOT / "platform/first-install/example.config.json").read_text())
         supplied = next(e for e in example["linux_templates"] if e["template_id"] == entry["template_id"])
         self.assertEqual(supplied["template_version"], entry["version"])
@@ -173,6 +174,70 @@ class DefaultDeploymentTest(unittest.TestCase):
         self.assertEqual(result["capacity"]["retained_template_root_bytes"], 16 * contract.GIB)
         self.assertEqual(result["capacity"]["retained_firmware_bytes"], entry["logical_bytes"] * 3 + 2 * 65536)
         self.assertFalse((self.base / "release").exists())
+
+    def test_boot_domains_match_handles_and_drop_a_stale_firmware_before_adoption(self):
+        import xenova_dom0less as early
+
+        keys = early.FACTORY_GUESTS
+        boot_ids = {key: str(UUID(int=index)) for index, key in enumerate(keys, 1)}
+        uuids = {key: str(UUID(int=index)) for index, key in enumerate(keys, 11)}
+        domids = dict(zip(keys, (3, 1, 2), strict=True))
+        asset = {"sha256": "a" * 64}
+        manifest = {"dom0less": {"guests": {
+            key: {"boot_id": boot_ids[key], "memory_mib": 16, "vcpus": 1,
+                  "assets": {"kernel": asset, **({"ramdisk": {"source_sha256": asset["sha256"]}}
+                                                if key == "debian-dev" else {})}}
+            for key in keys
+        }}}
+        state = {"identities": {key: {"uuid": uuids[key]} for key in keys}}
+        (self.base / ".xenova-install.json").write_text(json.dumps(manifest))
+        (self.base / ".first-install-state.json").write_text(json.dumps(state))
+        directory = self.base / "instances/debian-dev"
+        directory.mkdir(parents=True)
+        (directory / "boot.json").write_text(json.dumps({"kernel_sha256": asset["sha256"],
+                                                       "initrd_sha256": asset["sha256"]}))
+        records = {key: {"name": key, "uuid": uuids[key], "memory_mib": 16, "vcpus": 1,
+                         "active_firmware": asset, "guest_kind": "zephyr"}
+                   for key in keys}
+        records["debian-dev"]["guest_kind"] = "linux"
+        records["zephyr-drive-b"]["active_firmware"] = {"sha256": "b" * 64}
+
+        live = {0: ("Domain-0", str(UUID(int=0)))}
+        live.update({domids[key]: ("(null)", boot_ids[key]) for key in keys})
+        platform = Mock(data=self.base, runtime=self.base)
+        platform.cpu.return_value.policy.return_value = None
+        execution = platform.execution.return_value
+        execution.host = "test-boot"
+        execution.unique.side_effect = lambda row, deadline: str(100 + row["domid"])
+        execution.boot_decision.return_value = {"start": True}
+        execution.read.side_effect = lambda path: json.loads(path.read_text()) if path.exists() else None
+        execution.write.side_effect = lambda path, value: path.write_text(json.dumps(value))
+        mutations = []
+
+        def command(args, deadline):
+            if args == ["xl", "list", "-v"]:
+                header = "Name ID Mem VCPUs State Time(s) UUID Reason-Code Security Label"
+                return "\n".join([header, *(f"{name} {domid} 16 1 -b---- 0.1 {handle} - -"
+                                            for domid, (name, handle) in sorted(live.items()))])
+            mutations.append(args)
+            if args[0] == early.INIT:
+                _, raw_domid, boot_id, identity, name = args
+                domid = int(raw_domid)
+                self.assertEqual(live[domid], ("(null)", boot_id))
+                live[domid] = (name, identity)
+            else:
+                self.assertEqual(args, ["xl", "destroy", "2"])
+                del live[2]
+
+        platform.timed_command.side_effect = command
+        with patch.object(early, "enabled", return_value=True), patch.object(early, "validate_record"):
+            early.prepare(platform, records, 30)
+            early.prepare(platform, records, 30)
+
+        self.assertEqual([args[1] for args in mutations if args[0] == early.INIT], ["3", "1", "2"])
+        self.assertEqual(len(mutations), 4)
+        self.assertEqual({key: value["phase"] for key, value in early.receipts(platform).items()},
+                         {"debian-dev": "ready", "zephyr-drive-a": "ready", "zephyr-drive-b": "discarded"})
 
     def test_common_cli_reads_registry_and_requires_all_three_factory_vms(self):
         board, _ = self.current_board()

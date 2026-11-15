@@ -130,11 +130,21 @@ M은 ToF 관측 시각의 odom을 보간해 근거리 HIT를 발행용 World 사
 
 `--mapper-profile /absolute/path/mapper.json`은 카메라 보정과 별도의 선택형 local schema1 설정이다. 기존 인지·센서 타입의 timing/age/motion/통행 영역/표적/주차 통로/제동 상한을 명시하며, S-log가 canonical bytes와 SHA를 고정해 M에 전달한다. local mapper SHA·local calibration SHA·차량 configuration ID·전체 차량 보정 bundle은 각각 대조한다. 이 옵션은 `--perception-profile`과 `--jio-profile`을 함께 사용한다. 미정 timing이나 false qualification은 자동으로 채우지 않으며, clock/전체 capture pose가 없으면 기존 지도는 보존하고 별도 frame-local 진단을 사용한다.
 
+새 지도 시작 시 상대 오도메트리를 쓰려면 `sensors.wheel_odometry`에 차량과 일치하는 `encoder_bits`, `metres_per_tick`, `metres_per_tick_upper`, `track_width_m`, `distance_error_ratio`, `heading_error_per_m`를 명시한다. 같은 엔코더 세션의 짧은 누락은 `sensors.max_gap_us` 안에서 이동 오차에 포함한다. 긴 공백이나 엔코더 세션 변경 시 상대 이동 증거가 끊긴다.
+
+RGB 보정에 렌즈 왜곡 계수가 있으면 M은 흰선 추출·가림 마스크·NN 후보 투영에 편 영상과 같은 K의 무왜곡 모델을 쓴다. 편 영상의 각 픽셀이 원 영상의 어느 자리에서 왔는지는 정방향 왜곡 모델로 계산하고, 원 ROI 안에서 온 픽셀만 편 영상의 ROI에 둔다. NN 표본의 픽셀은 편 좌표로 옮겨 투영하되 기록은 원 좌표로 남긴다. 보정의 식별자와 오차 값은 바뀌지 않으며, 계수가 모두 0인 보정은 이전과 같은 경로로 처리한다. 진단 overlay와 yaw 편향 추정은 원 영상을 그대로 쓴다.
+
 흰선 추출은 `pipeline.tape.value_min`의 기본값인 HSV 밝기 `185`(0–255) 이상에서 밝은 부분을 잡는다. 인접한 밝기 `150~184` 픽셀은 테이프 폭 범위에서 주변보다 `pipeline.tape.contrast_min`(기본 `25`) 이상 밝을 때 포함한다. `pipeline.tape.min_strip_length_m`의 기본값 `0.02`m는 영상에서 가늘게 만든 중심선 길이 기준으로, 4~5cm 점선을 남기기 위한 값이다. 양끝과 폭을 확인한 짧은 조각은 점선 연결에 쓰고, `pipeline.road.min_usable_length_m` 기본값 `0.15`m는 연결된 차선 구간에 적용한다. 개별 흰선 조각으로 위치를 정합하는 최소 길이는 8cm다.
 
 바닥 투영 마스크에서 양쪽에 흰선이 검출된 틈은 빈 구간이 약 1.41cm(1cm 격자의 대각선 한 셀) 이하이고 그 안의 모든 셀이 시야 안에 있으며 가려지지 않았을 때 선 조각 추출 전에 메운다. 대각선 셀 길이도 실제 거리로 계산한다.
 
 실측 코스용 `platform/apps/simulator/tools/prepare_jetson_course_inputs.py`는 두 값을 새 개발용 `mapper-profile.json`에 기록한다. 이 프로필은 R45 재생 결과를 바탕으로 `pipeline.registration.max_position_error_m`에 `0.065`m를 적용한다. 같은 개발 시험에 기존 mapper 프로필을 재사용할 때도 세 값을 맞춘다. HIL 설치 명세가 해당 파일을 참조한다면 새 프로필의 파일 크기와 SHA도 반영한다.
+
+콘만 사용하는 시뮬레이션 코스의 `targets`는 렌더러의 사각 기둥 치수에 맞춘다. 폭·높이가 각각 18cm라면 내부 코어 반경은 9cm, 높이는 18cm, 충돌 배치를 검사하는 최대 반경은 약 12.73cm(바닥 대각선의 절반)다. 이 값은 해당 형상의 장애물이 셀에 들어올 수 있는지를 검사하는 기준이다. 깊이가 가려졌거나 누락된 곳에 새 FREE를 만들지 않는다. 실물 콘은 테이퍼가 있으므로 이 프로필을 실물에 그대로 적용하지 않는다.
+
+`demo_road_fill: true`는 단일 방향 2차로 시연에서 사용할 송신 설정이다. 같은 좌우 차로 ID로 차량 주변의 누적 차로를 잘라 쓰고, 코너는 짧은 선분 여러 개로 보낸다. 차량 앞뒤가 차로 절단면을 지나도 검사할 수 있도록 송신 격자에 약 20cm를 더 확보한다. 통행 허용 셀 중 OAK가 본 장애물과 그 추정 범위·가림, ToF가 막은 셀을 제외한 곳을 이번 송신에 한해 FREE로 채운다. 이 FREE는 시연 환경에 대한 가정이다. 깊이 관측이나 저장 지도에 추가되지 않는다. 시뮬레이터는 콘 치수를 구할 수 있는 시연 코스에서 이 설정을 사용한다.
+
+시뮬레이터가 만드는 시연 프로필은 `demo_pose_bounds`에 기존 Pi R45 시험과 같은 위치 0.001m·방향 0.002rad를 지정한다. 이 설정은 World의 기준 자세 오차에만 적용한다. Jetson의 추정 좌표와 원 정합 시각, Pi가 이후 이동에 더하는 오차는 기존 계산을 사용한다. 실제 센서 오차를 측정한 값이 아니며 실차 프로필에는 기본으로 제공하지 않는다.
 
 R45 실측 코스 설정은 폭 21cm·길이 38cm·축간거리 18cm·카메라 높이 14cm를 사용한다. 같은 설정에서 Jetson의 차체 보정과 Pi C 주행 프로필을 생성한다. 앞뒤 차체 돌출이 대칭이라고 가정한 개발 프로필에서 후륜축부터 앞단은 28cm, 뒤단은 10cm다.
 

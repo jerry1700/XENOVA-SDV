@@ -430,6 +430,115 @@ def test_actual_keyboard_packet_reaches_central_journal_and_source_loss_cancels_
     assert w.o.hold and w.o.operations.current()['departure'] is None
 
 
+@pytest.mark.parametrize('choice',['auto','manual','link_lost','silent_link','link_lost_before_countdown'])
+def test_jetson_return_uses_existing_departure_and_enter_keeps_manual(operating,choice):
+    from xenova_gateway import keyboard_contract as wire
+    from xenova_gateway.authority_journal import canonical
+    from xenova_gateway.keyboard_source import KeyboardSession
+    from test_keyboard_source import fields,profile_from_fields,packet,event
+    w=operating;owner=w.o.operations;m=w.w.m
+    # The state machine test covers entry from fresh, shared World losses. Here
+    # supply that boundary with the old AUTO operation still in the journal.
+    previous=w.call('drive.depart')['request_id']
+    w.w.auth.update(current_operation=dict(owner.current(),phase='ACTIVE',departure=previous,
+                                          desired_mode='AUTO'),manual_hold=False)
+    m.jetson_fallback=(m.active_vm,m.generation,w.o.now)
+    w.o.hold=False
+    w.pump(lambda:owner.current()['phase']=='WAIT' and w.o.job is None)
+    assert owner.jetson_return is not None and m.mode is Mode.MANUAL and not m.output_permitted
+
+    profile=profile_from_fields(fields());peer=object()
+    w.o.keyboard.profile_loader=lambda alias:profile
+    source=KeyboardSession(profile,w.o.status(),lambda:w.o.now,auto_enter=True)
+
+    def exchange():
+        outgoing=source.outgoing(w.o.now)
+        assert outgoing is not None
+        source.sent(outgoing,w.o.now)
+        result=w.o.keyboard.submit(wire.decode(outgoing.raw),peer)
+        w.o.keyboard.tick()
+        source.receive(canonical(result.get_nowait()),w.o.now)
+        while (notice:=w.o.keyboard.take_outgoing()) is not None:
+            if notice[0] is peer:
+                source.receive(canonical(notice[1]),w.o.now)
+        return outgoing.kind
+
+    def frame(enter=False):
+        w.w.t+=.02;w.w.bind();w.sink.measure();w.r.drive_link.tick()
+        if enter:
+            packet(source.state,event(28,1,w.o.now),observed=w.o.now)
+        source.offer(source.state.snapshot(w.o.now,w.o.now))
+        assert exchange()=='OBSERVE'
+
+    assert exchange()=='HELLO_AUTO' and source.observer
+    assert source.state.auto_context['blocked_reason']==wire.JETSON_RETURN_PENDING
+    assert '수동주행을 유지' in source.auto_notice
+    frame();frame()
+    if choice=='link_lost_before_countdown':
+        w.o.tick()
+        assert owner.jetson_return['scope'] is w.o.keyboard.scope
+        w.o.keyboard.lost(peer)
+        w.o.tick()
+        assert owner.jetson_return is None and m.mode is Mode.SAFE_STOP
+        assert w.o.hold and not m.output_permitted and isinstance(w.sink.frame,StopFrame)
+        return
+    preflight(w)
+    w.pump(lambda:owner.current()['phase']=='COUNTDOWN')
+    key=owner.current()['departure'];row=w.o._known(key)
+    assert row['request']['action']=='drive.depart' and row['request']['args']['mode']=='AUTO'
+    assert m.mode is Mode.MANUAL and not m.output_permitted
+
+    if choice=='manual':
+        frame(enter=True)
+        assert source.auto_trigger is None and owner.jetson_return is None
+        manual=[row for row in w.o.pending.values() if row['request']['action']=='mode.manual']
+        assert len(manual)==1
+        w.pump(lambda:w.o._known(key)['terminal'])
+        assert m.mode is Mode.MANUAL and not m.output_permitted
+        assert w.o._known(key)['phase']=='FAILED'
+        manual_key=manual[0]['key'];end=time.monotonic()+5
+        while not w.o._known(manual_key)['terminal']:
+            assert time.monotonic()<end
+            w.tick();w.apps();time.sleep(.001)
+        assert w.o._known(manual_key)['result']=='APPLIED'
+        assert m.mode is Mode.MANUAL and w.r.authority.value['manual_hold']
+        return
+    if choice in ('link_lost','silent_link'):
+        if choice=='link_lost':w.o.keyboard.lost(peer)
+        else:w.w.t+=.151
+        w.pump(lambda:w.o._known(key)['terminal'])
+        assert m.mode is Mode.SAFE_STOP and not m.output_permitted
+        assert w.o.hold and isinstance(w.sink.frame,StopFrame)
+        assert owner.jetson_return is None and w.o._known(key)['result']=='JETSON_KEYBOARD_LOST'
+        if choice=='link_lost':
+            peer=object()
+            source=KeyboardSession(profile,w.o.status(),lambda:w.o.now,auto_enter=True)
+            assert exchange()=='HELLO_AUTO' and source.observer
+            generation=m.generation
+            end=time.monotonic()+5
+            while not m._qualified(m.active_vm,'manual',w.w.t,held=True):
+                assert time.monotonic()<end
+                frame();w.apps()
+                assert m.mode is Mode.SAFE_STOP and m.generation==generation
+            assert not m.output_permitted
+            manual=w.call('mode.manual');manual['expected_owner']=None
+            assert w.apply(manual)['result']=='APPLIED' and m.mode is Mode.MANUAL
+        return
+
+    # Renew genuine neutral frames and typed preflight observations throughout
+    # the normal countdown. Existing full State/apply checks close output below.
+    end=time.monotonic()+6;ordinal=0
+    while m.mode is Mode.MANUAL:
+        assert time.monotonic()<end
+        frame()
+        if ordinal%3==0:
+            preflight(w)
+        ordinal+=1;w.o.tick();time.sleep(.001)
+        assert not w.o._known(key)['terminal']
+    assert m.mode is Mode.AUTO and owner.current()['phase']=='APPLYING'
+    assert not m.output_permitted
+
+
 def test_manual_departure_uses_actual_control_apply_and_preserves_permission(operating):
     w=operating;settle(w,operation_call(w,'parking.permission.set'));permission=w.o.operations.current()['permission_revision']
     call=operation_call(w,'drive.depart',mode='MANUAL');generation=w.w.m.generation

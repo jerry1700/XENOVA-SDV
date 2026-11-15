@@ -31,12 +31,26 @@ if(CONFIG_XENOVA_DRIVE_LATTICE)
   if(XENOVA_DRIVE_DEVELOPMENT_PROFILE)
     set(DRIVE_PRIMITIVES ${CMAKE_CURRENT_SOURCE_DIR}/../profiles/course-development-1/primitives.c)
   endif()
+  # Explicit measured vehicle for the LAB policy: profiles/<name>.json -> profiles/<name>/primitives.c.
+  if(XENOVA_DRIVE_VEHICLE_PROFILE)
+    if(XENOVA_DRIVE_DEVELOPMENT_PROFILE)
+      message(FATAL_ERROR "vehicle profile and development bundle are separate selections")
+    endif()
+    if(NOT XENOVA_DRIVE_VEHICLE_PROFILE MATCHES "^[A-Za-z0-9][A-Za-z0-9._-]*$")
+      message(FATAL_ERROR "plain vehicle profile name required")
+    endif()
+    set(DRIVE_PRIMITIVES ${CMAKE_CURRENT_SOURCE_DIR}/../profiles/${XENOVA_DRIVE_VEHICLE_PROFILE}/primitives.c)
+    if(NOT EXISTS ${DRIVE_PRIMITIVES})
+      message(FATAL_ERROR "generated vehicle primitives missing: ${DRIVE_PRIMITIVES}")
+    endif()
+  endif()
   target_include_directories(app PRIVATE ${DRIVE_WORLD} ${DRIVE_WORLD}/generated
     ${DRIVE_WORLD}/nanopb ${DRIVE_PLANNER})
   target_sources(app PRIVATE src/lattice_app.c src/lattice_input.c src/lattice_memory.c
     ${DRIVE_WORLD}/world.c ${DRIVE_WORLD}/generated/world.pb.c
     ${DRIVE_WORLD}/nanopb/pb_common.c ${DRIVE_WORLD}/nanopb/pb_decode.c ${DRIVE_WORLD}/nanopb/pb_encode.c
     ${DRIVE_PLANNER}/task_reference.c ${DRIVE_PLANNER}/behavior.c ${DRIVE_PLANNER}/parking.c
-    ${DRIVE_PLANNER}/lattice.c ${DRIVE_PLANNER}/route_plan.c ${DRIVE_PLANNER}/route_reference.c
+    ${DRIVE_PLANNER}/lattice.c ${DRIVE_PLANNER}/tof_recovery.c ${DRIVE_PLANNER}/tof_auto.c
+    ${DRIVE_PLANNER}/route_plan.c ${DRIVE_PLANNER}/route_reference.c
     ${DRIVE_PLANNER}/route_exit.c ${DRIVE_PLANNER}/route_progress.c ${DRIVE_PLANNER}/engine.c ${DRIVE_PRIMITIVES})
 endif()

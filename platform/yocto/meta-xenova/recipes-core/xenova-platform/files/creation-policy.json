@@ -1,0 +1,6 @@
+{
+  "schema_version": "1.0",
+  "call_ms": 1200000,
+  "execution_ms": 1140000,
+  "cleanup_ms": 30000
+}

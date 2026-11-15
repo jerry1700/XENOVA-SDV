@@ -13,6 +13,7 @@ import time
 HELLO, HELLO_ACK = 0x0f00, 0x0f01
 CLOCK_PROBE, CLOCK_REPLY, CLOCK_INSTALL, CLOCK_ACK = 0x0f10, 0x0f11, 0x0f12, 0x0f13
 SENSOR = 0x0f15
+TOF_SAMPLE = 0x0f17
 COMMAND, REPORT = 0x0111, 0x0f14
 HELLO3 = struct.Struct('<B16s32s')
 ACK3 = struct.Struct('<B16s16sH32s32sB')
@@ -23,19 +24,39 @@ CLOCK_ACK3 = struct.Struct('<16s16s16sQQBHQQ')
 SENSOR3 = struct.Struct('<16s16sQQqqBiH16sQ')
 COMMAND3 = struct.Struct('<16s16sQ16sQQQQIBBQhhBB')
 REPORT3 = struct.Struct('<16s16sQIBBBQQQBiiB16sQQQH')
+TOF3 = struct.Struct('<16s16sQQI16sQB16sII32sBBHHBBI')
+TOF_CRC_BYTES = 141  # sample_crc32 가 덮는 앞부분
 BAUD = 460800  # 펌웨어의 XENOVA_SERIAL_BAUD 와 같은 개발용 기본값
 REQUIRED_CAPS = 0x01f7  # Pi 가 ready 로 받는 최소 capability
+TOF_CAP = 0x0800        # 단일 존 ToF 를 보낸다는 capability
+PROXIMITY_CAP = 0x1000  # ToF 로 가까운 물체를 보면 그 방향의 출력을 끊는다는 capability
+FRONT_BLOCKED = 0x08    # 표본 quality 의 막힘 bit. PROXIMITY_CAP 을 알린 장치만 쓴다
+REAR_BLOCKED = 0x10
+# 근거리 제동의 기준 거리와 엔코더 한 칸의 거리 (device_config.h 의 XENOVA_PROXIMITY_STOP_MM·CLEAR_MM, XENOVA_UM_PER_TICK)
+STOP_MM, CLEAR_MM = 150, 180
+UM_PER_TICK = 164
 MAX_FRAME = 256
 REASONS = (
     'OK', 'BAD_LENGTH', 'BAD_CRC', 'SESSION_MISMATCH', 'SEQUENCE_REPLAY', 'IDEMPOTENCY_CONFLICT',
     'CLOCK_UNAVAILABLE', 'CLOCK_EXPIRED', 'COMMAND_EXPIRED', 'RANGE', 'DIRECTION_STOP_REQUIRED',
     'DEVICE_FAULT', 'CONFIG_MISMATCH', 'COUNTER_EXHAUSTED', 'E_STOP', 'GENERATION_REPLAY',
     'UNSUPPORTED_PROFILE', 'TIMESTAMP_ORDER', 'SENSOR_UNAVAILABLE', 'DEADLINE_MISMATCH', 'CLOCK_DRIFT',
+    'PROXIMITY_BLOCKED',
 )
 
 
 def now_us():
     return time.monotonic_ns() // 1000
+
+
+def quality_bits(capabilities):
+    """그 capability 의 장치가 표본 quality 에 쓸 수 있는 bit"""
+    return 7 | (FRONT_BLOCKED | REAR_BLOCKED if capabilities & PROXIMITY_CAP else 0)
+
+
+def blocked_name(quality):
+    """표본 quality 의 막힘 bit 를 글로"""
+    return {0: '없음', FRONT_BLOCKED: '앞', REAR_BLOCKED: '뒤'}.get(quality & (FRONT_BLOCKED | REAR_BLOCKED), '앞·뒤')
 
 
 def reason_name(reason):
@@ -124,8 +145,9 @@ class Splitter:
 class Simulator:
     """호스트로 빌드한 통신 처리(test/host 의 sim_link)를 자식 프로세스로 띄운다."""
 
-    def __init__(self, executable, ticks_per_second=0):
-        self._process = subprocess.Popen([executable, str(ticks_per_second)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+    def __init__(self, executable, ticks_per_second=0, wall_mm=0):
+        self._process = subprocess.Popen([executable, str(ticks_per_second), str(wall_mm)], stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, bufsize=0)
         self._received = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
 
@@ -195,10 +217,14 @@ def add_device_arguments(parser):
     parser.add_argument('--baud', type=int, default=BAUD, help=f'시리얼 속도 (기본 {BAUD})')
     parser.add_argument('--ticks-per-second', type=int, default=0,
                         help='시뮬레이터의 양쪽 엔코더가 도는 속도 (기본 0, 멈춰 있음)')
+    parser.add_argument('--wall-mm', type=int, default=0,
+                        help='시뮬레이터의 앞 센서에서 벽까지의 거리. 주면 굴러간 만큼 가까워지고 근거리 제동까지 본다 (기본 0, 벽 없음)')
 
 
 def open_device(args):
-    return Simulator(args.sim, args.ticks_per_second) if args.sim else SerialPort(args.port, args.baud)
+    if args.wall_mm and not args.sim:
+        raise SystemExit('--wall-mm 은 시뮬레이터에만 쓴다')
+    return Simulator(args.sim, args.ticks_per_second, args.wall_mm) if args.sim else SerialPort(args.port, args.baud)
 
 
 class Peer:

@@ -1,6 +1,6 @@
 """공통 SD 조립기. plan은 읽기만 하고, assemble --execute만 새 파일·자기 loop를 만든다.
 
-기존 플랫폼 파티션 바이트는 보존한다. 게스트 변환·초기화는 기존 준비 도구에 위임한다.
+dom0 파티션은 보존하고 복사한 FAT에 기본 게스트의 부팅 자산을 추가한다.
 """
 import argparse
 import bz2
@@ -29,6 +29,7 @@ from prepare_rootfs import inside
 sys.path.insert(0, str(FILES))
 import xenova_zephyr as zephyr
 import deployment_payloads
+import dom0less_boot
 
 spec = importlib.util.spec_from_file_location('xenova_prepare_existing', ROOT / 'platform/scripts/prepare-xenova-guests.py')
 prepare = importlib.util.module_from_spec(spec)
@@ -276,6 +277,7 @@ def plan(config, image, record, output, work, card_bytes):
     firmware_templates = rtos_info(config)
     if len(firmware_templates) != 1:
         raise ValueError('new first-install images require the verified Zephyr template; existing stores use create')
+    dom0less_boot.require_firmware(firmware_templates[0])
     for entry in firmware_templates:
         for path in (output, work):
             if path.is_relative_to(Path(entry['template'])):
@@ -315,6 +317,7 @@ def platform_root_ok(root):
         raise ValueError('platform lacks first-install capabilities; rebuild dom0 from the new Yocto source, no rootfs injection allowed')
     expected = {'usr/lib/xenova/xenova_vm.py': FILES / 'xenova_vm.py',
                 'etc/xenova/defaults.json': FILES / 'defaults.json',
+                'etc/xenova/creation-policy.json': FILES / 'creation-policy.json',
                 'usr/lib/xenova/xenova_first_boot.py': FILES / 'xenova_first_boot.py',
                 'usr/lib/xenova/first_install_contract.py': ROOT / 'platform/first-install/first_install_contract.py',
                 'usr/sbin/xenova-first-boot': FILES / 'xenova-first-boot',
@@ -329,6 +332,7 @@ def platform_root_ok(root):
                 'usr/lib/systemd/system/systemd-journal-flush.service.d/20-xenova-persistence.conf': FILES / 'xenova-journal-flush.conf'}
     for name in ('xenova_boot_status.py','xenova_boot_progress.py','xenova_management.py','xenova_management_cli.py','xenova_catalog.py','xenova_wifi.py',
                  'xenova_cpu.py','xenova_execution.py','xenova_recovery.py','xenova_domain_identity.py','xenova_preparation.py',
+                 'xenova_dom0less.py',
                  'xenova_creation.py','xenova_creation_auto.py',
                  'xenova_provisioning.py','xenova_guest_profile.py','xenova_registration.py','xenova_registration_hook.py',
                  'xenova_display_sync.py','xenova_display_setup.py'):
@@ -349,12 +353,21 @@ def platform_root_ok(root):
     for name in ('prepare_instance.py', 'prepare_rootfs.py', 'guest_identity.py'):
         expected['usr/lib/xenova/' + name] = ROOT / 'platform/guests/common' / name
     units = ['xenova-boot-status.service', 'xenova-cpu-prepare.service', 'xenova-data-prepare.service', 'xenova-first-boot.service', 'srv-xenova.mount',
-             'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-xen-ready.service', 'xenova-host-admission.service']
+             'xenova-vms.service', 'xenova-vm-shutdown.service', 'xenova-xen-ready.service', 'xenova-host-admission.service',
+             'xenova-telemetry-clock.service', 'xenova-telemetry-clock.timer',
+             'xenova-telemetry-evidence.service', 'xenova-telemetry-evidence.timer']
     expected.update({'usr/lib/systemd/system/' + u: FILES / u for u in units})
     expected.update(deployment_payloads.installed_sources(root))
     for relative, source in expected.items():
         if not path(relative).is_file() or path(relative).read_bytes() != source.read_bytes():
             raise ValueError('platform source/installed contract mismatch: ' + relative)
+    if not os.access(path('usr/lib/xen/bin/init-dom0less'), os.X_OK):
+        raise ValueError('platform lacks executable init-dom0less')
+    for name in ('xenova-telemetry-clock.timer', 'xenova-telemetry-evidence.timer'):
+        relative = 'etc/systemd/system/timers.target.wants/' + name
+        link = root / relative
+        if not link.is_symlink() or path(relative) != path('usr/lib/systemd/system/' + name):
+            raise ValueError('required telemetry timer not enabled: ' + name)
     # The bind must cover the path journald actually opens on the Yocto image.
     if path('var/log/journal') != root.resolve() / 'var/volatile/log/journal':
         raise ValueError('dom0 journal path does not match the Yocto /var/log layout')
@@ -380,15 +393,20 @@ def platform_root_ok(root):
     module_tree = path('usr/lib/modules')
     releases = [p for p in module_tree.iterdir() if p.is_dir()] if module_tree.is_dir() else []
     if not releases:
-        raise ValueError('required management wireless kernel modules missing')
+        raise ValueError('required platform kernel modules missing')
     for release in releases:
-        directory = path(str(release.relative_to(root)) + '/kernel/drivers/net/wireless/broadcom/brcm80211/brcmfmac')
-        for name in ('brcmfmac', 'brcmfmac-cyw'):
+        for relative, name in (
+            ('net/wireless/broadcom/brcm80211/brcmfmac', 'brcmfmac'),
+            ('net/wireless/broadcom/brcm80211/brcmfmac', 'brcmfmac-cyw'),
+            ('usb/serial', 'usbserial'),
+            ('usb/serial', 'cp210x'),
+        ):
+            directory = path(str(release.relative_to(root)) + '/kernel/drivers/' + relative)
             suffixes = {name + suffix for suffix in ('.ko', '.ko.xz', '.ko.gz', '.ko.zst')}
             candidates = [path(str(p.relative_to(root))) for p in directory.rglob(name + '.ko*')
                           if p.name in suffixes]
             if not any(p.is_file() and p.stat().st_size for p in candidates):
-                raise ValueError('required management wireless kernel module missing: ' + name)
+                raise ValueError('required platform kernel module missing: ' + name)
     for relative, defines in [
         ('usr/share/xenova/qemu-config-host.h', ('CONFIG_VNC', 'CONFIG_XEN_BACKEND')),
         ('usr/share/xenova/qemu-i386-config-target.h', ('CONFIG_XEN',)),
@@ -502,12 +520,22 @@ def platform_boot_ok(image, table, output):
         raise ValueError('invalid U-Boot script length')
     script = boot[72:72 + length].decode()
     for marker in ('part uuid mmc ${devnum}:2', 'fatload mmc ${devnum}:1 ${xen_loadaddr} xen',
-                   'fdt move ${fdtcontroladdr} ${fdt_addr_r}', 'booti ${xen_loadaddr} - ${fdt_addr_r}',
+                   'fdt move ${fdtcontroladdr} ${fdt_addr_r}',
                    'fdt rm /soc/mmcnr@7e300000 dmas || exit 1',
                    'fdt rm /soc/mmcnr@7e300000 dma-names || exit 1',
-                   'xenova_debug', 'setenv xenova_logargs "loglevel=4 ', 'systemd.show_status=error'):
+                   'xenova_debug', 'setenv xenova_logargs "loglevel=4 ', 'systemd.show_status=error',
+                   'xenova-guests.scr'):
         if marker not in script:
             raise ValueError('platform lacks validated Xen boot/PARTUUID contract: ' + marker)
+    # 기존 게시 WIC도 그대로 조립할 수 있다. 우회는 새 boot.scr을 빌드한 WIC에서 제공한다.
+    boot_paths = (
+        ('source 0x07000000 || exit 1', 'booti ${xen_loadaddr} - ${fdt_addr_r}'),
+        ('if source 0x07000000; then', 'setenv xenova_boot_fdt ${fdt_addr_r}',
+         'fdt move ${fdt_addr_r} 0x07800000', 'fdt addr ${xenova_boot_fdt}',
+         'booti ${xen_loadaddr} - ${xenova_boot_fdt}'),
+    )
+    if not any(all(marker in script for marker in path) for path in boot_paths):
+        raise ValueError('platform lacks validated Xen boot/PARTUUID contract: guest boot path')
     return result
 
 
@@ -612,6 +640,13 @@ def source_fingerprints():
              *(p for p in sorted((ROOT / 'platform/guests/linux').rglob('*')) if p.is_file()),
              ROOT / 'platform/scripts/assemble-xenova-first-install.py', ROOT / 'platform/scripts/prepare-xenova-guests.py',
              ROOT / 'platform/first-install/assemble.py', ROOT / 'platform/first-install/artifact_io.py',
+             ROOT / 'platform/first-install/dom0less_boot.py',
+             ROOT / 'platform/apps/drive/zephyr/boards/xenvm.conf',
+             ROOT / 'platform/apps/drive/zephyr/src/lattice_app.c',
+             ROOT / 'platform/guests/zephyr/xen-store/Kconfig',
+             ROOT / 'platform/guests/zephyr/xen-store/src/xenstore_zephyr.c',
+             ROOT / 'platform/guests/zephyr/xen-runtime/src/netfront.c',
+             ROOT / 'platform/guests/zephyr/xen-runtime/src/shutdown.c',
              ROOT / 'platform/first-install/completed_artifacts.py', ROOT / 'platform/scripts/publish-xenova-platform.py', ROOT / 'platform/scripts/publish-xenova-template-catalog.py',
              ROOT / 'platform/first-install/first_install_contract.py',
              ROOT / 'platform/first-install/deployment_payloads.py',
@@ -625,6 +660,8 @@ def source_fingerprints():
              ROOT / 'platform/scripts/update-xenova-guest-ssh.py', ROOT / 'platform/scripts/collect-xenova-guest-evidence.py',
              *sorted((ROOT / 'platform/guests/zephyr/starter-app').rglob('*.*')),
              ROOT / 'platform/yocto/meta-xenova/recipes-extended/xen/xen_4.21.bbappend',
+             ROOT / 'platform/yocto/meta-xenova/recipes-extended/xen/xen-tools_%.bbappend',
+             *sorted((ROOT / 'platform/yocto/meta-xenova/recipes-extended/xen/files').glob('*dom0less*.patch')),
              ROOT / 'platform/yocto/meta-xenova/recipes-extended/xen/files/0001-arm-rpi4-find-bcm2711-power-management-watchdog.patch',
              ROOT / 'platform/yocto/meta-xenova/recipes-core/xenova-platform/xenova-platform_1.0.bb',
              ROOT / 'platform/yocto/meta-xenova/recipes-devtools/qemu/qemu_10.2.0.bbappend',
@@ -713,6 +750,9 @@ def assemble(config, image, record, planned):
         factory = {'schema': 1, 'features': FEATURES, 'factory_id': str(uuid.uuid4()), 'instances': bundles,
                    'templates': template_records, 'rtos_templates': firmware_records, 'firmware_instances': firmware_instances,
                    'template_policy': planned['capacity']['template_policy']}
+        factory['dom0less'] = dom0less_boot.install(base, planned['layout'], work.path, data, factory,
+                                                     FILES / 'cpu-policy-preset.json', prepare.command)
+        platform_boot.update(factory['dom0less']['files'])
         (data / '.xenova-install.json').write_text(json.dumps(factory, indent=2) + '\n')
         stats = os.statvfs(data)
         actual_free = stats.f_bavail * stats.f_frsize

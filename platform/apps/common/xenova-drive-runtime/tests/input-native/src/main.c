@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
-/* Product accept_input -> refresh -> public metadata reader, real core parsers
- * and Zephyr mutexes. Only external MQTT latest delivery/clock/runtime binding
- * are fixtures. No broker, board, command execution or copied reader logic. */
+/* Product v1 input exchange and VM-targeted fault command dispatch.
+ * MQTT delivery, clock and runtime binding are fixtures. */
 #include <zephyr/ztest.h>
 #include <xenova/mqtt/xm.h>
 #include <string.h>
@@ -34,18 +33,41 @@ static int64_t latest_seq[4];
 static const char *latest_type[4];
 static struct xdr_app_region region;
 static struct xdr_app_buffer detail;
+static struct xd_delivery last_delivery;
+static unsigned auto_commands,manual_commands,auto_reports;
+static char command_result[576];
+static bool retained_command;
+K_SEM_DEFINE(auto_wake,0,1);
 
 int xdiag_clock_us(uint64_t *out){*out=test_ms<0?0:(uint64_t)test_ms*1000;return 0;}
 bool xd_owner_admit(void){return true;}
 int xd_owner_prepare(struct xm_zclient *c,const char *a,const char *b){return 0;}
-void xd_owner_context(struct xd_inputs *out){strcpy(out->vm_id,VM);strcpy(out->app_instances[1],manual_instance);}
-bool xd_owner_instance(int app,const char *instance){return !strcmp(instance,manual_instance);}
-void xd_delivery_record(const struct xd_delivery *in){}
+void xd_owner_context(struct xd_inputs *out){
+ strcpy(out->vm_id,VM);strcpy(out->app_instances[0],APP);strcpy(out->app_instances[1],manual_instance);
+}
+bool xd_owner_instance(int app,const char *instance){return !strcmp(instance,app==0?APP:manual_instance);}
+void xd_delivery_record(const struct xd_delivery *in){last_delivery=*in;}
 int xm_zclient_subscribe(struct xm_zclient *c,const char *t,uint8_t qos){return 0;}
 int xm_zclient_poll(struct xm_zclient *c,int32_t timeout){return 0;}
 void xm_zclient_close(struct xm_zclient *c){c->connected=false;}
+bool xm_zclient_latest_retained(struct xm_zclient *c,const char *topic){return retained_command;}
+int xm_zclient_publish(struct xm_zclient *c,const char *topic,const char *type,const char *payload){
+ zassert_equal(strcmp(topic,fault_result_topic),0);
+ zassert_equal(strcmp(type,"agent.command_result"),0);
+ zassert_true(strlen(payload)<sizeof(command_result));
+ strcpy(command_result,payload);
+ return 0;
+}
 int xm_zclient_publish_as_until(struct xm_zclient *c,const char *t,const char *type,
- const char *payload,const char *instance,int64_t end){return 0;}
+ const char *payload,const char *instance,int64_t end){
+ int app=app_index(t);
+ if(!strcmp(type,"drive.command")){
+  if(app==0)auto_commands++;
+  if(app==1)manual_commands++;
+ }
+ if(app==0&&!strcmp(type,"app.lifecycle"))auto_reports++;
+ return 0;
+}
 int xm_zclient_latest(struct xm_zclient *c,const char *topic,struct xm_envelope *out,int64_t *age){
  if(!strcmp(topic,input_topic)&&latest_error)return latest_error;
  for(unsigned i=0;i<ARRAY_SIZE(c->latest);i++){
@@ -81,6 +103,10 @@ static void sample_value(unsigned sample,bool valid,unsigned age,unsigned genera
 static void committed(void){refresh();zassert_ok(xd_io_memory_read(&region,&detail));}
 static void reset(void *unused){
  memset(&transport,0,sizeof(transport));transport.id.app_id="drive-controller";transport.connected=true;client=&transport;
+ transport.id.vm_id=VM;
+ strcpy(transport.id.boot_id,VM);
+ zassert_true(xm_topic_vm(fault_command_topic,sizeof(fault_command_topic),VM,"command")>0);
+ zassert_true(xm_topic_vm(fault_result_topic,sizeof(fault_result_topic),VM,"command-result")>0);
  strcpy(control_topic,"xenova/v1/vehicle/control");strcpy(input_topic,"xenova/v1/apps/manual/input");
  strcpy(perception_topic,"xenova/v1/apps/perception/events");strcpy(manual_instance,APP);
  memset(&shared,0,sizeof(shared));memset(&working,0,sizeof(working));memset(&manual_source,0,sizeof(manual_source));
@@ -90,6 +116,107 @@ static void reset(void *unused){
  memset(&region,0,sizeof(region));memset(&detail,0,sizeof(detail));latest_error=0;
  atomic_clear(&stop);atomic_clear(&snapshot_busy);dual_mode=true;attempted_start=true;
  test_ms=1000;control_parses=input_parses=0;xd_manual_bind(&manual_source,manual_instance);
+ auto_commands=manual_commands=auto_reports=0;
+ fault_last_rx=-1;retained_command=false;command_result[0]=0;
+ memset(auto_fault_receipts,0,sizeof(auto_fault_receipts));
+ drive_auto_exit_unbind();k_sem_reset(&auto_wake);
+}
+
+static void receive_fault(const char *id,const char *boot,const char *action,const char *parameters)
+{
+ struct xm_zlatest *slot=&transport.latest[3];
+ strcpy(slot->topic,fault_command_topic);
+ int length=snprintf(slot->data,sizeof(slot->data),
+  "{\"command_id\":\"%s\",\"operation_id\":\"op\",\"expected_boot_id\":\"%s\","
+  "\"expires_at\":\"2026-11-15T00:00:00Z\",\"action\":\"%s\",\"parameters\":%s}",
+  id,boot,action,parameters);
+ zassert_true(length>0&&(size_t)length<sizeof(slot->data));
+ slot->len=(size_t)length;slot->rx_ms=test_ms;latest_type[3]="agent.command";
+ receive_fault_command();
+}
+
+static void dispatch_command(const char *topic,const char *instance)
+{
+ struct xd_candidate candidate={
+  .id=1,.control_revision=shared.control_revision,.connection_revision=shared.connection_revision,
+  .expires_ms=test_ms+200,.json="{}",
+ };
+ strcpy(candidate.topic,topic);
+ strcpy(candidate.app_instance,instance);
+ zassert_ok(xd_io_command(&candidate));
+ send_command();
+}
+
+ZTEST(input_memory,test_auto_tx_block_keeps_reports_and_manual_and_expires)
+{
+ char auto_topic[XM_TOPIC_MAX],manual_topic[XM_TOPIC_MAX];
+ zassert_true(xm_topic_vm_app_events(auto_topic,sizeof(auto_topic),VM,"autonomous")>0);
+ zassert_true(xm_topic_vm_app_events(manual_topic,sizeof(manual_topic),VM,"manual")>0);
+ refresh();
+
+ receive_fault("invalid",VM,"auto_tx_block","{\"duration_s\":121}");
+ zassert_not_null(strstr(command_result,"\"code\":\"INVALID_PARAMETERS\""));
+ ++test_ms;
+ receive_fault("block",VM,"auto_tx_block","{\"duration_s\":1}");
+ zassert_not_null(strstr(command_result,"\"status\":\"RUNNING\""));
+ dispatch_command(auto_topic,APP);
+ zassert_equal(last_delivery.disposition,XD_INJECTED_DROP);
+ zassert_equal(drive_auto_tx_block_dropped(),1);
+ zassert_equal(auto_commands,0);
+ dispatch_command(manual_topic,manual_instance);
+ zassert_equal(manual_commands,1);
+ zassert_ok(xd_io_report(auto_topic,"app.lifecycle","{}",1,&shared));
+ send_report();
+ zassert_equal(auto_reports,1);
+
+ test_ms=2000;
+ receive_fault("block",VM,"auto_tx_block","{\"duration_s\":1}");
+ zassert_not_null(strstr(command_result,"\"status\":\"RUNNING\""));
+ dispatch_command(auto_topic,APP);
+ zassert_equal(drive_auto_tx_block_dropped(),2);
+ test_ms=2001;
+ observe_auto_faults(false);
+ zassert_not_null(strstr(command_result,"\"status\":\"SUCCEEDED\""));
+ zassert_not_null(strstr(command_result,"\"dropped\":2"));
+ send_command();
+ zassert_equal(auto_commands,0);
+ dispatch_command(auto_topic,APP);
+ zassert_equal(auto_commands,1);
+
+ ++test_ms;
+ receive_fault("block",VM,"auto_tx_block","{\"duration_s\":1}");
+ zassert_not_null(strstr(command_result,"\"status\":\"SUCCEEDED\""));
+ zassert_false(drive_auto_tx_block_active(test_ms));
+}
+
+ZTEST(input_memory,test_mqtt_app_exit_requires_current_boot_and_confirmed_worker_exit)
+{
+ drive_auto_exit_bind(&auto_wake);
+ receive_fault("old-boot",APP,"app_exit","{\"app_id\":\"autonomous\"}");
+ zassert_not_null(strstr(command_result,"\"code\":\"BOOT_MISMATCH\""));
+ zassert_false(drive_auto_exit_take());
+
+ ++test_ms;retained_command=true;
+ receive_fault("retained",VM,"app_exit","{\"app_id\":\"autonomous\"}");
+ zassert_not_null(strstr(command_result,"\"code\":\"INVALID_COMMAND\""));
+ zassert_false(drive_auto_exit_take());
+
+ ++test_ms;retained_command=false;
+ receive_fault("exit",VM,"app_exit","{\"app_id\":\"autonomous\"}");
+ zassert_not_null(strstr(command_result,"\"status\":\"RUNNING\""));
+ zassert_ok(k_sem_take(&auto_wake,K_NO_WAIT));
+ zassert_true(drive_auto_exit_take());
+ observe_auto_faults(false);
+ zassert_not_null(strstr(command_result,"\"status\":\"RUNNING\""));
+ drive_auto_exit_confirm();
+ observe_auto_faults(false);
+ zassert_not_null(strstr(command_result,"\"status\":\"SUCCEEDED\""));
+
+ drive_auto_exit_bind(&auto_wake);
+ ++test_ms;
+ receive_fault("exit",VM,"app_exit","{\"app_id\":\"autonomous\"}");
+ zassert_not_null(strstr(command_result,"\"status\":\"SUCCEEDED\""));
+ zassert_false(drive_auto_exit_take());
 }
 ZTEST(input_memory,test_prestart_empty_and_auto_only_unsupported){
  attempted_start=false;zassert_ok(xd_io_memory_read(&region,&detail));

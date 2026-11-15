@@ -50,6 +50,7 @@ class OperatorService:
     def _stop(self,reason):
         self.hold=True;self.hold_reason=reason
         self.fence_revision+=1
+        self.operations.jetson_return=None
         m=self.runner.machine;m.output_permitted=False;m._authorized=False;m._countdown=None
         m._resume_requested.clear();self.runner._deferred_drive=None
         if self.sources is not None:self.sources.fence(reason)

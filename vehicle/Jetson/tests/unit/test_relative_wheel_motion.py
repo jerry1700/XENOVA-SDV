@@ -65,20 +65,36 @@ class RelativeWheelMotionTests(unittest.TestCase):
         self.assertLess(propagated.position_error_m,fallback.position_error_m)
         self.assertLess(propagated.yaw_error_rad,fallback.yaw_error_rad)
 
-    def test_startup_pose_includes_wheel_quantization_missing_from_upstream_bound(self):
+    def test_new_map_uses_the_first_encoder_event_and_keeps_relative_quantization(self):
         self.sample(1,100_000,0.,0)
         self.sample(2,120_000,.01,10)
-        start, now = (replace(capture,sample=replace(capture.sample,
-            position_error_m=.0001,yaw_error_rad=.0001))
-            for capture in (self.capture(100_000),self.capture(120_000)))
+        start, now = self.capture(100_000), self.capture(120_000)
         wheel_position, wheel_yaw = relative_wheel_bounds(start,now)
 
         pose = MapOdomAlignment.project_startup(start,now,
             position_drift_mps=.001,yaw_drift_rps=.001).sample
 
-        self.assertGreaterEqual(pose.position_error_m,start.sample.position_error_m+wheel_position+.00002)
-        self.assertGreaterEqual(pose.yaw_error_rad,start.sample.yaw_error_rad+wheel_yaw+.00002)
+        self.assertAlmostEqual(pose.position_error_m,wheel_position)
+        self.assertAlmostEqual(pose.yaw_error_rad,wheel_yaw)
+        self.assertGreaterEqual(pose.position_error_m,self.profile.metres_per_tick_upper)
+        self.assertLess(pose.position_error_m,start.sample.position_error_m)
+        self.assertEqual(MapOdomAlignment.project_startup(start,start,
+            position_drift_mps=.001,yaw_drift_rps=.001).sample.x,start.sample.x)
         self.assertEqual((pose.x,pose.y,pose.yaw),(now.sample.x,now.sample.y,now.sample.yaw))
+
+    def test_exposure_uses_interior_samples_and_checks_the_actual_adjacent_gaps(self):
+        self.buffer = PoseBuffer(max_gap_us=25_000,max_speed_mps=1.,wheel_profile=self.profile)
+        for index in range(5):
+            self.sample(index+1,100_000+index*20_000,0.,0,clock_pad=500)
+        capture = self.capture(100_000,180_000)
+        self.assertEqual(capture.sample.at_us,140_000)
+        self.assertEqual(capture.support_us,tuple(range(100_000,180_001,20_000)))
+        self.assertAlmostEqual(capture.sample.position_error_m,.05)
+        self.assertAlmostEqual(capture.sample.yaw_error_rad,.05)
+        self.assertEqual(capture.wheel_capture.anchor_sample.at_us,140_000)
+        self.assertLess(capture.wheel_capture.position_pad_m,.014)
+        self.sample(6,220_000,0.,0)
+        self.assertIsNone(self.capture(180_000,220_000))
 
     def test_straight_motion_does_not_pay_full_tick_quantization_at_every_sample(self):
         for index in range(9):
@@ -87,15 +103,26 @@ class RelativeWheelMotionTests(unittest.TestCase):
         self.assertGreaterEqual(position,self.profile.metres_per_tick_upper)
         self.assertLess(position,2*self.profile.metres_per_tick_upper)
 
-    def test_missing_sample_changed_source_or_inconsistent_pose_breaks_relative_proof(self):
+    def test_short_missing_sample_has_a_larger_position_bound(self):
         self.sample(1,100_000,0.,0)
-        self.sample(3,120_000,.01,10)
-        self.sample(4,140_000,.02,20)
-        self.sample(5,160_000,.02,30)
-        self.sample(6,180_000,.03,40,source=('new-gateway','pi','wheel'))
-        first,after_gap,normal,wrong_pose,new_source = (self.capture(at) for at in range(100_000,180_001,20_000))
+        self.sample(3,140_000,.01,10)
+        start, later = self.capture(100_000),self.capture(140_000)
+        bound = relative_wheel_bounds(start,later)
+        self.assertIsNotNone(bound)
+        self.assertGreater(bound[0], .005)
+        self.assertLess(bound[0], .05)
+        self.assertGreater(later.wheel_capture.progress.position_gap_error_m,0.)
+
+    def test_long_gap_changed_source_or_inconsistent_pose_breaks_relative_proof(self):
+        self.sample(1,100_000,0.,0)
+        self.sample(8,240_000,.01,10)
+        self.sample(9,260_000,.02,20)
+        self.sample(10,280_000,.02,30)
+        self.sample(11,300_000,.03,40,source=('new-gateway','pi','wheel'))
+        first,after_gap,normal,wrong_pose,new_source = (self.capture(at) for at in
+                                                       (100_000,240_000,260_000,280_000,300_000))
         self.assertIsNone(relative_wheel_bounds(first,after_gap))
-        self.assertIsNone(self.capture(110_000).wheel_capture)
+        self.assertIsNone(self.capture(110_000))
         self.assertIsNotNone(relative_wheel_bounds(after_gap,normal))
         self.assertIsNone(relative_wheel_bounds(normal,wrong_pose))
         self.assertIsNone(relative_wheel_bounds(wrong_pose,new_source))

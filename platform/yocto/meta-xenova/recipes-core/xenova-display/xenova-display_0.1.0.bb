@@ -15,6 +15,9 @@ USERADD_PARAM:${PN} = "--system --gid xenova-display --home-dir /var/lib/xenova-
 
 RDEPENDS:${PN} = "xenova-dom0-manager xenova-mqtt-client xenova-gateway-client xenova-bringup python3-playwright chromium-x11 xserver-xorg xrandr xauth xinit openbox dbus ffmpeg source-han-sans-kr-fonts fontconfig xf86-input-libinput xf86-video-fbdev xf86-video-modesetting util-linux-setpriv python3-core"
 
+# The kiosk idle guard calls xset; ctypes loads TurboJPEG outside shlib scanning.
+RDEPENDS:${PN} += "xset libturbojpeg"
+
 SYSTEMD_SERVICE:${PN} = "xenova-display-feed.service xenova-display.target xenova-display-guest-relay.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 
