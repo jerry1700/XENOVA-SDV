@@ -1052,6 +1052,8 @@ PY
 
 최종 조립기는 복사한 FAT에 `xenova-guests.scr`, Debian 커널·initramfs, Zephyr A/B의 부팅 펌웨어를 추가하고 다시 읽어 해시를 확인한다. U-Boot가 커널·펌웨어와 Device Tree를 Xen에 전달하면 Xen이 dom0와 기본 domU 세 대를 같은 부팅 단계에서 실행 가능 상태로 만든다. FAT에 게스트가 없는 Yocto 중간 이미지와 기존 설치는 등록 후 `xl create` 경로를 쓴다. UART에서 `setenv xenova_skip_boot_guests 1`을 지정하고 부팅하면 해당 부팅에 기존 시작 경로를 쓸 수 있다.
 
+새 `boot.scr`에서는 게스트 스크립트가 Device Tree 복사본을 수정한다. U-Boot에서 스크립트 로딩·검증·실행에 실패하면 UART에 원인을 출력하고 보존한 dom0 전용 Device Tree로 Xen을 한 번 부팅한다. dom0의 자동 시작이 등록된 VM을 `xl create`로 띄운다. 이 부팅 분기는 환경을 영구 저장하지 않는다. Xen 실행 이후의 게스트 등록 실패에는 UART 수동 우회를 사용한다. 이전에 빌드한 `boot.scr`을 포함한 WIC에서는 기존 수동 우회가 적용된다.
+
 dom0는 보드별 UUID/MAC가 확정된 뒤 Xen boot handle로 각 도메인을 찾고 XenStore·PV 콘솔을 연결한다. `xenova-vms.service`는 기존 실행 기록을 게시하고, Debian의 `root.raw`는 Xen의 `block` 스크립트와 커널 블록 백엔드로, PV NIC는 `xenbr0`에 연결한다. 조기 부팅용 Debian initramfs에는 루트 장치가 나타날 때까지만 대기하는 훅을 추가한다. 저장된 기동 의도, CPU 정책 또는 펌웨어 자산이 조립 당시 설정과 다르면 해당 조기 도메인을 분리하고 현재 등록 정책을 적용한다. 게스트의 초기 실행과 앱·차량 출력 준비는 별도 단계다.
 
 ```bash
