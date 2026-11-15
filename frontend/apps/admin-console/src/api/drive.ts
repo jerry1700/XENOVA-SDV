@@ -33,10 +33,16 @@ export interface DriveSource {
 }
 
 export interface VmAppReport {
+  /** scoped app envelope identity; 앱 재시작과 VM 재부팅을 구분한다. */
+  boot_id?: string | null;
+  app_instance_id?: string | null;
   lifecycle: {
-    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'RESIDUAL';
+    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'STOPPED' | 'RESIDUAL';
     readiness: 'QUALIFIED' | 'READY' | 'NOT_READY';
     reason: string | null;
+    applied_generation?: number | null;
+    check_seq?: string | null;
+    progress_seq?: string | null;
   } | null;
   lifecycle_source: DriveSource;
   heartbeat: { state: NonNullable<DriveApp['heartbeat_state']> } | null;
