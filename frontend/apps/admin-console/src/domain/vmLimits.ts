@@ -45,6 +45,21 @@ export function vmNameProblem(name: string): string | null {
   return null;
 }
 
+/**
+ * VM 이름 비교 키 — 백엔드 DB(uk_vms_name, utf8mb4_0900_ai_ci)처럼 대소문자·악센트를 무시한다 (S15P31E110-473).
+ * NFKD 로 분해해 결합 부호(악센트)를 빼고 소문자로 맞춘다. 서버는 이 기준으로 같은 이름을 찾으므로
+ * (Drive-VM 을 만들면 drive-vm 을 찾는다) 화면도 같은 기준으로 막는다.
+ * 앞뒤 공백은 지우지 않는다 — 0900 collation 은 NO PAD 이고, 공백 규칙은 vmNameProblem 이 따로 본다.
+ */
+export function vmNameKey(name: string): string {
+  return name.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
+}
+
+/** DB 기준으로 같은 VM 이름인가 */
+export function sameVmName(a: string, b: string): boolean {
+  return vmNameKey(a) === vmNameKey(b);
+}
+
 /** 규칙에 맞으면 null, 아니면 입력칸 아래에 보일 이유 */
 export function vcpusProblem(value: number): string | null {
   if (!Number.isInteger(value) || value < VCPUS_MIN || value > VCPUS_MAX) {

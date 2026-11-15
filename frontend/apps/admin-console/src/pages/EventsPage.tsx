@@ -13,8 +13,11 @@ import styles from './pages.module.css';
 const CATEGORIES = Object.keys(CATEGORY_LABEL) as EventCategory[];
 const SEVERITIES: EventSeverity[] = ['INFO', 'WARNING', 'ERROR'];
 
-/** 날짜 구분 줄 (예: 2026. 11. 12.) — 같은 날 이벤트는 시각만 보인다 */
-const dayOf = (iso: string) => new Date(iso).toLocaleDateString('ko-KR');
+/** 날짜 구분 줄 (예: 2026. 11. 12.) — 같은 날 이벤트는 시각만 보인다. 읽을 수 없는 시각은 Invalid Date 대신 */
+const dayOf = (iso: string) => {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? '날짜 미상' : at.toLocaleDateString('ko-KR');
+};
 
 /** 칩 앞 색 점. tone 은 심각도(info·warning·error), color 는 VM 역할색 토큰 */
 type ChipDot = { tone?: string; color?: string };
@@ -175,8 +178,8 @@ export function EventsPage() {
             );
           })}
         </div>
-        {events.data && items.length === 0 && <p className={styles.dim}>조건에 맞는 이벤트가 없다</p>}
-        {events.error && <p className={styles.error}>이벤트를 불러오지 못했다</p>}
+        {events.data && items.length === 0 && <p className={styles.dim}>조건에 맞는 이벤트가 없습니다.</p>}
+        {events.error && <p className={styles.error}>이벤트를 불러오지 못했습니다.</p>}
       </Card>
     </div>
   );

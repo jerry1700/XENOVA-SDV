@@ -123,3 +123,79 @@ describe('탭 사이 세션 재발급 (QA 2-2)', () => {
     expect(client.getSession()?.access_token).toBe('newer');
   });
 });
+
+describe('인증 요청 시간 제한 (S15P31E110-472)', () => {
+  /** 응답 없이 매달리다 signal 이 끊기면 그 사유로 실패하는 fetch */
+  const hanging = (_url: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('refresh 가 10초 동안 답이 없으면 실패로 끝내고 탭 간 잠금을 푼다', async () => {
+    vi.useFakeTimers();
+    const locks = fakeLocks();
+    vi.stubGlobal('navigator', { ...navigator, locks });
+    const client = await loadClient();
+    client.setSession(token('old'));
+    fetchMock.mockImplementation(hanging);
+
+    const result = client.refreshSession();
+    await vi.advanceTimersByTimeAsync(client.AUTH_TIMEOUT_MS - 1);
+    // 아직 기다리는 중 — 다른 탭은 잠금을 얻지 못한다
+    let otherTabGotLock = false;
+    void locks.request('xenova-refresh', async () => {
+      otherTabGotLock = true;
+    });
+    await Promise.resolve();
+    expect(otherTabGotLock).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(result).resolves.toBe(false);
+    expect(client.getSession()).toBeNull();
+    expect(fetchMock.mock.calls[0]![1]?.signal?.aborted).toBe(true);
+    // 잠금이 풀려 다른 탭이 이어서 연결한다
+    await vi.advanceTimersByTimeAsync(0);
+    expect(otherTabGotLock).toBe(true);
+  });
+
+  it('refresh 가 거절되고 공용 계정 login 이 매달려도 10초 뒤 실패로 끝난다', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('navigator', { ...navigator, locks: fakeLocks() });
+    const client = await loadClient();
+    fetchMock
+      .mockResolvedValueOnce(json(401, { code: 'INVALID_REFRESH_TOKEN' }))
+      .mockImplementationOnce(hanging);
+
+    const result = client.refreshSession();
+    await vi.advanceTimersByTimeAsync(client.AUTH_TIMEOUT_MS);
+    await expect(result).resolves.toBe(false);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      '/api/v1/auth/refresh',
+      '/api/v1/auth/login',
+    ]);
+  });
+
+  it('timeoutSignal: 시간 제한과 호출하는 쪽 signal 중 먼저 오는 쪽으로 끊긴다', async () => {
+    vi.useFakeTimers();
+    const client = await loadClient();
+    const outer = new AbortController();
+    const byOuter = client.timeoutSignal(10_000, outer.signal);
+    outer.abort();
+    expect(byOuter.signal.aborted).toBe(true);
+    byOuter.done();
+
+    const byTime = client.timeoutSignal(10_000);
+    vi.advanceTimersByTime(10_000);
+    expect(byTime.signal.aborted).toBe(true);
+    expect((byTime.signal.reason as DOMException).name).toBe('TimeoutError');
+
+    const finished = client.timeoutSignal(10_000);
+    finished.done();
+    vi.advanceTimersByTime(10_000);
+    expect(finished.signal.aborted).toBe(false);
+  });
+});

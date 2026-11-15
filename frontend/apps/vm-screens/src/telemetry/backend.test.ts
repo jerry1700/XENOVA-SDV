@@ -124,3 +124,75 @@ describe('인증 실패 재시도 간격', () => {
     stop();
   });
 });
+
+describe('토큰 재발급은 관리 콘솔과 같은 탭 간 잠금 안에서 (S15P31E110-472)', () => {
+  const fetchMock = vi.fn<typeof fetch>();
+
+  /** 이름별로 한 번에 하나만 콜백을 돌리는 락 */
+  function fakeLocks() {
+    const tails = new Map<string, Promise<unknown>>();
+    const requested: string[] = [];
+    return {
+      requested,
+      request<T>(name: string, callback: () => Promise<T>): Promise<T> {
+        requested.push(name);
+        const next = (tails.get(name) ?? Promise.resolve()).then(() => callback());
+        tails.set(
+          name,
+          next.catch(() => undefined),
+        );
+        return next;
+      },
+    };
+  }
+
+  async function load(locks: ReturnType<typeof fakeLocks>) {
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('navigator', { ...navigator, locks });
+    vi.resetModules();
+    return import('./backend');
+  }
+
+  afterEach(() => {
+    fetchMock.mockReset();
+  });
+
+  it('refresh 는 xenova-refresh 잠금을 얻은 뒤에 보낸다 (콘솔 탭이 재발급 중이면 기다린다)', async () => {
+    const locks = fakeLocks();
+    const backend = await load(locks);
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ access_token: 'screen' }), { status: 200 }));
+    // 콘솔 탭이 먼저 잠금을 잡고 재발급 중
+    let releaseConsole!: () => void;
+    void locks.request('xenova-refresh', () => new Promise<void>((resolve) => (releaseConsole = resolve)));
+
+    const pending = backend.accessToken(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(locks.requested).toEqual(['xenova-refresh', 'xenova-refresh']);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    releaseConsole();
+    await expect(pending).resolves.toBe('screen');
+    expect(fetchMock.mock.calls[0]![0]).toBe('/api/v1/auth/refresh');
+    expect(backend.REFRESH_LOCK).toBe('xenova-refresh');
+  });
+
+  it('refresh 가 10초 동안 답이 없으면 끊고 잠금을 푼다', async () => {
+    const locks = fakeLocks();
+    const backend = await load(locks);
+    fetchMock.mockImplementation(
+      (_url, init) =>
+        new Promise<Response>((_resolve, reject) =>
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))),
+        ),
+    );
+    const pending = backend.accessToken(true);
+    await vi.advanceTimersByTimeAsync(backend.AUTH_TIMEOUT_MS);
+    await expect(pending).resolves.toBeNull();
+
+    let nextGotLock = false;
+    await locks.request('xenova-refresh', async () => {
+      nextGotLock = true;
+    });
+    expect(nextGotLock).toBe(true);
+  });
+});

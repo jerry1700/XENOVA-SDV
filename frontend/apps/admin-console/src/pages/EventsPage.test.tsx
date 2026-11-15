@@ -210,3 +210,28 @@ describe('이벤트 화면 표시', () => {
     expect(screen.queryByText('도메인 상태')).not.toBeInTheDocument();
   });
 });
+
+describe('이벤트 화면 문구 (S15P31E110-471)', () => {
+  it('읽을 수 없는 시각은 Invalid Date·NaN 대신 날짜 미상·—, 빈 목록은 존댓말', () => {
+    eventItems = [
+      {
+        event_id: 'broken',
+        type: 'vm.created',
+        severity: 'INFO',
+        vm_id: 'vm-a',
+        operation_id: null,
+        occurred_at: 'not-a-date',
+        recorded_at: 'not-a-date',
+        payload: {},
+      },
+    ];
+    renderAt('/dashboard/events');
+    expect(screen.getByText('날짜 미상')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/Invalid Date|NaN|vm\.created/);
+  });
+
+  it('조건에 맞는 이벤트가 없으면 존댓말 안내', () => {
+    renderAt('/dashboard/events');
+    expect(screen.getByText('조건에 맞는 이벤트가 없습니다.')).toBeInTheDocument();
+  });
+});

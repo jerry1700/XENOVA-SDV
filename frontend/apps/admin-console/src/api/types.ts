@@ -83,7 +83,7 @@ export interface VmSynchronizationResult {
 }
 
 export interface VmSynchronizationItem {
-  vm_id: string;
+  vm_id: string | null;
   /** 보드 VM 은 보드의 이름, 정리된 VM 은 정리 전 이름. 보드가 이름을 주지 않으면 null */
   name: string | null;
   action:
@@ -296,7 +296,6 @@ export type KnownErrorCode =
   | 'TOKEN_REVOKED'
   | 'INVALID_CREDENTIALS'
   | 'INVALID_REFRESH_TOKEN'
-  | 'LOGIN_RATE_LIMITED'
   | 'VALIDATION_ERROR'
   | 'TEMPLATE_NOT_FOUND'
   | 'VM_NOT_FOUND'
@@ -315,7 +314,26 @@ export type KnownErrorCode =
   | 'INTERNAL_SERVER_ERROR'
   | 'AGENT_UNAVAILABLE'
   | 'MQTT_UNAVAILABLE'
-  | 'COMMAND_NOT_FOUND';
+  | 'COMMAND_NOT_FOUND'
+  | 'NOT_FOUND'
+  | 'OPERATION_NOT_FOUND'
+  | 'RESOURCE_UPDATE_UNSUPPORTED'
+  | 'CPU_PLACEMENT_CONFLICT'
+  | 'CPU_POLICY_NOT_CONFIGURED'
+  | 'EVENT_CURSOR_EXPIRED'
+  | 'TIME_RANGE_INVALID'
+  | 'SIM_UNAVAILABLE'
+  | 'PHONE_RELAY_NOT_LISTENING'
+  | 'PHONE_LINK_UNAVAILABLE'
+  | 'LOG_SOURCE_UNAVAILABLE'
+  | 'PHONE_NOT_CONNECTED'
+  | 'DISPLAY_MODE_BUSY'
+  | 'DISPLAY_MODE_NOT_APPLIED'
+  | 'DISPLAY_SETUP_REQUIRED'
+  | 'DISPLAY_MODE_ROLLBACK_INCOMPLETE'
+  | 'DISPLAY_MODE_UNAVAILABLE'
+  | 'DISPLAY_MODE_TIMEOUT'
+  | 'BAD_RESPONSE';
 
 /** VM Agent 가 명령을 거절·실패할 때 명령 상태 error.code 로 보내는 코드 (platform vm-agent commands.py) */
 export type AgentErrorCode =
@@ -610,4 +628,20 @@ export interface PhoneLinkStatus {
 export interface PhonePairingCode {
   code: string;
   expires_at: string;
+}
+
+// ---- 표시 모드 HDMI / 휴대폰 (REST-40·REST-41, docs/contracts/phone-link-v1.md) ----
+
+/** hdmi: HDMI 모니터에 차량 화면 · mobile: USB 테더링 휴대폰에 차량 화면(휴대폰 중계가 켜짐) */
+export type DisplayModeName = 'hdmi' | 'mobile';
+
+export interface DisplayModeStatus {
+  mode: DisplayModeName;
+  /** 재부팅 뒤 모드. 지금은 항상 hdmi */
+  boot_default: DisplayModeName;
+  /** 각 표시 서비스의 systemd 상태 (active·inactive·activating·deactivating·failed·unknown) */
+  services: { hdmi: string; mobile: string; feed: string };
+  /** HDMI 화면이 실제로 그려지고 있음 */
+  hdmi_renderer_ready: boolean;
+  observed_at: string;
 }

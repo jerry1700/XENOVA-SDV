@@ -90,3 +90,17 @@ describe('VM 상세 이벤트 한 줄 표시', () => {
     expect(screen.getByText('이벤트를 불러오지 못했습니다.')).toBeInTheDocument();
   });
 });
+
+describe('VM 상세 이벤트 — 읽을 수 없는 시각 (S15P31E110-471)', () => {
+  it('시각이 깨진 이벤트도 NaN·Invalid Date 없이 — 와 시각 미상으로 보인다', () => {
+    const broken = {
+      ...event('vm.state.changed', 'INFO', { from: 'paused', to: 'running' }, 'x'),
+      occurred_at: 'bad',
+    };
+    const { container } = render(<DetailEvents pending={false} error={false} events={[broken]} />);
+    expect(container).not.toHaveTextContent(/NaN|Invalid Date/);
+    const time = container.querySelector('time')!;
+    expect(time).toHaveTextContent('—');
+    expect(time).toHaveAttribute('title', '시각 미상');
+  });
+});

@@ -3321,6 +3321,11 @@ button.chip:hover:not(.chipOn) {
   border-radius: 12px;
   background: color-mix(in srgb, var(--x-primary) 7%, var(--x-surface-2));
 }
+.pendingCreationSummary[data-unknown='true'] {
+  /* 결과를 모르는 기록은 진행 중(파랑)이 아니라 확인 필요(중립) */
+  border-color: var(--x-border);
+  background: var(--x-surface-2);
+}
 .pendingCreationSummary > div {
   display: grid;
   gap: 3px;
@@ -4902,7 +4907,7 @@ button.chip:hover:not(.chipOn) {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--x-space-3);
 }
-.summaryItem {
+.scenarioSummaryItem {
   display: grid;
   align-content: center;
   gap: var(--x-space-2);
@@ -4912,11 +4917,11 @@ button.chip:hover:not(.chipOn) {
   border-radius: var(--x-radius-md);
   background: var(--x-surface-1);
 }
-.summaryItem > span:first-child {
+.scenarioSummaryItem > span:first-child {
   color: var(--x-text-muted);
   font-size: var(--x-text-xs);
 }
-.summaryItem small {
+.scenarioSummaryItem small {
   color: var(--x-text-muted);
 }
 .drivingVmGrid {

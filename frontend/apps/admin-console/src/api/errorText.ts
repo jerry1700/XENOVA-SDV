@@ -3,17 +3,18 @@ import type { AgentErrorCode, CommandState, KnownErrorCode } from './types';
 
 /**
  * 화면에 보일 오류 문구 한 곳 (프론트 QA 1-F12·3-A6).
- * 서버 message 는 보드 영어 원문(`domain … is running; stop it before delete`)이 섞여 오므로 쓰지 않는다.
+ * 서버 message 는 보드 영어 원문(`domain … is running; stop it before delete`)이 섞여 오므로 쓰지 않는다
+ * (예외: 백엔드가 사유별 한글 문구를 만드는 코드 — 아래 SERVER_TEXT_FIRST).
  * 문구에 `(CODE)` 를 붙이지 않는다 — 코드가 필요하면 요소의 title 로.
  * KnownErrorCode 가 늘면 typecheck 가 빠진 문구를 잡는다.
  */
 export const ERROR_TEXT = {
-  UNAUTHORIZED: '로그인이 필요합니다. 다시 로그인해 주세요.',
-  INVALID_TOKEN: '로그인 정보가 올바르지 않습니다. 다시 로그인해 주세요.',
-  TOKEN_REVOKED: '로그인이 만료되었습니다. 다시 로그인해 주세요.',
+  // 로그인 화면이 없다 (공용 계정 자동 연결, 4bc4feb3) — 다시 로그인 대신 새로고침으로 다시 연결
+  UNAUTHORIZED: '콘솔 연결이 끊겼습니다. 페이지를 새로고침해 주세요.',
+  INVALID_TOKEN: '콘솔 연결 정보가 올바르지 않습니다. 페이지를 새로고침해 주세요.',
+  TOKEN_REVOKED: '콘솔 연결이 만료되었습니다. 페이지를 새로고침해 주세요.',
   INVALID_CREDENTIALS: '아이디 또는 비밀번호가 올바르지 않습니다.',
-  INVALID_REFRESH_TOKEN: '로그인이 만료되었습니다. 다시 로그인해 주세요.',
-  LOGIN_RATE_LIMITED: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.',
+  INVALID_REFRESH_TOKEN: '콘솔 연결이 만료되었습니다. 페이지를 새로고침해 주세요.',
   VALIDATION_ERROR: '입력한 값을 다시 확인해 주세요.',
   TEMPLATE_NOT_FOUND: '선택한 템플릿을 찾을 수 없습니다. 템플릿을 다시 선택해 주세요.',
   VM_NOT_FOUND: 'VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.',
@@ -36,6 +37,33 @@ export const ERROR_TEXT = {
   MQTT_UNAVAILABLE:
     '메시지 브로커에 연결되어 있지 않아 명령을 보내지 못했습니다. 잠시 후 다시 시도해 주세요.',
   COMMAND_NOT_FOUND: '명령을 찾을 수 없습니다. 이미 정리되었거나 다른 VM의 명령일 수 있습니다.',
+  // ---- 화면에서 만나는 백엔드 코드 (S15P31E110-471, 시연 전용 코드는 제외) ----
+  NOT_FOUND: '서버에 이 기능이 아직 없습니다. 배포된 서버 버전을 확인해 주세요.',
+  OPERATION_NOT_FOUND: '보드에서 작업 기록을 찾지 못했습니다. VM 목록에서 상태를 확인해 주세요.',
+  RESOURCE_UPDATE_UNSUPPORTED: '자원 변경은 Linux VM만 지원합니다.',
+  CPU_PLACEMENT_CONFLICT:
+    '선택한 pCPU는 dom0 공유 영역이거나 다른 VM이 전용으로 쓰고 있습니다. 다른 pCPU를 골라 주세요.',
+  CPU_POLICY_NOT_CONFIGURED: 'CPU 배치 정책이 아직 설정되지 않았습니다. 보드 설정을 확인해 주세요.',
+  EVENT_CURSOR_EXPIRED: '이전 이벤트 기록을 이어서 불러올 수 없습니다. 목록을 새로고침해 주세요.',
+  TIME_RANGE_INVALID: '조회 시작 시각이 끝 시각보다 앞서야 합니다. 기간을 다시 선택해 주세요.',
+  SIM_UNAVAILABLE: '시뮬레이터가 연결되어 있지 않습니다. 시뮬레이터 실행 상태를 확인해 주세요.',
+  PHONE_RELAY_NOT_LISTENING:
+    '휴대폰 화면 중계가 꺼져 있거나 휴대폰이 연결되지 않았습니다. 휴대폰 모드와 USB 테더링을 확인해 주세요.',
+  PHONE_LINK_UNAVAILABLE: '보드의 휴대폰 화면 중계 상태를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+  LOG_SOURCE_UNAVAILABLE: '실행 로그 수집기에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+  // 화면 전환 HDMI·휴대폰 (REST-41, 백엔드 d1c58849)
+  PHONE_NOT_CONNECTED:
+    '휴대폰이 USB로 연결되어 있지 않습니다. 케이블을 연결하고 USB 테더링을 켠 뒤 다시 시도해 주세요.',
+  DISPLAY_MODE_BUSY: '다른 화면 전환이 진행 중입니다. 잠시 후 다시 시도해 주세요.',
+  DISPLAY_MODE_NOT_APPLIED:
+    '화면 전환에 실패해 이전 화면을 유지했습니다. USB 테더링을 확인한 뒤 다시 시도해 주세요.',
+  DISPLAY_SETUP_REQUIRED:
+    '보드의 화면 설정이 준비되지 않아 전환할 수 없습니다. 보드의 표시 서비스 설정을 확인해 주세요.',
+  DISPLAY_MODE_ROLLBACK_INCOMPLETE:
+    '화면 전환에 실패했고 이전 화면으로 완전히 되돌리지 못했습니다. 보드에서 화면 서비스를 확인해 주세요.',
+  DISPLAY_MODE_UNAVAILABLE: '보드의 화면 상태를 확인할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+  DISPLAY_MODE_TIMEOUT: '보드의 화면 전환이 시간 안에 끝나지 않았습니다. 상태를 새로 고쳐 확인해 주세요.',
+  BAD_RESPONSE: '서버 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.',
 } as const satisfies Record<KnownErrorCode, string>;
 
 const DEFAULT_TEXT = '요청을 처리하지 못했습니다.';
@@ -43,9 +71,30 @@ const NETWORK_TEXT = '서버에 연결할 수 없습니다. 네트워크와 서�
 
 const isKnown = (code: string): code is KnownErrorCode => Object.hasOwn(ERROR_TEXT, code);
 
+/**
+ * 백엔드가 사유별 한글 message 를 보내는 코드 (보드 platform_code 별 문구, 백엔드 a76fc831 QA 1-B1).
+ * message 가 한글이면 그것을, 비었거나 한글이 아니면(보드 영어 원문) 표의 문구를 쓴다.
+ */
+const SERVER_TEXT_FIRST: ReadonlySet<string> = new Set<KnownErrorCode>([
+  'INVALID_VM_STATE',
+  'INVALID_ARGUMENT',
+]);
+const HANGUL = /[가-힣]/;
+
+function serverKoreanText(error: ApiError): string | null {
+  const message = error.message.trim();
+  // 본문에 message 가 없으면 ApiError 가 만든 기본 문구(api/client.ts)다 — 서버 문구가 아니다
+  if (!message || message === `요청이 실패했습니다 (${error.status})`) return null;
+  return HANGUL.test(message) ? message : null;
+}
+
 /** ApiError 면 코드별 한글 문구, 서버에 닿지 못했으면 연결 문구, 그 밖(모르는 코드·일반 예외)은 fallback 또는 기본 문구 */
 export function errorText(error: unknown, fallback: string = DEFAULT_TEXT): string {
   if (error instanceof ApiError) {
+    if (SERVER_TEXT_FIRST.has(error.code)) {
+      const server = serverKoreanText(error);
+      if (server) return server;
+    }
     if (isKnown(error.code)) return ERROR_TEXT[error.code];
     if (error.status === 0) return NETWORK_TEXT;
   }

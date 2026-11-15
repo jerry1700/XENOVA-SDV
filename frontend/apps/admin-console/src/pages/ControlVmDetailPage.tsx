@@ -2,7 +2,8 @@ import { Button, Card, Modal, useToast } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { ApiError } from '../api/client';
-import { useVm, useVmResources, useVms, type VmAction } from '../api/queries';
+import { errorText } from '../api/errorText';
+import { useVm, useVmResources, useVms, type VmAction, useVmIdsUpdatingResources } from '../api/queries';
 import type { Vm } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
 import {
@@ -59,6 +60,12 @@ export function ControlVmDetailPage() {
 
   const operation = vmOperations.operations[vmId];
   const operationPending = operation?.status === 'pending';
+  // 서버가 "다른 작업 진행 중"(409)을 줬으면 10초 잠그고, 이 탭에서 자원 적용 중이면 시작·정지를 잠근다 (S15P31E110-473).
+  // 핀닝 적용 중은 서버 409 로만 막는다 (VcpuPinningPanel 은 이 이슈에서 건드리지 않음)
+  const busy = vmOperations.isBusy(vmId);
+  const updatingResources = useVmIdsUpdatingResources().includes(vmId);
+  const actionsLocked = operationPending || busy;
+  const powerLocked = actionsLocked || updatingResources;
   // Zephyr 템플릿은 1 vCPU · 16 MiB 고정 프로필 (ResourceAdjustmentPanel 의 fixedProfile 과 같은 판단)
   const zephyr = vm.data?.guest_kind === 'zephyr';
 
@@ -93,8 +100,8 @@ export function ControlVmDetailPage() {
       {vm.isPending && <div className={styles.statePanel}>VM 관리 정보를 불러오는 중입니다…</div>}
       <LiveDataAlert />
       {vm.error instanceof ApiError && vm.error.status === 404 && (
-        <div className={styles.statePanel} role="alert">
-          {vm.error instanceof ApiError ? `${vm.error.message} (${vm.error.code})` : String(vm.error)}
+        <div className={styles.statePanel} role="alert" title={vm.error.code}>
+          {errorText(vm.error, VM_LOAD_FAILED_TEXT)}
         </div>
       )}
 
@@ -152,17 +159,24 @@ export function ControlVmDetailPage() {
                 <small>명령 실행 후 서버에서 다시 조회한 상태가 화면에 반영됩니다.</small>
               </div>
               <VmOperationNotice operation={operation} now={vmOperations.now} />
+              {(busy || updatingResources) && (
+                <p className={styles.dim} role="status">
+                  {busy
+                    ? '다른 작업이 진행 중이라 잠시 뒤 다시 누를 수 있습니다.'
+                    : '자원을 적용하는 중이라 시작·정지를 잠시 막습니다.'}
+                </p>
+              )}
               <div className={styles.lifecycleActions}>
                 <Button
                   onClick={() => run(vm.data, 'start')}
-                  disabled={!canStartVm(vm.data.state) || operationPending}
+                  disabled={!canStartVm(vm.data.state) || powerLocked}
                 >
                   VM 시작
                 </Button>
                 <Button
                   variant="secondary"
                   onClick={() => run(vm.data, 'stop')}
-                  disabled={!canStopVm(vm.data.state) || operationPending}
+                  disabled={!canStopVm(vm.data.state) || powerLocked}
                 >
                   VM 정지
                 </Button>
@@ -203,7 +217,7 @@ export function ControlVmDetailPage() {
             <Button
               variant="danger"
               onClick={() => setDeleteOpen(true)}
-              disabled={!canDeleteVm(vm.data.state) || operationPending}
+              disabled={!canDeleteVm(vm.data.state) || actionsLocked}
               title={canDeleteVm(vm.data.state) ? undefined : DELETE_BLOCKED_HINT}
             >
               VM 삭제

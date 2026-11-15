@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { sameVmName } from '../domain/vmLimits';
 import { formatElapsedTime } from '../format';
 
 export const VM_CREATION_LEAVE_MESSAGE =
@@ -19,6 +20,12 @@ export type PendingVmCreation = {
 type VmIdentity = { vm_id: string; name: string };
 
 let pendingCreations = loadPendingCreations();
+/**
+ * 이 탭(이 페이지 실행)이 보낸 생성 요청 (S15P31E110-473). 다른 탭·새로고침 전에서 남은 기록은 여기에 없다 —
+ * 그 요청의 결과(성공·실패)는 이 탭이 받지 못하므로 "생성 중" 대신 "생성 결과 확인 필요"로 보이고 카드를 잠그지 않는다.
+ */
+const ownedCreations = new Set<string>();
+const creationKey = (creation: PendingVmCreation) => `${creation.startedAt}:${creation.name}`;
 let expiryTimer: ReturnType<typeof setTimeout> | undefined;
 const listeners = new Set<() => void>();
 scheduleExpiry();
@@ -34,6 +41,7 @@ export function startVmCreation(
 ): void {
   const creation: PendingVmCreation =
     excludedVmIds.length > 0 ? { name, startedAt, excludedVmIds: [...excludedVmIds] } : { name, startedAt };
+  ownedCreations.add(creationKey(creation));
   replacePendingCreations([...pendingCreations.filter((item) => item.name !== name), creation]);
 }
 
@@ -43,16 +51,33 @@ export function finishVmCreation(name: string): void {
   replacePendingCreations(next);
 }
 
-/** 이름이 같고, 요청 전부터 있던 VM이 아닐 때만 그 생성 기록에 해당하는 VM으로 본다 */
-export function matchesVmCreation(vm: VmIdentity, creation: PendingVmCreation): boolean {
-  return creation.name === vm.name && !(creation.excludedVmIds ?? []).includes(vm.vm_id);
+/** 이 탭이 보낸 생성 요청의 기록인가 (아니면 결과를 알 수 없다) */
+export function isOwnedVmCreation(creation: PendingVmCreation): boolean {
+  return ownedCreations.has(creationKey(creation));
 }
 
+/** 결과를 모르는 기록을 사용자가 지운다 ([기록 지우기]) */
+export function clearVmCreation(creation: PendingVmCreation): void {
+  const key = creationKey(creation);
+  const next = pendingCreations.filter((item) => creationKey(item) !== key);
+  if (next.length === pendingCreations.length) return;
+  replacePendingCreations(next);
+}
+
+/** 이름이 같고(DB 기준, 대소문자·악센트 무시), 요청 전부터 있던 VM이 아닐 때만 그 생성 기록에 해당하는 VM으로 본다 */
+export function matchesVmCreation(vm: VmIdentity, creation: PendingVmCreation): boolean {
+  return sameVmName(creation.name, vm.name) && !(creation.excludedVmIds ?? []).includes(vm.vm_id);
+}
+
+/** 이 탭이 보낸 생성이 아직 끝나지 않은 VM 인가 — 결과를 모르는 기록(다른 탭·새로고침 전)은 카드를 잠그지 않는다 */
 export function isVmCreationPending(
   vm: VmIdentity & { state: string },
   creations: readonly PendingVmCreation[],
 ): boolean {
-  return vm.state !== 'running' && creations.some((creation) => matchesVmCreation(vm, creation));
+  return (
+    vm.state !== 'running' &&
+    creations.some((creation) => isOwnedVmCreation(creation) && matchesVmCreation(vm, creation))
+  );
 }
 
 export function readLastVmCreationDuration(): number | null {

@@ -154,6 +154,8 @@ export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
     const backoff = () => schedule(retryDelayMs(attempt++));
 
     const connect = () => {
+      // 세션 구독과 백오프 타이머가 둘 다 걸려 있을 수 있다 — 어느 쪽으로 왔든 남은 쪽을 지워 소켓이 하나 더 열리지 않게
+      window.clearTimeout(timer);
       unsubscribe?.();
       unsubscribe = undefined;
       if (stopped) return;
@@ -223,15 +225,38 @@ export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
   return { state, send };
 }
 
-/** 주행 통합 상태 (최대 10 Hz, 변화 없으면 1초마다) */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+/** 없음(null·undefined) 또는 객체 */
+const optionalRecord = (value: unknown) => value == null || isRecord(value);
+
+/**
+ * 화면이 바로 읽는 최소 형식인가 (S15P31E110-472). apps 가 빠지거나 블록이 객체가 아니면
+ * Overview·시뮬레이터가 렌더 중 예외로 오류 화면에 갔다. 세부 값은 화면마다 null 을 견딘다.
+ */
+export function isDriveState(value: unknown): value is DriveState {
+  if (!isRecord(value) || !isRecord(value.apps)) return false;
+  if (!Object.values(value.apps).every(isRecord)) return false;
+  return ['control', 'vehicle', 'perception', 'vm_apps', 'resume', 'resume_cancel'].every((key) =>
+    optionalRecord(value[key]),
+  );
+}
+
+/** 주행 통합 상태 (최대 10 Hz, 변화 없으면 1초마다). invalid = 마지막 프레임 형식이 틀려 버렸음 */
 export const useDriveState = MOCK ? useMockDriveState : useLiveDriveState;
 
-function useLiveDriveState() {
+export function useLiveDriveState() {
   const [drive, setDrive] = useState<DriveState | null>(null);
+  const [invalid, setInvalid] = useState(false);
   const { state } = useAuthedSocket('/ws/v1/drive/state', (frame) => {
-    if (frame.type === 'drive.state') setDrive(frame.state as DriveState);
+    if (frame.type !== 'drive.state') return;
+    // 형식이 틀린 프레임은 버리고 마지막 정상 상태를 둔다. 같은 값이면 다시 그리지 않아 안내가 쌓이지 않는다
+    if (isDriveState(frame.state)) {
+      setDrive(frame.state);
+      setInvalid(false);
+    } else setInvalid(true);
   });
-  return { drive, socket: state };
+  return { drive, socket: state, invalid };
 }
 
 function useMockDriveState() {
@@ -247,7 +272,7 @@ function useMockDriveState() {
       off?.();
     };
   }, []);
-  return { drive, socket: (drive ? 'open' : 'connecting') as SocketState };
+  return { drive, socket: (drive ? 'open' : 'connecting') as SocketState, invalid: false };
 }
 
 /**

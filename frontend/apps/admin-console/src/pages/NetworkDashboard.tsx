@@ -303,7 +303,7 @@ function poolCell(pool: NetworkPool): NetCell {
   };
 }
 
-/** 인터페이스 상태 박스 한 칸. 값이 없으면 "—" + 사유 (지금은 "데이터 없음 (백엔드 미지원)") */
+/** 인터페이스 상태 박스 한 칸. 값이 없으면 "—" + 사유 (지금은 백엔드가 보내지 않아 "데이터 없음") */
 function FlagItem({ label, flag, on, off }: { label: string; flag: InterfaceFlag; on: string; off: string }) {
   return (
     <div className={styles.counterItem} data-active={flag.state === 'off' ? 'true' : undefined}>

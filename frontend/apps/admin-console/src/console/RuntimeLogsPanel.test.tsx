@@ -66,8 +66,9 @@ describe('execution logs beside the terminal', () => {
     expect(screen.getByRole('status')).toHaveTextContent('연결 끊김 · 마지막 기록 유지');
     // 오류 메시지는 상태 문구와 섞지 않고 툴팁과 보조 줄로
     expect(screen.getByRole('status')).not.toHaveTextContent('offline');
-    expect(screen.getByRole('status')).toHaveAttribute('title', 'offline');
-    expect(screen.getByText('오류: offline')).toBeInTheDocument();
+    // 일반 예외 원문(영어) 대신 한글 안내
+    expect(screen.getByRole('status')).toHaveAttribute('title', '조회에 실패했습니다.');
+    expect(screen.getByText('오류: 조회에 실패했습니다.')).toBeInTheDocument();
     expect(screen.getByLabelText('수집된 로그')).toHaveTextContent('plain log');
   });
   it('shows each record in fixed columns and the collection sources as chips', async () => {

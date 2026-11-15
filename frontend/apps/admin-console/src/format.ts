@@ -33,7 +33,8 @@ export const capitalizeFirst = (value: string): string =>
 
 /** 경과 시간 mm:ss (음수는 00:00). VM 생성·정지·삭제 진행 표시가 같이 쓴다 */
 export function formatElapsedTime(elapsedMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  // NaN·음수는 00:00 (시작 시각을 못 읽었거나 시계가 어긋난 경우)
+  const totalSeconds = Number.isFinite(elapsedMs) ? Math.max(0, Math.floor(elapsedMs / 1000)) : 0;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;

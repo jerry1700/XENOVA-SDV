@@ -2,9 +2,10 @@ import { createContext, useContext, type ReactNode } from 'react';
 import { useDriveState, type DriveState, type SocketState } from '../api/drive';
 
 /** 주행 통합 상태 구독 하나를 모드 띠와 화면이 같이 쓴다 (WS 연결을 화면마다 따로 열지 않게) */
-const DriveContext = createContext<{ drive: DriveState | null; socket: SocketState }>({
+const DriveContext = createContext<{ drive: DriveState | null; socket: SocketState; invalid?: boolean }>({
   drive: null,
   socket: 'connecting',
+  invalid: false,
 });
 
 export function DriveProvider({ children }: { children: ReactNode }) {

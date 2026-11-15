@@ -2,6 +2,7 @@ import { Card } from '@xenova/ui';
 import { lazy, Suspense, type CSSProperties } from 'react';
 import { Link, useParams } from 'react-router';
 import { ApiError } from '../api/client';
+import { errorText } from '../api/errorText';
 import { useEvents, useVm, vmGone } from '../api/queries';
 import { AGENT_LABEL, STATE_HEALTH, STATE_LABEL } from '../format';
 import { MODE_LABEL, osLabel, roleOf } from '../domain/roles';
@@ -41,24 +42,29 @@ function AppStateTile({
     <div>
       <span>앱 상태</span>
       {reports.length > 0 ? (
-        reports.map(({ appId, appLabel, stage, reason, reasonLabel, phaseLabel, heartbeatLabel }) =>
-          // 단계(lifecycle)가 없고 heartbeat 가 신선하면 heartbeat 문구로 대신 보이고 출처를 작게 적는다
-          PHASE_UNAVAILABLE.has(phaseLabel) && FRESH_HEARTBEAT.has(heartbeatLabel) ? (
-            <strong key={appId} data-app={appId}>
-              {appLabel} · {heartbeatLabel}
-              <small className={styles.detailTileNote}>heartbeat 기준 · 단계 {phaseLabel}</small>
-            </strong>
-          ) : (
-            <strong key={appId} data-app={appId}>
-              {appLabel} · {stage}
-              {reason && (
-                <>
-                  {' · '}
-                  <span title={reason}>{reasonLabel}</span>
-                </>
-              )}
-            </strong>
-          ),
+        reports.map(
+          ({ appId, appLabel, stage, reason, reasonLabel, phaseLabel, heartbeatLabel, heartbeat }) =>
+            // 단계(lifecycle)가 없고 heartbeat 가 신선하면 heartbeat 문구로 대신 보이고 출처를 작게 적는다
+            appId === 'interaction' ? (
+              <strong key={appId} data-app={appId}>
+                {appLabel} · {heartbeat}
+              </strong>
+            ) : PHASE_UNAVAILABLE.has(phaseLabel) && FRESH_HEARTBEAT.has(heartbeatLabel) ? (
+              <strong key={appId} data-app={appId}>
+                {appLabel} · {heartbeatLabel}
+                <small className={styles.detailTileNote}>heartbeat 기준 · 단계 {phaseLabel}</small>
+              </strong>
+            ) : (
+              <strong key={appId} data-app={appId}>
+                {appLabel} · {stage}
+                {reason && (
+                  <>
+                    {' · '}
+                    <span title={reason}>{reasonLabel}</span>
+                  </>
+                )}
+              </strong>
+            ),
         )
       ) : (
         <strong>미확인</strong>
@@ -129,8 +135,12 @@ export function VmDetailPage() {
 
       {vm.isPending && <div className={styles.statePanel}>VM 상세 정보를 불러오는 중입니다…</div>}
       {vm.error && (
-        <div className={styles.statePanel} role="alert">
-          {vm.error instanceof ApiError ? `${vm.error.message} (${vm.error.code})` : String(vm.error)}
+        <div
+          className={styles.statePanel}
+          role="alert"
+          title={vm.error instanceof ApiError ? vm.error.code : undefined}
+        >
+          {errorText(vm.error, VM_LOAD_FAILED_TEXT)}
         </div>
       )}
 
@@ -163,7 +173,7 @@ export function VmDetailPage() {
               {vm.data.guest_kind === 'linux' && (
                 <div className={styles.collectorLine}>
                   <div>
-                    <span className={styles.collectorTitle}>Linux Agent 생존 (v1)</span>
+                    <span className={styles.collectorTitle}>Linux Agent 생존</span>
                     <StatusDot health={AGENT_HEALTH[vm.data.agent_status ?? 'UNKNOWN']}>
                       {AGENT_LABEL[vm.data.agent_status ?? 'UNKNOWN']}
                     </StatusDot>

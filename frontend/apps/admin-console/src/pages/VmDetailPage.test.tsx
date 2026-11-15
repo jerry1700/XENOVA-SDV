@@ -44,6 +44,11 @@ describe('VM 상세 부제 (S15P31E110-469)', () => {
     renderDetail();
     expect(screen.getByText(/VM 정보를 불러오지 못했습니다\./)).toBeInTheDocument();
     expect(screen.queryByText(/불러오는 중/)).toBeNull();
+    // 오류 코드는 화면 문구가 아니라 title 로만 (S15P31E110-471)
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.');
+    expect(alert).not.toHaveTextContent('VM_NOT_FOUND');
+    expect(alert).toHaveAttribute('title', 'VM_NOT_FOUND');
   });
 
   it('VM 이 없으면(404) 이 VM 의 이벤트 조회도 끈다', () => {
