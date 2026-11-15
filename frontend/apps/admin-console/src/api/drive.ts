@@ -40,6 +40,9 @@ export interface VmAppReport {
     phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'STOPPED' | 'RESIDUAL';
     readiness: 'QUALIFIED' | 'READY' | 'NOT_READY';
     reason: string | null;
+    applied_generation?: number | null;
+    check_seq?: string | null;
+    progress_seq?: string | null;
   } | null;
   lifecycle_source: DriveSource;
   heartbeat: { state: NonNullable<DriveApp['heartbeat_state']> } | null;

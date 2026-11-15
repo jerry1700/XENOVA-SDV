@@ -125,7 +125,7 @@ describe('장애 시연 1', () => {
     vmCrash.mutate.mockReset();
     perceptionBlock.mutate.mockReset();
     commandStatus.data = undefined;
-    autoDelay.mutate.mockClear();
+    autoDelay.mutate.mockReset();
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
     driveState.activeApp = 'autonomous';
@@ -246,7 +246,7 @@ describe('장애 시연 1', () => {
 
 describe('장애 시연 2', () => {
   beforeEach(() => {
-    autoDelay.mutate.mockClear();
+    autoDelay.mutate.mockReset();
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
     driveState.age = 100;
@@ -269,6 +269,27 @@ describe('장애 시연 2', () => {
       { delay_ms: 100, duration_s: 30 },
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
+  });
+
+  it('deadline 악화, generation, 예비 복귀 검증 단계를 표시한다', () => {
+    autoDelay.mutate.mockImplementation(
+      (_: unknown, options?: { onSuccess?: (value: Record<string, unknown>) => void }) =>
+        options?.onSuccess?.({
+          vm_id: 'vm-a',
+          command_id: 'delay-command',
+          submitted_at: new Date().toISOString(),
+          delay_ms: 100,
+          duration_s: 30,
+        }),
+    );
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 2/ }));
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '지연 발생' }));
+
+    expect(screen.getByText('Deadline miss와 준비 상태 악화')).toBeInTheDocument();
+    expect(screen.getByText('Generation 일관성 확인')).toBeInTheDocument();
+    expect(screen.getByText('장애 VM 예비 상태 복귀')).toBeInTheDocument();
   });
 
   it('AUTO가 아니면 시연을 시작할 수 없다', () => {

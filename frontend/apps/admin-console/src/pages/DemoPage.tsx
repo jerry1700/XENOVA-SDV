@@ -53,6 +53,7 @@ interface CrashRun extends Run {
 interface DelayRun extends Run {
   delayMs: number;
   durationS: number;
+  initialGeneration: number | null;
 }
 
 const DELAY_SCENARIO = { delay_ms: 100, duration_s: 30 } as const;
@@ -157,11 +158,38 @@ function DelayScenario() {
   );
   const delayRunning = command.data?.status === 'RUNNING' || command.data?.status === 'SUCCEEDED';
   const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
-  const commandFinishedWithoutHandoff = command.data?.status === 'SUCCEEDED' && activeId === run?.targetId;
+  const handoffGraceExpired = Boolean(
+    command.data?.status === 'SUCCEEDED' &&
+      command.data.finished_at &&
+      Date.now() - Date.parse(command.data.finished_at) >= 3_000 &&
+      activeId === run?.targetId,
+  );
   const sawHandoff = Boolean(run && activeId && activeId !== run.targetId);
   const modePreserved = Boolean(run && sawHandoff && control?.mode === 'AUTO');
-  const finished = sawHandoff && modePreserved;
-  const failed = commandFailed || commandFinishedWithoutHandoff;
+  const targetReport = run ? drive?.vm_apps?.[run.targetId]?.autonomous : null;
+  const targetLifecycle = targetReport?.lifecycle_source.status === 'fresh' ? targetReport.lifecycle : null;
+  const realtimeDegraded = Boolean(
+    run && targetLifecycle?.readiness === 'NOT_READY' && targetLifecycle.reason === 'CALCULATION_FAILED',
+  );
+  const targetAlive = Boolean(run && drivingVms.find((vm) => vm.vm_id === run.targetId)?.state === 'running');
+  const activeCommandGeneration = drive?.apps?.autonomous?.last_command?.generation ?? null;
+  const controlGeneration = control?.generation ?? null;
+  const appliedGeneration = drive?.vehicle?.applied_generation ?? null;
+  const generationConsistent = Boolean(
+    modePreserved &&
+      controlGeneration != null &&
+      activeCommandGeneration === controlGeneration &&
+      (appliedGeneration == null || appliedGeneration === controlGeneration),
+  );
+  const returnedAsStandby = Boolean(
+    command.data?.status === 'SUCCEEDED' &&
+      sawHandoff &&
+      targetAlive &&
+      targetLifecycle?.phase === 'WAITING' &&
+      targetLifecycle.readiness === 'QUALIFIED',
+  );
+  const finished = sawHandoff && modePreserved && generationConsistent && returnedAsStandby;
+  const failed = commandFailed || handoffGraceExpired;
   const unavailableReason = !controlFresh
     ? '주행 제어 상태가 최신이 아닙니다.'
     : control?.mode !== 'AUTO'
@@ -187,6 +215,7 @@ function DelayScenario() {
           startedAt: submitted.submitted_at,
           delayMs: submitted.delay_ms,
           durationS: submitted.duration_s,
+          initialGeneration: control?.generation ?? null,
         }),
     });
   };
@@ -277,14 +306,24 @@ function DelayScenario() {
                 }
               />
               <ProgressStep
+                done={realtimeDegraded}
+                failed={handoffGraceExpired && !realtimeDegraded}
+                title="Deadline miss와 준비 상태 악화"
+                detail={
+                  realtimeDegraded
+                    ? `${targetLifecycle?.phase} · ${appReasonLabel(targetLifecycle?.reason ?? 'CALCULATION_FAILED')}`
+                    : '활성 VM의 CALCULATION_FAILED lifecycle 보고를 기다리는 중입니다.'
+                }
+              />
+              <ProgressStep
                 done={sawHandoff}
-                failed={commandFinishedWithoutHandoff}
+                failed={handoffGraceExpired}
                 title="백업 VM으로 제어권 승계"
                 detail={
                   sawHandoff
                     ? `${run.targetName}에서 ${activeVm?.name ?? activeId}으로 전환됐습니다.`
-                    : commandFinishedWithoutHandoff
-                      ? '지연 명령은 끝났지만 active_vm_id 변경을 확인하지 못했습니다.'
+                    : handoffGraceExpired
+                      ? '지연 명령 종료 후 유예 시간 내 active_vm_id 변경을 확인하지 못했습니다.'
                       : '반복 deadline miss 판정과 active_vm_id 변경을 기다리는 중입니다.'
                 }
               />
@@ -293,6 +332,24 @@ function DelayScenario() {
                 failed={sawHandoff && control?.mode !== 'AUTO'}
                 title="AUTO 주행 유지"
                 detail={`시작: ${run.initialMode ? MODE_LABEL[run.initialMode] : '미확인'} · 현재: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`}
+              />
+              <ProgressStep
+                done={generationConsistent}
+                failed={Boolean(sawHandoff && control?.mode === 'AUTO' && !generationConsistent)}
+                title="Generation 일관성 확인"
+                detail={`시작 gen ${run.initialGeneration ?? '미확인'} · 제어 gen ${controlGeneration ?? '미확인'} · 명령 gen ${activeCommandGeneration ?? '미확인'} · 차량 적용 gen ${appliedGeneration ?? '미확인'}`}
+              />
+              <ProgressStep
+                done={returnedAsStandby}
+                failed={Boolean(command.data?.status === 'SUCCEEDED' && !targetAlive)}
+                title="장애 VM 예비 상태 복귀"
+                detail={
+                  returnedAsStandby
+                    ? '장애 VM은 실행 상태를 유지하며 WAITING · QUALIFIED 예비 상태로 복귀했습니다.'
+                    : targetLifecycle
+                      ? `${targetLifecycle.phase} · ${targetLifecycle.readiness}${targetLifecycle.reason ? ` · ${appReasonLabel(targetLifecycle.reason)}` : ''}`
+                      : '장애 종료 후 lifecycle 복귀를 기다리는 중입니다.'
+                }
               />
             </ol>
           </div>
