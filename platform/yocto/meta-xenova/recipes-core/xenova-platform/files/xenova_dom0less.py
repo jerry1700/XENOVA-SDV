@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from xenova_runtime import PlatformError
-from xenova_vm import guest_kind, has_network, regular_asset, validate_record
+from xenova_vm import DomainIdentityError, guest_kind, has_network, regular_asset, validate_record
 
 
 FACTORY_GUESTS = ('debian-dev', 'zephyr-drive-a', 'zephyr-drive-b')
@@ -58,17 +58,22 @@ def _boot_inventory(platform, deadline):
     return domains
 
 
+def _factory(platform):
+    manifest = json.loads(regular_asset(platform.data, '.xenova-install.json').read_text())
+    guests = manifest['dom0less']['guests']
+    identities = json.loads(regular_asset(platform.data, '.first-install-state.json').read_text())['identities']
+    if set(guests) != set(FACTORY_GUESTS) or set(identities) != set(guests):
+        raise PlatformError('invalid dom0less factory roles')
+    return guests, identities
+
+
 def prepare(platform, records, deadline):
     """Called under the VM lock after first registration, before CPU prepare."""
     if not enabled():
         return
     execution = platform.execution()
     execution.gate()
-    manifest = json.loads(regular_asset(platform.data, '.xenova-install.json').read_text())
-    guests = manifest['dom0less']['guests']
-    state = json.loads(regular_asset(platform.data, '.first-install-state.json').read_text())
-    if set(guests) != set(FACTORY_GUESTS) or set(state['identities']) != set(guests):
-        raise PlatformError('invalid dom0less factory roles')
+    guests, identities = _factory(platform)
 
     path = platform.runtime / 'dom0less.json'
     owned = receipts(platform)
@@ -80,7 +85,7 @@ def prepare(platform, records, deadline):
     for key in FACTORY_GUESTS:
         guest = guests[key]
         handle = str(UUID(hex=guest['boot_id']))
-        identity = state['identities'][key]['uuid']
+        identity = identities[key]['uuid']
         record = records.get(key)
         prior = owned.get(key)
         if prior and prior['phase'] in ('ready', 'discarded'):
@@ -143,6 +148,69 @@ def prepare(platform, records, deadline):
                 raise PlatformError(f'{key}: excluded factory boot domain is still present')
         owned[key]['phase'] = 'ready' if keep else 'discarded'
         save()
+
+
+def _check_unattached(platform, domid, deadline):
+    """Check frontend and dom0 backend nodes, including incomplete hotplug."""
+    def children(path):
+        return set(platform.timed_command(['xenstore-list', path], deadline).splitlines())
+
+    domains = children('/local/domain')
+    if '0' not in domains:
+        raise PlatformError('dom0 missing from XenStore; boot domain devices unverified')
+    guest = '/local/domain/' + domid
+    # init-dom0less creates device/suspend before any platform hotplug.
+    attached = domid in domains and 'device' in children(guest) and children(guest + '/device') - {'suspend'}
+    backend = '/local/domain/0/backend'
+    if attached or ('backend' in children('/local/domain/0') and
+                    any(domid in children(backend + '/' + kind) for kind in children(backend))):
+        raise PlatformError(f'factory boot domain {domid} has devices; refusing discard')
+
+
+def discard_unadopted(platform, deadline):
+    """Dispose only proven unattached boot domains under the shutdown VM lock."""
+    if not enabled():
+        return
+    guests, identities = _factory(platform)
+    targets = {key: (str(UUID(guests[key]['boot_id'])), str(UUID(identities[key]['uuid'])))
+               for key in FACTORY_GUESTS}
+    identifiers = {value for pair in targets.values() for value in pair}
+    if len(identifiers) != 2 * len(targets):
+        raise DomainIdentityError('duplicate factory boot UUID during shutdown')
+    owned = receipts(platform)
+    execution = platform.execution()
+    inventory = _boot_inventory(platform, deadline)
+    for key, (handle, identity) in targets.items():
+        proof = owned.get(key)
+        raw = inventory.get(handle)
+        row = raw or inventory.get(identity)
+        if not row or (not raw and not proof):
+            continue  # Ordinary registered execution or absent factory domain.
+        if not row['domid'] or (raw and identity in inventory):
+            raise DomainIdentityError(f'{key}: ambiguous factory boot domain during shutdown')
+        if execution.run_record({'uuid': identity}) is not None:
+            continue  # A launch may already have submitted hotplug. Apply normal stop policy.
+        phases = ('registering', 'discarding') if raw else ('registering', 'discarding', 'ready')
+        if proof and (proof['phase'] not in phases or proof['uuid'] != identity or proof['domid'] != row['domid']):
+            continue  # A stale receipt does not authorize disposal of a replacement.
+        names = ('(null)',) if raw else ('(null)', key)
+        if row['name'] not in names:
+            raise DomainIdentityError(f'{key}: factory boot name changed during shutdown')
+        expected = execution.unique(row, deadline)
+        if proof and proof['xen_unique_id'] != expected:
+            continue
+        domid = str(row['domid'])
+        _check_unattached(platform, domid, deadline)
+        locator = handle if raw else identity
+        current = _boot_inventory(platform, deadline)
+        if (current.get(locator) != row or (raw and identity in current)
+                or execution.unique(row, deadline) != expected):
+            raise DomainIdentityError(f'{key}: factory boot incarnation changed before discard')
+        platform.timed_command(['xl', 'destroy', domid], deadline)
+        after = _boot_inventory(platform, deadline)
+        if handle in after or identity in after or any(r['domid'] == row['domid'] for r in after.values()):
+            raise PlatformError(f'{key}: factory boot domain removal is unconfirmed')
+        execution.event('factory-boot-domain-discarded', details={'id': key, 'domid': row['domid']})
 
 
 def prepare_cpu(platform, sample, policy):

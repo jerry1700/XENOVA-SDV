@@ -145,6 +145,9 @@ unit 실행의 성공을 현재 것으로 사용하지 않는다. `/run/xenova/b
 unit의 `After/Before`는 순서를 지정하고 `Requires/Wants`는 함께 시작할 의존성을
 지정한다. ordering만으로 준비 성공을 보장하지 않는다. vms는 저장소·first-boot·Xen ready·
 종료 guard를 Requires+After로 요구하고, CPU 준비는 Wants+After로 연결한다.
+종료 guard는 먼저 등록과 Xen toolstack이 준비되기를 요구하고 Xen ready와의 순서를
+유지한다. 이 순서에서 `boot-domains`의 실패는 VM 자동 시작을 차단하며, 종료 guard는
+활성화할 수 있다.
 CPU 정책이 활성화되면 모든 수동/자동 start·reboot·recover_once가 현재 host 준비와
 실제 배치를 다시 검사하므로, 준비 서비스의 active 표시만으로 시작을 허가하지 않는다.
 
@@ -308,11 +311,15 @@ gate가 닫혔다 재열려도 검사 당시 barrier 사본과 달라진 실행�
 
 | 상황 | 종료 계약 |
 |---|---|
+| 조기 Xen 도메인 인계 실패 | 독립 guard가 종료를 시도한다. 현재 이미지의 로더 UUID 또는 이번 부팅 기록에 일치하고 실행 기록과 PV 장치가 없는 조기 도메인만 정리한다. 실제 인계가 시작된 VM은 기존 종료 정책으로 처리한다. |
 | 시작 실패한 vms batch | 실패 oneshot에는 ExecStop이 실행되지 않음. 성공 실행 scope는 batch cleanup과 분리되고 독립 guard는 host 종료용으로 남음 |
 | 정상 `systemctl stop/restart xenova-vms.service` | 제품 ExecStop의 shutdown-all이 실행됨. VM을 보존하는 단순 batch 중단 명령이 아님 |
 | 개별 `xenova-vm stop` | 그 VM과 소유 실행 프로세스만 정리. 자산·UUID·CPU 예약 유지 |
 | host 종료 | 전체 시작/복구 gate 차단 후 기존 guest별 graceful/refuse/force-allowed 정책과 종료 순서 적용 |
 
+조기 기동 도메인을 정리하기 직전에 Xen 실행 신원을 재확인한다. XenStore 장치 조회가
+실패하거나 대상 신원을 확정할 수 없으면 정리를 거절하고 이유를 `last-stop.json`에 남긴다.
+정리가 확인되면 기존 실행 진단 디렉터리에 `factory-boot-domain-discarded` 사건을 남긴다.
 실패·기한 초과를 자동 force로 바꾸지 않는다. host 종료 guard 자체의 실패/timeout 뒤
 systemd 종료는 계속될 수 있어 남은 backend가 정리될 수 있다. 이 경우까지 guest 보존을
 보장하지 않는다. 단순 시험 batch의 stop 결과를 제품 서비스나 host 종료에 확대하지 않는다.

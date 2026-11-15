@@ -958,6 +958,9 @@ class Platform:
         if deadline is None:
             deadline = self.clock() + timeout
         try:
+            if board:
+                from xenova_dom0less import discard_unadopted
+                discard_unadopted(self, deadline)
             domains = self.domains(deadline=deadline)
             expected = {(d['domid'], d['config']['c_info']['uuid'], d['config']['c_info']['name'])
                         for d in domains if d['domid'] != 0}
