@@ -11,9 +11,11 @@ from hashlib import sha256
 import json
 import math
 
+from ..mapping.alignment import REGISTRATION_MAX_AGE_US, SURVEY_REGISTRATION_MAX_AGE_US
 from ..mapping.local_map import GridSpec
 from ..mapping.map_lattice import GridWindow,RollingPolicy
 from ..mapping.registration import RegistrationProfile
+from ..mapping.survey_course import SurveyCourse
 from ..mapping.wheel_motion import WheelMotionProfile
 from ..perception.adapters import CaptureTiming
 from ..perception.calibration import CalibrationProfile
@@ -30,7 +32,7 @@ from .scene import SurveyProfile
 
 MAX_BYTES = 65536
 TOP = frozenset(('schema_version','vehicle_configuration','calibration_profile_sha256','capture_timing','demo_road_fill','demo_pose_bounds',
-                 'localization','catalog_policy','survey','rolling_roi','sensors','pipeline','targets','parking_aisles','stopping','motion_qualified'))
+                 'localization','catalog_policy','survey','survey_course','rolling_roi','sensors','pipeline','targets','parking_aisles','stopping','motion_qualified'))
 
 
 class MapperProfileError(ValueError):
@@ -173,7 +175,7 @@ class LocalizationLimits:
     yaw_drift_rps: float
 
     def __post_init__(self):
-        _uint(self.registration_valid_for_us,1,1_000_000)
+        _uint(self.registration_valid_for_us,1,SURVEY_REGISTRATION_MAX_AGE_US)
         for name in ('position_drift_mps','yaw_drift_rps'):
             try: _finite(getattr(self,name),maximum=math.inf)
             except OverflowError as error:
@@ -231,6 +233,7 @@ class MapperProfile:
     localization: LocalizationLimits | None
     catalog_policy: CatalogPolicy | None
     survey: SurveyProfile | None
+    survey_course: SurveyCourse | None
     rolling_roi: RollingPolicy | None
     sensors: SensorLimits
     pipeline: PipelineProfile
@@ -243,7 +246,7 @@ class MapperProfile:
 
     def __init__(self,value):
         own=_owned(value)
-        if type(own) is not dict or set(own)-TOP or TOP-{'capture_timing','localization','catalog_policy','survey','rolling_roi','demo_road_fill','demo_pose_bounds'}-set(own) or type(own.get('schema_version')) is not int or own['schema_version']!=1:
+        if type(own) is not dict or set(own)-TOP or TOP-{'capture_timing','localization','catalog_policy','survey','survey_course','rolling_roi','demo_road_fill','demo_pose_bounds'}-set(own) or type(own.get('schema_version')) is not int or own['schema_version']!=1:
             raise MapperProfileError('exact mapper-profile local schema1 required')
         own.setdefault('capture_timing',None)
         _label(own['vehicle_configuration']); _sha(own['calibration_profile_sha256'])
@@ -297,10 +300,16 @@ class MapperProfile:
                     or survey.max_pose_gap_us>sensors.max_gap_us
                     or survey.station_window_us>1_000_000 or survey.atlas_cell_capacity>128*4096):
                 raise MapperProfileError('survey exceeds installed sensors or original observation/window/atlas bounds')
+        course = own.get('survey_course')
+        if course is not None and (localization is None or catalog_policy is None or aisles):
+            raise MapperProfileError('survey course requires localization and an explicit road-only crossing policy')
+        survey_course = None if course is None else _typed(SurveyCourse, course)
+        if localization is not None and survey_course is None:
+            _uint(localization.registration_valid_for_us,1,REGISTRATION_MAX_AGE_US)
         raw=json.dumps(own,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode('ascii')
         if len(raw)>MAX_BYTES: raise MapperProfileError('canonical mapper profile exceeds64KiB')
         for name,item in dict(canonical_bytes=raw,sha256=sha256(raw).hexdigest(),vehicle_configuration=own['vehicle_configuration'],
-                calibration_profile_sha256=own['calibration_profile_sha256'],capture_timing=timing,localization=localization,catalog_policy=catalog_policy,survey=survey,rolling_roi=rolling,sensors=sensors,pipeline=pipeline,
+                calibration_profile_sha256=own['calibration_profile_sha256'],capture_timing=timing,localization=localization,catalog_policy=catalog_policy,survey=survey,survey_course=survey_course,rolling_roi=rolling,sensors=sensors,pipeline=pipeline,
                 targets=target_values,parking_aisles=aisle_values,stopping=stopping,declared_motion_qualified=own['motion_qualified'],
                 demo_road_fill=demo_road_fill,demo_pose_bounds=demo_pose_bounds).items():
             object.__setattr__(self,name,item)

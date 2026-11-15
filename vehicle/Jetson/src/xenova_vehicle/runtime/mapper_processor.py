@@ -556,6 +556,7 @@ class ResidentMapperProcessor:
                 motion_qualified=config.motion_qualified and config.localization_configured,
                 needed_region_factory=needed,cycle_bound_us=config.stopping.cycle_bound_us,
                 completion_bound_us=config.stopping.completion_bound_us,parking_clearance=parking_clearance,
+                survey_arcs=() if config.survey_course is None else config.survey_course.arcs,
                 **({} if self._mapping_draft is None else dict(evidence_observer=self._mapping_draft.observer,
                     roi_reframe=self._mapping_draft.roi_reframe)),**localization)
             if self._mapping_draft is not None:
@@ -598,7 +599,9 @@ class ResidentMapperProcessor:
             scene_draft=None if frame_state is None else frame_state.scene,
             hazard_draft=None if frame_state is None else frame_state.hazard,atlas_owner=self._mapping._atlas,
             tof_overlay=self._tof_obstacles,sensor_snapshot=sensors,demo_road_fill=self._config.demo_road_fill,
-            demo_pose_bounds=self._config.demo_pose_bounds)
+            demo_pose_bounds=self._config.demo_pose_bounds,
+            survey_course=self._config.survey_course,
+            survey_crossing=False if self._config.catalog_policy is None else self._config.catalog_policy.crossing_allowed)
         if built is None:return None,'WORLD_NOT_READY'
         alignment=draft.pipeline._alignment
         trust=decode(lease.trust_bytes,schema.WorldTrust)

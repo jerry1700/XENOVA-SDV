@@ -30,7 +30,7 @@ from ..mapping.local_map import EvidenceGrid, GridSpec, OCCUPIED, SourceGate
 from ..mapping.registration import (PointFeature,SegmentFeature,FrozenReference,
     RegistrationProfile,transform_point,segment_distance,wrap_yaw)
 from ..mapping.odometry import PoseEstimate
-from ..mapping.alignment import MapOdomAlignment
+from ..mapping.alignment import MapOdomAlignment, REGISTRATION_MAX_AGE_US, SURVEY_REGISTRATION_MAX_AGE_US
 from ..mapping.free_schedule import FreeScheduler,StoppingRegion
 
 
@@ -537,7 +537,7 @@ class PerceptionPipeline:
                 motion_qualified=False,needed_mask=None,cycle_bound_us=None,completion_bound_us=None,diagnostics=None,
                 needed_region_factory=None,evidence_observer=None,localization_valid_for_us=None,
                 localization_position_drift_mps=None,localization_yaw_drift_rps=None,roi_reframe=None,
-                parking_clearance=()):
+                parking_clearance=(),survey_arcs=()):
         """원 관측을 처리한다. 선택 clock은 입력과 같은 domain의 실제 완료시각이다.
 
         checkpoint는 계산 owner의 취소/진전 callback이다. 부분 상태를 변경하므로
@@ -570,7 +570,8 @@ class PerceptionPipeline:
         if any(value is not None for value in limits) and not localization_configured:
             raise ValueError('localization validity and both drift bounds must be supplied together')
         if localization_configured:
-            if (type(localization_valid_for_us) is not int or not 1<=localization_valid_for_us<=1_000_000
+            max_valid_us = SURVEY_REGISTRATION_MAX_AGE_US if survey_arcs else REGISTRATION_MAX_AGE_US
+            if (type(localization_valid_for_us) is not int or not 1<=localization_valid_for_us<=max_valid_us
                     or any(type(value) not in (int,float) or not math.isfinite(value) or value<0 for value in limits[1:])):
                 raise ValueError('invalid explicit localization lifetime/drift')
         operational_localization=bool(localization_configured and observation.kind=='LIVE') if type(observation) is PerceptionInput else False
@@ -841,6 +842,20 @@ class PerceptionPipeline:
                         quarantined=False
                 elif conflict:
                     quarantined=True
+        if (survey_arcs and rgb_new and geometry_qualified and operational_localization
+                and pose is not None and not self._restore_pending and not quarantined
+                and (registration is None or registration.status != 'BOUNDED')):
+            from ..mapping.survey_registration import refresh_corner_alignment
+            imported = refresh_corner_alignment(self._last_tape, raw_pose, pose, self._alignment,
+                                                survey_arcs, now_us=now_us)
+            if imported is not None:
+                corrected, alignment = imported
+                if (corrected.sample.position_error_m <= self.profile.registration.max_position_error_m
+                        and corrected.sample.yaw_error_rad <= self.profile.registration.max_yaw_error_rad):
+                    pose = corrected
+                    self._previous_propagation_anchor = self._propagation_anchor
+                    self._propagation_anchor = self._alignment = alignment
+                    registration_method = 'SURVEY_CORNER'
         map_pose = pose if not quarantined and not self._restore_pending and self._alignment is not None else None
         odometry_rejection=None
         if pose is not None and (pose.sample.position_error_m>self.profile.registration.max_position_error_m
