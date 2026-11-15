@@ -61,7 +61,7 @@ vi.mock('../api/queries', () => ({
       ],
     },
   }),
-  useStartVmCrash: () => vmCrash,
+  useStartActiveVmCrash: () => vmCrash,
   useStartActiveDriveAutoDelay: () => autoDelay,
     useStartStress: () => stress,
   useStartActiveAppExit: () => appExit,
@@ -227,6 +227,14 @@ describe('장애 시연 1', () => {
     show();
     expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
     expect(screen.getByText('현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.')).toBeInTheDocument();
+  });
+
+  it('AUTO 자율주행 상태가 아니면 VM 장애 시연을 시작할 수 없다', () => {
+    driveState.mode = 'MANUAL';
+    driveState.activeApp = 'manual';
+    show();
+    expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
+    expect(screen.getByText('자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.')).toBeInTheDocument();
   });
 
   it('배포 API가 없으면 별도 문구로 안내한다', () => {

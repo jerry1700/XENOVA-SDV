@@ -10,12 +10,12 @@ import {
   useEvents,
   useMetrics,
   usePerceptionFaultOperation,
+  useStartActiveVmCrash,
   useStartActiveDriveAutoDelay,
   useStartActiveAppExit,
   useStartStress,
   useStartAutoInputUnavailable,
   useStartPerceptionBlock,
-  useStartVmCrash,
   useVms,
 } from '../api/queries';
 import type { PerceptionFaultOperation, Vm } from '../api/types';
@@ -44,6 +44,10 @@ interface Run {
   initialMode: DriveMode | null;
   commandId: string;
   startedAt: string;
+}
+
+interface CrashRun extends Run {
+  initialBootId: string | null;
 }
 
 interface DelayRun extends Run {
@@ -1277,7 +1281,7 @@ function VmCrashScenario() {
   const vms = useVms();
   const { drive, socket } = useDrive();
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [run, setRun] = useState<Run | null>(null);
+  const [run, setRun] = useState<CrashRun | null>(null);
   const drivingVms = useMemo(
     () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
     [vms.data?.items],
@@ -1287,7 +1291,7 @@ function VmCrashScenario() {
   const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
   const target = run ? drivingVms.find((vm) => vm.vm_id === run.targetId) : undefined;
   const controlFresh = socket === 'open' && control != null && drive?.source?.status === 'fresh';
-  const start = useStartVmCrash(activeVm?.vm_id ?? '');
+  const start = useStartActiveVmCrash();
   const command = useCommandStatus(run?.targetId ?? '', run?.commandId ?? null, true);
   const events = useEvents({ vm_id: run?.targetId ?? '__not-started__', limit: 30 });
 
@@ -1305,13 +1309,18 @@ function VmCrashScenario() {
     (event) => event.type === 'recovery.completed' || event.type === 'recovery.recovered',
   );
   const recoveryFailed = runEvents.some((event) => event.type === 'recovery.failed');
-  const recovered = Boolean(run && sawFailure && target?.state === 'running' && recoveryFinished);
-  const modePreserved = Boolean(run && sawHandoff && control?.mode === run.initialMode);
-  const finished = recovered && sawHandoff && modePreserved;
+  const recoveredBootId = run ? drive?.vm_apps?.[run.targetId]?.autonomous?.boot_id ?? null : null;
+  const bootChanged = Boolean(run?.initialBootId && recoveredBootId && recoveredBootId !== run.initialBootId);
+  const recovered = Boolean(run && sawFailure && target?.state === 'running' && recoveryFinished && bootChanged);
+  const modePreserved = Boolean(run && sawHandoff && control?.mode === 'AUTO');
+  const returnedAsStandby = Boolean(recovered && activeId !== run?.targetId);
+  const finished = returnedAsStandby && sawHandoff && modePreserved;
   const unavailableReason = !controlFresh
     ? '주행 제어 상태가 최신이 아닙니다.'
     : !activeVm
       ? '현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.'
+      : control?.mode !== 'AUTO' || control.active_app !== 'autonomous'
+        ? '자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.'
       : activeVm.guest_kind !== 'zephyr'
         ? '현재 활성 VM이 Zephyr가 아닙니다.'
         : activeVm.state !== 'running'
@@ -1322,14 +1331,17 @@ function VmCrashScenario() {
     if (!activeVm || start.isPending) return;
     setRun(null);
     start.mutate(undefined, {
-      onSuccess: (submitted) =>
+      onSuccess: (submitted) => {
+        const submittedTarget = drivingVms.find((vm) => vm.vm_id === submitted.vm_id);
         setRun({
-          targetId: activeVm.vm_id,
-          targetName: activeVm.name,
+          targetId: submitted.vm_id,
+          targetName: submittedTarget?.name ?? submitted.vm_id,
           initialMode: control?.mode ?? null,
+          initialBootId: drive?.vm_apps?.[submitted.vm_id]?.autonomous?.boot_id ?? null,
           commandId: submitted.command_id,
           startedAt: submitted.submitted_at,
-        }),
+        });
+      },
     });
   };
 
@@ -1452,8 +1464,18 @@ function VmCrashScenario() {
                 title="장애 VM 자동 복구"
                 detail={
                   recovered
-                    ? '복구 완료 이벤트와 running 상태를 모두 확인했습니다.'
+                    ? `복구 완료, running 상태와 새 boot ID(${recoveredBootId?.slice(0, 8)})를 확인했습니다.`
                     : `현재 대상 상태: ${target ? STATE_LABEL[target.state] : '미확인'}`
+                }
+              />
+              <ProgressStep
+                done={returnedAsStandby}
+                failed={Boolean(recovered && activeId === run.targetId)}
+                title="예비 VM으로 복귀"
+                detail={
+                  returnedAsStandby
+                    ? '복구된 VM이 현재 제어권을 빼앗지 않고 예비 상태로 복귀했습니다.'
+                    : '복구 후 active_vm_id가 백업 VM에 유지되는지 확인하는 중입니다.'
                 }
               />
             </ol>
