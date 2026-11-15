@@ -9,6 +9,7 @@ const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: 
 const inputFault = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const stress = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const appExit = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const txBlock = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const inputStatus = vi.hoisted(() => ({ data: undefined as unknown }));
 const autoDelay = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const driveState = vi.hoisted(() => ({
@@ -65,6 +66,7 @@ vi.mock('../api/queries', () => ({
   useStartActiveDriveAutoDelay: () => autoDelay,
   useStartStress: () => stress,
   useStartActiveAppExit: () => appExit,
+  useStartActiveAutoTxBlock: () => txBlock,
   useMetrics: () => ({ data: { items: [] } }),
   useStartAutoInputUnavailable: () => inputFault,
   useCommandStatus: (vmId: string) => (vmId === 'vm-a' && inputStatus.data ? inputStatus : commandStatus),
@@ -367,5 +369,47 @@ describe('장애 시연 4', () => {
     fireEvent.click(screen.getByRole('button', { name: /시연 4/ }));
     expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
     expect(screen.getByText('자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('장애 시연 5', () => {
+  beforeEach(() => {
+    txBlock.mutate.mockReset();
+    driveState.activeId = 'vm-a';
+    driveState.mode = 'AUTO';
+    driveState.activeApp = 'autonomous';
+  });
+
+  it('활성 AUTO VM의 결과 송신 차단을 요청한다', () => {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 5/ }));
+    expect(screen.getByRole('heading', { name: 'AUTO 결과 송신 차단과 백업 승계' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('차단 시간'), { target: { value: '15' } });
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    expect(txBlock.mutate).toHaveBeenCalledWith(
+      { duration_s: 15 },
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+});
+
+describe('장애 시연 7', () => {
+  beforeEach(() => {
+    vmCrash.mutate.mockReset();
+    appExit.mutate.mockReset();
+    driveState.activeId = 'vm-a';
+    driveState.mode = 'AUTO';
+    driveState.activeApp = 'autonomous';
+  });
+
+  it('첫 단계로 활성 AUTO VM crash를 요청한다', () => {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 7/ }));
+    expect(screen.getByRole('heading', { name: 'AUTO 이중 장애와 안전 모드 전환' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
+    expect(vmCrash.mutate).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
   });
 });
