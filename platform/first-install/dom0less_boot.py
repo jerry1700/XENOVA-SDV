@@ -153,12 +153,15 @@ def render(guests, shared_cpus):
             size = asset['bytes']
             lines.extend([
                 f'fatload mmc ${{devnum}}:1 0x{start:x} {filename} 0x{size + 1:x} || exit 1',
-                f'itest.l 0x${{filesize}} == 0x{size:x} || exit 1',
-                f'crc32 0x{start:x} 0x{size:x} 0x07fffff8 || exit 1',
-                f'itest.l *0x07fffff8 == 0x{asset["crc32"]} || exit 1',
-                f'fdt mknode {node} {module} || exit 1',
-                f'fdt set {node}/{module} compatible "multiboot,{kind}" "multiboot,module" || exit 1',
-                f'fdt set {node}/{module} reg <0x{start:x} 0x{size:x}> || exit 1',
+                f'if itest.l 0x${{filesize}} == 0x{size:x} && crc32 0x{start:x} 0x{size:x} 0x07fffff8 '
+                f'&& itest.l *0x07fffff8 == 0x{asset["crc32"]}; then',
+                f'    fdt mknode {node} {module} || exit 1',
+                f'    fdt set {node}/{module} compatible "multiboot,{kind}" "multiboot,module" || exit 1',
+                f'    fdt set {node}/{module} reg <0x{start:x} 0x{size:x}> || exit 1',
+                'else',
+                f'    echo Xenova: size or CRC check failed for {filename}',
+                '    exit 1',
+                'fi',
             ])
             if name == 'debian-dev' and kind == 'kernel':
                 lines.append(f'fdt set {node}/{module} bootargs '

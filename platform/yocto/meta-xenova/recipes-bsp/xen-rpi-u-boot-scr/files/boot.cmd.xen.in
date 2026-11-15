@@ -78,11 +78,29 @@ if test "${xenova_debug}" = "1"; then
 fi
 
 # 완성 이미지의 FAT에만 기본 게스트를 등록하는 보조 스크립트가 있다.
-# boot.scr의 실행 버퍼와 겹치지 않는 위치에서 읽는다.
+# 스크립트 버퍼와 게스트 이미지 사이에 별도의 working FDT를 만든다.
+setenv xenova_boot_fdt ${fdt_addr_r} || exit 1
 if test "${xenova_skip_boot_guests}" != "1" && size mmc ${devnum}:1 xenova-guests.scr; then
-    fatload mmc ${devnum}:1 0x07000000 xenova-guests.scr || exit 1
-    source 0x07000000 || exit 1
+    # 256 KiB FDT 전체가 0x07000000 스크립트 버퍼보다 앞에 있어야 한다.
+    if itest.l ${fdt_addr_r} -gt 0x06fc0000; then
+        echo Xenova: base Device Tree address is outside the early boot layout, booting dom0 only
+    elif fdt move ${fdt_addr_r} 0x07800000 0x00040000; then
+        if fatload mmc ${devnum}:1 0x07000000 xenova-guests.scr 0x00100001 && itest.l 0x${filesize} -le 0x00100000; then
+            if source 0x07000000; then
+                setenv xenova_boot_fdt 0x07800000 || exit 1
+            else
+                echo Xenova: xenova-guests.scr execution failed, booting dom0 only
+            fi
+        else
+            echo Xenova: xenova-guests.scr load failed or exceeds 1 MiB, booting dom0 only
+        fi
+    else
+        echo Xenova: guest Device Tree copy failed, booting dom0 only
+    fi
+    # 도중에 실패하면 수정하기 전 FDT와 dom0 부팅 인자를 다시 선택한다.
+    fdt addr ${xenova_boot_fdt} || exit 1
+    fdt get value dom0_bootargs /chosen xen,dom0-bootargs || exit 1
 fi
 
 echo Boot Xen
-booti ${xen_loadaddr} - ${fdt_addr_r}
+booti ${xen_loadaddr} - ${xenova_boot_fdt}

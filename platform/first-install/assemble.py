@@ -520,13 +520,22 @@ def platform_boot_ok(image, table, output):
         raise ValueError('invalid U-Boot script length')
     script = boot[72:72 + length].decode()
     for marker in ('part uuid mmc ${devnum}:2', 'fatload mmc ${devnum}:1 ${xen_loadaddr} xen',
-                   'fdt move ${fdtcontroladdr} ${fdt_addr_r}', 'booti ${xen_loadaddr} - ${fdt_addr_r}',
+                   'fdt move ${fdtcontroladdr} ${fdt_addr_r}',
                    'fdt rm /soc/mmcnr@7e300000 dmas || exit 1',
                    'fdt rm /soc/mmcnr@7e300000 dma-names || exit 1',
                    'xenova_debug', 'setenv xenova_logargs "loglevel=4 ', 'systemd.show_status=error',
-                   'source 0x07000000 || exit 1', 'xenova-guests.scr'):
+                   'xenova-guests.scr'):
         if marker not in script:
             raise ValueError('platform lacks validated Xen boot/PARTUUID contract: ' + marker)
+    # 기존 게시 WIC도 그대로 조립할 수 있다. 우회는 새 boot.scr을 빌드한 WIC에서 제공한다.
+    boot_paths = (
+        ('source 0x07000000 || exit 1', 'booti ${xen_loadaddr} - ${fdt_addr_r}'),
+        ('if source 0x07000000; then', 'setenv xenova_boot_fdt ${fdt_addr_r}',
+         'fdt move ${fdt_addr_r} 0x07800000', 'fdt addr ${xenova_boot_fdt}',
+         'booti ${xen_loadaddr} - ${xenova_boot_fdt}'),
+    )
+    if not any(all(marker in script for marker in path) for path in boot_paths):
+        raise ValueError('platform lacks validated Xen boot/PARTUUID contract: guest boot path')
     return result
 
 
