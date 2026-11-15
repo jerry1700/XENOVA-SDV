@@ -74,7 +74,7 @@ def prepare(platform, records, deadline):
     owned = receipts(platform)
 
     def save():
-        execution.write(path, {'host_boot_id': execution.host, 'guests': owned})
+        execution.write(path, {'schema_version': '1.0', 'host_boot_id': execution.host, 'guests': owned})
 
     policy = platform.cpu().policy()
     for key in FACTORY_GUESTS:

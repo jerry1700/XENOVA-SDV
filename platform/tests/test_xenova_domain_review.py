@@ -349,6 +349,28 @@ class DomainReviewTest(unittest.TestCase):
         self.assertEqual(results[self.linux['id']]['app_readiness'], 'unknown')
         self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy']) for c in self.xen.calls))
 
+    def test_autostart_rechecks_transient_unknown_after_adoption(self):
+        import xenova_dom0less
+
+        self.live(self.linux)
+        self.p.defaults_path = self.base / 'defaults.json'
+        self.p.defaults_path.write_text(json.dumps({'instances': [self.linux]}))
+
+        def after_adoption(*args, **kwargs):
+            self.xen.states[1] = '------'
+
+        def settle(seconds):
+            self.xen.states[1] = '-b----'
+
+        self.p.sleep = settle
+        with patch.object(xenova_dom0less, 'adopt', side_effect=after_adoption) as adopt:
+            self.cli('autostart')
+
+        adopt.assert_called_once()
+        results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
+        self.assertEqual(results[self.linux['id']]['result'], 'blocked')
+        self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy']) for c in self.xen.calls))
+
     def test_create_result_is_checked_for_paused_domain_without_recovery(self):
         self.xen.states[1] = '--p---'
         error = self.cli_error('start', self.linux['id'], code='RECONCILE_REQUIRED', message='paused')

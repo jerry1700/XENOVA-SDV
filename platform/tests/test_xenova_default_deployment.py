@@ -177,6 +177,7 @@ class DefaultDeploymentTest(unittest.TestCase):
 
     def test_boot_domains_match_handles_and_drop_a_stale_firmware_before_adoption(self):
         import xenova_dom0less as early
+        from xenova_execution import read_record
 
         keys = early.FACTORY_GUESTS
         boot_ids = {key: str(UUID(int=index)) for index, key in enumerate(keys, 1)}
@@ -210,7 +211,7 @@ class DefaultDeploymentTest(unittest.TestCase):
         execution.host = "test-boot"
         execution.unique.side_effect = lambda row, deadline: str(100 + row["domid"])
         execution.boot_decision.return_value = {"start": True}
-        execution.read.side_effect = lambda path: json.loads(path.read_text()) if path.exists() else None
+        execution.read.side_effect = read_record
         execution.write.side_effect = lambda path, value: path.write_text(json.dumps(value))
         mutations = []
 
