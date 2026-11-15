@@ -33,7 +33,7 @@ def generate(profile,output):
         if type(cfg[key]) is not int or not 0<cfg[key]<=2**31-1:raise ValueError('positive bounded '+key)
     if cfg['guest_drift_ppm']>=1000000 or cfg['guest_timestamp_error_us']>=1000000:raise ValueError('explicit paired guest clock bounds')
     if cfg['direction_phase_us']>10000000:raise ValueError('provisional direction phase cap')
-    if (cfg['avoid_episode_us']>40000000 or cfg['avoid_phase_us']>10000000 or cfg['avoid_progress_us']>2000000 or
+    if (cfg['avoid_episode_us']>40000000 or cfg['avoid_phase_us']>15000000 or cfg['avoid_progress_us']>2000000 or
             cfg['avoid_settle_us']>cfg['avoid_phase_us'] or cfg['avoid_travel_m']>6 or cfg['avoid_policy'] not in (1,2)):
         raise ValueError('original avoidance hard caps')
     if cfg['parking_goal_distance']>cfg['goal_distance'] or cfg['parking_goal_heading']>cfg['goal_heading']:

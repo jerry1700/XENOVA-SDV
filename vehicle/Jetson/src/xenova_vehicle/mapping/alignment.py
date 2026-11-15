@@ -12,6 +12,10 @@ from .registration import transform_point, wrap_yaw
 from .wheel_motion import relative_wheel_bounds, wheel_path_length_bound
 
 
+REGISTRATION_MAX_AGE_US = 1_000_000
+SURVEY_REGISTRATION_MAX_AGE_US = 25_000_000
+
+
 @dataclass(frozen=True)
 class MapOdomAlignment:
     pose: tuple[float, float, float]
@@ -38,7 +42,7 @@ class MapOdomAlignment:
         if any(value is None for value in metadata):raise ValueError('alignment observation/revision/validity/drift must be supplied together')
         _interval(self.observed_j_interval)
         if (type(self.registration_revision) is not int or not 1<=self.registration_revision<2**63
-                or type(self.valid_for_us) is not int or not 1<=self.valid_for_us<=1_000_000
+                or type(self.valid_for_us) is not int or not 1<=self.valid_for_us<=SURVEY_REGISTRATION_MAX_AGE_US
                 or self.observed_j_interval[0]+self.valid_for_us>=2**64
                 or any(type(value) not in (int,float) or not math.isfinite(value) or value<0
                        for value in (self.position_drift_mps,self.yaw_drift_rps))):

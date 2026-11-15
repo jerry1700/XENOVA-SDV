@@ -244,7 +244,7 @@ void lp_index_build(struct lp_collision_index *index,const dw_world *w,const str
  tr_index_lanes(index,w,c);
  if(w->left_boundary_count>=2&&w->left_boundary_count<=TR_BASIS_POINTS&&
     w->left_boundary_count==w->right_boundary_count){
-  index->road_allowance=lp_lane_boundary_allowance_m(c);
+  index->road_allowance=lp_road_boundary_allowance_m(c);
   if(index->road_allowance>0)road_vertices(w,index->road_allowance,index->road_with_allowance);
  }
  for(unsigned y=0;y<w->height;y++)for(unsigned x=0;x<w->width;x++)
@@ -306,7 +306,7 @@ static enum lp_result footprint_geometry(const dw_world *w,dw_pose pose,float ex
  if(!obstacle_evidence&&!(space&&space->parking)){
  dw_point road_buffer[2*TR_BASIS_POINTS];
  unsigned vertices=2*w->left_boundary_count;
- float tape=task&&task->active&&!(space&&space->exiting)?lp_lane_boundary_allowance_m(c):0;
+ float tape=task&&task->active&&!(space&&space->exiting)?lp_road_boundary_allowance_m(c):0;
  const struct lp_collision_index *geometry=b->collision_index;
  const dw_point *road=road_buffer;
  if(tape>0&&geometry&&geometry->world==w&&geometry->sequence==w->sequence&&geometry->road_allowance==tape)
@@ -893,6 +893,7 @@ static bool make_lane_guide(const struct tr_view *view,const struct lp_config *c
  const dw_point *p=view->points;
  float arc[32]={0},bend_inset[32]={0};
  float reach=fmaxf(c->front,c->rear),scale=1.06f*reach*reach*.25f;
+ float turn_radius=c->wheelbase/tanf(c->max_steer);
  bool left=false,right=false;
  for(unsigned i=1;i<view->count;i++)arc[i]=arc[i-1]+hypotf(p[i].x-p[i-1].x,p[i].y-p[i-1].y);
  for(unsigned i=1;i+1<view->count;i++){
@@ -902,7 +903,15 @@ static bool make_lane_guide(const struct tr_view *view,const struct lp_config *c
   float curvature=2*(ax*by-ay*bx)/lengths;
   left|=curvature>.15f;right|=curvature<-.15f;
   /* Balance the inside flank with the outside bumper corner at this station. */
-  bend_inset[i]=scale*curvature/(1+c->half_width*fabsf(curvature));
+  float inset=scale*curvature/(1+c->half_width*fabsf(curvature));
+  /* Keep steering reserve when the target lane is already close to the
+   * minimum radius. A slight outward offset may be required in that case. */
+  if(fabsf(curvature)>1e-5f&&inset_scale>0){
+   float radial_reserve=.015f;
+   float limit=fmaxf(-radial_reserve,1/fabsf(curvature)-turn_radius-radial_reserve)/inset_scale;
+   inset=copysignf(1,curvature)*fminf(fabsf(inset),limit);
+  }
+  bend_inset[i]=inset;
  }
  if((left&&right)||(inset_scale>1&&!left&&!right))return false;
  float primitive_length=c->primitive_speed*c->primitive_duration;

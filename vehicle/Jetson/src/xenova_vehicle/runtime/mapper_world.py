@@ -155,7 +155,7 @@ def _current(draft, state, basis, context, source, calibration, sensors, vehicle
 def build_mapping_world(draft, catalog_state, basis, *, context, source, calibration,
                         sensors, current_vehicle, clock_lease, sequence, completed_j_us, published_j_us,
                         stopping=None,scene_draft=None,hazard_draft=None,atlas_owner=None,tof_overlay=None,sensor_snapshot=None,
-                        demo_road_fill=False,demo_pose_bounds=None):
+                        demo_road_fill=False,demo_pose_bounds=None,survey_course=None,survey_crossing=False):
     """원 채택 후보를 build_world에 전달한다. None은 원 자료/기한/표현의 NOT_READY다.
 
     sensors는 원 admission의 frozen read-view 또는 기존 owner다. 외부 source 교체 여부와
@@ -215,7 +215,12 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
             and model.source.stamp == draft.frame.observation.rgb.stamp
             and association is not None and association.source is model.source
             and association.status in ('NEW','UNIQUE'))
-        if stopping is None:
+        surveyed = survey_course is not None and retained is None and catalog_state.view.parking is None
+        if surveyed:
+            # The admitted model supplies lane identity. Survey geometry is
+            # cut below at the same admitted pose and keeps the observed grid.
+            publication_road, publication_lane = lane_publication(basis, model)
+        elif stopping is None:
             _need(current_geometry and catalog_state.view.road_basis is basis)
             publication_road, publication_lane = lane_publication(basis, model)
         else:
@@ -273,6 +278,10 @@ def build_mapping_world(draft, catalog_state, basis, *, context, source, calibra
                   and inventory.source_clock == snapshot['clock_id'])
             # 원 publication 후보의 geometry/age/UNKNOWN/cap을 다시 산출하지 않는다.
             value = inventory.apply_to_template(value)
+        if surveyed:
+            from .survey_world import build_survey_world
+            return build_survey_world(snapshot, value, source=bound, course=survey_course,
+                pose=(mapped.x, mapped.y, mapped.yaw), crossing=survey_crossing, static_retained=static)
         built = build_world(snapshot, value, source=bound, preferred_road=mask,static_retained=static)
         _need(b''.join(struct.pack('<ff', p.x, p.y) for p in built.message().reference) == basis.points_f32)
         return built

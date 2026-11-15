@@ -27,15 +27,18 @@ struct lp_config {
  deviation_cost,curvature_cost,switch_cost,plan_horizon,heuristic_weight,heading_weight,tracking_guard,goal_straight_m;
  float max_reverse_velocity;
  /* Tape controls boundary geometry. Zero narrow-lane speed disables its speed cap. */
- float lane_tape_half_width_m,lane_tape_overhang_m,narrow_lane_speed_mps;
+ float lane_tape_half_width_m,lane_tape_overhang_m,lane_divider_allowance_m,narrow_lane_speed_mps;
  float avoid_travel_m,avoid_progress_m,avoid_pass_margin_m,avoid_heading_rad,avoid_steering_rad;
  float parking_goal_distance,parking_goal_heading,parking_seed_inward_m,parking_yaw_seed_rad,min_control_speed;
  float parking_clearance_sufficient,parking_clearance_band,parking_stationary_speed,parking_yaw_rate;
  unsigned node_limit,expansion_limit,collision_limit,steering_levels,clock_error_us,clock_lease_us,planner_budget_us,state_period_us,direction_phase_us,guest_timestamp_error_us,guest_drift_ppm;
  unsigned avoid_episode_us,avoid_phase_us,avoid_progress_us,avoid_settle_us,avoid_policy,parking_final_window_us;
 };
-static inline float lp_lane_boundary_allowance_m(const struct lp_config *config){
+static inline float lp_road_boundary_allowance_m(const struct lp_config *config){
  return config->lane_tape_half_width_m+config->lane_tape_overhang_m;
+}
+static inline float lp_divider_allowance_m(const struct lp_config *config){
+ return config->lane_divider_allowance_m>0?config->lane_divider_allowance_m:lp_road_boundary_allowance_m(config);
 }
 struct lp_primitive_point { float x,y,yaw,steer; };
 struct lp_assets { const char *id,*sha256; float resolution,wheelbase,max_steer,steer_rate,speed,duration;
@@ -43,7 +46,7 @@ struct lp_assets { const char *id,*sha256; float resolution,wheelbase,max_steer,
 struct lp_collision_index { const dw_world *world;uint64_t sequence,rows[64],shoulder[64];float cell_age_ms,live_age_us;bool lane_pair_simple;
  uint64_t refined[64];
  float road_allowance;dw_point road_with_allowance[2*TR_BASIS_POINTS];
- float lane_allowance;bool lane_edges_ready;struct tr_lane_edges lane_edges[2]; };
+ float outer_allowance,divider_allowance;bool lane_edges_ready;struct tr_lane_edges lane_edges[2]; };
 struct lp_budget { uint64_t deadline_us; int (*clock)(void *,uint64_t *); bool (*cancelled)(void *);void *context;
  const struct lp_collision_index *collision_index; };
 struct lp_metrics { uint64_t expanded,primitives,footprints,cells,road_checks,cancel_checks,clock_checks;
