@@ -33,8 +33,11 @@ export interface DriveSource {
 }
 
 export interface VmAppReport {
+  /** scoped app envelope identity; 앱 재시작과 VM 재부팅을 구분한다. */
+  boot_id?: string | null;
+  app_instance_id?: string | null;
   lifecycle: {
-    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'RESIDUAL';
+    phase: 'WAITING' | 'ACTIVATING' | 'EXECUTING' | 'STOPPING' | 'STOPPED' | 'RESIDUAL';
     readiness: 'QUALIFIED' | 'READY' | 'NOT_READY';
     reason: string | null;
   } | null;

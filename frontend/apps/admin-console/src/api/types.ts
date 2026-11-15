@@ -172,6 +172,7 @@ export interface VmResourceUpdateResult {
 /** POST /api/v1/vms/{id}/stress/cpu — workers 1~4, duration_s 1~120 */
 export interface CpuStressRequest {
   workers: number;
+  load_percent?: number;
   duration_s: number;
 }
 

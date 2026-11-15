@@ -275,6 +275,17 @@ export function useStartAppExit(vmId: string) {
   });
 }
 
+/** 최신 AUTO 제어 주체는 백엔드가 결정한다. 프론트가 본 오래된 active_vm_id를 보내지 않는다. */
+export function useStartActiveAppExit() {
+  return useMutation({
+    mutationFn: () =>
+      request<AppExitCommand>('/api/v1/drive/faults/app-exit', {
+        method: 'POST',
+        body: { app_id: 'autonomous' },
+      }),
+  });
+}
+
 export function useStartDomainKill(vmId: string) {
   const client = useQueryClient();
   return useMutation({

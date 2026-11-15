@@ -7,6 +7,8 @@ import { DemoPage, failureText, perceptionFaultErrorText } from './DemoPage';
 
 const vmCrash = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const inputFault = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const stress = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
+const appExit = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const inputStatus = vi.hoisted(() => ({ data: undefined as unknown }));
 const autoDelay = vi.hoisted(() => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }));
 const driveState = vi.hoisted(() => ({
@@ -15,6 +17,9 @@ const driveState = vi.hoisted(() => ({
   activeApp: 'autonomous' as string,
   age: 100,
   inputReason: null as string | null,
+  appPhase: 'EXECUTING' as string,
+  appInstance: 'instance-a-1',
+  bootId: 'boot-a',
 }));
 /** 명령 상태 조회 결과 (기본: 응답 전) */
 const commandStatus = vi.hoisted(() => ({ data: undefined as unknown }));
@@ -38,6 +43,15 @@ vi.mock('../api/queries', () => ({
           guest_kind: 'zephyr',
         },
         {
+          vm_id: 'vm-interaction',
+          name: 'Interaction VM',
+          role: 'interaction',
+          state: 'running',
+          guest_kind: 'linux',
+          agent_status: 'ONLINE',
+          memory_mib: 512,
+        },
+        {
           vm_id: 'vm-b',
           name: 'Zephyr 주행 B',
           role: 'backup_drive',
@@ -49,6 +63,9 @@ vi.mock('../api/queries', () => ({
   }),
   useStartVmCrash: () => vmCrash,
   useStartActiveDriveAutoDelay: () => autoDelay,
+    useStartStress: () => stress,
+  useStartActiveAppExit: () => appExit,
+  useMetrics: () => ({ data: { items: [] } }),
   useStartAutoInputUnavailable: () => inputFault,
   useCommandStatus: (vmId: string) => (vmId === 'vm-a' && inputStatus.data ? inputStatus : commandStatus),
   useEvents: () => ({ data: { items: [] } }),
@@ -58,6 +75,7 @@ vi.mock('../api/queries', () => ({
 vi.mock('../layout/DriveContext', () => ({
   useDrive: () => ({
     drive: {
+      source: { status: 'fresh', age_ms: 10 },
       control: {
         mode: driveState.mode,
         active_app: driveState.activeApp,
@@ -68,8 +86,10 @@ vi.mock('../layout/DriveContext', () => ({
       vm_apps: {
         'vm-a': {
           autonomous: {
+            boot_id: driveState.bootId,
+            app_instance_id: driveState.appInstance,
             lifecycle: {
-              phase: 'EXECUTING',
+              phase: driveState.appPhase,
               readiness: driveState.inputReason ? 'NOT_READY' : 'READY',
               reason: driveState.inputReason,
             },
@@ -78,6 +98,8 @@ vi.mock('../layout/DriveContext', () => ({
         },
         'vm-b': {
           autonomous: {
+            boot_id: 'boot-b',
+            app_instance_id: 'instance-b-1',
             lifecycle: { phase: 'WAITING', readiness: 'QUALIFIED', reason: null },
             lifecycle_source: { status: 'fresh', age_ms: 10 },
           },
@@ -109,6 +131,9 @@ describe('장애 시연 1', () => {
     driveState.activeApp = 'autonomous';
     driveState.age = 100;
     driveState.inputReason = null;
+    driveState.appPhase = 'EXECUTING';
+    driveState.appInstance = 'instance-a-1';
+    driveState.bootId = 'boot-a';
     HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
       this.open = true;
     };
@@ -117,9 +142,9 @@ describe('장애 시연 1', () => {
     };
   });
 
-  it('시연 4에서 장애 시간을 정하고 Jetson 인지 차단 API를 호출한다', () => {
+  it('시연 6에서 장애 시간을 정하고 Jetson 인지 차단 API를 호출한다', () => {
     show();
-    fireEvent.click(screen.getByRole('button', { name: /시연 4/ }));
+    fireEvent.click(screen.getByRole('button', { name: /시연 6/ }));
     expect(screen.getByText('Jetson 인지 송신 단절과 수동 전환')).toBeInTheDocument();
     expect(screen.getByText('15 Hz · 정상')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('장애 지속 시간'), { target: { value: '30' } });
@@ -127,16 +152,16 @@ describe('장애 시연 1', () => {
     expect(perceptionBlock.mutate).toHaveBeenCalledWith(30, expect.any(Object));
   });
 
-  it('시연 4 API가 배포되지 않았으면 전용 안내를 표시한다', () => {
+  it('시연 6 API가 배포되지 않았으면 전용 안내를 표시한다', () => {
     expect(
       perceptionFaultErrorText(new ApiError(405, { code: 'METHOD_NOT_ALLOWED', message: '지원하지 않음' })),
     ).toBe('배포된 백엔드에 Jetson 인지 단절 시연 API가 아직 없습니다.');
   });
 
-  it('네 시연 책갈피와 기존 부하 테스트 메뉴를 표시한다', () => {
+  it('일곱 시연 책갈피와 기존 부하 테스트 메뉴를 표시한다', () => {
     show();
     expect(screen.getByRole('link', { name: '부하 테스트' })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /시연 [1-4]/ })).toHaveLength(4);
+    expect(screen.getAllByRole('button', { name: /시연 [1-7]/ })).toHaveLength(7);
   });
 
   it('활성 VM과 두 주행 VM, 현재 모드를 표시한다', () => {
@@ -249,13 +274,12 @@ describe('장애 시연 2', () => {
 
 describe('장애 시연 3', () => {
   beforeEach(() => {
-    inputFault.mutate.mockReset();
+      stress.mutate.mockReset();
     commandStatus.data = undefined;
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
     driveState.activeApp = 'autonomous';
     driveState.age = 100;
-    driveState.inputReason = null;
   });
 
   function selectScenario() {
@@ -263,63 +287,56 @@ describe('장애 시연 3', () => {
     fireEvent.click(screen.getByRole('button', { name: /시연 3/ }));
   }
 
-  it('지속 시간을 조절하고 확인 후 현재 활성 VM에만 명령을 보낸다', () => {
+  it('Interaction VM의 CPU 90% 개별 부하를 시작한다', () => {
     selectScenario();
-    const duration = screen.getByRole('spinbutton', { name: '장애 지속 시간' });
-    fireEvent.change(duration, { target: { value: '50' } });
+    expect(screen.getByRole('heading', { name: 'Interaction VM 자원 폭주와 주행 격리' })).toBeInTheDocument();
+    expect(screen.getAllByText('Interaction VM').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
-    expect(screen.getByText(/한 대의 AUTO 계산 입력만 50초/)).toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '50초 장애 발생' }));
-    expect(inputFault.mutate).toHaveBeenCalledWith(
-      { duration_s: 50 },
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'CPU 90% 부하' }));
+    expect(stress.mutate).toHaveBeenCalledWith(
+      { kind: 'cpu', body: { workers: 1, load_percent: 90, duration_s: 30 } },
       expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
   });
 
-  it('허용 범위를 벗어난 지속 시간과 AUTO가 아닌 상태를 차단한다', () => {
+  it('AUTO가 아니면 격리 시연을 시작할 수 없다', () => {
+    driveState.mode = 'MANUAL';
     selectScenario();
-    fireEvent.change(screen.getByRole('spinbutton', { name: '장애 지속 시간' }), {
-      target: { value: '121' },
-    });
     expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
-    expect(screen.getByText('장애 지속 시간은 1초부터 120초까지 입력해 주세요.')).toBeInTheDocument();
+    expect(screen.getByText('AUTO 주행 중에만 격리 시연을 시작할 수 있습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('장애 시연 4', () => {
+  beforeEach(() => {
+    appExit.mutate.mockReset();
+    commandStatus.data = undefined;
+    driveState.activeId = 'vm-a';
+    driveState.mode = 'AUTO';
+    driveState.activeApp = 'autonomous';
+    driveState.appPhase = 'EXECUTING';
+    driveState.appInstance = 'instance-a-1';
+    driveState.bootId = 'boot-a';
   });
 
-  it('INPUT_UNAVAILABLE와 AUTO를 유지한 VM 승계를 표시한다', () => {
-    inputFault.mutate.mockImplementation(
-      (_: unknown, options?: { onSuccess?: (value: Record<string, unknown>) => void }) =>
-        options?.onSuccess?.({
-          command_id: 'input-command',
-          submitted_at: new Date().toISOString(),
-          duration_s: 50,
-        }),
-    );
-    const { rerender } = render(
-      <ToastProvider>
-        <MemoryRouter>
-          <DemoPage />
-        </MemoryRouter>
-      </ToastProvider>,
-    );
-    const again = () =>
-      rerender(
-        <ToastProvider>
-          <MemoryRouter>
-            <DemoPage />
-          </MemoryRouter>
-        </ToastProvider>,
-      );
-    fireEvent.click(screen.getByRole('button', { name: /시연 3/ }));
+  it('확인 후 백엔드에 활성 AUTO 앱 종료를 요청한다', () => {
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 4/ }));
+    expect(screen.getByRole('heading', { name: '자율주행 앱 종료·재시작과 백업 승계' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '50초 장애 발생' }));
-    driveState.inputReason = 'INPUT_UNAVAILABLE';
-    commandStatus.data = { status: 'RUNNING', error: null };
-    again();
-    expect(screen.getAllByText('INPUT_UNAVAILABLE').length).toBeGreaterThan(0);
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '앱 종료' }));
+    expect(appExit.mutate).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
 
-    driveState.activeId = 'vm-b';
-    driveState.inputReason = null;
-    again();
-    expect(screen.getByText('AUTO 유지 · 승계 완료')).toBeInTheDocument();
+  it('AUTO가 아니면 시연을 차단한다', () => {
+    driveState.mode = 'MANUAL';
+    driveState.activeApp = 'manual';
+    show();
+    fireEvent.click(screen.getByRole('button', { name: /시연 4/ }));
+    expect(screen.getByRole('button', { name: '시연 시작' })).toBeDisabled();
+    expect(screen.getByText('자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.')).toBeInTheDocument();
   });
 });

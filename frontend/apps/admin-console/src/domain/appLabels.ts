@@ -21,6 +21,7 @@ const APP_REASON_LABEL: Readonly<Record<string, string>> = {
   CALCULATION_FAILED: '계산 실패',
   OUTPUT_INVALID: '출력 이상',
   APP_STOPPING: '앱 종료 중',
+  APP_EXITED: '앱 스레드 종료',
   RESOURCE_RETAINED: '자원 회수 대기',
 };
 

@@ -7,6 +7,7 @@ const PHASES = {
   ACTIVATING: '활성화 준비',
   EXECUTING: '실행 중',
   STOPPING: '종료 중',
+  STOPPED: '종료',
   RESIDUAL: '정리 미확정',
 };
 const READINESS = { QUALIFIED: '대기 자격 확인', READY: '계산 준비 확인', NOT_READY: '준비 미충족' };
