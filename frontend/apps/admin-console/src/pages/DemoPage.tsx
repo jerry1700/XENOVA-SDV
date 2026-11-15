@@ -142,6 +142,7 @@ function DelayScenario() {
   const { drive, socket } = useDrive();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [run, setRun] = useState<DelayRun | null>(null);
+  const [handoffTimedOut, setHandoffTimedOut] = useState(false);
   const drivingVms = useMemo(
     () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
     [vms.data?.items],
@@ -158,11 +159,21 @@ function DelayScenario() {
   );
   const delayRunning = command.data?.status === 'RUNNING' || command.data?.status === 'SUCCEEDED';
   const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
+  useEffect(() => {
+    if (
+      !run ||
+      command.data?.status !== 'SUCCEEDED' ||
+      !command.data.finished_at ||
+      activeId !== run.targetId
+    )
+      return;
+    const elapsed = Date.now() - Date.parse(command.data.finished_at);
+    const timer = window.setTimeout(() => setHandoffTimedOut(true), Math.max(0, 3_000 - elapsed));
+    return () => window.clearTimeout(timer);
+  }, [activeId, command.data?.finished_at, command.data?.status, run]);
+
   const handoffGraceExpired = Boolean(
-    command.data?.status === 'SUCCEEDED' &&
-      command.data.finished_at &&
-      Date.now() - Date.parse(command.data.finished_at) >= 3_000 &&
-      activeId === run?.targetId,
+    handoffTimedOut && command.data?.status === 'SUCCEEDED' && activeId === run?.targetId,
   );
   const sawHandoff = Boolean(run && activeId && activeId !== run.targetId);
   const modePreserved = Boolean(run && sawHandoff && control?.mode === 'AUTO');
@@ -177,16 +188,16 @@ function DelayScenario() {
   const appliedGeneration = drive?.vehicle?.applied_generation ?? null;
   const generationConsistent = Boolean(
     modePreserved &&
-      controlGeneration != null &&
-      activeCommandGeneration === controlGeneration &&
-      (appliedGeneration == null || appliedGeneration === controlGeneration),
+    controlGeneration != null &&
+    activeCommandGeneration === controlGeneration &&
+    (appliedGeneration == null || appliedGeneration === controlGeneration),
   );
   const returnedAsStandby = Boolean(
     command.data?.status === 'SUCCEEDED' &&
-      sawHandoff &&
-      targetAlive &&
-      targetLifecycle?.phase === 'WAITING' &&
-      targetLifecycle.readiness === 'QUALIFIED',
+    sawHandoff &&
+    targetAlive &&
+    targetLifecycle?.phase === 'WAITING' &&
+    targetLifecycle.readiness === 'QUALIFIED',
   );
   const finished = sawHandoff && modePreserved && generationConsistent && returnedAsStandby;
   const failed = commandFailed || handoffGraceExpired;
@@ -205,6 +216,7 @@ function DelayScenario() {
   const begin = () => {
     if (!activeVm || start.isPending) return;
     setRun(null);
+    setHandoffTimedOut(false);
     start.mutate(DELAY_SCENARIO, {
       onSuccess: (submitted) =>
         setRun({
@@ -419,11 +431,12 @@ function InteractionStressScenario() {
   const commandRunning = command.data?.status === 'RUNNING';
   const commandSucceeded = command.data?.status === 'SUCCEEDED';
   const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
-  const loadReached = run?.kind === 'cpu'
-    ? cpu != null && cpu >= STRESS_REACHED_PERCENT
-    : run?.kind === 'memory'
-      ? memory != null && memory >= STRESS_REACHED_PERCENT
-      : false;
+  const loadReached =
+    run?.kind === 'cpu'
+      ? cpu != null && cpu >= STRESS_REACHED_PERCENT
+      : run?.kind === 'memory'
+        ? memory != null && memory >= STRESS_REACHED_PERCENT
+        : false;
   const driveIsolated = Boolean(
     run &&
     control?.mode === 'AUTO' &&
@@ -452,18 +465,23 @@ function InteractionStressScenario() {
   const begin = (kind: 'cpu' | 'memory') => {
     if (!interactionVm || start.isPending) return;
     setRun(null);
-    const request = kind === 'cpu'
-      ? {
-          kind,
-          body: { workers: interactionVm.vcpus ?? 1, load_percent: 90, duration_s: INTERACTION_STRESS_DURATION_S },
-        } as const
-      : {
-          kind,
-          body: {
-            memory_mib: Math.min(Math.floor(interactionVm.memory_mib * 0.9), 512),
-            duration_s: INTERACTION_STRESS_DURATION_S,
-          },
-        } as const;
+    const request =
+      kind === 'cpu'
+        ? ({
+            kind,
+            body: {
+              workers: interactionVm.vcpus ?? 1,
+              load_percent: 90,
+              duration_s: INTERACTION_STRESS_DURATION_S,
+            },
+          } as const)
+        : ({
+            kind,
+            body: {
+              memory_mib: Math.min(Math.floor(interactionVm.memory_mib * 0.9), 512),
+              duration_s: INTERACTION_STRESS_DURATION_S,
+            },
+          } as const);
     start.mutate(request, {
       onSuccess: (submitted) =>
         setRun({
@@ -597,10 +615,22 @@ function InteractionStressScenario() {
               <Button variant="secondary" onClick={() => setConfirmOpen(false)}>
                 취소
               </Button>
-              <Button variant="danger" onClick={() => { begin('cpu'); setConfirmOpen(false); }}>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  begin('cpu');
+                  setConfirmOpen(false);
+                }}
+              >
                 CPU 90% 부하
               </Button>
-              <Button variant="danger" onClick={() => { begin('memory'); setConfirmOpen(false); }}>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  begin('memory');
+                  setConfirmOpen(false);
+                }}
+              >
                 메모리 90% 부하
               </Button>
             </>
@@ -643,7 +673,9 @@ function AppExitScenario() {
   const exitedNow = lifecycle?.phase === 'STOPPED' && lifecycle.reason === 'APP_EXITED';
 
   useEffect(() => {
-    if (run && exitedNow) setSawExited(true);
+    if (!run || !exitedNow) return;
+    const timer = window.setTimeout(() => setSawExited(true), 0);
+    return () => window.clearTimeout(timer);
   }, [run, exitedNow]);
 
   const commandAccepted = Boolean(
@@ -1189,7 +1221,8 @@ function JetsonLossScenario() {
           <span className={styles.scenarioNumber}>시연 6</span>
           <h2>Jetson 인지 송신 단절과 안전 전환</h2>
           <p>
-            Jetson 계산은 유지한 채 World 송신만 끊고, 두 주행 VM의 공통 입력 소실과 SAFE_STOP 또는 MANUAL 전환을 확인합니다.
+            Jetson 계산은 유지한 채 World 송신만 끊고, 두 주행 VM의 공통 입력 소실과 SAFE_STOP 또는 MANUAL
+            전환을 확인합니다.
           </p>
         </div>
         <div className={styles.scenarioAction}>
@@ -1300,7 +1333,7 @@ function JetsonLossScenario() {
                     ? '자동 복귀하지 않고 명시적인 수동 입력을 기다립니다.'
                     : safeStop
                       ? '활성 출력을 제거하고 SAFE_STOP 정지 상태를 유지합니다.'
-                    : `현재 모드: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`
+                      : `현재 모드: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`
                 }
               />
               <ProgressStep
@@ -1366,9 +1399,11 @@ function VmCrashScenario() {
     (event) => event.type === 'recovery.completed' || event.type === 'recovery.recovered',
   );
   const recoveryFailed = runEvents.some((event) => event.type === 'recovery.failed');
-  const recoveredBootId = run ? drive?.vm_apps?.[run.targetId]?.autonomous?.boot_id ?? null : null;
+  const recoveredBootId = run ? (drive?.vm_apps?.[run.targetId]?.autonomous?.boot_id ?? null) : null;
   const bootChanged = Boolean(run?.initialBootId && recoveredBootId && recoveredBootId !== run.initialBootId);
-  const recovered = Boolean(run && sawFailure && target?.state === 'running' && recoveryFinished && bootChanged);
+  const recovered = Boolean(
+    run && sawFailure && target?.state === 'running' && recoveryFinished && bootChanged,
+  );
   const modePreserved = Boolean(run && sawHandoff && control?.mode === 'AUTO');
   const returnedAsStandby = Boolean(recovered && activeId !== run?.targetId);
   const finished = returnedAsStandby && sawHandoff && modePreserved;
@@ -1378,11 +1413,11 @@ function VmCrashScenario() {
       ? '현재 활성 주행 VM을 VM 목록에서 찾지 못했습니다.'
       : control?.mode !== 'AUTO' || control.active_app !== 'autonomous'
         ? '자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.'
-      : activeVm.guest_kind !== 'zephyr'
-        ? '현재 활성 VM이 Zephyr가 아닙니다.'
-        : activeVm.state !== 'running'
-          ? '현재 활성 VM이 실행 중이 아닙니다.'
-          : null;
+        : activeVm.guest_kind !== 'zephyr'
+          ? '현재 활성 VM이 Zephyr가 아닙니다.'
+          : activeVm.state !== 'running'
+            ? '현재 활성 VM이 실행 중이 아닙니다.'
+            : null;
 
   const begin = () => {
     if (!activeVm || start.isPending) return;

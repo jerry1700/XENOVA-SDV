@@ -63,7 +63,7 @@ vi.mock('../api/queries', () => ({
   }),
   useStartActiveVmCrash: () => vmCrash,
   useStartActiveDriveAutoDelay: () => autoDelay,
-    useStartStress: () => stress,
+  useStartStress: () => stress,
   useStartActiveAppExit: () => appExit,
   useMetrics: () => ({ data: { items: [] } }),
   useStartAutoInputUnavailable: () => inputFault,
@@ -303,7 +303,7 @@ describe('장애 시연 2', () => {
 
 describe('장애 시연 3', () => {
   beforeEach(() => {
-      stress.mutate.mockReset();
+    stress.mutate.mockReset();
     commandStatus.data = undefined;
     driveState.activeId = 'vm-a';
     driveState.mode = 'AUTO';
