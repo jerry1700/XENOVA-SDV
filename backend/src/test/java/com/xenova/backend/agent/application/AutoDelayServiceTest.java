@@ -35,12 +35,13 @@ class AutoDelayServiceTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final List<JsonNode> sent = new ArrayList<>();
     private AutoDelayService service;
+    private ZephyrFaultService faults;
 
     @BeforeEach
     void setUp() {
         when(vmService.get(VM_ID)).thenReturn(vm(GuestKind.ZEPHYR));
         when(telemetryHeartbeatStore.view(VM_ID)).thenReturn(freshHeartbeat());
-        service = new AutoDelayService(vmService, telemetryHeartbeatStore, commandResultStore,
+        faults = new ZephyrFaultService(vmService, telemetryHeartbeatStore, commandResultStore,
                 () -> (topic, payload, qos) -> {
             assertThat(topic).isEqualTo("xenova/v1/vms/" + VM_ID + "/command");
             assertThat(qos).isEqualTo(1);
@@ -51,6 +52,7 @@ class AutoDelayServiceTest {
             }
             return true;
         }, objectMapper, Clock.fixed(NOW, ZoneOffset.UTC));
+        service = new AutoDelayService(faults);
     }
 
     @Test
@@ -95,14 +97,31 @@ class AutoDelayServiceTest {
 
     @Test
     void reportsUnavailableBroker() {
-        service = new AutoDelayService(vmService, telemetryHeartbeatStore, commandResultStore,
+        service = new AutoDelayService(new ZephyrFaultService(vmService, telemetryHeartbeatStore, commandResultStore,
                 () -> null, objectMapper,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC)));
 
         assertThatThrownBy(() -> service.send(VM_ID, 50, 30))
                 .isInstanceOfSatisfying(ApiException.class,
                         exception -> assertThat(exception.getCode()).isEqualTo("MQTT_UNAVAILABLE"));
         verify(commandResultStore).discardPending(eq(VM_ID), any());
+    }
+
+    @Test
+    void publishesExitAndTxBlockToTheSelectedZephyrBoot() {
+        ZephyrFaultCommand exit = faults.appExit(VM_ID);
+        ZephyrFaultCommand block = faults.blockAutoTx(VM_ID, 5);
+
+        JsonNode exitPayload = sent.get(0).path("payload");
+        assertThat(exitPayload.path("action").asText()).isEqualTo("app_exit");
+        assertThat(exitPayload.path("parameters").path("app_id").asText()).isEqualTo("autonomous");
+        assertThat(exitPayload.path("expected_boot_id").asText()).isEqualTo("zephyr-boot");
+        JsonNode blockPayload = sent.get(1).path("payload");
+        assertThat(blockPayload.path("action").asText()).isEqualTo("auto_tx_block");
+        assertThat(blockPayload.path("parameters").path("duration_s").asInt()).isEqualTo(5);
+        assertThat(blockPayload.path("expected_boot_id").asText()).isEqualTo("zephyr-boot");
+        verify(commandResultStore).recordPending(VM_ID, exit.commandId(), exit.operationId(), "zephyr-boot", NOW);
+        verify(commandResultStore).recordPending(VM_ID, block.commandId(), block.operationId(), "zephyr-boot", NOW);
     }
 
     private static Vm vm(GuestKind guestKind) {
