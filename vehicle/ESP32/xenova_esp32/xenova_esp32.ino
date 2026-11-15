@@ -30,12 +30,12 @@ const uint8_t MOTOR_BITS = 10;
 // 배터리 전압과 바닥에 따라 달라진다
 const int32_t FULL_DUTY_MMPS = 1276;
 const uint32_t MOTOR_START_DUTY = 62;  // 1023 가운데
-// 조향(앞바퀴 각)을 서보 펄스로 바꾸는 값. 한계는 조립 안내서 단계 K 에서 찾았고, 나머지는 바닥에서 조향마다
-// 3초씩 달려 양쪽 엔코더의 차이로 잰 값이다(조립 안내서 9.2).
+// 조향(앞바퀴 각)을 서보 펄스로 바꾸는 값. 펄스 범위는 받아들이는 조향 한계(490 mrad)에 유격 보정을 더한
+// 884 us 에서 2162 us 를 덮게 잡았고, 나머지는 바닥에서 조향마다 3초씩 달려 양쪽 엔코더의 차이로 잰 값이다(조립 안내서 9.2).
 //  - 바퀴 1 rad 에 1170 us. 서보 팔이 도는 각의 0.545 배만 바퀴가 꺾인다
 //  - 가운데 1523 us. 1500 us 에서는 바퀴가 왼쪽으로 1.2도 틀어져 있다
 //  - 유격 66 us. 조향 방향을 바꾸면 바퀴가 3.3도 늦게 따라와서, 움직이는 쪽으로 그만큼 더 보낸다
-const int32_t SERVO_CENTER_US = 1523, SERVO_MIN_US = 900, SERVO_MAX_US = 2100;
+const int32_t SERVO_CENTER_US = 1523, SERVO_MIN_US = 870, SERVO_MAX_US = 2180;
 const int32_t SERVO_US_PER_RAD = 1170;
 const int32_t SERVO_BACKLASH_US = 66;
 // 이보다 작은 조향 변화에는 서보를 움직이지 않는다. 명령이 조금씩 흔들릴 때 유격 보정이 좌우로 떨지 않게 한다

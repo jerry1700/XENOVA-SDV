@@ -299,12 +299,12 @@ python vehicle/ESP32/tools/cutoff_stress.py --port COM8 --trials 1000
 - 도구가 확인하는 것은 그 DRIVE 가 APPLIED 로 돌아오고, 머무는 동안 받은 표본(SENSOR 와, lease 를 설치하며 받은 CLOCK_REPLY)마다 엔코더 누계가 시작값 그대로라는 것까지다. 머무는 동안 lease 를 0.5초마다 이어 설치해 SENSOR 가 끊기지 않게 하고, DRIVE 뒤로 표본이 오지 않은 자리는 확인하지 못한 것이므로 실패로 친다. **서보가 실제로 움직인 방향과 바퀴 각도는 사람이 보고 잰다.**
 - 실보드에는 `--drive` 를 줄 때만 보낸다. 서보 전원(UBEC)이 들어와 있어야 움직인다. 앞바퀴가 바닥에 닿지 않게 차를 올려 두고, 조립 안내서 단계 K 의 서보 확인과 같은 자세로 본다.
 - 볼 것: + 에 바퀴가 왼쪽으로 꺾이는지, 0 에서 곧은지, 같은 크기의 + 와 − 가 좌우로 같은 만큼 꺾이는지.
-- ±350 mrad(약 20도)를 넘는 값은 펌웨어가 `RANGE` 로 거절한다.
+- ±490 mrad(약 28도)를 넘는 값은 펌웨어가 `RANGE` 로 거절한다. 바퀴를 띄우고 보면 25도와 28도 사이에서는 바퀴가 더 꺾이고 28도와 32도 사이에서는 차이가 없다. 바닥에서 왼쪽 490 mrad 로 0.10 m/s 를 6초 달렸을 때 엔코더로 계산한 회전 반경은 0.30 m 였다(2026-11-15, 오른쪽은 재지 않았다).
 - `--stationary` 를 주면 속도 0 인 DRIVE 대신 HOLD_STEER 로 보낸다. 장치가 정지 조향(`0x0400`)을 알리지 않으면 보내지 않고 실패로 끝난다. 서보가 움직이는 것은 같다.
 
 ```sh
 python vehicle/ESP32/tools/steer_check.py --port COM8 --drive
-python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --mrad 100 200 300 350 --hold 5
+python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --mrad 100 200 300 490 --hold 5
 python vehicle/ESP32/tools/steer_check.py --port COM8 --drive --stationary
 ```
 
