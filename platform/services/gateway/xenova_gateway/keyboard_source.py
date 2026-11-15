@@ -388,7 +388,8 @@ class KeyState:
                 context=ready is not None and (ready['vehicle_phase']=='WAIT' or ready['mode']=='MANUAL'
                     and ready['desired_mode']!='AUTO' and ready['manual_attach_available'])
                 current=context and self.auto_neutral_samples>=2 and ready['auto_ready'] and event.time_us<int(ready['valid_until_pi_us'])
-                self.auto_edge = (self.key_event, dict(ready) if current else None)
+                retaining=ready is not None and ready.get('blocked_reason')==contract.JETSON_RETURN_PENDING
+                self.auto_edge = (self.key_event, dict(ready) if current or retaining else None)
                 self.auto_neutral_samples=0
                 self.arm_event = None
             else:
@@ -642,6 +643,8 @@ class KeyboardSession:
         edge, self.state.auto_edge = self.state.auto_edge, None
         if not self.auto_enabled or edge is None:return
         event, context = edge
+        if frame.key_event==event and context and context.get('blocked_reason')==contract.JETSON_RETURN_PENDING:
+            return  # The actor uses this original OBSERVE/FRAME to keep MANUAL.
         if (context is None or self.auto_trigger is not None or event != frame.key_event or frame.mask != ENTER
                 or self.state.mask not in (0, ENTER) or self.fence is not None or self.wait_stop
                 or self.pending_mask or self.state.fence_mask or frame.last_event is None
@@ -671,7 +674,9 @@ class KeyboardSession:
                     ('auto_ready','blocked_reason','vehicle_phase','ready_revision','parking_enabled','permission_revision')):
                 manual=p['manual_attach_available'] and not self.state.armed and not self.observer
                 departing=p['desired_mode']=='AUTO' and p['vehicle_phase'] in ('COUNTDOWN','APPLYING','ACTIVE')
-                self.auto_notice=('MANUAL_ARM: 모든 조작 키를 놓고 Enter를 새로 누르세요.' if manual else
+                self.auto_notice=('Jetson 복구 대기: Enter를 누르면 수동주행을 유지합니다.' if
+                    p['blocked_reason']==contract.JETSON_RETURN_PENDING else
+                    'MANUAL_ARM: 모든 조작 키를 놓고 Enter를 새로 누르세요.' if manual else
                     'AUTO_'+p['vehicle_phase'] if departing else
                     'AUTO_READY: Enter를 새로 누르면 AUTO 출발을 요청합니다.' if p['auto_ready']
                     else 'AUTO_'+p['vehicle_phase']+': '+str(p['blocked_reason'] or 'NOT_READY'))

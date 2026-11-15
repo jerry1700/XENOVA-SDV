@@ -428,6 +428,10 @@ class FunctionFailureScopeTests(unittest.TestCase):
                     w.arm()
                 w.tick(.1,reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
                 self.assertEqual((w.m.mode, w.m.active_vm), (Mode.MANUAL, A))
+                if reason=='WORLD_UNAVAILABLE':
+                    self.assertEqual(w.m.jetson_fallback[:2],(A,w.m.generation))
+                else:
+                    self.assertIsNone(w.m.jetson_fallback)
                 w.tick(.2, reasons={(A, 'autonomous'): reason, (B, 'autonomous'): reason})
                 self.assertEqual((w.m.mode, w.m.active_vm), (Mode.MANUAL, A))
 
@@ -435,6 +439,7 @@ class FunctionFailureScopeTests(unittest.TestCase):
         w = self.w
         w.tick(.1,reasons={(A, 'autonomous'): 'WORLD_UNAVAILABLE'})
         self.assertEqual((w.m.mode, w.m.active_vm), (Mode.AUTO, B))
+        self.assertIsNone(w.m.jetson_fallback)
 
     def test_real_binding_loss_still_selects_b_immediately(self):
         w = self.w
