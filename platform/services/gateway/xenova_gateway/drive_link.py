@@ -124,7 +124,8 @@ class DriveLinkProvider:
     def _send_copy(self,vm):
         m=self.runner.machine;binding=m.bindings.current(vm,m.clock())
         self._prune()
-        if not binding or app_instance(binding,'autonomous') is None or vm==m.active_vm:return
+        if (not binding or app_instance(binding,'autonomous') is None or
+            (vm==m.active_vm and m.active_app=='autonomous')):return
         held=self.inflight.get(vm)
         if held is None and self.copies:
             identity=next(reversed(self.copies))

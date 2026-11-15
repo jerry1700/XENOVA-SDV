@@ -8,7 +8,7 @@
 #include "parking.h"
 #define DE_PATH_SLOTS 3
 enum de_result { DE_OK,DE_BUSY,DE_INPUT,DE_WAITING,DE_MAP,DE_POSE,DE_PATH,
- DE_EXPIRED,DE_CHANGED,DE_STATE,DE_LIMIT,DE_CANCELLED,DE_CLOCK,DE_FRAME,DE_CONFIGURATION,DE_REFERENCE };
+ DE_EXPIRED,DE_CHANGED,DE_STATE,DE_LIMIT,DE_CANCELLED,DE_CLOCK,DE_FRAME,DE_CONFIGURATION,DE_REFERENCE,DE_DEADLINE };
 /* Path registration progresses independently of the driving episode phase. */
 enum de_episode_handoff { DE_EPISODE_IDLE,DE_EPISODE_PLANNING,DE_EPISODE_PASS_PLANNING,
  DE_EPISODE_REQUEST_READY,DE_EPISODE_AWAITING_RECEIPT };
@@ -49,8 +49,9 @@ struct drive_engine {
  struct tr_intent task;struct tr_basis basis;
  struct lp_tracker progress_snapshot;uint32_t progress_generation;uint64_t planning_vehicle_pi_us;
  struct dw_handle planning_map;const struct dw_snapshot *planning_snapshot;
- struct de_reference planning_path;bool planning,plan_finalized,plan_valid;atomic_bool stopping,path_invalidated;int current;
+ struct de_reference planning_path;bool planning,plan_finalized,plan_valid,planning_startup;atomic_bool stopping,path_invalidated;int current;
  uint32_t epoch,next_generation,next_lease;uint64_t path_revision;
+ atomic_uint startup_hold_generation;
  atomic_ullong completed,plans,discarded;atomic_uint requested;
  uint32_t started;atomic_int last_reason;
  bool receive_pending,receive_awaiting,apply_pending,apply_valid;struct dw_handle receive_handle;

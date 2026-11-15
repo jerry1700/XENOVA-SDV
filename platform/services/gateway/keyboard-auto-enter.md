@@ -8,6 +8,8 @@ B09 A3 구현. 기존 `keyboard-source-1` v1의 HELLO/ATTACH/FRAME/ARM/FENCE/STO
 
 - 현재 WAIT이면 source는 추진 SID 없는 observer로 시작한다. 실제 AUTO 입력 preflight가 준비되면 AUTO_READY를 안내한다. 모든 조작 키를 놓은 두 원 관측 뒤 Enter를 **새로** 눌러 AUTO 출발을 요청한다.
 - 현재 정상 MANUAL이면 기존 ATTACH→실제 STOP/기존 새 GRANT→새 Enter ARM으로 조종한다. arm된 상태에서 WASD 해제·neutral·실제 STOP과 AUTO 준비를 갖춘 뒤의 **다음** 새 Enter는 AUTO 요청이다. 움직이는 중 누른 Enter가 기존 SID를 폐기하거나 재무장하지 않는다.
+- 주행 중 양쪽 AUTO의 Jetson World 입력이 만료되어 같은 VM의 MANUAL로 내려간 경우, 키보드에 `JETSON_RETURN_PENDING`이 안내된다. 현재 키보드의 중립 관측과 실제 정지, 새 World·Vehicle·clock 준비가 맞으면 기존 3초 AUTO 카운트다운을 시작한다. 카운트다운 중에도 키보드와 입력 준비가 유지되어야 한다. AUTO 적용 전에 새 Enter를 누르면 기존 `mode.manual` 경로로 수동 유지 의사를 반영한다. 수동 키보드의 추진 재무장은 기존 절차를 따른다.
+- Jetson 복귀 절차 중 확인한 키보드 연결이 끊기거나 키 관측 기한이 만료되면 즉시 출력을 차단하고 `SAFE_STOP`으로 전환한다. 재연결 뒤에는 운영자가 MANUAL을 명시적으로 선택하고 키보드를 다시 무장한다.
 - 준비 전/만료된 안내에서 누른 Enter는 소비한다. 반복 value2, 중복 down, READY를 기다리며 계속 누르고 있는 Enter는 나중 요청으로 바뀌지 않는다. ARM과 AUTO_ENTER를 한 이벤트로 함께 만들지 않는다.
 - 중앙 수락 뒤 COUNTDOWN/APPLYING/ACTIVE의 원 request ID를 확인하면 같은 source는 observer로 남는다. 원 MANUAL FRAME은 AUTO 입력으로 재해석하지 않으며 `AUTO_DEPARTING` 거절로만 전송 credit을 정리한다. HELD 철회·WAIT/countdown·새 grant/fullState/실제 apply/fresh calculation의 출력 gate는 중앙의 책임이다.
 - 명시 MANUAL 출발이 실제 MANUAL 제어로 수락되면 같은 source가 기존 ATTACH부터 다시 진행한다. 자동으로 ARM하지 않는다. AUTO→MANUAL의 원 STOP·새 SID/입력 epoch·새 Enter ARM 조건은 유지한다. 정상 MANUAL same-SID CONTINUE는 기존 경로로 원 입력/E/keyup fence를 보존한다.

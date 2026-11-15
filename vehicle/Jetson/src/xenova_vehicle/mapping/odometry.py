@@ -10,7 +10,7 @@ import math
 
 from ..perception.inputs import FrameStamp
 from .registration import wrap_yaw, PoseBox
-from .wheel_motion import WheelCapture, WheelMotionProfile, WheelObservation, wheel_progress
+from .wheel_motion import WheelCapture, WheelMotionProfile, WheelObservation, wheel_progress, wheel_sample_bounds
 
 
 @dataclass(frozen=True)
@@ -52,6 +52,7 @@ class PoseEstimate:
     bracket_us: tuple[int, int]
     wheel_capture: WheelCapture | None = None
     exposure_motion: tuple[float, float] | None = None
+    support_us: tuple[int, ...] = ()
 
     @property
     def prior(self):
@@ -119,19 +120,40 @@ class PoseBuffer:
             return None
         left_index,left = next(((i,p) for i,p in reversed(matching) if p.at_us <= lo),(None,None))
         right_index,right = next(((i,p) for i,p in matching if p.at_us >= hi),(None,None))
-        if left is None or right is None or left.context != right.context or right.at_us-left.at_us > self.max_gap_us:
+        if left is None or right is None or left.context != right.context:
             return None
-        gap = right.at_us-left.at_us
+        bracket = matching[left_index-matching[0][0]:right_index-matching[0][0]+1]
+        if any(b.at_us-a.at_us > self.max_gap_us for (_, a), (_, b) in zip(bracket, bracket[1:])):
+            return None
         middle = (lo+hi)//2
-        weight = 0. if gap == 0 else (middle-left.at_us)/gap
-        x, y = left.x+(right.x-left.x)*weight, left.y+(right.y-left.y)*weight
-        yaw = wrap_yaw(left.yaw+wrap_yaw(right.yaw-left.yaw)*weight)
+        before = next(p for _,p in reversed(bracket) if p.at_us <= middle)
+        after = next(p for _,p in bracket if p.at_us >= middle)
+        gap = after.at_us-before.at_us
+        weight = 0. if gap == 0 else (middle-before.at_us)/gap
+        x, y = before.x+(after.x-before.x)*weight, before.y+(after.y-before.y)*weight
+        yaw = wrap_yaw(before.yaw+wrap_yaw(after.yaw-before.yaw)*weight)
         # 두 endpoint 각각의 reachable ball은 구간 전체를 덮는다. 같은 중심에서
         # 더 작은 ball을 택해도 보수적이며 sample 평균으로 오차를 줄이지 않는다.
         position_error = min(left.position_error_m+self.speed*(hi-left.at_us)/1e6+math.hypot(x-left.x,y-left.y),
                              right.position_error_m+self.speed*(right.at_us-lo)/1e6+math.hypot(x-right.x,y-right.y))
         yaw_error = min(left.yaw_error_rad+self.yaw_rate*(hi-left.at_us)/1e6+abs(wrap_yaw(yaw-left.yaw)),
                         right.yaw_error_rad+self.yaw_rate*(right.at_us-lo)/1e6+abs(wrap_yaw(yaw-right.yaw)))
+        # 가까운 원 표본이 덮는 시간 구간마다 상한을 계산하고 합집합의 최대를 취한다.
+        # 촬영 전체의 상한을 요구하므로 중간 표본의 오차가 작다고 평균하지 않는다.
+        edges = [lo, *((a.at_us+b.at_us)//2 for (_, a), (_, b) in zip(bracket, bracket[1:])), hi]
+        support = []
+        for (index, source), begin, end in zip(bracket, edges, edges[1:]):
+            begin, end = max(lo, begin), min(hi, end)
+            if begin > end:
+                continue
+            duration = max(abs(begin-source.at_us), abs(end-source.at_us)) / 1e6
+            position_shift = math.hypot(x-source.x, y-source.y)
+            yaw_shift = abs(wrap_yaw(yaw-source.yaw))
+            support.append((index, source, duration, position_shift, yaw_shift))
+        position_error = min(position_error, max(p.position_error_m+self.speed*dt+shift
+                                                   for _,p,dt,shift,_ in support))
+        yaw_error = min(yaw_error, max(p.yaw_error_rad+self.yaw_rate*dt+shift
+                                         for _,p,dt,_,shift in support))
         if yaw_error > math.pi:
             return None
         sample = PoseSample(left.epoch, left.clock_id, calibration_id, middle, x,y,yaw,
@@ -140,19 +162,20 @@ class PoseBuffer:
         if (self._wheel_profile is not None and self._wheel_progress[left_index] is not None
                 and self._wheel_progress[right_index] is not None
                 and self._wheel_progress[left_index].segment == self._wheel_progress[right_index].segment):
-            # 촬영 구간 가까이에 있는 원 표본을 사용하고 남는 시간·보간 오차를 포함한다.
-            candidates = []
-            for index, endpoint in ((left_index, left), (right_index, right)):
+            anchor_index, anchor, *_ = min(support, key=lambda entry: abs(entry[1].at_us-middle))
+            anchor_progress = self._wheel_progress[anchor_index]
+            positions, headings = [], []
+            for index, _, dt, position_shift, yaw_shift in support:
                 progress = self._wheel_progress[index]
-                duration = (max(abs(hi-endpoint.at_us),abs(lo-endpoint.at_us))
-                            + progress.observation.clock_pad_us) / 1e6
-                candidates.append(WheelCapture(progress,
-                    self.speed*duration+math.hypot(x-endpoint.x,y-endpoint.y),
-                    self.yaw_rate*duration+abs(wrap_yaw(yaw-endpoint.yaw))))
-            capture = min(candidates,key=lambda item: (item.position_pad_m,item.yaw_pad_rad))
+                position_pad, yaw_pad = wheel_sample_bounds(anchor_progress, progress)
+                duration = dt + progress.observation.clock_pad_us / 1e6
+                positions.append(position_pad+self.speed*duration+position_shift)
+                headings.append(yaw_pad+self.yaw_rate*duration+yaw_shift)
+            capture = WheelCapture(anchor_progress, max(positions), max(headings), anchor)
         # Relative travel from the true midpoint pose to any instant of this
         # exposure does not include the accumulated absolute encoder drift.
         duration = max(middle-lo,hi-middle)/1e6
         exposure = (math.nextafter(self.speed*duration, math.inf),
                     min(math.pi,math.nextafter(self.yaw_rate*duration, math.inf)))
-        return PoseEstimate(sample,stamp.captured_us,(left.at_us,right.at_us),capture,exposure)
+        return PoseEstimate(sample,stamp.captured_us,(left.at_us,right.at_us),capture,exposure,
+                            tuple(p.at_us for _,p in bracket))

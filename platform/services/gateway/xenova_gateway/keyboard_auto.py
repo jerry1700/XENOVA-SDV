@@ -8,7 +8,7 @@ from hashlib import sha256
 import queue
 
 from .authority_journal import canonical
-from .keyboard_contract import AUTO_FRAME
+from .keyboard_contract import AUTO_FRAME,JETSON_RETURN_PENDING
 from .operator_contract import OperatorError
 
 
@@ -34,6 +34,10 @@ class AutoKeyboardBoundary:
     @property
     def operator(self):return self.actor.operator
 
+    def _jetson_return(self):
+        operations=getattr(self.operator,'operations',None)
+        return operations if getattr(operations,'jetson_return',None) is not None else None
+
     def status(self):
         getter=getattr(self.operator,'operation_status',None)
         if getter is None:raise OperatorError('UNSUPPORTED_PROFILE')
@@ -57,15 +61,18 @@ class AutoKeyboardBoundary:
     def ready(self,call,*,reply=False):
         v=self.status();s=self.actor.scope;b=v['binding'];m=self.operator.runner.machine
         identity=(b['operation_revision'],b['permission_revision'],v['ready_revision'],m.generation,m.active_vm)
-        if v['auto_ready'] and self.operator.now<int(v['valid_until_pi_us']):
+        recovering=self._jetson_return() is not None
+        auto_ready=v['auto_ready'] and not recovering
+        if auto_ready and self.operator.now<int(v['valid_until_pi_us']):
             if s.get('ready_identity')!=identity:
                 s['ready_identity']=identity;s['ready_since']=self.operator.now
         else:s['ready_identity']=None;s['ready_since']=None
         p=dict(device_instance=s['device'],link_epoch=s['link'],generation=m.generation,
             owner=None if m.mode.value=='SAFE_STOP' else m.active_vm,mode=m.mode.value,
             operation_revision=b['operation_revision'],permission_revision=b['permission_revision'],
-            parking_enabled=b['parking_enabled'],ready_revision=v['ready_revision'],auto_ready=v['auto_ready'],
-            vehicle_phase=v['vehicle_phase'],blocked_reason=v['blocked_reason'],valid_until_pi_us=v['valid_until_pi_us'],
+            parking_enabled=b['parking_enabled'],ready_revision=v['ready_revision'],auto_ready=auto_ready,
+            vehicle_phase=v['vehicle_phase'],blocked_reason=JETSON_RETURN_PENDING if recovering else v['blocked_reason'],
+            valid_until_pi_us=v['valid_until_pi_us'],
             active_request_id=v['active_request_id'],desired_mode=v['desired_mode'],supported=True,
             manual_attach_available=bool(m.mode.value=='MANUAL' and not self.operator.hold),
             reply_to_kind=call['kind'] if reply else None,reply_to_sequence=call['sequence'] if reply else None)
@@ -95,7 +102,14 @@ class AutoKeyboardBoundary:
         before=0 if old is None else old['key_mask'];mask=p['key_mask'];neutral=s['all_up']
         s['all_up']=min(2,neutral+1) if mask==0 else 0
         s['frame']=frame
-        if mask==64 and before==0 and old is not None and event==int(old['key_event_seq'])+1 and neutral>=2:
+        enter_edge=mask==64 and before==0 and old is not None and event==int(old['key_event_seq'])+1 and neutral>=2
+        recovery=self._jetson_return()
+        if recovery is not None:
+            s['candidate']=None
+            if enter_edge and last is not None:
+                recovery.retain_manual_after_jetson(int(last))
+            return
+        if enter_edge:
             r=self.actor.registry
             ready=self.status()
             identity=(ready['binding']['operation_revision'],ready['binding']['permission_revision'],

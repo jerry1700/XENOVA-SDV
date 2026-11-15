@@ -15,15 +15,49 @@ def test_actual_main_drops_single_deadlines_and_stops_on_fifth(tmp_path,pattern,
         'if(at_us<600000||at_us>=1000000)out->sample.reason="STATE_PREPARING";\n'
         ' else if(at_us>=800000)out->sample.v_mps=.3f;',
         f'if({pattern})out->sample.reason="DEADLINE";else out->sample.v_mps=.3f;')
+    harness=harness.replace('static const char *last_reason;', '''
+static const char *last_reason;
+static uint64_t last_deadline_report;
+static unsigned distinct_deadline_reports;
+''').replace('supervisions++;return 0;', '''
+ if(strstr(payload,"\\"phase\\":\\"EXECUTING\\"")&&strstr(payload,"\\"reason\\":\\"DEADLINE\\"")&&
+    completed[0].progress!=last_deadline_report){
+  distinct_deadline_reports++;
+  last_deadline_report=completed[0].progress;
+ }
+ supervisions++;return 0;''')
     start=harness.index(' assert(loops==60&&reads[0]==60')
     end=harness.index(' printf(',start)
     harness=harness[:start]+f'''
  assert(loops==60&&reads[0]==60);
  assert(first_restricted_iteration=={first});
  assert(restricted_attempts=={int(bool(first))}&&moving_attempts=={moving});
+ assert(distinct_deadline_reports=={60-moving});
 '''+harness[end:]
     result=compile_main(tmp_path,harness,['CONFIG_XENOVA_DRIVE_WARM=1','CONFIG_XENOVA_DRIVE_LATTICE=1'])
     assert result['restricted_attempts']==int(bool(first))
+
+
+def test_actual_main_reports_exit_without_offering_or_using_old_auto_work(tmp_path):
+    harness=HARNESS.replace(
+        'out->state=DRIVE_TASK_WAITING;return 0;',
+        'out->state=task==DRIVE_TASK_AUTO&&at_us>=900000?DRIVE_TASK_EXITED:DRIVE_TASK_WAITING;return 0;')
+    harness=harness.replace('static const char *last_reason;',
+        'static const char *last_reason; static unsigned auto_exits, manual_reports_after_exit;')
+    harness=harness.replace('supervisions++;return 0;', r'''
+ if(strstr(payload,"\"reason\":\"APP_EXITED\"")){
+  assert(strstr(topic,"/autonomous/")&&strstr(payload,"\"phase\":\"STOPPED\"")&&at_us>=900000);
+  auto_exits++;
+ }
+ if(at_us>=900000&&strstr(topic,"/manual/"))manual_reports_after_exit++;
+ supervisions++;return 0;''')
+    start=harness.index(' assert(loops==60&&reads[0]==60')
+    end=harness.index(' printf(',start)
+    harness=harness[:start]+'''
+ assert(loops==45&&offers[0]==45&&reads[0]==45);
+ assert(auto_exits>=2&&manual_reports_after_exit>=2);
+'''+harness[end:]
+    compile_main(tmp_path,harness,['CONFIG_XENOVA_DRIVE_WARM=1','CONFIG_XENOVA_DRIVE_LATTICE=1'])
 
 
 def native(tmp_path,name,source,extra=()):

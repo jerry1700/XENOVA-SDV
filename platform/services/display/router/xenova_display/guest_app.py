@@ -10,7 +10,8 @@ one request, GET /api/v1/display/presentation, to dom0's read-only guest data
 path (410) with the guest data token. The page never sees a token. State
 collection and screen decisions stay in dom0.
 
-Standard library only (runs in a minimal Debian guest, no extra packages).
+HTTP serving uses the standard library. An optional VM-scoped MQTT connection
+reports the serving loop using the client already packaged with the guest Agent.
 """
 from __future__ import annotations
 
@@ -18,12 +19,17 @@ import argparse
 import http.client
 import ipaddress
 import json
+import logging
 import mimetypes
+import os
 from pathlib import Path
 import re
 import signal
 import threading
+import time
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from uuid import UUID
 
 from .guest_sender import read_token
 
@@ -32,6 +38,9 @@ DATA_PATH = "/api/v1/display/presentation"
 # mp3 is the 350 music app's audio; the phone relay (mobile_upstream) allows the same list.
 ASSET = re.compile(r"/assets/([A-Za-z0-9][A-Za-z0-9_.-]{0,159}\.(?:js|css|png|jpg|jpeg|webp|svg|woff2?|ttf|ico|mp3))")
 MAX_BODY = 2 * 1024 * 1024
+LOG = logging.getLogger(__name__)
+SUMMARY_INTERVAL_S = 60
+RESULT_CHANGE_INTERVAL_S = 5
 TYPES = {".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2",
          ".woff": "font/woff", ".ttf": "font/ttf", ".ico": "image/x-icon", ".png": "image/png",
          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".mp3": "audio/mpeg"}
@@ -110,7 +119,45 @@ class DataSource:
                 except Exception: pass
 
 
-def make_handler(web_root, data, allowed_clients=("127.0.0.1",)):
+class PresentationRequests:
+    """Keep process-local counts for actual presentation responses, including failed writes."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counts = Counter()
+        self._last_result = None
+        self._last_success_at = None
+        self._reported = ({}, None, None)
+        self._reported_at = None
+
+    def record(self, result):
+        with self._lock:
+            self._counts[result] += 1
+            self._last_result = result
+            if result == "served":
+                self._last_success_at = time.time()
+
+    def report(self):
+        with self._lock:
+            current = (dict(self._counts), self._last_result, self._last_success_at)
+        previous = self._reported
+        now = time.monotonic()
+        if current == previous:
+            return
+        if self._reported_at is not None and current[0].keys() == previous[0].keys():
+            interval = RESULT_CHANGE_INTERVAL_S if current[1] != previous[1] else SUMMARY_INTERVAL_S
+            if now - self._reported_at < interval:
+                return
+        LOG.info("presentation responses %s", json.dumps({
+            "counts": current[0],
+            "last_result": current[1],
+            "last_success_unix_s": current[2],
+        }, sort_keys=True))
+        self._reported = current
+        self._reported_at = now
+
+
+def make_handler(web_root, data, allowed_clients=("127.0.0.1",), *, requests=None):
     index = web_root / "index.html"
     assets = (web_root / "assets").resolve()
     allowed = frozenset(allowed_clients)
@@ -144,9 +191,20 @@ def make_handler(web_root, data, allowed_clients=("127.0.0.1",)):
                 return self.send(200, index.read_bytes(), "text/html; charset=utf-8")
             if path == DATA_PATH:
                 status, error, body = data.get()
-                if error is not None:
-                    return self.code(status, error["code"])
-                return self.send(200, body, "application/json")
+                result = error["code"] if error is not None else "served"
+                try:
+                    if error is not None:
+                        self.code(status, result)
+                    else:
+                        self.send(200, body, "application/json")
+                except OSError:
+                    if error is None:
+                        result = "GUEST_DATA_RESPONSE_WRITE_FAILED"
+                    raise
+                finally:
+                    if requests is not None:
+                        requests.record(result)
+                return
             match = ASSET.fullmatch(path)
             if match:
                 file = (assets / match[1]).resolve()
@@ -167,15 +225,51 @@ class AppServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def service_actions(self):
+        if self.heartbeat is not None:
+            self.heartbeat.beat("idle")
+        self.requests.report()
 
-def serve(config, token, *, connect=http.client.HTTPConnection):
+
+def serve(config, token, *, connect=http.client.HTTPConnection, heartbeat=None):
     data = DataSource(config["data_host"], config["data_port"], token, connect=connect)
+    requests = PresentationRequests()
     # Plan A: bind this guest's bridge address, allow dom0 only. Plan B: loopback only.
-    handler = make_handler(config["web_root"], data, config.get("allowed_clients", ["127.0.0.1"]))
-    return AppServer((config.get("bind", "127.0.0.1"), config["app_port"]), handler)
+    handler = make_handler(config["web_root"], data, config.get("allowed_clients", ["127.0.0.1"]),
+                           requests=requests)
+    server = AppServer((config.get("bind", "127.0.0.1"), config["app_port"]), handler)
+    server.requests = requests
+    server.heartbeat = heartbeat
+    return server
+
+
+def start_heartbeat(environ):
+    """Use the app's write-only credential, supplied by the unit from a root-only file."""
+    names = ("VM_ID", "BROKER_HOST", "BROKER_PORT", "BROKER_PASSWORD")
+    values = [environ.get("XENOVA_INTERACTION_" + name) for name in names]
+    if all(value is None for value in values):
+        return None, None
+    try:
+        vm_id, host, port, password = values
+        if not all(values) or not 0 < int(port) <= 65535:
+            raise ValueError("invalid Interaction MQTT configuration")
+        identity = UUID(vm_id)
+        if not identity.int or str(identity) != vm_id:
+            raise ValueError("invalid Interaction MQTT configuration")
+        from xenova_mqtt import AppHeartbeat, Identity, XenovaClient
+
+        client = XenovaClient(Identity(vm_id=vm_id, app_id="interaction"), host, int(port),
+                              username="interaction-" + vm_id, password=password)
+        heartbeat = AppHeartbeat(client, "interaction", vm_id=vm_id)
+        client.start()
+    except (ImportError, ValueError, OSError, RuntimeError) as error:
+        LOG.warning("Interaction heartbeat unavailable (%s)", type(error).__name__)
+        return None, None
+    return client, heartbeat
 
 
 def main(argv=None):
+    logging.basicConfig(level=logging.INFO)
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="/etc/xenova/guest-display-domu.json")
     args = p.parse_args(argv)
@@ -187,10 +281,13 @@ def main(argv=None):
         return 2
     server = serve(config, token)
     signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=server.shutdown, daemon=True).start())
+    client, server.heartbeat = start_heartbeat(os.environ)
     try:
         server.serve_forever(poll_interval=0.5)
     finally:
         server.server_close()
+        if client is not None:
+            client.stop(flush_s=0)
     return 0
 
 

@@ -9,7 +9,7 @@ const APP_LABEL: Readonly<Record<string, string>> = {
 };
 
 /**
- * app.lifecycle NOT_READY 사유 (백엔드 VmAppReport.REASONS 9개, MQTT 계약 6.2·6.3절).
+ * app.lifecycle NOT_READY 사유 (MQTT 계약 6.2·6.3절).
  * 화면에는 짧은 한글, 원문 코드는 title 로 남긴다.
  */
 const APP_REASON_LABEL: Readonly<Record<string, string>> = {
@@ -21,6 +21,7 @@ const APP_REASON_LABEL: Readonly<Record<string, string>> = {
   CALCULATION_FAILED: '계산 실패',
   OUTPUT_INVALID: '출력 이상',
   APP_STOPPING: '앱 종료 중',
+  APP_EXITED: '앱 스레드 종료',
   RESOURCE_RETAINED: '자원 회수 대기',
 };
 

@@ -404,6 +404,42 @@ class PhonePairingCode(BaseModel):
     expires_at: datetime
 
 
+# ---- 차량 표시 장치 모드 HDMI / 휴대폰 (계약 4.14) ----
+
+
+class DisplayModeName(str, Enum):
+    hdmi = "hdmi"  # HDMI 모니터에 통합 화면. 재부팅 뒤 기본값
+    mobile = "mobile"  # USB 테더링 휴대폰에 통합 화면. 휴대폰 중계가 켜지고 HDMI 는 꺼진다
+
+
+class DisplayModeServices(BaseModel):
+    """각 표시 서비스의 systemd ActiveState(active·inactive·activating·deactivating·failed 등). 읽지 못하면 unknown."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hdmi: str = Field(description="xenova-display-hdmi.service")
+    mobile: str = Field(description="xenova-display-mobile.service = 휴대폰 중계")
+    feed: str = Field(description="xenova-display-feed.service = 두 모드가 함께 쓰는 화면 데이터")
+
+
+class DisplayModeStatus(BaseModel):
+    """계약 4.14."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: DisplayModeName = Field(description="지금 선택된 표시 모드")
+    boot_default: DisplayModeName = Field(description="재부팅 뒤 모드. 지금은 항상 hdmi")
+    services: DisplayModeServices
+    hdmi_renderer_ready: bool = Field(description="HDMI 화면이 실제로 그려지고 있음(HDMI 렌더러 상태 파일 기준)")
+    observed_at: datetime
+
+
+class SetDisplayModeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: DisplayModeName
+
+
 # ---- CPU 배치 조회 (S15P31E110-353, 계약 4.11) ----
 # 플랫폼 cpu-layout 응답의 공개 필드만 옮긴다(모르는 필드는 버린다). null 은 '해당 없음·모름'이며 true/false 로 채우지 않는다.
 

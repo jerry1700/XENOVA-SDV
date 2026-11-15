@@ -67,7 +67,8 @@ def install_service(root):
     text = raw.decode("utf-8")
     required = (
         "User=xenova-display", "Group=xenova-display",
-        "Environment=PYTHONPATH=/opt/xenova/display-guest",
+        "Environment=PYTHONPATH=/opt/xenova/display-guest:/opt/xenova/mqtt-client",
+        "EnvironmentFile=-/etc/xenova/interaction-app.env",
         "ExecStart=/usr/bin/python3 -m xenova_display.guest_app --config /etc/xenova/guest-display-domu.json",
         "Restart=on-failure", "NoNewPrivileges=true", "ProtectSystem=strict",
     )

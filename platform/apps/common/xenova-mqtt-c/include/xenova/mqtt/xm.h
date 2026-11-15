@@ -257,6 +257,18 @@ int xm_auto_delay_command_parse(struct xm_span payload, struct xm_auto_delay_com
 int xm_auto_delay_result_json(char *out, size_t n, const struct xm_auto_delay_command *command,
 			      const char *status, uint64_t duration_ms, const char *error_code);
 
+enum xm_auto_fault_action { XM_AUTO_FAULT_APP_EXIT, XM_AUTO_FAULT_TX_BLOCK, XM_AUTO_FAULT_COUNT };
+struct xm_auto_fault_command {
+	char command_id[129], operation_id[129], expected_boot_id[XM_UUID_LEN + 1];
+	enum xm_auto_fault_action action;
+	uint32_t duration_s;
+};
+/* -ENOTSUP means the action belongs to a different command handler. */
+int xm_auto_fault_command_parse(struct xm_span payload, struct xm_auto_fault_command *out);
+/* duration_ms is -1 when there is no terminal duration to report. */
+int xm_auto_fault_result_json(char *out, size_t n, const struct xm_auto_fault_command *command,
+			      const char *status, int64_t duration_ms, uint64_t dropped, const char *error_code);
+
 struct xm_auto_input_fault_command {
 	char command_id[129], operation_id[129], expected_boot_id[XM_UUID_LEN + 1];
 	uint32_t duration_s;

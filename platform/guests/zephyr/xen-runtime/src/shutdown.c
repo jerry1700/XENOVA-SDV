@@ -118,17 +118,18 @@ int xshutdown_start(xshutdown_hook hook,void *context) {
  if(started||atomic_get(&owner)){k_mutex_unlock(&shutdown_lock);return -EALREADY;}
  started=true;
  int rc=xsr_open();if(rc)goto out;
- struct xs_client *c=xsr_acquire(k_uptime_get()+1000);
+ const int store_ms=IS_ENABLED(CONFIG_XENOVA_DOM0LESS_BOOT)?2000:500;
+ struct xs_client *c=xsr_acquire(k_uptime_get()+2*store_ms);
  if(!c){rc=-ETIMEDOUT;goto out;}
  char domid[16],*tail;unsigned long id;
- rc=xs_read_text(c,0,"domid",domid,sizeof(domid),500);
+ rc=xs_read_text(c,0,"domid",domid,sizeof(domid),store_ms);
  if(!rc) {
   id=strtoul(domid,&tail,10);
   if(!domid[0]||*tail||id==0||id>0x7fef)rc=-EPROTO;
   else {
    snprintf(domain_path,sizeof(domain_path),"/local/domain/%lu",id);
    snprintf(shutdown_path,sizeof(shutdown_path),"%s/control/shutdown",domain_path);
-   rc=xs_watch(c,shutdown_path,&watch_id,500);
+   rc=xs_watch(c,shutdown_path,&watch_id,store_ms);
    if(watch_id)atomic_set(&watch_owned,1); /* Includes XS_W_UNCERTAIN. */
   }
  }
@@ -142,9 +143,9 @@ int xshutdown_start(xshutdown_hook hook,void *context) {
  char feature[XS_PATH_LIMIT];
  atomic_set(&features_possible,1); /* Error can follow a successful remote write. */
  snprintf(feature,sizeof(feature),"%s/control/feature-poweroff",domain_path);
- rc=xsr_write(feature,"1",500);
+ rc=xsr_write(feature,"1",store_ms);
  snprintf(feature,sizeof(feature),"%s/control/feature-reboot",domain_path);
- if(!rc)rc=xsr_write(feature,"1",500);
+ if(!rc)rc=xsr_write(feature,"1",store_ms);
  if(rc)atomic_set(&stopping,1);
  k_sem_give(&feature_publication_done);
 out:

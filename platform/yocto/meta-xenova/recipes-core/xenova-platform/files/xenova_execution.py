@@ -601,7 +601,7 @@ class Execution:
 
     @traced('execution.prepare_launch')
     def prepare_launch(self, record, owner=None, *, deadline=None, expected_cpu=None, cpu_evidence=None,
-                       reuse_process_scope=False, reboot_from=None):
+                       reuse_process_scope=False, reboot_from=None, early_boot=False):
         self.require_launch_available(record)
         _, generation = self.lifecycle(record)
         intent = self.intent(record)
@@ -640,7 +640,9 @@ class Execution:
                 'manifest_sha256':info['revision'],'build_id':info['source'].get('build_id'),
                 'display_name':record.get('display_name'),'hostname':record.get('hostname'),
                 'internal_name':record['name']}
-        if self.p.process_isolation:
+        if early_boot:
+            value['early_boot'] = True
+        elif self.p.process_isolation:
             from xenova_guest_process import scope_name
             previous=self.run_record(record)
             # toolstack의 Linux reboot는 기존 monitor를 쓴다. 구형 실행에 scope가

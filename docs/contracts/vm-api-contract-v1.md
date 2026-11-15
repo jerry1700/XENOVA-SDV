@@ -224,7 +224,7 @@ dom0-manager가 `xentop -b -i 1 -n -x -f` 한 번의 출력에서 만드는 VM�
 | `recovery_attempt_id` | 논리적 복구 시도마다 발급하는 UUID이자 플랫폼 `recover_once` journal 키. **같은 시도의 재전달(응답 유실·Worker 재시작 뒤 재확인)과 결과 조회(`recovery-operation`)에는 반드시 같은 값을 재사용한다.** 이전 시도가 `failed`로 확정되고 backoff 뒤 다음 시도를 시작할 때만 새 UUID를 발급한다. Spring 이벤트의 `operation_id`로 기록 |
 | `attempt` | 같은 `recovery_id` 안의 시도 번호(1부터). 새 `recovery_attempt_id`를 발급할 때만 1씩 증가하고 재전달·재확인에서는 그대로다. 새 `recovery_id`에서 1로 돌아간다. 재시도 한도·대기는 복구 정책(S15P31E110-125) |
 | `reason` | 판정 근거. `HEARTBEAT_LOST`(Linux VM, `agent.heartbeat` 30초 무수신) / `APP_HEARTBEAT_LOST`(Zephyr VM, `app.heartbeat` 15초 무수신, 시나리오 D8. 대상은 템플릿 capability `app_heartbeat` 가 `true` 이거나 신호를 한 번이라도 받은 VM) / `VM_UNTRUSTED`(binding이 검증된 현재 Zephyr 주행 execution에서 `vm.trust`가 발행되어 Gateway가 출력 신뢰를 철회함) / `DOMAIN_ABSENT`(의도 running인데 도메인 없음, 60초 유예 뒤) / `DOMAIN_CRASHED`(`crashed`) |
-| `mode` | 플랫폼 `recover_once`의 `mode`: `start-if-absent` / `graceful-restart` / `force-restart` |
+| `mode` | 플랫폼 `recover_once`의 `mode`: `start-if-absent` / `graceful-restart` / `force-restart` / `restart-crashed` |
 | `detected_at` | 장애 판정 시각 (dom0) |
 | `occurred_at` | 이 이벤트의 시각 (dom0) |
 | `attempt_duration_ms` | `started` 외에만. 마지막 시도의 `started`부터 이 이벤트까지 |
@@ -298,6 +298,8 @@ Spring은 3.1의 네 상태에 `stopped`를 더해 다섯 상태를 공개합니
 | `PUT` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 변경 결과 (4.12) | `400`, `401`, `404`, `409`, `500`, `501`, `503`, `504` |
 | `GET` | `/api/v1/display/phone-link` | `200` 휴대폰 중계 상태 (4.13) | `401`, `503` |
 | `POST` | `/api/v1/display/phone-link/pairing-code` | `200` 새 연결번호 (4.13) | `401`, `409`, `503` |
+| `GET` | `/api/v1/display/mode` | `200` 표시 모드 (4.14) | `401`, `503`, `504` |
+| `POST` | `/api/v1/display/mode` | `200` 전환 뒤 표시 모드 (4.14) | `400`, `401`, `409`, `500`, `503`, `504` |
 | `GET` | `/healthz` | `200` | `401`, `503` |
 
 `/healthz` 를 뺀 모든 엔드포인트는 선택 헤더 `X-Request-Budget-Ms`(요청 예산, 4.9)를 받는다.
@@ -594,11 +596,64 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 - `409 InvalidState`: 중계가 `listening` 이 아님(신호를 보내지 않음). `503 PlatformUnavailable`: `systemctl`·`ip`·파일 읽기 실패, 신호 거절, 또는 2초 안에 새 번호가 나오지 않음.
 - 번호를 웹에 보여 주는 근거: 로그인한 운영자는 이미 SSH 로 같은 파일을 읽을 수 있고, 번호는 USB 로 연결된 휴대폰에서만(중계가 `usb0` 에 묶임) 2분·5회 안에 쓸 수 있다.
 
+### 4.14 `GET /api/v1/display/mode`, `POST /api/v1/display/mode` — 표시 장치 모드(HDMI / 휴대폰) 전환
+
+차량 통합 화면은 HDMI 모니터 또는 USB 테더링 휴대폰 중 하나에 나온다. 지금까지는 보드에 SSH 로 들어가 `sudo python3 -m xenova_display.display_mode mobile` 로 바꿨고, 휴대폰 중계는 재부팅 뒤 꺼져 있다. 관리 콘솔에서 바꿀 수 있게 dom0-manager 가 같은 명령을 대신 실행한다. 전환 로직(잠금, 순서, 실패 시 되돌리기)은 그 명령의 것이고 dom0-manager 는 바꾸지 않는다.
+
+| 요청 | 보드에서 하는 일 |
+|---|---|
+| `GET` | `display_mode status` 결과를 옮긴다 (한도 10초) |
+| `POST {"mode": "mobile"}` | USB 링크(4.13 의 `usb.present`)가 없으면 명령을 부르지 않고 `409 USB_LINK_ABSENT`. 있으면 `display_mode mobile`: 휴대폰 중계를 켜고 접속 주소가 생긴 뒤 HDMI 를 끈다 |
+| `POST {"mode": "hdmi"}` | `display_mode hdmi`: HDMI 를 켜고 화면이 실제로 그려진 뒤 휴대폰 중계를 끈다 |
+
+`GET`·`POST` 응답 `200` (`POST` 는 전환 뒤 상태):
+
+```json
+{
+  "mode": "mobile",
+  "boot_default": "hdmi",
+  "services": {"hdmi": "inactive", "mobile": "active", "feed": "active"},
+  "hdmi_renderer_ready": false,
+  "observed_at": "2026-11-14T09:00:00Z"
+}
+```
+
+| 필드 | 의미 |
+|---|---|
+| `mode` | 지금 선택된 표시 모드 `hdmi` · `mobile` |
+| `boot_default` | 재부팅 뒤 모드. 지금은 항상 `hdmi` |
+| `services.hdmi` | `xenova-display-hdmi.service` 의 systemd 상태(`active`·`inactive`·`activating`·`deactivating`·`failed` 등, 못 읽으면 `unknown`) |
+| `services.mobile` | `xenova-display-mobile.service`(휴대폰 중계)의 상태 |
+| `services.feed` | `xenova-display-feed.service`(두 모드가 함께 쓰는 화면 데이터)의 상태. `active` 가 아니면 전환을 거절한다 |
+| `hdmi_renderer_ready` | HDMI 화면이 실제로 그려지고 있음(렌더러 상태 파일 기준) |
+| `observed_at` | 보드에서 읽은 시각(UTC) |
+
+- 휴대폰 모드가 되어도 휴대폰이 실제로 붙은 것은 아니다. 접속 주소와 연결번호는 4.13 으로 읽는다.
+- 전환은 보통 수 초, 최악 240초(되돌리기 포함) 걸린다. 도중에 끊으면 두 화면이 모두 꺼질 수 있어 끊지 않는다. 요청 예산(4.9)은 시작 전에만 확인한다(소진이면 바꾸지 않고 `504`). 호출자는 240초보다 길게 기다린다.
+- 동시 전환은 명령의 잠금이 막는다(`409 DISPLAY_MODE_BUSY`). 표시 장치를 바꿔도 VM·주행 모드·Gateway·MQTT 는 바뀌지 않는다.
+- 응답은 `Cache-Control: no-store`.
+
+오류 (`platform_code` 로 분기, `retryable` 은 다시 눌러 볼 만한지):
+
+| HTTP | code | platform_code | 상황 |
+|---|---|---|---|
+| `400` | `InvalidArgument` | — | `mode` 가 `hdmi`·`mobile` 이 아님 |
+| `409` | `InvalidState` | `USB_LINK_ABSENT` | (mobile) 케이블·USB 테더링 없음. 명령을 부르지 않음. retryable |
+| `409` | `InvalidState` | `DISPLAY_MODE_BUSY` | 다른 전환이 진행 중. retryable |
+| `409` | `InvalidState` | `MOBILE_ENDPOINT_NOT_READY` · `HDMI_RENDERER_NOT_READY` · `DISPLAY_SERVICE_TRANSITION_FAILED` · `DISPLAY_MODE_FAILED_RESTORED` | 전환 실패, 이전 모드로 되돌림. retryable |
+| `409` | `InvalidState` | `DISPLAY_SERVICE_NOT_SETTLED` | 표시 서비스가 켜지거나 꺼지는 중. retryable |
+| `409` | `InvalidState` | `SHARED_FEED_NOT_ACTIVE` · `MODE_GUARD_NOT_LOADED` · `NATIVE_DISPLAY_UNITS_REQUIRED` · `LEGACY_MOBILE_FIRST_REQUIRES_MIGRATION` · `FOREIGN_MODE_MARKER` · `UNSAFE_CONFIGURATION` · `UNSAFE_RUNTIME_DIRECTORY` | 보드 표시 설정 문제. 보드 작업 필요 |
+| `500` | `DriverError` | `ROLLBACK_INCOMPLETE_CHECK_DISPLAY_SERVICES` | 실패 후 이전 모드로 완전히 되돌리지 못함. 보드에서 표시 서비스 확인 |
+| `503` | `PlatformUnavailable` | 명령이 준 코드 또는 없음 | 명령 실행·결과 해석 실패 |
+| `504` | `DriverTimeout` | `DISPLAY_MODE_TIMEOUT` 또는 없음 | 명령이 시한 안에 안 끝남(상태를 다시 읽어 확인), 또는 시작 전 예산 소진 |
+
+dom0less 로 바뀌면 이 명령을 실행하는 곳이 dom0 에서 표시 장치를 가진 VM 으로 옮겨간다. 경로와 본문은 그대로 둔다.
+
 ---
 
 ## 5. Spring 공개 API
 
-프론트에 노출되는 VM 관리 엔드포인트는 아래 8개입니다. `start`는 dom0-manager의 `POST /api/v1/vms` 재호출로 구현합니다.
+프론트에 노출되는 VM 관리 엔드포인트는 다음과 같습니다. `start`는 dom0-manager의 `POST /api/v1/vms` 재호출로 구현합니다.
 
 | 메서드 | 경로 | 성공 응답 | 비고 |
 |---|---|---|---|
@@ -610,6 +665,9 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `POST` | `/api/v1/vms/{vm_id}/stop` | `200` VM (`state: stopped`) | dom0 단건 조회로 정지 전 상태를 읽은 뒤 **runtime 유무와 관계없이** dom0 stop을 호출. 플랫폼이 `desired_state: stopped` 의도를 기록해야 Recovery Worker가 사용자가 끈 VM을 다시 켜지 않는다(1.2절). 이미 꺼져 있었으면 `vm.state.changed` 이벤트만 남기지 않음. dom0는 `204`지만 Spring은 레코드로 VM 객체를 만들어 반환 |
 | `DELETE` | `/api/v1/vms/{vm_id}` | `204` | dom0 retire 성공 뒤 Spring 레코드를 `RETIRED`로 보존하고 v1 목록·단건 조회에서는 숨김. 보존 행의 이름은 `<이름>~<vm_id 앞 8자>`로 바꿔 같은 이름을 다시 쓸 수 있게 함 |
 | `GET` | `/api/v1/templates` | `200` 템플릿 배열 | 보드 카탈로그(템플릿별 최신) + 설정 표시 정보 (2.3절). 보드 미조회 시 `503` |
+| `POST` | `/api/v1/vms/{vm_id}/reboot` | `200`·`202` 작업 상태 | 선택 `Idempotency-Key`. 진행 중이면 `202` |
+| `GET` | `/api/v1/vms/{vm_id}/control-operations?request_key=` | `200` 작업 상태 | 선택 `request_key`로 원 작업 조회 |
+| `PUT` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 변경 결과 | 정지한 Linux VM의 vCPU·메모리를 변경하며 다음 시작부터 적용(보드 계약 4.12) |
 | `GET` | `/api/v1/vms/{vm_id}/resources` | `200` 자원 뷰 | vCPU·메모리, pCPU 수, `vcpu_pinning`(VM의 hard affinity), `shared_pcpus`(dom0 공유 집합), `exclusive_pcpus`, `limits`. `host_preparation_required`는 `null` |
 | `PUT` | `/api/v1/vms/{vm_id}/resources/vcpu-pinning` | `200` 자원 뷰 | 본문 `{mappings:[{vcpu, pcpus}]}`(모든 vCPU에 같은 마스크). 공유 VM은 공유 집합 안, 전용 VM은 공유·다른 전용 코어 밖. 응답 `host_preparation_required`: `true`면 보드 호스트 준비 뒤 시작 가능(1차 보드는 늘 `true`), `false`면 바로 시작 가능(플랫폼 1e41ea73 이후 게스트 배치만 바뀐 변경). 공유·전용 방식과 공유 집합은 바꾸지 않는다 |
 
@@ -624,7 +682,7 @@ Spring의 페이지 규칙: (1) `gap: true`면 `recovery.failed` 유실 가능�
 | `POST` | `/api/v1/vms/registrations` | 신규 `201`, 기존 `200` `{vm_id, registration: "confirmed"}` | 사용자 JWT 가 아니라 등록 통지 전용 서비스 토큰. 본문 오류 `400 INVALID_REGISTRATION`, 충돌 `409 VM_REGISTRATION_CONFLICT` ([등록 계약](vm-provisioning-v1.md)) |
 | `POST` | `/api/v1/vms/synchronizations` | `200` 동기화 결과 | dom0 등록 목록을 읽어 요청 한 번에 Spring 레코드를 보드와 같게 맞춘다. 보드에 없는 행은 즉시 RETIRED(작업 중이면 보류), 같은 `vm_id`가 다시 나타나면 복구 ([등록 계약](vm-provisioning-v1.md)) |
 
-보고서 `GET /api/v1/reports/os-evidence`, `GET /api/v1/reports/performance` 와 실행 로그 `GET /api/v1/logs`(·`/sources`, [실행 로그 계약](runtime-logs-v1.md))도 같은 JWT 로 연다. Spring 에는 VM `reboot`·`control-operations`·`resources` 공개 엔드포인트가 없다(dom0-manager 4.3.1·4.8·4.10·4.12 는 내부 계약).
+보고서 `GET /api/v1/reports/os-evidence`, `GET /api/v1/reports/performance` 와 실행 로그 `GET /api/v1/logs`(·`/sources`, [실행 로그 계약](runtime-logs-v1.md))도 같은 JWT 로 연다.
 
 모든 공개 API는 `Authorization: Bearer {access_token}`이 필요합니다. 생성·시작·정지·삭제가 성공하면 이벤트(`vm.created`, `vm.state.changed`, `vm.deleted`)가 기록됩니다.
 
@@ -946,3 +1004,4 @@ dom0-manager는 보드의 Tailscale 주소에 바인딩하고 `/healthz`를 포�
 | v1.23 | 2026-11-12 | VM 상태 5초 주기 조회(`EVENT_VM_STATE_CHECK_INTERVAL_MS`)를 되살린다. 공개 `GET /api/v1/vms` 요청 시 동기화와 함께 동작하며 실행 상태만 다룬다. 보드 등록 목록 → VM 테이블 등록 동기화는 주기 실행 없이 `POST /api/v1/vms/synchronizations` 요청 때만 실행한다 |
 | v1.24 | 2026-11-13 | dom0-manager의 생성·정지·보관 오류에 선택 `context` 추가. 기존 원장으로 작업 ID 조회 제공(8.1.1) |
 | v1.25 | 2026-11-14 | `POST /api/v1/vms/synchronizations`가 요청 한 번에 보드와 맞춘다: 연속 2회·생성 후 20분 유예 제거, 정리 후 등록 순서, 같은 `vm_id` 복구(`restored`), 작업 중 보류(`skipped`), 결과 항목에 `name`. `missing_from_board` 개수 필드 삭제. RETIRED 행은 이름을 `<이름>~<vm_id 앞 8자>`로 비움(V10) |
+| v1.26 | 2026-11-14 | 표시 장치 모드 조회 `GET /api/v1/display/mode` 와 전환 `POST /api/v1/display/mode`(4.14). 보드 명령 `display_mode` 를 그대로 실행하고, mobile 은 USB 링크가 없으면 `409 USB_LINK_ABSENT`, 전환 도중 끊지 않음(최악 240초) |

@@ -79,7 +79,7 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 | MQTT-01 | `xenova/v1/vms/{vm_id}/heartbeat` | `agent.heartbeat` | 에이전트 → 백엔드 | 1 | X | `{}` (봉투만) |
 | MQTT-02 | `xenova/v1/vms/{vm_id}/inventory` | `agent.inventory` | 에이전트 → 백엔드 | 1 | **O** | `os{id, version_id, pretty_name}`, `kernel_release`, `hostname`, `interfaces[{name, mac, addresses[{address, family}]}]`, `agent_version`, `capabilities{commands[], metrics[]}` |
 | MQTT-03 | `xenova/v1/vms/{vm_id}/metrics` | `agent.metrics` | Linux Agent·Zephyr Publisher → 백엔드 | 0 | X | 공통 `window_ms`·`values[]`. Linux는 `processes[]`·`process_collection`, Zephyr는 `observed_uptime_ms`(3.1절) |
-| MQTT-04 | `xenova/v1/vms/{vm_id}/command` | `agent.command` | 백엔드 → 에이전트/drive-v1 | 1 | X | `command_id`, `operation_id`, `expected_boot_id`, `expires_at`, `action`(`stress`/`agent_exit`/`auto_delay`), `parameters` |
+| MQTT-04 | `xenova/v1/vms/{vm_id}/command` | `agent.command` | 백엔드 → 에이전트/drive-v1 | 1 | X | `command_id`, `operation_id`, `expected_boot_id`, `expires_at`, `action`(`stress`/`agent_exit`/`auto_delay`/`app_exit`/`auto_tx_block`), `parameters` |
 | MQTT-05 | `xenova/v1/vms/{vm_id}/command-result` | `agent.command_result` | 에이전트 → 백엔드 | 1 | X | `command_id`, `operation_id`, `status`(`ACCEPTED`/`RUNNING`/`SUCCEEDED`/`FAILED`/`REJECTED`), `started_at`, `finished_at`, `duration_ms`, `result`, `error` |
 
 - inventory는 retained다. 최초 기동과 OS·네트워크 정보가 바뀔 때 전체를 다시 보낸다. retained 메시지는 마지막 보고일 뿐 지금 `ONLINE`이라는 증거가 아니다. VM을 삭제하면 백엔드가 그 VM의 retained inventory를 지운다.
@@ -129,8 +129,8 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 | `operation_id` | 선택. 주면 문자열이어야 한다(아니면 `INVALID_COMMAND`). 결과에 그대로 돌려준다 |
 | `expected_boot_id` | 필수. 대상 VM 의 현재 boot_id(inventory 나 heartbeat 봉투에서 얻는다). 다르면 `BOOT_MISMATCH` |
 | `expires_at` | 필수. ISO-8601 UTC. 봉투 `sent_at` 보다 늦고 300초 이내여야 한다(`INVALID_COMMAND`). 받은 시각이 이 시각 이후면 `EXPIRED` |
-| `action` | `stress` / `agent_exit` / `auto_delay`. 그 밖은 `UNSUPPORTED_ACTION` |
-| `parameters` | 객체. Linux `stress`: `cpu_workers` 0..4, `memory_mib` 0..512, `duration_s` 1..120. `agent_exit`: 빈 객체. Zephyr `auto_delay`: `delay_ms` 1..100, `duration_s` 1..120. 모두 정수(bool·실수 불가)이며 명시되지 않은 키는 거절 |
+| `action` | `stress` / `agent_exit` / `auto_delay` / `app_exit` / `auto_tx_block` |
+| `parameters` | 객체. Linux `stress`: `cpu_workers` 0..4, `memory_mib` 0..512, `duration_s` 1..120. `agent_exit`: 빈 객체. Zephyr `auto_delay`: `delay_ms` 1..100, `duration_s` 1..120. `app_exit`: `app_id`는 `autonomous`. `auto_tx_block`: `duration_s` 1..120. 숫자는 정수이며 명시되지 않은 키는 거절 |
 
 - 시각: 에이전트는 자기 UTC 시계로 만료를 판정한다. `sent_at` 이 에이전트 시계보다 30초 넘게 앞서면 시계를 믿을 수 없다고 보고 `CLOCK_UNTRUSTED` 로 거절한다
 - retained 로 온 명령은 실행하지 않는다(`INVALID_COMMAND`). 명령은 retain 하지 않는다
@@ -155,6 +155,7 @@ Linux·Zephyr 명령 발행은 백엔드에 구현돼 있다.
 - 결과를 받지 못하면(만료까지) 보낸 쪽은 결과 없음으로 처리한다. 같은 `command_id` 로 다시 보내면 실행 없이 마지막 결과만 돌아온다
 - MQTT-05 는 QoS 1 이라 같은 결과가 두 번 이상 올 수 있다(재전달, 재시작 뒤 재제출). 백엔드는 `(vm_id, command_id)` 를 한 명령의 집계 키로 쓴다. 같은 `status`·같은 payload 의 재전달은 무시하고, `RUNNING` → `SUCCEEDED`/`FAILED` 는 정상 상태 전이로 처리한다. 종결 상태 뒤에 다른 종결 상태가 오면 계약 위반으로 기록한다
 - Zephyr `auto_delay`는 UTC 시계가 없으므로 `expires_at`의 형식과 상한은 명령을 발행하는 백엔드가 검증한다. drive-v1은 현재 boot 일치, retained 여부와 파라미터를 검증하고 단조 시계로 실행 시간을 제한한다. 결과의 UTC 시각 필드는 null이다.
+- `warm-lattice-lab`의 `app_exit`와 `auto_tx_block`도 같은 대상 boot와 결과 토픽을 사용한다. `app_exit`의 성공은 AUTO 스레드 종료 관측을, `auto_tx_block`의 성공은 차단 기간 만료를 뜻한다. 송신 차단의 종결 결과에는 `duration_s`와 해당 실행의 `dropped` 건수가 포함된다.
 - 현재 소스의 FW1.0.33 후보는 AUTO 지연·heap 비율을 `vm.trust`로 발행하지 않는다. 실제 AUTO 작업이 원 release deadline을 넘으면 해당 결과를 즉시 제한하고 기존 `app.lifecycle`의 NOT_READY로 보고한다. 원 errno·health failure·주입 명령의 결과는 각각 보존한다. 명령의 `SUCCEEDED`는 설정된 주입 기간의 종결이며 실제 AUTO 계산·준비·승계 성공이 아니다.
 - `AUTO_DEADLINE_MISS`의 `consecutive_misses`, `command_id`는 AUTO 기능 실패 근거다. 현재 binding·boot·app과 일치하는 비-retained 보고만 소비한다. Gateway는 해당 AUTO 자격을 제한하고 현재 후보로 승계/정지를 판단하며, Worker는 이를 진단으로 보관하고 이 보고만으로 `VM_UNTRUSTED` latch·새 복구 시도를 만들지 않는다.
 - 과거 Authority `distrusted`와 원 보호 기록은 기존 형식으로 읽고 자동 변환·삭제하지 않는다. 실제 VM 장애의 원 복구는 Gateway 보호→기존 `recover_once`→새 execution의 receipt·binding·준비 확인→정당한 protection 종결→Standby 재합류를 따른다. 현재 Active를 자동 탈환하지 않는다. 입력/기능 회복의 AUTO 재개는 현재 Active와 기존 명시 요청·카운트다운·제어 적용을 사용하고 사용자 `manual_hold`를 보존한다.
@@ -375,6 +376,7 @@ ESP32가 시리얼로 보낸 상태를 게이트웨이가 바꿔 발행한다. �
 | ID | 토픽 | `type` | 발행 → 구독 | 주기 | QoS | 주요 payload |
 | --- | --- | --- | --- | --- | --- | --- |
 | MQTT-06 | `xenova/v1/apps/{app_id}/events` | `app.heartbeat` | 앱 VM → 백엔드, 인터랙션 VM, 주행 화면 | 1초 | 0 | `state`, `uptime_s` |
+| MQTT-06 (Debian 화면 서버) | `xenova/v1/vms/{vm_id}/apps/interaction/events` | `app.heartbeat` | Debian → 백엔드 | 1초 | 0 | `state: idle`, `uptime_s` |
 
 | 필드 | 타입 | 설명 |
 | --- | --- | --- |
@@ -387,7 +389,8 @@ ESP32가 시리얼로 보낸 상태를 게이트웨이가 바꿔 발행한다. �
 - verified의 `active`는 게스트가 적용한 control에서 자신이 선택됐다는 보고이며 Gateway의 실제 출력 허가가 아니다. 준비·승격은 §6.2를 따른다.
 - Legacy의 에이전트가 없는 Zephyr 주행 VM에서는 이 신호가 앱 쪽 생존 정보다. 복구 서비스의 VM 재시작 판정(5.1)과 게이트웨이의 `AUTO_READY` 판정(5.2)은 Xen 도메인 상태와 이 신호를 쓴다 (시나리오 §8 D8).
 - Linux VM 에서 도는 앱도 같은 토픽·형식으로 보낸다(어떤 앱을 올릴지는 4장 앱 구성에 따른다). 주행과 무관한 앱의 평상시 상태는 `idle` 이다. 에이전트의 `agent.heartbeat`(3장)는 VM·에이전트 생존이고 앱 생존이 아니며, `metrics` 의 `processes[]` 는 CPU 상위 목록이라 앱 생존 근거로 쓰지 않는다.
-- Linux 앱의 이 신호는 **상태 표시용**이다. 복구 서비스는 Linux VM 을 이 신호로 재시작하지 않는다(Linux VM 재시작 근거는 Xen 상태와 `agent.heartbeat`). 멈춘 Linux 앱은 게스트 안 systemd 가 `Restart=on-failure`·`WatchdogSec` 으로 되살린다. 앱은 처리 루프에서 이 신호와 watchdog 통지를 함께 보낸다(공용 클라이언트 `xenova_mqtt.AppHeartbeat`).
+- Linux 앱의 이 신호는 **상태 표시용**이다. 복구 서비스는 Linux VM 을 이 신호로 재시작하지 않는다(Linux VM 재시작 근거는 Xen 상태와 `agent.heartbeat`). 앱은 처리 루프에서 공용 클라이언트 `xenova_mqtt.AppHeartbeat`를 호출한다. 유닛에 `WatchdogSec`를 설정한 앱은 같은 호출에서 systemd 통지도 보낼 수 있다.
+- Debian 화면 서버는 HTTP 수신 루프에 진입한 뒤 `idle`을 보고한다. 공통 봉투의 VM UUID·boot ID·발행자 instance ID로 수신 기록을 구분하며 retain은 끈다. `interaction-{vm_id}` 계정은 이 VM의 토픽에만 발행할 수 있다. 실제 presentation 응답 성공과 실패는 게스트 저널에 남는다. 화면 렌더링은 dom0에서 확인한다.
 
 ### 6.2 앱 준비 보고 `app.readiness`
 
@@ -440,9 +443,11 @@ mode를 발급하면 해당 새 세대 적용을 다시 확인한다. 상태 있
 | `applied_generation` | JSON integer, 0..4294967295 | 검증한 현재 제어 문맥. 미적용은 0 |
 | `check_seq` | 정규 uint64 십진 string, 1..18446744073709551615 | supervisor의 실제 입력·설정·소유 상태 확인 순번. 계산·송신 횟수 아님 |
 | `progress_seq` | 정규 uint64 십진 string, 0..18446744073709551615 | 앱 instance의 실제 계산 완료 순번. 무업무 대기 중 증가하지 않음 |
-| `phase` | WAITING / ACTIVATING / EXECUTING / STOPPING / RESIDUAL | 무업무 대기 / 현재 문맥의 계산 대기 / 계산 실행·결과 관측 / 종료 중 / 정리 미확정 |
+| `phase` | WAITING / ACTIVATING / EXECUTING / STOPPING / STOPPED / RESIDUAL | 무업무 대기 / 현재 문맥의 계산 대기 / 계산 실행·결과 관측 / 종료 중 / 스레드 종료 확인 / 정리 미확정 |
 | `readiness` | QUALIFIED / READY / NOT_READY | 사전 대기 자격 / 실제 계산을 확인한 활성화 준비 / 제한 상태 |
-| `reason` | QUALIFIED·READY는 null, NOT_READY는 제한 코드 | 6.2절 코드, APP_STOPPING·RESOURCE_RETAINED, 아래 lattice 계산 코드 |
+| `reason` | QUALIFIED·READY는 null, NOT_READY는 제한 코드 | 6.2절 코드, APP_STOPPING·RESOURCE_RETAINED·APP_EXITED, 아래 lattice 계산 코드 |
+
+`STOPPED / NOT_READY / APP_EXITED`는 Zephyr 감독 루프가 해당 AUTO 작업 스레드의 종료를 확인한 보고다. 세대는 1 이상이어야 하며 완료 작업은 새로 세지 않는다. Gateway는 현재 boot·앱 인스턴스·세대에 속한 신선한 보고만 사용한다. 제어권 철회 뒤 기존 AUTO 재초기화 절차를 요청한다. 자원 정리 여부는 재초기화 단계에서 확인한다.
 
 lattice 계산 코드(공통 펌웨어의 경로 계획·추종 사유. C `xm_app_lifecycle_json`·Python `xenova_mqtt.lifecycle.LATTICE_REASONS` 가 같은 집합을 받는다):
 BUSY, MAP_UNAVAILABLE, WORLD_UNAVAILABLE, POSE_UNAVAILABLE, PATH_UNAVAILABLE, PATH_INVALIDATED,

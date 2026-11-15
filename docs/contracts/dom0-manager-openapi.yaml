@@ -940,6 +940,101 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /api/v1/display/mode:
+    get:
+      tags: [Display mode]
+      operationId: getDisplayMode
+      summary: 지금 표시 모드(HDMI / 휴대폰)와 표시 서비스 상태
+      description: >-
+        보드 명령 `python3 -m xenova_display.display_mode status` 결과를 옮긴다(계약 4.14). 응답은 Cache-Control no-store 다.
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      responses:
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 표시 모드
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisplayModeStatus'
+        '503':
+          description: 표시 모드 명령 실행 또는 결과 해석 실패 (code PlatformUnavailable). 재시도 가능
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: 명령이 10초 안에 끝나지 않음 또는 요청 예산 소진 (code DriverTimeout)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [Display mode]
+      operationId: setDisplayMode
+      summary: 표시 모드 전환
+      description: >-
+        보드 명령 `python3 -m xenova_display.display_mode <hdmi|mobile>` 을 실행하고 끝날 때까지 기다린다(계약 4.14).
+        mobile 은 휴대폰 중계(xenova-display-mobile)를 켠 뒤 HDMI 를 끄고, hdmi 는 HDMI 화면이 뜬 뒤 중계를 끈다.
+        실패하면 명령이 이전 모드로 되돌린다. mobile 요청인데 USB 링크(테더링)가 없으면 명령을 부르지 않고 409 USB_LINK_ABSENT.
+        보통 수 초, 최악 240초 걸릴 수 있다. 전환 도중에는 끊지 않으므로 요청 예산은 시작 전에만 확인한다.
+        응답은 Cache-Control no-store 다.
+      parameters:
+        - $ref: '#/components/parameters/RequestBudget'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetDisplayModeRequest'
+      responses:
+        '400':
+          description: mode 가 hdmi·mobile 이 아님 (code InvalidArgument)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '200':
+          description: 전환 뒤 표시 모드
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DisplayModeStatus'
+        '409':
+          description: >-
+            전환하지 않았거나 실패 후 이전 모드로 되돌림 (code InvalidState). 사유는 platform_code:
+            USB_LINK_ABSENT, DISPLAY_MODE_BUSY, MOBILE_ENDPOINT_NOT_READY, HDMI_RENDERER_NOT_READY,
+            DISPLAY_SERVICE_TRANSITION_FAILED, DISPLAY_MODE_FAILED_RESTORED, DISPLAY_SERVICE_NOT_SETTLED,
+            SHARED_FEED_NOT_ACTIVE 와 보드 설정 문제(MODE_GUARD_NOT_LOADED 등). retryable 로 다시 눌러 볼 만한지 알린다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: >-
+            전환 실패 후 이전 모드로 완전히 되돌리지 못함 (code DriverError, platform_code
+            ROLLBACK_INCOMPLETE_CHECK_DISPLAY_SERVICES). 보드에서 표시 서비스를 확인해야 한다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: 표시 모드 명령 실행 또는 결과 해석 실패 (code PlatformUnavailable)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '504':
+          description: >-
+            시작 전 요청 예산 소진(바꾸지 않음) 또는 명령이 240초 안에 끝나지 않음 (code DriverTimeout,
+            platform_code DISPLAY_MODE_TIMEOUT). 뒤의 경우 상태를 다시 읽어 확인한다
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /healthz:
     get:
       tags: [Health]
@@ -1781,7 +1876,7 @@ components:
           description: HEARTBEAT_LOST / APP_HEARTBEAT_LOST / DOMAIN_ABSENT / DOMAIN_CRASHED
         mode:
           type: [string, 'null']
-          description: start-if-absent / graceful-restart / force-restart
+          description: start-if-absent / graceful-restart / force-restart / restart-crashed
         detected_at:
           type: string
           format: date-time
@@ -1896,6 +1991,51 @@ components:
         expires_at:
           type: string
           format: date-time
+    DisplayModeStatus:
+      type: object
+      description: 계약 4.14
+      additionalProperties: false
+      required: [mode, boot_default, services, hdmi_renderer_ready, observed_at]
+      properties:
+        mode:
+          type: string
+          enum: [hdmi, mobile]
+          description: 지금 선택된 표시 모드
+        boot_default:
+          type: string
+          enum: [hdmi, mobile]
+          description: 재부팅 뒤 모드. 지금은 항상 hdmi
+        services:
+          $ref: '#/components/schemas/DisplayModeServices'
+        hdmi_renderer_ready:
+          type: boolean
+          description: HDMI 화면이 실제로 그려지고 있음(HDMI 렌더러 상태 파일 기준)
+        observed_at:
+          type: string
+          format: date-time
+    DisplayModeServices:
+      type: object
+      description: 각 표시 서비스의 systemd ActiveState(active·inactive·activating·deactivating·failed 등). 읽지 못하면 unknown
+      additionalProperties: false
+      required: [hdmi, mobile, feed]
+      properties:
+        hdmi:
+          type: string
+          description: xenova-display-hdmi.service
+        mobile:
+          type: string
+          description: xenova-display-mobile.service = 휴대폰 중계
+        feed:
+          type: string
+          description: xenova-display-feed.service = 두 모드가 함께 쓰는 화면 데이터
+    SetDisplayModeRequest:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [hdmi, mobile]
     Health:
       type: object
       additionalProperties: false

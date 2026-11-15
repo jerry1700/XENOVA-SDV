@@ -41,6 +41,16 @@ def tof_leaf():
 
 
 class MapperProfileTests(unittest.TestCase):
+    def test_demo_pose_bounds_are_explicit(self):
+        value = profile_fields()
+        self.assertIsNone(MapperProfile(value).demo_pose_bounds)
+        value['demo_pose_bounds'] = {'position_m': .001, 'heading_rad': .002}
+        with self.assertRaises(MapperProfileError):
+            MapperProfile(value)
+        value['demo_road_fill'] = True
+        profile = MapperProfile(value)
+        self.assertEqual(MapperProfile.from_bytes(profile.canonical_bytes).demo_pose_bounds, (.001, .002))
+
     def test_roundtrip_immutable_typed_config_preserves_distinct_vehicle_and_local_ids(self):
         calib=calibration(); value=profile_fields(calib)
         profile=MapperProfile.from_dict(value)

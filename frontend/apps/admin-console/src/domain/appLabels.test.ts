@@ -13,7 +13,7 @@ describe('앱 ID·사유 한글 라벨', () => {
     expect(appLabel('toString')).toBe('toString');
   });
 
-  it('백엔드 REASONS 9개를 모두 한글로 바꾸고, 모르는 코드는 원문', () => {
+  it('백엔드 REASONS를 한글로 바꾸고, 모르는 코드는 원문', () => {
     const reasons = [
       'CONTROL_UNAPPLIED',
       'INPUT_UNAVAILABLE',
@@ -23,6 +23,7 @@ describe('앱 ID·사유 한글 라벨', () => {
       'CALCULATION_FAILED',
       'OUTPUT_INVALID',
       'APP_STOPPING',
+      'APP_EXITED',
       'RESOURCE_RETAINED',
     ];
     expect(reasons.map(appReasonLabel)).toEqual([
@@ -34,6 +35,7 @@ describe('앱 ID·사유 한글 라벨', () => {
       '계산 실패',
       '출력 이상',
       '앱 종료 중',
+      '앱 스레드 종료',
       '자원 회수 대기',
     ]);
     expect(appReasonLabel('PATH_UNAVAILABLE')).toBe('PATH_UNAVAILABLE');

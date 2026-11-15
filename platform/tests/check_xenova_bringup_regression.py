@@ -15,13 +15,64 @@ boot = boot.replace('<${kernel_loadaddr} ${kernel_size}>', '"<${kernel_loadaddr}
 boot = boot.replace('@@RPI_DOM0_MEM@@', '1024M').replace('@@RPI_DEBUG_XEN_ARGS@@', 'sync_console bootscrub=0')
 boot_mocks = r'''
 setenv() { key=$1; shift; export "$key=$*"; }
-fdt() { echo "FDT $*"; [ "${FAIL:-}" != "fdt-$1" ] && [ "${FAIL:-}" != "fdt-$1-${3:-}" ]; }
+declare -A fdt_args fdt_guests
+fdt() {
+    echo "FDT $*"
+    [ "$FAIL" != "fdt-$1" ] && [ "$FAIL" != "fdt-$1-${3:-}" ] || return 1
+    case "$1" in
+        move)
+            [ "$FAIL" != fdt-copy-guest ] || [ "$3" != 0x07800000 ] || return 1
+            fdt_args[$3]=${fdt_args[$2]:-}
+            fdt_guests[$3]=${fdt_guests[$2]:-}
+            working_fdt=$3
+            ;;
+        addr) working_fdt=$2 ;;
+        set)
+            if [ "$3" = xen,dom0-bootargs ]; then fdt_args[$working_fdt]=$4; fi
+            ;;
+        get) setenv "$3" "${fdt_args[$working_fdt]}" ;;
+        mknode)
+            if [ "$3" != dom0 ]; then fdt_guests[$working_fdt]+=" $3"; fi
+            ;;
+    esac
+}
 part() { echo "PART $*"; [ "${FAIL:-}" != part ] || return 1; rootfs_partuuid=test-root; }
-fatload() { echo "LOAD $*"; [ "${FAIL:-}" != "$4" ] || return 1; filesize=1234; }
-booti() { echo "BOOT $*"; }
+fatload() {
+    echo "LOAD $*"
+    [ "$FAIL" != "$4" ] || return 1
+    filesize=1234
+    if [ "$4" = xenova-guests.scr ]; then filesize=${SCRIPT_FILESIZE:-1234}; fi
+}
+size() { [ "${GUEST_SCRIPT:-}" = 1 ]; }
+itest.l() {
+    case "$2" in
+        -gt) (( $1 > $3 )) ;;
+        -le) (( $1 <= $3 )) ;;
+        *) return 2 ;;
+    esac
+}
+source() {
+    echo "SOURCE $*"
+    [ "$FAIL" != source-header ] || return 1
+    # Model failure after the real guest script has changed the working FDT.
+    setenv dom0_bootargs "$dom0_bootargs xenova.dom0less=1"
+    fdt set /chosen xen,dom0-bootargs "$dom0_bootargs"
+    fdt mknode /chosen debian-dev
+    [ "$FAIL" != source ] || return 1
+    fdt mknode /chosen zephyr-drive-a
+    fdt mknode /chosen zephyr-drive-b
+}
+booti() {
+    echo "BOOT $*"
+    [ "$3" = "$working_fdt" ] || return 1
+    echo "BOOT_ARGS ${fdt_args[$3]}"
+    echo "BOOT_ENV $dom0_bootargs"
+    echo "BOOT_GUESTS${fdt_guests[$3]}"
+    echo "BOOT_SKIP ${xenova_skip_boot_guests:-}"
+}
 sleep() { :; }
 '''
-for name, values, failure in [
+boot_cases = [
     ('bootflow-mmc0', {'devtype': 'mmc', 'devnum': '0'}, False),
     ('bootflow-mmc1', {'devtype': 'mmc', 'devnum': '1'}, False),
     ('manual-mmc0-fallback', {}, False),
@@ -33,8 +84,19 @@ for name, values, failure in [
     ('stop-on-partuuid-failure', {'FAIL': 'part'}, True),
     ('stop-on-xen-load-failure', {'FAIL': 'xen'}, True),
     ('stop-on-kernel-load-failure', {'FAIL': 'Image'}, True),
-]:
-    env = {**os.environ, 'devtype': '', 'devnum': '', 'FAIL': '', 'xenova_debug': '', 'fdtcontroladdr': '0x3aff0000', 'fdt_addr_r': '0x05600000', **values}
+    ('load-factory-domains', {'GUEST_SCRIPT': '1'}, False),
+    ('skip-factory-domains', {'GUEST_SCRIPT': '1', 'xenova_skip_boot_guests': '1'}, False),
+    ('fallback-on-overlapping-base-fdt', {'GUEST_SCRIPT': '1', 'fdt_addr_r': '0x07800000'}, False),
+    ('fallback-on-guest-script-load-failure', {'GUEST_SCRIPT': '1', 'FAIL': 'xenova-guests.scr'}, False),
+    ('fallback-on-oversized-guest-script', {'GUEST_SCRIPT': '1', 'SCRIPT_FILESIZE': '100001'}, False),
+    ('fallback-on-guest-fdt-copy-failure', {'GUEST_SCRIPT': '1', 'FAIL': 'fdt-copy-guest'}, False),
+    ('fallback-on-invalid-guest-script-header', {'GUEST_SCRIPT': '1', 'FAIL': 'source-header'}, False),
+    ('fallback-after-partial-guest-fdt-changes', {'GUEST_SCRIPT': '1', 'FAIL': 'source'}, False),
+]
+for name, values, failure in boot_cases:
+    env = {**os.environ, 'devtype': '', 'devnum': '', 'FAIL': '', 'xenova_debug': '',
+           'fdtcontroladdr': '0x3aff0000', 'fdt_addr_r': '0x05600000',
+           'GUEST_SCRIPT': '', 'SCRIPT_FILESIZE': '', 'xenova_skip_boot_guests': '', **values}
     result = subprocess.run(['bash', '-c', boot_mocks + boot], env=env, text=True, capture_output=True, timeout=5)
     assert (result.returncode != 0) == failure, (name, result.stdout, result.stderr)
     if failure:
@@ -44,7 +106,36 @@ for name, values, failure in [
         assert f'PART uuid mmc {devnum}:2 rootfs_partuuid' in result.stdout
         assert f'LOAD mmc {devnum}:1 0x00200000 xen' in result.stdout
         assert f'LOAD mmc {devnum}:1 0x00400000 Image' in result.stdout
-        assert 'BOOT 0x00200000 - 0x05600000' in result.stdout
+        lines = result.stdout.splitlines()
+        early = name == 'load-factory-domains'
+        fdt_address = '0x07800000' if early else env['fdt_addr_r']
+        assert [line for line in lines if line.startswith('BOOT ')] == [f'BOOT 0x00200000 - {fdt_address}']
+        boot_args = next(line.removeprefix('BOOT_ARGS ') for line in lines if line.startswith('BOOT_ARGS '))
+        assert f'BOOT_ENV {boot_args}' in lines
+        assert ('xenova.dom0less=1' in boot_args) == early
+        assert f'BOOT_SKIP {values.get("xenova_skip_boot_guests", "")}' in lines
+        assert next(line for line in lines if line.startswith('BOOT_GUESTS')) == (
+            'BOOT_GUESTS debian-dev zephyr-drive-a zephyr-drive-b' if early else 'BOOT_GUESTS')
+        if early:
+            assert result.stdout.index('SOURCE 0x07000000') < result.stdout.index('BOOT ')
+        if name == 'skip-factory-domains':
+            assert 'SOURCE ' not in result.stdout
+        if name.startswith('fallback-'):
+            fallback_log = {
+                'fallback-on-overlapping-base-fdt': 'base Device Tree address is outside the early boot layout',
+                'fallback-on-guest-script-load-failure': 'xenova-guests.scr load failed',
+                'fallback-on-oversized-guest-script': 'xenova-guests.scr load failed',
+                'fallback-on-guest-fdt-copy-failure': 'guest Device Tree copy failed',
+                'fallback-on-invalid-guest-script-header': 'xenova-guests.scr execution failed',
+                'fallback-after-partial-guest-fdt-changes': 'xenova-guests.scr execution failed',
+            }[name]
+            assert result.stdout.count('booting dom0 only') == 1
+            assert result.stdout.index(fallback_log) < result.stdout.index('BOOT ')
+            assert result.stdout.count('SOURCE ') == int('execution failed' in fallback_log)
+        if name == 'fallback-after-partial-guest-fdt-changes':
+            assert result.stdout.index('FDT mknode /chosen debian-dev') < result.stdout.index('booting dom0 only')
+        if name == 'fallback-on-overlapping-base-fdt':
+            assert 'LOAD mmc 0:1 0x07000000 xenova-guests.scr' not in result.stdout
         xen_args = next(line.split() for line in result.stdout.splitlines()
                         if line.startswith('FDT set /chosen xen,xen-bootargs '))
         assert [arg for arg in xen_args if arg.startswith('dom0_max_vcpus=')] == ['dom0_max_vcpus=2'], (name, xen_args)
@@ -57,7 +148,7 @@ for name, values, failure in [
         assert ('systemd.log_target=console' if debug else
                 'systemd.log_target=journal-or-kmsg') in dom0_args, (name, dom0_args)
         assert ('earlycon=xenboot' in dom0_args) == debug, (name, dom0_args)
-        assert result.stdout.index('FDT move 0x3aff0000 0x05600000') < result.stdout.index('FDT set ')
+        assert result.stdout.index(f'FDT move 0x3aff0000 {env["fdt_addr_r"]}') < result.stdout.index('FDT set ')
         assert result.stdout.index('FDT move ') < result.stdout.index('FDT rm /soc/mmcnr@7e300000 dmas')
         assert result.stdout.index('FDT rm /soc/mmcnr@7e300000 dmas') < result.stdout.index('FDT rm /soc/mmcnr@7e300000 dma-names')
         assert result.stdout.index('FDT rm /soc/mmcnr@7e300000 dma-names') < result.stdout.index('LOAD ')
@@ -123,4 +214,4 @@ assert not any(fnmatch.fnmatchcase('eth0', pattern) for pattern in rules)
 assert any(fnmatch.fnmatchcase('vif1.0', pattern) for pattern in rules)
 assert any(fnmatch.fnmatchcase('xenbr0', pattern) for pattern in rules)
 print('PASS network-rules-match-only-vif-and-xenbr0')
-print('PASS 20 boot/init/network regression cases (hardware not exercised)')
+print(f'PASS {len(boot_cases) + 9} boot/init/network regression cases (hardware not exercised)')

@@ -82,7 +82,7 @@ def source(path):
                              delivery["queued_us"] != row["mailbox_end"]):
                 raise ValueError("candidate/source identity mismatch")
             if delivery:
-                if not (delivery["disposition"] in range(6) and delivery["created_us"] <= delivery["queued_us"] <= delivery["taken_us"]):
+                if not (delivery["disposition"] in range(7) and delivery["created_us"] <= delivery["queued_us"] <= delivery["taken_us"]):
                     raise ValueError("invalid candidate disposition/timestamps")
                 if delivery["disposition"] in (0, 1) and not delivery["taken_us"] <= delivery["send_begin_us"] <= delivery["send_end_us"]:
                     raise ValueError("invalid socket submission timestamps")

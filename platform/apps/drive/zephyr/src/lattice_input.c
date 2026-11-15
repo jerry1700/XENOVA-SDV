@@ -259,7 +259,7 @@ static struct state_slot copies[2];
 static char in_topic[XM_TOPIC_MAX],out_topic[XM_TOPIC_MAX];
 static struct k_thread map_thread,link_thread;
 K_THREAD_STACK_DEFINE(map_stack,8192);
-K_THREAD_STACK_DEFINE(link_stack,8192);
+K_THREAD_STACK_DEFINE(link_stack,12288);
 K_MUTEX_DEFINE(input_context_lock);
 K_MUTEX_DEFINE(applied_lock);
 struct guest_clock_slot {

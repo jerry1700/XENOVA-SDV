@@ -14,7 +14,9 @@ from .calibration import CameraModel, Plane, number as _native_number
 
 TIMING_PHASES = frozenset(('depth.prepare','depth.validity','depth.projection','depth.height_classify',
     'depth.selection','depth.selected_reclassify','depth.hit_batch','depth.ray_geometry','depth.ray_batch',
-    'tape.birdview_remap','tape.mask','tape.skeleton','tape.projection','tape.graph',
+    'rgb.rectification','rgb.depth_occlusion',
+    'tape.birdview_remap','tape.validity_remap','tape.occlusion_remap','tape.surface_edges',
+    'tape.mask','tape.skeleton','tape.projection','tape.graph',
     'geometry.ground_prepare','geometry.ground_ray_intervals','geometry.ground_intersection',
     'geometry.axial_prepare','geometry.axial_ray_intervals','geometry.axial_range'))
 

@@ -4,6 +4,7 @@ from .operator_contract import depth,decimal
 from .authority_journal import canonical
 
 ENDPOINT='/run/xenova-gateway/keyboard.sock'
+JETSON_RETURN_PENDING='JETSON_RETURN_PENDING'
 FIELDS={'version','kind','host_boot_id','gateway_instance_id','source_instance','channel_epoch',
     'sequence','request_id','issued_pi_us','expires_pi_us','payload'}
 PAYLOADS={

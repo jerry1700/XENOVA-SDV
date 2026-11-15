@@ -96,7 +96,9 @@ class DisplayGuestAccountTest(unittest.TestCase):
         unit = self.root / "usr/lib/systemd/system/xenova-guest-display-app.service"
         directives = unit.read_text().splitlines()
         self.assertIn("User=xenova-display", directives)
-        self.assertIn("Environment=PYTHONPATH=/opt/xenova/display-guest", directives)
+        self.assertIn("Environment=PYTHONPATH=/opt/xenova/display-guest:/opt/xenova/mqtt-client", directives)
+        self.assertIn("EnvironmentFile=-/etc/xenova/interaction-app.env", directives)
+        self.assertFalse((self.root / "etc/xenova/interaction-app.env").exists())
         self.assertIn("Restart=on-failure", directives)
         self.assertEqual(result["service"]["path"],
                          "/usr/lib/systemd/system/xenova-guest-display-app.service")

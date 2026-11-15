@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import shlex
 import subprocess
@@ -24,21 +25,33 @@ DEVELOPMENT_BUNDLE = Path('platform/apps/drive/profiles/course-development-1')
 DEVELOPMENT_SOURCE_FILES = frozenset(('motion.canonical.json', 'development.canonical.json',
     'calibration-bound.json', 'motion-metadata-receipt.json', 'grid.json', 'lattice-lab-policy.json'))
 COURSE_CLEARANCE = 'course-clearance.json'
+VEHICLE_PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}')
+
+
+def vehicle_folder(home, vehicle):
+    """LAB 정책에 실측 차량을 고정한 profiles/<name>.json과 생성 산출물 profiles/<name>/."""
+    if not isinstance(vehicle, str) or not VEHICLE_PROFILE.fullmatch(vehicle) or vehicle in ('course-development-1', 'lattice-lab-1'):
+        raise ValueError('plain separate vehicle profile name required')
+    return home / 'profiles' / vehicle, home / 'profiles' / (vehicle + '.json')
 
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def lattice_inputs(name, bundle=None):
+def lattice_inputs(name, bundle=None, vehicle=None):
     """선택한 C/config/generated asset과 원 development 입력의 지문을 검산한다."""
     home = ROOT / 'platform/apps/drive'
     development = name == 'warm-lattice-development'
     if bundle is not None and (not development or not bundle.is_absolute() or bundle.resolve() != bundle):
         raise ValueError('canonical bundle path requires warm-lattice-development')
+    if vehicle is not None and name != 'warm-lattice-lab':
+        raise ValueError('vehicle profile requires warm-lattice-lab')
     folder = (bundle or ROOT / DEVELOPMENT_BUNDLE) if development else home / 'planner/generated'
     members = bundle_members(folder) if development else {}
     profile_path = folder / 'profile.json' if development else home / 'profiles/lattice-lab-1.json'
+    if vehicle is not None:
+        folder, profile_path = vehicle_folder(home, vehicle)
     profile = json.loads(profile_path.read_text())
     generated = json.loads((folder / 'primitive-manifest.json').read_text())
     canonical = json.dumps(profile, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
@@ -105,10 +118,12 @@ def bundle_members(folder):
     return {(DEVELOPMENT_BUNDLE / name).as_posix(): path for name, path in paths.items()}
 
 
-def selected_primitive_source(commands, home, profile):
+def selected_primitive_source(commands, home, profile, vehicle=None):
     """실제 ARM compile DB의 단 하나의 primitive TU가 선택한 profile과 일치해야 한다."""
     expected = (home / ('../profiles/course-development-1/primitives.c'
                        if profile == 'warm-lattice-development' else '../planner/generated/primitives.c')).resolve()
+    if vehicle is not None:
+        expected = (vehicle_folder(home / '..', vehicle)[0] / 'primitives.c').resolve()
     sources = [Path(row['file']).resolve() for row in commands if Path(row['file']).name == 'primitives.c']
     if sources != [expected]:
         raise ValueError('actual compiler primitive input differs from the selected profile')
@@ -289,8 +304,12 @@ def build_candidate(resources):
                    help='prepared course bundle for explicit drive/warm-lattice-development')
     p.add_argument('--incremental-workspace', type=Path,
                    help='optional owned stable workspace; only warm-lattice-development, every --output remains new')
+    p.add_argument('--vehicle-profile',
+                   help='explicit measured vehicle (platform/apps/drive/profiles/<name>.json) for drive/warm-lattice-lab')
     p.add_argument("--execute", action="store_true")
     args = p.parse_args()
+    if args.vehicle_profile is not None and (args.app, args.profile) != ('drive', 'warm-lattice-lab'):
+        p.error('vehicle profile requires explicit drive/warm-lattice-lab')
     if args.incremental_workspace is not None and (args.app, args.profile) != ('drive', 'warm-lattice-development'):
         p.error('incremental workspace requires explicit drive/warm-lattice-development')
     if args.development_bundle is not None and (args.app, args.profile) != ('drive', 'warm-lattice-development'):
@@ -298,7 +317,7 @@ def build_candidate(resources):
     if args.profile.startswith('warm-') and args.app!='drive':p.error('warm profiles require the common drive firmware')
     is_lattice = args.profile in LATTICE_PROFILES
     if is_lattice:
-        profile, generated, provenance = lattice_inputs(args.profile, args.development_bundle)
+        profile, generated, provenance = lattice_inputs(args.profile, args.development_bundle, args.vehicle_profile)
     for path in (args.zephyr_source, args.tools, args.output, *([args.incremental_workspace] if args.incremental_workspace else [])):
         if not path.is_absolute() or path.resolve() != path or path.is_symlink():
             raise ValueError("canonical absolute paths required")
@@ -323,13 +342,18 @@ def build_candidate(resources):
         raise ValueError("existing fixed CMake/Ninja/AArch64 toolchain required")
     paths = source_paths(args.app, args.development_bundle)
     source = source_fingerprint(paths)
-    digest = hashlib.sha256(json.dumps({"profile": args.profile, "files": source},
-                                      sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    selection = {"profile": args.profile, "files": source}
+    if args.vehicle_profile is not None:
+        # 같은 소스 snapshot에서 LAB 기본 차량과 실측 차량 빌드를 구분한다. 기존 digest는 그대로다.
+        selection["vehicle_profile"] = args.vehicle_profile
+    digest = hashlib.sha256(json.dumps(selection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     plan = {"action": "build-drive-candidate" if args.execute else "plan", "app": args.app,
                       "source_sha256": digest, "profile": args.profile,
                       "output": str(args.output), "board_tested": False}
     if args.incremental_workspace is not None:
         plan['incremental_workspace'] = str(args.incremental_workspace)
+    if args.vehicle_profile is not None:
+        plan['vehicle_profile'] = args.vehicle_profile
     print(json.dumps(plan), flush=True)
     if not args.execute:
         return
@@ -344,6 +368,9 @@ def build_candidate(resources):
     if args.development_bundle is not None and lattice_inputs(args.profile, snapshot / DEVELOPMENT_BUNDLE) != (
             profile, generated, provenance):
         raise ValueError('selected development bundle changed during snapshot')
+    if args.vehicle_profile is not None and lattice_inputs(args.profile, None, args.vehicle_profile) != (
+            profile, generated, provenance):
+        raise ValueError('selected vehicle profile changed during snapshot')
     frozen_home = snapshot / f"platform/apps/{args.app}/zephyr"
     inputs, build = snapshot, args.output / 'build'
     workspace_identity = None
@@ -374,6 +401,8 @@ def build_candidate(resources):
         profile_args = ["-DEXTRA_CONF_FILE=" + str(home / "profiles" / (args.profile + ".conf"))]
     if args.profile=='warm-lattice-development':
         profile_args+=['-DXENOVA_DRIVE_DEVELOPMENT_PROFILE=ON']
+    if args.vehicle_profile is not None:
+        profile_args+=['-DXENOVA_DRIVE_VEHICLE_PROFILE='+args.vehicle_profile]
     if is_lattice:
         # This frozen toolchain contains picolibc. Legacy cross-compile does not
         # advertise it without an explicit path/flag; do not change old profiles.
@@ -391,7 +420,7 @@ def build_candidate(resources):
     stack_dir.mkdir()
     commands = json.loads((build / "compile_commands.json").read_text())
     compiled_sources = verify_compile_sources(commands, inputs, source, args.zephyr_source, build) if workspace_identity else None
-    selected_primitive = selected_primitive_source(commands, home, args.profile) if is_lattice else None
+    selected_primitive = selected_primitive_source(commands, home, args.profile, args.vehicle_profile) if is_lattice else None
     command = next(v for v in commands if v["file"].endswith("/xen-runtime/src/netfront.c"))
     audit_args = shlex.split(command["command"])
     if set(audit_args) & {"-MF", "-MD", "-MMD"}:
@@ -506,6 +535,10 @@ def build_candidate(resources):
             receipt['drive_contract']['development_inputs']=provenance
         if args.development_bundle is not None:
             receipt['drive_contract']['explicit_development_bundle'] = True
+        if args.vehicle_profile is not None:
+            receipt['vehicle_profile'] = args.vehicle_profile
+            receipt['drive_contract']['vehicle_profile'] = {'name': args.vehicle_profile,
+                'vehicle': profile['vehicle'], 'calibration': profile['calibration']}
         receipt['drive_contract']['compiled_primitive_source']={
             'path':str(selected_primitive.relative_to(inputs)).replace('\\','/'),
             'sha256':sha(selected_primitive)}

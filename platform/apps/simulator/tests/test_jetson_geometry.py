@@ -49,22 +49,28 @@ def test_geometry_parameters_move_road_obstacles_and_rear_axle_start(tmp_path):
     assert track["lane_width_m"] == pytest.approx(.54)
     assert track["centerline"][0] == pytest.approx([2.14, .37])
     layout = track["layout"]
-    assert layout["vehicle"]["length_m"] == .38
-    assert layout["vehicle"]["width_m"] == .21
-    assert layout["vehicle"]["wheelbase_m"] == .18
-    assert layout["vehicle"]["min_turn_radius_m"] == pytest.approx(.18 / math.tan(math.radians(40)))
-    assert layout["tape_width_m"] == .012
-    assert layout["camera"]["height_m"] == .14
-    assert layout["start_pose"] == pytest.approx([2.42, .505, math.pi])
+    length = settings["vehicle_length_m"]
+    width = settings["vehicle_width_m"]
+    wheelbase = settings["wheelbase_m"]
+    min_turn_radius = wheelbase / math.tan(math.radians(settings["max_steer_deg"]))
+    rear_overhang = (length - wheelbase) / 2
+    rear_axle_to_front = wheelbase + rear_overhang
+    assert layout["vehicle"]["length_m"] == length
+    assert layout["vehicle"]["width_m"] == width
+    assert layout["vehicle"]["wheelbase_m"] == wheelbase
+    assert layout["vehicle"]["min_turn_radius_m"] == pytest.approx(min_turn_radius)
+    assert layout["tape_width_m"] == settings["tape_width_m"]
+    assert layout["camera"]["height_m"] == settings["camera_height_m"]
+    assert layout["start_pose"] == pytest.approx([2.14 + rear_axle_to_front, .505, math.pi])
     assert [cone["y"] for cone in layout["obstacle_seeds"]] == pytest.approx([.505, .235])
     rendered = Track(replace(sources()["jetson-r55"], centerline=track["centerline"],
                              lane_width_m=track["lane_width_m"], layout=layout))
     x, y, yaw = rendered.start_pose()
     car = placement.Car(x, y, yaw, 0, 0, rendered.start_index)
     polygon = placement.car_polygon(rendered, car)
-    assert min(px for px, _ in polygon) == pytest.approx(x - .28)
-    assert max(px for px, _ in polygon) == pytest.approx(x + .10)
-    assert max(py for _, py in polygon) - min(py for _, py in polygon) == pytest.approx(.21)
+    assert min(px for px, _ in polygon) == pytest.approx(x - rear_axle_to_front)
+    assert max(px for px, _ in polygon) == pytest.approx(x + rear_overhang)
+    assert max(py for _, py in polygon) - min(py for _, py in polygon) == pytest.approx(width)
 
 
 @pytest.mark.parametrize("track_id,digest", LEGACY_PAYLOADS.items())

@@ -346,7 +346,7 @@ run drive-build python3 -B "$REPO/platform/scripts/build-xenova-drive-app.py" \
   --zephyr-source "$ZEPHYR_SOURCE" --tools "$ZEPHYR_TOOLS" \
   --output "$RUN/drive-build" --execute
 
-read -r -p "기존 게시본과 다른 새 주행 버전 (예: 1.0.9): " DRIVE_VERSION
+read -r -p "기존 게시본과 다른 새 주행 버전 (예: 1.0.10): " DRIVE_VERSION
 run drive-template-package python3 -B \
   "$REPO/platform/scripts/package-xenova-drive-template.py" \
   --build-root "$RUN/drive-build" --output "$RUN/drive-candidate" --version "$DRIVE_VERSION"
@@ -358,6 +358,18 @@ run drive-template-package python3 -B \
 0444·디렉터리 0555로 보존한다. 기존 게시본은 덮어쓰지 않는다.
 실제 manifest와 version은 아래 선택 확정 절차로 기본 lock·A/B 설정에 반영한다.
 A/B seed와 보관 원본의 `zephyr.bin` 해시가 같아야 한다.
+조기 부팅용 A/B에는 `CONFIG_XENOVA_DOM0LESS_BOOT=y`가 필요하다. 이 설정은
+XenStore와 VIF가 처음 연결되기를 기다리는 펌웨어를 만들어 조립기가 확인한다.
+
+실차 Pi 재부팅 검증에 사용한 공통 A/B 번들은 `warm-lattice-lab` 1.0.11이었다.
+동일 후보를 재현할 때는 아래 두 해시를 확인하고, 조립 설정의 `rtos_templates`에
+실제 게시본 경로와 `template_manifest_sha256`을 지정한다.
+다음 실차용 주행 프로필을 빌드하면 두 VM에 그 새 번들을 함께 선택하고 새 해시를 기록한다.
+
+| Pi 검증 번들 파일 | SHA-256 |
+| --- | --- |
+| `firmware.json` | `e587dbf71937e03a9d1663bbdb881bab84b87e258ba9a8c74a77c7ca9f59f392` |
+| `zephyr.bin` | `94aece19951de6557b6da5cb4065512140269d7dcfc5d82ad01781bac5b3bce7` |
 
 공용 seed/firmware에는 VM 암호가 없고 host 첫 등록에서 UUID별로 공급한다.
 `lattice-lab-1`은 시험 차량 프로필이다. ARM 빌드·패키징과 실제 보드·실차 수락은
@@ -636,6 +648,18 @@ seed에 넣지 않는다. 새 VM 계정은 이미지 재빌드 없이 `xenova-br
 주행은 VM UUID 계정, Telemetry는 `telemetry-UUID` 계정을 쓴다. Telemetry 계정은 자기 VM의
 v1 `/metrics`와 v2 텔레메트리를 발행한다. 기존 설치에 정책을 교체하면
 [브로커 ACL 갱신 절차](../../platform/deploy/mosquitto/README.md#기존-계정과-업데이트)를 따른다.
+
+실차용 이미지의 Gateway는 현재 저장소 소스에서 패키징한다. 조립 전 검사에서
+Gateway unit·운영 설정 예시·Recovery Worker 예시의 설치 바이트와 CP210x·USB serial 모듈을
+확인한다. 브로커는 `wlan0`에서 Jetson 연결을 받고 공통 ACL에서 `oak-1` 지도·시계 토픽을 허용한다.
+
+이미지 기록 및 첫 등록 후에는 [Pi 실차 Gateway 설치](../../platform/services/gateway/README.md#pi-실차-gateway-자동-시작)를 따른다.
+보드마다 `gateway.env`, `drive-rejoin.json`, USB 식별자와 MQTT 자격증명을 채운다.
+차량별 `vehicle-limits.json`, `gateway-odometry.json`, `gateway-feedback3.json`과
+feedback timeout은 장치 담당자가 확정한 값을 사용한다. 주행용 번들의 축간거리·조향
+상한을 실측값과 대조한다. Pi의 `gateway-mapper-uplink.json`과 Jetson의 JIO 프로필은
+운영 지도·시계에 같은 차량 식별자와 보정 번들을 사용한다. 정지 상태에서
+ESP32를 연결한 채 재부팅해 Gateway·A/B 바인딩을 확인하고 실시간 지도 수락을 별도로 확인한다.
 
 고정 meta-networking에는 Tailscale 1.94.2가 있지만, 현재 이미지는 보안 수정이 포함된
 공식 ARM64 정적 릴리스 1.104.2를 meta-xenova recipe로 고정한다. TS-2026-013의 수정은
@@ -1025,6 +1049,12 @@ PY
 ## 8. seed 생성과 최종 조립·검증
 
 조립 실행 안에서 Debian seed와 Zephyr A/B의 독립 firmware 자산, 카탈로그, factory metadata가 준비된다. Debian seed의 machine-id·SSH 키와 각 VM의 UUID/MAC는 최초 보드 부팅에서 확정한다. CPU 프리셋은 공통 이미지에 보드 UUID를 넣지 않고, 첫 identity plan에서 확정한 A/B UUID에 연결한다. 기존 identity plan·CPU 정책을 새 기본값으로 덮어쓰지 않는다.
+
+최종 조립기는 복사한 FAT에 `xenova-guests.scr`, Debian 커널·initramfs, Zephyr A/B의 부팅 펌웨어를 추가하고 다시 읽어 해시를 확인한다. U-Boot가 커널·펌웨어와 Device Tree를 Xen에 전달하면 Xen이 dom0와 기본 domU 세 대를 같은 부팅 단계에서 실행 가능 상태로 만든다. FAT에 게스트가 없는 Yocto 중간 이미지와 기존 설치는 등록 후 `xl create` 경로를 쓴다. UART에서 `setenv xenova_skip_boot_guests 1`을 지정하고 부팅하면 해당 부팅에 기존 시작 경로를 쓸 수 있다.
+
+새 `boot.scr`에서는 게스트 스크립트가 Device Tree 복사본을 수정한다. U-Boot에서 스크립트 로딩·검증·실행에 실패하면 UART에 원인을 출력하고 보존한 dom0 전용 Device Tree로 Xen을 한 번 부팅한다. dom0의 자동 시작이 등록된 VM을 `xl create`로 띄운다. 이 부팅 분기는 환경을 영구 저장하지 않는다. Xen 실행 이후의 게스트 등록 실패에는 UART 수동 우회를 사용한다. 이전에 빌드한 `boot.scr`을 포함한 WIC에서는 기존 수동 우회가 적용된다.
+
+dom0는 보드별 UUID/MAC가 확정된 뒤 Xen boot handle로 각 도메인을 찾고 XenStore·PV 콘솔을 연결한다. `xenova-vms.service`는 기존 실행 기록을 게시하고, Debian의 `root.raw`는 Xen의 `block` 스크립트와 커널 블록 백엔드로, PV NIC는 `xenbr0`에 연결한다. 조기 부팅용 Debian initramfs에는 루트 장치가 나타날 때까지만 대기하는 훅을 추가한다. 저장된 기동 의도, CPU 정책 또는 펌웨어 자산이 조립 당시 설정과 다르면 해당 조기 도메인을 분리하고 현재 등록 정책을 적용한다. 게스트의 초기 실행과 앱·차량 출력 준비는 별도 단계다.
 
 ```bash
 run check-before-assembly python3 -B "$RUN/tools/inputs.py" check

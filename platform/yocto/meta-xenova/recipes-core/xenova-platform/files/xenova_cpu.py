@@ -602,7 +602,7 @@ class CPU:
             if op.get('host_boot_id') == self.e.host and op.get('phase') not in ('completed', 'failed'):
                 refuse('RECONCILE_REQUIRED', 'unfinished control/recovery blocks CPU policy')
 
-    def set_policy(self, spec, records, *, execute, key, context, deadline=None):
+    def set_policy(self, spec, records, *, execute, key, context, deadline=None, factory_boot=False):
         # 등록 검증과 factory 준비도 호출자의 전체 기한을 공유한다.
         deadline = self.p.clock()+15 if deadline is None else deadline
         spec = validate_spec(spec)
@@ -647,8 +647,12 @@ class CPU:
             refuse('TARGET_CHANGED', 'pending CPU publication no longer fits the observed host')
         # An older pending request keeps its original host-wide admission rules.
         affected = self._affected_vms(previous, candidate) if not op or op.get('guest_only') else None
-        self.guard_stopped(records, sample, policy_operation=op['operation_id'] if op else None, affected=affected)
-        self.check_unknown(records, sample, spec['shared_pcpus'])
+        guarded = sample
+        if factory_boot:
+            from xenova_dom0less import prepare_cpu
+            guarded = prepare_cpu(self.p, sample, candidate)
+        self.guard_stopped(records, guarded, policy_operation=op['operation_id'] if op else None, affected=affected)
+        self.check_unknown(records, guarded, spec['shared_pcpus'])
         ready = False
         if affected is not None:
             issues = self._placement_issues(candidate, records, sample['domains'])
@@ -702,9 +706,11 @@ class CPU:
             self.policy()
             previous = next((v for v in self.operations() if v['idempotency_key'] == key),None)
             if previous and previous['phase'] != 'completed':
-                self.set_policy(activation, records, execute=True, key=key, context={}, deadline=deadline)
+                self.set_policy(activation, records, execute=True, key=key, context={}, deadline=deadline,
+                                factory_boot=True)
             return
-        self.set_policy(activation, records, execute=True, key=key, context={}, deadline=deadline)
+        self.set_policy(activation, records, execute=True, key=key, context={}, deadline=deadline,
+                        factory_boot=True)
 
     def prepare(self, records, deadline, *, execute=False, restore=False, context=None):
         from xenova_runtime import boot_progress
@@ -720,8 +726,12 @@ class CPU:
             return {'configured':False, 'ready':False, 'legacy':True}
         isolated = self._isolated_creations(records, deadline, context, execute=execute)
         sample = self.observe(deadline)
-        self.guard_stopped(records, sample, isolated_creations=isolated)
-        self.check_unknown(records, sample, policy['shared_pcpus'])
+        guarded = sample
+        if not restore:
+            from xenova_dom0less import prepare_cpu
+            guarded = prepare_cpu(self.p, sample, policy)
+        self.guard_stopped(records, guarded, isolated_creations=isolated)
+        self.check_unknown(records, guarded, policy['shared_pcpus'])
         if (sample['hardware']['pool_name'] != policy['pool_name'] or not
                 selected_cpus(policy) <= set(sample['hardware']['online_pcpus'])):
             refuse('CPU_NOT_READY', 'saved CPU policy does not fit the current Xen pool/topology')

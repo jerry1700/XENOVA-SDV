@@ -15,6 +15,8 @@ TRUST_REASONS=frozenset(('AUTO_DEADLINE_MISS',))
 INPUT_FAILURES=frozenset(('INPUT_UNAVAILABLE','INPUT_STALE','INPUT_INVALID','MAP_UNAVAILABLE',
                          'WORLD_UNAVAILABLE','POSE_UNAVAILABLE','OBSERVATION_EXPIRED',
                          'CLOCK_ERROR','STEERING_UNAVAILABLE'))
+WORLD_INPUT_LOST=frozenset(('WORLD_UNAVAILABLE','OBSERVATION_EXPIRED'))
+JETSON_KEYBOARD_LOST='JETSON_KEYBOARD_LOST'
 
 def valid_untrusted_payload(payload):
     """Validate legacy FW32 evidence, not its former VM-wide interpretation."""
@@ -61,6 +63,7 @@ class VerifiedDriveMachine(ControlMachine):
         self._deferred_authority=None;self._authority_transition_deferred=False
         self._last_forwarded_t=None
         self._resume_vm=self.active_vm
+        self.jetson_fallback=None
         # Restart restores preference, never output permission, even if the last
         # process persisted an in-flight command with arm_after_apply=true.
         self.authority.update(rearm_required=True)
@@ -167,7 +170,12 @@ class VerifiedDriveMachine(ControlMachine):
         self._authorized=False
         if (self._input_unavailable(vm,now) and self._input_unavailable(other,now) and
                 self.transport_ok and self._qualified(vm,MANUAL_APP,now,held=True)):
-            return self._change(Mode.MANUAL,vm,'autonomous_input_unavailable',now,arm=False)
+            world_lost=all(self.prepared[node,AUTONOMOUS].reason in WORLD_INPUT_LOST for node in self.vm_ids)
+            generation=self.generation
+            actions=self._change(Mode.MANUAL,vm,'autonomous_input_unavailable',now,arm=False)
+            if world_lost and self.mode is Mode.MANUAL and self.generation!=generation:
+                self.jetson_fallback=(vm,self.generation,int(now*1000000))
+            return actions
         return self._change(Mode.SAFE_STOP,vm,'no_fresh_standby',now)
 
     def _ready(self,vm,app,now,held=False):
@@ -237,7 +245,7 @@ class VerifiedDriveMachine(ControlMachine):
             failure={'reason':reason,'generation':self.generation,'observed_monotonic_ms':int(now*1000)})
         except AuthorityError:self.failure='AUTHORITY_STORAGE_UNCERTAIN'
 
-    def _change(self,mode,vm,reason,now,*,arm=False,manual=None,distrust=None):
+    def _change(self,mode,vm,reason,now,*,arm=False,manual=None,distrust=None,auto_recovery=None):
         if not self.durable_write_available():
             # No control was accepted yet. Re-evaluate current qualifications next
             # turn rather than replaying a stale transition or issuing a generation.
@@ -246,7 +254,8 @@ class VerifiedDriveMachine(ControlMachine):
         cancelled=[] if reason=='resume_requested' else self._cancel_countdown(reason,now)
         self._countdown=None;self._resume_requested.clear()
         self.output_permitted=False
-        try:self.authority.issue(mode,vm,reason,now,self.apply_timeout_s,arm=arm,manual=manual,distrust=distrust)
+        try:self.authority.issue(mode,vm,reason,now,self.apply_timeout_s,arm=arm,manual=manual,distrust=distrust,
+            auto_recovery=auto_recovery)
         except AuthorityError as exc:
             self._fail(str(exc),now)
             return [ForwardStop(self.generation)]
@@ -255,6 +264,7 @@ class VerifiedDriveMachine(ControlMachine):
     def _adopt_control(self,mode,vm,reason,now,cancelled=()):
         """Adopt an already durable authority change; never issues another generation."""
         old_mode,old_vm=self.mode,self.active_vm
+        self.jetson_fallback=None
         self._handoff_grace_until=0.
         self._last_forwarded_t=None
         self._resume_auto=False
@@ -403,7 +413,8 @@ class VerifiedDriveMachine(ControlMachine):
             elif (self.mode is Mode.AUTO_READY and not self._qualified(self.active_vm,AUTONOMOUS,now)
                     and self._function_failure_confirmed(self.active_vm,AUTONOMOUS,now)):
                 actions=self._change(Mode.MANUAL,self.active_vm,'autonomous_lost',now,arm=True)
-        elif self.mode is Mode.SAFE_STOP and self.transport_ok and not self.failure:
+        elif (self.mode is Mode.SAFE_STOP and self.transport_ok and not self.failure
+                and self.authority.value['reason']!=JETSON_KEYBOARD_LOST):
             candidate=next((vm for vm in (self.active_vm,other) if self._qualified(vm,MANUAL_APP,now,held=True)),None)
             if candidate:actions=self._change(Mode.MANUAL,candidate,'manual_fresh',now,arm=False)
         if self._countdown:

@@ -84,7 +84,7 @@ struct lp_road_state {dw_pose pose;float arc,offset,curvature,length;};
  * starts at arc zero. Live map and vehicle checks remain in the tracker. */
 struct lp_tracking_geometry {float arc[LP_PATH],max_steer_slope[3],sweep_pad[LP_PATH];};
 struct lp_parking_cache {struct tr_parking_geometry geometry;bool ready;};
-struct lp_tracker { size_t index;float last_velocity,last_steer;uint64_t completed;
+struct lp_tracker { size_t index;float last_velocity,last_steer;uint64_t completed;uint32_t startup_checked_map;
  uint64_t path_token,last_pi_us,gate_revision;unsigned segment;float progress;bool initialized; };
 /* 실제 현재 owner의 STOP/APPLIED·정지/조향 확인을 소비하는 내부 사실이다.
  * StateCopy.direction_gate 자체는 이 사실을 생산하지 않는다. */
@@ -140,6 +140,11 @@ void lp_index_build(struct lp_collision_index *,const dw_world *,const struct lp
  * bounded inside each primitive/footprint. SEARCHING is not completed progress. */
 enum lp_result lp_advance(struct lp_search *,unsigned,struct lp_path *);
 enum lp_result lp_footprint(const dw_world *,dw_pose,float,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
+/* AUTO startup uses only ordinary verified-free space. The wire path carries
+ * the low-speed straight profile so a State consumer uses the same limits. */
+enum lp_result lp_plan_startup_straight(const dw_world *,dw_pose,const dw_vehicle *,const struct lp_config *,
+ const struct tr_intent *,const struct tr_basis *,struct lp_path *,struct lp_metrics *,const struct lp_budget *);
+bool lp_startup_straight(const struct lp_path *,const struct lp_config *);
 enum lp_result lp_validate_path(const struct lp_path *,const dw_world *,const struct lp_config *,struct lp_metrics *,const struct lp_budget *);
 enum lp_result lp_validate_path_prepared(const struct lp_path *,const dw_world *,const struct lp_config *,
  struct lp_metrics *,const struct lp_budget *,struct lp_tracking_geometry *);

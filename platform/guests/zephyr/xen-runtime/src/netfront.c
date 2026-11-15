@@ -261,10 +261,26 @@ static int start_inner(void) {
  if(started||stop_requested||!iface)return -EALREADY;
  started=true;startup_stage="store-open";if(!admit())return -ECANCELED;
  int rc=xsr_open();if(rc)return rc;
- int64_t end=k_uptime_get()+10000;
+ const bool early=IS_ENABLED(CONFIG_XENOVA_DOM0LESS_BOOT);
+ const int store_ms=early?2000:500;
+ const int backend_ms=early?2000:100;
+ const int connect_ms=early?20000:10000;
+ int64_t end=k_uptime_get()+connect_ms;
  struct xs_client *c=xsr_acquire(end);if(!c)return -ETIMEDOUT;
- startup_stage="vif-discover";rc=xvif_discover(c,&vif,500);
- if(!rc&&admit()){startup_stage="backend-watch";rc=xvif_watch_backend(c,&vif,&backend_watch,500);if(backend_watch)watch_owned=true;}
+ startup_stage="vif-discover";rc=xvif_discover(c,&vif,store_ms);
+#if defined(CONFIG_XENOVA_DOM0LESS_BOOT)
+ /* XenStore registration and the first VIF are separate dom0 operations.
+  * Return the Store lock while the interface is still absent. */
+ int64_t discover_deadline=k_uptime_get()+180000;
+ while (rc==-ENODEV && admit() && k_uptime_get()<discover_deadline) {
+  xsr_release();
+  k_sleep(K_MSEC(50));
+  c=xsr_acquire(discover_deadline);if(!c)return -ETIMEDOUT;
+  rc=xvif_discover(c,&vif,store_ms);
+ }
+ end=k_uptime_get()+connect_ms;
+#endif
+ if(!rc&&admit()){startup_stage="backend-watch";rc=xvif_watch_backend(c,&vif,&backend_watch,store_ms);if(backend_watch)watch_owned=true;}
  xsr_release();if(rc)return rc;
  if(stop_requested)return -ECANCELED;
  /* Current implementation supports dom0 netback only; no ownership guess. */
@@ -272,7 +288,7 @@ static int start_inner(void) {
  startup_stage="backend-init-wait";
  while(vif.backend_state!=XenbusStateInitWait) {
   if(stop_requested)return -ECANCELED;
-  int state=backend_state(100,NULL);
+  int state=backend_state(backend_ms,NULL);
   if(state<0||state>=XenbusStateClosing)return state<0?state:-ENETDOWN;
   if(k_uptime_get()>=end)return -ETIMEDOUT;
   (void)xsr_watch_next(backend_watch,10);
@@ -281,7 +297,7 @@ static int start_inner(void) {
  char path[XS_PATH_LIMIT],feature[16];
  if(snprintf(path,sizeof(path),"%s/feature-rx-copy",vif.backend)>=(int)sizeof(path))return -ENAMETOOLONG;
  if(stop_requested)return -ECANCELED;
- startup_stage="rx-copy-feature";rc=xsr_read(path,feature,sizeof(feature),500);
+ startup_stage="rx-copy-feature";rc=xsr_read(path,feature,sizeof(feature),store_ms);
  if(rc||strcmp(feature,"1"))return rc?rc:-ENOTSUP;
  if(stop_requested)return -ECANCELED;
  startup_stage="grant-init";rc=xgrant_init();if(rc)return rc;
@@ -309,11 +325,11 @@ static int start_inner(void) {
  startup_stage="event-unmask";rc=HYPERVISOR_event_channel_op(EVTCHNOP_unmask,&unmask);if(rc)return rc;
  if(!admit())return -ECANCELED;
  startup_stage="frontend-publish";publication_possible=true;
- rc=xsr_transaction(MIN(1000,MAX(0,end-k_uptime_get())),publish,NULL);if(rc)return rc;
+ rc=xsr_transaction(MIN(early?5000:1000,MAX(0,end-k_uptime_get())),publish,NULL);if(rc)return rc;
  startup_stage="backend-connected-wait";
  for(;;) {
   if(stop_requested)return -ECANCELED;
-  int state=backend_state(100,NULL);
+  int state=backend_state(backend_ms,NULL);
   if(state==XenbusStateConnected)break;
   if(state<0||state>=XenbusStateClosing)return state<0?state:-ENETDOWN;
   if(k_uptime_get()>=end)return -ETIMEDOUT;

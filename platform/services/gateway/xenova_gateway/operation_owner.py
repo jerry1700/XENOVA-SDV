@@ -5,7 +5,8 @@
 """
 from copy import deepcopy
 from hashlib import sha256
-from uuid import UUID
+from queue import Queue
+from uuid import UUID,uuid4
 
 from xenova_drive_world import schema,encode,decode,operation_binding_equal
 from xenova_drive_world.codec import STATE_KNOWN_FEATURES
@@ -13,6 +14,7 @@ from xenova_mqtt.drive_binding import app_instance
 from .authority_journal import canonical
 from .operator_contract import OperatorError
 from .machine import Mode
+from .verified import JETSON_KEYBOARD_LOST
 
 
 NIL=bytes(16);U63=2**63-1
@@ -81,6 +83,7 @@ class OperationOwner:
         self.o=operator;self.r=operator.runner;self.reports={};self.selected=False
         self.ready_revision=1;self.semantic=None;self.last_state=None;self.fresh_command=None
         self.trigger=None;self.search_birth=None;self.report_hwm={};self.support_fence=None
+        self.jetson_return=None
 
     @property
     def enabled(self):return bool(getattr(self.r,'operation_support',False))
@@ -104,6 +107,74 @@ class OperationOwner:
     def active_peer(self):
         m=self.r.machine;row=self.r.bindings.current(m.active_vm,self.r._clock())
         return None if row is None else (m.active_vm,row['execution_id'],app_instance(row,'autonomous'))
+
+    def _return_call(self, action, issued, args):
+        m=self.r.machine;host=self.r.authority.host
+        return dict(version=2,action=action,request_id=f'g1:{host}:{issued}:{uuid4()}',
+            host_boot_id=host,gateway_instance_id=self.o.instance,expected_generation=m.generation,
+            expected_owner=m.active_vm,deadline_pi_ms=issued+10000,args=args)
+
+    def _return_keyboard_live(self, scope):
+        return bool(scope and scope is self.o.keyboard.scope and scope.get('auto') and 'closing' not in scope
+            and scope.get('frame') and self.o.now<int(scope['frame']['t1_pi_us'])+150000)
+
+    def _return_keyboard_current(self, scope):
+        return bool(self._return_keyboard_live(scope) and scope['all_up']>=2 and scope['frame']['key_mask']==0
+            and int(scope['frame']['t1_pi_us'])>=self.jetson_return['at'])
+
+    def retain_manual_after_jetson(self, keydown_pi_us):
+        recovery=self.jetson_return
+        m=self.r.machine
+        if recovery is None or keydown_pi_us<recovery['at'] or m.active_vm!=recovery['vm']:
+            return False
+        value=self.current()
+        waiting=m.mode is Mode.MANUAL and m.generation==recovery['generation']
+        applying=(m.mode is Mode.AUTO and not m.output_permitted and recovery['request'] is not None
+            and value is not None and value['departure']==recovery['request']
+            and m.generation==recovery['generation']+1)
+        if not (waiting or applying):
+            return False
+        self.jetson_return=None
+        call=self._return_call('mode.manual',keydown_pi_us//1000,{})
+        try:
+            self.o._accept(call,Queue(maxsize=1))
+        except OperatorError:
+            # Even when a MANUAL apply cannot be recorded, Enter vetoes AUTO.
+            self.o._stop('mode.manual')
+        return True
+
+    def _try_jetson_return(self, value):
+        recovery=self.jetson_return
+        if recovery is None or recovery['request'] is not None:
+            return
+        m=self.r.machine
+        if ((m.active_vm,m.generation)!=(recovery['vm'],recovery['generation'])
+                or m.mode is not Mode.MANUAL or m.failure or not m.transport_ok
+                or self.r.authority.value.get('manual_hold',False)):
+            self.jetson_return=None
+            return
+        scope=self.o.keyboard.scope
+        if value['phase']!='WAIT' or not self._return_keyboard_current(scope) or not self.o.stationary():
+            return
+        source=self.o.sources
+        if source.kind=='NEUTRAL_ONLY' and not source.valid:
+            source.neutral_candidate()
+        if m.phase!='APPLIED':
+            return
+        ready,_,_,peer=self.refresh_ready()
+        if not ready or peer!=recovery['peer'] or self.o.routes.exit_required():
+            return
+        args=dict(mode='AUTO',expected_operation_revision=str(value['revision']),
+            expected_permission_revision=str(value['permission_revision']),
+            ready_revision=str(self.ready_revision),trigger_sha256=None)
+        call=self._return_call('drive.depart',self.o.now//1000,args)
+        try:
+            self.o._accept(call,Queue(maxsize=1))
+        except OperatorError as exc:
+            if exc.code!='BUSY_NOT_ACCEPTED':
+                self.jetson_return=None
+            return
+        recovery.update(request=call['request_id'],scope=scope)
 
     def supported(self,peer):
         features=self.o.episodes.peers.get(peer,0)
@@ -326,6 +397,8 @@ class OperationOwner:
         return {**changes,'current_operation':value}
 
     def _finish(self,row,result,changes=None,*,failed=False):
+        if self.jetson_return is not None and self.jetson_return['request']==row['key']:
+            self.jetson_return=None
         row=self.o._terminal(row,result,failed=failed)
         return row,{**self.o._ledger(row),**(changes or {})}
 
@@ -364,8 +437,14 @@ class OperationOwner:
                 resumed['grant_revision']=advance(max(resumed['grant_revision'],mission['grant_revision']))
                 changes['current_mission']=resumed
             return self._finish(row,'APPLIED',changes)
+        if effect['fence']!=self.o.fence_revision and self.o.hold_reason==JETSON_KEYBOARD_LOST:
+            return self._cancel_departure(row,JETSON_KEYBOARD_LOST)
         if self.o.now>=call['deadline_pi_ms']*1000:return self._cancel_departure(row,'DEADLINE_EXCEEDED')
         if value['departure']!=row['key'] or effect['fence']!=self.o.fence_revision:return self._cancel_departure(row,'CONTEXT_CHANGED')
+        recovery=self.jetson_return
+        if (recovery is not None and recovery['request']==row['key']
+                and (self.active_peer()!=recovery['peer'] or not self._return_keyboard_current(recovery['scope']))):
+            return self._cancel_departure(row,'INPUT_NOT_NEUTRAL')
         trigger=self.trigger
         if call['args']['trigger_sha256'] is not None and (trigger is None or trigger['key']!=row['key'] or not trigger['current']()):
             return self._cancel_departure(row,'INPUT_NOT_NEUTRAL')
@@ -414,11 +493,21 @@ class OperationOwner:
         if not self.enabled:return
         value=self.current()
         if value is None:return
+        recovery=self.jetson_return
+        if recovery is not None:
+            if recovery['scope'] is not None and not self._return_keyboard_live(recovery['scope']):
+                self.o._stop(JETSON_KEYBOARD_LOST)
+            elif recovery['scope'] is None and self._return_keyboard_live(self.o.keyboard.scope):
+                recovery['scope']=self.o.keyboard.scope
         self.refresh_ready()
         if self.trigger is not None:
             row=self.o._known(self.trigger['key'])
             if row is None or row['terminal']:self.trigger=None
         if self.o.job is not None or self.o.worker.busy or self.o.unknown is not None:return
+        m=self.r.machine
+        if (self.o.hold_reason==JETSON_KEYBOARD_LOST and m.mode is not Mode.SAFE_STOP
+                and not self.r.authority.error and m.durable_write_available()):
+            self.r._emit(m._change(Mode.SAFE_STOP,m.active_vm,JETSON_KEYBOARD_LOST,self.r._clock()))
         if value['phase']=='STOPPING' and self.o.stationary():
             stopped=deepcopy(value);stopped.update(phase='WAIT',departure=None,desired_mode='NONE',countdown_until=0,
                 revision=advance(value['revision']))
@@ -426,12 +515,19 @@ class OperationOwner:
             if mission is not None and mission['admitted']:changes['current_mission']=self.o.missions.fence()
             self.o._proposal('operation-wait',changes,'operation_wait',self.o.now+10000000,lambda ok,unknown:None)
             return
-        if value['phase']=='ACTIVE' and value['desired_mode']=='AUTO' and self.r.machine.mode is not Mode.AUTO:
-            self.o._stop('AUTO_INPUT_UNAVAILABLE')
+        if value['phase']=='ACTIVE' and value['desired_mode']=='AUTO' and m.mode is not Mode.AUTO:
+            if not self.o.hold:
+                self.o._stop('AUTO_INPUT_UNAVAILABLE')
+                fallback=m.jetson_fallback
+                if fallback is not None and fallback[:2]==(m.active_vm,m.generation) and value['parking_attempt'] is None:
+                    scope=self.o.keyboard.scope
+                    self.jetson_return=dict(vm=m.active_vm,generation=m.generation,at=fallback[2],
+                        peer=self.active_peer(),request=None,scope=scope if self._return_keyboard_live(scope) else None)
         if value['phase']=='ACTIVE' and self.o.hold:
             stopped=deepcopy(value);stopped.update(phase='STOPPING',countdown_until=0,desired_mode='NONE',result=self.o.hold_reason or 'CANCELLED')
             self.o._proposal('operation-stop',{'current_operation':stopped},'operation_stop',self.o.now+10000000,lambda ok,unknown:None)
             return
+        self._try_jetson_return(value)
         if self.search_birth is not None:
             state,birth,meter=self.search_birth;self.search_birth=None
             if (value['phase']!='ACTIVE' or not value['parking_enabled'] or value['parking_attempt'] is not None

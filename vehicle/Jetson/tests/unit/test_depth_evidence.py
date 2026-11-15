@@ -45,6 +45,14 @@ class DepthEvidenceTests(unittest.TestCase):
         self.assertGreater(certificate.required_tiles, 1)
         self.assertLessEqual(certificate.work, 256)
 
+    def test_tile_outside_radial_extent_does_not_require_a_witness(self):
+        target = TargetClass(.5, .5, .5, qualified=True)
+        bounds = (-.01, -.01, .01, .01)
+        rays = tuple(ray for ray in witness_rays() if ray.direction_lower[0] * ray.direction_lower[1] == 0.)
+        result = certify_cell(bounds, rays, (target,), profile(), tile_size_m=.125)
+        self.assertEqual(result.required_tiles, 77)
+        self.assertEqual(result.status, 'UNKNOWN')
+
     def test_blind_volume_and_long_protrusion_are_not_cleared(self):
         p = profile()
         target = TargetClass(.5, .5, .5, qualified=True)
@@ -112,6 +120,27 @@ class DepthEvidenceTests(unittest.TestCase):
         deferred = preparation.materialize(hit_only)
         self.assertEqual(tuple(deferred.patches), tuple(eager.patches))
         self.assertEqual(deferred.omitted_patch_count, eager.omitted_patch_count)
+
+    def test_rgb_occluders_require_supported_height_above_uncertain_floor(self):
+        import numpy as np
+        p = profile(48)
+        camera = replace(p.right, rotation_error_rad=.002, translation_error_m=.002)
+        config = DepthConfig(max_patches=0, extra_depth_error_m=.002)
+        depth = np.full((48, 48), 988, dtype=np.uint16)
+        depth[3, 3] = 800  # Isolated stereo mismatch.
+        depth[20:36, 23:39] = 800  # Contiguous object above the floor.
+        original = analyze_depth(depth, camera, p.plane, config=config)
+        evidence = analyze_depth(depth, camera, p.plane, config=config, collect_occlusion=True)
+        self.assertEqual(evidence.hit_boxes, original.hit_boxes)
+        self.assertEqual(evidence.floor_count, original.floor_count)
+        self.assertGreater(len(evidence.occlusion_boxes), 30)
+        self.assertLess(len(evidence.occlusion_boxes), len(evidence.hit_boxes))
+        self.assertTrue(np.all(evidence.occlusion_boxes.lower[:, 2] > .15))
+        self.assertTrue(np.all(evidence.occlusion_boxes.lower[:, 0] > -.02))
+        depth[20:36, 23:39] = 988
+        empty = analyze_depth(depth, camera, p.plane, config=config, collect_occlusion=True)
+        self.assertEqual(empty.occlusion_boxes, ())
+        self.assertGreater(len(empty.hit_boxes), 1)
 
     def test_invalid_depth_across_blocks_preserves_unknown_without_clearance(self):
         import numpy as np

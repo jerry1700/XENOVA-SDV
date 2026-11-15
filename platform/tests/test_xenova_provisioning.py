@@ -167,6 +167,33 @@ class ProvisioningTest(unittest.TestCase):
         self.assertEqual(result['guest_application'],'private-root-configured')
         self.assertEqual(result['authentication'],'unobserved')
 
+    def test_display_unit_gets_only_its_vm_scoped_app_credential(self):
+        root = self.root()
+        (root / 'etc/xenova/instance-id').write_text(A + '\n')
+        (root / 'etc/passwd').write_text('xenova-display:x:998:998::/nonexistent:/usr/sbin/nologin\n')
+        unit = root / 'usr/lib/systemd/system/xenova-guest-display-app.service'
+        unit.write_text('[Service]\nEnvironmentFile=-/etc/xenova/interaction-app.env\n')
+        config = root / 'etc/xenova/guest-display-domu.json'
+        config.write_text(json.dumps({'data_token_file': '/etc/xenova/guest-display/guest-data.token'}))
+        token = self.data / 'relay.token'
+        token.write_text('fixture-display-token\n')
+        token.chmod(0o600)
+        record = {**self.record, 'ipv4': '192.168.77.20'}
+        first = provision.apply_linux(self.data, record, root, gid=0, rules=self.rules, display_token_path=token)
+        credential = root / 'etc/xenova/interaction-app.env'
+        published = self.value()
+        account = 'interaction-' + A
+        self.assertEqual(first['display_application'], 'private-root-configured')
+        self.assertEqual(credential.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(credential.stat().st_uid, 0)
+        self.assertEqual(credential.read_text(), broker.interaction_environment(A, published['secrets'][account]))
+        self.assertEqual(broker.grants((published['path'] / 'acl').read_text())[account],
+                         {f'topic write xenova/v1/vms/{A}/apps/interaction/events'})
+
+        provision.apply_linux(self.data, record, root, gid=0, rules=self.rules, display_token_path=token)
+        self.assertEqual(self.value()['revision'], published['revision'])
+        self.assertEqual(self.value()['secrets'], published['secrets'])
+
     def test_factory_host_uuid_is_used_by_real_guest_identity_not_machine_id_uuid(self):
         root=self.root();(root/'etc/machine-id').write_text('123456781234123412341234567890ab\n')
         (root/'etc/xenova/deployment-seed.json').write_text('{"schema":1}\n')
