@@ -12,9 +12,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.xenova.backend.agent.application.AutoDelayCommand;
+import com.xenova.backend.agent.application.VmCrashCommand;
 import com.xenova.backend.agent.application.ZephyrFaultCommand;
 import com.xenova.backend.drive.application.ActiveDriveAppExitService;
 import com.xenova.backend.drive.application.ActiveDriveAutoDelayService;
+import com.xenova.backend.drive.application.ActiveDriveVmCrashService;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +31,7 @@ class DriveFaultControllerTest {
     private static final Instant NOW = Instant.parse("2026-11-13T00:00:00Z");
     private final ActiveDriveAutoDelayService service = mock(ActiveDriveAutoDelayService.class);
     private final ActiveDriveAppExitService appExitService = mock(ActiveDriveAppExitService.class);
+    private final ActiveDriveVmCrashService vmCrashService = mock(ActiveDriveVmCrashService.class);
     private MockMvc mvc;
 
     @BeforeEach
@@ -36,7 +39,7 @@ class DriveFaultControllerTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules()
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-        mvc = MockMvcBuilders.standaloneSetup(new DriveFaultController(service, appExitService))
+        mvc = MockMvcBuilders.standaloneSetup(new DriveFaultController(service, appExitService, vmCrashService))
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(mapper)).build();
     }
 
@@ -90,5 +93,18 @@ class DriveFaultControllerTest {
                 .andExpect(status().isBadRequest());
 
         verifyNoInteractions(appExitService);
+    }
+
+    @Test
+    void crashesTheServerSelectedActiveAutoVm() throws Exception {
+        when(vmCrashService.send()).thenReturn(new VmCrashCommand(
+                "command-3", "operation-3", ACTIVE_VM, NOW, NOW.plusSeconds(30)));
+
+        mvc.perform(post("/api/v1/drive/faults/vm-crash"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.command_id").value("command-3"))
+                .andExpect(jsonPath("$.vm_id").value(ACTIVE_VM));
+
+        verify(vmCrashService).send();
     }
 }
