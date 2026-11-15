@@ -1,5 +1,5 @@
 import { Button, Card, Modal, StatusBadge } from '@xenova/ui';
-import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { Link } from 'react-router';
 import { ApiError } from '../api/client';
 import { commandErrorCode } from '../api/commandStatus';
@@ -13,6 +13,7 @@ import {
   useStartActiveVmCrash,
   useStartActiveDriveAutoDelay,
   useStartActiveAppExit,
+  useStartActiveAutoTxBlock,
   useStartStress,
   useStartAutoInputUnavailable,
   useStartPerceptionBlock,
@@ -33,9 +34,9 @@ const SCENARIOS: { id: ScenarioId; label: string; title: string; ready: boolean 
   { id: 'delay', label: '시연 2', title: '연산 지연 반복', ready: true },
   { id: 'interaction-stress', label: '시연 3', title: 'Interaction 자원 폭주', ready: true },
   { id: 'app-exit', label: '시연 4', title: '자율주행 앱 장애', ready: true },
-  { id: 'tx-block', label: '시연 5', title: '결과 송신 장애', ready: false },
+  { id: 'tx-block', label: '시연 5', title: '결과 송신 장애', ready: true },
   { id: 'jetson-loss', label: '시연 6', title: 'Jetson 인지 장애', ready: true },
-  { id: 'dual-fault', label: '시연 7', title: 'AUTO 이중 장애', ready: false },
+  { id: 'dual-fault', label: '시연 7', title: 'AUTO 이중 장애', ready: true },
 ];
 
 interface Run {
@@ -115,8 +116,12 @@ export function DemoPage() {
           <InteractionStressScenario />
         ) : scenario.id === 'app-exit' ? (
           <AppExitScenario />
+        ) : scenario.id === 'tx-block' ? (
+          <TxBlockScenario />
         ) : scenario.id === 'jetson-loss' ? (
           <JetsonLossScenario />
+        ) : scenario.id === 'dual-fault' ? (
+          <DualFaultScenario />
         ) : (
           <Card title={`${scenario.label} · ${scenario.title}`}>
             <div className={styles.scenarioEmpty}>
@@ -1151,6 +1156,325 @@ export function AutoInputUnavailableScenario() {
           </p>
         </Modal>
       )}
+    </div>
+  );
+}
+
+interface TxBlockRun extends Run {
+  durationS: number;
+  initialGeneration: number | null;
+}
+
+function TxBlockScenario() {
+  const { drive, socket } = useDrive();
+  const vms = useVms();
+  const start = useStartActiveAutoTxBlock();
+  const [durationS, setDurationS] = useState(10);
+  const [run, setRun] = useState<TxBlockRun | null>(null);
+  const control = drive?.control ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
+  );
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const targetVm = run ? drivingVms.find((vm) => vm.vm_id === run.targetId) : null;
+  const targetReport = run ? drive?.vm_apps?.[run.targetId]?.autonomous : null;
+  const lifecycle = targetReport?.lifecycle_source.status === 'fresh' ? targetReport.lifecycle : null;
+  const command = useCommandStatus(run?.targetId ?? '', run?.commandId ?? null);
+  const commandFailed = command.data?.status === 'FAILED' || command.data?.status === 'REJECTED';
+  const commandRunning = command.data?.status === 'RUNNING' || command.data?.status === 'SUCCEEDED';
+  const calculationHealthy = Boolean(
+    targetReport?.heartbeat_source.status === 'fresh' &&
+    lifecycle &&
+    lifecycle.phase !== 'STOPPED' &&
+    lifecycle.readiness !== 'NOT_READY',
+  );
+  const sawHandoff = Boolean(run && activeId && activeId !== run.targetId);
+  const autoPreserved = Boolean(sawHandoff && control?.mode === 'AUTO');
+  const generationConsistent = Boolean(
+    autoPreserved &&
+    control?.generation != null &&
+    drive?.apps?.autonomous?.last_command?.generation === control.generation,
+  );
+  const returnedAsStandby = Boolean(
+    command.data?.status === 'SUCCEEDED' &&
+    sawHandoff &&
+    targetVm?.state === 'running' &&
+    lifecycle?.phase === 'WAITING' &&
+    lifecycle.readiness === 'QUALIFIED',
+  );
+  const durationValid = Number.isInteger(durationS) && durationS >= 1 && durationS <= 120;
+  const unavailableReason =
+    socket !== 'open' || drive?.source?.status !== 'fresh' || !control
+      ? '주행 제어 상태가 최신이 아닙니다.'
+      : control.mode !== 'AUTO' || control.active_app !== 'autonomous'
+        ? '자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.'
+        : !activeVm
+          ? '현재 활성 주행 VM을 찾지 못했습니다.'
+          : !durationValid
+            ? '장애 지속 시간은 1~120초여야 합니다.'
+            : null;
+  const terminal = commandFailed || returnedAsStandby;
+
+  const begin = () => {
+    if (!activeVm || unavailableReason || start.isPending) return;
+    setRun(null);
+    start.mutate(
+      { duration_s: durationS },
+      {
+        onSuccess: (submitted) =>
+          setRun({
+            targetId: submitted.vm_id,
+            targetName: drivingVms.find((vm) => vm.vm_id === submitted.vm_id)?.name ?? submitted.vm_id,
+            initialMode: control?.mode ?? null,
+            initialGeneration: control?.generation ?? null,
+            commandId: submitted.command_id,
+            startedAt: submitted.submitted_at,
+            durationS,
+          }),
+      },
+    );
+  };
+
+  return (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 5</span>
+          <h2>AUTO 결과 송신 차단과 백업 승계</h2>
+          <p>계산과 heartbeat는 유지하고 활성 VM의 drive.command 발행만 차단합니다.</p>
+        </div>
+        <div className={styles.scenarioAction}>
+          <label>
+            <span>차단 시간</span>
+            <span className={styles.memoryInputGroup}>
+              <input
+                aria-label="차단 시간"
+                type="number"
+                min={1}
+                max={120}
+                value={durationS}
+                disabled={start.isPending || Boolean(run && !terminal)}
+                onChange={(event) => setDurationS(Number(event.target.value))}
+              />
+              <span>초</span>
+            </span>
+          </label>
+          <Button
+            variant="danger"
+            disabled={Boolean(unavailableReason) || start.isPending || Boolean(run && !terminal)}
+            title={unavailableReason ?? undefined}
+            onClick={begin}
+          >
+            {start.isPending ? '차단 명령 전송 중…' : terminal ? '시연 다시 시작' : '시연 시작'}
+          </Button>
+        </div>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {start.isError && <p className={styles.scenarioWarning}>{failureText(start.error)}</p>}
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            차단을 시작하면 계산 유지, 명령 stale, 승계와 복구를 표시합니다.
+          </div>
+        ) : (
+          <ol className={styles.scenarioProgress}>
+            <ProgressStep
+              done={commandRunning}
+              failed={commandFailed}
+              title="auto_tx_block 적용"
+              detail={`${run.targetName} · ${run.durationS}초`}
+            />
+            <ProgressStep
+              done={calculationHealthy && commandRunning}
+              failed={commandFailed}
+              title="계산 및 heartbeat 유지"
+              detail={lifecycle ? `${lifecycle.phase} · ${lifecycle.readiness}` : 'lifecycle 보고 대기 중'}
+            />
+            <ProgressStep
+              done={sawHandoff}
+              title="drive.command stale 및 백업 승계"
+              detail={
+                sawHandoff ? `현재 활성 VM: ${activeVm?.name ?? activeId}` : '명령 갱신 중단 감지 대기 중'
+              }
+            />
+            <ProgressStep
+              done={generationConsistent}
+              title="AUTO와 generation 유지"
+              detail={`시작 gen ${run.initialGeneration ?? '미확인'} · 현재 gen ${control?.generation ?? '미확인'}`}
+            />
+            <ProgressStep
+              done={returnedAsStandby}
+              failed={commandFailed}
+              title="송신 복구 후 예비 복귀"
+              detail={
+                returnedAsStandby
+                  ? '차단이 해제되고 원래 VM이 WAITING · QUALIFIED 상태로 복귀했습니다.'
+                  : command.data
+                    ? commandStateText(command.data.status)
+                    : '명령 결과 대기 중'
+              }
+            />
+          </ol>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+interface DualFaultRun {
+  firstVmId: string;
+  firstVmName: string;
+  crashCommandId: string;
+  startedAt: string;
+  secondVmId: string | null;
+  secondVmName: string | null;
+  appExitCommandId: string | null;
+}
+
+function DualFaultScenario() {
+  const { drive, socket } = useDrive();
+  const vms = useVms();
+  const crash = useStartActiveVmCrash();
+  const appExit = useStartActiveAppExit();
+  const [run, setRun] = useState<DualFaultRun | null>(null);
+  const secondRequested = useRef(false);
+  const control = drive?.control ?? null;
+  const activeId = control?.active_vm_id ?? null;
+  const drivingVms = useMemo(
+    () => (vms.data?.items ?? []).filter((vm) => vm.role === 'primary_drive' || vm.role === 'backup_drive'),
+    [vms.data?.items],
+  );
+  const activeVm = drivingVms.find((vm) => vm.vm_id === activeId);
+  const firstVm = run ? drivingVms.find((vm) => vm.vm_id === run.firstVmId) : null;
+  const secondReport = run?.secondVmId ? drive?.vm_apps?.[run.secondVmId]?.autonomous : null;
+  const secondLifecycle = secondReport?.lifecycle_source.status === 'fresh' ? secondReport.lifecycle : null;
+  const firstHandoff = Boolean(run && activeId && activeId !== run.firstVmId && control?.mode === 'AUTO');
+  const safeMode = control?.mode === 'SAFE_STOP' || control?.mode === 'MANUAL';
+  const secondExited = secondLifecycle?.phase === 'STOPPED' || safeMode;
+  const firstRecovered = Boolean(run && firstVm?.state === 'running');
+  const secondRecovered = Boolean(
+    run?.secondVmId &&
+    secondLifecycle &&
+    secondLifecycle.phase !== 'STOPPED' &&
+    (secondLifecycle.readiness === 'READY' || secondLifecycle.readiness === 'QUALIFIED'),
+  );
+  const recoveredWithoutAuto = Boolean(firstRecovered && secondRecovered && safeMode);
+  const unavailableReason =
+    socket !== 'open' || drive?.source?.status !== 'fresh' || !control
+      ? '주행 제어 상태가 최신이 아닙니다.'
+      : control.mode !== 'AUTO' || control.active_app !== 'autonomous'
+        ? '자율주행 앱이 AUTO 제어 중일 때만 시연할 수 있습니다.'
+        : drivingVms.length < 2 || !activeVm
+          ? '실행 가능한 주행 VM 두 대가 필요합니다.'
+          : null;
+
+  useEffect(() => {
+    if (!run || !firstHandoff || run.secondVmId || !activeId || secondRequested.current) return;
+    secondRequested.current = true;
+    appExit.mutate(undefined, {
+      onSuccess: (submitted) =>
+        setRun((current) =>
+          current
+            ? {
+                ...current,
+                secondVmId: submitted.vm_id,
+                secondVmName: drivingVms.find((vm) => vm.vm_id === submitted.vm_id)?.name ?? submitted.vm_id,
+                appExitCommandId: submitted.command_id,
+              }
+            : current,
+        ),
+    });
+  }, [activeId, appExit, drivingVms, firstHandoff, run]);
+
+  const begin = () => {
+    if (!activeVm || unavailableReason || crash.isPending) return;
+    secondRequested.current = false;
+    setRun(null);
+    crash.mutate(undefined, {
+      onSuccess: (submitted) =>
+        setRun({
+          firstVmId: submitted.vm_id,
+          firstVmName: drivingVms.find((vm) => vm.vm_id === submitted.vm_id)?.name ?? submitted.vm_id,
+          crashCommandId: submitted.command_id,
+          startedAt: submitted.submitted_at,
+          secondVmId: null,
+          secondVmName: null,
+          appExitCommandId: null,
+        }),
+    });
+  };
+
+  return (
+    <div className={styles.scenarioStack}>
+      <section className={styles.scenarioIntro}>
+        <div>
+          <span className={styles.scenarioNumber}>시연 7</span>
+          <h2>AUTO 이중 장애와 안전 모드 전환</h2>
+          <p>활성 VM을 crash한 뒤 승계된 백업 VM의 자율주행 앱까지 종료합니다.</p>
+        </div>
+        <Button
+          variant="danger"
+          disabled={
+            Boolean(unavailableReason) || crash.isPending || appExit.isPending || Boolean(run && !safeMode)
+          }
+          title={unavailableReason ?? undefined}
+          onClick={begin}
+        >
+          {crash.isPending || appExit.isPending ? '장애 주입 중…' : safeMode ? '시연 다시 시작' : '시연 시작'}
+        </Button>
+      </section>
+      {unavailableReason && <p className={styles.scenarioWarning}>{unavailableReason}</p>}
+      {(crash.isError || appExit.isError) && (
+        <p className={styles.scenarioWarning}>{failureText(crash.error ?? appExit.error)}</p>
+      )}
+      <Card title="시연 진행">
+        {!run ? (
+          <div className={styles.scenarioEmpty}>
+            첫 VM 장애부터 이중화 소진과 안전 전환까지 순서대로 표시합니다.
+          </div>
+        ) : (
+          <ol className={styles.scenarioProgress}>
+            <ProgressStep
+              done
+              title="활성 VM crash"
+              detail={`${run.firstVmName} · ${run.crashCommandId.slice(0, 8)}`}
+            />
+            <ProgressStep
+              done={firstHandoff}
+              title="백업 VM으로 AUTO 승계"
+              detail={firstHandoff ? `현재 활성 VM: ${activeVm?.name ?? activeId}` : '첫 번째 승계 대기 중'}
+            />
+            <ProgressStep
+              done={Boolean(run.secondVmId)}
+              failed={appExit.isError}
+              title="백업 VM 자율주행 앱 종료"
+              detail={run.secondVmName ?? '승계 확인 후 app_exit 명령을 전송합니다.'}
+            />
+            <ProgressStep
+              done={secondExited && safeMode}
+              title="AUTO 이중화 소진"
+              detail={secondExited ? '사용 가능한 AUTO 경로가 없어졌습니다.' : '두 번째 장애 관측 대기 중'}
+            />
+            <ProgressStep
+              done={safeMode}
+              failed={Boolean(run.secondVmId && control?.mode === 'AUTO' && secondExited)}
+              title="SAFE_STOP 또는 MANUAL 전환"
+              detail={`현재 모드: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`}
+            />
+            <ProgressStep
+              done={recoveredWithoutAuto}
+              title="복구 후 AUTO 자동 재개 없음"
+              detail={
+                recoveredWithoutAuto
+                  ? '두 AUTO 경로가 복구됐지만 명시적 요청 전까지 안전 모드를 유지합니다.'
+                  : `A 복구 ${firstRecovered ? '완료' : '대기'} · B 앱 복구 ${secondRecovered ? '완료' : '대기'}`
+              }
+            />
+          </ol>
+        )}
+      </Card>
     </div>
   );
 }

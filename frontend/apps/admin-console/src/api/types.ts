@@ -237,6 +237,12 @@ export interface AppExitRequest {
 
 export type AppExitCommand = SubmittedCommand;
 
+export interface AutoTxBlockRequest {
+  duration_s: number;
+}
+
+export type AutoTxBlockCommand = SubmittedCommand;
+
 /** POST /api/v1/vms/{id}/faults/domain-kill — 도메인 즉시 소멸(xl destroy). 의도(running)는 남아 복구 워커가 다시 띄운다 */
 export interface DomainKillResponse {
   operation_id: string;

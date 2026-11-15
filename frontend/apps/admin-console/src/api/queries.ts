@@ -17,6 +17,8 @@ import type {
   AppExitRequest,
   AutoDelayCommand,
   AutoDelayRequest,
+  AutoTxBlockCommand,
+  AutoTxBlockRequest,
   CommandStatusResponse,
   DomainKillResponse,
   Display,
@@ -294,6 +296,17 @@ export function useStartActiveAppExit() {
       request<AppExitCommand>('/api/v1/drive/faults/app-exit', {
         method: 'POST',
         body: { app_id: 'autonomous' },
+      }),
+  });
+}
+
+/** 최신 AUTO 제어 주체는 백엔드가 결정하고 drive.command 발행만 일정 시간 차단한다. */
+export function useStartActiveAutoTxBlock() {
+  return useMutation({
+    mutationFn: (body: AutoTxBlockRequest) =>
+      request<AutoTxBlockCommand>('/api/v1/drive/faults/auto-tx-block', {
+        method: 'POST',
+        body,
       }),
   });
 }
