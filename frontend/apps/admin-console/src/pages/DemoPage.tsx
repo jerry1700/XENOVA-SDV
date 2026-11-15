@@ -1086,8 +1086,12 @@ function JetsonLossScenario() {
   const applied = current?.status === 'APPLIED' || current?.status === 'ENDED';
   const ended = current?.status === 'ENDED';
   const sawLoss = Boolean(run && (perception?.valid === false || ended));
-  const sameActive = Boolean(run?.active_vm_id && activeId === run.active_vm_id);
   const manual = control?.mode === 'MANUAL';
+  const safeStop = control?.mode === 'SAFE_STOP';
+  const safeMode = manual || safeStop;
+  const noUnexpectedHandoff = Boolean(
+    run?.active_vm_id && (activeId === run.active_vm_id || (safeStop && activeId == null)),
+  );
   const bothInputsUnavailable = Boolean(
     run &&
     drivingVms.length >= 2 &&
@@ -1096,7 +1100,7 @@ function JetsonLossScenario() {
       return reason.includes('WORLD_UNAVAILABLE') || reason.includes('INPUT_UNAVAILABLE');
     }),
   );
-  const recovered = Boolean(ended && sawLoss && perceptionReady);
+  const recovered = Boolean(ended && sawLoss && perceptionReady && safeMode);
 
   const unavailableReason =
     socket !== 'open'
@@ -1121,10 +1125,10 @@ function JetsonLossScenario() {
     <div className={styles.scenarioStack}>
       <section className={styles.scenarioIntro}>
         <div>
-          <span className={styles.scenarioNumber}>시연 4</span>
-          <h2>Jetson 인지 송신 단절과 수동 전환</h2>
+          <span className={styles.scenarioNumber}>시연 6</span>
+          <h2>Jetson 인지 송신 단절과 안전 전환</h2>
           <p>
-            Jetson 계산은 유지한 채 World 송신만 끊고, 두 주행 VM의 공통 입력 소실과 MANUAL 전환을 확인합니다.
+            Jetson 계산은 유지한 채 World 송신만 끊고, 두 주행 VM의 공통 입력 소실과 SAFE_STOP 또는 MANUAL 전환을 확인합니다.
           </p>
         </div>
         <div className={styles.scenarioAction}>
@@ -1165,11 +1169,15 @@ function JetsonLossScenario() {
         </p>
       )}
       <div className={styles.scenarioSummary}>
-        <Summary label="현재 활성 VM" value={activeVm?.name ?? '미확인'} mono={activeId?.slice(0, 8)} />
+        <Summary
+          label="현재 활성 VM"
+          value={safeStop && !activeId ? '없음 · SAFE_STOP' : (activeVm?.name ?? '미확인')}
+          mono={activeId?.slice(0, 8)}
+        />
         <Summary
           label="주행 모드"
           value={control?.mode ? MODE_LABEL[control.mode] : '미확인'}
-          health={control?.mode === 'AUTO' ? 'ok' : control?.mode === 'MANUAL' ? 'recovering' : 'fault'}
+          health={control?.mode === 'AUTO' ? 'ok' : safeMode ? 'recovering' : 'fault'}
         />
         <Summary
           label="Jetson 인지 입력"
@@ -1180,7 +1188,7 @@ function JetsonLossScenario() {
       <Card title="시연 진행">
         {!run ? (
           <div className={styles.scenarioEmpty}>
-            <p>시연을 시작하면 Jetson 명령 적용부터 수동 전환, 인지 송신 복구까지 표시됩니다.</p>
+            <p>시연을 시작하면 Jetson 명령 적용부터 안전 전환, 인지 송신 복구까지 표시됩니다.</p>
           </div>
         ) : (
           <div>
@@ -1224,22 +1232,26 @@ function JetsonLossScenario() {
                 }
               />
               <ProgressStep
-                done={manual}
-                title="AUTO에서 MANUAL로 안전 전환"
+                done={safeMode}
+                title="AUTO 출력 차단 및 안전 전환"
                 detail={
                   manual
                     ? '자동 복귀하지 않고 명시적인 수동 입력을 기다립니다.'
+                    : safeStop
+                      ? '활성 출력을 제거하고 SAFE_STOP 정지 상태를 유지합니다.'
                     : `현재 모드: ${control?.mode ? MODE_LABEL[control.mode] : '미확인'}`
                 }
               />
               <ProgressStep
-                done={sameActive && manual}
-                failed={Boolean(run.active_vm_id && activeId && !sameActive)}
-                title="기존 active VM 유지"
+                done={noUnexpectedHandoff && safeMode}
+                failed={Boolean(run.active_vm_id && activeId && activeId !== run.active_vm_id)}
+                title="불필요한 A/B 승계 없음"
                 detail={
-                  sameActive
-                    ? '공통 입력 장애이므로 VM 미러링을 수행하지 않았습니다.'
-                    : 'active_vm_id를 확인하는 중입니다.'
+                  safeStop && !activeId
+                    ? '공통 입력 장애이므로 다른 AUTO VM을 선택하지 않고 제어권을 해제했습니다.'
+                    : noUnexpectedHandoff
+                      ? '공통 입력 장애이므로 다른 주행 VM으로 승계하지 않았습니다.'
+                      : 'active_vm_id와 주행 모드를 확인하는 중입니다.'
                 }
               />
               <ProgressStep
@@ -1247,7 +1259,7 @@ function JetsonLossScenario() {
                 title="Jetson 인지 송신 복구"
                 detail={
                   recovered
-                    ? '새 인지 결과 수신이 재개됐으며 주행 모드는 MANUAL로 유지됩니다.'
+                    ? `새 인지 결과 수신이 재개됐으며 주행 모드는 ${control?.mode ? MODE_LABEL[control.mode] : '안전 상태'}로 유지됩니다. AUTO는 명시적 요청 전까지 재개되지 않습니다.`
                     : ended
                       ? '차단은 종료됐고 새 인지 결과를 기다립니다.'
                       : '설정한 지속 시간이 끝나기를 기다립니다.'

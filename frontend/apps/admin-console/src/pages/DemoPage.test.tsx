@@ -145,7 +145,7 @@ describe('장애 시연 1', () => {
   it('시연 6에서 장애 시간을 정하고 Jetson 인지 차단 API를 호출한다', () => {
     show();
     fireEvent.click(screen.getByRole('button', { name: /시연 6/ }));
-    expect(screen.getByText('Jetson 인지 송신 단절과 수동 전환')).toBeInTheDocument();
+    expect(screen.getByText('Jetson 인지 송신 단절과 안전 전환')).toBeInTheDocument();
     expect(screen.getByText('15 Hz · 정상')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('장애 지속 시간'), { target: { value: '30' } });
     fireEvent.click(screen.getByRole('button', { name: '시연 시작' }));
