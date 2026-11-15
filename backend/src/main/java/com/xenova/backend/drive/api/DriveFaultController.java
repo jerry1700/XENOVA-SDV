@@ -5,6 +5,7 @@ import com.xenova.backend.agent.application.VmCrashCommand;
 import com.xenova.backend.agent.application.ZephyrFaultCommand;
 import com.xenova.backend.drive.application.ActiveDriveAutoDelayService;
 import com.xenova.backend.drive.application.ActiveDriveAppExitService;
+import com.xenova.backend.drive.application.ActiveDriveAutoTxBlockService;
 import com.xenova.backend.drive.application.ActiveDriveVmCrashService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -21,12 +22,14 @@ public class DriveFaultController {
     private final ActiveDriveAutoDelayService service;
     private final ActiveDriveAppExitService appExitService;
     private final ActiveDriveVmCrashService vmCrashService;
+    private final ActiveDriveAutoTxBlockService autoTxBlockService;
 
     public DriveFaultController(ActiveDriveAutoDelayService service, ActiveDriveAppExitService appExitService,
-            ActiveDriveVmCrashService vmCrashService) {
+            ActiveDriveVmCrashService vmCrashService, ActiveDriveAutoTxBlockService autoTxBlockService) {
         this.service = service;
         this.appExitService = appExitService;
         this.vmCrashService = vmCrashService;
+        this.autoTxBlockService = autoTxBlockService;
     }
 
     @PostMapping("/auto-delay")
@@ -42,5 +45,10 @@ public class DriveFaultController {
     @PostMapping("/vm-crash")
     public ResponseEntity<VmCrashCommand> vmCrash() {
         return ResponseEntity.accepted().body(vmCrashService.send());
+    }
+
+    @PostMapping("/auto-tx-block")
+    public ResponseEntity<ZephyrFaultCommand> autoTxBlock(@Valid @RequestBody DriveAutoTxBlockRequest request) {
+        return ResponseEntity.accepted().body(autoTxBlockService.send(request.durationS()));
     }
 }
