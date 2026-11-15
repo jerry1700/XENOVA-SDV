@@ -143,7 +143,7 @@ def mapper_sensor_owner(boot, binding):
         tof_leaves=limits.tof_leaves,vehicle_max_age_us=limits.vehicle_max_age_us,tof_max_age_us=limits.tof_max_age_us,
         max_speed_mps=limits.max_speed_mps,max_yaw_rate_rps=limits.max_yaw_rate_rps,
         max_gap_us=limits.max_gap_us,capacity=limits.capacity,mapper_worker=boot.peer.worker_instance,
-        mapper_instance=boot.mapper_instance)
+        mapper_instance=boot.mapper_instance,wheel_profile=limits.wheel_odometry)
     return config,owner
 
 

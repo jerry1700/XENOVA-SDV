@@ -101,6 +101,21 @@ class MapperRuntimeProfileTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs['perception_profile_bytes'],self.calibration_bytes)
             self.assertNotIn('diagnostics',run.call_args.kwargs)
 
+    def test_live_sensor_owner_uses_explicit_wheel_odometry_calibration(self):
+        from xenova_vehicle.mapping.wheel_motion import WheelMotionProfile
+
+        fields = deepcopy(self.fields)
+        fields['sensors']['wheel_odometry'] = dict(encoder_bits=32, metres_per_tick=.001,
+            metres_per_tick_upper=.0011, track_width_m=.174, distance_error_ratio=.02, heading_error_per_m=.02)
+        profile = MapperProfile(fields)
+        f = self.fixture
+        _, owner = resident_workers.mapper_sensor_owner(SimpleNamespace(
+            mapper_profile_bytes=profile.canonical_bytes, perception_profile_bytes=self.calibration_bytes,
+            source_policy=self.source_policy, clock_policy=f.policy,
+            peer=SimpleNamespace(worker_instance=f.mapper_worker), mapper_instance=f.mapper_instance), self.raw)
+        self.assertEqual(owner._wheel_profile, WheelMotionProfile(**fields['sensors']['wheel_odometry']))
+        self.assertIsNone(self.sensor_owner._wheel_profile)
+
     def test_prepare_pins_canonical_bytes_before_optional_copy_and_checks_vehicle_policy(self):
         with tempfile.TemporaryDirectory() as directory:
             def runtime(name,policy):

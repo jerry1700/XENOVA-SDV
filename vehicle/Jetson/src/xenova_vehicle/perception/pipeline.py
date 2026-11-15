@@ -689,8 +689,8 @@ class PerceptionPipeline:
                 and (raw_pose.wheel_capture is not None or localization_position_drift_mps or localization_yaw_drift_rps)):
             initial = self._startup_odometry
             if initial is None or initial.sample.context != raw_pose.sample.context:
-                self._startup_odometry = raw_pose
-            elif raw_pose.captured_us[1] >= initial.captured_us[1]:
+                initial = self._startup_odometry = raw_pose
+            if raw_pose.captured_us[1] >= initial.captured_us[1]:
                 registration_pose = pose = MapOdomAlignment.project_startup(initial, raw_pose,
                     position_drift_mps=localization_position_drift_mps,
                     yaw_drift_rps=localization_yaw_drift_rps)

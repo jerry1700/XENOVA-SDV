@@ -126,9 +126,21 @@ class MapOdomAlignment:
 
     @classmethod
     def project_startup(cls, initial, odom, *, position_drift_mps, yaw_drift_rps):
-        """Propagate from the first odometry capture before a visual match exists."""
+        """Bound a new map from its first continuous encoder event."""
         if initial.sample.context != odom.sample.context or odom.captured_us[1] < initial.captured_us[1]:
             raise ValueError('startup projection requires the original odometry context and time order')
+        wheel = initial.wheel_capture
+        if wheel is not None and wheel.anchor_sample is not None:
+            anchor = wheel.anchor_sample
+            instant = (anchor.at_us, anchor.at_us)
+            origin = PoseEstimate(anchor, instant, instant,
+                                  replace(wheel, position_pad_m=0., yaw_pad_rad=0.))
+            bounds = relative_wheel_bounds(origin, odom)
+            if bounds is not None:
+                # The encoder event defines this map's gauge. Visual-match drift
+                # starts with a visual match; wheel calibration bounds this leg.
+                position, yaw = bounds
+                return replace(odom, sample=replace(odom.sample, position_error_m=position, yaw_error_rad=yaw))
         return cls.from_match(initial, initial)._project(odom, odom.captured_us[1] - initial.captured_us[0],
             drift_rates=(position_drift_mps, yaw_drift_rps))
 
