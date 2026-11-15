@@ -11,21 +11,25 @@ TUNING_FILE = 'course-clearance.json'
 REQUIRED = {'margin', 'tracking_guard', 'primitive_duration'}
 LANE_TUNING = {'tape_width_m', 'narrow_lane_speed_mps'}
 TAPE_OVERHANG = 'tape_overhang_m'
+DIVIDER_OVERHANG = 'divider_overhang_m'
 
 
 def tuned_profile(profile, tuning):
     fields = set(tuning)
-    if not REQUIRED <= fields or fields - REQUIRED - LANE_TUNING - {'primitive_speed', 'avoid_policy', TAPE_OVERHANG}:
+    if not REQUIRED <= fields or fields - REQUIRED - LANE_TUNING - {'primitive_speed', 'avoid_policy', TAPE_OVERHANG, DIVIDER_OVERHANG}:
         raise ValueError('course clearance requires margin, tracking_guard and primitive_duration')
-    nonnegative = {'tape_width_m', TAPE_OVERHANG}
+    nonnegative = {'tape_width_m', TAPE_OVERHANG, DIVIDER_OVERHANG}
     if any(type(value) not in (int, float) or not math.isfinite(value)
             or value < 0 or (value == 0 and name not in nonnegative) for name, value in tuning.items()):
         raise ValueError('course settings must be positive and finite, except tape settings may be zero')
-    result = dict(profile, **{name: tuning[name] for name in fields - LANE_TUNING - {TAPE_OVERHANG}})
+    result = dict(profile, **{name: tuning[name] for name in fields - LANE_TUNING - {TAPE_OVERHANG, DIVIDER_OVERHANG}})
     if 'avoid_policy' in tuning and (type(tuning['avoid_policy']) is not int or tuning['avoid_policy'] not in (1, 2)):
         raise ValueError('course avoidance policy must be return-home or keep-target')
     tape = tuning.get('tape_width_m', 0)
     overhang = tuning.get(TAPE_OVERHANG, 0)
+    divider = tuning.get(DIVIDER_OVERHANG)
+    if divider is not None and (tape <= 0 or tape / 2 + divider > result['half_width']):
+        raise ValueError('divider allowance requires tape and may not exceed the body half width')
     speed = tuning.get('narrow_lane_speed_mps', 0)
     if tape + 2 * overhang > result['half_width'] or speed > result['max_velocity']:
         raise ValueError('course boundary allowance or narrow-lane speed exceeds its vehicle bound')
@@ -40,6 +44,8 @@ def tuned_profile(profile, tuning):
             result['assumptions'] += f' Narrow-lane speed={speed:.9g} m/s.'
     if overhang:
         result['assumptions'] += f' Body overhang beyond tape={overhang:.9g} m.'
+    if divider is not None:
+        result['assumptions'] += f' Divider overhang beyond tape={divider:.9g} m.'
     spacing = min(result['resolution'] * .25, result['tracking_guard'] * .5)
     if result['primitive_speed'] * result['primitive_duration'] > 64 * spacing:
         raise ValueError('primitive exceeds the swept-check subdivisions; shorten primitive_duration')
@@ -55,6 +61,9 @@ def lane_source(tuning):
         source += f" .narrow_lane_speed_mps={tuning['narrow_lane_speed_mps']:.9e}f,\n"
     if overhang := tuning.get(TAPE_OVERHANG, 0):
         source += f" .lane_tape_overhang_m={overhang:.9e}f,\n"
+    if DIVIDER_OVERHANG in tuning:
+        allowance = tuning['tape_width_m'] / 2 + tuning[DIVIDER_OVERHANG]
+        source += f" .lane_divider_allowance_m={allowance:.9e}f,\n"
     return source.encode()
 
 
