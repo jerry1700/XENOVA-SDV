@@ -164,7 +164,7 @@ def prepare_cpu(platform, sample, policy):
 
 
 def adopt(platform, record, row, deadline, *, owner=None, result=None):
-    """Attach PV backends to the same incarnation and publish its execution once."""
+    """Attach PV backends once and return the execution identity for start confirmation."""
     proof = receipts(platform).get(record['id'])
     if not proof or proof['phase'] != 'ready' or proof['domid'] != row['domid']:
         return None
@@ -177,7 +177,7 @@ def adopt(platform, record, row, deadline, *, owner=None, result=None):
     previous = execution.run_record(record)
     if (previous and previous['phase'] == 'observed' and previous.get('cpu_verification') == 'complete'
             and previous['domid'] == row['domid'] and previous['xen_unique_id'] == unique):
-        return
+        return previous
     expected = {**row, 'xen_unique_id': unique}
     domid = str(row['domid'])
     directory = platform.data / 'instances' / record['id']
@@ -235,4 +235,4 @@ def adopt(platform, record, row, deadline, *, owner=None, result=None):
             raise PlatformError('factory network attachment could not be verified')
 
     execution.guard_launch(record, launch, deadline)
-    execution.bind_launch(record, launch, expected, deadline)
+    return execution.bind_launch(record, launch, expected, deadline)

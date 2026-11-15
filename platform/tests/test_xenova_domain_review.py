@@ -324,11 +324,17 @@ class DomainReviewTest(unittest.TestCase):
 
     def test_existing_unhealthy_domain_refuses_start_without_recovery(self):
         for flags, state in (('--p---', 'paused'), ('---s--', 'shutdown'),
-                             ('---sc-', 'crashed'), ('-----d', 'dying'), ('------', 'unknown')):
+                             ('---sc-', 'crashed'), ('-----d', 'dying')):
             self.xen.rows = []
             self.live(self.linux, flags=flags)
             with self.subTest(flags=flags):
                 self.cli_error('start', self.linux['id'], message=state)
+        self.xen.rows = []
+        self.live(self.linux, flags='------')
+        now = [100.0]
+        self.p.clock = lambda: now[0]
+        self.p.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        self.cli_error('start', self.linux['id'], code='DEADLINE_EXCEEDED')
         self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy'], ['xl', 'unpause']) for c in self.xen.calls))
 
     def test_autostart_main_preserves_blocked_and_failed_actual_states(self):
@@ -349,27 +355,74 @@ class DomainReviewTest(unittest.TestCase):
         self.assertEqual(results[self.linux['id']]['app_readiness'], 'unknown')
         self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy']) for c in self.xen.calls))
 
-    def test_autostart_rechecks_transient_unknown_after_adoption(self):
+    def _autostart_after_adoption(self, after, settle=None):
         import xenova_dom0less
 
         self.live(self.linux)
+        row = self.xen.rows[0]
+        row['config']['disks'][0]['vdev'] = 'xvda'
+        row['config']['nics'] = [{'mac': self.linux['mac'], 'bridge': 'xenbr0'}]
         self.p.defaults_path = self.base / 'defaults.json'
         self.p.defaults_path.write_text(json.dumps({'instances': [self.linux]}))
+        vm.ensure_runtime(self.p.runtime)
+        execution = self.p.execution()
+        execution.write(self.p.runtime / 'dom0less.json', {
+            'schema_version': '1.0', 'host_boot_id': execution.host, 'guests': {
+                self.linux['id']: {'phase': 'ready', 'domid': 1, 'uuid': self.linux['uuid'],
+                                   'xen_unique_id': execution.unique(row, self.p.clock() + 2)}}})
 
-        def after_adoption(*args, **kwargs):
-            self.xen.states[1] = '------'
+        def command(args, **kwargs):
+            if args == ['xenstore-read', '/local/domain/0/backend/vbd/1/51712/physical-device']:
+                return '7:0'
+            return self.xen(args, **kwargs)
 
-        def settle(seconds):
-            self.xen.states[1] = '-b----'
+        real_adopt = xenova_dom0less.adopt
 
-        self.p.sleep = settle
-        with patch.object(xenova_dom0less, 'adopt', side_effect=after_adoption) as adopt:
-            self.cli('autostart')
+        def adopt(*args, **kwargs):
+            bound = real_adopt(*args, **kwargs)
+            after()
+            return bound
 
-        adopt.assert_called_once()
+        if settle is not None:
+            self.p.sleep = settle
+        with (patch.object(self.p, 'command', side_effect=command),
+              patch.object(xenova_dom0less, 'adopt', side_effect=adopt) as wrapped):
+            try:
+                self.cli('autostart')
+            finally:
+                wrapped.assert_called_once()
+                self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy'],
+                                                ['xl', 'block-attach'], ['xl', 'network-attach'])
+                                     for c in self.xen.calls))
+
+    def test_autostart_rechecks_transient_unknown_after_adoption(self):
+        self._autostart_after_adoption(lambda: self.xen.states.update({1: '------'}),
+                                      lambda seconds: self.xen.states.update({1: '-b----'}))
         results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
         self.assertEqual(results[self.linux['id']]['result'], 'blocked')
-        self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy']) for c in self.xen.calls))
+
+    def test_autostart_refuses_replacement_on_first_sample_after_adoption(self):
+        def replace():
+            # Reuse the same domid, UUID and name with a different Xen incarnation.
+            self.xen.rows[0] = copy.deepcopy(self.xen.rows[0])
+            self.xen.states[1] = '-b----'
+
+        with self.assertRaises(SystemExit):
+            self._autostart_after_adoption(replace)
+        results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
+        self.assertEqual(results[self.linux['id']]['result'], 'failed')
+        self.assertIn('incarnation changed during start confirmation', results[self.linux['id']]['error'])
+
+    def test_autostart_refuses_replacement_between_confirmation_samples(self):
+        def replace(_seconds):
+            self.xen.rows[0] = copy.deepcopy(self.xen.rows[0])
+            self.xen.states[1] = '-b----'
+
+        with self.assertRaises(SystemExit):
+            self._autostart_after_adoption(lambda: self.xen.states.update({1: '------'}), replace)
+        results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
+        self.assertEqual(results[self.linux['id']]['result'], 'failed')
+        self.assertIn('incarnation changed during start confirmation', results[self.linux['id']]['error'])
 
     def test_create_result_is_checked_for_paused_domain_without_recovery(self):
         self.xen.states[1] = '--p---'
