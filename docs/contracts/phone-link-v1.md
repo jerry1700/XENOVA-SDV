@@ -75,6 +75,85 @@ Spring 은 아무것도 저장하지 않고 dom0-manager 응답 본문을 그대
 | 503 | `PHONE_LINK_UNAVAILABLE` | 보드에 연결할 수 없음, 또는 보드가 상태를 읽지 못함·2초 안에 새 번호가 나오지 않음 |
 | 504 | `PHONE_LINK_UNAVAILABLE` | 보드 응답 시간 초과. REST-39 는 번호가 만들어졌을 수 있으므로 상태를 다시 읽고 필요하면 사람이 다시 누른다 |
 
+## 표시 모드 전환 (REST-40, REST-41)
+
+휴대폰 중계는 재부팅 뒤 꺼져 있습니다. 지금까지는 SSH 로 보드에 들어가 `sudo python3 -m xenova_display.display_mode mobile` 을 실행해야 켤 수 있었는데, 콘솔에서 같은 일을 하도록 Spring 이 dom0-manager 를 대신 부릅니다. 휴대폰 모드로 바꾸면 중계가 켜지고 HDMI 가 꺼지며, HDMI 모드는 반대입니다. 따로 "중계 켜기" 버튼은 없습니다.
+
+- 보드 쪽 계약: [VM 관리 API 계약](vm-api-contract-v1.md) 4.14 (`GET`·`POST /api/v1/display/mode`)
+
+| ID | 메서드 | 경로 | 요청 | 성공 | 오류 |
+| --- | --- | --- | --- | --- | --- |
+| REST-40 | GET | `/api/v1/display/mode` | — | 200 표시 모드 | 401, 502, 503, 504 |
+| REST-41 | POST | `/api/v1/display/mode` | `{"mode": "mobile" \| "hdmi"}` | 200 전환 뒤 표시 모드 | 401, 409, 422, 500, 502, 503, 504 |
+
+두 응답 모두 `Cache-Control: no-store` 이고, 본문은 dom0-manager 응답 그대로입니다.
+
+### REST-40 `GET /api/v1/display/mode`
+
+```json
+{
+  "mode": "mobile",
+  "boot_default": "hdmi",
+  "services": {"hdmi": "inactive", "mobile": "active", "feed": "active"},
+  "hdmi_renderer_ready": false,
+  "observed_at": "2026-11-14T09:00:00Z"
+}
+```
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `mode` | string | 지금 표시 모드. `hdmi` HDMI 모니터 · `mobile` USB 테더링 휴대폰 |
+| `boot_default` | string | 재부팅 뒤 모드. 지금은 항상 `hdmi` |
+| `services.hdmi` | string | HDMI 화면 서비스의 systemd 상태(`active`·`inactive`·`activating`·`deactivating`·`failed`, 못 읽으면 `unknown`) |
+| `services.mobile` | string | 휴대폰 중계 서비스의 상태. `active` 면 중계가 켜져 있다 |
+| `services.feed` | string | 두 모드가 함께 쓰는 화면 데이터 서비스의 상태. `active` 가 아니면 전환할 수 없다 |
+| `hdmi_renderer_ready` | bool | HDMI 화면이 실제로 그려지고 있음 |
+| `observed_at` | string | 보드에서 읽은 시각(UTC) |
+
+### REST-41 `POST /api/v1/display/mode`
+
+요청 `{"mode": "mobile"}` 또는 `{"mode": "hdmi"}`. 응답 본문은 REST-40 과 같은 형식의 **전환 뒤** 상태입니다.
+
+```json
+{
+  "mode": "mobile",
+  "boot_default": "hdmi",
+  "services": {"hdmi": "inactive", "mobile": "active", "feed": "active"},
+  "hdmi_renderer_ready": false,
+  "observed_at": "2026-11-14T09:00:05Z"
+}
+```
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `mode` | string | 전환 뒤 표시 모드 `hdmi` · `mobile` |
+| `boot_default` | string | 재부팅 뒤 모드. 지금은 항상 `hdmi` |
+| `services.hdmi` | string | HDMI 화면 서비스의 systemd 상태 |
+| `services.mobile` | string | 휴대폰 중계 서비스의 상태 |
+| `services.feed` | string | 화면 데이터 서비스의 상태 |
+| `hdmi_renderer_ready` | bool | HDMI 화면이 실제로 그려지고 있음 |
+| `observed_at` | string | 보드에서 읽은 시각(UTC) |
+
+- 휴대폰 모드로 바꾸기 전에 휴대폰을 USB 로 연결하고 **USB 테더링**을 켜야 합니다. 없으면 보드가 바로 거절합니다(`PHONE_NOT_CONNECTED`).
+- 휴대폰 모드가 되어도 휴대폰이 접속한 것은 아닙니다. 접속 주소와 연결번호는 REST-38·39 로 받습니다.
+- 전환은 보통 수 초, 최악 240초 걸립니다. Spring 은 260초까지 기다리고, 요청을 보낸 뒤에는 재시도하지 않습니다(두 번째 요청이 첫 전환과 겹치므로). 실패하면 보드가 이전 모드로 되돌립니다.
+- 누가 어느 모드로 바꿨는지 Spring 로그에 남깁니다.
+
+### 오류 (REST-40·41)
+
+| HTTP | code | 상황 |
+| --- | --- | --- |
+| 401 | `UNAUTHORIZED` | 로그인 안 됨. 보드에 묻지 않는다 |
+| 409 | `PHONE_NOT_CONNECTED` | (mobile) 휴대폰 USB 링크·테더링 없음. 아무것도 바꾸지 않았다 |
+| 409 | `DISPLAY_MODE_BUSY` | 다른 전환이 진행 중이거나 표시 서비스가 켜지고 꺼지는 중. 잠시 뒤 다시 |
+| 409 | `DISPLAY_MODE_NOT_APPLIED` | 전환 실패, 보드가 이전 모드로 되돌림 |
+| 409 | `DISPLAY_SETUP_REQUIRED` | 보드 표시 설정 문제(설정 파일·서비스 미설치 등). 보드 작업 필요 |
+| 422 | `VALIDATION_ERROR` | `mode` 가 없거나 `hdmi`·`mobile` 이 아님. 보드에 묻지 않는다 |
+| 500 | `DISPLAY_MODE_ROLLBACK_INCOMPLETE` | 전환 실패 후 이전 모드로 완전히 되돌리지 못함. 보드에서 표시 서비스 확인 |
+| 502 | `DISPLAY_MODE_UNAVAILABLE` | dom0-manager 응답을 해석할 수 없음, 서비스 토큰 설정 불일치 |
+| 503 | `DISPLAY_MODE_UNAVAILABLE` | 보드에 연결할 수 없음, 또는 보드가 표시 모드 명령을 실행하지 못함 |
+| 504 | `DISPLAY_MODE_TIMEOUT` | 보드 응답 시간 초과. 전환이 끝났을 수 있으므로 REST-40 으로 다시 확인한다 |
+
 ## 연결번호를 웹에 보여 주는 근거
 
 로그인한 운영자는 이미 SSH 로 보드의 같은 파일을 읽을 수 있고, 번호는 USB 로 연결된 휴대폰에서만(중계가 `usb0` 에 묶임) 2분·5회 안에 쓸 수 있습니다. 그래서 인증된 콘솔 화면에는 보여 주되, 어디에도 남기지 않습니다.
@@ -84,3 +163,4 @@ Spring 은 아무것도 저장하지 않고 dom0-manager 응답 본문을 그대
 | 버전 | 일자 | 내용 |
 | --- | --- | --- |
 | v1 | 2026-11-12 | REST-38 상태 조회, REST-39 연결번호 발급 |
+| v1.1 | 2026-11-14 | REST-40 표시 모드 조회, REST-41 표시 모드 전환(휴대폰 모드가 중계를 켬). 보드 계약 4.14 |

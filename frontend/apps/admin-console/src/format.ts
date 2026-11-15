@@ -33,7 +33,8 @@ export const capitalizeFirst = (value: string): string =>
 
 /** 경과 시간 mm:ss (음수는 00:00). VM 생성·정지·삭제 진행 표시가 같이 쓴다 */
 export function formatElapsedTime(elapsedMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  // NaN·음수는 00:00 (시작 시각을 못 읽었거나 시계가 어긋난 경우)
+  const totalSeconds = Number.isFinite(elapsedMs) ? Math.max(0, Math.floor(elapsedMs / 1000)) : 0;
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
@@ -46,6 +47,12 @@ export function formatElapsedTime(elapsedMs: number): string {
  */
 export const canStartVm = (state: VmState): boolean => state === 'stopped';
 export const canStopVm = (state: VmState): boolean => state !== 'stopped';
+/** 보드 계약: 도메인이 남아 있으면(running·paused·crashed·stopping) 삭제는 409 — 정지된 VM만 */
+export const canDeleteVm = (state: VmState): boolean => state === 'stopped';
+export const DELETE_BLOCKED_HINT = '정지 후 삭제할 수 있습니다.';
+/** 삭제는 보드에서 숨김 보관(retire)이고 화면에서 되살리는 수단은 없다 */
+export const DELETE_CONFIRM_TEXT =
+  '정지된 VM만 삭제할 수 있습니다. 삭제한 VM은 목록에서 사라지며 되돌릴 수 없습니다.';
 
 /** VM 생명주기 요청 이름 (진행 표시·완료 알림이 같이 쓴다) */
 export const VM_ACTION_LABEL: Record<VmAction, string> = {

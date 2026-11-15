@@ -14,21 +14,35 @@ export function wsUrl(path: string): string {
   return origin.replace(/^http/, 'ws') + path;
 }
 
+/** 인증 요청 시간 제한 — 잠금(xenova-refresh)을 쥔 채 매달리지 않게 (관리 콘솔 api/client 와 같은 10초) */
+export const AUTH_TIMEOUT_MS = 10_000;
+
 async function token(path: string, body?: unknown): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
   try {
     const response = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: body ? { 'Content-Type': 'application/json' } : undefined,
       body: body ? JSON.stringify(body) : undefined,
       credentials: 'include',
+      signal: controller.signal,
     });
     if (!response.ok) return null;
     const json = (await response.json()) as { access_token?: string };
     return json.access_token ?? null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
+
+/**
+ * 관리 콘솔(api/client.ts)과 같은 잠금 이름 (S15P31E110-472). 같은 브라우저(같은 origin)에서 콘솔과 이 화면이
+ * 같은 refresh 쿠키로 동시에 재발급하면 서버가 재사용으로 보고 공용 계정의 토큰을 전부 폐기한다 → 한 번에 하나씩.
+ */
+export const REFRESH_LOCK = 'xenova-refresh';
 
 /**
  * 모니터 화면은 로그인 화면이 없다. 같은 브라우저에서 관리 콘솔에 로그인했으면 refresh 쿠키로 받고,
@@ -47,7 +61,12 @@ export function accessToken(fresh = false): Promise<string | null> {
 let cached: Promise<string | null> | null = null;
 let inflight = false;
 
-async function fetchToken(): Promise<string | null> {
+function fetchToken(): Promise<string | null> {
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks;
+  return locks ? locks.request(REFRESH_LOCK, fetchTokenOnce) : fetchTokenOnce();
+}
+
+async function fetchTokenOnce(): Promise<string | null> {
   const refreshed = await token('/api/v1/auth/refresh');
   if (refreshed) return refreshed;
   const username = import.meta.env.VITE_SCREEN_USERNAME;
@@ -68,17 +87,47 @@ export interface SocketOptions {
   onConnection: (state: Connection) => void;
 }
 
-const RETRY_MS = 2000;
+export const RETRY_MS = 2000;
+/** 인증 실패가 이어질 때 재시도 간격의 상한 */
+export const MAX_AUTH_RETRY_MS = 30_000;
 
-/** 끊기면 2초 뒤 다시 붙는다. 반환값을 부르면 닫고 멈춘다 */
+/**
+ * 다시 붙기까지 기다릴 시간. 인증 실패(토큰 없음·4401)가 연달아 n 번이면 2·4·8·16·30초…로 늘린다
+ * (refresh·login 을 2초마다 부르지 않게). 그 밖의 끊김은 2초 그대로
+ */
+export function retryDelay(authFailures: number): number {
+  if (authFailures <= 0) return RETRY_MS;
+  return Math.min(MAX_AUTH_RETRY_MS, RETRY_MS * 2 ** (authFailures - 1));
+}
+
+/** 텍스트 프레임 해석. JSON 이 아니거나 type 이 없으면 null (버린다) */
+export function parseFrame(data: unknown): ({ type: string } & Record<string, unknown>) | null {
+  if (typeof data !== 'string') return null;
+  let frame: unknown;
+  try {
+    frame = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  return typeof frame === 'object' &&
+    frame !== null &&
+    !Array.isArray(frame) &&
+    typeof (frame as { type?: unknown }).type === 'string'
+    ? (frame as { type: string } & Record<string, unknown>)
+    : null;
+}
+
+/** 끊기면 다시 붙는다 (간격은 retryDelay). 반환값을 부르면 닫고 멈춘다 */
 export function openSocket(options: SocketOptions): () => void {
   let socket: WebSocket | null = null;
   let timer: number | undefined;
   let stopped = false;
   let fresh = false;
+  // 연달아 인증에 실패한 횟수 (인증되면 0)
+  let authFailures = 0;
 
   const retry = () => {
-    if (!stopped) timer = window.setTimeout(connect, RETRY_MS);
+    if (!stopped) timer = window.setTimeout(connect, retryDelay(authFailures));
   };
 
   async function connect() {
@@ -89,6 +138,7 @@ export function openSocket(options: SocketOptions): () => void {
     if (!accessToken) {
       options.onConnection('unauthorized');
       fresh = true;
+      authFailures += 1;
       retry();
       return;
     }
@@ -97,8 +147,11 @@ export function openSocket(options: SocketOptions): () => void {
     const send = (frame: unknown) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(frame));
     ws.onopen = () => send({ type: 'auth', access_token: accessToken });
     ws.onmessage = (message) => {
-      const frame = JSON.parse(String(message.data)) as { type: string } & Record<string, unknown>;
+      // 깨진 프레임 하나로 핸들러가 예외를 던지지 않게 버린다
+      const frame = parseFrame(message.data);
+      if (!frame) return;
       if (frame.type === 'authenticated') {
+        authFailures = 0;
         options.onConnection('live');
         options.afterAuth?.(send);
         return;
@@ -109,6 +162,7 @@ export function openSocket(options: SocketOptions): () => void {
       if (socket === ws) socket = null;
       if (stopped) return;
       fresh = event.code === UNAUTHORIZED;
+      if (fresh) authFailures += 1;
       options.onConnection(fresh ? 'unauthorized' : 'offline');
       retry();
     };

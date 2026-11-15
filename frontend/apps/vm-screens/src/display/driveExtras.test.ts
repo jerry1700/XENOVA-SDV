@@ -6,13 +6,17 @@ import {
   courseOf,
   driveAppStatus,
   driverMode,
+  fixed2,
   gaugeMaxOf,
+  MAX_STEER_DEG,
   MAX_STEER_RAD,
   maxSpeedOf,
   RATED_RUNTIME_S,
   remainingRuntimeS,
   steeringOf,
   tripOf,
+  VEHICLE_RANGE,
+  vehicleOf,
   vmLineStatus,
 } from './driveExtras';
 import { presentationFixture } from './fixture';
@@ -72,13 +76,73 @@ describe('운전자 화면 주행 모드 문구', () => {
 describe('조향 표시 (최대각 0.55 rad, + = 왼쪽)', () => {
   it('정수 도·좌우·최대각 대비 비율', () => {
     expect(MAX_STEER_RAD).toBe(0.55);
-    expect(steeringOf(0.21)).toEqual({ deg: 12, side: '좌', ratio: 0.21 / 0.55 });
-    expect(steeringOf(-0.21)).toEqual({ deg: 12, side: '우', ratio: -0.21 / 0.55 });
+    expect(steeringOf(0.21)).toEqual({ deg: 12, side: '좌', ratio: 0.21 / 0.55, clipped: false });
+    expect(steeringOf(-0.21)).toEqual({ deg: 12, side: '우', ratio: -0.21 / 0.55, clipped: false });
     expect(steeringOf(0.004)).toMatchObject({ deg: 0, side: null });
     expect(steeringOf(1)!.ratio).toBe(1);
     expect(steeringOf(-1)!.ratio).toBe(-1);
     expect(steeringOf(null)).toBeNull();
     expect(steeringOf(Number.NaN)).toBeNull();
+  });
+
+  it(`최대각을 넘으면 ±${MAX_STEER_DEG}° 로 자르고 clipped (잡음 수준 초과는 경고하지 않음)`, () => {
+    expect(MAX_STEER_DEG).toBe(32);
+    expect(steeringOf(3.14)).toEqual({ deg: 32, side: '좌', ratio: 1, clipped: true });
+    expect(steeringOf(-1e9)).toEqual({ deg: 32, side: '우', ratio: -1, clipped: true });
+    expect(steeringOf(MAX_STEER_RAD)).toMatchObject({ deg: 32, clipped: false });
+    expect(steeringOf(MAX_STEER_RAD + 0.005)).toMatchObject({ deg: 32, clipped: false });
+  });
+});
+
+describe('물리 범위 밖 값 (VEHICLE_RANGE)', () => {
+  const vehicle = (v: Record<string, unknown>) =>
+    vehicleOf(
+      withExtras({
+        vehicle: { v_mps: 0.4, steer_rad: 0, batt_v: 12, flags: null, source: fresh, ...v },
+      }),
+    );
+
+  it('범위 상수는 한곳에: |v| ≤ 10, 9 ~ 13.5 V, 최대 속도 ≤ 5', () => {
+    expect(VEHICLE_RANGE).toEqual({ maxAbsSpeedMps: 10, minBattV: 9, maxBattV: 13.5, maxProfileSpeedMps: 5 });
+  });
+
+  it('속도·전압이 범위 밖이면 null + outOfRange, 경계값은 그대로', () => {
+    expect(vehicle({ v_mps: 1e9, batt_v: 1e9 })).toMatchObject({
+      v_mps: null,
+      batt_v: null,
+      outOfRange: { v_mps: true, batt_v: true },
+    });
+    expect(vehicle({ v_mps: -10.01, batt_v: 8.9 })!.outOfRange).toEqual({ v_mps: true, batt_v: true });
+    expect(vehicle({ v_mps: -10, batt_v: 13.5 })).toMatchObject({
+      v_mps: -10,
+      batt_v: 13.5,
+      outOfRange: { v_mps: false, batt_v: false },
+    });
+    expect(vehicle({ v_mps: 0, batt_v: 9 })).toMatchObject({ v_mps: 0, batt_v: 9 });
+    // Infinity 도 범위 밖, 숫자가 아니면 미수신 (범위 밖 아님)
+    expect(vehicle({ v_mps: Infinity, batt_v: '12' })!.outOfRange).toEqual({ v_mps: true, batt_v: false });
+    expect(vehicle({ v_mps: Number.NaN })!.outOfRange.v_mps).toBe(false);
+  });
+
+  it('범위 밖 전압은 잔량도 미확인', () => {
+    const p = withExtras({ vehicle: { v_mps: 0, steer_rad: 0, batt_v: 1e9, flags: null, source: fresh } });
+    expect(batteryOf(p)).toBeNull();
+  });
+
+  it('최대 속도가 범위 밖이면 null, 눈금은 기본값', () => {
+    const limit = (max_v_mps: unknown) => maxSpeedOf(withExtras({ drive_limits: { max_v_mps } }));
+    expect(limit(1e308)).toBeNull();
+    expect(limit(5.01)).toBeNull();
+    expect(limit(5)).toBe(5);
+    expect(gaugeMaxOf(1e308)).toBe(1);
+    expect(gaugeMaxOf(5)).toBe(10);
+  });
+
+  it('소수 둘째 자리 표시는 -0.00 대신 0.00', () => {
+    expect(fixed2(-0.003)).toBe('0.00');
+    expect(fixed2(-0)).toBe('0.00');
+    expect(fixed2(-0.005)).toBe('-0.01');
+    expect(fixed2(0.42)).toBe('0.42');
   });
 });
 

@@ -9,12 +9,13 @@
 import { delay, http, HttpResponse, type JsonBodyType } from 'msw';
 import {
   VM_CPU_PERCENT_METRIC,
+  type AutoInputUnavailableRequest,
   type CpuStressRequest,
   type AutoDelayRequest,
+  type CommandState,
   type CreateVmRequest,
   type LoginRequest,
   type MemoryStressRequest,
-  type SignupRequest,
   type StressCommand,
   type TokenResponse,
   type UpdateMemoryRequest,
@@ -36,10 +37,13 @@ import {
 } from './memoryMetrics';
 import { mockTelemetryHeartbeat } from './telemetryHeartbeat';
 import {
+  exitApp,
   getDisplays,
+  killDomain,
   resetScenario,
   RouteError,
   scenarioEvents,
+  snapshot,
   setRoute,
   startVm,
   stopVm,
@@ -60,7 +64,26 @@ let refreshGranted = false;
 let mockUsername = MOCK_USER.username;
 let mockNickname = MOCK_USER.nickname;
 let mockPassword = MOCK_PASSWORD;
-const demoCommands = new Map<string, { vmId: string; createdAt: number; agentExit?: boolean }>();
+/**
+ * mock 명령. outcome 으로 Agent 결과를 흉내 낸다 (백엔드 AgentCommandStatusResponse 형식):
+ *  - busy: 같은 VM 에 끝나지 않은 부하 명령이 있으면 Agent 가 BUSY 로 거절 (Agent 는 부하를 한 번에 하나만)
+ *  - failed: CPU 워커 4개 부하는 부하 프로세스가 일찍 끝나 실패로 둔다 (시험용)
+ */
+interface DemoCommand {
+  vmId: string;
+  createdAt: number;
+  agentExit?: boolean;
+  stress?: boolean;
+  outcome?: 'busy' | 'failed';
+}
+const demoCommands = new Map<string, DemoCommand>();
+const STRESS_DONE_MS = 2200;
+const STRESS_RUNNING_MS = 600;
+/** 같은 VM 에 아직 끝나지 않은(거절·실패 아닌) 부하 명령이 있는가 */
+const stressRunning = (vmId: string) =>
+  [...demoCommands.values()].some(
+    (c) => c.vmId === vmId && c.stress && !c.outcome && Date.now() - c.createdAt <= STRESS_DONE_MS,
+  );
 
 /** 시험용: 처음 상태로 */
 export function resetMockState(): void {
@@ -167,34 +190,50 @@ function authorized(request: Request): boolean {
 const unauthorized = () => error(401, 'INVALID_TOKEN', '인증이 필요합니다.');
 /** mock 휴대폰 연결번호의 만료 시각(ms). 번호 값은 남기지 않는다 */
 let mockPairingExpiresAt: number | null = null;
+/** mock 표시 모드. 재부팅 뒤처럼 HDMI 로 시작하고, 휴대폰 모드여야 중계가 듣는다 */
+let mockDisplayMode: 'hdmi' | 'mobile' = 'hdmi';
+const mockDisplayModeStatus = () => ({
+  mode: mockDisplayMode,
+  boot_default: 'hdmi',
+  services: {
+    hdmi: mockDisplayMode === 'hdmi' ? 'active' : 'inactive',
+    mobile: mockDisplayMode === 'mobile' ? 'active' : 'inactive',
+    feed: 'active',
+  },
+  hdmi_renderer_ready: mockDisplayMode === 'hdmi',
+  observed_at: new Date().toISOString(),
+});
 /** 자율주행 VM 은 시연 시나리오(강제 종료 → 재시작)를 따른다 */
 const live = (vm: Vm): Vm => ({ ...vm, state: vmStateOf(vm.vm_id) ?? vm.state });
 const find = (id: string) => {
   const vm = vms.find((v) => v.vm_id === id);
   return vm && live(vm);
 };
-const vmNotFound = () => error(404, 'VM_NOT_FOUND', 'VM을 찾을 수 없습니다.');
+const vmNotFound = () => error(404, 'VM_NOT_FOUND', '존재하지 않는 VM입니다.');
 
+/** backend CreateVmRequest 의 name 패턴: 1~63자, 앞뒤 공백·제어문자·줄/문단 구분자 금지 */
+// eslint-disable-next-line no-control-regex
+const CREATE_NAME_PATTERN = /^(?![ \t\n\x0B\f\r])(?!.*[ \t\n\x0B\f\r]$)[^\p{Cc}\p{Zl}\p{Zp}]{1,63}$/u;
+
+/** backend CreateVmRequest 의 Bean Validation (필드 순서·문구 원문 그대로). 템플릿 최소 메모리는 VmService.create 가 따로 본다 */
 function validate(body: Partial<CreateVmRequest>): { field: string; reason: string }[] {
   const errors: { field: string; reason: string }[] = [];
-  const name = body.name ?? '';
-  // eslint-disable-next-line no-control-regex
-  if (name.length < 1 || name.length > 63 || name.trim() !== name || /[\u0000-\u001f]/.test(name)) {
-    errors.push({ field: 'name', reason: '1~63자, 앞뒤 공백·제어문자 금지' });
+  const name = body.name;
+  if (name == null || name.trim() === '') errors.push({ field: 'name', reason: 'name은 필수입니다.' });
+  if (name != null && !CREATE_NAME_PATTERN.test(name)) {
+    errors.push({ field: 'name', reason: 'name은 1~63자이며 제어문자와 앞뒤 공백은 사용할 수 없습니다.' });
   }
-  if (!Number.isInteger(body.vcpus) || body.vcpus! < 1 || body.vcpus! > 4) {
-    errors.push({ field: 'vcpus', reason: '1~4' });
+  if (!body.template_id?.trim()) errors.push({ field: 'template_id', reason: 'template_id는 필수입니다.' });
+  if (!body.template_version?.trim()) {
+    errors.push({ field: 'template_version', reason: 'template_version은 필수입니다.' });
   }
-  const template = TEMPLATES.find(
-    (t) => t.template_id === body.template_id && t.version === body.template_version,
-  );
-  if (
-    template &&
-    (!Number.isInteger(body.memory_mib) ||
-      body.memory_mib! < template.min_memory_mib ||
-      body.memory_mib! > 1024)
-  ) {
-    errors.push({ field: 'memory_mib', reason: `${template.min_memory_mib}~1024` });
+  if (body.vcpus == null) errors.push({ field: 'vcpus', reason: 'vcpus는 필수입니다.' });
+  else if (!Number.isInteger(body.vcpus) || body.vcpus < 1 || body.vcpus > 4) {
+    errors.push({ field: 'vcpus', reason: 'vcpus는 1~4여야 합니다.' });
+  }
+  if (body.memory_mib == null) errors.push({ field: 'memory_mib', reason: 'memory_mib는 필수입니다.' });
+  else if (!Number.isInteger(body.memory_mib) || body.memory_mib < 16 || body.memory_mib > 1024) {
+    errors.push({ field: 'memory_mib', reason: 'memory_mib는 16~1024여야 합니다.' });
   }
   return errors;
 }
@@ -243,26 +282,6 @@ function mockZephyrThreads(vmId: string) {
 
 export const handlers = [
   // ---- 인증 ----
-  http.post('*/api/v1/auth/signup', async ({ request }) => {
-    await delay(LATENCY_MS);
-    const body = (await request.json()) as Partial<SignupRequest>;
-    if (!body.username || !body.nickname || !body.password) {
-      return error(422, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
-    }
-    mockUsername = body.username;
-    mockNickname = body.nickname;
-    mockPassword = body.password;
-    return HttpResponse.json(
-      {
-        user_id: MOCK_USER.user_id,
-        username: body.username,
-        nickname: body.nickname,
-        created_at: new Date().toISOString(),
-      } as JsonBodyType,
-      { status: 201 },
-    );
-  }),
-
   http.post('*/api/v1/auth/login', async ({ request }) => {
     await delay(LATENCY_MS);
     const body = (await request.json()) as Partial<LoginRequest>;
@@ -488,7 +507,12 @@ export const handlers = [
       submitted_at: now.toISOString(),
       expires_at: new Date(now.getTime() + 30_000).toISOString(),
     };
-    demoCommands.set(command.command_id, { vmId: vm.vm_id, createdAt: Date.now() });
+    demoCommands.set(command.command_id, {
+      vmId: vm.vm_id,
+      createdAt: Date.now(),
+      stress: true,
+      outcome: stressRunning(vm.vm_id) ? 'busy' : kind === 'cpu' && amount === 4 ? 'failed' : undefined,
+    });
     return HttpResponse.json(command as unknown as JsonBodyType, { status: 202 });
   }),
 
@@ -527,6 +551,70 @@ export const handlers = [
     );
   }),
 
+  http.post('*/api/v1/drive/faults/auto-delay', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const control = snapshot().control;
+    if (!control || control.source?.status !== 'fresh')
+      return error(503, 'DRIVE_STATE_UNAVAILABLE', '최신 주행 상태를 확인할 수 없습니다.');
+    if (control.mode !== 'AUTO')
+      return error(409, 'DRIVE_MODE_NOT_AUTO', '자동주행 중에만 연산 지연 시나리오를 시작할 수 있습니다.');
+    const vm = control.active_vm_id ? find(control.active_vm_id) : undefined;
+    if (!vm) return error(409, 'ACTIVE_DRIVE_VM_UNAVAILABLE', '현재 자동주행 VM을 확인할 수 없습니다.');
+    const body = (await request.json()) as Partial<AutoDelayRequest>;
+    if (
+      !Number.isInteger(body.delay_ms) ||
+      body.delay_ms! < 1 ||
+      body.delay_ms! > 100 ||
+      !Number.isInteger(body.duration_s) ||
+      body.duration_s! < 1 ||
+      body.duration_s! > 120
+    ) {
+      return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    }
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        delay_ms: body.delay_ms,
+        duration_s: body.duration_s,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.post('*/api/v1/vms/:vmId/faults/auto-input-unavailable', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr' || vm.state !== 'running')
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 Zephyr VM이 아닙니다.');
+    const body = (await request.json()) as Partial<AutoInputUnavailableRequest>;
+    if (!Number.isInteger(body.duration_s) || body.duration_s! < 1 || body.duration_s! > 120)
+      return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        duration_s: body.duration_s,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
   http.post('*/api/v1/vms/:vmId/faults/agent-exit', async ({ request, params }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
@@ -551,6 +639,70 @@ export const handlers = [
     );
   }),
 
+  http.post('*/api/v1/vms/:vmId/faults/vm-crash', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr')
+      return error(400, 'UNSUPPORTED_GUEST_KIND', 'vm_crash는 Zephyr VM에서만 지원합니다.');
+    if (vm.state !== 'running' || !killDomain(vm.vm_id))
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 Zephyr VM이 아닙니다.');
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  // 장애 주입 (계약안 .../faults/app-exit · domain-kill — 백엔드 구현 전, 시연 제어 화면용)
+  http.post('*/api/v1/vms/:vmId/faults/app-exit', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.guest_kind !== 'zephyr')
+      return error(400, 'UNSUPPORTED_GUEST_KIND', 'app_exit는 Zephyr VM에서만 지원합니다.');
+    const body = (await request.json().catch(() => ({}))) as { app_id?: unknown };
+    if (body.app_id !== 'autonomous') return error(400, 'VALIDATION_ERROR', '입력값을 확인해 주세요.');
+    if (vm.state !== 'running' || !exitApp(vm.vm_id))
+      return error(409, 'COMMAND_UNAVAILABLE', '실행 중인 주행 앱이 아닙니다.');
+    const now = new Date();
+    const commandId = crypto.randomUUID();
+    demoCommands.set(commandId, { vmId: vm.vm_id, createdAt: Date.now() });
+    return HttpResponse.json(
+      {
+        command_id: commandId,
+        operation_id: crypto.randomUUID(),
+        vm_id: vm.vm_id,
+        submitted_at: now.toISOString(),
+        expires_at: new Date(now.getTime() + 30_000).toISOString(),
+      },
+      { status: 202 },
+    );
+  }),
+
+  http.post('*/api/v1/vms/:vmId/faults/domain-kill', async ({ request, params }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    const vm = find(String(params.vmId));
+    if (!vm) return vmNotFound();
+    if (vm.state !== 'running' || !killDomain(vm.vm_id))
+      return error(409, 'INVALID_VM_STATE', 'VM이 실행 중이 아닙니다.');
+    return HttpResponse.json(
+      { operation_id: crypto.randomUUID(), vm_id: vm.vm_id, submitted_at: new Date().toISOString() },
+      { status: 202 },
+    );
+  }),
+
   http.get('*/api/v1/vms/:vmId/commands/:commandId', async ({ request, params }) => {
     await delay(80);
     if (!authorized(request)) return unauthorized();
@@ -558,22 +710,38 @@ export const handlers = [
     if (!item || item.vmId !== params.vmId)
       return error(404, 'COMMAND_NOT_FOUND', '명령을 찾을 수 없습니다.');
     const elapsed = Date.now() - item.createdAt;
-    return HttpResponse.json({
-      command_id: params.commandId,
-      vm_id: params.vmId,
-      status: item.agentExit
-        ? 'ACCEPTED'
-        : elapsed > 2200
-          ? 'SUCCEEDED'
-          : elapsed > 600
+    const status: CommandState = item.agentExit
+      ? 'ACCEPTED'
+      : item.outcome === 'busy'
+        ? 'REJECTED'
+        : elapsed > STRESS_DONE_MS
+          ? item.outcome === 'failed'
+            ? 'FAILED'
+            : 'SUCCEEDED'
+          : elapsed > STRESS_RUNNING_MS
             ? 'RUNNING'
-            : 'ACCEPTED',
-      message: item.agentExit
-        ? 'Agent가 종료 명령을 수락했습니다.'
-        : elapsed > 2200
-          ? '명령 실행이 완료되었습니다.'
-          : 'VM에서 명령을 실행하고 있습니다.',
-      updated_at: new Date().toISOString(),
+            : 'ACCEPTED';
+    const at = (ms: number) => new Date(item.createdAt + ms).toISOString();
+    const done = status === 'SUCCEEDED' || status === 'FAILED' || status === 'REJECTED';
+    return HttpResponse.json({
+      vm_id: params.vmId,
+      command_id: params.commandId,
+      operation_id: null,
+      status,
+      submitted_at: at(0),
+      started_at: status === 'REJECTED' || status === 'ACCEPTED' ? null : at(STRESS_RUNNING_MS),
+      finished_at: done ? at(item.outcome === 'busy' ? 50 : STRESS_DONE_MS) : null,
+      duration_ms: done ? (item.outcome === 'busy' ? 0 : STRESS_DONE_MS - STRESS_RUNNING_MS) : null,
+      result: status === 'SUCCEEDED' ? {} : null,
+      error:
+        status === 'REJECTED'
+          ? { code: 'BUSY', message: 'stress command is running' }
+          : status === 'FAILED'
+            ? { code: 'PROCESS_EXITED', message: 'stress worker exited early' }
+            : null,
+      received_at: new Date().toISOString(),
+      contract_violation: false,
+      violation_detail: null,
     });
   }),
 
@@ -598,14 +766,31 @@ export const handlers = [
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
     const body = (await request.json()) as Partial<CreateVmRequest>;
+    // backend 순서: 요청 검증(422 + errors) → 템플릿(404) → 템플릿 최소 메모리(422) → 이름 충돌(409)
+    const errors = validate(body);
+    if (errors.length) return error(422, 'VALIDATION_ERROR', '요청 값이 올바르지 않습니다.', errors);
     const template = TEMPLATES.find(
       (t) => t.template_id === body.template_id && t.version === body.template_version,
     );
-    if (!template) return error(404, 'TEMPLATE_NOT_FOUND', '템플릿을 찾을 수 없습니다.');
-    const errors = validate(body);
-    if (errors.length) return error(422, 'VALIDATION_ERROR', '입력값을 확인해 주세요.', errors);
-    if (vms.some((vm) => vm.name === body.name))
-      return error(409, 'VM_NAME_CONFLICT', '같은 이름의 VM이 있습니다.');
+    if (!template) return error(404, 'TEMPLATE_NOT_FOUND', '존재하지 않는 템플릿입니다.');
+    if (body.memory_mib! < template.min_memory_mib) {
+      return error(
+        422,
+        'VALIDATION_ERROR',
+        `memory_mib는 이 템플릿의 최소값(${template.min_memory_mib}) 이상이어야 합니다.`,
+      );
+    }
+    const same = vms.find((vm) => vm.name === body.name);
+    if (same) {
+      // backend VmService.create: 같은 이름·같은 사양 재요청은 기존 VM 을 시작해 200, 사양이 다르면 409
+      const sameSpec =
+        same.template_id === template.template_id &&
+        same.template_version === template.version &&
+        same.vcpus === body.vcpus &&
+        same.memory_mib === body.memory_mib;
+      if (!sameSpec) return error(409, 'VM_NAME_CONFLICT', '이미 사용 중인 VM 이름입니다.');
+      return HttpResponse.json(live(same) as unknown as JsonBodyType, { status: 200 });
+    }
     const vm: Vm = {
       vm_id: crypto.randomUUID(),
       name: body.name!,
@@ -651,7 +836,12 @@ export const handlers = [
   http.delete('*/api/v1/vms/:vmId', async ({ request, params }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
-    if (!find(String(params.vmId))) return vmNotFound();
+    const target = find(String(params.vmId));
+    if (!target) return vmNotFound();
+    // 보드 계약 v1.1: 도메인이 남아 있으면 삭제하지 않는다 (강제 종료 없음).
+    // backend VmService.destroy 가 보드 원문(stop it before delete)을 아래 문구로 바꿔 돌려준다
+    if (target.state !== 'stopped')
+      return error(409, 'INVALID_VM_STATE', '실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.');
     vms = vms.filter((vm) => vm.vm_id !== params.vmId);
     pinningByVm.delete(String(params.vmId));
     return new HttpResponse(null, { status: 204 });
@@ -661,12 +851,13 @@ export const handlers = [
   http.get('*/api/v1/display/phone-link', async ({ request }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
-    const active = mockPairingExpiresAt !== null && mockPairingExpiresAt > Date.now();
+    const listening = mockDisplayMode === 'mobile';
+    const active = listening && mockPairingExpiresAt !== null && mockPairingExpiresAt > Date.now();
     return HttpResponse.json(
       {
         configured: true,
-        relay: 'listening',
-        url: 'http://10.117.188.25:8084/display/mobile',
+        relay: listening ? 'listening' : 'stopped',
+        url: listening ? 'http://10.117.188.25:8084/display/mobile' : null,
         usb: { interface: 'usb0', present: true, ipv4: ['10.117.188.25/24'], gateway: '10.117.188.86' },
         configured_phone_ipv4: '10.117.188.86',
         subnet_mismatch: false,
@@ -680,12 +871,38 @@ export const handlers = [
   http.post('*/api/v1/display/phone-link/pairing-code', async ({ request }) => {
     await delay(LATENCY_MS);
     if (!authorized(request)) return unauthorized();
+    if (mockDisplayMode !== 'mobile') {
+      return error(
+        409,
+        'PHONE_RELAY_NOT_LISTENING',
+        '휴대폰 화면 중계가 꺼져 있거나 휴대폰이 연결되지 않았습니다.',
+      );
+    }
     mockPairingExpiresAt = Date.now() + 120_000;
     const code = String(Math.floor(Math.random() * 1_000_000)).padStart(6, '0');
     return HttpResponse.json(
       { code, expires_at: new Date(mockPairingExpiresAt).toISOString() },
       { headers: { 'Cache-Control': 'no-store' } },
     );
+  }),
+
+  // ---- 표시 모드 HDMI / 휴대폰 (REST-40·REST-41). 실제 보드처럼 전환에 몇 초 걸린다 ----
+  http.get('*/api/v1/display/mode', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    return HttpResponse.json(mockDisplayModeStatus(), { headers: { 'Cache-Control': 'no-store' } });
+  }),
+
+  http.post('*/api/v1/display/mode', async ({ request }) => {
+    if (!authorized(request)) return unauthorized();
+    const body = (await request.json()) as { mode?: string };
+    if (body.mode !== 'hdmi' && body.mode !== 'mobile') {
+      return error(422, 'VALIDATION_ERROR', '요청 값이 올바르지 않습니다.');
+    }
+    await delay(2500);
+    mockDisplayMode = body.mode;
+    if (body.mode === 'hdmi') mockPairingExpiresAt = null;
+    return HttpResponse.json(mockDisplayModeStatus(), { headers: { 'Cache-Control': 'no-store' } });
   }),
 
   // ---- 화면 배치 (REST-23·REST-24, 백엔드 -129) ----

@@ -1,5 +1,6 @@
 import { Card } from '@xenova/ui';
 import { useEffect, useState } from 'react';
+import { errorText } from '../api/errorText';
 import { appendLogs, fetchLogs, fetchLogSources, type RuntimeLog, type LogSource } from '../api/logs';
 import styles from './RuntimeLogsPanel.module.css';
 
@@ -78,8 +79,7 @@ export function RuntimeLogsPanel({ vmId }: { vmId?: string }) {
           }
         }
       } catch (error) {
-        if (active)
-          setPoll({ kind: 'error', detail: error instanceof Error ? error.message : '조회에 실패했습니다.' });
+        if (active) setPoll({ kind: 'error', detail: errorText(error, '조회에 실패했습니다.') });
         delay = 3000;
       } finally {
         if (active)

@@ -76,7 +76,7 @@ VM Dashboard 안에는 [Overview · CPU · Memory · Console] 2차 탭을 둔다
 
 | 항목       | 내용                                                                            |
 | ---------- | ------------------------------------------------------------------------------- |
-| 보여 줄 것 | 아이디·비밀번호 입력, 오류 메시지 (`INVALID_CREDENTIALS`, `LOGIN_RATE_LIMITED`) |
+| 보여 줄 것 | 아이디·비밀번호 입력, 오류 메시지 (`INVALID_CREDENTIALS`). 로그인 실패 횟수 제한은 없다(2026-11-14, 공용 계정 자동 로그인) |
 | 동작       | 로그인 → 원래 가려던 화면으로. 세션 만료 시 자동 재발급, 실패하면 다시 이 화면  |
 | 데이터     | `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh` (노션 API 명세)          |
 

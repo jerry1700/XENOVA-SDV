@@ -1,20 +1,15 @@
-import { AppShell, Button } from '@xenova/ui';
+import { AppShell } from '@xenova/ui';
 import logo from '@xenova/ui/assets/xenova-logo.png';
-import { Link, NavLink, Outlet, useNavigate } from 'react-router';
-import { useLogout } from '../api/queries';
-import { useSession } from '../auth';
+import { Link, NavLink, Outlet } from 'react-router';
 import { DriveProvider } from './DriveContext';
+import { DriveSocketAlert } from './DriveSocketAlert';
 import { LiveDataAlertHost } from './LiveDataAlert';
 import { MockBoardSwitch } from './MockBoardSwitch';
 import { ResumeNotice } from './ResumeNotice';
 import styles from './layout.module.css';
 
-/** 관리자 웹 공통 틀: 핵심 업무 4개 영역, 차량 화면(Screens)과 계정 동작. */
+/** 관리자 웹 공통 틀: 핵심 업무 영역 메뉴. 계정이 없는 콘솔이라 사용자·로그아웃 영역은 두지 않는다. */
 export function ConsoleLayout() {
-  const session = useSession();
-  const logout = useLogout();
-  const navigate = useNavigate();
-  const name = session?.user.nickname || session?.user.username || '';
   return (
     <DriveProvider>
       <AppShell
@@ -32,30 +27,13 @@ export function ConsoleLayout() {
           <>
             <NavLink to="/dashboard">VM Dashboard</NavLink>
             <NavLink to="/vision">Vision</NavLink>
-            <NavLink to="/control">VM Control</NavLink>
             <NavLink to="/simulator">Simulator</NavLink>
             <NavLink to="/phone-link">휴대폰 연결</NavLink>
           </>
         }
-        actions={
-          <>
-            <span className={styles.user}>
-              <span className={styles.avatar} aria-hidden="true">
-                {name.slice(0, 1).toUpperCase()}
-              </span>
-              {name}
-            </span>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => logout.mutate(undefined, { onSettled: () => navigate('/login') })}
-            >
-              로그아웃
-            </Button>
-          </>
-        }
       >
         <ResumeNotice />
+        <DriveSocketAlert />
         <LiveDataAlertHost />
         <Outlet />
         <MockBoardSwitch />

@@ -57,26 +57,29 @@ xenova:
     access-token-ttl: ${ACCESS_TOKEN_TTL:15m}
     refresh-token-ttl: ${REFRESH_TOKEN_TTL:7d}
     refresh-cookie-secure: ${AUTH_COOKIE_SECURE:false}
-    max-login-attempts: ${MAX_LOGIN_ATTEMPTS:5}
-    login-attempt-window: ${LOGIN_ATTEMPT_WINDOW:5m}
-  # 플랫폼 공개 카탈로그 키를 그대로 사용한다. dom0-manager는 ID나 버전을 변환하지 않는다.
+  # 템플릿 버전은 여기서 정하지 않는다. 보드 카탈로그(dom0-manager GET /api/v1/templates)에서 읽고,
+  # 위저드에는 template-id별 최신 버전만 보인다. 여기에는 보드 카탈로그에 없는 표시 이름·최소 메모리만 둔다.
+  # - 보드에 있어도 여기에 없는 template-id는 위저드에 보이지 않는다. 여기에 있어도 보드에 없으면 보이지 않는다.
   # - guest-kind가 zephyr인 템플릿은 에이전트·네트워크·정상 종료가 없는 콘솔 전용 펌웨어다.
+  # - 목록 순서가 위저드 표시 순서다.
   template-catalog:
+    refresh-interval: ${TEMPLATE_CATALOG_REFRESH_INTERVAL:30s}
     templates:
       - template-id: ubuntu-24.04-arm64
-        version: "1.0.2"
         display-name: Ubuntu 24.04
         min-memory-mib: 512
         guest-kind: linux
       - template-id: debian-13-arm64
-        version: "1.0.8"
         display-name: Debian 13
         min-memory-mib: 256
         guest-kind: linux
+      - template-id: zephyr-drive-lattice-lab-arm64
+        display-name: Zephyr Drive Lattice Lab
+        # Zephyr 펌웨어는 1 vCPU / 16MiB 고정 프로필이다.
+        min-memory-mib: 16
+        guest-kind: zephyr
       - template-id: zephyr-xenvm-starter-arm64
-        version: "1.1.0"
-        display-name: Zephyr Network Starter 1.1.0
-        # 플랫폼 Network Starter 1.1.0은 1 vCPU / 16MiB 고정 프로필이다.
+        display-name: Zephyr Network Starter
         min-memory-mib: 16
         guest-kind: zephyr
   agent:
@@ -128,12 +131,6 @@ xenova:
       refresh-delay: ${VM_RUNTIME_REFRESH_DELAY:1s}
       # safety net only: past this age (loop stopped or failing) reads go to dom0-manager again
       stale-limit: ${VM_RUNTIME_STALE_LIMIT:10s}
-    # Board registry -> VM table on POST /api/v1/vms/synchronizations only (no periodic loop).
-    registration-sync:
-      # consecutive reads a VM must be absent from the board before its row is retired
-      missing-threshold: ${VM_REGISTRATION_SYNC_MISSING_THRESHOLD:2}
-      # never retire a row younger than this: create registers on the board only at its end (dom0 command timeout)
-      creation-grace: ${VM_REGISTRATION_SYNC_CREATION_GRACE:20m}
   vm-registration:
     # Platform registration sender authentication; separate from user JWT and dom0-manager credentials.
     service-token: ${VM_REGISTRATION_SERVICE_TOKEN:}

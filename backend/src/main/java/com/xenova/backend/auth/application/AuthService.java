@@ -10,7 +10,6 @@ import com.xenova.backend.auth.domain.UserRepository;
 import com.xenova.backend.auth.infrastructure.AuthProperties;
 import com.xenova.backend.auth.infrastructure.JwtTokenService;
 import com.xenova.backend.auth.infrastructure.JwtTokenService.IssuedAccessToken;
-import com.xenova.backend.auth.infrastructure.LoginRateLimiter;
 import com.xenova.backend.common.error.ApiException;
 import java.security.SecureRandom;
 import java.time.Clock;
@@ -32,7 +31,6 @@ public class AuthService {
     private final AccessTokenRevocationStore accessTokenRevocationStore;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenService jwtTokenService;
-    private final LoginRateLimiter loginRateLimiter;
     private final AuthProperties properties;
     private final Clock clock;
     private final SecureRandom secureRandom = new SecureRandom();
@@ -43,7 +41,6 @@ public class AuthService {
             AccessTokenRevocationStore accessTokenRevocationStore,
             PasswordEncoder passwordEncoder,
             JwtTokenService jwtTokenService,
-            LoginRateLimiter loginRateLimiter,
             AuthProperties properties,
             Clock clock) {
         this.userRepository = userRepository;
@@ -51,7 +48,6 @@ public class AuthService {
         this.accessTokenRevocationStore = accessTokenRevocationStore;
         this.passwordEncoder = passwordEncoder;
         this.jwtTokenService = jwtTokenService;
-        this.loginRateLimiter = loginRateLimiter;
         this.properties = properties;
         this.clock = clock;
     }
@@ -74,16 +70,12 @@ public class AuthService {
 
     @Transactional
     public LoginResult login(String username, String password) {
-        if (loginRateLimiter.isBlocked(username)) {
-            throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "LOGIN_RATE_LIMITED", "로그인 시도 횟수를 초과했습니다.");
-        }
-
+        // No failure lockout: the console signs in with one shared account (frontend auto-login), so blocking that
+        // username after wrong attempts would lock everyone out of the console.
         User user = userRepository.findByUsername(username).orElse(null);
         if (user == null || !passwordEncoder.matches(password, user.getPasswordHash())) {
-            loginRateLimiter.recordFailure(username);
             throw new ApiException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS", "아이디 또는 비밀번호가 올바르지 않습니다.");
         }
-        loginRateLimiter.reset(username);
 
         return issueTokens(user, clock.instant());
     }

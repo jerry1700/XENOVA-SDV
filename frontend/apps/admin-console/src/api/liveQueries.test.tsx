@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { ToastProvider } from '@xenova/ui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -191,7 +191,7 @@ describe('LiveDataAlert', () => {
     );
   }
 
-  it('실패한 조회를 이름과 오류 코드로 보이고, 404 는 넣지 않는다', async () => {
+  it('실패한 조회를 이름과 한글 문구로 보이고(코드는 title 로만), 404 는 넣지 않는다', async () => {
     const backend = stubBackend();
     backend.online = false;
     const Wrapper = wrapper();
@@ -202,9 +202,10 @@ describe('LiveDataAlert', () => {
     );
 
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent(
-      'VM 목록: VM 제어 서비스와의 연결 설정이 올바르지 않습니다. (VM_CONTROL_BAD_RESPONSE)',
-    );
+    expect(alert).toHaveTextContent('VM 목록: 보드 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+    expect(alert).not.toHaveTextContent('VM_CONTROL_BAD_RESPONSE');
+    expect(alert).not.toHaveTextContent(/\([A-Z_]+\)/);
+    expect(within(alert).getByText(/^VM 목록:/)).toHaveAttribute('title', 'VM_CONTROL_BAD_RESPONSE');
     expect(alert).not.toHaveTextContent('에이전트 상태');
   });
 

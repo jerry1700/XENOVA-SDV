@@ -1,7 +1,14 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { presentationFixture } from './fixture';
-import { DISPLAY_PROBLEM_TEXT, POLL_MS, REQUEST_TIMEOUT_MS, STALL_MS, useDisplay } from './useDisplay';
+import {
+  DISPLAY_PROBLEM_TEXT,
+  FAILURE_LIMIT,
+  POLL_MS,
+  REQUEST_TIMEOUT_MS,
+  STALL_MS,
+  useDisplay,
+} from './useDisplay';
 
 type Reply = (signal: AbortSignal) => Promise<Response>;
 
@@ -57,6 +64,15 @@ async function tick(ms: number) {
   });
 }
 
+/** 즉시 실패하는 응답이 연속 실패 기준에 닿을 때까지 폴링을 돌린다 (첫 요청은 start 에서 이미 실패) */
+async function failToLimit() {
+  for (let i = 1; i < FAILURE_LIMIT; i += 1) await tick(POLL_MS);
+}
+
+const down: Reply = async () => {
+  throw new TypeError('Failed to fetch');
+};
+
 describe('표시 데이터 요청 실패는 종류별 고정 한국어 문구', () => {
   it('시간 초과(AbortError)는 원문 대신 "응답이 늦습니다"', async () => {
     // 응답하지 않다가 시간 제한에 끊기면 브라우저처럼 AbortError 로 거절한다
@@ -70,6 +86,7 @@ describe('표시 데이터 요청 실패는 종류별 고정 한국어 문구', 
     );
     const { result } = await start();
     await tick(REQUEST_TIMEOUT_MS);
+    for (let i = 1; i < FAILURE_LIMIT; i += 1) await tick(POLL_MS + REQUEST_TIMEOUT_MS);
     expect(result.current).toMatchObject({
       connected: false,
       problem: 'timeout',
@@ -83,6 +100,7 @@ describe('표시 데이터 요청 실패는 종류별 고정 한국어 문구', 
       throw new TypeError('Failed to fetch');
     });
     const { result } = await start();
+    await failToLimit();
     expect(result.current.problem).toBe('network');
     expect(result.current.error).toBe('수집기에 연결할 수 없습니다');
   });
@@ -90,11 +108,13 @@ describe('표시 데이터 요청 실패는 종류별 고정 한국어 문구', 
   it('응답 오류: 401 은 인증, 그 밖의 HTTP 오류는 응답 오류', async () => {
     reply(async () => json({}, 401));
     const auth = await start();
+    await failToLimit();
     expect(auth.result.current.error).toBe('화면 인증이 필요합니다');
     auth.unmount();
 
     reply(async () => json({}, 503));
     const http = await start();
+    await failToLimit();
     expect(http.result.current.problem).toBe('http');
     expect(http.result.current.error).toBe(DISPLAY_PROBLEM_TEXT.http);
   });
@@ -109,12 +129,14 @@ describe('표시 데이터 요청 실패는 종류별 고정 한국어 문구', 
         }) as Response,
     );
     const broken = await start();
+    await failToLimit();
     expect(broken.result.current.problem).toBe('format');
     expect(broken.result.current.error).toBe('표시 데이터 형식 오류입니다');
     broken.unmount();
 
     reply(async () => json({ schema_version: 99 }));
     const invalid = await start();
+    await failToLimit();
     expect(invalid.result.current.error).toBe(DISPLAY_PROBLEM_TEXT.format);
   });
 });
@@ -151,7 +173,63 @@ describe('같은 sequence 재수신', () => {
   it('더 작은(이전) sequence 는 지금처럼 오류', async () => {
     reply(ok(5), ok(4));
     const { result } = await start();
-    await tick(POLL_MS);
+    await tick(POLL_MS * FAILURE_LIMIT);
     expect(result.current).toMatchObject({ connected: false, problem: 'old' });
+  });
+});
+
+describe('연속 실패 기준 (한 번 실패로는 끊김이 아니다)', () => {
+  it('첫 응답 전에는 연결 중, 받으면 연결됨', async () => {
+    reply(() => new Promise(() => {}));
+    const pending = renderHook(() => useDisplay());
+    expect(pending.result.current).toMatchObject({ connected: false, connecting: true, problem: null });
+    pending.unmount();
+
+    reply(ok(1));
+    const { result } = await start();
+    expect(result.current).toMatchObject({ connected: true, connecting: false });
+  });
+
+  it('첫 응답 전 실패도 기준에 닿기 전까지는 연결 중으로 둔다', async () => {
+    reply(down);
+    const { result } = await start();
+    expect(result.current).toMatchObject({ connected: false, connecting: true, problem: null, error: null });
+    await failToLimit();
+    expect(result.current).toMatchObject({ connected: false, connecting: false, problem: 'network' });
+  });
+
+  it('한 번 실패(5xx·시간 초과)하고 다음에 회복하면 끊김 없이 마지막 값을 유지한다', async () => {
+    reply(ok(1), async () => json({}, 503), ok(2));
+    const { result } = await start();
+    const first = result.current.presentation;
+    await tick(POLL_MS);
+    // 실패 1회: 값·연결 상태 그대로
+    expect(result.current).toMatchObject({ connected: true, problem: null, error: null });
+    expect(result.current.presentation).toBe(first);
+    await tick(POLL_MS);
+    expect(result.current).toMatchObject({ connected: true, problem: null });
+    expect(result.current.presentation?.state.sequence).toBe(2);
+  });
+
+  it(`${FAILURE_LIMIT}번 연속 실패하면 끊김, 사이에 성공이 끼면 다시 센다`, async () => {
+    reply(ok(1), down, ok(2), down, down);
+    const { result } = await start();
+    await tick(POLL_MS * 3);
+    // 실패 · 성공 · 실패: 연속 1회
+    expect(result.current.connected).toBe(true);
+    await tick(POLL_MS);
+    expect(result.current).toMatchObject({ connected: false, problem: 'network' });
+    expect(result.current.presentation?.state.sequence).toBe(2);
+  });
+
+  it('같은 종류 실패가 이어지면 debug 로그는 한 번만, 종류가 바뀌면 다시 남긴다', async () => {
+    reply(down, down, down, async () => json({}, 503));
+    await start();
+    await tick(POLL_MS * 2);
+    expect(console.debug).toHaveBeenCalledTimes(1);
+    await tick(POLL_MS);
+    expect(console.debug).toHaveBeenCalledTimes(2);
+    await tick(POLL_MS * 3);
+    expect(console.debug).toHaveBeenCalledTimes(2);
   });
 });

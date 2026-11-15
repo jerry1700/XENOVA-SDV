@@ -6,7 +6,7 @@
  * 첫 프레임은 {"type":"auth","access_token"}. 4401 로 닫히면 토큰을 재발급해 다시 붙는다.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getSession, refreshSession, request } from './client';
+import { getSession, onSessionChange, refreshSession, request } from './client';
 
 /** VITE_MOCK 이면 WS 대신 표본 시나리오(src/mocks/scenario.ts)를 쓴다 */
 const MOCK = import.meta.env.VITE_MOCK === 'true';
@@ -100,11 +100,24 @@ export interface DriveState {
 /** MQTT 계약 §7 */
 export type DriveKey = 'up' | 'down' | 'left' | 'right' | 'brake';
 export type InputResult = 'SENT' | 'RELEASED' | 'NOT_MANUAL' | 'NOT_CONNECTED';
-export type SocketState = 'connecting' | 'open' | 'closed';
+/** rejected: 서버가 다시 붙어도 같은 이유로 닫는 연결(REJECTED_CLOSE_CODES). 재연결하지 않는다 */
+export type SocketState = 'connecting' | 'open' | 'closed' | 'rejected';
 
 const BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const UNAUTHORIZED = 4401;
-const RETRY_MS = 2000;
+/**
+ * 다시 붙어도 같은 결과인 종료 코드 (S15P31E110-469). 1008 정책 위반, 1009 프레임이 너무 큼
+ * (백엔드 AuthenticatedSocketHandler), 4400 잘못된 요청, 4403 권한 없음.
+ */
+export const REJECTED_CLOSE_CODES: ReadonlySet<number> = new Set([1008, 1009, 4400, 4403]);
+/** 재연결 간격: 2초부터 두 배씩, 최대 30초. 인증까지 끝나면 처음 간격으로 돌린다 */
+export const RETRY_MS = 2000;
+export const RETRY_MAX_MS = 30_000;
+
+/** attempt 번째(0부터) 재연결까지 기다릴 시간 */
+export function retryDelayMs(attempt: number): number {
+  return Math.min(RETRY_MS * 2 ** attempt, RETRY_MAX_MS);
+}
 
 function wsUrl(path: string): string {
   return (BASE || window.location.origin).replace(/^http/, 'ws') + path;
@@ -112,7 +125,13 @@ function wsUrl(path: string): string {
 
 type Frame = { type: string } & Record<string, unknown>;
 
-/** 인증 소켓 하나를 열고, 끊기면 다시 붙는다. 4401 이면 refresh 후 재시도. path 가 비면 열지 않는다 */
+/**
+ * 인증 소켓 하나를 열고, 끊기면 다시 붙는다. path 가 비면 열지 않는다.
+ * - 4401: refresh 후 처음 간격으로 다시 붙는다
+ * - REJECTED_CLOSE_CODES: 멈추고 'rejected'
+ * - 그 밖: retryDelayMs 지수 백오프 (인증되면 처음 간격으로)
+ * - 연결 순간 토큰이 없으면(세션 복원·자동 로그인 중) 세션이 생기는 즉시, 늦어도 백오프 간격 뒤 다시 시도한다
+ */
 export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
   const [state, setState] = useState<SocketState>('connecting');
   const socketRef = useRef<WebSocket | null>(null);
@@ -125,11 +144,29 @@ export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
     if (!path) return; // 빈 주소 = 연결하지 않는다 (mock)
     let stopped = false;
     let timer: number | undefined;
+    let attempt = 0;
+    let unsubscribe: (() => void) | undefined;
+
+    const schedule = (delay: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(connect, delay);
+    };
+    const backoff = () => schedule(retryDelayMs(attempt++));
 
     const connect = () => {
+      // 세션 구독과 백오프 타이머가 둘 다 걸려 있을 수 있다 — 어느 쪽으로 왔든 남은 쪽을 지워 소켓이 하나 더 열리지 않게
+      window.clearTimeout(timer);
+      unsubscribe?.();
+      unsubscribe = undefined;
+      if (stopped) return;
       const token = getSession()?.access_token;
       if (!token) {
         setState('closed');
+        // 세션이 생기면 바로 붙고, 끝내 생기지 않아도 간격을 늘려 가며 다시 확인한다
+        unsubscribe = onSessionChange((next) => {
+          if (next?.access_token) connect();
+        });
+        backoff();
         return;
       }
       setState('connecting');
@@ -143,17 +180,29 @@ export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
         } catch {
           return; // 깨진 프레임 하나로 onmessage 가 예외를 던지지 않게 버린다
         }
-        if (frame.type === 'authenticated') setState('open');
-        else frameRef.current(frame);
+        if (frame.type === 'authenticated') {
+          attempt = 0;
+          setState('open');
+        } else frameRef.current(frame);
       };
       ws.onclose = async (event) => {
         if (socketRef.current === ws) socketRef.current = null;
         if (stopped) return;
+        if (REJECTED_CLOSE_CODES.has(event.code)) {
+          setState('rejected');
+          return;
+        }
         setState('closed');
-        if (event.code === UNAUTHORIZED && !(await refreshSession())) return; // 세션 끝 → 로그인으로
-        // refresh 를 기다리는 사이 화면을 떠났으면 정리(clearTimeout)가 이미 끝났으므로 다시 걸지 않는다
-        if (stopped) return;
-        timer = window.setTimeout(connect, RETRY_MS);
+        if (event.code === UNAUTHORIZED) {
+          const refreshed = await refreshSession();
+          // refresh 를 기다리는 사이 화면을 떠났으면 정리(clearTimeout)가 이미 끝났으므로 다시 걸지 않는다
+          if (stopped) return;
+          // 되살리지 못했으면 세션이 비어 있다 → connect 가 세션이 다시 생길 때를 기다린다 (RequireAuth 가 안내)
+          if (refreshed) schedule(RETRY_MS);
+          else connect();
+          return;
+        }
+        backoff();
       };
     };
 
@@ -161,6 +210,7 @@ export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
     return () => {
       stopped = true;
       window.clearTimeout(timer);
+      unsubscribe?.();
       socketRef.current?.close();
     };
   }, [path]);
@@ -175,15 +225,38 @@ export function useAuthedSocket(path: string, onFrame: (frame: Frame) => void) {
   return { state, send };
 }
 
-/** 주행 통합 상태 (최대 10 Hz, 변화 없으면 1초마다) */
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+/** 없음(null·undefined) 또는 객체 */
+const optionalRecord = (value: unknown) => value == null || isRecord(value);
+
+/**
+ * 화면이 바로 읽는 최소 형식인가 (S15P31E110-472). apps 가 빠지거나 블록이 객체가 아니면
+ * Overview·시뮬레이터가 렌더 중 예외로 오류 화면에 갔다. 세부 값은 화면마다 null 을 견딘다.
+ */
+export function isDriveState(value: unknown): value is DriveState {
+  if (!isRecord(value) || !isRecord(value.apps)) return false;
+  if (!Object.values(value.apps).every(isRecord)) return false;
+  return ['control', 'vehicle', 'perception', 'vm_apps', 'resume', 'resume_cancel'].every((key) =>
+    optionalRecord(value[key]),
+  );
+}
+
+/** 주행 통합 상태 (최대 10 Hz, 변화 없으면 1초마다). invalid = 마지막 프레임 형식이 틀려 버렸음 */
 export const useDriveState = MOCK ? useMockDriveState : useLiveDriveState;
 
-function useLiveDriveState() {
+export function useLiveDriveState() {
   const [drive, setDrive] = useState<DriveState | null>(null);
+  const [invalid, setInvalid] = useState(false);
   const { state } = useAuthedSocket('/ws/v1/drive/state', (frame) => {
-    if (frame.type === 'drive.state') setDrive(frame.state as DriveState);
+    if (frame.type !== 'drive.state') return;
+    // 형식이 틀린 프레임은 버리고 마지막 정상 상태를 둔다. 같은 값이면 다시 그리지 않아 안내가 쌓이지 않는다
+    if (isDriveState(frame.state)) {
+      setDrive(frame.state);
+      setInvalid(false);
+    } else setInvalid(true);
   });
-  return { drive, socket: state };
+  return { drive, socket: state, invalid };
 }
 
 function useMockDriveState() {
@@ -199,7 +272,7 @@ function useMockDriveState() {
       off?.();
     };
   }, []);
-  return { drive, socket: (drive ? 'open' : 'connecting') as SocketState };
+  return { drive, socket: (drive ? 'open' : 'connecting') as SocketState, invalid: false };
 }
 
 /**

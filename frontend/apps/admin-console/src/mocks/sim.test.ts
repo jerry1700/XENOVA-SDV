@@ -16,6 +16,12 @@ import { TRACKS } from './tracks';
 /** 출발 신호가 다 꺼질 때까지 (최대 0.7 + 4 + 3 초) 기다린 뒤 시각 */
 const GO_AT = 8000;
 
+/**
+ * 처음 놓인 장애물만으로 한 바퀴를 본다 — 30초마다 하는 시연용 재배치(무작위 위치)를 끈다.
+ * 켜 두면 드물게(silverstone 약 1/60) 피하기 어려운 배치가 나와 테스트가 간헐적으로 실패했다.
+ */
+const withoutReshuffle = (s: SimState): SimState => ({ ...s, nextDemoAt: Infinity });
+
 function run(
   s: SimState,
   from: number,
@@ -55,7 +61,7 @@ describe('시뮬레이터 mock (계약 v1.4 §11)', () => {
   });
 
   it('장애물을 피해 한 바퀴를 닿지 않고 돈다', () => {
-    let { s, t } = run(initialSim(0), 0, GO_AT, 'autonomous');
+    let { s, t } = run(withoutReshuffle(initialSim(0)), 0, GO_AT, 'autonomous');
     for (; s.race.lap < 1 && t < 120_000; t += 100) s = advance(s, t, 0.1, 'autonomous');
     expect(s.race.lap).toBe(1);
     expect(s.car.touchAt).toBe(-9);
@@ -65,7 +71,7 @@ describe('시뮬레이터 mock (계약 v1.4 §11)', () => {
   it.each(TRACKS.filter((t) => !t.layout).map((t) => [t.id]))(
     '%s: 처음 장애물을 두고 한 바퀴를 벽·장애물에 닿지 않고 돈다',
     (id) => {
-      let { s, t } = run(initialSim(0, id), 0, GO_AT, 'autonomous');
+      let { s, t } = run(withoutReshuffle(initialSim(0, id)), 0, GO_AT, 'autonomous');
       expect(s.obstacles.length).toBeGreaterThan(0);
       for (; s.race.lap < 1 && t < 200_000; t += 100) s = advance(s, t, 0.1, 'autonomous');
       expect(s.race.lap).toBe(1);
@@ -86,6 +92,14 @@ describe('시뮬레이터 mock (계약 v1.4 §11)', () => {
     const r = place(s, 'box', ...atT(s.T, i, 0));
     expect(r).toMatchObject({ ok: false, code: 'NO_GAP' });
     expect(r.message).toContain('틈');
+  });
+
+  it('한 바퀴 테스트는 시연용 재배치 없이 처음 장애물만 쓴다', () => {
+    const s = withoutReshuffle(initialSim(0, 'silverstone'));
+    const ids = s.obstacles.map((o) => o.id).join(',');
+    const { s: after } = run(s, 0, 120_000, 'autonomous');
+    expect(after.nextDemoAt).toBe(Infinity);
+    expect(after.obstacles.map((o) => o.id).join(',')).toBe(ids);
   });
 
   it('트랙을 바꾸면 몬차로, revision 이 오르고 출발 신호가 처음부터', () => {

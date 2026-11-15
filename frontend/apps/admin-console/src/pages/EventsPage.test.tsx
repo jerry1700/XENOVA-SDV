@@ -134,6 +134,23 @@ describe('이벤트 화면 표시', () => {
     expect(screen.queryByText(/gen 4/)).not.toBeInTheDocument();
   });
 
+  it('인계 값이 숫자가 아니면 [object Object] 대신 숫자인 이전 인계를 쓰고, 이벤트 줄에도 원문이 없다 (S15P31E110-469)', () => {
+    eventItems = [
+      event('e1', '2026-11-12T03:00:00Z', {
+        type: 'drive.mode.changed',
+        payload: { from: { a: 1 }, to: 'MANUAL', handoff_ms: { ms: 99 }, generation: { n: 1 } },
+      }),
+      event('e2', '2026-11-12T02:00:00Z', {
+        type: 'drive.mode.changed',
+        payload: { from: 'AUTO', to: 'MANUAL', handoff_ms: 140 },
+      }),
+    ];
+    renderAt('/dashboard/events');
+    const tiles = within(screen.getByRole('region', { name: '주행 요약' }));
+    expect(tiles.getByText('최근 인계').parentElement).toHaveTextContent(/^최근 인계140ms/);
+    expect(document.body).not.toHaveTextContent(/\[object Object\]|NaN|undefined/);
+  });
+
   it('한 줄 형식: 날짜가 바뀔 때만 날짜 줄, 대상은 VM 이름(또는 회색 게이트웨이), 상태 값은 한글(원문은 title)', () => {
     eventItems = [
       event('e1', '2026-11-12T03:00:00.250Z', {
@@ -191,5 +208,30 @@ describe('이벤트 화면 표시', () => {
     const head = document.querySelector('[data-head]')!;
     expect([...head.children].map((cell) => cell.textContent)).toEqual(['시각', '상태', '대상', '내용']);
     expect(screen.queryByText('도메인 상태')).not.toBeInTheDocument();
+  });
+});
+
+describe('이벤트 화면 문구 (S15P31E110-471)', () => {
+  it('읽을 수 없는 시각은 Invalid Date·NaN 대신 날짜 미상·—, 빈 목록은 존댓말', () => {
+    eventItems = [
+      {
+        event_id: 'broken',
+        type: 'vm.created',
+        severity: 'INFO',
+        vm_id: 'vm-a',
+        operation_id: null,
+        occurred_at: 'not-a-date',
+        recorded_at: 'not-a-date',
+        payload: {},
+      },
+    ];
+    renderAt('/dashboard/events');
+    expect(screen.getByText('날짜 미상')).toBeInTheDocument();
+    expect(document.body).not.toHaveTextContent(/Invalid Date|NaN|vm\.created/);
+  });
+
+  it('조건에 맞는 이벤트가 없으면 존댓말 안내', () => {
+    renderAt('/dashboard/events');
+    expect(screen.getByText('조건에 맞는 이벤트가 없습니다.')).toBeInTheDocument();
   });
 });

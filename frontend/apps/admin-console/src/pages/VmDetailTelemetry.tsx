@@ -425,8 +425,9 @@ function Threads({ vmId }: { vmId: string }) {
             </tr>
           </thead>
           <tbody>
-            {visible.rows.map((thread) => (
-              <tr key={thread.thread_id}>
+            {/* 같은 thread_id 가 두 번 와도(재사용·중복 보고) 행이 겹치지 않게 순번을 붙인다 */}
+            {visible.rows.map((thread, index) => (
+              <tr key={`${thread.thread_id}-${index}`}>
                 <td title={`${thread.thread_name || '—'}${thread.name_truncated ? ' (잘림)' : ''}`}>
                   {thread.thread_name || '—'}
                   {thread.name_truncated ? ' (잘림)' : ''}

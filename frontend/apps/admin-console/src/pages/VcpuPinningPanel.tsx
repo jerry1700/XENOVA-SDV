@@ -59,7 +59,10 @@ function usePcpuLoads(vmId: string, initial: PcpuStatus[]) {
 function errorMessage(error: unknown): string {
   if (!(error instanceof ApiError)) return String(error);
   if (error.status === 404 || error.code === 'VM_CONTROL_NOT_SUPPORTED') {
-    return '리소스 제어 API가 아직 연결되지 않았습니다. 백엔드 107 연동 후 실제 매핑이 표시됩니다.';
+    return '보드가 CPU 배치 조회를 지원하지 않습니다. 보드의 플랫폼 버전을 확인해 주세요.';
+  }
+  if (error.code === 'CPU_POLICY_NOT_CONFIGURED') {
+    return '보드에 CPU 배치 정책이 아직 설정되지 않았습니다.';
   }
   if (error.code === 'CPU_PLACEMENT_CONFLICT') {
     return '선택한 코어는 dom0 공유 영역이거나 다른 VM이 전용으로 사용 중입니다. 최신 배치를 다시 확인해 주세요.';

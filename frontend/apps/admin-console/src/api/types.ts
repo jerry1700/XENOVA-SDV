@@ -12,19 +12,6 @@ export interface LoginRequest {
   password: string;
 }
 
-export interface SignupRequest {
-  username: string;
-  nickname: string;
-  password: string;
-}
-
-export interface SignupResponse {
-  user_id: string;
-  username: string;
-  nickname: string;
-  created_at: string;
-}
-
 /** 로그인·재발급 응답. refresh 토큰은 HttpOnly 쿠키(xenova_refresh)라 본문에 없다 */
 export interface TokenResponse {
   access_token: string;
@@ -72,19 +59,37 @@ export interface VmListResponse {
   observed_at: string;
 }
 
-/** POST /api/v1/vms/synchronizations — 보드 등록 목록 ↔ DB VM 테이블 등록 동기화 결과 */
+/**
+ * POST /api/v1/vms/synchronizations — 보드 등록 목록을 기준으로 DB VM 테이블을 맞춘 결과.
+ * VM 은 vm_id(UUID)로만 짝짓는다. 버튼 한 번에 끝난다(서버 주기 실행 없음).
+ */
 export interface VmSynchronizationResult {
-  /** 보드에 등록된 VM 수 */
+  /** 보드가 돌려준 VM 수 (형식 오류 포함) */
   discovered: number;
+  /** 보드에만 있어 새로 등록 */
   registered: number;
+  /** 보드 기준으로 이름·사양·IP 갱신 */
   updated: number;
   unchanged: number;
+  /** 정리됐던 vm_id 가 보드에 다시 있어 복구 */
+  restored: number;
+  /** 보드에 없어 정리(목록에서 빠짐) */
+  retired: number;
+  /** 보드에 없지만 생성·시작·정지·삭제 진행 중이라 이번엔 건드리지 않음 */
+  skipped: number;
   conflicts: number;
   incomplete: number;
-  /** DB 에는 있는데 이번에 보드에 없던 VM (연속으로 없으면 retired) */
-  missing_from_board: number;
-  retired: number;
-  results: { vm_id: string; action: string; reason: string | null }[];
+  results: VmSynchronizationItem[];
+}
+
+export interface VmSynchronizationItem {
+  vm_id: string | null;
+  /** 보드 VM 은 보드의 이름, 정리된 VM 은 정리 전 이름. 보드가 이름을 주지 않으면 null */
+  name: string | null;
+  action:
+    'registered' | 'updated' | 'unchanged' | 'restored' | 'retired' | 'skipped' | 'conflict' | 'incomplete';
+  /** missing_from_board · in_operation · duplicate_name · duplicate_board_vm_id · invalid_vm_id · registration_metadata_missing */
+  reason: string | null;
 }
 
 /** §5 POST /api/v1/vms 요청 (§9 입력값 규칙) */
@@ -209,17 +214,61 @@ export interface AutoDelayCommand extends SubmittedCommand {
   duration_s: number;
 }
 
+/** 활성 Zephyr VM의 AUTO 계산 입력만 일정 시간 사용할 수 없게 만드는 시연 명령 */
+export interface AutoInputUnavailableRequest {
+  duration_s: number;
+}
+
+export interface AutoInputUnavailableCommand extends SubmittedCommand {
+  duration_s: number;
+}
+
 /** POST /api/v1/vms/{id}/faults/agent-exit — Linux Agent 종료 데모 명령 */
 export type AgentExitCommand = SubmittedCommand;
 
+/** POST /api/v1/vms/{id}/faults/vm-crash — 실행 중인 Zephyr 도메인이 스스로 crash 하게 하는 시연 명령 */
+export type VmCrashCommand = SubmittedCommand;
+
+/** POST /api/v1/vms/{id}/faults/app-exit — Zephyr 주행 앱의 한 앱(지금은 자율)만 멈추는 장애 주입. VM 은 그대로 */
+export interface AppExitRequest {
+  app_id: 'autonomous';
+}
+
+export type AppExitCommand = SubmittedCommand;
+
+/** POST /api/v1/vms/{id}/faults/domain-kill — 도메인 즉시 소멸(xl destroy). 의도(running)는 남아 복구 워커가 다시 띄운다 */
+export interface DomainKillResponse {
+  operation_id: string;
+  vm_id: string;
+  submitted_at: string;
+}
+
 export type CommandState = 'PENDING' | 'ACCEPTED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REJECTED';
 
+/**
+ * Agent 가 보낸 실패·거절 사유 (백엔드 AgentCommandStatusResponse.error, JsonNode 그대로).
+ * 형식이 보장되지 않으므로 값은 commandErrorCode 로 꺼낸다
+ */
+export interface CommandError {
+  code?: unknown;
+  message?: unknown;
+}
+
+/** GET /api/v1/vms/{vmId}/commands/{commandId} — 백엔드 AgentCommandStatusResponse (snake_case) */
 export interface CommandStatusResponse {
-  command_id: string;
   vm_id: string;
+  command_id: string;
+  operation_id?: string | null;
   status: CommandState;
-  message?: string | null;
-  updated_at: string;
+  submitted_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  result?: unknown;
+  error?: CommandError | null;
+  received_at?: string | null;
+  contract_violation?: boolean;
+  violation_detail?: string | null;
 }
 
 /** §2.3 */
@@ -247,12 +296,12 @@ export type KnownErrorCode =
   | 'TOKEN_REVOKED'
   | 'INVALID_CREDENTIALS'
   | 'INVALID_REFRESH_TOKEN'
-  | 'LOGIN_RATE_LIMITED'
   | 'VALIDATION_ERROR'
   | 'TEMPLATE_NOT_FOUND'
   | 'VM_NOT_FOUND'
   | 'VM_NAME_CONFLICT'
   | 'INVALID_VM_STATE'
+  | 'VM_OPERATION_IN_PROGRESS'
   | 'VM_ALREADY_EXISTS'
   | 'INVALID_ARGUMENT'
   | 'INSUFFICIENT_RESOURCES'
@@ -262,7 +311,44 @@ export type KnownErrorCode =
   | 'VM_CONTROL_TIMEOUT'
   | 'VM_CONTROL_BAD_RESPONSE'
   | 'RESOURCE_UNSUPPORTED'
-  | 'INTERNAL_SERVER_ERROR';
+  | 'INTERNAL_SERVER_ERROR'
+  | 'AGENT_UNAVAILABLE'
+  | 'MQTT_UNAVAILABLE'
+  | 'COMMAND_NOT_FOUND'
+  | 'NOT_FOUND'
+  | 'OPERATION_NOT_FOUND'
+  | 'RESOURCE_UPDATE_UNSUPPORTED'
+  | 'CPU_PLACEMENT_CONFLICT'
+  | 'CPU_POLICY_NOT_CONFIGURED'
+  | 'EVENT_CURSOR_EXPIRED'
+  | 'TIME_RANGE_INVALID'
+  | 'SIM_UNAVAILABLE'
+  | 'PHONE_RELAY_NOT_LISTENING'
+  | 'PHONE_LINK_UNAVAILABLE'
+  | 'LOG_SOURCE_UNAVAILABLE'
+  | 'PHONE_NOT_CONNECTED'
+  | 'DISPLAY_MODE_BUSY'
+  | 'DISPLAY_MODE_NOT_APPLIED'
+  | 'DISPLAY_SETUP_REQUIRED'
+  | 'DISPLAY_MODE_ROLLBACK_INCOMPLETE'
+  | 'DISPLAY_MODE_UNAVAILABLE'
+  | 'DISPLAY_MODE_TIMEOUT'
+  | 'BAD_RESPONSE';
+
+/** VM Agent 가 명령을 거절·실패할 때 명령 상태 error.code 로 보내는 코드 (platform vm-agent commands.py) */
+export type AgentErrorCode =
+  | 'BUSY'
+  | 'INVALID_PARAMETERS'
+  | 'INVALID_COMMAND'
+  | 'AGENT_EXITING'
+  | 'RESOURCE_UNAVAILABLE'
+  | 'STATE_UNAVAILABLE'
+  | 'UNSUPPORTED_ACTION'
+  | 'DEMO_DISABLED'
+  | 'EXPIRED'
+  | 'CLOCK_UNTRUSTED'
+  | 'BOOT_MISMATCH'
+  | 'IDEMPOTENCY_CONFLICT';
 
 // ---- 이벤트 (노션 API 명세 REST-18 "이벤트 조회", 백엔드 EventResponse) -------------------
 
@@ -457,6 +543,21 @@ export interface TelemetryHeartbeatResponse {
   age_ms: number | null;
 }
 
+export type PerceptionFaultStatus =
+  'QUERYING' | 'COMMAND_SENT' | 'APPLIED' | 'ENDED' | 'REJECTED' | 'UNKNOWN' | 'FAILED';
+
+export interface PerceptionFaultOperation {
+  operation_id: string;
+  command_id: string;
+  duration_s: number;
+  status: PerceptionFaultStatus;
+  reason: string | null;
+  active_vm_id: string | null;
+  mode_before: string | null;
+  submitted_at: string;
+  updated_at: string;
+}
+
 // ---- 화면 배치 (노션 API 명세 REST-23·REST-24, 백엔드 -129) ----
 
 export type DisplayView = 'split' | 'os-face';
@@ -527,4 +628,20 @@ export interface PhoneLinkStatus {
 export interface PhonePairingCode {
   code: string;
   expires_at: string;
+}
+
+// ---- 표시 모드 HDMI / 휴대폰 (REST-40·REST-41, docs/contracts/phone-link-v1.md) ----
+
+/** hdmi: HDMI 모니터에 차량 화면 · mobile: USB 테더링 휴대폰에 차량 화면(휴대폰 중계가 켜짐) */
+export type DisplayModeName = 'hdmi' | 'mobile';
+
+export interface DisplayModeStatus {
+  mode: DisplayModeName;
+  /** 재부팅 뒤 모드. 지금은 항상 hdmi */
+  boot_default: DisplayModeName;
+  /** 각 표시 서비스의 systemd 상태 (active·inactive·activating·deactivating·failed·unknown) */
+  services: { hdmi: string; mobile: string; feed: string };
+  /** HDMI 화면이 실제로 그려지고 있음 */
+  hdmi_renderer_ready: boolean;
+  observed_at: string;
 }

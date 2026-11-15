@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -45,6 +46,7 @@ public class VmService {
     private static final Set<String> REJECTED_BY_DOM0 =
             Set.of("INVALID_ARGUMENT", "INSUFFICIENT_RESOURCES", "VM_CONTROL_NOT_SUPPORTED", "VM_NAME_CONFLICT");
     private static final String DOMAIN_EXISTS = "VM_ALREADY_EXISTS";
+    private static final String INVALID_VM_STATE = "INVALID_VM_STATE";
 
     private final VmControlPort vmControlPort;
     private final VmRecordRepository vmRecordRepository;
@@ -54,6 +56,8 @@ public class VmService {
     private final VmRuntimeCache runtimeCache;
     private final AgentInventoryCleaner inventoryCleaner;
     private final Clock clock;
+    // VMs with a state-changing request in flight in this instance (exclusively)
+    private final Set<String> inFlight = ConcurrentHashMap.newKeySet();
 
     public VmService(
             VmControlPort vmControlPort,
@@ -207,7 +211,16 @@ public class VmService {
     public VmControlOperation reboot(String vmId, String requestKey) {
         String validatedKey = validateRequestKey(requestKey);
         findRecord(vmId);
-        return vmControlPort.requestReboot(vmId, validatedKey);
+        try {
+            return exclusively(vmId, () -> vmControlPort.requestReboot(vmId, validatedKey));
+        } catch (ApiException exception) {
+            // Reboot needs a running domain: a stopped VM is started instead, a crashed one is stopped first.
+            if (INVALID_VM_STATE.equals(exception.getCode())) {
+                throw new ApiException(HttpStatus.CONFLICT, INVALID_VM_STATE,
+                        "실행 중인 VM만 재부팅할 수 있습니다. 꺼진 VM은 시작하고, 비정상 상태면 정지한 뒤 시작하세요.");
+            }
+            throw exception;
+        }
     }
 
     public VmControlOperation controlOperation(String vmId, String requestKey) {
@@ -249,7 +262,7 @@ public class VmService {
         VmRecord record = findRecord(vmId);
         CpuLayout layout = requireConfiguredCpuLayout(vmControlPort.cpuLayout());
         CpuLayout.VmCpuLayout vmLayout = findVmLayout(layout, vmId);
-        return resourceView(record, layout, requireUniformAffinity(vmLayout), exclusivePcpus(layout));
+        return resourceView(record, layout, requireUniformAffinity(vmLayout), exclusivePcpus(layout), null);
     }
 
     public VmResourceView updateVcpuPinning(
@@ -299,8 +312,8 @@ public class VmService {
             placements.add(new CpuPolicyUpdate.CpuPlacement(item.vmId(), item.allocation(), mask));
         }
         placements.sort(Comparator.comparing(CpuPolicyUpdate.CpuPlacement::vmId));
-        CpuPolicyUpdate update = vmControlPort.updateCpuPolicy(
-                new CpuPolicyUpdate.Request(layout.policyRevision(), sortedUnique(shared), placements), validatedKey);
+        CpuPolicyUpdate update = exclusively(vmId, () -> vmControlPort.updateCpuPolicy(
+                new CpuPolicyUpdate.Request(layout.policyRevision(), sortedUnique(shared), placements), validatedKey));
         validateCpuPolicyResponse(update, vmId, target.allocation(), requestedMask, layout.policyRevision());
 
         List<CpuLayout.VcpuAffinity> applied = new ArrayList<>();
@@ -311,7 +324,7 @@ public class VmService {
                 .filter(placement -> "exclusive".equals(placement.mode()))
                 .flatMap(placement -> placement.pcpus().stream())
                 .distinct().sorted().toList();
-        return resourceView(record, layout, applied, exclusive);
+        return resourceView(record, layout, applied, exclusive, update.hostPreparationRequired());
     }
 
     private CpuLayout requireConfiguredCpuLayout(CpuLayout layout) {
@@ -398,7 +411,8 @@ public class VmService {
             VmRecord record,
             CpuLayout layout,
             List<CpuLayout.VcpuAffinity> pinning,
-            List<Integer> exclusive) {
+            List<Integer> exclusive,
+            Boolean hostPreparationRequired) {
         VmTemplate template = templateCatalog.find(record.getTemplateId(), record.getTemplateVersion())
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TEMPLATE_NOT_FOUND", "존재하지 않는 템플릿입니다."));
         boolean fixed = record.getGuestKind() == GuestKind.ZEPHYR;
@@ -416,7 +430,8 @@ public class VmService {
                         fixed ? record.getMemoryMib() : template.minMemoryMib(),
                         fixed ? record.getMemoryMib() : 1024,
                         fixed ? 1 : 128),
-                clock.instant());
+                clock.instant(),
+                hostPreparationRequired);
     }
 
     private static List<Integer> sortedUnique(List<Integer> values) {
@@ -429,7 +444,9 @@ public class VmService {
             String mode,
             List<Integer> mask,
             int previousRevision) {
-        if (update == null || update.policy() == null || !update.hostPreparationRequired()
+        // host_preparation_required may be false: since the platform scopes changes to affected VMs (1e41ea73),
+        // a guest-only placement change keeps this boot's dom0 preparation and the VM can start right away.
+        if (update == null || update.policy() == null
                 || update.policy().policyRevision() != previousRevision + 1
                 || update.policy().placements() == null) {
             throw malformedCpuLayout();
@@ -460,11 +477,17 @@ public class VmService {
     // it was already retired or removed with a platform tool, so the delete is complete and the row is retired too.
     public void destroy(String vmId) {
         VmRecord record = findRecord(vmId);
+        // retire() frees the name, so the event keeps the name the VM had.
+        String name = record.getName();
         boolean alreadyGone = underOperation(vmId, () -> {
             boolean gone = false;
             try {
                 vmControlPort.destroy(vmId);
             } catch (ApiException exception) {
+                // dom0-manager refuses a delete while the domain exists ("stop it before delete").
+                if (INVALID_VM_STATE.equals(exception.getCode())) {
+                    throw new ApiException(HttpStatus.CONFLICT, INVALID_VM_STATE, "실행 중인 VM은 정지한 뒤 삭제할 수 있습니다.");
+                }
                 if (!"VM_NOT_FOUND".equals(exception.getCode())) {
                     throw exception;
                 }
@@ -477,22 +500,40 @@ public class VmService {
             return gone;
         });
         if (alreadyGone) {
-            eventRecorder.vmDeleted(vmId, record.getName(), "platform");
+            eventRecorder.vmDeleted(vmId, name, "platform");
         } else {
-            eventRecorder.vmDeleted(vmId, record.getName());
+            eventRecorder.vmDeleted(vmId, name);
         }
         // Only after dom0-manager confirmed the delete. Failures are logged there and never fail the delete.
         inventoryCleaner.vmDeleted(vmId);
     }
 
     // Marks the VM busy so an overlapping on-demand state sync does not report this operation's
-    // intermediate states as detected changes.
+    // intermediate states as detected changes. Only one such operation runs per VM (see exclusively).
     private <T> T underOperation(String vmId, Supplier<T> operation) {
-        stateTracker.beginOperation(vmId);
+        return exclusively(vmId, () -> {
+            stateTracker.beginOperation(vmId);
+            try {
+                return operation.get();
+            } finally {
+                stateTracker.endOperation(vmId);
+            }
+        });
+    }
+
+    // QA 1-B2: a second create/start/stop/delete/resource/pinning/reboot request for a VM that already has one in
+    // flight (another tab or user) is refused at once instead of queueing behind it in dom0-manager, where it would
+    // wait silently and then run against whatever state the first one left (e.g. stop then delete).
+    // The set is per Spring instance, which is enough while the backend runs as a single instance.
+    private <T> T exclusively(String vmId, Supplier<T> operation) {
+        if (!inFlight.add(vmId)) {
+            throw new ApiException(HttpStatus.CONFLICT, "VM_OPERATION_IN_PROGRESS",
+                    "이 VM에 다른 작업이 진행 중입니다. 끝난 뒤 다시 시도하세요.");
+        }
         try {
             return operation.get();
         } finally {
-            stateTracker.endOperation(vmId);
+            inFlight.remove(vmId);
         }
     }
 
@@ -539,6 +580,21 @@ public class VmService {
             runtimeCache.put(record.getVmId(), runtime);
         }
         return Vm.of(record, runtime);
+    }
+
+    /**
+     * 장애 주입 강제 종료. dom0-manager kill 로 도메인만 없애고 등록·의도(running)는 남겨 복구 워커가 다시 띄우게 한다.
+     * 사용자 정지가 아니므로 stateTracker.changedByUser 로 기록하지 않는다 — 꺼짐은 다음 상태 동기화가 장애로 감지한다.
+     */
+    public DomainKill kill(String vmId) {
+        VmRecord record = findRecord(vmId);
+        VmState state = vmControlPort.find(vmId).map(VmRuntime::state).orElse(VmState.STOPPED);
+        if (state != VmState.RUNNING) {
+            throw new ApiException(HttpStatus.CONFLICT, "INVALID_VM_STATE", "실행 중인 VM만 강제 종료할 수 있습니다.");
+        }
+        vmControlPort.kill(vmId);
+        eventRecorder.faultInjected(vmId, record.getName(), "force_kill");
+        return new DomainKill(UUID.randomUUID().toString(), vmId, clock.instant());
     }
 
     private VmRecord findRecord(String vmId) {

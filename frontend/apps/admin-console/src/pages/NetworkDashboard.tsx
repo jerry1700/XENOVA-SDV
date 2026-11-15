@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import type { DriveState } from '../api/drive';
 import { LIVE_POLL_MS, useMetrics, useTelemetryHeartbeat } from '../api/queries';
 import type { AgentStatus, Vm } from '../api/types';
+import { observedControl } from '../domain/driveObservations';
 import { buildPacketRateSeries, bytesToKiB, poolLevel } from '../domain/memoryPools';
 import {
   buildLinuxNetworkSeries,
@@ -21,6 +22,7 @@ import { publisherObservation } from '../domain/telemetryPublisher';
 import { vmAuthorityOf } from '../domain/vmAuthority';
 import type { DiskIoCounter } from '../domain/vmMetrics';
 import { AGENT_LABEL } from '../format';
+import { useDrive } from '../layout/DriveContext';
 import { LiveDataAlert } from '../layout/LiveDataAlert';
 import { useNow } from '../useNow';
 import { collectorBadgeLabel, collectorTooltip } from './collectorStatus';
@@ -70,6 +72,7 @@ export function NetworkDashboard({
       </header>
 
       {pending && <div className={styles.statePanel}>VM 정보를 불러오는 중입니다…</div>}
+      {!pending && items?.length === 0 && <div className={styles.statePanel}>등록된 VM이 없습니다.</div>}
       <LiveDataAlert />
 
       <div className={styles.memoryVmGrid}>
@@ -100,7 +103,9 @@ function ZephyrNetworkPanel({ vm, drive }: { vm: Vm; drive: DriveState | null })
   const ratePoints = mergeDirectRxRate(bytes.rates, rxRate.points);
   const interfaceUp = interfaceFlagOf(samples, ZEPHYR_INTERFACE_UP_METRIC);
   const carrier = interfaceFlagOf(samples, ZEPHYR_CARRIER_METRIC);
-  const authority = vmAuthorityOf(role, vm, drive?.control?.active_vm_id);
+  const { socket } = useDrive();
+  // Memory 탭·Overview·VM 상세와 같이 소켓이 열려 있고 control 이 신선할 때만 ACTIVE/STANDBY 를 판정한다
+  const authority = vmAuthorityOf(role, vm, observedControl(drive, socket)?.active_vm_id);
   const lastUpdated = relativeTime(latestTime(pools.lastObservedAt, bytes.observedAt));
   const style = { '--vm-accent': role?.color ?? UNASSIGNED_COLOR, ...RX_TX_ACCENTS } as CSSProperties;
 
@@ -179,7 +184,9 @@ function LinuxNetworkPanel({ vm, drive }: { vm: Vm; drive: DriveState | null }) 
   const role = roleOf(vm, drive);
   const metrics = useMetrics(vm.vm_id, true, 5, LIVE_POLL_MS, { keepLastData: true });
   const series = buildLinuxNetworkSeries(metrics.data?.items ?? []);
-  const authority = vmAuthorityOf(role, vm, drive?.control?.active_vm_id);
+  const { socket } = useDrive();
+  // Memory 탭·Overview·VM 상세와 같이 소켓이 열려 있고 control 이 신선할 때만 ACTIVE/STANDBY 를 판정한다
+  const authority = vmAuthorityOf(role, vm, observedControl(drive, socket)?.active_vm_id);
   const agent = vm.agent_status ?? 'UNKNOWN';
   const style = { '--vm-accent': role?.color ?? UNASSIGNED_COLOR, ...RX_TX_ACCENTS } as CSSProperties;
 
@@ -296,7 +303,7 @@ function poolCell(pool: NetworkPool): NetCell {
   };
 }
 
-/** 인터페이스 상태 박스 한 칸. 값이 없으면 "—" + 사유 (지금은 "데이터 없음 (백엔드 미지원)") */
+/** 인터페이스 상태 박스 한 칸. 값이 없으면 "—" + 사유 (지금은 백엔드가 보내지 않아 "데이터 없음") */
 function FlagItem({ label, flag, on, off }: { label: string; flag: InterfaceFlag; on: string; off: string }) {
   return (
     <div className={styles.counterItem} data-active={flag.state === 'off' ? 'true' : undefined}>
