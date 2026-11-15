@@ -90,31 +90,31 @@ class AgentStressServiceTest {
     }
 
     @Test
-    void memoryLoadUpTo70PercentOfTheVmIsSent() {
-        // vm(...) has 512 MiB: 70% is 358 MiB (rounded down)
-        service.memory(VM_ID, 358, 30);
+    void memoryLoadUpTo90PercentOfTheVmIsSent() {
+        // vm(...) has 512 MiB: 90% is 460 MiB (rounded down)
+        service.memory(VM_ID, 460, 30);
 
         assertThat(sent).hasSize(1);
-        assertThat(sent.get(0).path("payload").path("parameters").path("memory_mib").asInt()).isEqualTo(358);
+        assertThat(sent.get(0).path("payload").path("parameters").path("memory_mib").asInt()).isEqualTo(460);
     }
 
     @Test
-    void memoryLoadAbove70PercentOfTheVmIsRejectedWithoutSending() {
-        assertThatThrownBy(() -> service.memory(VM_ID, 359, 30))
+    void memoryLoadAbove90PercentOfTheVmIsRejectedWithoutSending() {
+        assertThatThrownBy(() -> service.memory(VM_ID, 461, 30))
                 .isInstanceOfSatisfying(ApiException.class, exception -> {
                     assertThat(exception.getStatus()).isEqualTo(HttpStatus.UNPROCESSABLE_ENTITY);
                     assertThat(exception.getCode()).isEqualTo("VALIDATION_ERROR");
-                    assertThat(exception.getMessage()).contains("358 MiB");
+                    assertThat(exception.getMessage()).contains("460 MiB");
                 });
         assertThat(sent).isEmpty();
         verify(commandResultStore, never()).recordPending(any(), any(), any(), any(), any());
     }
 
     @Test
-    void theMemoryCapIs70PercentOfTheVmButNeverAbove512() {
-        assertThat(AgentStressService.maxMemoryStressMib(512)).isEqualTo(358);
-        assertThat(AgentStressService.maxMemoryStressMib(256)).isEqualTo(179);
-        // 70% of these would pass 512, which the agent refuses
+    void theMemoryCapIs90PercentOfTheVmButNeverAbove512() {
+        assertThat(AgentStressService.maxMemoryStressMib(512)).isEqualTo(460);
+        assertThat(AgentStressService.maxMemoryStressMib(256)).isEqualTo(230);
+        // 90% of these would pass 512, which the agent refuses
         assertThat(AgentStressService.maxMemoryStressMib(832)).isEqualTo(512);
         assertThat(AgentStressService.maxMemoryStressMib(1024)).isEqualTo(512);
     }

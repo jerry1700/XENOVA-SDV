@@ -1,7 +1,11 @@
 package com.xenova.backend.drive.api;
 
 import com.xenova.backend.agent.application.AutoDelayCommand;
+import com.xenova.backend.agent.application.VmCrashCommand;
+import com.xenova.backend.agent.application.ZephyrFaultCommand;
 import com.xenova.backend.drive.application.ActiveDriveAutoDelayService;
+import com.xenova.backend.drive.application.ActiveDriveAppExitService;
+import com.xenova.backend.drive.application.ActiveDriveVmCrashService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,13 +19,28 @@ import org.springframework.web.bind.annotation.RestController;
 public class DriveFaultController {
 
     private final ActiveDriveAutoDelayService service;
+    private final ActiveDriveAppExitService appExitService;
+    private final ActiveDriveVmCrashService vmCrashService;
 
-    public DriveFaultController(ActiveDriveAutoDelayService service) {
+    public DriveFaultController(ActiveDriveAutoDelayService service, ActiveDriveAppExitService appExitService,
+            ActiveDriveVmCrashService vmCrashService) {
         this.service = service;
+        this.appExitService = appExitService;
+        this.vmCrashService = vmCrashService;
     }
 
     @PostMapping("/auto-delay")
     public ResponseEntity<AutoDelayCommand> autoDelay(@Valid @RequestBody DriveAutoDelayRequest request) {
         return ResponseEntity.accepted().body(service.send(request.delayMs(), request.durationS()));
+    }
+
+    @PostMapping("/app-exit")
+    public ResponseEntity<ZephyrFaultCommand> appExit(@Valid @RequestBody DriveAppExitRequest request) {
+        return ResponseEntity.accepted().body(appExitService.send());
+    }
+
+    @PostMapping("/vm-crash")
+    public ResponseEntity<VmCrashCommand> vmCrash() {
+        return ResponseEntity.accepted().body(vmCrashService.send());
     }
 }
