@@ -118,6 +118,37 @@ class Dom0ManagerClientTest {
     }
 
     @Test
+    void listTemplatesReadsEveryPublishedVersionAndIgnoresExtraFields() {
+        server.createContext(
+                "/api/v1/templates",
+                exchange -> respond(exchange, 200, """
+                        [{
+                          "template_id":"debian-13-arm64",
+                          "template_version":"1.0.7",
+                          "guest_kind":"linux",
+                          "default_resources":{"vcpus":1,"memory_mib":512},
+                          "resource_limits":{"vcpus":[1,4],"memory_mib":[128,8192]},
+                          "capabilities":{"graceful_shutdown":true}
+                        },{
+                          "template_id":"zephyr-drive-lattice-lab-arm64",
+                          "template_version":"1.0.8",
+                          "guest_kind":"zephyr",
+                          "default_resources":{"vcpus":1,"memory_mib":16},
+                          "resource_limits":{"vcpus":[1,1],"memory_mib":[16,16]},
+                          "capabilities":{"graceful_shutdown":false}
+                        }]
+                        """));
+
+        var templates = client.listTemplates();
+
+        assertThat(templates).containsExactly(
+                new com.xenova.backend.template.domain.BoardTemplate(
+                        "debian-13-arm64", "1.0.7", com.xenova.backend.template.domain.GuestKind.LINUX),
+                new com.xenova.backend.template.domain.BoardTemplate(
+                        "zephyr-drive-lattice-lab-arm64", "1.0.8", com.xenova.backend.template.domain.GuestKind.ZEPHYR));
+    }
+
+    @Test
     void runtimeLogsForwardOnlyQueryAndServerServiceToken() {
         AtomicReference<String> query = new AtomicReference<>();
 
@@ -225,6 +256,24 @@ class Dom0ManagerClientTest {
         client.stop(VM_ID);
 
         assertThat(requests).hasValue(1);
+    }
+
+    @Test
+    void killPostsToTheKillPathOnceAndAcceptsNoContent() {
+        AtomicInteger requests = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<String> method = new java.util.concurrent.atomic.AtomicReference<>();
+
+        server.createContext("/api/v1/vms/" + VM_ID + "/kill", exchange -> {
+            requests.incrementAndGet();
+            method.set(exchange.getRequestMethod());
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        client.kill(VM_ID);
+
+        assertThat(requests).hasValue(1);
+        assertThat(method.get()).isEqualTo("POST");
     }
 
     @Test
@@ -559,6 +608,64 @@ class Dom0ManagerClientTest {
     }
 
     @Test
+    void displayModeSwitchPostsTheModeAndWaitsLongerThanTheQueryTimeout() {
+        AtomicReference<String> sent = new AtomicReference<>();
+        AtomicInteger requests = new AtomicInteger();
+        server.createContext("/api/v1/display/mode", exchange -> {
+            requests.incrementAndGet();
+            sent.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            try {
+                Thread.sleep(800); // longer than the 300 ms query read timeout: a switch may take minutes
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            respond(exchange, 200, """
+                    {"mode":"mobile","boot_default":"hdmi",
+                     "services":{"hdmi":"inactive","mobile":"active","feed":"active"},
+                     "hdmi_renderer_ready":false,"observed_at":"2026-11-14T09:00:00Z"}
+                    """);
+        });
+
+        JsonNode result = client.setDisplayMode("mobile");
+
+        assertThat(sent.get()).contains("\"mode\":\"mobile\"");
+        assertThat(requests).hasValue(1);
+        assertThat(result.path("mode").asText()).isEqualTo("mobile");
+        assertThat(result.path("services").path("mobile").asText()).isEqualTo("active");
+    }
+
+    @Test
+    void displayModeRefusalsUseTheBoardReason() {
+        server.createContext("/api/v1/display/mode", exchange -> respond(exchange, 409, """
+                {"code":"InvalidState","message":"no USB link","platform_code":"USB_LINK_ABSENT"}
+                """));
+
+        assertThatThrownBy(() -> client.setDisplayMode("mobile"))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("PHONE_NOT_CONNECTED");
+                });
+    }
+
+    @Test
+    void displayModeErrorsMapToDisplayCodes() {
+        assertThat(code("InvalidState", "DISPLAY_MODE_BUSY", 409)).isEqualTo("DISPLAY_MODE_BUSY");
+        assertThat(code("InvalidState", "MOBILE_ENDPOINT_NOT_READY", 409)).isEqualTo("DISPLAY_MODE_NOT_APPLIED");
+        assertThat(code("InvalidState", "DISPLAY_MODE_FAILED_RESTORED", 409)).isEqualTo("DISPLAY_MODE_NOT_APPLIED");
+        assertThat(code("InvalidState", "MODE_GUARD_NOT_LOADED", 409)).isEqualTo("DISPLAY_SETUP_REQUIRED");
+        assertThat(code("DriverError", "ROLLBACK_INCOMPLETE_CHECK_DISPLAY_SERVICES", 500))
+                .isEqualTo("DISPLAY_MODE_ROLLBACK_INCOMPLETE");
+        assertThat(code("DriverTimeout", "DISPLAY_MODE_TIMEOUT", 504)).isEqualTo("DISPLAY_MODE_TIMEOUT");
+        assertThat(code("PlatformUnavailable", null, 503)).isEqualTo("DISPLAY_MODE_UNAVAILABLE");
+        assertThat(code("Unauthorized", null, 401)).isEqualTo("VM_CONTROL_BAD_RESPONSE");
+    }
+
+    private static String code(String code, String platformCode, int status) {
+        return Dom0ManagerClient.mapDisplayModeError(
+                new Dom0ErrorResponse(code, "m", null, null, platformCode), status).getCode();
+    }
+
+    @Test
     void driverErrorsAreNotRetried() {
         AtomicInteger requests = new AtomicInteger();
 
@@ -575,6 +682,55 @@ class Dom0ManagerClientTest {
         assertThatThrownBy(() -> client.launch(VM_ID, SPEC))
                 .isInstanceOf(ApiException.class);
         assertThat(requests).hasValue(1);
+    }
+
+    // QA 1-B1: the board's English message (with internal ids) must not reach the API; Korean text per code instead.
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0} {1} -> {3}")
+    @org.junit.jupiter.params.provider.CsvSource(delimiter = '|', textBlock = """
+            VMNotFound        |                            | 404 | VM_NOT_FOUND        | 보드에서 VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.
+            VMExists          |                            | 409 | VM_ALREADY_EXISTS   | 보드에 같은 VM이 이미 있습니다.
+            InvalidState      |                            | 409 | INVALID_VM_STATE    | 지금 VM 상태에서는 할 수 없는 작업입니다. VM 상태를 확인한 뒤 다시 시도하세요.
+            InvalidState      | VM_NOT_STOPPED             | 409 | INVALID_VM_STATE    | VM을 정지한 뒤 다시 시도하세요.
+            InvalidState      | VM_NOT_RUNNING             | 409 | INVALID_VM_STATE    | 실행 중인 VM에서만 할 수 있는 작업입니다.
+            InvalidState      | HOST_QUIESCING             | 409 | INVALID_VM_STATE    | 보드가 종료 중이라 새 작업을 받을 수 없습니다.
+            InvalidArgument   |                            | 400 | INVALID_ARGUMENT    | 보드가 요청 값을 받아들이지 않았습니다. 입력값을 확인하세요.
+            InvalidArgument   | TEMPLATE_VERSION_NOT_FOUND | 400 | INVALID_ARGUMENT    | 보드에 해당 템플릿 버전이 없습니다. 템플릿을 다시 선택하세요.
+            OperationNotFound |                            | 404 | OPERATION_NOT_FOUND | 보드에서 요청한 작업 기록을 찾을 수 없습니다.
+            DriverError       |                            | 500 | VM_DRIVER_ERROR     | 보드에서 VM 작업을 처리하지 못했습니다. 잠시 후 다시 시도하세요.
+            """)
+    void boardErrorsAreReturnedInKoreanWithoutTheBoardsOwnWording(
+            String dom0Code, String platformCode, int status, String code, String message) {
+        String platform = platformCode == null ? "" : ",\"platform_code\":\"" + platformCode + "\"";
+        server.createContext(
+                "/api/v1/vms",
+                exchange -> respond(exchange, status, """
+                        {"code":"%s","message":"domain 6f0c-internal is running; stop it before delete"%s}
+                        """.formatted(dom0Code, platform)));
+
+        assertThatThrownBy(() -> client.launch(VM_ID, SPEC))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus().value()).isEqualTo(status);
+                    assertThat(exception.getCode()).isEqualTo(code);
+                    assertThat(exception.getMessage()).isEqualTo(message).doesNotContain("domain", "6f0c");
+                });
+    }
+
+    @Test
+    void startRefusedUntilHostPreparationIsAClear409() {
+        // dom0-manager has no mapping for the platform's CPU_NOT_READY and sends it as DriverError
+        server.createContext(
+                "/api/v1/vms",
+                exchange -> respond(exchange, 500, """
+                        {"code":"DriverError","message":"CPU_NOT_READY: prepare this host boot and policy revision",
+                         "platform_code":"CPU_NOT_READY"}
+                        """));
+
+        assertThatThrownBy(() -> client.launch(VM_ID, SPEC))
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(exception.getCode()).isEqualTo("CPU_NOT_READY");
+                    assertThat(exception.getMessage()).contains("호스트 준비").doesNotContain("prepare this host");
+                });
     }
 
     private void assertLaunchFailsWith(

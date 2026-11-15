@@ -3,6 +3,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from 'react-router';
 import { DevControls } from './components/DevControls';
+import { DisplayNotFound, DisplayOutput } from './components/DisplayNotFound';
+import { DisplayRouteError } from './components/DisplayRouteError';
 import { DisplayFollower } from './components/DisplayFollower';
 import { ResumeOverlay } from './components/ResumeOverlay';
 import { DetailPage } from './pages/DetailPage';
@@ -58,26 +60,35 @@ function ToSplit() {
 
 const router = createBrowserRouter(
   [
-    // 휴대폰과 HDMI는 같은 합친 차량 화면을 띄운다 (S15P31E110-350).
-    // 휴대폰 접속·VM3 기본 설정·이미지 점검이 이 주소를 쓰므로 경로는 그대로 두고, 주소를 바꾸지 않게 이동 없이 바로 그린다
     {
-      path: '/display/mobile',
-      lazy: async () => ({ Component: (await import('./display/CombinedPage')).CombinedPage }),
-    },
-    // 모니터 2대(계기판·인포테인먼트)를 한 화면으로 합친 차량 화면 (S15P31E110-128, 미리보기 단계)
-    {
-      path: '/display/combined',
-      lazy: async () => ({ Component: (await import('./display/CombinedPage')).CombinedPage }),
-    },
-    { path: '/display/:outputId', element: <ToCombined /> },
-    {
-      element: <Root />,
+      // 렌더 예외·배포 직후 chunk 실패에 기본 영어 오류 화면 대신 (QA 2-1)
+      errorElement: <DisplayRouteError />,
       children: [
-        { path: '/', element: <ToSplit /> },
-        { path: '/split', element: <ScreenEntry /> },
-        { path: '/detail/:app', element: <ScreenEntry detail /> },
-        // 화면 배치 view sim (screen_path /sim, 화면 배치 계약 v1.1)
-        { path: '/sim', element: legacyPreview ? <SimPage /> : <ToCombined /> },
+        // 휴대폰과 HDMI는 같은 합친 차량 화면을 띄운다 (S15P31E110-350).
+        // 휴대폰 접속·VM3 기본 설정·이미지 점검이 이 주소를 쓰므로 경로는 그대로 두고, 주소를 바꾸지 않게 이동 없이 바로 그린다
+        {
+          path: '/display/mobile',
+          lazy: async () => ({ Component: (await import('./display/CombinedPage')).CombinedPage }),
+        },
+        // 모니터 2대(계기판·인포테인먼트)를 한 화면으로 합친 차량 화면 (S15P31E110-128, 미리보기 단계)
+        {
+          path: '/display/combined',
+          lazy: async () => ({ Component: (await import('./display/CombinedPage')).CombinedPage }),
+        },
+        // 옛 모니터 주소(monitor-N)만 합친 화면으로, 나머지 /display/… 는 없는 화면 주소 안내 (S15P31E110-472)
+        { path: '/display/:outputId', element: <DisplayOutput /> },
+        {
+          element: <Root />,
+          children: [
+            { path: '/', element: <ToSplit /> },
+            { path: '/split', element: <ScreenEntry /> },
+            { path: '/detail/:app', element: <ScreenEntry detail /> },
+            // 화면 배치 view sim (screen_path /sim, 화면 배치 계약 v1.1)
+            { path: '/sim', element: legacyPreview ? <SimPage /> : <ToCombined /> },
+          ],
+        },
+        // 없는 주소는 새로고침하지 않는 안내 (예전에는 오류 화면이 10초마다 새로고침을 반복했다)
+        { path: '*', element: <DisplayNotFound /> },
       ],
     },
   ],

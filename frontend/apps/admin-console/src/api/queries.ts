@@ -1,33 +1,44 @@
 /** TanStack Query 훅. 경로·응답은 VM 관리 API 계약 §5, 인증은 노션 API 명세 */
-import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type UseQueryResult,
+  useMutationState,
+} from '@tanstack/react-query';
 import { useState } from 'react';
-import { request, setSession } from './client';
+import { ApiError, request, requestWithStatus } from './client';
 import type {
   CreateVmRequest,
+  AutoInputUnavailableCommand,
+  AutoInputUnavailableRequest,
   AgentExitCommand,
+  AppExitCommand,
+  AppExitRequest,
   AutoDelayCommand,
   AutoDelayRequest,
   CommandStatusResponse,
+  DomainKillResponse,
   Display,
   DisplayListResponse,
+  DisplayModeName,
+  DisplayModeStatus,
   EventListResponse,
-  LoginRequest,
   MetricHistoryResponse,
   PhoneLinkStatus,
   PhonePairingCode,
+  PerceptionFaultOperation,
   ProcessesResponse,
   RouteRequest,
-  SignupRequest,
-  SignupResponse,
   StressCommand,
   StressRequest,
   TelemetryHeartbeatResponse,
   Template,
   ThreadsResponse,
-  TokenResponse,
   UpdateVcpuPinningRequest,
   UpdateVmResourcesRequest,
   Vm,
+  VmCrashCommand,
   VmListResponse,
   VmResourceUpdateResult,
   VmSynchronizationResult,
@@ -48,6 +59,8 @@ export const keys = {
   command: (id: string, commandId: string) => ['vms', id, 'commands', commandId] as const,
   displays: ['displays'] as const,
   phoneLink: ['display', 'phone-link'] as const,
+  displayMode: ['display', 'mode'] as const,
+  perceptionFault: (id: string) => ['drive', 'faults', 'perception-block', id] as const,
 };
 
 /**
@@ -89,6 +102,17 @@ function useWithoutStaleData<TData, TError>(
   } as UseQueryResult<TData, TError>;
 }
 
+/** 없는 VM(404). 다시 읽어도 404 라 그 VM 의 조회는 주기 재조회를 멈춘다 (S15P31E110-469) */
+export function vmGone(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404;
+}
+
+/** 404 를 받기 전까지만 ms 주기로 다시 읽는다 */
+const pollUntilGone =
+  (ms: number) =>
+  (query: { state: { error: Error | null } }): number | false =>
+    vmGone(query.state.error) ? false : ms;
+
 /**
  * pollMs: VM Control 은 1초 (관측 시각이 초 단위로 바뀌게), 나머지는 LIVE_POLL_MS.
  * keepLastData: 실패해도 마지막 목록을 남긴다 — 화면이 직접 "조회 불가" 로 표시할 때만 (대시보드 Overview 카드)
@@ -122,7 +146,7 @@ export function useVm(vmId: string) {
     useQuery({
       queryKey: keys.vm(vmId),
       queryFn: ({ signal }) => request<Vm>(`/api/v1/vms/${encodeURIComponent(vmId)}`, { signal }),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -134,7 +158,7 @@ export function useVmResources(vmId: string) {
       queryFn: ({ signal }) =>
         request<VmResources>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources`, { signal }),
       enabled: Boolean(vmId),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -152,9 +176,13 @@ export function useUpdateVcpuPinning(vmId: string) {
   });
 }
 
+/** 자원 적용 mutation 키 — 같은 탭의 다른 화면이 "이 VM 자원 적용 중"을 알 수 있게 (S15P31E110-473) */
+const RESOURCE_UPDATE_KEY = 'vm-resources-update';
+
 export function useUpdateVmResources(vmId: string) {
   const client = useQueryClient();
   return useMutation({
+    mutationKey: [RESOURCE_UPDATE_KEY, vmId],
     mutationFn: (body: UpdateVmResourcesRequest) =>
       request<VmResourceUpdateResult>(`/api/v1/vms/${encodeURIComponent(vmId)}/resources`, {
         method: 'PUT',
@@ -165,6 +193,14 @@ export function useUpdateVmResources(vmId: string) {
       void client.invalidateQueries({ queryKey: keys.vm(vmId) });
       void client.invalidateQueries({ queryKey: keys.vms });
     },
+  });
+}
+
+/** 이 탭에서 자원 적용(PUT /resources)이 진행 중인 VM id 들. 그 VM 의 시작·정지를 잠근다 */
+export function useVmIdsUpdatingResources(): readonly string[] {
+  return useMutationState({
+    filters: { mutationKey: [RESOURCE_UPDATE_KEY], status: 'pending' },
+    select: (mutation) => String(mutation.options.mutationKey?.[1] ?? ''),
   });
 }
 
@@ -188,6 +224,27 @@ export function useStartAutoDelay(vmId: string) {
   });
 }
 
+/** 현재 AUTO 제어권을 가진 VM을 백엔드가 판정해 연산 지연을 적용한다. */
+export function useStartActiveDriveAutoDelay() {
+  return useMutation({
+    mutationFn: (body: AutoDelayRequest) =>
+      request<AutoDelayCommand>('/api/v1/drive/faults/auto-delay', {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartAutoInputUnavailable(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AutoInputUnavailableRequest) =>
+      request<AutoInputUnavailableCommand>(
+        `/api/v1/vms/${encodeURIComponent(vmId)}/faults/auto-input-unavailable`,
+        { method: 'POST', body },
+      ),
+  });
+}
+
 export function useStartAgentExit(vmId: string) {
   return useMutation({
     mutationFn: () =>
@@ -196,6 +253,69 @@ export function useStartAgentExit(vmId: string) {
       }),
   });
 }
+
+export function useStartVmCrash(vmId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<VmCrashCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/vm-crash`, {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+export function useStartAppExit(vmId: string) {
+  return useMutation({
+    mutationFn: (body: AppExitRequest) =>
+      request<AppExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/app-exit`, {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+export function useStartDomainKill(vmId: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<DomainKillResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/domain-kill`, {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
+export function useStartPerceptionBlock() {
+  return useMutation({
+    mutationFn: (durationS: number) =>
+      request<PerceptionFaultOperation>('/api/v1/drive/faults/perception-block', {
+        method: 'POST',
+        body: { duration_s: durationS },
+      }),
+  });
+}
+
+export function usePerceptionFaultOperation(operationId: string | null) {
+  return useQuery({
+    queryKey: keys.perceptionFault(operationId ?? ''),
+    queryFn: ({ signal }) =>
+      request<PerceptionFaultOperation>(
+        `/api/v1/drive/faults/perception-block/${encodeURIComponent(operationId!)}`,
+        { signal },
+      ),
+    enabled: Boolean(operationId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      return status === 'ENDED' || status === 'REJECTED' || status === 'UNKNOWN' || status === 'FAILED'
+        ? false
+        : 500;
+    },
+  });
+}
+
+/** 명령이 없다는 응답(404 COMMAND_NOT_FOUND): 다시 물어도 같으므로 재시도·반복 조회를 멈춘다 */
+const commandGone = (error: unknown) => error instanceof ApiError && error.status === 404;
 
 export function useCommandStatus(vmId: string, commandId: string | null, acceptedIsTerminal = false) {
   return useQuery({
@@ -206,7 +326,9 @@ export function useCommandStatus(vmId: string, commandId: string | null, accepte
         { signal },
       ),
     enabled: Boolean(vmId && commandId),
+    retry: (count, error) => !commandGone(error) && count < 1,
     refetchInterval: (query) => {
+      if (commandGone(query.state.error)) return false;
       const status = query.state.data?.status;
       return status === 'SUCCEEDED' ||
         status === 'FAILED' ||
@@ -227,7 +349,10 @@ export function useTemplates() {
 }
 
 /** 이벤트 목록. 실시간 추가는 WS /ws/v1/events 대신 짧은 주기 재조회로 한다 (초안) */
-export function useEvents(params: { vm_id?: string; type?: string; severity?: string; limit?: number } = {}) {
+export function useEvents(
+  params: { vm_id?: string; type?: string; severity?: string; limit?: number } = {},
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const query = new URLSearchParams(
     Object.entries(params).filter(([, v]) => v != null && v !== '') as [string, string][],
   ).toString();
@@ -236,6 +361,7 @@ export function useEvents(params: { vm_id?: string; type?: string; severity?: st
       queryKey: keys.events(query),
       queryFn: ({ signal }) =>
         request<EventListResponse>(`/api/v1/events${query ? `?${query}` : ''}`, { signal }),
+      enabled,
       refetchInterval: LIVE_POLL_MS,
     }),
   );
@@ -260,7 +386,7 @@ export function useMetrics(
         );
       },
       enabled,
-      refetchInterval: pollMs,
+      refetchInterval: pollUntilGone(pollMs),
     }),
     keepLastData,
   );
@@ -273,7 +399,7 @@ export function useProcesses(vmId: string, enabled: boolean) {
       queryFn: ({ signal }) =>
         request<ProcessesResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/processes`, { signal }),
       enabled,
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -285,7 +411,7 @@ export function useThreads(vmId: string) {
       queryFn: ({ signal }) =>
         request<ThreadsResponse>(`/api/v1/vms/${encodeURIComponent(vmId)}/threads`, { signal }),
       enabled: Boolean(vmId),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
     }),
   );
 }
@@ -299,7 +425,7 @@ export function useTelemetryHeartbeat(vmId: string) {
           signal,
         }),
       enabled: Boolean(vmId),
-      refetchInterval: LIVE_POLL_MS,
+      refetchInterval: pollUntilGone(LIVE_POLL_MS),
       retry: false,
     }),
   );
@@ -356,6 +482,36 @@ export function useIssuePhonePairingCode() {
   });
 }
 
+/** 표시 모드 HDMI / 휴대폰 (REST-40) */
+export function useDisplayMode() {
+  return useQuery({
+    queryKey: keys.displayMode,
+    queryFn: ({ signal }) => request<DisplayModeStatus>('/api/v1/display/mode', { signal }),
+    refetchInterval: 5000,
+    retry: false,
+  });
+}
+
+/**
+ * 표시 모드 전환 (REST-41). 휴대폰 모드는 휴대폰 중계를 켜고 HDMI 를 끈다.
+ * 보드 전환이 끝날 때까지(보통 수 초, 최악 4분) 기다리며, 겹친 전환을 막으려 재시도하지 않는다.
+ */
+export function useSetDisplayMode() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (mode: DisplayModeName) =>
+      request<DisplayModeStatus>('/api/v1/display/mode', { method: 'POST', body: { mode } }),
+    retry: false,
+    onSuccess: (status) => {
+      client.setQueryData(keys.displayMode, status);
+    },
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: keys.displayMode });
+      void client.invalidateQueries({ queryKey: keys.phoneLink });
+    },
+  });
+}
+
 export type VmAction = 'start' | 'stop' | 'delete';
 
 export function useVmAction() {
@@ -383,37 +539,19 @@ export function useSynchronizeVms() {
   });
 }
 
+/** 201 = 새로 만듦. 200 = 같은 이름·같은 사양의 재요청이라 서버가 기존 VM 을 시작해 돌려줌 (backend VmService.create) */
+export interface CreateVmResult {
+  vm: Vm;
+  created: boolean;
+}
+
 export function useCreateVm() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: (body: CreateVmRequest) => request<Vm>('/api/v1/vms', { method: 'POST', body }),
-    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
-  });
-}
-
-export function useLogin() {
-  return useMutation({
-    mutationFn: (body: LoginRequest) =>
-      request<TokenResponse>('/api/v1/auth/login', { method: 'POST', body, auth: false }),
-    onSuccess: setSession,
-  });
-}
-
-export function useSignup() {
-  return useMutation({
-    mutationFn: (body: SignupRequest) =>
-      request<SignupResponse>('/api/v1/auth/signup', { method: 'POST', body, auth: false }),
-  });
-}
-
-export function useLogout() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: () => request<void>('/api/v1/auth/logout', { method: 'POST' }),
-    onSettled: () => {
-      setSession(null);
-      clearVmList();
-      client.clear();
+    mutationFn: async (body: CreateVmRequest): Promise<CreateVmResult> => {
+      const { data, status } = await requestWithStatus<Vm>('/api/v1/vms', { method: 'POST', body });
+      return { vm: data, created: status !== 200 };
     },
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
   });
 }

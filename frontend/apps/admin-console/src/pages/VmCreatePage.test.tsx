@@ -24,9 +24,18 @@ const createMutation = vi.hoisted(() => ({
   reset: vi.fn(),
 }));
 
+const templatesQuery = vi.hoisted(() => ({
+  data: undefined as unknown,
+  error: null as unknown,
+  isPending: false,
+}));
+
+const listedVms = vi.hoisted(() => ({ items: [] as { vm_id: string; name: string; state: string }[] }));
+
 vi.mock('../api/queries', () => ({
   useCreateVm: () => createMutation,
-  useTemplates: () => ({ data: [LINUX_TEMPLATE], error: null, isPending: false }),
+  useVms: () => ({ data: { items: listedVms.items }, error: null, isPending: false }),
+  useTemplates: () => templatesQuery,
 }));
 
 beforeAll(() => {
@@ -45,6 +54,10 @@ beforeEach(() => {
   createMutation.error = null;
   createMutation.isPending = false;
   createMutation.mutateAsync.mockReset();
+  templatesQuery.data = [LINUX_TEMPLATE];
+  templatesQuery.error = null;
+  templatesQuery.isPending = false;
+  listedVms.items = [];
 });
 
 afterEach(() => {
@@ -146,6 +159,24 @@ describe('VM 생성 중 기록 정리', () => {
     expect(pendingNames()).toEqual([]);
   });
 
+  it('생성 실패는 한글 문구만 보이고 서버 원문·(코드)를 붙이지 않는다 (코드는 title 에만)', () => {
+    createMutation.error = new ApiError(409, {
+      code: 'VM_NAME_CONFLICT',
+      message: 'name already used by a retained VM',
+    });
+    renderCreatePage();
+    goToReviewStep();
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.');
+    expect(alert).not.toHaveTextContent('VM_NAME_CONFLICT');
+    expect(alert).not.toHaveTextContent('name already used');
+    expect(within(alert).getByText('같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.')).toHaveAttribute(
+      'title',
+      'VM_NAME_CONFLICT',
+    );
+  });
+
   it('504 타임아웃이면 실패 대신 진행 중일 수 있음과 재시도 방법을 안내한다', () => {
     createMutation.error = new ApiError(504, {
       code: 'VM_CONTROL_TIMEOUT',
@@ -162,5 +193,287 @@ describe('VM 생성 중 기록 정리', () => {
       within(notice).getByText(/같은 이름·사양으로 다시 생성하면 이어서 복구됩니다/),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '같은 사양으로 다시 생성' })).toBeEnabled();
+  });
+});
+
+describe('같은 이름의 VM (QA 1-F2)', () => {
+  it('목록에 같은 이름이 있으면 2단계에서 막는다', () => {
+    listedVms.items = [{ vm_id: 'vm-existing', name: 'drive-vm-a', state: 'stopped' }];
+    renderCreatePage();
+    fireEvent.click(screen.getByRole('button', { name: /Linux Base/ }));
+    fireEvent.click(screen.getByRole('button', { name: '다음' }));
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'drive-vm-a' } });
+    expect(
+      screen.getByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'drive-vm-b' } });
+    expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
+  });
+
+  it.each([
+    ['Drive-VM-A', '대소문자만 다름'],
+    ['drivé-vm-a', '악센트만 다름'],
+  ])('%s 처럼 DB 기준으로 같은 이름(%s)도 막는다 (S15P31E110-473)', (typed) => {
+    listedVms.items = [{ vm_id: 'vm-existing', name: 'drive-vm-a', state: 'stopped' }];
+    renderCreatePage();
+    fireEvent.click(screen.getByRole('button', { name: /Linux Base/ }));
+    fireEvent.click(screen.getByRole('button', { name: '다음' }));
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: typed } });
+    expect(
+      screen.getByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+  });
+
+  it('서버가 200(같은 사양 재요청 = 기존 VM 시작)이면 "생성 완료"가 아니라 기존 VM 을 시작했다고 알린다', () => {
+    createMutation.data = { vm: { vm_id: 'vm-existing', name: 'drive-vm-a' }, created: false };
+    renderCreatePage();
+    goToReviewStep();
+    expect(
+      screen.getByText('같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('새 VM이 성공적으로 생성되었습니다.')).toBeNull();
+  });
+
+  it('201 이면 생성 완료', () => {
+    createMutation.data = { vm: { vm_id: 'vm-new', name: 'drive-vm-a' }, created: true };
+    renderCreatePage();
+    goToReviewStep();
+    expect(screen.getByText('새 VM이 성공적으로 생성되었습니다.')).toBeInTheDocument();
+  });
+});
+
+describe('생성 시간 초과 뒤 다시 생성 (S15P31E110-473)', () => {
+  const timeout = new ApiError(504, { code: 'VM_CONTROL_TIMEOUT', message: 'timeout' });
+  /** 첫 [VM 생성]이 응답 시간 초과로 끝나게 한다 (mutation 상태도 함께 바꾼다) */
+  async function timeOutFirstAttempt() {
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.error = timeout;
+      throw timeout;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'VM 생성' }));
+    expect(await screen.findByRole('button', { name: '같은 사양으로 다시 생성' })).toBeInTheDocument();
+  }
+
+  it('다시 생성이 200(created=false)으로 끝나면 "VM 생성 완료 / 이어서 마쳤습니다"', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    await timeOutFirstAttempt();
+    expect(screen.getByText(/새로고침하면 이 안내가 사라집니다/)).toBeInTheDocument();
+
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.error = null;
+      createMutation.data = { vm: { vm_id: 'vm-new', name: 'drive-vm-a' }, created: false };
+      return createMutation.data;
+    });
+    fireEvent.click(screen.getByRole('button', { name: '같은 사양으로 다시 생성' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'VM 생성 완료' });
+    expect(within(dialog).getByText('앞서 시간이 초과된 생성을 이어서 마쳤습니다.')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/새 VM은 만들지 않았습니다/)).toBeNull();
+  });
+
+  it('시간 초과된 이름은 [이전]으로 돌아가도 같은 이름 차단에서 빠진다 (다른 같은 이름은 그대로 막는다)', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    await timeOutFirstAttempt();
+    // 서버가 이어서 만든 VM 이 목록에 생겼다
+    listedVms.items = [
+      { vm_id: 'vm-new', name: 'drive-vm-a', state: 'stopped' },
+      { vm_id: 'vm-other', name: 'drive-vm-b', state: 'running' },
+    ];
+    fireEvent.click(screen.getByRole('button', { name: '이전' }));
+    expect(screen.queryByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.')).toBeNull();
+    expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'Drive-VM-B' } });
+    expect(
+      screen.getByText('같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.'),
+    ).toBeInTheDocument();
+  });
+
+  it('다시 생성했는데 409 VM_OPERATION_IN_PROGRESS 면 시간 초과 안내를 유지하고 아직 진행 중이라고 알린다', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    await timeOutFirstAttempt();
+
+    const busy = new ApiError(409, { code: 'VM_OPERATION_IN_PROGRESS', message: 'busy' });
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.error = busy;
+      throw busy;
+    });
+    fireEvent.click(screen.getByRole('button', { name: '같은 사양으로 다시 생성' }));
+
+    expect(
+      await screen.findByText('보드에서 생성이 아직 진행 중입니다. 잠시 후 목록에서 확인해 주세요.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('생성 요청의 응답 시간이 초과되었습니다')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '같은 사양으로 다시 생성' })).toBeEnabled();
+    // 일반 오류 문구("이 VM에 다른 작업이 진행 중입니다")로 바꾸지 않는다
+    expect(screen.queryByText(/이 VM에 다른 작업이 진행 중입니다/)).toBeNull();
+  });
+
+  it('시간 초과 없이 처음부터 200 이면 지금처럼 "기존 VM 시작"', async () => {
+    renderCreatePage();
+    goToReviewStep();
+    createMutation.mutateAsync.mockImplementationOnce(async () => {
+      createMutation.data = { vm: { vm_id: 'vm-existing', name: 'drive-vm-a' }, created: false };
+      return createMutation.data;
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'VM 생성' }));
+    const dialog = await screen.findByRole('dialog', { name: '기존 VM 시작' });
+    expect(within(dialog).getByText(/새 VM은 만들지 않았습니다/)).toBeInTheDocument();
+  });
+});
+
+describe('메모리 입력 규칙 (S15P31E110-469, 조정 화면과 같은 16 MiB 단위)', () => {
+  const goToInfoStep = () => {
+    renderCreatePage();
+    fireEvent.click(screen.getByRole('button', { name: /Linux Base/ }));
+    fireEvent.click(screen.getByRole('button', { name: '다음' }));
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'drive-vm-a' } });
+  };
+  const memory = () => screen.getByLabelText(/메모리/);
+
+  it.each([
+    ['300', '메모리는 16 MiB 단위로 입력해 주세요.'],
+    ['128', '메모리는 256~1024 MiB 사이로 입력해 주세요.'],
+    ['2048', '메모리는 256~1024 MiB 사이로 입력해 주세요.'],
+  ])('%s MiB 는 입력칸 아래에 "%s" 를 보이고 다음 단계를 막는다', (value, reason) => {
+    goToInfoStep();
+    fireEvent.change(memory(), { target: { value } });
+    expect(screen.getByText(reason)).toHaveAttribute('id', 'vm-memory-reason');
+    expect(memory()).toHaveAttribute('aria-invalid', 'true');
+    expect(memory()).toHaveAttribute('aria-describedby', 'vm-memory-reason');
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+  });
+
+  it('16 MiB 단위면 통과 (화살표 단위 64 와 별개)', () => {
+    goToInfoStep();
+    fireEvent.change(memory(), { target: { value: '272' } });
+    expect(memory()).toHaveAttribute('step', '64');
+    expect(memory()).toHaveAttribute('aria-invalid', 'false');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
+  });
+});
+
+describe('VM 이름 규칙별 이유 (S15P31E110-469)', () => {
+  const goToInfoStep = () => {
+    renderCreatePage();
+    fireEvent.click(screen.getByRole('button', { name: /Linux Base/ }));
+    fireEvent.click(screen.getByRole('button', { name: '다음' }));
+  };
+  const nameInput = () => screen.getByLabelText(/VM 이름/);
+
+  it('처음 빈 칸에는 이유를 띄우지 않고 다음만 막는다', () => {
+    goToInfoStep();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(nameInput()).toHaveAttribute('aria-invalid', 'false');
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+  });
+
+  it.each([
+    ['', 'VM 이름을 입력해 주세요.'],
+    ['a'.repeat(64), 'VM 이름은 63자 이하로 입력해 주세요. (지금 64자)'],
+    [' drive', 'VM 이름 앞뒤에는 공백을 넣을 수 없습니다.'],
+    ['drive ', 'VM 이름 앞뒤에는 공백을 넣을 수 없습니다.'],
+    ['dr\u0001ive', 'VM 이름에는 줄바꿈·탭 같은 제어문자를 쓸 수 없습니다.'],
+  ])('%j → "%s"', (value, reason) => {
+    goToInfoStep();
+    fireEvent.change(nameInput(), { target: { value: 'x' } });
+    fireEvent.change(nameInput(), { target: { value } });
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(reason);
+    expect(nameInput()).toHaveAttribute('aria-invalid', 'true');
+    expect(nameInput()).toHaveAttribute('aria-describedby', alert.id);
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+  });
+
+  it('vCPU 가 1~4 밖이면 입력칸 아래에 이유', () => {
+    goToInfoStep();
+    fireEvent.change(nameInput(), { target: { value: 'drive-vm-a' } });
+    fireEvent.change(screen.getByLabelText(/vCPU/), { target: { value: '5' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('vCPU는 1~4개 사이 정수로 입력해 주세요.');
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+  });
+});
+
+describe('서버 422 필드 오류를 입력칸에 (S15P31E110-469)', () => {
+  it('errors[].field 를 입력 단계의 해당 칸 아래에 한글로 보이고(서버 영문 문구 없음), 고치면 지운다', async () => {
+    createMutation.mutateAsync.mockRejectedValue(
+      new ApiError(422, {
+        code: 'VALIDATION_ERROR',
+        message: '요청 값이 올바르지 않습니다.',
+        errors: [
+          { field: 'name', reason: 'name은 1~63자이며 제어문자와 앞뒤 공백은 사용할 수 없습니다.' },
+          { field: 'memory_mib', reason: 'memory_mib는 16~1024여야 합니다.' },
+        ],
+      }),
+    );
+    renderCreatePage();
+    goToReviewStep();
+    fireEvent.click(screen.getByRole('button', { name: 'VM 생성' }));
+
+    const nameReason = await screen.findByText('VM 이름은 1~63자이며 앞뒤 공백과 제어문자를 쓸 수 없습니다.');
+    expect(screen.getByRole('heading', { name: 'VM 정보 및 리소스' })).toBeInTheDocument();
+    expect(screen.getByLabelText(/VM 이름/)).toHaveAttribute('aria-describedby', nameReason.id);
+    const memoryReason = screen.getByText('메모리는 256~1024 MiB 사이로 입력해 주세요.');
+    expect(screen.getByLabelText(/메모리/)).toHaveAttribute('aria-describedby', memoryReason.id);
+    expect(screen.getByRole('status')).toHaveTextContent('서버가 입력값을 받아들이지 않았습니다.');
+    expect(document.body).not.toHaveTextContent(/name은|memory_mib|요청 값이 올바르지/);
+    expect(screen.getByRole('button', { name: '다음' })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/VM 이름/), { target: { value: 'drive-vm-b' } });
+    expect(screen.queryByText(/VM 이름은 1~63자/)).toBeNull();
+    fireEvent.change(screen.getByLabelText(/메모리/), { target: { value: '528' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: '다음' })).toBeEnabled();
+  });
+
+  it('입력칸이 없는 필드만 오면 확인 단계에 공용 문구', async () => {
+    const failure = new ApiError(422, {
+      code: 'VALIDATION_ERROR',
+      message: '요청 값이 올바르지 않습니다.',
+      errors: [{ field: 'template_id', reason: 'template_id는 필수입니다.' }],
+    });
+    createMutation.error = failure;
+    createMutation.mutateAsync.mockRejectedValue(failure);
+    renderCreatePage();
+    goToReviewStep();
+    fireEvent.click(screen.getByRole('button', { name: 'VM 생성' }));
+    await Promise.resolve();
+    expect(screen.getByRole('heading', { name: '생성 정보를 확인해 주세요' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('입력한 값을 다시 확인해 주세요.');
+  });
+});
+
+describe('템플릿 목록 안내', () => {
+  it('보드에 닿지 못해 템플릿을 못 읽으면 보드 연결 문제라고 안내한다', () => {
+    templatesQuery.data = undefined;
+    templatesQuery.error = new ApiError(503, {
+      code: 'VM_CONTROL_UNAVAILABLE',
+      message: 'VM 제어 서비스에 연결할 수 없습니다.',
+    });
+    renderCreatePage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent('보드에 연결할 수 없어 템플릿을 불러오지 못했습니다');
+  });
+
+  it('그 밖의 오류는 일반 실패 문구를 보여 준다', () => {
+    templatesQuery.data = undefined;
+    templatesQuery.error = new ApiError(500, { code: 'INTERNAL_ERROR' });
+    renderCreatePage();
+
+    expect(screen.getByRole('alert')).toHaveTextContent('템플릿을 불러오지 못했습니다.');
+    expect(screen.queryByText(/보드에 연결할 수 없어/)).not.toBeInTheDocument();
+  });
+
+  it('보드에 공개된 템플릿이 없으면 빈 목록 안내를 보여 준다', () => {
+    templatesQuery.data = [];
+    renderCreatePage();
+
+    expect(screen.getByText(/보드에 공개된 템플릿이 없습니다/)).toBeInTheDocument();
   });
 });

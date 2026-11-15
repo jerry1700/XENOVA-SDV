@@ -50,24 +50,24 @@ docker run --rm -p 8081:8080 xenova-vm-screens
 API·WebSocket 프록시와 운영 도메인은 배포 Nginx 설정에서 연결합니다.
 
 - 콘솔 환경변수는 `apps/admin-console/.env.example` 을 `.env.local` 로 복사해 바꿉니다 (`VITE_BACKEND_ORIGIN`, `VITE_API_BASE_URL`, `VITE_MOCK`).
-- 디자인 확인만 할 때는 로그인 없이 `http://localhost:5173/components-public`.
+- 디자인 확인만 할 때는 서버 연결 없이 `http://localhost:5173/components-public` (개발 모드에서만 열림 — 개발 서버·`VITE_MOCK=true` 빌드. 운영 빌드에서는 `/components`·`/components-public` 모두 콘솔 첫 화면으로 넘어간다).
 
 ## 관리 콘솔
 
 관리자 웹은 **VM Dashboard · Vision · VM Control · Simulator** 네 영역으로 구성합니다. 주행 상태는 전역 띠로 반복하지 않고 Dashboard Overview와 Simulator 안에서 맥락에 맞게 보여 줍니다.
 
-| 경로                                                 | 화면                                      | 데이터                              |
-| ---------------------------------------------------- | ----------------------------------------- | ----------------------------------- |
-| `/login`                                             | 로그인                                    | auth                                |
-| `/dashboard/overview`                                | VM 3대 통합 현황                          | drive state, vms, events            |
-| `/dashboard/cpu`, `/dashboard/memory`                | CPU·Memory 자원 현황                      | vms, metrics                        |
-| `/dashboard/console`                                 | VM별 웹 콘솔                              | WS `/ws/v1/vms/{id}/console`        |
-| `/dashboard/vms/:vmId`                               | Overview에서 진입하는 VM 상세             | vms, metrics, processes, 콘솔 WS-03 |
-| `/vision`                                            | Jetson 카메라·인지 현황                   | 후속 이슈 -306                      |
-| `/control`, `/control/vms/new`, `/control/vms/:vmId` | VM 목록·생성·생명주기 제어                | vms, templates                      |
-| `/simulator`                                         | 실차 전 시뮬레이터·장애/복구 시연         | drive state, input, display route   |
-| `/phone-link`                                        | 휴대폰 화면 연결(접속 주소·연결번호 발급) | REST-38·REST-39 phone-link          |
-| `/events`, `/components`                             | 기존 보조·개발 화면                       | events 또는 —                       |
+| 경로                                                 | 화면                                                                           | 데이터                              |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------ | ----------------------------------- |
+| `/login`                                             | 로그인                                                                         | auth                                |
+| `/dashboard/overview`                                | VM 3대 통합 현황                                                               | drive state, vms, events            |
+| `/dashboard/cpu`, `/dashboard/memory`                | CPU·Memory 자원 현황                                                           | vms, metrics                        |
+| `/dashboard/console`                                 | VM별 웹 콘솔                                                                   | WS `/ws/v1/vms/{id}/console`        |
+| `/dashboard/vms/:vmId`                               | Overview에서 진입하는 VM 상세                                                  | vms, metrics, processes, 콘솔 WS-03 |
+| `/vision`                                            | Jetson 카메라·인지 현황                                                        | 후속 이슈 -306                      |
+| `/control`, `/control/vms/new`, `/control/vms/:vmId` | VM 목록·생성·생명주기 제어                                                     | vms, templates                      |
+| `/simulator`                                         | 실차 전 시뮬레이터·장애/복구 시연                                              | drive state, input, display route   |
+| `/phone-link`                                        | 차량 화면 출력 전환(HDMI / 휴대폰)과 휴대폰 화면 연결(접속 주소·연결번호 발급) | REST-38~41 phone-link, display mode |
+| `/events`, `/components`                             | 기존 보조·개발 화면                                                            | events 또는 —                       |
 
 기존 `/vms`, `/resources`, `/demo`, `/console` 주소는 북마크 호환을 위해 새 주소로 이동시킵니다.
 

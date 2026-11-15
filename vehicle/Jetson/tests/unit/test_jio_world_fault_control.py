@@ -167,6 +167,40 @@ class JioWorldFaultControlTests(unittest.TestCase):
         finally:
             self.close(owner)
 
+    def test_scenario4_BLOCK_stops_World_then_only_fresh_World_resumes_after_duration(self):
+        clock, owner, client = self.owner()
+        owner.bind_world_fault_control(fixtures.uid(10))
+        request = self.set_request(owner, mode='BLOCK', delay=0, duration=1)
+        applied = json.loads(self.receive(owner, request).raw)['payload']
+        self.assertEqual(applied['status'], 'APPLIED')
+        self.assertEqual(owner.snapshot()['world_fault']['mode'], 'BLOCK')
+
+        # BLOCK 동안 계산 결과는 JIO 경계에서 소비되고 MQTT World로 나가지 않는다.
+        self.assertTrue(self.offer(owner))
+        self.assertFalse(owner.snapshot()['world_pending'])
+        owner.start()
+        try:
+            self.wait(lambda: any(item[0].endswith('/fault/result.json') for item in client.published))
+            self.assertFalse(any(item[0] == WORLD_TOPIC for item in client.published))
+
+            deadline = owner.snapshot()['fault_control']['deadline_us']
+            clock.now = deadline
+            self.wait(lambda: owner.snapshot()['world_fault']['mode'] == 'PASS')
+            self.assertIsNone(owner.snapshot()['fault_control']['active_command_id'])
+            self.assertFalse(any(item[0] == WORLD_TOPIC for item in client.published))
+
+            # 기간 종료 뒤에는 BLOCK 전에 버린 결과가 아니라 새로 계산된 결과만 송신한다.
+            value = fixtures.decode(fixtures.world(2), fixtures.schema.WorldSnapshot)
+            value.completed_us, value.published_us = clock.now - 20, clock.now - 10
+            fresh = fixtures.encode(value)
+            self.assertTrue(owner.offer_world(fresh, expires_j_us=clock.now + 100_000,
+                publication_sha256=owner.snapshot()['publication_sha256']))
+            self.wait(lambda: any(item[0] == WORLD_TOPIC for item in client.published))
+            worlds = [item for item in client.published if item[0] == WORLD_TOPIC]
+            self.assertEqual([item[1] for item in worlds], [fresh])
+        finally:
+            self.close(owner)
+
     def test_wrong_qos_and_retained_commands_do_not_change_filter(self):
         _, owner, _ = self.owner()
         owner.bind_world_fault_control(fixtures.uid(10))

@@ -3,7 +3,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties
 import { useSearchParams } from 'react-router';
 import { useEvents, useVms } from '../api/queries';
 import type { EventSeverity, Vm, VmEvent } from '../api/types';
-import { CATEGORY_LABEL, categoryOf, clock, type EventCategory } from '../domain/events';
+import { CATEGORY_LABEL, categoryOf, clock, payloadNumber, type EventCategory } from '../domain/events';
 import { MODE_LABEL, plain, roleOf, sortVms } from '../domain/roles';
 import { useDrive } from '../layout/DriveContext';
 import { SEVERITY_LABEL } from './eventLine';
@@ -13,8 +13,11 @@ import styles from './pages.module.css';
 const CATEGORIES = Object.keys(CATEGORY_LABEL) as EventCategory[];
 const SEVERITIES: EventSeverity[] = ['INFO', 'WARNING', 'ERROR'];
 
-/** 날짜 구분 줄 (예: 2026. 11. 12.) — 같은 날 이벤트는 시각만 보인다 */
-const dayOf = (iso: string) => new Date(iso).toLocaleDateString('ko-KR');
+/** 날짜 구분 줄 (예: 2026. 11. 12.) — 같은 날 이벤트는 시각만 보인다. 읽을 수 없는 시각은 Invalid Date 대신 */
+const dayOf = (iso: string) => {
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? '날짜 미상' : at.toLocaleDateString('ko-KR');
+};
 
 /** 칩 앞 색 점. tone 은 심각도(info·warning·error), color 는 VM 역할색 토큰 */
 type ChipDot = { tone?: string; color?: string };
@@ -59,7 +62,7 @@ export function EventsPage() {
   const vmOf = (vmId: string | null | undefined): Vm | undefined =>
     vmId ? vms.data?.items.find((v) => v.vm_id === vmId) : undefined;
   const lastHandoff = (events.data?.items ?? []).find(
-    (e) => e.type === 'drive.mode.changed' && e.payload.handoff_ms != null,
+    (e) => e.type === 'drive.mode.changed' && payloadNumber(e.payload.handoff_ms) != null,
   );
   const control = drive?.control;
 
@@ -75,12 +78,13 @@ export function EventsPage() {
       type="button"
       aria-pressed={current === value}
       className={styles.eventChip}
+      title={label}
       onClick={() => set(current === value ? null : value)}
     >
       {dot && (
         <i data-tone={dot.tone} style={dot.color ? ({ '--dot': dot.color } as CSSProperties) : undefined} />
       )}
-      {label}
+      <span className={styles.eventChipLabel}>{label}</span>
     </button>
   );
 
@@ -142,7 +146,7 @@ export function EventsPage() {
           <strong>
             {lastHandoff ? (
               <>
-                {String(lastHandoff.payload.handoff_ms)}
+                {payloadNumber(lastHandoff.payload.handoff_ms)}
                 <small>ms</small>
               </>
             ) : (
@@ -174,8 +178,8 @@ export function EventsPage() {
             );
           })}
         </div>
-        {events.data && items.length === 0 && <p className={styles.dim}>조건에 맞는 이벤트가 없다</p>}
-        {events.error && <p className={styles.error}>이벤트를 불러오지 못했다</p>}
+        {events.data && items.length === 0 && <p className={styles.dim}>조건에 맞는 이벤트가 없습니다.</p>}
+        {events.error && <p className={styles.error}>이벤트를 불러오지 못했습니다.</p>}
       </Card>
     </div>
   );

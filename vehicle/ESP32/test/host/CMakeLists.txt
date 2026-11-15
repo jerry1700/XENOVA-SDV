@@ -22,6 +22,22 @@ if(EXISTS ${CONTRACT_VECTORS})
   endif()
 endif()
 
+# 단일 존 ToF vector 도 같은 방식으로 복사본을 쓴다
+set(PINNED_TOF_VECTORS ${CMAKE_CURRENT_SOURCE_DIR}/gateway-tof-single-1.json)
+set(CONTRACT_TOF_VECTORS ${CMAKE_CURRENT_SOURCE_DIR}/../../../../docs/contracts/vectors/gateway-tof-single-1.json)
+if(EXISTS ${CONTRACT_TOF_VECTORS})
+  file(SHA256 ${CONTRACT_TOF_VECTORS} contract_tof_sha256)
+  file(SHA256 ${PINNED_TOF_VECTORS} pinned_tof_sha256)
+  if(NOT contract_tof_sha256 STREQUAL pinned_tof_sha256)
+    message(FATAL_ERROR "gateway-tof-single-1.json 복사본이 docs/contracts/vectors 의 원본과 다르다. 원본을 다시 복사한다")
+  endif()
+endif()
+
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/tof_vectors.inc
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_vectors.py --tof ${PINNED_TOF_VECTORS} ${CMAKE_CURRENT_BINARY_DIR}/tof_vectors.inc
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_vectors.py ${PINNED_TOF_VECTORS}
+  VERBATIM)
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vectors.inc
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_vectors.py ${PINNED_VECTORS} ${CMAKE_CURRENT_BINARY_DIR}/vectors.inc
@@ -49,7 +65,8 @@ set(FB3_CODEC ${FB3_SOURCE}/wire.c ${FB3_SOURCE}/payloads.c)
 set(FB3_LINK ${FB3_CODEC} ${FB3_SOURCE}/cutoff.c ${FB3_SOURCE}/link.c)
 
 enable_testing()
-fb3_host_executable(test_feedback3 test_feedback3.c ${FB3_CODEC} ${CMAKE_CURRENT_BINARY_DIR}/vectors.inc)
+fb3_host_executable(test_feedback3 test_feedback3.c ${FB3_CODEC} ${CMAKE_CURRENT_BINARY_DIR}/vectors.inc
+                    ${CMAKE_CURRENT_BINARY_DIR}/tof_vectors.inc)
 add_test(NAME esp32_feedback3 COMMAND test_feedback3)
 
 fb3_host_executable(test_link test_link.c ${FB3_LINK} ${CMAKE_CURRENT_BINARY_DIR}/link_vectors.inc)
@@ -64,6 +81,9 @@ if(WIN32)
   target_link_libraries(sim_link PRIVATE winmm)
 endif()
 add_test(NAME esp32_link_bench COMMAND ${Python3_EXECUTABLE} ${TOOLS}/link_bench.py --sim $<TARGET_FILE:sim_link>)
+# 시뮬레이터의 앞 벽으로 다가가 근거리 제동이 걸리고 풀리는 것까지 본다
+add_test(NAME esp32_link_bench_wall
+         COMMAND ${Python3_EXECUTABLE} ${TOOLS}/link_bench.py --sim $<TARGET_FILE:sim_link> --wall-mm 230)
 add_test(NAME esp32_steer_check COMMAND ${Python3_EXECUTABLE} ${TOOLS}/steer_check.py --sim $<TARGET_FILE:sim_link> --hold 0.1)
 add_test(NAME esp32_steer_check_stationary
          COMMAND ${Python3_EXECUTABLE} ${TOOLS}/steer_check.py --sim $<TARGET_FILE:sim_link> --hold 0.1 --stationary)

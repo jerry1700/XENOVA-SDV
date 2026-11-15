@@ -134,24 +134,32 @@ class AuthApiIntegrationTest {
     }
 
     @Test
-    void loginIsRateLimitedAfterMaximumFailures() throws Exception {
-        String invalidCredentials = """
-                {"username":"rate-limited-user","password":"wrong-password"}
-                """;
+    void repeatedWrongPasswordsNeverLockTheAccount() throws Exception {
+        // The console shares one account (frontend auto-login); a lockout would stop every viewer.
+        mockMvc.perform(post("/api/v1/auth/signup")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"username":"shared-console","nickname":"shared","password":"password123!"}
+                                """))
+                .andExpect(status().isCreated());
 
-        for (int attempt = 0; attempt < 5; attempt++) {
+        for (int attempt = 0; attempt < 20; attempt++) {
             mockMvc.perform(post("/api/v1/auth/login")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content(invalidCredentials))
+                            .content("""
+                                    {"username":"shared-console","password":"wrong-password"}
+                                    """))
                     .andExpect(status().isUnauthorized())
                     .andExpect(jsonPath("$.code").value("INVALID_CREDENTIALS"));
         }
 
         mockMvc.perform(post("/api/v1/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(invalidCredentials))
-                .andExpect(status().isTooManyRequests())
-                .andExpect(jsonPath("$.code").value("LOGIN_RATE_LIMITED"));
+                        .content("""
+                                {"username":"shared-console","password":"password123!"}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.access_token").isNotEmpty());
     }
 
     @Test

@@ -1,5 +1,6 @@
 /* feedback-3 통신 처리 호스트 시험. gen_vectors.py 가 만든 vectors.inc 의 고정 바이트와 대조한다 */
 #include "check.h"
+#include "feedback3/codes.h"
 #include "feedback3/payloads.h"
 #include "feedback3/wire.h"
 
@@ -23,7 +24,21 @@ struct cobs_case {
 	const char *encoded_hex;
 };
 
+struct tof_case {
+	const char *name;
+	uint8_t sensor_id;
+	uint64_t source_sample;
+	uint64_t source_us;
+	uint16_t distance_mm;
+	uint8_t status;
+	uint8_t quality;
+	uint32_t crc32;
+	const char *payload_hex;
+	const char *wire_hex;
+};
+
 #include "vectors.inc"
+#include "tof_vectors.inc"
 
 static void test_crc(void)
 {
@@ -160,6 +175,51 @@ static void test_boundaries(void)
 	CHECK(fb3_pack_hello(&hello, short_buffer, sizeof short_buffer) == 0);
 }
 
+/* 단일 존 ToF 관측. 계약의 따로 둔 vector(gateway-tof-single-1.json)와 대조한다 */
+static void test_tof(void)
+{
+	current = "tof layout";
+	CHECK(FB3_TOF_SAMPLE_ID == TOF_ID && FB3_TOF_SAMPLE_SIZE == TOF_PAYLOAD_BYTES);
+	CHECK(FB3_TOF_SAMPLE_CRC_SIZE == TOF_CRC_BYTES && FB3_CAP_TOF_SINGLE == TOF_CAPABILITY);
+	CHECK(TOF_WIRE_BYTES <= FB3_MAX_WIRE);
+
+	current = "crc32 check";
+	CHECK(fb3_crc32((const uint8_t *)"123456789", 9) == 0xcbf43926u && fb3_crc32(NULL, 0) == 0);
+
+	for (size_t i = 0; i < COUNT(TOF_FRAMES); i++) {
+		const struct tof_case *t = &TOF_FRAMES[i];
+		uint8_t payload[FB3_MAX_WIRE], wire[FB3_MAX_WIRE], out[FB3_MAX_WIRE];
+		struct fb3_tof_sample v;
+		struct fb3_frame frame;
+
+		current = t->name;
+		size_t payload_len = from_hex(t->payload_hex, payload, sizeof payload);
+		size_t wire_len = from_hex(t->wire_hex, wire, sizeof wire);
+		memset(&v, 0xa5, sizeof v);
+		CHECK(payload_len == FB3_TOF_SAMPLE_SIZE && fb3_unpack_tof_sample(payload, payload_len, &v));
+		CHECK(v.sensor_id == t->sensor_id && v.source_sample == t->source_sample && v.device_sample_us == t->source_us);
+		CHECK(v.rows == 1 && v.cols == 1 && v.distance_mm == t->distance_mm && v.status == t->status
+		      && v.quality == t->quality && v.sample_crc32 == t->crc32);
+		CHECK(fb3_crc32(payload, FB3_TOF_SAMPLE_CRC_SIZE) == t->crc32);
+
+		/* 같은 값으로 다시 묶으면 같은 바이트가 나온다. CRC 는 seal 이 채운다 */
+		v.sample_crc32 = 0;
+		memset(out, 0xa5, sizeof out);
+		CHECK(fb3_pack_tof_sample(&v, out, sizeof out) == FB3_TOF_SAMPLE_SIZE);
+		CHECK(memcmp(out, payload, FB3_TOF_SAMPLE_CRC_SIZE) == 0 && memcmp(out, payload, payload_len) != 0);
+		fb3_seal_tof_sample(out);
+		CHECK(memcmp(out, payload, payload_len) == 0);
+		CHECK(fb3_pack_tof_sample(&v, out, FB3_TOF_SAMPLE_SIZE - 1) == 0);
+		CHECK(!fb3_unpack_tof_sample(payload, payload_len - 1, &v));
+
+		size_t n = fb3_encode_frame(FB3_TOF_SAMPLE_ID, payload, payload_len, out, sizeof out);
+		CHECK(n == wire_len && n <= TOF_WIRE_BYTES && memcmp(out, wire, n) == 0);
+		CHECK(fb3_decode_frame(wire, wire_len, &frame) == FB3_FRAME_OK);
+		CHECK(frame.id == FB3_TOF_SAMPLE_ID && frame.length == payload_len
+		      && memcmp(frame.payload, payload, payload_len) == 0);
+	}
+}
+
 int main(void)
 {
 	test_crc();
@@ -169,7 +229,8 @@ int main(void)
 	test_frames();
 	test_malformed();
 	test_boundaries();
-	printf("feedback-3: %zu frames, %zu malformed, %zu cobs, %d checks, %d failures\n",
-		   COUNT(FRAMES), COUNT(MALFORMED), COUNT(COBS), checks, failures);
+	test_tof();
+	printf("feedback-3: %zu frames, %zu malformed, %zu cobs, %zu tof, %d checks, %d failures\n",
+		   COUNT(FRAMES), COUNT(MALFORMED), COUNT(COBS), COUNT(TOF_FRAMES), checks, failures);
 	return failures == 0 ? 0 : 1;
 }

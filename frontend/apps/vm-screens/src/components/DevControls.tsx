@@ -2,6 +2,7 @@ import { Link } from 'react-router';
 import { label } from '../telemetry/scenario';
 import { useTelemetry } from '../telemetry/TelemetryProvider';
 import { APP_IDS } from '../telemetry/types';
+import { devControlsVisible } from './devControlsVisible';
 import styles from './screens.module.css';
 
 const SOURCE_LABEL = { mock: '가짜 시나리오', console: '관리 콘솔 mock', live: '백엔드' } as const;
@@ -10,16 +11,17 @@ const CONNECTION_LABEL = {
   connecting: '연결 중',
   live: '연결됨',
   offline: '신호 없음',
-  unauthorized: '인증 필요 — 관리 콘솔 로그인 또는 .env.local 계정',
+  unauthorized: '인증 필요',
 } as const;
 
 /**
- * 개발용 아래 띠: 데이터 출처·연결 상태와 화면 이동 링크만. 키오스크(?kiosk=1)에서는 숨긴다.
+ * 개발용 아래 띠: 데이터 출처·연결 상태와 화면 이동 링크만. 키오스크(?kiosk=1)와 운영 빌드에서는 숨긴다
+ * (운영 점검은 ?dev=1, devControlsVisible).
  * 조작 버튼은 없다 — 모니터는 보여 주기만 하고, 장애 주입·재개는 관리 콘솔 시연 제어에서 한다 (화면 정의서 §1).
  */
 export function DevControls() {
   const { source, connection } = useTelemetry();
-  if (new URLSearchParams(window.location.search).has('kiosk')) return null;
+  if (!devControlsVisible(window.location.search)) return null;
   return (
     <footer className={styles.dev}>
       <span className={styles.devTitle}>

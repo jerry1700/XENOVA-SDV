@@ -1,6 +1,12 @@
 import type { DriveMode } from '../api/drive';
 import type { AgentStatus, EventSeverity, VmEvent, VmState } from '../api/types';
-import { describe } from '../domain/events';
+import {
+  describe,
+  payloadNumber,
+  payloadText,
+  UNKNOWN_EVENT_LABEL,
+  unknownEventType,
+} from '../domain/events';
 import { MODE_LABEL } from '../domain/roles';
 import { AGENT_LABEL, STATE_LABEL } from '../format';
 import { RECOVERY_CODE_LABEL } from './vmDetailEventFormat';
@@ -33,7 +39,8 @@ export const EVENT_KIND: Partial<Record<VmEvent['type'], string>> = {
 
 export const SEVERITY_LABEL: Record<EventSeverity, string> = { INFO: '정보', WARNING: '경고', ERROR: '오류' };
 
-const str = (value: unknown) => (value == null ? '' : String(value));
+/** 객체·배열·NaN 은 `[object Object]`·`NaN` 대신 비운다 (domain/events payloadText) */
+const str = payloadText;
 const stateLabel = (value: unknown) => STATE_LABEL[str(value) as VmState] ?? str(value);
 const agentLabel = (value: unknown) => AGENT_LABEL[str(value) as AgentStatus] ?? (str(value) || '—');
 const modeLabel = (value: unknown) => MODE_LABEL[str(value) as DriveMode] ?? (str(value) || '—');
@@ -49,6 +56,8 @@ export interface EventLine {
   code: string | null;
   /** 줄 전체 설명 (title). 한글로 바꾼 상태 값의 원문을 포함한다 */
   full: string;
+  /** 화면이 모르는 이벤트 종류의 원문 type — 화면 문구에는 넣지 않고 title 로만. 아는 종류면 null */
+  rawType: string | null;
 }
 
 export function eventLine(event: VmEvent): EventLine {
@@ -82,7 +91,7 @@ export function eventLine(event: VmEvent): EventLine {
       note = base.detail;
       break;
     case 'drive.resume.accepted':
-      text = `재개 승인 — ${Number(p.switch_in_ms ?? 3000) / 1000}초 뒤 ${MODE_LABEL.AUTO}`;
+      text = `재개 승인 — ${(payloadNumber(p.switch_in_ms) ?? 3000) / 1000}초 뒤 ${MODE_LABEL.AUTO}`;
       raw = title;
       note = base.detail;
       break;
@@ -114,7 +123,7 @@ export function eventLine(event: VmEvent): EventLine {
     default:
       note = base.detail;
   }
-  const kind = EVENT_KIND[event.type] ?? event.type;
+  const kind = EVENT_KIND[event.type] ?? UNKNOWN_EVENT_LABEL;
   return {
     kind,
     text,
@@ -123,5 +132,6 @@ export function eventLine(event: VmEvent): EventLine {
     full: [kind, text, note, code, raw && `원문 ${raw}`, base.detail !== note && base.detail]
       .filter(Boolean)
       .join(' · '),
+    rawType: unknownEventType(event),
   };
 }

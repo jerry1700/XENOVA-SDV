@@ -45,6 +45,7 @@ export function ConsolePage() {
 
       <LiveDataAlert />
       {vms.isPending && <p className={styles.dim}>불러오는 중…</p>}
+      {vms.isSuccess && items.length === 0 && <div className={styles.statePanel}>등록된 VM이 없습니다.</div>}
 
       <div className={styles.picks} role="tablist" aria-label="콘솔을 열 VM">
         {items.map((vm) => {
@@ -62,7 +63,9 @@ export function ConsolePage() {
               onClick={() => setParams({ vm: vm.vm_id }, { replace: true })}
             >
               <span className={styles.row}>
-                <b style={{ color: role?.color }}>{vm.name}</b>
+                <b className={styles.pickName} style={{ color: role?.color }} title={vm.name}>
+                  {vm.name}
+                </b>
                 <span className={styles.grow} />
                 <span className={styles.consoleStates}>
                   <span className={styles.consoleAuthority} data-authority={authority.toLowerCase()}>

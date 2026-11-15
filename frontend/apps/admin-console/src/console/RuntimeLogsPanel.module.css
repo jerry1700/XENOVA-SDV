@@ -209,3 +209,18 @@
   padding: var(--x-space-3);
   color: var(--x-text-muted);
 }
+
+/* 좁은 화면(휴대폰·200% 확대): 메타 정보(시각·레벨·소스·VM)를 한 줄, 메시지는 다음 줄 전체 폭.
+   고정 열 합계(약 390px)가 화면보다 넓어 메시지 열이 0이 되던 문제 */
+@media (max-width: 640px) {
+  .row {
+    grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 10ch);
+    column-gap: var(--x-space-2);
+    row-gap: 0;
+    padding-block: 3px;
+  }
+
+  .message {
+    grid-column: 1 / -1;
+  }
+}

@@ -1,16 +1,27 @@
 import { Button, Card, Modal, StatusBadge, useToast } from '@xenova/ui';
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router';
-import { ApiError } from '../api/client';
-import { useSynchronizeVms, useVms, type VmAction } from '../api/queries';
+import { errorText } from '../api/errorText';
+import { useSynchronizeVms, useVms, type VmAction, useVmIdsUpdatingResources } from '../api/queries';
 import type { Vm, VmSynchronizationResult } from '../api/types';
 import { osLabel, sortVms } from '../domain/roles';
-import { canStartVm, canStopVm, STATE_HEALTH, STATE_LABEL, VM_ACTION_LABEL } from '../format';
+import {
+  canDeleteVm,
+  canStartVm,
+  canStopVm,
+  DELETE_BLOCKED_HINT,
+  DELETE_CONFIRM_TEXT,
+  STATE_HEALTH,
+  STATE_LABEL,
+  VM_ACTION_LABEL,
+} from '../format';
 import styles from './pages.module.css';
 import { VmOperationNotice } from './VmOperationProgress';
 import { useVmOperationProgress } from './useVmOperationProgress';
 import {
   finishVmCreation,
+  clearVmCreation,
+  isOwnedVmCreation,
   isVmCreationPending,
   matchesVmCreation,
   usePendingVmCreations,
@@ -27,17 +38,27 @@ export function VmListPage() {
   const navigate = useNavigate();
   const [deleting, setDeleting] = useState<Vm | null>(null);
   const pendingCreations = usePendingVmCreations();
+  const updatingResources = useVmIdsUpdatingResources();
 
   const registrationSync = useSynchronizeVms();
 
   // 보드 등록 목록 ↔ DB 등록 동기화. VM 실행 상태는 목록 자동 갱신이 따로 맡는다.
+  // 200 이어도 보류·충돌·정보 부족이 있으면 확인할 VM 과 사유를 같이, 더 오래 보인다.
   const synchronize = async () => {
     try {
       const result = await registrationSync.mutateAsync();
-      toast.show(synchronizationSummary(result), 'ok', 5000);
+      const needsAttention = synchronizationProblems(result).length > 0;
+      toast.show(
+        <SynchronizationToast result={result} />,
+        needsAttention ? 'recovering' : 'ok',
+        needsAttention ? 10000 : 5000,
+      );
     } catch (error) {
-      const message = error instanceof ApiError ? `${error.message} (${error.code})` : String(error);
-      toast.show(`VM 동기화에 실패했습니다. ${message}`, 'fault', 5000);
+      toast.show(
+        `VM 동기화에 실패했습니다. ${errorText(error, '잠시 후 다시 시도해 주세요.')}`,
+        'fault',
+        5000,
+      );
     }
   };
 
@@ -60,6 +81,8 @@ export function VmListPage() {
       ),
     [items, pendingCreations],
   );
+  const ownedPendingCreations = visiblePendingCreations.filter(isOwnedVmCreation);
+  const unknownPendingCreations = visiblePendingCreations.filter((creation) => !isOwnedVmCreation(creation));
 
   useEffect(() => {
     pendingCreations.forEach((creation) => {
@@ -89,7 +112,7 @@ export function VmListPage() {
             variant="secondary"
             onClick={() => void synchronize()}
             disabled={registrationSync.isPending}
-            title="보드에 등록된 VM과 서버 목록을 맞춥니다 (보드에만 있는 VM 추가, 보드에서 사라진 VM 정리)"
+            title="보드를 기준으로 VM 목록을 맞춥니다 (보드에만 있는 VM 추가·복구, 보드에 없는 VM 정리)"
           >
             {registrationSync.isPending ? '동기화 중…' : 'VM 동기화'}
           </Button>
@@ -122,16 +145,43 @@ export function VmListPage() {
         </div>
       )}
 
-      {visiblePendingCreations.length > 0 && (
+      {ownedPendingCreations.length > 0 && (
         <div className={styles.pendingCreationSummary} role="status">
           <i aria-hidden="true" />
           <div>
             <strong>VM 생성 작업 진행 중</strong>
-            <span>{visiblePendingCreations.map((creation) => creation.name).join(', ')}</span>
+            <span>{ownedPendingCreations.map((creation) => creation.name).join(', ')}</span>
           </div>
           <small>목록을 자동으로 갱신해 완료 상태를 확인합니다.</small>
         </div>
       )}
+
+      {/* 다른 탭·새로고침 전에 보낸 생성 — 결과를 이 탭이 받지 못해 성공·실패를 모른다 (S15P31E110-473) */}
+      {unknownPendingCreations.map((creation) => (
+        <div
+          key={`${creation.startedAt}:${creation.name}`}
+          className={styles.pendingCreationSummary}
+          data-unknown="true"
+          role="status"
+        >
+          <span aria-hidden="true" />
+          <div>
+            <strong>생성 결과 확인 필요</strong>
+            <span>
+              {creation.name} · 이 화면에서 보낸 요청이 아니라 결과를 알 수 없습니다. 목록에서 상태를 확인한
+              뒤 기록을 지워 주세요.
+            </span>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            aria-label={`${creation.name} 생성 기록 지우기`}
+            onClick={() => clearVmCreation(creation)}
+          >
+            기록 지우기
+          </Button>
+        </div>
+      ))}
 
       <div className={styles.controlGrid}>
         {items.map((vm, index) => {
@@ -139,7 +189,9 @@ export function VmListPage() {
           const operation = vmOperations.operations[vm.vm_id];
           const operationPending = operation?.status === 'pending';
           const creationPending = isVmCreationPending(vm, pendingCreations);
-          const controlsDisabled = operationPending || creationPending;
+          // 서버가 "다른 작업 진행 중"(409)을 줬으면 잠시, 이 탭에서 자원 적용 중이면 시작·정지를 잠근다 (S15P31E110-473)
+          const controlsDisabled = operationPending || creationPending || vmOperations.isBusy(vm.vm_id);
+          const powerDisabled = controlsDisabled || updatingResources.includes(vm.vm_id);
           return (
             <Card
               key={vm.vm_id}
@@ -209,7 +261,7 @@ export function VmListPage() {
                     <Button
                       size="sm"
                       onClick={() => run(vm, 'start')}
-                      disabled={!canStartVm(vm.state) || controlsDisabled}
+                      disabled={!canStartVm(vm.state) || powerDisabled}
                     >
                       시작
                     </Button>
@@ -217,7 +269,7 @@ export function VmListPage() {
                       size="sm"
                       variant="secondary"
                       onClick={() => run(vm, 'stop')}
-                      disabled={!canStopVm(vm.state) || controlsDisabled}
+                      disabled={!canStopVm(vm.state) || powerDisabled}
                     >
                       정지
                     </Button>
@@ -226,7 +278,8 @@ export function VmListPage() {
                     size="sm"
                     variant="danger"
                     onClick={() => setDeleting(vm)}
-                    disabled={controlsDisabled}
+                    disabled={!canDeleteVm(vm.state) || controlsDisabled}
+                    title={canDeleteVm(vm.state) ? undefined : DELETE_BLOCKED_HINT}
                   >
                     삭제
                   </Button>
@@ -263,10 +316,7 @@ export function VmListPage() {
             <span aria-hidden="true">!</span>
             <div>
               <strong>‘{deleting.name}’ VM을 삭제하시겠습니까?</strong>
-              <p>
-                VM을 종료하고 연결된 디스크를 삭제합니다.
-                <span className={styles.deleteIrreversible}>이 작업은 되돌릴 수 없습니다.</span>
-              </p>
+              <p>{DELETE_CONFIRM_TEXT}</p>
             </div>
           </div>
         )}
@@ -310,15 +360,55 @@ const formatMiB = (mib: number) => `${mib.toLocaleString('ko-KR')} MiB`;
 function synchronizationSummary(result: VmSynchronizationResult): string {
   const parts = [
     result.registered && `추가 ${result.registered}`,
+    result.restored && `복구 ${result.restored}`,
     result.updated && `갱신 ${result.updated}`,
     result.retired && `정리 ${result.retired}`,
-    result.missing_from_board && `보드에 없음 ${result.missing_from_board}`,
+    result.skipped && `보류 ${result.skipped}`,
     result.conflicts && `충돌 ${result.conflicts}`,
     result.incomplete && `정보 부족 ${result.incomplete}`,
   ].filter(Boolean);
   return parts.length === 0
     ? `VM 동기화 완료: 보드 ${result.discovered}대, 바뀐 것 없음`
     : `VM 동기화 완료: 보드 ${result.discovered}대 · ${parts.join(' · ')}`;
+}
+
+const SYNC_REASON_LABEL: Record<string, string> = {
+  in_operation: '작업 진행 중이라 이번엔 정리하지 않음',
+  duplicate_name: '이미 다른 VM이 쓰는 이름',
+  duplicate_board_vm_id: '보드에 같은 UUID가 두 번 있음',
+  invalid_vm_id: 'UUID 형식이 아님',
+  registration_metadata_missing: '보드 등록 정보가 부족함',
+};
+
+/**
+ * 사용자가 확인해야 할 항목(보류·충돌·정보 부족)을 VM 이름과 사유로. 화면에 없는 VM 이라 이름이 없으면 UUID 앞부분,
+ * 보드가 vm_id 도 주지 않았으면(invalid_vm_id, 백엔드 VmSynchronizationService) "알 수 없는 VM" (S15P31E110-473)
+ */
+function synchronizationProblems(result: VmSynchronizationResult): string[] {
+  return result.results
+    .filter((item) => item.action === 'skipped' || item.action === 'conflict' || item.action === 'incomplete')
+    .map((item) => {
+      const who = item.name ?? item.vm_id?.slice(0, 8) ?? '알 수 없는 VM';
+      const why = (item.reason && SYNC_REASON_LABEL[item.reason]) ?? item.reason ?? item.action;
+      return `${who}: ${why}`;
+    });
+}
+
+function SynchronizationToast({ result }: { result: VmSynchronizationResult }) {
+  const problems = synchronizationProblems(result);
+  return (
+    <div>
+      <div>{synchronizationSummary(result)}</div>
+      {problems.length > 0 && (
+        <ul className={styles.syncProblems} aria-label="동기화 확인 필요">
+          {/* 같은 이름·같은 사유가 겹칠 수 있다 (duplicate_board_vm_id) — key 가 겹치지 않게 순서를 섞는다 */}
+          {problems.map((problem, index) => (
+            <li key={`${index}:${problem}`}>{problem}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /** 서버가 dom0 목록을 받은 시각(observed_at). 읽을 수 없으면 화면이 응답을 받은 시각 */

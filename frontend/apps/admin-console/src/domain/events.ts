@@ -35,6 +35,16 @@ const CATEGORY: Record<EventType, EventCategory> = {
 
 export const categoryOf = (event: VmEvent): EventCategory => CATEGORY[event.type] ?? 'lifecycle';
 
+/** 화면이 모르는 이벤트 종류(백엔드에 새로 생긴 type)의 표시 이름. 원문 type 은 title 로만 남긴다 */
+export const UNKNOWN_EVENT_LABEL = '기타 이벤트';
+
+/** 화면이 아는 이벤트 종류인가 (모르면 UNKNOWN_EVENT_LABEL 로 보이고 원문은 title 로) */
+export const isKnownEventType = (type: string): type is EventType => Object.hasOwn(CATEGORY, type);
+
+/** 화면 title 용 원문 type — 아는 종류면 null */
+export const unknownEventType = (event: VmEvent): string | null =>
+  isKnownEventType(event.type) ? null : String(event.type);
+
 const REASON: Record<string, string> = {
   start: '시작',
   command_timeout: '명령 끊김',
@@ -48,7 +58,23 @@ const REASON: Record<string, string> = {
   readiness_lost: '준비 상태 깨짐',
 };
 
-const str = (value: unknown) => (value == null ? '' : String(value));
+/**
+ * payload 값을 한 줄 글자로. 글자·유한한 숫자·참거짓만 보이고, 객체·배열·NaN 처럼 글자로 바꾸면
+ * `[object Object]`·`NaN` 이 되는 값은 비운다 (S15P31E110-469)
+ */
+export function payloadText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '';
+  if (typeof value === 'boolean') return String(value);
+  return '';
+}
+
+/** payload 의 유한한 숫자만, 아니면 null */
+export function payloadNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+const str = payloadText;
 
 /** 한 줄 제목과 보조 설명 */
 export function describe(
@@ -62,8 +88,8 @@ export function describe(
         title: `${str(p.from) || '—'} → ${str(p.to)}`,
         detail: [
           REASON[str(p.reason)] ?? str(p.reason),
-          p.generation != null && `gen ${str(p.generation)}`,
-          p.handoff_ms != null && `인계 ${str(p.handoff_ms)} ms`,
+          str(p.generation) && `gen ${str(p.generation)}`,
+          payloadNumber(p.handoff_ms) != null && `인계 ${str(p.handoff_ms)} ms`,
         ]
           .filter(Boolean)
           .join(' · '),
@@ -75,10 +101,10 @@ export function describe(
       };
     case 'drive.resume.accepted':
       return {
-        title: `재개 승인 — ${Number(p.switch_in_ms ?? 3000) / 1000}초 뒤 AUTO`,
+        title: `재개 승인 — ${(payloadNumber(p.switch_in_ms) ?? 3000) / 1000}초 뒤 AUTO`,
         detail: [
-          p.requested_by && `요청 ${str(p.requested_by)}`,
-          p.generation != null && `gen ${str(p.generation)}`,
+          str(p.requested_by) && `요청 ${str(p.requested_by)}`,
+          str(p.generation) && `gen ${str(p.generation)}`,
         ]
           .filter(Boolean)
           .join(' · '),
@@ -116,14 +142,27 @@ export function describe(
         title: `${vmName(event.vm_id)} 에이전트 ${str(p.from)} → ${str(p.to)}`,
         detail: 'heartbeat 5초 주기',
       };
+    case 'vm.created':
+      return { title: `${vmName(event.vm_id)} 생성`, detail: 'VM 등록' };
+    case 'vm.deleted':
+      return { title: `${vmName(event.vm_id)} 삭제`, detail: 'VM 등록 해제' };
+    case 'demo.command.completed':
+      return { title: `${vmName(event.vm_id)} 시연 명령 완료`, detail: '운영자 시연 조작' };
+    case 'demo.command.failed':
+      return { title: `${vmName(event.vm_id)} 시연 명령 실패`, detail: '운영자 시연 조작' };
+    case 'display.route.changed':
+      return { title: `${vmName(event.vm_id)} 화면 배치 변경`, detail: '모니터 화면 배치' };
     default:
-      return { title: `${vmName(event.vm_id)} ${event.type}`, detail: '' };
+      // 모르는 종류: 원문 type(영문)은 화면 문구에 넣지 않는다 — 부르는 쪽이 unknownEventType 으로 title 에
+      return { title: `${vmName(event.vm_id)} ${UNKNOWN_EVENT_LABEL}`, detail: '' };
   }
 }
 
 /** 14:31:20.112 (화면 시계 기준, 계약 §1) — 로캘마다 모양이 달라지지 않게 직접 만든다 */
 export const clock = (iso: string) => {
   const d = new Date(iso);
+  // 읽을 수 없는 시각은 NaN:NaN:NaN 대신
+  if (Number.isNaN(d.getTime())) return '—';
   const two = (n: number) => String(n).padStart(2, '0');
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
 };

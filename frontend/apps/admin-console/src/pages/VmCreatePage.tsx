@@ -2,9 +2,21 @@ import { Button, Card, Modal } from '@xenova/ui';
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { Link, useBlocker, useNavigate } from 'react-router';
 import { ApiError } from '../api/client';
-import { useCreateVm, useTemplates } from '../api/queries';
+import { errorText } from '../api/errorText';
+import { useCreateVm, useTemplates, useVms } from '../api/queries';
 import type { Template } from '../api/types';
 import { loadVmList } from '../api/vmListCache';
+import {
+  sameVmName,
+  MEMORY_MAX_MIB,
+  MEMORY_STEP_MIB,
+  memoryMinMib,
+  memoryProblem,
+  VCPUS_MAX,
+  VCPUS_MIN,
+  vcpusProblem,
+  vmNameProblem,
+} from '../domain/vmLimits';
 import styles from './pages.module.css';
 import {
   blockVmCreationUnload,
@@ -23,16 +35,9 @@ const TEMPLATE_ACCENTS = [
   'var(--x-app-manual)',
   'var(--x-app-interaction)',
 ] as const;
-const MAX_MEMORY = 1024;
+/** 입력칸 화살표 한 번의 증감. 검증 단위는 vmLimits.MEMORY_STEP_MIB(16) */
 const MEMORY_STEP = 64;
 const ZEPHYR_PROFILE = { vcpus: 1, memory_mib: 16 };
-
-const ERROR_HINT: Record<string, string> = {
-  VM_NAME_CONFLICT: '같은 이름의 VM이 있습니다. 다른 이름을 입력해 주세요.',
-  INSUFFICIENT_RESOURCES: '사용 가능한 CPU 또는 메모리가 부족합니다. 할당량을 조정해 주세요.',
-  VALIDATION_ERROR: '입력한 VM 정보와 자원 값을 다시 확인해 주세요.',
-  TEMPLATE_NOT_FOUND: '선택한 템플릿을 찾을 수 없습니다. 템플릿을 다시 선택해 주세요.',
-};
 
 export function VmCreatePage() {
   const templates = useTemplates();
@@ -50,15 +55,36 @@ export function VmCreatePage() {
   const leaveBlocker = useBlocker(create.isPending);
   const zephyr = template?.guest_kind === 'zephyr';
   const spec = zephyr ? ZEPHYR_PROFILE : { vcpus, memory_mib: memory };
-  const nameOk = name.length >= 1 && name.length <= 63 && name.trim() === name;
-  const resourcesOk =
-    template !== null &&
-    Number.isInteger(spec.vcpus) &&
-    spec.vcpus >= 1 &&
-    spec.vcpus <= 4 &&
-    Number.isInteger(spec.memory_mib) &&
-    spec.memory_mib >= template.min_memory_mib &&
-    spec.memory_mib <= MAX_MEMORY;
+  const vms = useVms();
+  /**
+   * 응답 시간이 초과된 생성의 이름 (S15P31E110-473). 서버는 레코드를 남기고 생성을 이어 가므로 그 이름의 VM 이
+   * 목록에 생겨도 내 생성이다. 화면 상태로만 기억한다 — 새로고침하면 잊고, 그때는 목록에서 확인하도록 안내한다
+   */
+  const [timedOutName, setTimedOutName] = useState<string | null>(null);
+  /** 이번 요청이 시간 초과된 생성을 같은 이름으로 다시 보낸 것인가 (200 이면 "이어서 마쳤습니다") */
+  const [resuming, setResuming] = useState(false);
+  const isTimedOutName = (candidate: string) => timedOutName !== null && sameVmName(candidate, timedOutName);
+  // 같은 이름이 있으면 서버는 409(사양 다름) 또는 200(같은 사양 = 기존 VM 시작)이라 새 VM 이 생기지 않는다 (QA 1-F2)
+  // 비교는 DB 기준(대소문자·악센트 무시) — 서버는 Drive-VM 요청에 drive-vm 을 찾는다. 시간 초과된 내 생성은 빼고 본다
+  const duplicateName =
+    name.length > 0 &&
+    (vms.data?.items ?? []).some((vm) => sameVmName(vm.name, name) && !isTimedOutName(vm.name));
+  /** 서버 422 errors[] 를 입력칸별 한글 이유로 바꾼 것. 그 칸을 고치면 지운다 */
+  const [serverReasons, setServerReasons] = useState<FieldReasons>({});
+  /** 한 번도 입력하지 않은 빈 이름에는 이유를 띄우지 않는다 */
+  const [nameTouched, setNameTouched] = useState(false);
+  const nameRule = vmNameProblem(name);
+  const nameReason =
+    serverReasons.name ?? (duplicateName ? DUPLICATE_NAME_TEXT : nameTouched ? nameRule : null);
+  const nameOk = nameRule === null && !duplicateName && !serverReasons.name;
+  // Zephyr 는 고정 프로필이라 입력을 검사하지 않는다
+  const memoryMin = memoryMinMib(template?.min_memory_mib);
+  const vcpusReason = template && !zephyr ? (serverReasons.vcpus ?? vcpusProblem(vcpus)) : null;
+  const memoryReason =
+    template && !zephyr ? (serverReasons.memory_mib ?? memoryProblem(memory, memoryMin)) : null;
+  const resourcesOk = template !== null && vcpusReason === null && memoryReason === null;
+  const clearServerReason = (field: keyof FieldReasons) =>
+    setServerReasons(({ [field]: _cleared, ...rest }) => rest);
 
   useEffect(() => {
     mounted.current = true;
@@ -85,7 +111,7 @@ export function VmCreatePage() {
 
   const pick = (selected: Template) => {
     setTemplate(selected);
-    setMemory(Math.max(selected.min_memory_mib, Math.min(memory, MAX_MEMORY)));
+    setMemory(Math.max(selected.min_memory_mib, Math.min(memory, MEMORY_MAX_MIB)));
     create.reset();
   };
 
@@ -94,8 +120,11 @@ export function VmCreatePage() {
     const startedAt = Date.now();
     setCreationStartedAt(startedAt);
     setNow(startedAt);
-    // 같은 이름의 VM이 이미 있으면 409(사양 불일치) 또는 200(같은 사양 재시도)이므로 새로 생성되는 VM이 아니다
-    startVmCreation(name, startedAt, existingVmIdsNamed(name));
+    const retry = isTimedOutName(name);
+    setResuming(retry);
+    // 같은 이름의 VM이 이미 있으면 409(사양 불일치) 또는 200(같은 사양 재시도)이므로 새로 생성되는 VM이 아니다.
+    // 시간 초과된 내 생성을 다시 보내는 것이면 그 VM 은 이번 생성의 결과다
+    startVmCreation(name, startedAt, retry ? [] : existingVmIdsNamed(name));
     void create
       .mutateAsync({
         name,
@@ -110,13 +139,25 @@ export function VmCreatePage() {
         finishVmCreation(name);
         if (mounted.current) setLastCreationDuration(duration);
       })
-      .catch(() => {
+      .catch((failure: unknown) => {
         finishVmCreation(name);
+        if (mounted.current && failure instanceof ApiError && isCreationTimeout(failure))
+          setTimedOutName(name);
+        // 서버가 입력칸 규칙으로 거절했으면(422 errors[]) 입력 단계로 돌아가 해당 칸 아래에 이유를 보인다
+        const reasons = fieldReasonsOf(failure, memoryMinMib(template.min_memory_mib));
+        if (!reasons || !mounted.current) return;
+        setServerReasons(reasons);
+        setNameTouched(true);
+        setStep(1);
+        create.reset();
       });
   };
 
   const error = create.error instanceof ApiError ? create.error : null;
-  const timedOut = error !== null && isCreationTimeout(error);
+  /** 시간 초과 뒤 다시 보냈는데 서버가 아직 그 생성을 붙잡고 있음 (nginx 15분 < 백엔드 20분 사이) */
+  const stillCreating = resuming && error?.code === 'VM_OPERATION_IN_PROGRESS';
+  const timedOut = error !== null && (isCreationTimeout(error) || stillCreating);
+  const resumedExisting = resuming && create.data?.created === false;
   const goToList = () => navigate('/control');
 
   return (
@@ -158,7 +199,16 @@ export function VmCreatePage() {
           </div>
 
           {templates.isPending && <div className={styles.statePanel}>템플릿을 불러오는 중입니다…</div>}
-          {templates.error && <div className={styles.statePanel}>템플릿을 불러오지 못했습니다.</div>}
+          {templates.error && (
+            <div className={styles.statePanel} role="alert">
+              {templateLoadMessage(templates.error)}
+            </div>
+          )}
+          {templates.data && templates.data.length === 0 && (
+            <div className={styles.statePanel}>
+              보드에 공개된 템플릿이 없습니다. 보드에 템플릿 이미지가 설치됐는지 확인해 주세요.
+            </div>
+          )}
           <div className={styles.templateGrid}>
             {(templates.data ?? []).map((item, index) => {
               const selected =
@@ -208,6 +258,12 @@ export function VmCreatePage() {
             <p>{template.display_name} 템플릿에 적용할 이름과 초기 자원을 설정합니다.</p>
           </div>
 
+          {Object.keys(serverReasons).length > 0 && (
+            <div className={styles.createError} role="status">
+              <strong>서버가 입력값을 받아들이지 않았습니다. 표시된 칸을 고쳐 주세요.</strong>
+            </div>
+          )}
+
           <div className={styles.createFormLayout}>
             <Card className={styles.createFormCard} title="기본 정보">
               <div className={styles.createForm}>
@@ -218,10 +274,20 @@ export function VmCreatePage() {
                 <input
                   id="vm-name"
                   value={name}
-                  onChange={(event) => setName(event.target.value)}
+                  onChange={(event) => {
+                    setName(event.target.value);
+                    setNameTouched(true);
+                    clearServerReason('name');
+                  }}
                   placeholder="예: drive-vm-a"
-                  aria-invalid={name.length > 0 && !nameOk}
+                  aria-invalid={nameReason !== null}
+                  aria-describedby={nameReason ? 'vm-name-reason' : undefined}
                 />
+                {nameReason && (
+                  <small id="vm-name-reason" role="alert">
+                    {nameReason}
+                  </small>
+                )}
 
                 {zephyr ? (
                   <div className={styles.fixedProfile}>
@@ -242,14 +308,24 @@ export function VmCreatePage() {
                         min={1}
                         max={4}
                         value={vcpus}
-                        onChange={(event) => setVcpus(Number(event.target.value))}
+                        aria-invalid={vcpusReason !== null}
+                        aria-describedby={vcpusReason ? 'vm-vcpus-reason' : undefined}
+                        onChange={(event) => {
+                          setVcpus(Number(event.target.value));
+                          clearServerReason('vcpus');
+                        }}
                       />
+                      {vcpusReason && (
+                        <small id="vm-vcpus-reason" role="alert">
+                          {vcpusReason}
+                        </small>
+                      )}
                     </div>
                     <div>
                       <label htmlFor="vm-memory">
                         <span>메모리</span>
                         <small>
-                          {template.min_memory_mib}~{MAX_MEMORY} MiB
+                          {template.min_memory_mib}~{MEMORY_MAX_MIB} MiB · {MEMORY_STEP_MIB} MiB 단위
                         </small>
                       </label>
                       <div className={styles.inputWithUnit}>
@@ -257,13 +333,23 @@ export function VmCreatePage() {
                           id="vm-memory"
                           type="number"
                           min={template.min_memory_mib}
-                          max={MAX_MEMORY}
+                          max={MEMORY_MAX_MIB}
                           step={MEMORY_STEP}
                           value={memory}
-                          onChange={(event) => setMemory(Number(event.target.value))}
+                          aria-invalid={memoryReason !== null}
+                          aria-describedby={memoryReason ? 'vm-memory-reason' : undefined}
+                          onChange={(event) => {
+                            setMemory(Number(event.target.value));
+                            clearServerReason('memory_mib');
+                          }}
                         />
                         <span>MiB</span>
                       </div>
+                      {memoryReason && (
+                        <small id="vm-memory-reason" role="alert">
+                          {memoryReason}
+                        </small>
+                      )}
                     </div>
                   </div>
                 )}
@@ -353,7 +439,11 @@ export function VmCreatePage() {
                   </span>
                 </div>
               </div>
+              {stillCreating && (
+                <p role="alert">보드에서 생성이 아직 진행 중입니다. 잠시 후 목록에서 확인해 주세요.</p>
+              )}
               <p>목록에 VM이 없거나 시작되지 않았다면 같은 이름·사양으로 다시 생성하면 이어서 복구됩니다.</p>
+              <p>이 화면을 새로고침하면 이 안내가 사라집니다. 그때는 VM 목록에서 상태를 확인해 주세요.</p>
               <div className={styles.createTimeoutActions}>
                 <Button variant="secondary" size="sm" onClick={goToList}>
                   VM 목록에서 확인
@@ -364,8 +454,7 @@ export function VmCreatePage() {
 
           {create.error && !timedOut && (
             <div className={styles.createError} role="alert">
-              <strong>{error ? `${error.message} (${error.code})` : String(create.error)}</strong>
-              {error && ERROR_HINT[error.code] && <span>{ERROR_HINT[error.code]}</span>}
+              <strong title={error?.code}>{errorText(create.error, 'VM을 생성하지 못했습니다.')}</strong>
             </div>
           )}
 
@@ -417,7 +506,7 @@ export function VmCreatePage() {
 
       <Modal
         open={create.data !== undefined}
-        title="VM 생성 완료"
+        title={create.data?.created === false && !resumedExisting ? '기존 VM 시작' : 'VM 생성 완료'}
         onClose={goToList}
         footer={<Button onClick={goToList}>VM 목록으로</Button>}
       >
@@ -425,8 +514,14 @@ export function VmCreatePage() {
           <div className={styles.createSuccess}>
             <span aria-hidden="true">✓</span>
             <div>
-              <strong>‘{create.data.name}’</strong>
-              <p>새 VM이 성공적으로 생성되었습니다.</p>
+              <strong>‘{create.data.vm.name}’</strong>
+              <p>
+                {create.data.created
+                  ? '새 VM이 성공적으로 생성되었습니다.'
+                  : resumedExisting
+                    ? '앞서 시간이 초과된 생성을 이어서 마쳤습니다.'
+                    : '같은 이름의 기존 VM을 시작했습니다. 새 VM은 만들지 않았습니다.'}
+              </p>
             </div>
             <dl className={styles.createSuccessMeta}>
               <div>
@@ -466,6 +561,37 @@ export function VmCreatePage() {
   );
 }
 
+const DUPLICATE_NAME_TEXT = '같은 이름의 VM이 이미 있습니다. 다른 이름을 입력해 주세요.';
+
+type FieldReasons = Partial<Record<'name' | 'vcpus' | 'memory_mib', string>>;
+
+/**
+ * 422 VALIDATION_ERROR 의 errors[].field 를 입력칸별 한글 이유로. 서버 reason 은 `name은 …` 처럼 필드 영문명이
+ * 섞여 있어 쓰지 않는다. 입력칸이 없는 필드뿐이면 null (확인 단계의 공용 오류 문구로 보인다)
+ */
+function fieldReasonsOf(error: unknown, memoryMin: number): FieldReasons | null {
+  if (!(error instanceof ApiError) || error.status !== 422 || !error.fieldErrors?.length) return null;
+  const reasons: FieldReasons = {};
+  for (const { field } of error.fieldErrors) {
+    if (field === 'name') {
+      reasons.name = 'VM 이름은 1~63자이며 앞뒤 공백과 제어문자를 쓸 수 없습니다.';
+    } else if (field === 'vcpus') {
+      reasons.vcpus = `vCPU는 ${VCPUS_MIN}~${VCPUS_MAX}개 사이 정수로 입력해 주세요.`;
+    } else if (field === 'memory_mib') {
+      reasons.memory_mib = `메모리는 ${memoryMin}~${MEMORY_MAX_MIB} MiB 사이로 입력해 주세요.`;
+    }
+  }
+  return Object.keys(reasons).length ? reasons : null;
+}
+
+/** 템플릿 버전은 보드 카탈로그에서 읽는다. 보드에 한 번도 닿지 못하면 백엔드가 dom0-manager 오류를 그대로 준다 */
+function templateLoadMessage(error: unknown): string {
+  if (error instanceof ApiError && error.code.startsWith('VM_CONTROL_')) {
+    return '보드에 연결할 수 없어 템플릿을 불러오지 못했습니다. 보드 상태를 확인한 뒤 다시 시도해 주세요.';
+  }
+  return '템플릿을 불러오지 못했습니다.';
+}
+
 /** 백엔드는 dom0-manager 응답을 command-timeout(20m)까지 기다린 뒤 504 VM_CONTROL_TIMEOUT으로 끝낸다 */
 function isCreationTimeout(error: ApiError): boolean {
   return error.code === 'VM_CONTROL_TIMEOUT' || error.status === 504;
@@ -473,5 +599,5 @@ function isCreationTimeout(error: ApiError): boolean {
 
 /** 이 탭이 마지막으로 받은 VM 목록에서 같은 이름의 VM. 목록이 없으면 비워 두고 응답으로 정리한다 */
 function existingVmIdsNamed(name: string): string[] {
-  return (loadVmList()?.data.items ?? []).filter((vm) => vm.name === name).map((vm) => vm.vm_id);
+  return (loadVmList()?.data.items ?? []).filter((vm) => sameVmName(vm.name, name)).map((vm) => vm.vm_id);
 }

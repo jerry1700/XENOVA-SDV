@@ -2,20 +2,38 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ToastProvider } from '@xenova/ui';
 import { render, screen } from '@testing-library/react';
 import { createMemoryRouter, RouterProvider } from 'react-router';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../api/client';
 import { initialVms, VM_IDS } from '../mocks/data';
 import { ControlVmDetailPage } from './ControlVmDetailPage';
 
 const VMS = initialVms();
+const resourcesQuery = vi.hoisted(() => ({
+  data: undefined as { vcpu_pinning: { vcpu: number; pcpus: number[] }[] } | undefined,
+  error: null as unknown,
+  isPending: false,
+}));
+
+/** 설정하면 useVm 이 이 결과를 돌려준다 (조회 실패 화면용) */
+const vmQueryOverride = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }));
+/** 자원 적용 중인 VM id (useVmIdsUpdatingResources) · 409 로 잠긴 VM (isBusy) */
+const lock = vi.hoisted(() => ({ updating: [] as string[], busy: [] as string[] }));
 
 vi.mock('../api/queries', () => ({
-  useVm: (vmId: string) => ({ data: VMS.find((vm) => vm.vm_id === vmId), error: null, isPending: false }),
+  useVm: (vmId: string) =>
+    vmQueryOverride.value ?? { data: VMS.find((vm) => vm.vm_id === vmId), error: null, isPending: false },
   useVms: () => ({ data: { items: VMS }, error: null, isPending: false }),
-  useVmResources: () => ({ data: undefined, error: null, isPending: false }),
+  useVmResources: () => resourcesQuery,
+  useVmIdsUpdatingResources: () => lock.updating,
 }));
 
 vi.mock('./useVmOperationProgress', () => ({
-  useVmOperationProgress: () => ({ operations: {}, now: 0, run: vi.fn() }),
+  useVmOperationProgress: () => ({
+    operations: {},
+    now: 0,
+    run: vi.fn(),
+    isBusy: (vmId: string) => lock.busy.includes(vmId),
+  }),
 }));
 
 // 패널 내부(자원 조회·스트림)는 이 테스트의 관심 밖이라 자리만 확인한다
@@ -40,17 +58,107 @@ function renderDetail(vmId: string) {
 }
 
 describe('VM Control 상세 자원 패널', () => {
-  it('Zephyr VM은 조정·핀닝 패널을 숨긴다', () => {
+  it('Zephyr VM은 고정 프로필이라 조정 패널을 숨기지만 전용 코어 핀닝 패널은 보인다', () => {
     renderDetail(VM_IDS.autonomous);
     expect(screen.queryByLabelText('vCPU 및 메모리 조정')).toBeNull();
-    expect(screen.queryByLabelText('vCPU 핀닝 설정')).toBeNull();
+    expect(screen.getByLabelText('vCPU 핀닝 설정')).toBeInTheDocument();
     // 요약 카드의 할당 자원은 그대로 보인다
     expect(screen.getByText('할당 자원')).toBeInTheDocument();
   });
 
-  it('Linux VM은 자원 조정과 핀닝 미연결 상태를 보인다', () => {
+  it('Linux VM은 자원 조정과 핀닝 패널을 모두 보이고 미연결 문구는 없다', () => {
     renderDetail(VM_IDS.interaction);
     expect(screen.getByLabelText('vCPU 및 메모리 조정')).toBeInTheDocument();
-    expect(screen.getByText('vCPU 핀닝 변경 API가 아직 연결되지 않았습니다.')).toBeInTheDocument();
+    expect(screen.getByLabelText('vCPU 핀닝 설정')).toBeInTheDocument();
+    expect(screen.queryByText(/핀닝 변경 API가 아직 연결되지 않았습니다/)).toBeNull();
+    expect(screen.queryByText('변경 API 미연결')).toBeNull();
+  });
+
+  it('할당 자원 요약에 현재 핀닝된 pCPU 를 보인다', () => {
+    resourcesQuery.data = { vcpu_pinning: [{ vcpu: 0, pcpus: [0, 3] }] };
+    renderDetail(VM_IDS.interaction);
+    expect(screen.getByText('0, 3')).toBeInTheDocument();
+    resourcesQuery.data = undefined;
+  });
+
+  it('핀닝 조회에 실패하면 요약에 조회 실패를 보인다', () => {
+    resourcesQuery.error = new Error('boom');
+    renderDetail(VM_IDS.interaction);
+    expect(screen.getByText('조회 실패')).toBeInTheDocument();
+    resourcesQuery.error = null;
+  });
+});
+
+describe('VM Control 상세 부제 (S15P31E110-469)', () => {
+  afterEach(() => {
+    vmQueryOverride.value = null;
+  });
+
+  it('조회 중에는 "불러오는 중", 실패하면 "불러오지 못했습니다"', () => {
+    vmQueryOverride.value = { data: undefined, error: null, isPending: true };
+    const view = renderDetail('missing');
+    expect(screen.getByText('VM 정보를 불러오는 중입니다.')).toBeInTheDocument();
+    view.unmount();
+
+    vmQueryOverride.value = {
+      data: undefined,
+      error: new ApiError(404, { code: 'VM_NOT_FOUND', message: '존재하지 않는 VM입니다.' }),
+      isPending: false,
+    };
+    renderDetail('missing');
+    expect(screen.getByText('VM 정보를 불러오지 못했습니다.')).toBeInTheDocument();
+    expect(screen.queryByText('VM 정보를 불러오는 중입니다.')).toBeNull();
+    // 오류 코드는 화면 문구가 아니라 title 로만 (S15P31E110-471)
+    const notFound = screen.getByText('VM을 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.');
+    expect(notFound).toHaveAttribute('title', 'VM_NOT_FOUND');
+    expect(screen.queryByText(/\(VM_NOT_FOUND\)/)).toBeNull();
+  });
+});
+
+describe('VM Control 상세 삭제 — 정지된 VM만 (QA 1-F1·1-F9)', () => {
+  it('실행 중이면 [VM 삭제] 가 꺼져 있고 정지 후 삭제할 수 있다고 알린다', () => {
+    renderDetail(VM_IDS.interaction);
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeDisabled();
+    expect(screen.getAllByText(/정지 후 삭제할 수 있습니다/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/VM을 종료하고 연결된 디스크를 삭제합니다/)).toBeNull();
+  });
+});
+
+describe('작업 중 버튼 잠금 (S15P31E110-473)', () => {
+  /** 정지된 VM (mock 데이터는 모두 실행 중이라 상태만 바꾼다) */
+  const stoppedVm = () => {
+    const vm = { ...VMS[1]!, state: 'stopped' as const };
+    vmQueryOverride.value = { data: vm, error: null, isPending: false };
+    return vm;
+  };
+  afterEach(() => {
+    lock.updating = [];
+    lock.busy = [];
+    vmQueryOverride.value = null;
+  });
+
+  it('이 탭에서 자원 적용 중이면 시작·정지를 잠그고 안내한다 (삭제는 상태 규칙대로)', () => {
+    const stopped = stoppedVm();
+    lock.updating = [stopped.vm_id];
+    renderDetail(stopped.vm_id);
+    expect(screen.getByRole('button', { name: 'VM 시작' })).toBeDisabled();
+    expect(screen.getByText('자원을 적용하는 중이라 시작·정지를 잠시 막습니다.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeEnabled();
+  });
+
+  it('서버가 "다른 작업 진행 중"(409)을 줘 잠긴 VM 은 시작·정지·삭제를 모두 잠근다', () => {
+    const stopped = stoppedVm();
+    lock.busy = [stopped.vm_id];
+    renderDetail(stopped.vm_id);
+    expect(screen.getByRole('button', { name: 'VM 시작' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeDisabled();
+    expect(screen.getByText('다른 작업이 진행 중이라 잠시 뒤 다시 누를 수 있습니다.')).toBeInTheDocument();
+  });
+
+  it('잠금이 없으면 정지된 VM 은 시작·삭제할 수 있다', () => {
+    const stopped = stoppedVm();
+    renderDetail(stopped.vm_id);
+    expect(screen.getByRole('button', { name: 'VM 시작' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'VM 삭제' })).toBeEnabled();
   });
 });

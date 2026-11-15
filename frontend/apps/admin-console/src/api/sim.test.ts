@@ -82,19 +82,20 @@ describe('결과 문구', () => {
 
   it('message 가 없으면 사유 코드를 한국어로', () => {
     const text = (code: string) => describeSimResult(result({ ok: false, code }));
-    expect(text('ON_CAR')).toBe('차와 겹치는 자리라 놓을 수 없어요');
-    expect(text('OUT_OF_TRACK')).toBe('벽 밖이라 놓을 수 없어요');
-    expect(text('INVALID')).toBe('시뮬레이터가 받을 수 없는 명령이에요');
-    expect(text('NO_GAP')).toBe('차가 지나갈 틈이 없어요');
+    expect(text('ON_CAR')).toBe('차와 겹치는 자리라 놓을 수 없습니다');
+    expect(text('OUT_OF_TRACK')).toBe('벽 밖이라 놓을 수 없습니다');
+    expect(text('INVALID')).toBe('시뮬레이터가 받을 수 없는 명령입니다');
+    expect(text('NO_GAP')).toBe('차가 지나갈 틈이 없습니다');
     expect(text('TOO_DENSE')).toContain('촘촘');
     expect(text('TOO_CLOSE')).toContain('피할 거리');
-    expect(text('SOMETHING_NEW')).toBe('시뮬레이터가 거부했어요 (SOMETHING_NEW)');
+    // 모르는 사유 코드는 화면 문구에 붙이지 않는다 (S15P31E110-471)
+    expect(text('SOMETHING_NEW')).toBe('시뮬레이터가 거부했습니다');
   });
 
   it('적용은 명령별 짧은 문구', () => {
-    expect(describeSimResult(result({ op: 'obstacle.add' }))).toBe('장애물을 놓았어요');
-    expect(describeSimResult(result({ op: 'track.select' }))).toBe('트랙을 바꿨어요');
-    expect(describeSimResult(result({ op: 'unknown' }))).toBe('적용했어요');
+    expect(describeSimResult(result({ op: 'obstacle.add' }))).toBe('장애물을 놓았습니다');
+    expect(describeSimResult(result({ op: 'track.select' }))).toBe('트랙을 바꿨습니다');
+    expect(describeSimResult(result({ op: 'unknown' }))).toBe('적용했습니다');
   });
 });
 

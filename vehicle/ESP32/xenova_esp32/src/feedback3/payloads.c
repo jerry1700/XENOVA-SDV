@@ -210,6 +210,29 @@ static void report_fields(struct cursor *c, struct fb3_report *v)
 	io_u16(c, &v->reason);
 }
 
+static void tof_sample_fields(struct cursor *c, struct fb3_tof_sample *v)
+{
+	io_bytes(c, v->pi_session, sizeof v->pi_session);
+	io_bytes(c, v->device_session, sizeof v->device_session);
+	io_u64(c, &v->source_sample);
+	io_u64(c, &v->device_sample_us);
+	io_u32(c, &v->sample_time_error_us);
+	io_bytes(c, v->clock_epoch, sizeof v->clock_epoch);
+	io_u64(c, &v->clock_sequence);
+	io_u8(c, &v->sensor_id);
+	io_bytes(c, v->sensor_instance, sizeof v->sensor_instance);
+	io_u32(c, &v->sensor_generation);
+	io_u32(c, &v->sensor_config_revision);
+	io_bytes(c, v->sensor_calibration_sha256, sizeof v->sensor_calibration_sha256);
+	io_u8(c, &v->rows);
+	io_u8(c, &v->cols);
+	io_u16(c, &v->frame_status);
+	io_u16(c, &v->distance_mm);
+	io_u8(c, &v->status);
+	io_u8(c, &v->quality);
+	io_u32(c, &v->sample_crc32);
+}
+
 /* 필드를 다 읽거나 쓴 뒤 움직인 거리가 정해진 크기와 같은지도 본다 */
 #define FB3_CODEC(name, type, size) \
 	bool fb3_unpack_##name(const uint8_t *payload, size_t len, type *out) \
@@ -241,3 +264,26 @@ FB3_CODEC(clock_ack, struct fb3_clock_ack, FB3_CLOCK_ACK_SIZE)
 FB3_CODEC(sensor, struct fb3_sensor, FB3_SENSOR_SIZE)
 FB3_CODEC(command, struct fb3_command, FB3_COMMAND_SIZE)
 FB3_CODEC(report, struct fb3_report, FB3_REPORT_SIZE)
+FB3_CODEC(tof_sample, struct fb3_tof_sample, FB3_TOF_SAMPLE_SIZE)
+
+uint32_t fb3_crc32(const uint8_t *data, size_t len)
+{
+	uint32_t crc = 0xffffffffu;
+
+	for (size_t i = 0; i < len; i++) {
+		crc ^= data[i];
+		for (int bit = 0; bit < 8; bit++) {
+			crc = crc & 1u ? crc >> 1 ^ 0xedb88320u : crc >> 1;
+		}
+	}
+	return ~crc;
+}
+
+void fb3_seal_tof_sample(uint8_t payload[FB3_TOF_SAMPLE_SIZE])
+{
+	uint32_t crc = fb3_crc32(payload, FB3_TOF_SAMPLE_CRC_SIZE);
+
+	for (int i = 0; i < 4; i++) {
+		payload[FB3_TOF_SAMPLE_CRC_SIZE + i] = (uint8_t)(crc >> (8 * i));
+	}
+}

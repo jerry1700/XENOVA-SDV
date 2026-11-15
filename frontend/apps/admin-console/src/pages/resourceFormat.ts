@@ -103,6 +103,8 @@ export function tooltipSide(xPercent: number): 'left' | 'right' {
 /** 툴팁 시각: "12초 전 · 13:04:05" */
 export function tooltipTime(observedAt: string, now = Date.now()): string {
   const at = new Date(observedAt);
+  // 읽을 수 없는 시각은 "NaN초 전 · NaN:NaN:NaN" 대신
+  if (Number.isNaN(at.getTime())) return '시각 미상';
   const clock = [at.getHours(), at.getMinutes(), at.getSeconds()]
     .map((part) => String(part).padStart(2, '0'))
     .join(':');
