@@ -17,6 +17,8 @@ import type {
   AppExitRequest,
   AutoDelayCommand,
   AutoDelayRequest,
+  AutoTxBlockCommand,
+  AutoTxBlockRequest,
   CommandStatusResponse,
   DomainKillResponse,
   Display,
@@ -265,10 +267,44 @@ export function useStartVmCrash(vmId: string) {
   });
 }
 
+/** 시연 1 전용: 서버가 최신 AUTO 제어 상태에서 crash 대상 VM을 결정한다. */
+export function useStartActiveVmCrash() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      request<VmCrashCommand>('/api/v1/drive/faults/vm-crash', {
+        method: 'POST',
+      }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.vms }),
+  });
+}
+
 export function useStartAppExit(vmId: string) {
   return useMutation({
     mutationFn: (body: AppExitRequest) =>
       request<AppExitCommand>(`/api/v1/vms/${encodeURIComponent(vmId)}/faults/app-exit`, {
+        method: 'POST',
+        body,
+      }),
+  });
+}
+
+/** 최신 AUTO 제어 주체는 백엔드가 결정한다. 프론트가 본 오래된 active_vm_id를 보내지 않는다. */
+export function useStartActiveAppExit() {
+  return useMutation({
+    mutationFn: () =>
+      request<AppExitCommand>('/api/v1/drive/faults/app-exit', {
+        method: 'POST',
+        body: { app_id: 'autonomous' },
+      }),
+  });
+}
+
+/** 최신 AUTO 제어 주체는 백엔드가 결정하고 drive.command 발행만 일정 시간 차단한다. */
+export function useStartActiveAutoTxBlock() {
+  return useMutation({
+    mutationFn: (body: AutoTxBlockRequest) =>
+      request<AutoTxBlockCommand>('/api/v1/drive/faults/auto-tx-block', {
         method: 'POST',
         body,
       }),
