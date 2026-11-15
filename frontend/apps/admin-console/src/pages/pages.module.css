@@ -5109,3 +5109,13 @@ button.chip:hover:not(.chipOn) {
     flex-basis: auto;
   }
 }
+/* Jetson 카메라 영상 (S15P31E110-306): 640×360 원본 비율을 유지한다 */
+.visionFrame {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  border-radius: var(--x-radius-sm);
+  background: #000;
+}
