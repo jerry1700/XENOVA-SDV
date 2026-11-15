@@ -177,7 +177,7 @@ class DefaultDeploymentTest(unittest.TestCase):
 
     def test_boot_domains_match_handles_and_drop_a_stale_firmware_before_adoption(self):
         import xenova_dom0less as early
-        from xenova_execution import read_record
+        from xenova_execution import Execution
 
         keys = early.FACTORY_GUESTS
         boot_ids = {key: str(UUID(int=index)) for index, key in enumerate(keys, 1)}
@@ -206,13 +206,9 @@ class DefaultDeploymentTest(unittest.TestCase):
         live = {0: ("Domain-0", str(UUID(int=0)))}
         live.update({domids[key]: ("(null)", boot_ids[key]) for key in keys})
         platform = Mock(data=self.base, runtime=self.base)
+        platform.boot_id_reader.return_value = str(UUID(int=101))
         platform.cpu.return_value.policy.return_value = None
-        execution = platform.execution.return_value
-        execution.host = "test-boot"
-        execution.unique.side_effect = lambda row, deadline: str(100 + row["domid"])
-        execution.boot_decision.return_value = {"start": True}
-        execution.read.side_effect = read_record
-        execution.write.side_effect = lambda path, value: path.write_text(json.dumps(value))
+        platform.execution.side_effect = lambda: Execution(platform)
         mutations = []
 
         def command(args, deadline):
@@ -224,6 +220,9 @@ class DefaultDeploymentTest(unittest.TestCase):
             if args[0] == early.INIT:
                 _, raw_domid, boot_id, identity, name = args
                 domid = int(raw_domid)
+                saved = platform.execution().read(self.base / "dom0less.json")
+                self.assertEqual(saved["host_boot_id"], platform.boot_id_reader())
+                self.assertEqual(saved["guests"][name]["domid"], domid)
                 self.assertEqual(live[domid], ("(null)", boot_id))
                 live[domid] = (name, identity)
             else:
@@ -231,10 +230,16 @@ class DefaultDeploymentTest(unittest.TestCase):
                 del live[2]
 
         platform.timed_command.side_effect = command
-        with patch.object(early, "enabled", return_value=True), patch.object(early, "validate_record"):
+        with (patch.object(early, "enabled", return_value=True),
+              patch.object(early, "validate_record"),
+              patch.object(Execution, "unique", side_effect=lambda row, deadline: str(100 + row["domid"])),
+              patch.object(Execution, "boot_decision", return_value={"start": True})):
             early.prepare(platform, records, 30)
+            saved = platform.execution().read(self.base / "dom0less.json")
+            self.assertEqual(saved["schema_version"], "1.0")
             early.prepare(platform, records, 30)
 
+        self.assertEqual(platform.execution().read(self.base / "dom0less.json"), saved)
         self.assertEqual([args[1] for args in mutations if args[0] == early.INIT], ["3", "1", "2"])
         self.assertEqual(len(mutations), 4)
         self.assertEqual({key: value["phase"] for key, value in early.receipts(platform).items()},

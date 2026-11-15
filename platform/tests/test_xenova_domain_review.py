@@ -12,6 +12,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import UUID
 
 from first_install_fixture import vm
 from test_xenova_platform import record, fixture, domain, FakeXen
@@ -324,11 +325,17 @@ class DomainReviewTest(unittest.TestCase):
 
     def test_existing_unhealthy_domain_refuses_start_without_recovery(self):
         for flags, state in (('--p---', 'paused'), ('---s--', 'shutdown'),
-                             ('---sc-', 'crashed'), ('-----d', 'dying'), ('------', 'unknown')):
+                             ('---sc-', 'crashed'), ('-----d', 'dying')):
             self.xen.rows = []
             self.live(self.linux, flags=flags)
             with self.subTest(flags=flags):
                 self.cli_error('start', self.linux['id'], message=state)
+        self.xen.rows = []
+        self.live(self.linux, flags='------')
+        now = [100.0]
+        self.p.clock = lambda: now[0]
+        self.p.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        self.cli_error('start', self.linux['id'], code='DEADLINE_EXCEEDED')
         self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy'], ['xl', 'unpause']) for c in self.xen.calls))
 
     def test_autostart_main_preserves_blocked_and_failed_actual_states(self):
@@ -349,27 +356,136 @@ class DomainReviewTest(unittest.TestCase):
         self.assertEqual(results[self.linux['id']]['app_readiness'], 'unknown')
         self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy']) for c in self.xen.calls))
 
-    def test_autostart_rechecks_transient_unknown_after_adoption(self):
+    def _autostart_after_adoption(self, after, settle=None):
         import xenova_dom0less
 
         self.live(self.linux)
+        row = self.xen.rows[0]
+        row['config']['disks'][0]['vdev'] = 'xvda'
+        row['config']['nics'] = [{'mac': self.linux['mac'], 'bridge': 'xenbr0'}]
         self.p.defaults_path = self.base / 'defaults.json'
         self.p.defaults_path.write_text(json.dumps({'instances': [self.linux]}))
+        vm.ensure_runtime(self.p.runtime)
+        execution = self.p.execution()
+        execution.write(self.p.runtime / 'dom0less.json', {
+            'schema_version': '1.0', 'host_boot_id': execution.host, 'guests': {
+                self.linux['id']: {'phase': 'ready', 'domid': 1, 'uuid': self.linux['uuid'],
+                                   'xen_unique_id': execution.unique(row, self.p.clock() + 2)}}})
 
-        def after_adoption(*args, **kwargs):
-            self.xen.states[1] = '------'
+        def command(args, **kwargs):
+            if args == ['xenstore-read', '/local/domain/0/backend/vbd/1/51712/physical-device']:
+                return '7:0'
+            return self.xen(args, **kwargs)
 
-        def settle(seconds):
-            self.xen.states[1] = '-b----'
+        real_adopt = xenova_dom0less.adopt
 
-        self.p.sleep = settle
-        with patch.object(xenova_dom0less, 'adopt', side_effect=after_adoption) as adopt:
-            self.cli('autostart')
+        def adopt(*args, **kwargs):
+            bound = real_adopt(*args, **kwargs)
+            after()
+            return bound
 
-        adopt.assert_called_once()
+        if settle is not None:
+            self.p.sleep = settle
+        with (patch.object(self.p, 'command', side_effect=command),
+              patch.object(xenova_dom0less, 'adopt', side_effect=adopt) as wrapped):
+            try:
+                self.cli('autostart')
+            finally:
+                wrapped.assert_called_once()
+                self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy'],
+                                                ['xl', 'block-attach'], ['xl', 'network-attach'])
+                                     for c in self.xen.calls))
+
+    def test_autostart_rechecks_transient_unknown_after_adoption(self):
+        self._autostart_after_adoption(lambda: self.xen.states.update({1: '------'}),
+                                      lambda seconds: self.xen.states.update({1: '-b----'}))
         results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
         self.assertEqual(results[self.linux['id']]['result'], 'blocked')
-        self.assertFalse(any(c[:2] in (['xl', 'create'], ['xl', 'destroy']) for c in self.xen.calls))
+
+    def test_autostart_refuses_replacement_on_first_sample_after_adoption(self):
+        def replace():
+            # Reuse the same domid, UUID and name with a different Xen incarnation.
+            self.xen.rows[0] = copy.deepcopy(self.xen.rows[0])
+            self.xen.states[1] = '-b----'
+
+        with self.assertRaises(SystemExit):
+            self._autostart_after_adoption(replace)
+        results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
+        self.assertEqual(results[self.linux['id']]['result'], 'failed')
+        self.assertIn('incarnation changed during start confirmation', results[self.linux['id']]['error'])
+
+    def test_autostart_refuses_replacement_between_confirmation_samples(self):
+        def replace(_seconds):
+            self.xen.rows[0] = copy.deepcopy(self.xen.rows[0])
+            self.xen.states[1] = '-b----'
+
+        with self.assertRaises(SystemExit):
+            self._autostart_after_adoption(lambda: self.xen.states.update({1: '------'}), replace)
+        results = json.loads((self.p.runtime / 'autostart-results.json').read_text())
+        self.assertEqual(results[self.linux['id']]['result'], 'failed')
+        self.assertIn('incarnation changed during start confirmation', results[self.linux['id']]['error'])
+
+    def _shutdown_with_early_domains(self, *, backend=False, replace=False):
+        import xenova_dom0less as early
+
+        debian, _ = self.add_linux()
+        self.live(self.linux, 1)
+        self.live(debian, 2, '-b----')
+        named = self.xen.rows[1]
+        named['config']['disks'] = []
+        handles = {key: str(UUID(int=index)) for index, key in enumerate(early.FACTORY_GUESTS, 10)}
+        identities = {key: {'uuid': str(UUID(int=index))} for index, key in enumerate(early.FACTORY_GUESTS, 20)}
+        identities[debian['id']]['uuid'] = debian['uuid']
+        raw = {'domid': 3, 'config': {'c_info': {'name': '(null)', 'uuid': handles['zephyr-drive-a']}}}
+        self.xen.rows.append(raw)
+        (self.base / '.xenova-install.json').write_text(json.dumps(
+            {'dom0less': {'guests': {key: {'boot_id': handle} for key, handle in handles.items()}}}))
+        (self.base / '.first-install-state.json').write_text(json.dumps(
+            {'schema': 1, 'phase': 'complete', 'identities': identities}))
+        vm.ensure_runtime(self.p.runtime)
+        execution = self.p.execution()
+        execution.write(self.p.runtime / 'dom0less.json', {
+            'schema_version': '1.0', 'host_boot_id': execution.host, 'guests': {
+                debian['id']: {'phase': 'registering', 'domid': 2, 'uuid': debian['uuid'],
+                               'xen_unique_id': execution.unique(named, self.p.clock() + 2)}}})
+        listing = {'/local/domain': '0\n1\n2\n', '/local/domain/2': 'device\ncontrol\n',
+                   '/local/domain/2/device': 'suspend\n', '/local/domain/0': 'backend\n',
+                   '/local/domain/0/backend': 'vbd\n',
+                   '/local/domain/0/backend/vbd': '1\n2\n' if backend else '1\n'}
+
+        def command(args, **kwargs):
+            if args[0] == 'xenstore-list':
+                if replace and args[1] == '/local/domain/2/device':
+                    self.xen.rows[1] = copy.deepcopy(named)
+                return listing[args[1]]
+            return self.xen(args, **kwargs)
+
+        with patch.object(early, 'enabled', return_value=True), patch.object(self.p, 'command', side_effect=command):
+            self.cli('shutdown-all')
+
+    def test_shutdown_discards_unattached_boot_domains_and_stops_registered_guest(self):
+        self._shutdown_with_early_domains()
+        result = json.loads((self.p.runtime / 'last-stop.json').read_text())
+        events = [json.loads(path.read_text()) for path in (self.p.runtime / 'execution-events').glob('*.json')]
+        self.assertEqual({event['details']['id'] for event in events if event['event'] == 'factory-boot-domain-discarded'},
+                         {'debian-dev', 'zephyr-drive-a'})
+        self.assertEqual(result['stopped'], [self.linux['id']])
+        self.assertEqual([args[1:] for args in self.xen.calls if args[:2] in (['xl', 'destroy'], ['xl', 'shutdown'])],
+                         [['destroy', '2'], ['destroy', '3'], ['shutdown', '1']])
+
+    def test_shutdown_refuses_unadopted_boot_domain_with_backend(self):
+        with self.assertRaises(SystemExit):
+            self._shutdown_with_early_domains(backend=True)
+        result = json.loads((self.p.runtime / 'last-stop.json').read_text())
+        self.assertIn('has devices', result['preflight_error'])
+        self.assertFalse(any(args[:2] == ['xl', 'destroy'] for args in self.xen.calls))
+
+    def test_shutdown_refuses_boot_domain_replaced_before_discard(self):
+        with self.assertRaises(SystemExit):
+            self._shutdown_with_early_domains(replace=True)
+        result = json.loads((self.p.runtime / 'last-stop.json').read_text())
+        self.assertIn('incarnation changed before discard', result['preflight_error'])
+        self.assertFalse(any(args[:2] == ['xl', 'destroy'] for args in self.xen.calls))
 
     def test_create_result_is_checked_for_paused_domain_without_recovery(self):
         self.xen.states[1] = '--p---'

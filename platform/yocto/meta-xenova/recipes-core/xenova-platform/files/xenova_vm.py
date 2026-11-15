@@ -721,23 +721,26 @@ class Platform:
             started_state(record, current)
             owner = _accept() if _accept else _owner
             from xenova_dom0less import adopt
-            adopt(self, record, current, deadline, owner=owner, result=_result)
+            expected = adopt(self, record, current, deadline, owner=owner, result=_result)
             if _result is not None:
                 _result['stage'] = 'start_confirmation'
-            observation = execution.observe(record, deadline)
             # Xen can report no flags during a scheduling transition after PV attachment.
-            # Recheck the same execution without resubmitting start or adopting it again.
-            initial = observation
-            while observation['xen_state'] == 'unknown':
+            # Check the bound incarnation even on the first sample after adoption.
+            while True:
+                observation = execution.observe(record, deadline)
+                if expected is not None and any(
+                        observation[key] != expected[key] for key in ('domid', 'xen_unique_id', 'execution_id')):
+                    raise DomainIdentityError('domain incarnation changed during start confirmation')
+                if observation['xen_state'] != 'unknown':
+                    break
                 remaining = deadline - self.clock()
                 if remaining <= 0:
                     break
+                if expected is None:
+                    expected = observation
                 self.sleep(min(0.1, remaining))
                 if self.clock() >= deadline:
                     break
-                observation = execution.observe(record, deadline)
-                if any(observation[key] != initial[key] for key in ('domid', 'xen_unique_id', 'execution_id')):
-                    raise DomainIdentityError('domain incarnation changed during start confirmation')
             state = started_state(record, observation)
             self.cpu().require(record, deadline, expected=cpu_context, present=True,
                                expected_identity=observation)
@@ -955,6 +958,9 @@ class Platform:
         if deadline is None:
             deadline = self.clock() + timeout
         try:
+            if board:
+                from xenova_dom0less import discard_unadopted
+                discard_unadopted(self, deadline)
             domains = self.domains(deadline=deadline)
             expected = {(d['domid'], d['config']['c_info']['uuid'], d['config']['c_info']['name'])
                         for d in domains if d['domid'] != 0}
