@@ -8,10 +8,11 @@ from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 import math
 import struct
+from threading import local
 from typing import Any
 
 from .inputs import FrameStamp
-from .geometry import timing_start, timing_finish
+from .geometry import project_ground_bounds_many, timing_start, timing_finish
 
 
 ENDPOINT_KINDS = frozenset(('physical_junction', 'observed_paint_end', 'FOV_clip', 'occluded', 'predicted'))
@@ -240,6 +241,60 @@ def _birdview_map(camera, plane, profile):
     margin = camera.pixel_error + 1.0
     valid = valid & (u - margin >= x0) & (u + margin < x1) & (v - margin >= y0) & (v + margin < y1)
     return _readonly(np, u), _readonly(np, v), _readonly(np, valid)
+
+
+class _TapeProjectionCache:
+    """한 호출 스레드에서 최근 보정·격자 하나의 고정 투영만 재사용한다."""
+
+    def __init__(self, key):
+        self.key = key
+        self.valid_source = self.valid_mask = None
+        self.offsets = self.status = None
+
+    def visible_grid(self, np, cv2, u, v, inside, valid_rgb):
+        if valid_rgb is None:
+            return inside.copy()
+        if valid_rgb is self.valid_source:
+            return self.valid_mask.copy()
+        valid = inside & (cv2.remap(valid_rgb, u, v, cv2.INTER_NEAREST,
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0) != 0)
+        # 임의 배열은 다음 프레임에서 제자리 수정될 수 있다. bytes 저장소만 키로 보유한다.
+        owner = valid_rgb
+        while isinstance(owner, np.ndarray):
+            owner = owner.base
+        if isinstance(owner, bytes):
+            self.valid_source, self.valid_mask = valid_rgb, valid
+            return valid.copy()
+        return valid
+
+    def point_offsets(self, np, u, v, rows, columns, diagnostics):
+        camera, plane, profile = self.key
+        if self.offsets is None:
+            self.offsets = np.empty(u.shape + (2,), dtype=np.float64)
+            self.status = np.zeros(u.shape, dtype=np.uint8)
+        missing = self.status[rows, columns] == 0
+        if np.any(missing):
+            rr, cc = rows[missing], columns[missing]
+            lower, upper, bounded = project_ground_bounds_many(u[rr, cc], v[rr, cc],
+                camera, plane, pixel_error=camera.pixel_error + 1.0, diagnostics=diagnostics)
+            nominal = np.column_stack((profile.x_min_m + rr * profile.cell_m,
+                                       profile.y_min_m + cc * profile.cell_m))
+            self.offsets[rr, cc] = np.maximum(np.abs(lower[:, :2] - nominal),
+                                               np.abs(upper[:, :2] - nominal))
+            self.status[rr, cc] = 1 + bounded.astype(np.uint8)
+        return self.offsets[rows, columns], self.status[rows, columns] == 2
+
+
+# 최대 262,144셀 × (float64 2개 + 상태 1B + 유효 mask 1B) = 4.5MiB / 호출 스레드.
+_TAPE_PROJECTION = local()
+
+
+def _tape_projection(camera, plane, profile):
+    key = camera, plane, profile
+    cache = getattr(_TAPE_PROJECTION, 'cache', None)
+    if cache is None or cache.key != key:
+        cache = _TAPE_PROJECTION.cache = _TapeProjectionCache(key)
+    return cache
 
 
 def _trace(np, cv2, skeleton, valid, occluded, band, projection_error, projection_xy, profile, work):
@@ -531,8 +586,6 @@ def _close_tape_gaps(white, eligible, cell_m):
 
 def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, first_id):
     """Trace the outward dark-to-light transition on both sides of the board."""
-    from .geometry import project_ground_bounds_many
-
     step = max(1, round(.025 / profile.cell_m))
     shoulder = max(2, round(.035 / profile.cell_m))
     if first_id == 32 or hsv.shape[1] <= 2 * shoulder:
@@ -603,25 +656,32 @@ def _surface_edges(np, cv2, hsv, visible, white, u, v, camera, plane, profile, f
     return tuple(result)
 
 
-def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None, nn_candidates=None, diagnostics=None):
+def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlusion_mask=None,
+                 valid_rgb=None, nn_candidates=None, diagnostics=None):
     """RGB에서 흰 테이프와 어두운 도로 바깥 경계를 별도 관측으로 뽑는다."""
     timing=timing_start(diagnostics,'tape.birdview_remap')
     if type(profile) is not TapeProfile or stamp is not None and type(stamp) is not FrameStamp:
         raise ValueError('expected tape profile and optional original FrameStamp')
     import numpy as np
     import cv2
-    from .geometry import project_ground_bounds_many
-
     if (not isinstance(bgr, np.ndarray) or bgr.dtype != np.uint8
             or bgr.shape != (camera.height, camera.width, 3)):
         raise ValueError('tape input differs from camera BGR shape')
     if occlusion_mask is not None and (not isinstance(occlusion_mask, np.ndarray)
             or occlusion_mask.shape != bgr.shape[:2] or occlusion_mask.dtype not in (np.bool_, np.uint8)):
         raise ValueError('occlusion mask must be bool/uint8 in original RGB coordinates; nonzero is blocked')
-    u, v, valid = _birdview_map(camera, plane, profile)
+    u, v, inside = _birdview_map(camera, plane, profile)
     warped = cv2.remap(bgr, u, v, cv2.INTER_LINEAR,
                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-    valid = np.asarray(valid, dtype=np.bool_).copy()
+    timing_finish(diagnostics,timing)
+    timing=timing_start(diagnostics,'tape.validity_remap')
+    if valid_rgb is not None:
+        if valid_rgb.shape != bgr.shape[:2] or valid_rgb.dtype != np.uint8:
+            raise ValueError('valid_rgb must describe the rectified RGB grid')
+    cache = _tape_projection(camera, plane, profile)
+    valid = cache.visible_grid(np, cv2, u, v, inside, valid_rgb)
+    timing_finish(diagnostics,timing)
+    timing=timing_start(diagnostics,'tape.occlusion_remap')
     occ = np.zeros(valid.shape, dtype=np.bool_)
     if occlusion_mask is not None:
         footprint = cv2.dilate((occlusion_mask != 0).astype(np.uint8), np.ones((3, 3), np.uint8))
@@ -695,12 +755,9 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
         rows, columns = np.nonzero(skeleton)
         work['projection_checks'] = len(rows)
         if len(rows):
+            # Work counts observations. TimingDiagnostics separately counts actual bound calculations.
             work['projection_batches'] = 1
-            lower, upper, bounded = project_ground_bounds_many(u[rows, columns], v[rows, columns],
-                camera, plane, pixel_error=camera.pixel_error + 1.0,diagnostics=diagnostics)
-            nominal = np.column_stack((profile.x_min_m + rows * profile.cell_m,
-                                       profile.y_min_m + columns * profile.cell_m))
-            pad = np.maximum(np.abs(lower[:, :2] - nominal), np.abs(upper[:, :2] - nominal))
+            pad, bounded = cache.point_offsets(np, u, v, rows, columns, diagnostics)
             errors = np.nextafter(np.hypot(pad[:, 0], pad[:, 1]), np.inf)
             projection_error[rows, columns] = errors
             projection_xy[rows, columns] = np.nextafter(pad, np.inf)
@@ -728,7 +785,9 @@ def extract_tape(bgr, camera, plane, profile=TapeProfile(), *, stamp=None, occlu
                     ('strip_cap_exhausted', 'STRIP_COUNT_CAP'), ('junction_cap_exhausted', 'JUNCTION_COUNT_CAP')):
                 if work[key]:
                     reasons.append(reason)
+    timing=timing_start(diagnostics,'tape.surface_edges')
     surface_edges = _surface_edges(np,cv2,hsv,visible,white,u,v,camera,plane,profile,len(strips))
+    timing_finish(diagnostics,timing)
     work['surface_edges'] = len(surface_edges)
     return TapeGraph(tuple(strips), junctions, 'UNKNOWN' if not complete else 'VALID' if strips else 'EMPTY',
         complete, tuple(reasons), None if stamp is None else stamp.key,

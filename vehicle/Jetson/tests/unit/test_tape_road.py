@@ -392,17 +392,37 @@ class TapeImageTests(unittest.TestCase):
         self.assertTrue(self.np.array_equal(without.mask, with_auxiliary.mask))
 
     def test_reusing_static_camera_projection_does_not_reuse_the_previous_image(self):
+        from xenova_vehicle.perception.geometry import TimingDiagnostics
+
         image = self.image()
         for y in (-.3, 0., .3):
             self.draw(image, ((.3, y), (1.3, y)))
         observed = self.extract(image)
         empty = self.extract(self.image())
-        observed_again = self.extract(image)
+        timing = TimingDiagnostics()
+        observed_again = self.extract(image, diagnostics=timing)
         self.assertEqual(empty.status, 'EMPTY')
         self.assertFalse(empty.strips)
         self.assertEqual(observed.strips, observed_again.strips)
         self.assertEqual(observed.work['projection_batches'], 1)
         self.assertEqual(empty.work['projection_batches'], 0)
+        self.assertNotIn('geometry.ground_prepare', timing.snapshot()['phases'])
+
+    def test_projection_cache_respects_calibration_and_mutable_validity(self):
+        image = self.image()
+        self.draw(image, ((.3, 0.), (1.3, 0.)))
+        mutable = self.np.ones(image.shape[:2], dtype=self.np.uint8)
+        frozen = self.np.frombuffer(mutable.tobytes(), dtype=mutable.dtype).reshape(mutable.shape)
+        original = self.extract(image, valid_rgb=frozen)
+        self.assertTrue(original.strips)
+        self.assertEqual(original.strips, self.extract(image, valid_rgb=mutable).strips)
+        mutable[:, :] = 0
+        self.assertFalse(self.extract(image, valid_rgb=mutable).strips)
+        self.assertEqual(original.strips, self.extract(image, valid_rgb=frozen).strips)
+        more_uncertain = replace(self.camera, pixel_error=.5)
+        changed = extract_tape(image, more_uncertain, self.plane, self.profile, valid_rgb=frozen)
+        self.assertGreater(changed.strips[0].error_m, original.strips[0].error_m)
+        self.assertEqual(original.strips, self.extract(image, valid_rgb=frozen).strips)
 
     def traced_raster(self, boundary=None, internal=False):
         # 제어한 raster로 edge 탐색 분류만 검사한다. renderer/실물 영상의 양성 주장은 아니다.

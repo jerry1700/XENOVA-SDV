@@ -135,6 +135,7 @@ class DepthEvidence:
     metric_qualified: bool
     mode: str
     _ray_inputs: "_RayInputs | None" = field(default=None, repr=False, compare=False)
+    occlusion_boxes: PointBoundsBatch | tuple | None = None
 
     @property
     def rays(self):
@@ -231,8 +232,24 @@ class _RayInputs:
         return evidence
 
 
+def _flat_height_bounds(np, qx, qy, z, axis, offset, plane_offset, uncertainty, config):
+    """평평한 바닥의 높이만 구한다. 분류 경계는 원 XYZ 경로에서 다시 계산한다."""
+    height = z * (qx * axis[0] + qy * axis[1] + axis[2]) + offset + plane_offset
+    lower, upper = height - uncertainty, height + uncertainty
+    # 호출 조건(광선 norm <= 10, 깊이 <= 100m, offset <= 10m)에서
+    # 1nm는 판정 경계에 영향을 줄 수 있는 float64 연산 순서 오차보다 크다.
+    guard = 1e-9
+    nearby = ((np.abs(lower + config.floor_tolerance_m) <= guard)
+        | (np.abs(upper - config.floor_tolerance_m) <= guard)
+        | (np.abs(lower - config.obstacle_min_height_m) <= guard)
+        | (np.abs(upper - config.obstacle_min_height_m) <= guard)
+        | (np.abs(lower - config.obstacle_max_height_m) <= guard))
+    return None if np.any(nearby) else (height, lower, upper)
+
+
 def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
-                  input_kind='LIVE', profile=None, config=DepthConfig(), diagnostics=None, defer_patches=False):
+                  input_kind='LIVE', profile=None, config=DepthConfig(), diagnostics=None, defer_patches=False,
+                  collect_occlusion=False):
     """전체 nominal 분류는 8192픽셀 block, hit/patch는 명시 cap의 immutable 기록이다.
 
     고정 camera의 norm/q_error 두 열만 최대4.6875MiB 캐시한다. 출력 선택용
@@ -270,9 +287,13 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
     absolute = config.extra_depth_error_m + (0. if profile is None else profile.depth_error_m)
     relative = config.extra_relative_error + (0. if profile is None else profile.depth_relative_error)
     nominal = _nominal_terms(camera)
+    flat_plane = (plane.normal == (0., 0., 1.) and not plane_delta
+                  and max(abs(translation)) <= 10. and abs(plane.offset) <= 10.)
     timing_finish(diagnostics,timing)
 
-    def classify(indices):
+    elevated = np.zeros(total, dtype=np.uint8) if collect_occlusion and config.max_hit_boxes else None
+
+    def classify(indices, *, mark_occlusion=False, keep_points=False):
         # 최대 BLOCK_PIXELS개의 작업 배열만 유지한다. bbox radius는 축별 pad다.
         timing=timing_start(diagnostics,'depth.validity')
         with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
@@ -294,9 +315,9 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
             z = z[locations]
             qy = row_qy[yy[locations]]
             qx = (centered_x[xx[locations]] - k[0][1] * qy) / k[0][0]
-            q = np.stack((qx, qy, np.ones_like(qx)), axis=-1)
-            points = z[:, None] * (q @ transform) + translation
+            q = None
             if nominal is None:
+                q = np.column_stack((qx, qy, np.ones_like(qx)))
                 norm = np.sqrt((q * q).sum(axis=-1))
                 min_hz = 1 / (norm + pixel_q_error) - delta
                 q_error = pixel_q_error + np.where(min_hz > 0,
@@ -310,15 +331,28 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
                 + camera.translation_error_m + 1e-9)
             timing_finish(diagnostics,timing)
             timing=timing_start(diagnostics,'depth.height_classify')
-            heights = points @ normal + plane.offset
             h_error = radius * normal_l1 + plane.offset_error_m + 1e-9
-            # 축별 translation/error box의 L2 반경은 sqrt(3)*radius 이하다.
-            h_error += plane_delta * (np.sqrt((points * points).sum(axis=-1)) + math.sqrt(3) * radius)
+            points = None
+            bounds = None
+            if flat_plane and not keep_points and float(np.max(norm)) <= 10.:
+                bounds = _flat_height_bounds(np, qx, qy, z, transform[:, 2], translation[2],
+                                             plane.offset, h_error, config)
+            if bounds is None:
+                if q is None:
+                    q = np.column_stack((qx, qy, np.ones_like(qx)))
+                points = z[:, None] * (q @ transform) + translation
+                heights = points @ normal + plane.offset
+                # 축별 translation/error box의 L2 반경은 sqrt(3)*radius 이하다.
+                if plane_delta:
+                    h_error += plane_delta * (np.sqrt((points * points).sum(axis=-1)) + math.sqrt(3) * radius)
+                bounds = heights, heights - h_error, heights + h_error
+            heights, lower_height, upper_height = bounds
             finite = np.isfinite(radius) & np.isfinite(heights) & np.isfinite(h_error)
-            floor_values = (finite & (heights - h_error >= -config.floor_tolerance_m)
-                     & (heights + h_error <= config.floor_tolerance_m))
-            hit_values = (finite & (heights + h_error >= config.obstacle_min_height_m)
-                    & (heights - h_error <= config.obstacle_max_height_m))
+            floor_values = finite & (lower_height >= -config.floor_tolerance_m) & (upper_height <= config.floor_tolerance_m)
+            hit_values = finite & (upper_height >= config.obstacle_min_height_m) & (lower_height <= config.obstacle_max_height_m)
+            if mark_occlusion:
+                # Only points whose whole height interval is above the floor can hide paint.
+                elevated[indices[locations]] = hit_values & (lower_height >= config.obstacle_min_height_m)
             floor, hits = np.zeros(len(indices), dtype=bool), np.zeros(len(indices), dtype=bool)
             floor[locations], hits[locations] = floor_values, hit_values
         timing_finish(diagnostics,timing)
@@ -333,7 +367,7 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
     valid_count = floor_count = hit_count = patch_count = 0
     for start in range(0, total, BLOCK_PIXELS):
         indices = np.arange(start, min(start + BLOCK_PIXELS, total), dtype=np.int32)
-        points, radii, valid, floor, hits = classify(indices)
+        points, radii, valid, floor, hits = classify(indices, mark_occlusion=elevated is not None)
         valid_count += int(np.count_nonzero(valid))
         floor_count += int(np.count_nonzero(floor))
         current_hits = int(np.count_nonzero(hits))
@@ -357,16 +391,45 @@ def analyze_depth(depth_mm, camera, plane, *, stamp=None, calibration_id=None,
     hit_boxes = ()
     for start in range(0, len(chosen_hits), BLOCK_PIXELS):
         timing=timing_start(diagnostics,'depth.selected_reclassify')
-        points, radii, valid, floor, hits = classify(chosen_hits[start:start + BLOCK_PIXELS])
+        points, radii, valid, floor, hits = classify(chosen_hits[start:start + BLOCK_PIXELS], keep_points=True)
         timing_finish(diagnostics,timing)
         timing=timing_start(diagnostics,'depth.hit_batch')
         lower, upper = np.nextafter(points - radii[:, None], -np.inf), np.nextafter(points + radii[:, None], np.inf)
         hit_boxes = PointBoundsBatch(lower, upper, bool(metric), None if stamp is None else stamp.key)
         del points, radii, valid, floor, hits
         timing_finish(diagnostics,timing)
+    occlusion_boxes = () if collect_occlusion else None
+    if elevated is not None:
+        selected = _occlusion_indices(depth, elevated.reshape(depth.shape), config.max_hit_boxes)
+        if len(selected):
+            points, radii, _, _, _ = classify(selected, keep_points=True)
+            occlusion_boxes = PointBoundsBatch(np.nextafter(points - radii[:, None], -np.inf),
+                np.nextafter(points + radii[:, None], np.inf), bool(metric), None if stamp is None else stamp.key)
     evidence = DepthEvidence(stamp, calibration_id, input_kind, hit_boxes, (),
         valid_count, floor_count, total - floor_count - len(hit_boxes), total - valid_count,
         hit_count - len(hit_boxes), valid_count, bool(metric),
         'QUALIFIED_RAYS' if free else 'HIT_ONLY' if metric else 'UNKNOWN',
-        ray_inputs if defer_patches else None)
+        ray_inputs if defer_patches else None, occlusion_boxes)
     return evidence if defer_patches or ray_inputs is None else ray_inputs.materialize(evidence,diagnostics)
+
+
+def _occlusion_indices(depth, elevated, limit):
+    """Find coherent visible surfaces for RGB masking. Ambiguous hits still reach occupancy."""
+    import cv2
+    import numpy as np
+
+    # Provisional stereo support at native resolution, used only for masking paint.
+    minimum_support = 30
+    if cv2.countNonZero(elevated) < minimum_support:
+        return np.empty(0, dtype=np.intp)
+    patch = np.ones((5, 5), dtype=np.uint8)
+    z = np.where(elevated, depth, 0).astype(np.float32)
+    near = cv2.erode(z, patch)
+    far = cv2.dilate(z, patch)
+    cores = ((near > 0) & (far - near <= 45)).astype(np.uint8)
+    if cv2.countNonZero(cores) < minimum_support:
+        return np.empty(0, dtype=np.intp)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(cores, connectivity=8)
+    supported = stats[:, cv2.CC_STAT_AREA] >= minimum_support
+    supported[0] = False
+    return _selected(np.flatnonzero(supported[labels]), limit)
