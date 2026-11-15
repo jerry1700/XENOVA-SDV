@@ -203,7 +203,7 @@ class EpisodeOwner:
             if (birth is None or birth.pi_sample_us-birth.clock_error_us>begin[1]
                     or begin[0]>birth.pi_sample_us-birth.clock_error_us+200000):return self._reply(request,digest,3,5)
             candidate.state=2;candidate.started_pi_us=begin[0];candidate.deadline_pi_us=begin[0]+40000000
-            candidate.phase_started_pi_us=phase[0];candidate.phase_deadline_pi_us=min(candidate.deadline_pi_us,phase[0]+10000000)
+            candidate.phase_started_pi_us=phase[0];candidate.phase_deadline_pi_us=min(candidate.deadline_pi_us,phase[0]+15000000)
             candidate.origin_vehicle_sequence=birth.vehicle_sequence
             candidate.left_baseline_ticks=birth.left_ticks;candidate.right_baseline_ticks=birth.right_ticks
             candidate.meter_epoch=UUID(birth.meter_epoch).bytes;candidate.meter_baseline_total_ticks=birth.total_ticks
@@ -231,7 +231,7 @@ class EpisodeOwner:
                 phase=self.o.clocks.interval(peer,request.clock_probe_sequence,request.phase_started_guest_us,now,self.r.machine.generation)
                 if phase is None:return self._reply(request,digest,3,5)
                 candidate.phase_started_pi_us=phase[0]
-                candidate.phase_deadline_pi_us=min(old.core.deadline_pi_us,phase[0]+10000000)
+                candidate.phase_deadline_pi_us=min(old.core.deadline_pi_us,phase[0]+15000000)
             if request.action==3 and (candidate.phase!=5 or not self.registry['state']):return self._reply(request,digest,2,4)
         meter=self._meter()
         if (meter is None or not candidate.max_travel_m or now>=min(candidate.deadline_pi_us,candidate.phase_deadline_pi_us)

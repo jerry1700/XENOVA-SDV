@@ -80,7 +80,7 @@ def validate_one(value):
         times=(value.started_pi_us,value.deadline_pi_us,value.phase_started_pi_us,value.phase_deadline_pi_us)
         if any(times) and (not all(times) or not value.started_pi_us<=value.phase_started_pi_us<value.phase_deadline_pi_us<=value.deadline_pi_us
                 or value.deadline_pi_us-value.started_pi_us>40000000
-                or value.phase_deadline_pi_us-value.phase_started_pi_us>10000000):
+                or value.phase_deadline_pi_us-value.phase_started_pi_us>15000000):
             raise ValueError('episode original time nesting')
         if value.stop_wait!=(value.stop_wait_started_pi_us>0):raise ValueError('episode stop wait time')
     elif name=='EpisodeProgress':
