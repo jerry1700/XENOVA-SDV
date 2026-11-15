@@ -121,6 +121,8 @@ class RoadResult:
     semantic_total: int = 0
     semantic_complete: bool | None = None
     semantic_source: tuple | None = None
+    # Per-hypothesis bounds for local road admission and diagnostics only.
+    local_normal_bounds_m: tuple[tuple[float, float, float] | None, ...] = ()
 
     def descriptor(self):
         return dict(status=self.status, complete=self.complete, reasons=list(self.reasons),
@@ -138,6 +140,7 @@ class _Chain:
     gaps: tuple = ()
     point_error_xy: tuple = ()
     segment_error_xy: tuple = ()
+    has_axis_bounds: bool = False
 
 
 def _arc(points):
@@ -147,8 +150,9 @@ def _arc(points):
     return result
 
 
-def _at(points, s):
-    lengths = _arc(points)
+def _at(points, s, lengths=None):
+    if lengths is None:
+        lengths = _arc(points)
     for i in range(len(points) - 1):
         if s <= lengths[i + 1] or i == len(points) - 2:
             t = max(0., min(1., (s - lengths[i]) / max(1e-12, lengths[i + 1] - lengths[i])))
@@ -209,7 +213,7 @@ def _simplify(chain, profile):
             mapped.append(lengths[index] + t * (lengths[index + 1] - lengths[index]))
         gaps.append((max(0., min(mapped) - maximum_deviation), max(mapped) + maximum_deviation))
     return _Chain(chain.ids, points, chain.error + maximum_deviation, tuple(gaps),
-                  tuple(chain.point_error_xy[i] for i in selected), tuple(segments))
+                  tuple(chain.point_error_xy[i] for i in selected), tuple(segments), chain.has_axis_bounds)
 
 
 def _heading_error(chain, index):
@@ -291,7 +295,9 @@ def _chains(graph, profile, strips):
         segment_errors = strip.segment_error_xy or tuple((strip.error_m, strip.error_m) for _ in points[1:])
         if points is not strip.points_xy:
             errors, segment_errors = tuple(reversed(errors)), tuple(reversed(segment_errors))
-        chain = _simplify(_Chain((strip.local_id,), points, strip.error_m, (), errors, segment_errors), profile)
+        has_axis_bounds = bool(strip.point_error_xy and strip.segment_error_xy)
+        chain = _simplify(_Chain((strip.local_id,), points, strip.error_m, (), errors, segment_errors,
+                                 has_axis_bounds), profile)
         points = chain.points
         short = strip.length_m < profile.min_usable_length_m
         if strip.closed or (short and not (profile.allow_dashed and strip.observed and strip.width_complete
@@ -304,7 +310,8 @@ def _chains(graph, profile, strips):
         first, last = span
         if first or last != len(points) - 1:
             chain = _Chain(chain.ids, points[first:last + 1], chain.error, (),
-                           chain.point_error_xy[first:last + 1], chain.segment_error_xy[first:last])
+                           chain.point_error_xy[first:last + 1], chain.segment_error_xy[first:last],
+                           chain.has_axis_bounds)
             if first:
                 start = None
             if last != len(points) - 1:
@@ -350,6 +357,7 @@ def _chains(graph, profile, strips):
         points, ids, gaps = list(chain.points), list(chain.ids), list(chain.gaps)
         point_errors, segment_errors = list(chain.point_error_xy), list(chain.segment_error_xy)
         error = chain.error
+        has_axis_bounds = chain.has_axis_bounds
         current = index
         while current not in visited:
             visited.add(current)
@@ -361,18 +369,25 @@ def _chains(graph, profile, strips):
             beginning = _arc(points)[-1]
             gap = math.dist(points[-1], added.points[0])
             lateral = link_lateral[current, other]
+            curvature_pad = profile.max_curvature_1pm * gap * gap / 8
+            has_axis_bounds &= added.has_axis_bounds
+            if has_axis_bounds:
+                # 연결부의 오차는 양 끝 관측에서 가져온다. 전후 오차를 횡오차로 복사하지 않는다.
+                join_bounds = (point_errors[-1], added.point_error_xy[0],
+                               segment_errors[-1], added.segment_error_xy[0])
+                gap_error = tuple(max(axis) + lateral + curvature_pad for axis in zip(*join_bounds))
+            else:
+                gap_error = (max(error, added.error) + lateral + curvature_pad,) * 2
             gaps.append((beginning, beginning + gap))
             points.extend(added.points)
             ids.extend(added.ids)
             point_errors.extend(added.point_error_xy)
-            gap_error = tuple(max(error, added.error) + lateral
-                              + profile.max_curvature_1pm * gap * gap / 8 for _ in (0, 1))
             segment_errors.extend((gap_error,) + added.segment_error_xy)
-            error = max(error, added.error + lateral + profile.max_curvature_1pm * gap * gap / 8)
+            error = max(error, added.error + lateral + curvature_pad)
             current = other
         if _arc(points)[-1] >= profile.min_usable_length_m:
             output.append(_simplify(_Chain(tuple(ids), tuple(points), error, tuple(gaps),
-                                         tuple(point_errors), tuple(segment_errors)), profile))
+                                          tuple(point_errors), tuple(segment_errors), has_axis_bounds), profile))
     if len(visited) != len(usable):
         return [chain for i, chain in enumerate(usable) if i not in short_dashes], True, work
     return output, False, work
@@ -397,6 +412,8 @@ class _WorkCap(Exception):
 def _in_gap(chain, point):
     if chain is None:
         return True
+    if not chain.gaps:
+        return False
     lengths = _arc(chain.points)
     for index, (a, b) in enumerate(zip(chain.points, chain.points[1:])):
         dx, dy = b[0] - a[0], b[1] - a[1]
@@ -409,7 +426,7 @@ def _in_gap(chain, point):
 
 def _normal_hits(chain, point, normal, side, profile, error, work):
     hits = []
-    for a, b in zip(chain.points, chain.points[1:]):
+    for i, (a, b) in enumerate(zip(chain.points, chain.points[1:])):
         if work['intersection_tests'] >= profile.intersection_work_cap:
             raise _WorkCap()
         work['intersection_tests'] += 1
@@ -424,8 +441,8 @@ def _normal_hits(chain, point, normal, side, profile, error, work):
         if (-1e-8 <= t <= 1 + 1e-8 and width > 0
                 and width + error >= profile.lane_width_min_m
                 and width - error <= profile.lane_width_max_m
-                and not any(abs(distance - old) < 1e-6 for old in hits)):
-            hits.append(distance)
+                and not any(abs(distance - old) < 1e-6 for old, _ in hits)):
+            hits.append((distance, i))
     return hits
 
 
@@ -441,62 +458,107 @@ def _common_runs(values, minimum_length):
     return runs
 
 
+def _normal_box_error(error_xy, normal, sin_yaw):
+    ex, ey = error_xy
+    nx, ny = map(abs, normal)
+    # Any normal rotated by the heading bound has a projection no larger than
+    # the nominal normal projection plus the tangential projection times sin(yaw).
+    return min(math.hypot(ex, ey), nx * ex + ny * ey + sin_yaw * (ny * ex + nx * ey))
+
+
+def _station_normal_bounds(left, divider, right, normal, index, hits, yaw, profile):
+    sin_yaw = math.sin(yaw)
+    turn = 1 - math.cos(yaw)
+    center = _normal_box_error(divider.segment_error_xy[index], normal, sin_yaw)
+    sides = []
+    for chain, (distance, segment) in zip((left, right), hits):
+        width = abs(distance)
+        if chain is None:
+            # A tilted inferred offset moves mostly along the line. Its normal
+            # displacement is width * (1 - cos(yaw)); width itself has a prior.
+            bound = center + profile.missing_outer_width_error_m + width * turn
+        else:
+            bound = _normal_box_error(chain.segment_error_xy[segment], normal, sin_yaw)
+            width_error = center + bound + width * turn + 2 * profile.station_error_m
+            if width + width_error < profile.lane_width_min_m or width - width_error > profile.lane_width_max_m:
+                return None
+        sides.append(bound)
+    return sides[0], center, sides[1]
+
+
 def _hypothesis(left, divider, right, profile, local_id, work):
-    length = _arc(divider.points)[-1]
+    lengths = _arc(divider.points)
+    length = lengths[-1]
     stations = [length * i / (profile.station_count - 1) for i in range(profile.station_count)]
     values = []
     ambiguous = False
     prior_pad = profile.missing_outer_width_error_m
+    used = [chain for chain in (left, divider, right) if chain is not None]
+    has_axis_bounds = all(chain.has_axis_bounds for chain in used)
+    heading_errors = tuple(_heading_error(divider, i) for i in range(len(divider.points) - 1))
+    matching_error = divider.error + max(c.error if c is not None else prior_pad for c in (left, right))
     for station in stations:
-        point, index = _at(divider.points, station)
+        point, index = _at(divider.points, station, lengths)
         a, b = divider.points[index:index + 2]
         heading = _angle(a, b)
         normal = -math.sin(heading), math.cos(heading)
-        error = divider.error + max(c.error if c is not None else prior_pad for c in (left, right))
-        distances = []
+        crossings = []
         for chain, side in ((left, 1), (right, -1)):
-            hits = ([side * profile.missing_outer_width_m] if chain is None
-                    else _normal_hits(chain, point, normal, side, profile, error, work))
+            hits = ([(side * profile.missing_outer_width_m, None)] if chain is None
+                    else _normal_hits(chain, point, normal, side, profile, matching_error, work))
             if len(hits) > 1:
                 work['ambiguous_normal_stations'] += 1
                 ambiguous = True
             if len(hits) != 1:
                 if not hits:
                     work['unmatched_normal_stations'] += 1
-                distances = []
                 break
-            distances.append(hits[0])
-        if not distances:
+            crossings.append(hits[0])
+        if len(crossings) != 2:
             values.append(None)
             continue
+        distances = tuple(hit[0] for hit in crossings)
         outers = [tuple(point[k] + normal[k] * distance for k in (0, 1)) for distance in distances]
         inferred = (left is None or right is None or any(lo < station < hi for lo, hi in divider.gaps)
                     or _in_gap(left, outers[0]) or _in_gap(right, outers[1]))
-        values.append((station, point, outers[0], outers[1], inferred, distances, index))
+        bounds = None
+        if has_axis_bounds:
+            bounds = _station_normal_bounds(left, divider, right, normal, index, crossings,
+                                            heading_errors[index], profile)
+            if bounds is None:
+                work['unmatched_normal_stations'] += 1
+                values.append(None)
+                continue
+        values.append((station, point, outers[0], outers[1], inferred, distances, index, bounds))
     # 관측된 공통 범위만 쓴다. 분리된 여러 범위를 하나의 연속 도로로 만들지 않는다.
     eligible = _common_runs(values, profile.min_usable_length_m)
     if len(eligible) != 1:
         work['no_usable_common_run' if not eligible else 'multiple_common_runs'] += 1
-        return None, ambiguous or len(eligible) > 1
+        return None, ambiguous or len(eligible) > 1, None
     run = eligible[0]
-    used = [chain for chain in (left, divider, right) if chain is not None]
     error = max(c.error for c in used) + profile.station_error_m
     if left is None or right is None:
         error += prior_pad
-    heading_errors = tuple(_heading_error(divider, i) for i in range(len(divider.points) - 1))
-    yaw_error = max(heading_errors[row[6]] for row in run)
     max_width = max(abs(distance) for row in run for distance in row[5])
     step = max(b[0] - a[0] for a, b in zip(run, run[1:]))
-    error += profile.max_curvature_1pm * step * step / 8
-    if error + max_width * math.sin(yaw_error) > profile.max_geometry_error_m:
-        # 방향이 불확실한 끝부분을 빼도 연속 구간 하나가 충분히 길 때만 쓴다.
-        stable = _common_runs((row if error + max_width * math.sin(heading_errors[row[6]])
-                               <= profile.max_geometry_error_m else None for row in run),
-                              profile.min_usable_length_m)
+    curvature_pad = profile.max_curvature_1pm * step * step / 8
+    error += curvature_pad
+    normal_pad = profile.station_error_m + curvature_pad
+    if has_axis_bounds:
+        station_errors = [max(row[7]) + normal_pad for row in run]
+    else:
+        station_errors = [error + max_width * math.sin(heading_errors[row[6]]) for row in run]
+    if max(station_errors) > profile.max_geometry_error_m:
+        # 오차가 큰 부분을 빼도 충분히 긴 연속 구간이 하나일 때만 사용한다.
+        stable = _common_runs((row if bound <= profile.max_geometry_error_m else None
+                               for row, bound in zip(run, station_errors)), profile.min_usable_length_m)
         if len(stable) == 1:
             run = stable[0]
-            yaw_error = max(heading_errors[row[6]] for row in run)
+    yaw_error = max(heading_errors[row[6]] for row in run)
+    max_width = max(abs(distance) for row in run for distance in row[5])
     error += max_width * math.sin(yaw_error)
+    boundary_normal_bounds = (tuple(max(role) + normal_pad for role in zip(*(row[7] for row in run)))
+                              if has_axis_bounds else None)
     divider_points = tuple(row[1] for row in run)
     left_outer, right_outer = tuple(row[2] for row in run), tuple(row[3] for row in run)
     centers = [tuple(tuple((p[k] + q[k]) / 2 for k in (0, 1)) for p, q in zip(divider_points, outer))
@@ -506,7 +568,7 @@ def _hypothesis(left, divider, right, profile, local_id, work):
     result = LaneHypothesis(local_id, tuple(() if c is None else c.ids for c in (left, divider, right)),
         tuple(row[0] for row in run), divider_points, left_outer, right_outer, centers[0], centers[1],
         tuple(row[4] for row in run), widths, error, yaw_error)
-    return result, ambiguous
+    return result, ambiguous, boundary_normal_bounds
 
 
 def infer_road(graph, profile=RoadProfile()):
@@ -514,21 +576,34 @@ def infer_road(graph, profile=RoadProfile()):
     if type(graph) is not TapeGraph or type(profile) is not RoadProfile:
         raise ValueError('road inference requires a tape graph/profile')
     paint = _infer_road(graph, profile, graph.strips)
-    if paint.status == 'VALID' or not graph.surface_edges or not graph.complete:
+    if paint.status == 'VALID' or not graph.complete:
         return paint
+    # A dark pair of shoulders alone also occurs on parking markings. Use it
+    # to resolve paint roles only alongside a measured light outer shoulder.
+    roles = dict(graph.paint_roles)
+    resolved = paint
+    if 1 in roles.values() and any(role in (0, 2) for role in roles.values()):
+        classified = _infer_road(graph, profile, graph.strips, paint_roles=roles)
+        if len(classified.hypotheses) == 1 and classified.complete:
+            resolved = classified
+    if not graph.surface_edges:
+        return resolved
     mixed = _infer_road(graph, profile, graph.strips + graph.surface_edges)
-    return mixed if mixed.status in ('VALID','PARTIAL') else paint
+    return mixed if mixed.status in ('VALID','PARTIAL') else resolved
 
 
-def _infer_road(graph, profile, strips):
+def _infer_road(graph, profile, strips, *, paint_roles=None):
     chains, merge_ambiguous, chain_work = _chains(graph, profile, strips)
     edge_roles = {edge.local_id:edge.outer_role for edge in graph.surface_edges}
+    if paint_roles is not None:
+        edge_roles.update(paint_roles)
     complete = graph.complete
     reasons = list(graph.reasons)
     if merge_ambiguous:
         complete = False
         reasons.append('DASH_CHAIN_AMBIGUOUS')
     hypotheses = []
+    local_bounds = []
     work = dict(intersection_tests=0, no_x_overlap=0, unmatched_normal_stations=0,
                 ambiguous_normal_stations=0, no_usable_common_run=0, multiple_common_runs=0)
     checked = 0
@@ -549,7 +624,7 @@ def _infer_road(graph, profile, strips):
         if any(edge_roles.get(i,role)!=role for role,chain in enumerate(ordered) for i in chain.ids):
             continue
         try:
-            result, ambiguous = _hypothesis(*ordered, profile, len(hypotheses), work)
+            result, ambiguous, bounds = _hypothesis(*ordered, profile, len(hypotheses), work)
         except _WorkCap:
             complete = False
             reasons.append('ROAD_WORK_CAP')
@@ -560,6 +635,7 @@ def _infer_road(graph, profile, strips):
             reasons.append('NORMAL_INTERSECTION_AMBIGUOUS')
         if result is not None:
             hypotheses.append(result)
+            local_bounds.append(bounds)
     # 관측3선으로 지지되는 가설이 없을 때만 기존 missing-outer prior를 사용한다.
     # 다른 비도로선/가림 조각의 존재만으로 관측2선의 부분 가설까지 없애지는 않는다.
     if not hypotheses and not work_exhausted and len(chains) >= 2 and profile.allow_missing_outer:
@@ -583,7 +659,7 @@ def _infer_road(graph, profile, strips):
                     break
                 missing_roles_checked += 1
                 try:
-                    result, ambiguous = _hypothesis(*roles, profile, len(hypotheses), work)
+                    result, ambiguous, bounds = _hypothesis(*roles, profile, len(hypotheses), work)
                 except _WorkCap:
                     complete = False
                     reasons.append('ROAD_WORK_CAP')
@@ -591,6 +667,7 @@ def _infer_road(graph, profile, strips):
                     break
                 if result is not None:
                     hypotheses.append(result)
+                    local_bounds.append(bounds)
                 complete = complete and not ambiguous
             if capped:
                 break
@@ -601,7 +678,7 @@ def _infer_road(graph, profile, strips):
     elif not hypotheses:
         status = 'UNKNOWN'
         reasons.append('NO_SUPPORTED_ROAD')
-    elif hypotheses[0].error_m > profile.max_geometry_error_m:
+    elif max(local_bounds[0] or (hypotheses[0].error_m,)) > profile.max_geometry_error_m:
         status = 'UNKNOWN'
         reasons.append('GEOMETRY_ERROR_BUDGET')
     elif any(hypotheses[0].inferred):
@@ -613,4 +690,5 @@ def _infer_road(graph, profile, strips):
                                                        triples_total=possible, hypotheses=len(hypotheses),
                                                        missing_pairs_checked=missing_pairs_checked,
                                                        missing_roles_checked=missing_roles_checked,
-                                                       **chain_work, **work))
+                                                               **chain_work, **work),
+                      local_normal_bounds_m=tuple(local_bounds))

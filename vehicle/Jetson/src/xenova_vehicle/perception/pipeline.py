@@ -39,6 +39,25 @@ _BOUNDARY_PARENTS_PER_FRAME = 2
 _BOUNDARY_RAY_TESTS_PER_FRAME = 2048
 
 
+def _select_mapped_road(road, temporal, limits):
+    if temporal is None or road is None:
+        return temporal
+    if road.status == 'UNKNOWN' and len(road.hypotheses) <= 1 and set(road.reasons) <= {
+            'NO_MEASURED_TAPE_WIDTH', 'NO_SUPPORTED_ROAD', 'GEOMETRY_ERROR_BUDGET'}:
+        return temporal
+    if (road.status != 'PARTIAL' or not road.complete or len(road.hypotheses) != 1
+            or temporal.road.source_key != road.source_key or road.source_key not in temporal.sources
+            or len(temporal.sources) < 2 or not temporal.within(limits)):
+        return None
+    observations = temporal.road.hypotheses[0].boundary_observations
+    if observations is not None:
+        current_roles = {strip: role for role, ids in enumerate(road.hypotheses[0].strip_ids) for strip in ids}
+        if any(key == road.source_key and current_roles.get(strip, role) != role
+               for role, evidence in enumerate(observations) for key, strip in evidence):
+            return None
+    return temporal
+
+
 def _digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
@@ -1103,10 +1122,7 @@ class PerceptionPipeline:
                 geometry_limits=self.profile.road_limits)
             approach_fit = self._temporal_road.approach_fit
             # 현재 영상이 여러 도로를 가리키거나 탐색을 끝내지 못했다면 후보를 승격하지 않는다.
-            if (self._last_road is None or (self._last_road.status == 'UNKNOWN'
-                    and len(self._last_road.hypotheses) <= 1 and set(self._last_road.reasons) <= {
-                        'NO_MEASURED_TAPE_WIDTH','NO_SUPPORTED_ROAD','GEOMETRY_ERROR_BUDGET'})):
-                mapped_road = temporal
+            mapped_road = _select_mapped_road(self._last_road, temporal, self.profile.road_limits)
         lane_section = None
         if lane_status == 'HELD' and lane_pose is not None:
             lane_section = mapped_lane_ahead(self._current_lane, lane_pose, self.profile.road)
