@@ -20,10 +20,14 @@ def _validate_auto_recovery(value):
     if not isinstance(rows,dict) or len(rows)>2:raise ValueError('AUTO recovery journal limit')
     for vm,row in rows.items():
         canonical(vm)
-        if not isinstance(row,dict) or set(row)!=set(AUTO_RECOVERY_IDENTITY)|{'instance','generation','host'}:
+        fields=set(AUTO_RECOVERY_IDENTITY)|{'instance','generation','host'}
+        if not isinstance(row,dict) or (set(row)!=fields and
+                (set(row)!=fields|{'trigger'} or row['trigger']!='app-exit')):
             raise ValueError('AUTO recovery identity')
         for key in ('execution_id','boot_id','host','instance'):canonical(row[key])
-        if (type(row['generation']) is not int or not 1<=row['generation']<value['generation'] or
+        if (type(row['generation']) is not int or not 1<=row['generation']<=value['generation'] or
+            (row['generation']==value['generation'] and
+             (row.get('trigger')!='app-exit' or (value['mode']=='AUTO' and value['owner']==vm))) or
             any(type(row[k]) is not int or row[k]<0 for k in AUTO_RECOVERY_IDENTITY[2:])):
             raise ValueError('AUTO recovery context')
 

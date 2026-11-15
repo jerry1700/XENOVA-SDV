@@ -1345,7 +1345,7 @@ Gateway의 정상 권위 원본은 별도 [로컬 진단·재확인](../../platf
 | `expected_lifecycle_generation` | probe의 `lifecycle_generation`, 정수 ≥0 |
 | `expected_intent_revision` | probe의 `intent_revision`, 정수 ≥1 |
 | `expected_execution` | 아래 mode별 객체. 여분 필드 없음 |
-| `mode` | 아래 세 값 중 하나 |
+| `mode` | 아래 표의 값 중 하나 |
 | `deadline_monotonic_ms` | 같은 host 부팅의 절대 단조 ms. 새 실행 판정 시 미래이며 120초 이내 |
 
 | mode | expected_execution | 추가 조건 |
@@ -1353,6 +1353,7 @@ Gateway의 정상 권위 원본은 별도 [로컬 진단·재확인](../../platf
 | `start-if-absent` | `{"absent_observation_revision":2}` | 최신 성공 probe가 실제 absent이며 revision이 일치 |
 | `graceful-restart` | `{"execution_id":"UUID"}` | managed 실행 ID 일치·협조형 종료 지원 |
 | `force-restart` | `{"execution_id":"UUID"}` | managed 실행 ID 일치·정책 `force_restart_vm_ids`에 해당 UUID 승인 |
+| `restart-crashed` | `{"execution_id":"UUID"}` | managed 실행 ID 일치·Xen에서 `crashed` 확인·최초 설치에 등록된 Zephyr A/B 또는 `force_restart_vm_ids`에 해당 UUID 승인 |
 
 
 <a id="cmd-recover-once"></a>
@@ -1371,6 +1372,8 @@ Gateway의 정상 권위 원본은 별도 [로컬 진단·재확인](../../platf
 **사용 조건**
 
 REGISTERED·동일 세대·유효 running 의도·정확한 revision·동일 host의 allowed admission·열린 host gate·정상 기존 자산이 필요하다. 아래 예시는 **현재 running 의도인 협조형 시험 VM**용이다. 정지 의도를 복구로 우회하지 않는다.
+
+Recovery Worker가 주행 VM에 `restart-crashed`를 요청하려면 같은 host의 Gateway에서 해당 VM의 바인딩이 제거되고 출력 권한이 철회됐음을 확인해야 한다. 플랫폼은 제거 직전에도 같은 Xen 실행과 `crashed` 상태를 확인한다. 새 실행의 바인딩과 앱 준비 상태는 기존 대기 후보 합류 절차에서 다시 검증한다.
 
 **실행 예시**
 

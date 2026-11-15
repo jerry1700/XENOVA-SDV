@@ -584,6 +584,9 @@ class Platform:
         if expected is not None and expected.get("xen_unique_id") is not None:
             if self.execution().unique(row, deadline) != expected["xen_unique_id"]:
                 raise DomainIdentityError("domain incarnation changed before operation")
+        if expected is not None and expected.get("required_xen_state") is not None:
+            if row["xen_state"] != expected["required_xen_state"]:
+                raise DomainIdentityError("domain is no longer in the required Xen state")
         return row
 
     def require_cooperative(self, record, row, action, deadline):
@@ -645,7 +648,7 @@ class Platform:
             self.sleep(min(0.1,max(0,deadline-self.clock())))
         raise PlatformError('cooperative reboot removal deadline exceeded; no force')
 
-    def control(self, record, action, expected, *, deadline=None, _launch=None):
+    def control(self, record, action, expected, *, deadline=None, _launch=None, _result=None):
         row = self.resolve_domain(record, expected=expected, deadline=deadline)
         if action=='reboot' and self.process_isolation and guest_kind(record)=='linux':
             from xenova_guest_process import command
@@ -662,6 +665,9 @@ class Platform:
                         refuse('INTENT_MISMATCH','reboot superseded by stop intent')
                 self.timed_command(['xl', action, str(row['domid'])], deadline)
         else:
+            if _result is not None:
+                _result['physical_submitted'] = True
+                _result['stage'] = 'shutdown_submit'
             self.timed_command(['xl',action,str(row['domid'])],deadline)
         return row
 
@@ -916,7 +922,7 @@ class Platform:
         return rows
 
     def stop_many(self, records, timeout=90, *, force=False, board=False, deadline=None,
-                  _accept=None, _expected_runs=None, _observed=None, _result=None):
+                  _accept=None, _expected_runs=None, _observed=None, _result=None, _required_state=None):
         """사전 안전 검사와 요청 후 신원 관측을 분리한다. 자동 강제 종료는 없다."""
         from xenova_preparation import guard_asset
         for record in records:
@@ -961,6 +967,8 @@ class Platform:
                     self.require_cooperative(record,row,'shutdown',deadline)
                 if _expected_runs and record['uuid'] in _expected_runs:
                     row = {**row, 'xen_unique_id': _expected_runs[record['uuid']]}
+                    if _required_state is not None:
+                        row['required_xen_state'] = _required_state
                     self.resolve_domain(record, expected=row, deadline=deadline)
                 planned.append((record, row, strategy))
             if board:
@@ -988,10 +996,8 @@ class Platform:
                     unique = owns_execution(self, record, row, deadline)
                     if unique:
                         row = {**row, 'xen_unique_id': unique}
-                if _result is not None:
-                    _result['physical_submitted'] = True
-                    _result['stage'] = 'shutdown_submit'
-                self.control(record, 'destroy' if strategy == 'forced' else 'shutdown', row, deadline=deadline)
+                self.control(record, 'destroy' if strategy == 'forced' else 'shutdown', row, deadline=deadline,
+                             _result=_result)
             except (PlatformError, OSError, ValueError, KeyError, TypeError) as exc:
                 if isinstance(exc, DomainIdentityError):
                     identity_error = exc

@@ -7,7 +7,7 @@ from uuid import UUID
 
 import pytest
 
-from dom0_manager.errors import DriverError, InvalidState
+from dom0_manager.errors import DriverError, DriverTimeout, InvalidState
 from dom0_manager.recovery.config import RecoverySettings
 from dom0_manager.recovery.engine import KEEP_CLOSED
 from dom0_manager.recovery.model import FailureReason, HealthState
@@ -15,7 +15,7 @@ from dom0_manager.recovery.policy import RecoveryPolicy
 from dom0_manager.recovery.protection import GatewayProtection, GatewayRefused, GatewayUncertain
 from dom0_manager.recovery.state import RecoveryStatus, RecoveryStore
 from fake_gateway import FakeGateway, lost
-from test_recovery_engine import APP, EXEC, HOST, VM, VM2, held, judgment, make, view, zephyr_judgment
+from test_recovery_engine import APP, EXEC, HOST, VM, VM2, crashed_view, held, judgment, make, view, zephyr_judgment
 
 NEW = "7d1e2f3a-4b5c-4d6e-8f70-81a2b3c4d5e6"  # 복구가 만든 새 실행
 OTHER_HOST = "1c2d3e4f-5a6b-4c7d-8e9f-a0b1c2d3e4f5"
@@ -156,12 +156,68 @@ def test_expired_key_is_replaced_only_after_a_fresh_judgment_and_within_the_requ
 
 
 def test_no_gateway_binding_holds_without_issuing_a_key(tmp_path):
-    """crashed·미합류 실행은 Gateway binding 이 없어 보호를 받지 않는다. 보내지 않고 보류한다."""
+    """A live VM with heartbeat loss still needs a current binding and durable protection."""
     w = drive(tmp_path, bound=False)
     w.engine.on_judgment(zephyr_judgment())
     w.tick()
     assert held(w) and entry(w) is None and w.gateway.issued == 0 and w.gateway.count("submit") == 0
     assert "no current binding" in w.engine._held[w.record().recovery_id]  # noqa: SLF001
+
+
+@pytest.mark.parametrize("withdrawal", ["failover", "safe-stop"])
+def test_crash_without_binding_waits_for_gateway_withdrawal(tmp_path, withdrawal):
+    w = drive(tmp_path)
+    w.gateway.vm_ids = (str(VM), str(VM2))
+    w.gateway.owner = str(VM)
+    w.platform.views[VM] = crashed_view()
+    w.watcher.failing(VM, FailureReason.DOMAIN_CRASHED)
+    w.engine.on_judgment(zephyr_judgment())
+    w.tick()
+    assert held(w) and "still has a binding" in w.engine._held[w.record().recovery_id]
+
+    w.gateway.bind(str(VM), None)
+    w.advance(5)
+    w.tick()
+    assert held(w) and "has not withdrawn" in w.engine._held[w.record().recovery_id]
+    assert w.record().attempt == 0
+
+    w.gateway.generation += 1
+    if withdrawal == "failover":
+        w.gateway.owner = str(VM2)
+    else:
+        w.gateway.mode = "SAFE_STOP"
+        w.gateway.control_phase = "PENDING"
+    w.gateway.output_permitted = False
+    w.advance(5)
+    w.tick()
+    spec = w.platform.recover_calls()[0][1]
+    assert spec["mode"] == "restart-crashed" and spec["expected_execution"] == {"execution_id": EXEC}
+    assert w.record().status is RecoveryStatus.COMPLETED
+    assert w.gateway.issued == 0 and w.gateway.count("submit") == 0
+
+
+def test_crash_retry_rechecks_withdrawal_and_reuses_attempt(tmp_path):
+    w = drive(tmp_path, bound=False)
+    w.gateway.vm_ids = (str(VM), str(VM2))
+    w.gateway.owner = str(VM2)
+    w.platform.views[VM] = crashed_view()
+    w.watcher.failing(VM, FailureReason.DOMAIN_CRASHED)
+    w.platform.results.insert(0, DriverTimeout("response lost"))
+    w.engine.on_judgment(judgment(reason=FailureReason.DOMAIN_CRASHED, kind="zephyr"))
+    w.tick()
+    spec = w.platform.recover_calls()[0][1]
+    assert w.record().replay and w.record().attempt == 1
+
+    w.gateway.storage_uncertain = True
+    w.advance(5)
+    w.tick()
+    assert len(w.platform.recover_calls()) == 1
+
+    w.gateway.storage_uncertain = False
+    w.advance(5)
+    w.tick()
+    assert [call[1] for call in w.platform.recover_calls()] == [spec, spec]
+    assert w.record().status is RecoveryStatus.COMPLETED
 
 
 @pytest.mark.parametrize("change", ["owner", "binding", "host", "storage"])

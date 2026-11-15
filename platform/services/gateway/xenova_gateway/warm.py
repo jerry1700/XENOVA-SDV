@@ -6,7 +6,7 @@ owner must actually calculate in the newly issued context before output resumes.
 from xenova_mqtt.lifecycle import parse
 from xenova_mqtt.drive_binding import app_instance
 from .verified import VerifiedDriveMachine
-from .machine import DRIVE_APPS,ForwardStop
+from .machine import DRIVE_APPS,ForwardStop,Mode
 from .authority import AuthorityError,AUTO_RECOVERY_IDENTITY
 
 # 결과의 부적합과 VM/앱 실행 고장을 구분한다. 아래 이유 자체는 새 READY나 명령을 만들지 않는다.
@@ -81,7 +81,6 @@ class WarmDriveMachine(VerifiedDriveMachine):
     def _change(self,mode,vm,reason,now,*,arm=False,distrust=None):
         if not self.durable_write_available():
             return super()._change(mode,vm,reason,now,arm=arm,distrust=distrust)
-        from .machine import Mode
         if not self._abandon('CONTROL_CONTEXT_CHANGED'):return [ForwardStop(self.generation)]
         manual=None
         if self.authority.value.get('manual_input_profile') in ('manual-session-1','manual-input-2','manual-input-3') and mode in (Mode.MANUAL,Mode.AUTO_READY):
@@ -96,12 +95,26 @@ class WarmDriveMachine(VerifiedDriveMachine):
         recovery=None
         lost=self.active_vm
         if (reason in ('autonomous_unavailable','no_fresh_standby') and self.active_app=='autonomous' and
-            self.output_permitted and (vm!=lost or mode is Mode.SAFE_STOP) and self._deadline_recovery_due(lost,now)):
-            row=self.bindings.current(lost,now)
-            if row and self.sessions.get((lost,'autonomous'))==(row['execution_id'],row['boot_id'],app_instance(row,'autonomous')):
-                recovery=(lost,{**{key:row[key] for key in AUTO_RECOVERY_IDENTITY},'instance':app_instance(row,'autonomous'),
-                    'generation':self.generation,'host':self.authority.host})
+            (vm!=lost or mode is Mode.SAFE_STOP) and
+            (self._auto_exit_confirmed(lost,now) or
+             (self.output_permitted and self._deadline_recovery_due(lost,now)))):
+            fault=self._auto_recovery_identity(lost,now)
+            if fault:recovery=(lost,fault)
         return super()._change(mode,vm,reason,now,arm=arm,manual=manual,distrust=distrust,auto_recovery=recovery)
+
+    def _auto_recovery_identity(self,vm,now):
+        row=self.bindings.current(vm,now)
+        if row and self.sessions.get((vm,'autonomous'))==(row['execution_id'],row['boot_id'],app_instance(row,'autonomous')):
+            return {**{key:row[key] for key in AUTO_RECOVERY_IDENTITY},'instance':app_instance(row,'autonomous'),
+                    'generation':self.generation,'host':self.authority.host}
+        return None
+
+    def _auto_exit_confirmed(self,vm,now):
+        key=vm,'autonomous'
+        check=self.checks.get(key)
+        return (self.execution_phases.get(key)=='STOPPED' and self.prepared[key].generation==self.generation
+                and check is not None and 0<=now-check[1]<=self.readiness_lease_s
+                and self._bound(vm,now,'autonomous'))
 
     def _deadline_recovery_due(self,vm,now):
         key=(vm,'autonomous')
@@ -151,6 +164,7 @@ class WarmDriveMachine(VerifiedDriveMachine):
         return bool(registry is not None and registry.zero_prepared(self.manual_input.value))
 
     def on_command(self,app,vm,payload,t,reference=None):
+        if self.execution_phases.get((vm,app))=='STOPPED':return False
         if not 0<=self.clock()-t<=self.timing.command_timeout_s:return False
         if app=='manual' and vm==self.active_vm and self.movement:
             if not isinstance(payload,dict):return False
@@ -199,7 +213,7 @@ class WarmDriveMachine(VerifiedDriveMachine):
     def _input_unavailable(self,vm,now):
         from .verified import INPUT_FAILURES
         p=self.prepared[vm,'autonomous'];check=self.checks.get((vm,'autonomous'))
-        return (self.execution_phases.get((vm,'autonomous')) not in ('STOPPING','RESIDUAL')
+        return (self.execution_phases.get((vm,'autonomous')) not in ('STOPPING','STOPPED','RESIDUAL')
                 and p.generation==self.generation and p.state!='READY' and p.reason in INPUT_FAILURES and
                 check is not None and 0<=now-check[1]<=self.readiness_lease_s)
 
@@ -211,8 +225,13 @@ class WarmDriveMachine(VerifiedDriveMachine):
         except (ValueError,TypeError):return False
         key=vm,app;old=self.checks.get(key);p=self.prepared[key]
         if (value.generation!=self.generation or (old and value.check<=old[0]) or value.progress<p.progress):return False
+        if self.execution_phases.get(key)=='STOPPED' and value.phase!='STOPPED':return False
         fresh_ready=value.readiness=='READY' and value.progress>p.progress
         if value.readiness=='READY' and p.state!='READY' and not fresh_ready:return False
+        if value.phase=='STOPPED':
+            self.nodes[vm][app].pending=None
+            self.references.pop(key,None)
+            self.states.invalidate(vm,app)
         recovering=self._retrying_function(key,p.reason,self.execution_phases.get(key),t)
         self.checks[key]=(value.check,t)
         self.execution_phases[key]=value.phase
@@ -333,7 +352,43 @@ class WarmDriveMachine(VerifiedDriveMachine):
         if self.active_app=='manual' and self.movement and self.output_permitted and not self._manual_zero_prepared():
             sample=self.manual_input.current(now)
             if sample is None or sample.session!=self.movement.session or not self._manual_context(sample) or self.movement.blocked:
-                from .machine import Mode
                 self._authorized=False
                 return self._change(Mode.SAFE_STOP,self.active_vm,'driver_session_unavailable',now)+self._output(now)
-        return super().step(now)
+        if (not self.authority.error and self.active_app=='autonomous' and not self.output_permitted and
+            self.phase in ('APPLIED','DISARMED','FAILED') and self._auto_exit_confirmed(self.active_vm,now)):
+            self._authorized=False
+            return self._change(Mode.SAFE_STOP,self.active_vm,'no_fresh_standby',now)+self._output(now)
+        actions=super().step(now)
+        if not self._record_standby_auto_recovery(now):return [ForwardStop(self.generation)]
+        return actions
+
+    def _record_standby_auto_recovery(self,now):
+        """Persist a late exit or settle a recovery once its replacement is ready."""
+        if self.authority.error or not self.durable_write_available() or self.phase not in ('APPLIED','DISARMED'):
+            return True
+        # A report may arrive after the lost command already triggered a handoff.
+        # Persist the local exit without issuing a new control generation.
+        prior=self.authority.value.get('auto_recovery',{})
+        recoveries=dict(prior)
+        for vm in self.vm_ids:
+            active_auto=vm==self.active_vm and self.active_app=='autonomous'
+            previous=prior.get(vm,{})
+            exited=not active_auto and self._auto_exit_confirmed(vm,now)
+            if not exited and not previous:continue
+            fault=self._auto_recovery_identity(vm,now)
+            if not fault:continue
+            same_context=all(previous.get(key)==fault[key] for key in (*AUTO_RECOVERY_IDENTITY,'host'))
+            if exited and not same_context:
+                # A newly replaced AUTO that exits during preparation belongs
+                # to the original attempt's VM escalation, not another rotation.
+                recoveries[vm]={**fault,'trigger':'app-exit'}
+            elif (same_context and previous['instance']!=fault['instance']
+                  and (self.output_permitted and self._ready(vm,'autonomous',now) if active_auto
+                       else self._qualified(vm,'autonomous',now,held=True))):
+                del recoveries[vm]
+        if recoveries!=prior:
+            try:self.authority.update(auto_recovery=recoveries)
+            except AuthorityError:
+                self._fail('AUTHORITY_STORAGE_UNCERTAIN',now)
+                return False
+        return True

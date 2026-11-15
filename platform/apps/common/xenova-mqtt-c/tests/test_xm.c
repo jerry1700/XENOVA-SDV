@@ -493,6 +493,9 @@ static void test_lifecycle(void)
 {
  char out[256];
  CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"WAITING","QUALIFIED",NULL)>0,"waiting qualification");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"STOPPED","NOT_READY","APP_EXITED")>0,"confirmed exit");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"STOPPING","NOT_READY","APP_EXITED")==-EINVAL,"exit requires STOPPED");
+ CHECK(xm_app_lifecycle_json(out,sizeof(out),0,1,0,"STOPPED","NOT_READY","APP_EXITED")==-EINVAL,"exit requires generation");
  CHECK(strstr(out,"\"progress_seq\":\"0\"")&&strstr(out,"\"profile\":\"warm-drive-1\""),"distinct supervision %s",out);
  CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,0,"EXECUTING","READY",NULL)==-EINVAL,"no fabricated progress");
  CHECK(xm_app_lifecycle_json(out,sizeof(out),42,1,1,"WAITING","READY",NULL)==-EINVAL,"waiting is not activation");

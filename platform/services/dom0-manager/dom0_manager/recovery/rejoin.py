@@ -20,7 +20,8 @@ def _auto_fault(authority, row):
     vm=row['vm_id'];fault=authority.get('auto_recovery',{}).get(vm)
     if (not isinstance(fault,dict) or fault['host']!=row['host_boot_id'] or
         any(fault[k]!=row[k] for k in ('execution_id','boot_id','intent_revision','lifecycle_generation')) or
-        type(authority.get('generation')) is not int or authority['generation']<=fault['generation'] or
+        type(authority.get('generation')) is not int or authority['generation']<fault['generation'] or
+        (authority['generation']==fault['generation'] and fault.get('trigger')!='app-exit') or
         authority.get('phase') not in ('APPLIED','DISARMED') or
         authority.get('mode') not in ('AUTO','MANUAL','AUTO_READY','SAFE_STOP') or
         (authority.get('owner')==vm and authority.get('mode')=='AUTO')):
@@ -425,7 +426,8 @@ class RejoinCoordinator:
                 identity=(env['agent_instance_id'],ready.generation)
                 old_failure=self._auto_failures.get(info.vm_id)
                 if not old_failure or old_failure[:2]!=identity or ready.check>old_failure[2]:
-                    failed=(ready.phase,ready.reason) in (('RESIDUAL','RESOURCE_RETAINED'),('WAITING','DEADLINE'))
+                    failed=(ready.phase,ready.reason) in (
+                        ('RESIDUAL','RESOURCE_RETAINED'),('WAITING','DEADLINE'),('STOPPED','APP_EXITED'))
                     self._auto_failures[info.vm_id]=(*identity,ready.check,t,failed)
         mode=authority.get('mode')
         if mode not in ('SAFE_STOP','MANUAL','AUTO_READY','AUTO'):return

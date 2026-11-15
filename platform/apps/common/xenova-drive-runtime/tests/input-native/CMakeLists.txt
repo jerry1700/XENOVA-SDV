@@ -8,9 +8,12 @@ set(DIAGNOSTICS ${RUNTIME}/../../../guests/zephyr/diagnostics)
 target_include_directories(app PRIVATE ${RUNTIME}/include ${MQTT}/include
  ${MQTT}/ports/zephyr ${MQTT}/src ${MQTT}/third_party/jsmn ${DIAGNOSTICS}/include)
 target_compile_definitions(app PRIVATE CONFIG_XENOVA_DRIVE_WARM=1
+ CONFIG_XENOVA_AUTO_EXIT_INJECTION=1
+ CONFIG_XENOVA_AUTO_TX_BLOCK_INJECTION=1
  CONFIG_XENOVA_DRIVE_IO_PRIORITY=8 CONFIG_XENOVA_DIAGNOSTICS_MAX_THREADS=32
  CONFIG_XENOVA_MQTT_RX_BUF=1280
  CONFIG_XENOVA_MQTT_TX_BUF=1280 CONFIG_XENOVA_MQTT_MAX_SUBS=4
  CONFIG_XENOVA_MQTT_LATEST_SLOTS=4 CONFIG_XENOVA_MQTT_PUB_TOPICS=4)
-target_sources(app PRIVATE src/main.c ${MQTT}/src/xm_topic.c ${MQTT}/src/xm_policy.c
+target_sources(app PRIVATE src/main.c ${RUNTIME}/src/auto_exit.c ${RUNTIME}/src/auto_tx_block.c
+ ${MQTT}/src/xm_topic.c ${MQTT}/src/xm_policy.c
  ${MQTT}/src/xm_json.c ${MQTT}/src/xm_envelope.c ${MQTT}/src/xm_seq.c ${MQTT}/src/xm_payload.c ${MQTT}/src/xm_manual.c)

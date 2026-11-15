@@ -46,6 +46,8 @@ def decide_vm(vm):
     apps = list(vm.get("apps", {}).values())
     if apps and all(a.get("report_profile") == "warm-drive-1" for a in apps):
         values = [a.get("lifecycle", {}).get("current") for a in apps]
+        if any(v is not None and v["phase"] == "STOPPED" for v in values):
+            return {"kind": "app_stopping", "label": "자율주행 스레드 종료 · VM 실행 중", "tone": "warning"}
         if all(v is not None for v in values):
             if any(v["phase"] == "RESIDUAL" for v in values):
                 return {"kind": "app_error", "label": "앱 정리 미확정 · 상태 확인 필요", "tone": "danger"}

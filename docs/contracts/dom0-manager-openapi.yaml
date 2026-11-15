@@ -1876,7 +1876,7 @@ components:
           description: HEARTBEAT_LOST / APP_HEARTBEAT_LOST / DOMAIN_ABSENT / DOMAIN_CRASHED
         mode:
           type: [string, 'null']
-          description: start-if-absent / graceful-restart / force-restart
+          description: start-if-absent / graceful-restart / force-restart / restart-crashed
         detected_at:
           type: string
           format: date-time

@@ -29,7 +29,10 @@ struct xd_candidate {
  struct xm_manual_input manual_source; /* immutable completed-job source */
  bool modern_manual; /* false for STOP and the explicit legacy profile */
 };
-enum xd_disposition { XD_SENT, XD_SEND_FAILED, XD_REPLACED, XD_EXPIRED, XD_CONTEXT_CHANGED, XD_STOPPED };
+enum xd_disposition {
+ XD_SENT, XD_SEND_FAILED, XD_REPLACED, XD_EXPIRED, XD_CONTEXT_CHANGED, XD_STOPPED,
+ XD_INJECTED_DROP
+};
 struct xd_delivery {
  uint64_t id, created_us, queued_us, taken_us, send_begin_us, send_end_us, capture_us;
  uint32_t message, topic_seq;

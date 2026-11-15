@@ -20,6 +20,10 @@ class FakeGateway:
         self.owner = OWNER
         self.generation = 7
         self.storage_uncertain = False
+        self.mode = "AUTO"
+        self.control_phase = "APPLIED"
+        self.output_permitted = True
+        self.vm_ids: tuple[str, ...] = ()
         self.targets = targets or {}  # vm → {execution_id, intent_revision, lifecycle_generation} (현재 binding)
         self.rows: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, Any]] = []
@@ -56,8 +60,9 @@ class FakeGateway:
     def context(self) -> dict[str, Any]:
         self.calls.append(("context", None))
         return self._call("context", lambda: {
-            "host_boot_id": self.host, "owner": self.owner, "generation": self.generation, "mode": "AUTO", "phase": "APPLIED",
-            "output_permitted": True, "storage_uncertain": self.storage_uncertain, "targets": {k: dict(v) for k, v in self.targets.items()}})
+            "host_boot_id": self.host, "owner": self.owner, "generation": self.generation, "mode": self.mode, "phase": self.control_phase,
+            "output_permitted": self.output_permitted, "storage_uncertain": self.storage_uncertain,
+            "targets": {k: dict(self.targets[k]) if k in self.targets else None for k in self.targets.keys() | set(self.vm_ids)}})
 
     def submit(self, request_id: str, spec: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(("submit", request_id))

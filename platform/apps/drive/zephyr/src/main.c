@@ -30,7 +30,7 @@ static struct drive_deadline_gate deadline_gate;
 struct app_lifecycle {
  char instance[XM_UUID_LEN+1],last_phase[16],last_state[16],last_reason[65];
  uint64_t check;uint32_t generation;int64_t due,stop_due;
- uint64_t last_reported_progress;
+ uint64_t last_reported_progress,lifetime;
  bool rotating,failed,planner_reset;
 };
 static struct app_lifecycle lifecycle[DRIVE_TASK_COUNT];
@@ -48,18 +48,18 @@ static bool warm_prepare(enum drive_task task)
  if(a->failed){if(!strcmp(a->instance,expected))return false;a->failed=false;}
  if(!a->instance[0]){strcpy(a->instance,expected);return true;}
  if(!strcmp(a->instance,expected)&&!a->rotating)return true;
- struct drive_task_status status;
- if(drive_workers_status(task,&status))return false;
  if(!a->rotating){
+  struct drive_task_status status;
+  if(drive_workers_status(task,&status))return false;
   a->stop_due=k_uptime_get()+CONFIG_XENOVA_DRIVE_APP_STOP_MS;
   int rc=drive_task_cancel(task,status.lifetime,a->stop_due);
   if(rc)return false;
   xd_health_task_clear(task);
-  a->rotating=true;a->planner_reset=false;
+  a->lifetime=status.lifetime;a->rotating=true;a->planner_reset=false;
  }
- int rc=drive_task_join_poll(task,status.lifetime);
+ int rc=drive_task_join_poll(task,a->lifetime);
  if(rc){
-  if(rc==-ETIMEDOUT){(void)xdiag_error("app-reinit-residual",rc);return warm_reinit_failed(a,expected);}
+  if(rc==-ETIMEDOUT||rc==-EIO){(void)xdiag_error("app-reinit-residual",rc);return warm_reinit_failed(a,expected);}
   return false;
  }
  struct drive_adapter *adapter=task==DRIVE_TASK_AUTO?&controller.automatic:&controller.manual;
@@ -77,7 +77,7 @@ static bool warm_prepare(enum drive_task task)
  if(task==DRIVE_TASK_AUTO)drive_auto_adapter(adapter,&controller.auto_cfg);
  else drive_manual_adapter(adapter,&controller.manual_cfg);
 #endif
- rc=drive_task_restart(task,status.lifetime,adapter);
+ rc=drive_task_restart(task,a->lifetime,adapter);
  if(rc==-EBUSY&&k_uptime_get()<a->stop_due)return false;
  if(rc){(void)xdiag_error("app-reinit-start",rc);return warm_reinit_failed(a,expected);}
  strcpy(a->instance,expected);a->rotating=false;a->check=0;a->due=0;a->last_reported_progress=0;
@@ -89,21 +89,22 @@ static void warm_report(enum drive_task task,const struct drive_result *selected
 {
  struct app_lifecycle *a=&lifecycle[task];struct drive_task_status status;
  if(!a->instance[0]||a->rotating||strcmp(a->instance,inputs.app_instances[task])||
-    drive_workers_status(task,&status))return;
+    (!a->failed&&drive_workers_status(task,&status)))return;
  bool chosen=selected->locally_active&&selected->mode==(task==DRIVE_TASK_AUTO?DRIVE_AUTO:DRIVE_MANUAL);
  const struct xd_received *in=task==DRIVE_TASK_AUTO?&inputs.perception:&inputs.input;
  struct drive_adapter *adapter=task==DRIVE_TASK_AUTO?&controller.automatic:&controller.manual;
  int64_t tick=k_uptime_get();
  const struct drive_completion *work=&completed[task];
  uint64_t clock=0;bool clock_valid=true;
- if(chosen&&drive_warm_current(&status,work,inputs.control_revision,inputs.connection_revision))clock_valid=xdiag_clock_us(&clock)==0;
+ if(!a->failed&&chosen&&drive_warm_current(&status,work,inputs.control_revision,inputs.connection_revision))clock_valid=xdiag_clock_us(&clock)==0;
  struct drive_warm_view view=a->failed?
   (struct drive_warm_view){"RESIDUAL","NOT_READY","RESOURCE_RETAINED",selected->control_valid?selected->generation:0}:
   drive_warm_classify(adapter,selected,&status,work,chosen,
    (struct xm_span){in->error?NULL:in->payload,in->error?0:in->length},in->error?-1:tick-in->received_ms,
    inputs.control_revision,inputs.connection_revision,tick,clock,clock_valid);
 #if defined(CONFIG_XENOVA_DRIVE_LATTICE)
- if(task==DRIVE_TASK_AUTO&&!chosen&&!a->failed&&selected->control_valid&&drive_lattice_recovery_deadline_failed())
+ if(task==DRIVE_TASK_AUTO&&!chosen&&!a->failed&&status.state!=DRIVE_TASK_EXITED&&selected->control_valid&&
+    drive_lattice_recovery_deadline_failed())
   view=(struct drive_warm_view){"WAITING","NOT_READY","DEADLINE",selected->generation};
 #endif
  const char *phase=view.phase,*state=view.state,*reason=view.reason;uint32_t generation=view.generation;
@@ -173,6 +174,7 @@ static int offer(enum drive_task task,uint64_t release,uint64_t sequence,uint64_
  job.release_us=release;job.deadline_us=release+DRIVE_PERIOD_US;
  job.iteration_begin_us=iteration_begin;
  struct drive_task_status status;int rc=drive_workers_status(task,&status);if(rc)return rc;
+ if(status.state==DRIVE_TASK_EXITED)return -ESHUTDOWN;
  job.lifetime=status.lifetime;
  job.input_seq=in->seq;job.control_seq=inputs.control.seq;job.input_received_ms=in->received_ms;
  if(task==DRIVE_TASK_MANUAL)job.manual_witness=inputs.manual_witness;
@@ -273,6 +275,9 @@ int main(void)
      if(!admitted[task]||!selected.locally_active||selected.mode!=(task==DRIVE_TASK_AUTO?DRIVE_AUTO:DRIVE_MANUAL))continue;
 #endif
      int status=offer(task,release,(release-origin)/DRIVE_PERIOD_US+1,now);
+#if defined(CONFIG_XENOVA_DRIVE_WARM)
+     if(task==DRIVE_TASK_AUTO&&status==-ESHUTDOWN)continue;
+#endif
      if(status&&status!=-EBUSY&&status!=-EALREADY){rc=status;break;}
     }
     if(rc)break;
