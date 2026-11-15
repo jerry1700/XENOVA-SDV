@@ -16,6 +16,7 @@ import com.xenova.backend.agent.application.VmCrashCommand;
 import com.xenova.backend.agent.application.ZephyrFaultCommand;
 import com.xenova.backend.drive.application.ActiveDriveAppExitService;
 import com.xenova.backend.drive.application.ActiveDriveAutoDelayService;
+import com.xenova.backend.drive.application.ActiveDriveAutoTxBlockService;
 import com.xenova.backend.drive.application.ActiveDriveVmCrashService;
 import java.time.Instant;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,6 +33,7 @@ class DriveFaultControllerTest {
     private final ActiveDriveAutoDelayService service = mock(ActiveDriveAutoDelayService.class);
     private final ActiveDriveAppExitService appExitService = mock(ActiveDriveAppExitService.class);
     private final ActiveDriveVmCrashService vmCrashService = mock(ActiveDriveVmCrashService.class);
+    private final ActiveDriveAutoTxBlockService autoTxBlockService = mock(ActiveDriveAutoTxBlockService.class);
     private MockMvc mvc;
 
     @BeforeEach
@@ -39,7 +41,8 @@ class DriveFaultControllerTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules()
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
-        mvc = MockMvcBuilders.standaloneSetup(new DriveFaultController(service, appExitService, vmCrashService))
+        mvc = MockMvcBuilders.standaloneSetup(
+                        new DriveFaultController(service, appExitService, vmCrashService, autoTxBlockService))
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(mapper)).build();
     }
 
@@ -106,5 +109,20 @@ class DriveFaultControllerTest {
                 .andExpect(jsonPath("$.vm_id").value(ACTIVE_VM));
 
         verify(vmCrashService).send();
+    }
+
+    @Test
+    void blocksTheServerSelectedActiveAutoVmsCommandPublication() throws Exception {
+        when(autoTxBlockService.send(10)).thenReturn(new ZephyrFaultCommand(
+                "command-4", "operation-4", ACTIVE_VM, NOW, NOW.plusSeconds(30)));
+
+        mvc.perform(post("/api/v1/drive/faults/auto-tx-block")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"duration_s\":10}"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.command_id").value("command-4"))
+                .andExpect(jsonPath("$.vm_id").value(ACTIVE_VM));
+
+        verify(autoTxBlockService).send(10);
     }
 }
