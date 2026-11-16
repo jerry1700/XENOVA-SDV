@@ -27,6 +27,7 @@ export function ConsoleLayout() {
           <>
             <NavLink to="/dashboard">VM Dashboard</NavLink>
             <NavLink to="/vision">Vision</NavLink>
+            <NavLink to="/control">VM Control</NavLink>
             <NavLink to="/simulator">Simulator</NavLink>
             <NavLink to="/phone-link">휴대폰 연결</NavLink>
           </>
