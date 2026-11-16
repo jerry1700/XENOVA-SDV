@@ -151,10 +151,25 @@
 
 .row {
   display: grid;
-  grid-template-columns: 12ch 7ch minmax(0, 18ch) minmax(0, 10ch) minmax(0, 1fr);
+  grid-template-columns: 12ch 7ch minmax(0, 34ch) minmax(0, 10ch) minmax(0, 1fr);
   gap: var(--x-space-3);
   align-items: baseline;
   padding: 1px var(--x-space-3);
+}
+
+/* 소스 열은 보이는 행 가운데 가장 긴 이름에 맞추고(48ch 와 패널 폭의 30% 가운데 작은 쪽까지) 모든 행이 같은 세로선을 쓴다.
+   subgrid 가 없는 브라우저는 위의 고정 폭을 쓴다 */
+@supports (grid-template-columns: subgrid) {
+  .output ol {
+    display: grid;
+    grid-template-columns: 12ch 7ch fit-content(min(48ch, 30%)) minmax(0, 10ch) minmax(0, 1fr);
+    column-gap: var(--x-space-3);
+  }
+
+  .row {
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+  }
 }
 
 .row:hover {
@@ -198,6 +213,13 @@
   white-space: nowrap;
 }
 
+/* 소스 이름(source/component)은 자르지 않는다. 열보다 길면 다음 줄로 넘긴다 */
+.source {
+  min-width: 0;
+  color: var(--x-text-muted);
+  overflow-wrap: anywhere;
+}
+
 .message {
   min-width: 0;
   white-space: pre-wrap;
@@ -213,7 +235,12 @@
 /* 좁은 화면(휴대폰·200% 확대): 메타 정보(시각·레벨·소스·VM)를 한 줄, 메시지는 다음 줄 전체 폭.
    고정 열 합계(약 390px)가 화면보다 넓어 메시지 열이 0이 되던 문제 */
 @media (max-width: 640px) {
+  .output ol {
+    display: block;
+  }
+
   .row {
+    grid-column: auto;
     grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 10ch);
     column-gap: var(--x-space-2);
     row-gap: 0;
