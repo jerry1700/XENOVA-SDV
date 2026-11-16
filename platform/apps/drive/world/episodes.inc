@@ -16,7 +16,7 @@ enum dw_result dw_episode_core_validate(const xenova_drive_EpisodeCore *c){
  if(!simple(c->blocker,c->blocker_count,true))return DW_GEOMETRY;
  bool pos=true,neg=true;for(size_t i=0;i<c->blocker_count;i++){float turn=cross(c->blocker[i],c->blocker[(i+1)%c->blocker_count],c->blocker[(i+2)%c->blocker_count]);pos&=turn>1e-6f;neg&=turn< -1e-6f;}
  if(!pos&&!neg)return DW_GEOMETRY;
- if((c->started_pi_us||c->deadline_pi_us||c->phase_started_pi_us||c->phase_deadline_pi_us)&&(!positive63(c->started_pi_us)||!positive63(c->deadline_pi_us)||!positive63(c->phase_started_pi_us)||!positive63(c->phase_deadline_pi_us)||c->started_pi_us>c->phase_started_pi_us||c->phase_started_pi_us>=c->phase_deadline_pi_us||c->phase_deadline_pi_us>c->deadline_pi_us||c->deadline_pi_us-c->started_pi_us>40000000||c->phase_deadline_pi_us-c->phase_started_pi_us>10000000))return DW_TIME;
+ if((c->started_pi_us||c->deadline_pi_us||c->phase_started_pi_us||c->phase_deadline_pi_us)&&(!positive63(c->started_pi_us)||!positive63(c->deadline_pi_us)||!positive63(c->phase_started_pi_us)||!positive63(c->phase_deadline_pi_us)||c->started_pi_us>c->phase_started_pi_us||c->phase_started_pi_us>=c->phase_deadline_pi_us||c->phase_deadline_pi_us>c->deadline_pi_us||c->deadline_pi_us-c->started_pi_us>40000000||c->phase_deadline_pi_us-c->phase_started_pi_us>15000000))return DW_TIME;
  return c->stop_wait!=(c->stop_wait_started_pi_us>0)?DW_TIME:DW_OK;
 }
 enum dw_result dw_episode_snapshot_validate(const xenova_drive_EpisodeSnapshot *s){

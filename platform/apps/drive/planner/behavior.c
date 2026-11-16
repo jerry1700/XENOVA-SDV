@@ -7,7 +7,7 @@
 #include <string.h>
 
 bool db_limits_valid(const struct db_limits *l){
- return l&&l->episode_us&&l->episode_us<=40000000&&l->phase_us&&l->phase_us<=10000000&&
+ return l&&l->episode_us&&l->episode_us<=40000000&&l->phase_us&&l->phase_us<=15000000&&
   l->progress_us&&l->progress_us<=2000000&&l->settle_us&&l->settle_us<=l->phase_us&&
   isfinite(l->travel_m)&&l->travel_m>0&&l->travel_m<=6&&isfinite(l->progress_m)&&l->progress_m>0&&
   isfinite(l->pass_margin_m)&&l->pass_margin_m>=0&&isfinite(l->heading_rad)&&l->heading_rad>0&&

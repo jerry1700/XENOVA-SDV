@@ -59,25 +59,27 @@ static dw_point vertex(const struct tr_view *v,unsigned i){
  if(v->selected==v->from)return d;
  dw_point c=v->from->centerline[j];return (dw_point){2*c.x-d.x,2*c.y-d.y};
 }
-static dw_point tape_vertex(const struct tr_view *v,unsigned i,float tape){
+struct tr_allowance {float outer,divider;};
+static dw_point tape_vertex(const struct tr_view *v,unsigned i,struct tr_allowance allowance){
  unsigned n=v->count,j=i<n?i:2*n-1-i;
  dw_point point=vertex(v,i);
- bool changing=v->selected!=v->from;
+ bool changing=v->selected!=v->from, outer=i<n||changing;
+ float tape=outer?allowance.outer:allowance.divider;
  /* A lane change may use both outer tapes within the observed corridor. */
  if(tape>0&&(!changing||(j>0&&j+1<n))){
-  if(v->index&&v->index->lane_edges_ready&&v->index->lane_allowance==tape){
+  if(v->index&&v->index->lane_edges_ready&&(outer?v->index->outer_allowance:v->index->divider_allowance)==tape){
    const struct tr_lane_edges *edges=&v->index->lane_edges[(i<n?v->selected:v->from)-v->world->lane_model.lanes];
-   return i<n||changing?edges->outer_tape[j]:edges->divider_tape[j];
+   return outer?edges->outer_tape[j]:edges->divider_tape[j];
   }
   dw_point a=(i<n?v->selected:v->from)->centerline[j],b=v->world->lane_model.divider[j];
   float x=a.x-b.x,y=a.y-b.y,length=hypotf(x,y);
-  if(length>1e-6f){float scale=(i<n||changing?tape:-tape)/length;point.x+=scale*x;point.y+=scale*y;}
+  if(length>1e-6f){float scale=(outer?tape:-tape)/length;point.x+=scale*x;point.y+=scale*y;}
  }
  return point;
 }
 /* A footprint shares the same polygon across its axle or corner probes.
  * Keep the original crossing formula and vertex order at the boundary. */
-static unsigned points_inside_mask(const struct tr_view *v,const dw_point *points,unsigned count,float tape){
+static unsigned points_inside_mask(const struct tr_view *v,const dw_point *points,unsigned count,struct tr_allowance tape){
  unsigned hits=0,n=2*v->count;
  dw_point b=tape_vertex(v,n-1,tape);
  for(unsigned i=0;i<n;i++){
@@ -90,18 +92,18 @@ static unsigned points_inside_mask(const struct tr_view *v,const dw_point *point
  }
  return hits;
 }
-static bool inside(const struct tr_view *v,dw_point p){return points_inside_mask(v,&p,1,0)!=0;}
+static bool inside(const struct tr_view *v,dw_point p){return points_inside_mask(v,&p,1,(struct tr_allowance){0})!=0;}
 static float orient(dw_point a,dw_point b,dw_point c){return (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);}
 
 /* Outside a slice end, continue only its lateral limits. This supplies no free cells. */
-static bool beyond_end(const struct tr_view *v,dw_point point,unsigned end,unsigned next,float tape){
+static bool beyond_end(const struct tr_view *v,dw_point point,unsigned end,unsigned next,struct tr_allowance tape){
  dw_point a=tape_vertex(v,end,tape),b=tape_vertex(v,2*v->count-1-end,tape);
  float x=b.x-a.x,y=b.y-a.y;
  float inward=orient(a,b,v->points[next]),side=orient(a,b,point);
  float lateral=(point.x-a.x)*x+(point.y-a.y)*y;
  return fabsf(inward)>1e-8f&&side*inward<=0&&lateral>=0&&lateral<=x*x+y*y;
 }
-static bool points_inside(const struct tr_view *v,const dw_point *points,unsigned count,float tape,bool open_ends,
+static bool points_inside(const struct tr_view *v,const dw_point *points,unsigned count,struct tr_allowance tape,bool open_ends,
  bool first_must_be_inside){
  unsigned missing=((1u<<count)-1)^points_inside_mask(v,points,count,tape);
  if(!missing||!open_ends)return !missing;
@@ -137,16 +139,17 @@ static bool contains(const struct tr_view *v,dw_pose pose,float extra,const stru
  }
  float half=(c->front+c->rear)*.5f+c->margin+extra,width=c->half_width+c->margin+extra;
  bool changing=v->selected!=v->from;
- float tape=lp_lane_boundary_allowance_m(c);
+ struct tr_allowance tape={lp_road_boundary_allowance_m(c),lp_divider_allowance_m(c)};
+ bool padded=tape.outer>0||tape.divider>0;
  float cs=cosf(pose.yaw),sn=sinf(pose.yaw);
  /* Axles do not use the tape allowance. The rear axle also stays within the window. */
- if(tape>0){
+ if(padded){
   dw_point axles[2]={{pose.x,pose.y},{pose.x+c->wheelbase*cs,pose.y+c->wheelbase*sn}};
-  if(!points_inside(v,axles,2,0,open_ends,true))return false;
+  if(!points_inside(v,axles,2,(struct tr_allowance){0},open_ends,true))return false;
  }
  dw_pose center=pose;float shift=(c->front-c->rear)*.5f;
  center.x+=shift*cs;center.y+=shift*sn;
- bool check_rear=open_ends&&tape<=0;
+ bool check_rear=open_ends&&!padded;
  dw_point probes[5]={{pose.x,pose.y}};
  for(unsigned i=0;i<4;i++){
   float u=i&1?half:-half,z=i&2?width:-width;
@@ -160,7 +163,7 @@ static bool contains(const struct tr_view *v,dw_pose pose,float extra,const stru
   if((!open_ends||(i+1!=v->count&&i+1!=n))&&cuts(a,b,center,cs,sn,half,width))return false;
   a=b;
  }
- for(unsigned i=0;(changing||tape<=0)&&i+1<v->count;i++){
+ for(unsigned i=0;(changing||tape.divider<=0)&&i+1<v->count;i++){
   if(changing&&m->crossing.bytes[i]==1&&!m->divider_state.bytes[i]&&!m->divider_state.bytes[i+1])continue;
   if(cuts(m->divider[i],m->divider[i+1],center,cs,sn,half,width))return false;
  }
@@ -223,7 +226,9 @@ void tr_index_lanes(struct lp_collision_index *index,const dw_world *w,const str
   const struct tr_intent task={true,false,id,id,id,0};
   if(!lane_view(w,&task,NULL,&views[i])||views[i].selected!=&model->lanes[i])return;
  }
- index->lane_allowance=lp_lane_boundary_allowance_m(c);
+ struct tr_allowance tape={lp_road_boundary_allowance_m(c),lp_divider_allowance_m(c)};
+ index->outer_allowance=tape.outer;
+ index->divider_allowance=tape.divider;
  for(unsigned i=0;i<2;i++){
   const struct tr_view *view=&views[i];
   struct tr_lane_edges *edges=&index->lane_edges[i];
@@ -233,8 +238,8 @@ void tr_index_lanes(struct lp_collision_index *index,const dw_world *w,const str
    dw_point center=view->points[j],divider=model->divider[j];
    edges->min_half_width=fminf(edges->min_half_width,hypotf(center.x-divider.x,center.y-divider.y));
    edges->outer[j]=vertex(view,j);
-   edges->outer_tape[j]=tape_vertex(view,j,index->lane_allowance);
-   edges->divider_tape[j]=tape_vertex(view,2*view->count-1-j,index->lane_allowance);
+   edges->outer_tape[j]=tape_vertex(view,j,tape);
+   edges->divider_tape[j]=tape_vertex(view,2*view->count-1-j,tape);
   }
  }
  index->lane_edges_ready=true;
