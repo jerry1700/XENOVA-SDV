@@ -191,7 +191,7 @@ export function RuntimeLogsPanel({ vmId }: { vmId?: string }) {
                   <span className={styles.level} data-tone={LEVEL_TONE[r.level] ?? 'muted'}>
                     {r.level}
                   </span>
-                  <span className={styles.cell} title={`${r.source_id}/${r.component}`}>
+                  <span className={styles.source}>
                     {r.source_id}/{r.component}
                   </span>
                   <span className={styles.cell} title={r.vm_id ?? undefined}>

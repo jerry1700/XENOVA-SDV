@@ -307,6 +307,16 @@ export const handlers = [
     });
   }),
 
+  // ---- Vision (S15P31E110-306): 모의 모드에는 Jetson 카메라가 없다 ----
+  http.get('*/api/v1/vision/snapshot', async ({ request }) => {
+    await delay(LATENCY_MS);
+    if (!authorized(request)) return unauthorized();
+    return HttpResponse.json(
+      { code: 'VISION_NOT_CONFIGURED', message: 'Jetson 카메라 주소가 설정되지 않았습니다.' },
+      { status: 503 },
+    );
+  }),
+
   // ---- 템플릿·VM ----
   http.get('*/api/v1/templates', async ({ request }) => {
     await delay(LATENCY_MS);
