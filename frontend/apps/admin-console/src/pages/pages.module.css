@@ -2124,10 +2124,11 @@ button.chip:hover:not(.chipOn) {
   font-size: var(--x-text-xs);
   overflow-wrap: anywhere;
 }
-/* 이벤트 화면: 시각 | 상태 | 대상 | 내용, 시각은 밀리초까지 (S15P31E110-462) */
+/* 이벤트 화면: 시각 | 상태 | 대상 | 내용, 시각은 밀리초까지 (S15P31E110-462).
+   대상 열은 "Debian Interaction" 같은 VM 이름이 한 줄에 들어가는 폭 */
 .detailEventRow[data-target] {
   grid-template-columns:
-    calc(var(--x-space-6) * 3 + var(--x-space-3)) var(--x-space-6) calc(var(--x-space-6) * 4)
+    calc(var(--x-space-6) * 3 + var(--x-space-3)) var(--x-space-6) calc(var(--x-space-6) * 6)
     minmax(0, 1fr);
 }
 /* 열 제목 줄: 작은 회색, 행과 같은 grid */
@@ -2161,11 +2162,10 @@ button.chip:hover:not(.chipOn) {
     grid-column: 1 / -1;
   }
 }
+/* 대상 이름은 자르지 않는다. 열보다 길면 다음 줄로 넘긴다 */
 .eventTarget {
-  overflow: hidden;
   min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .eventTarget > i,
 .eventChip > i {
