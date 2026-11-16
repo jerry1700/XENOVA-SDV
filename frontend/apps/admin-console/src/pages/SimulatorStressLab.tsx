@@ -311,7 +311,7 @@ export function SimulatorStressLab() {
         </div>
       </section>
       <nav className={styles.simulatorTabs} aria-label="Simulator 하위 메뉴">
-        <Link to="/simulator">시뮬레이션 제어</Link>
+        <Link to="/simulator">장애 시연</Link>
         <Link to="/simulator/stress" aria-current="page">
           부하 테스트
         </Link>

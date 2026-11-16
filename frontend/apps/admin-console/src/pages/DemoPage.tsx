@@ -82,7 +82,7 @@ export function DemoPage() {
     <div className={styles.page}>
       <section className={styles.pageHead}>
         <div>
-          <div className={styles.eyebrow}>Simulator</div>
+          <div className={styles.eyebrow}>Simulator / Fault demo</div>
           <h1>장애 시연</h1>
           <p className={styles.dim}>장애 발생부터 주행 제어권 승계와 VM 복구까지 한 화면에서 확인합니다.</p>
         </div>
