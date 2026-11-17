@@ -173,11 +173,14 @@ function ExecutionTable({
 /** 시뮬레이터 VM에 부하를 주고 같은 자리에서 telemetry와 실행 단위를 확인한다. */
 export function SimulatorStressLab() {
   const vms = useVms();
-  const [vmId, setVmId] = useState('');
-  const vm = useMemo(
-    () => vms.data?.items.find((item) => item.vm_id === vmId) ?? vms.data?.items[0],
-    [vms.data, vmId],
+  // 부하 테스트는 데비안(Linux Agent) VM 만 대상으로 보인다. Zephyr 연산 지연 화면 코드는 남겨 두되
+  // 목록에서 빼서 고를 수 없게 한다 — 다시 열려면 이 필터만 걷으면 된다
+  const targets = useMemo(
+    () => (vms.data?.items ?? []).filter((item) => item.guest_kind === 'linux'),
+    [vms.data],
   );
+  const [vmId, setVmId] = useState('');
+  const vm = useMemo(() => targets.find((item) => item.vm_id === vmId) ?? targets[0], [targets, vmId]);
   const stress = useStartStress(vm?.vm_id ?? '');
   const autoDelay = useStartAutoDelay(vm?.vm_id ?? '');
   const agentExit = useStartAgentExit(vm?.vm_id ?? '');
@@ -317,13 +320,13 @@ export function SimulatorStressLab() {
             <span>01</span>
             <div>
               <h2 id="stress-vm-title">대상 VM 선택</h2>
-              <p>운영체제에 맞는 부하 항목만 표시됩니다.</p>
+              <p>데비안 VM의 Agent 부하 항목을 실행합니다.</p>
             </div>
           </div>
           {vm && <small>{ready ? '명령 가능' : '연결 확인 필요'}</small>}
         </div>
         <div className={styles.stressVmGrid}>
-          {(vms.data?.items ?? []).map((item) => (
+          {targets.map((item) => (
             <button
               key={item.vm_id}
               type="button"
@@ -346,7 +349,7 @@ export function SimulatorStressLab() {
 
       {!vm ? (
         <Card>
-          <p className={styles.dim}>부하를 줄 VM이 없습니다.</p>
+          <p className={styles.dim}>부하를 줄 데비안 VM이 없습니다.</p>
         </Card>
       ) : (
         <>
