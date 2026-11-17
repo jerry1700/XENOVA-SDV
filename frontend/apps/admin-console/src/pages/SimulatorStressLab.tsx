@@ -8,6 +8,7 @@ import {
   useProcesses,
   useStartAgentExit,
   useStartAutoDelay,
+  useStartDomainKill,
   useStartStress,
   useThreads,
   useVms,
@@ -173,17 +174,14 @@ function ExecutionTable({
 /** 시뮬레이터 VM에 부하를 주고 같은 자리에서 telemetry와 실행 단위를 확인한다. */
 export function SimulatorStressLab() {
   const vms = useVms();
-  // 부하 테스트는 데비안(Linux Agent) VM 만 대상으로 보인다. Zephyr 연산 지연 화면 코드는 남겨 두되
-  // 목록에서 빼서 고를 수 없게 한다 — 다시 열려면 이 필터만 걷으면 된다
-  const targets = useMemo(
-    () => (vms.data?.items ?? []).filter((item) => item.guest_kind === 'linux'),
-    [vms.data],
-  );
+  // Linux VM 은 Agent 부하·종료, Zephyr VM 은 연산 지연·강제 종료를 고른 VM 에 맞춰 보인다
+  const targets = useMemo(() => vms.data?.items ?? [], [vms.data]);
   const [vmId, setVmId] = useState('');
   const vm = useMemo(() => targets.find((item) => item.vm_id === vmId) ?? targets[0], [targets, vmId]);
   const stress = useStartStress(vm?.vm_id ?? '');
   const autoDelay = useStartAutoDelay(vm?.vm_id ?? '');
   const agentExit = useStartAgentExit(vm?.vm_id ?? '');
+  const domainKill = useStartDomainKill(vm?.vm_id ?? '');
   const metrics = useMetrics(vm?.vm_id ?? '', Boolean(vm), 5);
   // 보낸 명령은 보낸 VM 과 함께 둔다. 지금 선택된 VM 과 같을 때만 조회해서, 응답 전에 VM 을 바꾸거나
   // 목록 첫 VM 으로 바뀌어도 이전 VM 의 명령 ID 로 새 VM 을 조회하지 않는다 (404 반복 조회 방지)
@@ -208,8 +206,8 @@ export function SimulatorStressLab() {
   const [delayMs, setDelayMs] = useState(20);
   const [delayDuration, setDelayDuration] = useState(30);
   const toast = useToast();
-  // 되돌리기 어려운 장애 주입(Agent 종료·연산 지연)은 확인 창을 거친다
-  const [confirm, setConfirm] = useState<'agentExit' | 'delay' | null>(null);
+  // 되돌리기 어려운 장애 주입(Agent 종료·연산 지연·VM 강제 종료)은 확인 창을 거친다
+  const [confirm, setConfirm] = useState<'agentExit' | 'delay' | 'kill' | null>(null);
 
   function selectVm(nextVmId: string) {
     setVmId(nextVmId);
@@ -229,6 +227,7 @@ export function SimulatorStressLab() {
     stress.isPending ||
     autoDelay.isPending ||
     agentExit.isPending ||
+    domainKill.isPending ||
     Boolean(
       command.data &&
       !terminal.has(command.data.status) &&
@@ -303,6 +302,23 @@ export function SimulatorStressLab() {
     }
   }
 
+  async function sendKill() {
+    if (!vm) return;
+    // 응답을 기다리는 사이 VM 을 바꿀 수 있으므로 보낸 VM 을 붙잡아 둔다
+    const target = vm.vm_id;
+    try {
+      setFeedback(null);
+      await domainKill.mutateAsync();
+      // 강제 종료는 조회할 명령이 없다. 결과는 VM 상태와 이벤트에 나타난다
+      setSent(null);
+      setFeedback('VM 강제 종료를 요청했습니다. 주행 제어권 승계와 자동 복구를 확인하세요.', target);
+      toast.show(`${vm.name}: VM 강제 종료 요청`, 'ok');
+    } catch (error) {
+      setFeedback(sendErrorText(error), target, true);
+      toast.show(sendErrorText(error), 'fault', 5000);
+    }
+  }
+
   return (
     <div className={styles.page} style={{ '--vm-accent': 'var(--x-primary)' } as CSSProperties}>
       <section className={styles.pageHead}>
@@ -320,7 +336,7 @@ export function SimulatorStressLab() {
             <span>01</span>
             <div>
               <h2 id="stress-vm-title">대상 VM 선택</h2>
-              <p>데비안 VM의 Agent 부하 항목을 실행합니다.</p>
+              <p>운영체제에 맞는 부하 항목만 표시됩니다.</p>
             </div>
           </div>
           {vm && <small>{ready ? '명령 가능' : '연결 확인 필요'}</small>}
@@ -349,7 +365,7 @@ export function SimulatorStressLab() {
 
       {!vm ? (
         <Card>
-          <p className={styles.dim}>부하를 줄 데비안 VM이 없습니다.</p>
+          <p className={styles.dim}>부하를 줄 VM이 없습니다.</p>
         </Card>
       ) : (
         <>
@@ -360,13 +376,13 @@ export function SimulatorStressLab() {
                 <div>
                   <h2 id="stress-actions-title">부하 시나리오</h2>
                   <p>
-                    {vm.guest_kind === 'zephyr' ? 'Zephyr 연산 지연' : 'Linux Agent 부하·종료'} · 한 번에
-                    하나씩 실행
+                    {vm.guest_kind === 'zephyr' ? 'Zephyr 연산 지연·강제 종료' : 'Linux Agent 부하·종료'} · 한
+                    번에 하나씩 실행
                   </p>
                 </div>
               </div>
             </div>
-            <div className={styles.stressScenarioGrid} data-count={vm.guest_kind === 'zephyr' ? 1 : 3}>
+            <div className={styles.stressScenarioGrid} data-count={vm.guest_kind === 'zephyr' ? 2 : 3}>
               {vm.guest_kind === 'linux' && (
                 <>
                   <div className={styles.stressControlCard}>
@@ -530,6 +546,25 @@ export function SimulatorStressLab() {
                   </Button>
                 </div>
               )}
+              {vm.guest_kind === 'zephyr' && (
+                <div className={styles.stressControlCard}>
+                  <div className={styles.stressSubhead}>
+                    <div className={styles.stressScenarioIcon}>KILL</div>
+                    <div>
+                      <strong>VM 강제 종료</strong>
+                      <p>Xen 도메인을 즉시 없애 승계와 자동복구 흐름 확인</p>
+                    </div>
+                  </div>
+                  <div className={styles.stressFields}>
+                    <p className={styles.dim}>
+                      실행하면 이 VM이 바로 꺼집니다. 등록은 남아 있어 복구 워커가 다시 띄웁니다.
+                    </p>
+                  </div>
+                  <Button disabled={!ready || busy} onClick={() => setConfirm('kill')}>
+                    VM 강제 종료 실행
+                  </Button>
+                </div>
+              )}
             </div>
             {(feedback || command.data || command.isError) && (
               // 상태·사유는 한글로만. 명령 ID 는 글자로 보이지 않고 title 에만 남긴다
@@ -588,7 +623,9 @@ export function SimulatorStressLab() {
       )}
       <Modal
         open={confirm !== null && Boolean(vm)}
-        title={confirm === 'agentExit' ? 'Agent 종료' : '주행 연산 지연'}
+        title={
+          confirm === 'agentExit' ? 'Agent 종료' : confirm === 'kill' ? 'VM 강제 종료' : '주행 연산 지연'
+        }
         onClose={() => setConfirm(null)}
         footer={
           <>
@@ -602,9 +639,10 @@ export function SimulatorStressLab() {
                 setConfirm(null);
                 if (action === 'agentExit') void sendAgentExit();
                 else if (action === 'delay') void sendDelay();
+                else if (action === 'kill') void sendKill();
               }}
             >
-              {confirm === 'agentExit' ? 'Agent 종료' : '지연 시작'}
+              {confirm === 'agentExit' ? 'Agent 종료' : confirm === 'kill' ? '강제 종료' : '지연 시작'}
             </Button>
           </>
         }
@@ -619,6 +657,15 @@ export function SimulatorStressLab() {
                   <p>
                     Agent가 결과를 보낸 뒤 종료되어 heartbeat가 끊깁니다. 자동 복구로 Agent가 다시 뜰 때까지
                     이 VM에 부하·명령을 보낼 수 없습니다.
+                  </p>
+                </>
+              ) : confirm === 'kill' ? (
+                <>
+                  <strong>‘{vm.name}’ VM을 강제 종료하시겠습니까?</strong>
+                  <p>
+                    Xen 도메인을 즉시 없앱니다. 주행 중인 VM이면 준비된 다른 주행 VM이 제어권을 넘겨받고,
+                    넘겨받을 VM이 없으면 차량은 정지합니다. 복구 워커가 이 VM을 다시 띄울 때까지 명령을 보낼
+                    수 없습니다.
                   </p>
                 </>
               ) : (

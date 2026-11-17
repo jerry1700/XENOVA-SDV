@@ -30,6 +30,7 @@ const state = vi.hoisted(() => ({
   stress: vi.fn(),
   delay: vi.fn(),
   exit: vi.fn(),
+  kill: vi.fn(),
 }));
 
 vi.mock('../api/queries', () => {
@@ -42,6 +43,7 @@ vi.mock('../api/queries', () => {
     useStartStress: () => mutation(state.stress),
     useStartAutoDelay: () => mutation(state.delay),
     useStartAgentExit: () => mutation(state.exit),
+    useStartDomainKill: () => mutation(state.kill),
     useCommandStatus: (vmId: string, commandId: string | null) => {
       state.queried.push([vmId, commandId]);
       const failed = Boolean(commandId && state.statusError);
@@ -73,6 +75,7 @@ beforeEach(() => {
   state.stress.mockReset();
   state.delay.mockReset();
   state.exit.mockReset();
+  state.kill.mockReset();
 });
 
 /** 응답을 붙잡아 두었다가 resolve 로 보낸다 */
@@ -179,7 +182,7 @@ describe('부하 실험실 결과 문구 (영어 상태값·명령 ID·(CODE) �
   });
 });
 
-describe('Agent 종료·연산 지연 확인 창', () => {
+describe('Agent 종료·연산 지연·VM 강제 종료 확인 창', () => {
   beforeEach(() => {
     HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
       this.open = true;
@@ -204,6 +207,57 @@ describe('Agent 종료·연산 지연 확인 창', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Agent 종료' }));
     expect(state.exit).toHaveBeenCalledTimes(1);
   });
+
+  it('[연산 지연 시작]은 지연값·시간을 보이고, 확인해야 요청을 보낸다', async () => {
+    state.delay.mockResolvedValue({ command_id: 'cmd-delay' });
+    renderLab();
+    await userEvent.click(screen.getByRole('button', { name: /autonomous/ }));
+    await userEvent.click(screen.getByRole('button', { name: '연산 지연 시작' }));
+    expect(state.delay).not.toHaveBeenCalled();
+    expect(screen.getByText('‘autonomous’ VM의 주행 연산에 지연을 넣으시겠습니까?')).toBeInTheDocument();
+    expect(screen.getByText(/20 ms 지연을 30초 동안/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '취소' }));
+    expect(state.delay).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('button', { name: '연산 지연 시작' }));
+    await userEvent.click(screen.getByRole('button', { name: '지연 시작' }));
+    expect(state.delay).toHaveBeenCalledTimes(1);
+    expect(state.delay).toHaveBeenCalledWith({ delay_ms: 20, duration_s: 30 });
+  });
+
+  it('[VM 강제 종료 실행]은 대상 VM·영향을 보이고, 확인해야 요청을 보낸다', async () => {
+    state.kill.mockResolvedValue({
+      operation_id: 'op-kill',
+      vm_id: 'vm-z',
+      submitted_at: '2026-11-17T00:00:00Z',
+    });
+    renderLab();
+    await userEvent.click(screen.getByRole('button', { name: /autonomous/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'VM 강제 종료 실행' }));
+    expect(state.kill).not.toHaveBeenCalled();
+    expect(screen.getByText('‘autonomous’ VM을 강제 종료하시겠습니까?')).toBeInTheDocument();
+    expect(screen.getByText(/제어권을 넘겨받고/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '취소' }));
+    expect(state.kill).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'VM 강제 종료 실행' }));
+    await userEvent.click(screen.getByRole('button', { name: '강제 종료' }));
+    expect(state.kill).toHaveBeenCalledTimes(1);
+    // 조회할 명령이 없으므로 명령 상태를 묻지 않고 안내만 남긴다
+    expect(state.queried.every(([, id]) => id === null)).toBe(true);
+    expect(screen.getByRole('status')).toHaveTextContent('VM 강제 종료를 요청했습니다');
+  });
+
+  it('강제 종료 요청이 거절되면 사유를 보이고 실패로 표시한다', async () => {
+    state.kill.mockRejectedValue(new ApiError(409, { code: 'INVALID_VM_STATE', message: 'x' }));
+    renderLab();
+    await userEvent.click(screen.getByRole('button', { name: /autonomous/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'VM 강제 종료 실행' }));
+    await userEvent.click(screen.getByRole('button', { name: '강제 종료' }));
+    expect(screen.getByRole('status')).toHaveAttribute('data-tone', 'fault');
+  });
 });
 
 describe('부하 실험실 VM 목록 라벨', () => {
@@ -223,19 +277,29 @@ describe('부하 실험실 VM 목록 라벨', () => {
   });
 });
 
-describe('부하 실험실 대상은 데비안 VM 만', () => {
-  it('Zephyr VM 은 목록에 없고 연산 지연 항목도 보이지 않는다', () => {
+describe('부하 실험실 대상 VM 과 항목', () => {
+  it('Zephyr VM 도 목록에 있고, 고르면 연산 지연·강제 종료 항목만 보인다', async () => {
     renderLab();
-    expect(screen.getByRole('button', { name: /interaction/ })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /autonomous/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '연산 지연 시작' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'CPU 부하 시작' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'VM 강제 종료 실행' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: /autonomous/ }));
+    expect(screen.getByRole('button', { name: '연산 지연 시작' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'VM 강제 종료 실행' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'CPU 부하 시작' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Agent 종료 실행' })).not.toBeInTheDocument();
   });
 
-  it('데비안 VM 이 없으면 Zephyr 를 대신 고르지 않고 안내만 한다', () => {
-    state.vms = [zephyr];
+  it('꺼진 Zephyr VM 에는 강제 종료를 보낼 수 없다', async () => {
+    state.vms = [{ ...zephyr, state: 'stopped' }];
     renderLab();
-    expect(screen.getByText('부하를 줄 데비안 VM이 없습니다.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /autonomous/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'VM 강제 종료 실행' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '연산 지연 시작' })).toBeDisabled();
+  });
+
+  it('VM 이 하나도 없으면 안내만 한다', () => {
+    state.vms = [];
+    renderLab();
+    expect(screen.getByText('부하를 줄 VM이 없습니다.')).toBeInTheDocument();
   });
 });
