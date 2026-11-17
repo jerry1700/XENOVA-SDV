@@ -204,24 +204,6 @@ describe('Agent 종료·연산 지연 확인 창', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Agent 종료' }));
     expect(state.exit).toHaveBeenCalledTimes(1);
   });
-
-  it('[연산 지연 시작]은 지연값·시간을 보이고, 확인해야 요청을 보낸다', async () => {
-    state.delay.mockResolvedValue({ command_id: 'cmd-delay' });
-    renderLab();
-    await userEvent.click(screen.getByRole('button', { name: /autonomous/ }));
-    await userEvent.click(screen.getByRole('button', { name: '연산 지연 시작' }));
-    expect(state.delay).not.toHaveBeenCalled();
-    expect(screen.getByText('‘autonomous’ VM의 주행 연산에 지연을 넣으시겠습니까?')).toBeInTheDocument();
-    expect(screen.getByText(/20 ms 지연을 30초 동안/)).toBeInTheDocument();
-
-    await userEvent.click(screen.getByRole('button', { name: '취소' }));
-    expect(state.delay).not.toHaveBeenCalled();
-
-    await userEvent.click(screen.getByRole('button', { name: '연산 지연 시작' }));
-    await userEvent.click(screen.getByRole('button', { name: '지연 시작' }));
-    expect(state.delay).toHaveBeenCalledTimes(1);
-    expect(state.delay).toHaveBeenCalledWith({ delay_ms: 20, duration_s: 30 });
-  });
 });
 
 describe('부하 실험실 VM 목록 라벨', () => {
@@ -229,15 +211,31 @@ describe('부하 실험실 VM 목록 라벨', () => {
     state.vms = [
       linux('vm-a', 'interaction'),
       { ...linux('vm-b', 'manual-b'), state: 'stopped' },
-      { ...zephyr, state: 'crashed' },
+      { ...linux('vm-c', 'crashed-c'), state: 'crashed' },
     ];
     renderLab();
     const grid = screen.getByRole('button', { name: /interaction/ }).parentElement!;
     expect(grid).toHaveTextContent('Debian');
-    expect(grid).toHaveTextContent('Zephyr');
     expect(grid).toHaveTextContent('실행 중');
     expect(grid).toHaveTextContent('꺼짐');
     expect(grid).toHaveTextContent('비정상 종료');
     expect(grid).not.toHaveTextContent(/linux|zephyr|RUNNING|STOPPED|CRASHED/);
+  });
+});
+
+describe('부하 실험실 대상은 데비안 VM 만', () => {
+  it('Zephyr VM 은 목록에 없고 연산 지연 항목도 보이지 않는다', () => {
+    renderLab();
+    expect(screen.getByRole('button', { name: /interaction/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /autonomous/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '연산 지연 시작' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'CPU 부하 시작' })).toBeInTheDocument();
+  });
+
+  it('데비안 VM 이 없으면 Zephyr 를 대신 고르지 않고 안내만 한다', () => {
+    state.vms = [zephyr];
+    renderLab();
+    expect(screen.getByText('부하를 줄 데비안 VM이 없습니다.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /autonomous/ })).not.toBeInTheDocument();
   });
 });
