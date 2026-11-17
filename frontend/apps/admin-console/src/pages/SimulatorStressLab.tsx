@@ -1,6 +1,5 @@
 import { Button, Card, Modal, useToast } from '@xenova/ui';
 import { useMemo, useState, type CSSProperties } from 'react';
-import { Link } from 'react-router';
 import { commandErrorCode } from '../api/commandStatus';
 import { agentErrorText, commandStateText, errorText } from '../api/errorText';
 import {
@@ -305,17 +304,12 @@ export function SimulatorStressLab() {
     <div className={styles.page} style={{ '--vm-accent': 'var(--x-primary)' } as CSSProperties}>
       <section className={styles.pageHead}>
         <div>
-          <div className={styles.eyebrow}>Simulator / Load test</div>
+          <div className={styles.eyebrow}>Load test</div>
           <h1>VM 부하 테스트</h1>
           <p className={styles.dim}>부하를 실행하고 같은 VM의 telemetry와 실행 단위를 함께 관찰합니다.</p>
         </div>
       </section>
-      <nav className={styles.simulatorTabs} aria-label="Simulator 하위 메뉴">
-        <Link to="/simulator">장애 시연</Link>
-        <Link to="/simulator/stress" aria-current="page">
-          부하 테스트
-        </Link>
-      </nav>
+      {/* 부하 테스트는 상단 단독 메뉴라 Simulator 하위 탭(장애 시연 ↔ 부하 테스트)을 두지 않는다 */}
 
       <section className={styles.stressVmSection} aria-labelledby="stress-vm-title">
         <div className={styles.stressSectionTitle}>
