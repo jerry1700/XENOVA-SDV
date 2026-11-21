@@ -1,13 +1,37 @@
+<div align="center">
+
 # Xenova
-> Xen 기반 임베디드 멀티 OS 관리 및 장애 대응 플랫폼
+
+### Xen 기반 임베디드 멀티 OS 관리 및 장애 대응 플랫폼
+
+![Raspberry Pi 4](https://img.shields.io/badge/Raspberry_Pi_4-Xen_ARM64-A22846?logo=raspberrypi&logoColor=white)
+![Zephyr](https://img.shields.io/badge/Zephyr-RTOS-6E3BBF?logo=zephyrproject&logoColor=white)
+![Yocto](https://img.shields.io/badge/Yocto-dom0_이미지-0070C0)
+![ESP32](https://img.shields.io/badge/ESP32-차량_제어-E7352C?logo=espressif&logoColor=white)
+![Jetson](https://img.shields.io/badge/Jetson_Nano-인지-76B900?logo=nvidia&logoColor=white)
+![SSAFY](https://img.shields.io/badge/SSAFY-자율_프로젝트-1428A0)
+
+`Xen 하이퍼바이저` · `멀티 OS 격리` · `VM 장애 복구` · `주행 제어권 이중화` · `자율주행 RC카`
+
+</div>
+
+---
 
 Xenova는 Raspberry Pi 4에 오픈소스 하이퍼바이저 Xen을 브링업하고, Linux와 Zephyr RTOS를 하나의 하드웨어에서 독립적으로 실행·관리할 수 있도록 구축한 임베디드 가상화 플랫폼입니다.
 
 Yocto 기반 시스템 이미지부터 VM 템플릿과 배포, 가상머신의 생명주기·자원 관리, 상태 모니터링, 원격 관리 인터페이스까지 통합하여 멀티 OS 운영 환경을 제공합니다.
 
-![XENOVA_overview.png](docs\images\readme\XENOVA_overview.png)
+![XENOVA_overview.png](docs/images/readme/XENOVA_overview.png)
 
 또한 자율주행 RC카를 응용 사례로 활용하여, 서로 다른 OS와 VM에 분산된 기능의 격리·협력·장애 대응을 실증합니다. 주행 VM 장애 시 예비 VM으로의 제어권 전환, 인지 시스템 장애 시 주행 모드 전환, 장애 VM의 자동 복구와 재합류를 주요 검증 목표로 삼습니다.
+
+SSAFY 자율 프로젝트 · 2026.10 – 11 · 6인 팀 프로젝트 · 이 저장소는 팀 GitLab 모노레포를 커밋 이력째 옮긴 것입니다.
+필자는 CTRL·차량 파트를 맡았고, 그 범위는 [6장](#6-ctrl차량-파트-작업-범위)에 따로 정리했습니다.
+
+**Key Results**
+- 실차 자율주행: Jetson 차선 인식과 깊이 기반 장애물 회피로 303 × 194 cm 2차로 트랙을 한 바퀴 넘게(9.5 m) 주행
+- 주행 VM 이중화: 활성 Zephyr VM이 멈추면 예비 VM이 약 0.3초 만에 제어권을 넘겨받음 (바퀴를 띄운 실보드 시험)
+- 하위 안전 장치: ESP32가 명령마다 80 ms 수명을 걸어, 상위가 멈춰도 스스로 출력을 끊고 15 cm 앞 물체에서 제동
 
 ## 목차
 [1. 시스템 구성 (System Overview)](#1-시스템-구성-system-overview)
@@ -40,15 +64,19 @@ Yocto 기반 시스템 이미지부터 VM 템플릿과 배포, 가상머신의 �
 [- 4.6. 장애 VM 복구 및 Standby 재합류](#46-장애-vm-복구-및-standby-재합류)  
 [- 4.7. 양쪽 Zephyr VM 사용 불가](#47-양쪽-zephyr-vm-사용-불가)   
 
-[5. 설치 및 사용 (Getting Started)]()
-[- 5.1 실행 환경 및 사전 준비]()  
-[- 5.2 빌드 및 배포]()  
-[- 5.3 실행 및 관리 방법]()  
-[- 5.4 상세 기술 문서]()  
+[5. 설치 및 사용 (Getting Started)](#5-설치-및-사용-getting-started)  
+[- 5.1 실행 환경 및 사전 준비](#51-실행-환경-및-사전-준비)  
+[- 5.2 빌드 및 배포](#52-빌드-및-배포)  
+[- 5.3 실행 및 관리 방법](#53-실행-및-관리-방법)  
+[- 5.4 상세 기술 문서](#54-상세-기술-문서)  
+
+[6. CTRL·차량 파트 작업 범위](#6-ctrl차량-파트-작업-범위)  
+[7. 트러블슈팅 (요약)](#7-트러블슈팅-요약)  
+[8. 팀 구성과 기여](#8-팀-구성과-기여)  
 
 ## 1. 시스템 구성 (System Overview)
 ### 1.1. 전체 시스템 구성도  
-![overview.png](docs\images\readme\overview.png)
+![overview.png](docs/images/readme/overview.png)
 Xenova는 **Xen 기반 멀티 OS 플랫폼**을 중심으로 이를 제어 및 시각화하는 **웹 서비스**와 이를 통해 구동되는 **차량 시스템**으로 구성됩니다.
 
 | | |
@@ -104,7 +132,7 @@ Raspberry Pi 4에 Xen 하이퍼바이저를 구성하고, Yocto 기반 Linux 관
 | 구성 | 역할 |
 |---|---|
 | Xen Hypervisor | 하드웨어 자원 가상화, VM 실행 격리 및 vCPU 스케줄링 |
-| dom0 (Yocto Linux)** | Xen Toolstack, VM 관리 서비스, 가상 네트워크 및 장치 I/O 관리 |
+| **dom0 (Yocto Linux)** | Xen Toolstack, VM 관리 서비스, 가상 네트워크 및 장치 I/O 관리 |
 | Zephyr A / B | 독립적으로 실행되는 주행 제어 VM. 동일한 주행 펌웨어를 기반으로 Active/Standby 역할 수행 |
 | Debian | Interaction 및 차량 화면 애플리케이션을 실행하는 Linux VM |
 
@@ -161,45 +189,45 @@ dom0의 Display Feed가 VM 및 차량 상태를 수집·정리하고, Debian Int
 | dom0 ↔ Interaction VM | 가상 네트워크, HTTP | 차량 화면 데이터 및 웹 콘텐츠 제공 |
 
 ## 3. 주요 기능 (Key Features)
-> 참고: [CLI 문서](docs\platform\cli-manager-spec.md)
+> 참고: [CLI 문서](docs/platform/cli-manager-spec.md)
 
 ### 3.1 멀티 OS 실행 및 VM 관리
 
 - Xen 기반 가상화 환경에서 Linux와 Zephyr RTOS를 독립적인 VM으로 실행하고, CLI 및 웹 관리 콘솔을 통해 가상머신을 관리합니다.
 
-![XENOVA_vmcontrol.png](docs\images\readme\XENOVA_vmcontrol.png)
-![XENOVA_console.png](docs\images\readme\XENOVA_console.png)
+![XENOVA_vmcontrol.png](docs/images/readme/XENOVA_vmcontrol.png)
+![XENOVA_console.png](docs/images/readme/XENOVA_console.png)
 
 - 템플릿 카탈로그를 기반으로 VM을 생성하며, 시작·정지·재부팅과 등록 자산의 보관·복원 기능을 제공합니다.
 
-![XENOVA_vmcreate.png](docs\images\readme\XENOVA_vmcreate.png)
+![XENOVA_vmcreate.png](docs/images/readme/XENOVA_vmcreate.png)
 
 ### 3.2 리소스 할당 및 제어
 
 - VM별 vCPU·메모리 자원 설정과 CPU 배치 정책을 제공합니다.
 - vCPU와 물리 CPU의 배치를 설정하고 실제 Xen 실행 상태와 대조할 수 있습니다.
 
-![XENOVA_vmdetail1.png](docs\images\readme\XENOVA_vmdetail1.png)
-![XENOVA_vmdetail2.png](docs\images\readme\XENOVA_vmdetail2.png)
+![XENOVA_vmdetail1.png](docs/images/readme/XENOVA_vmdetail1.png)
+![XENOVA_vmdetail2.png](docs/images/readme/XENOVA_vmdetail2.png)
 
 ### 3.3 상태 모니터링 및 진단
 
 - Xen 실행 상태와 게스트 OS·애플리케이션의 상태를 수집하여 VM별 운영 정보를 제공합니다.
 
-![XENOVA_overview.png](docs\images\readme\XENOVA_overview.png)
+![XENOVA_overview.png](docs/images/readme/XENOVA_overview.png)
 
 - CPU·메모리·네트워크 등의 자원 정보와 Agent·애플리케이션의 상태 보고를 구분하여 표시합니다.
 
-![XENOVA_cpu.png](docs\images\readme\XENOVA_cpu.png)
-![XENOVA_vmmemory.png](docs\images\readme\XENOVA_vmmemory.png)
-![XENOVA_network.png](docs\images\readme\XENOVA_network.png)
+![XENOVA_cpu.png](docs/images/readme/XENOVA_cpu.png)
+![XENOVA_vmmemory.png](docs/images/readme/XENOVA_vmmemory.png)
+![XENOVA_network.png](docs/images/readme/XENOVA_network.png)
 
 ### 3.4 장애 감지 및 자동 복구
 
 - Recovery Worker가 Xen 실행 상태와 게스트의 생존 신호를 감시하여 VM 장애를 판정합니다.
 - 비정상 종료와 사용자의 의도적인 정지를 구분하고, 복구 정책에 따라 재시작을 수행합니다.
 
-![XENOVA_timeline.png](docs\images\readme\XENOVA_timeline.png)
+![XENOVA_timeline.png](docs/images/readme/XENOVA_timeline.png)
 
 ### 3.5 주행 제어권 전환 및 모드 전환
 
@@ -207,7 +235,7 @@ dom0의 Display Feed가 VM 및 차량 상태를 수집·정리하고, Debian Int
 - 활성 VM에 장애가 발생하면 Gateway가 기존 제어권을 무효화하고 준비된 예비 VM으로 제어권을 전환합니다. 또한 환경 인지 기능의 장애는 VM 장애와 구분하여 AUTO/MANUAL 모드 전환으로 대응합니다.
 -  유효한 제어권이나 주행 입력이 확보되지 않으면 주행 명령을 차단하고 안전 정지 상태로 전환합니다.
 
-![XENOVA_timeline2.png](docs\images\readme\XENOVA_timeline2.png)
+![XENOVA_timeline2.png](docs/images/readme/XENOVA_timeline2.png)
 
 ### 3.6 웹 기반 관리 및 시각화
 
@@ -215,8 +243,8 @@ dom0의 Display Feed가 VM 및 차량 상태를 수집·정리하고, Debian Int
 - 별도의 차량 화면 시스템은 Debian Interaction VM이 제공하는 계기판·인포테인먼트 화면을 HDMI 모니터 또는 USB 연결 휴대폰에 표시합니다.
 - 관리 콘솔과 차량 디스플레이를 분리하여 운영·제어 기능과 차량 정보 표시 기능을 각각 제공합니다.
 
-![XENOVA-instrument.png](docs\images\readme\XENOVA-instrument.png)
-![XENOVA_infotainment.png](docs\images\readme\XENOVA_infotainment.png)
+![XENOVA-instrument.png](docs/images/readme/XENOVA-instrument.png)
+![XENOVA_infotainment.png](docs/images/readme/XENOVA_infotainment.png)
 
 ## 4. 장애 대응 시나리오 (Scenarios)
 
@@ -347,3 +375,44 @@ xenova-vm get <VM_UUID>
 | [차량 화면 운영 가이드](docs/platform/display-operations-handoff.md) | HDMI·휴대폰 화면 출력 및 전환 |
 | [RC카 조립 가이드](docs/vehicle/assembly-guide.md) | 하드웨어 구성 및 연결 |
 
+## 6. CTRL·차량 파트 작업 범위
+
+필자가 맡은 범위는 보드 위의 VM 관리 서비스와, 주행 명령이 바퀴까지 가는 하위 경로입니다.
+
+| 영역 | 한 일 | 위치 |
+|---|---|---|
+| dom0-manager | FastAPI 기반 보드 관리 API(조회·정지·재부팅·자원 변경·CPU 배치), 플랫폼 드라이버 연동, xentop 통계 | [platform/services/dom0-manager](platform/services/dom0-manager/README.md) |
+| Recovery Worker | Xen 상태·생존 신호·실행 의도로 장애를 판정하고, 주행 VM은 Gateway 보호를 먼저 확보한 뒤 재시작 | 같은 폴더 `recovery/` |
+| VM Agent | Linux 게스트의 heartbeat·inventory·metrics 보고, 부하·Agent 종료 데모 명령 | [platform/services/vm-agent](platform/services/vm-agent) |
+| ESP32 펌웨어 | feedback-3 시리얼 규약(세션·시각 lease·DRIVE/STOP·REPORT), 50 Hz 센서 표본, 명령 수명이 지나면 출력 차단, ToF 근거리 제동 | [vehicle/ESP32](vehicle/ESP32/README.md) |
+| Gateway 수정 | ESP32 연결 재시도, 정지 확인 창 계산, 근거리 막힘 표시 수용 | [platform/services/gateway](platform/services/gateway/README.md) |
+| 실차 주행 도구 | Jetson이 차선·장애물을 보고 조향을 정해 RPi4 중계로 ESP32를 모는 주행 도구와 모형 주행 | [vehicle/Jetson/tools/lane_drive](vehicle/Jetson/tools/lane_drive/README.md) |
+| 하드웨어 | RC카 조립·배선·전원 단계별 시험과 기록 | [docs/vehicle/assembly-guide.md](docs/vehicle/assembly-guide.md) |
+| 계약 문서 | VM 관리 API 계약 v1, dom0-manager OpenAPI, 복구 이벤트·vm.health MQTT 계약 | [docs/contracts](docs/contracts) |
+
+**설계 원칙**
+- 안전은 가장 아래에서 한 번 더 막습니다. ESP32는 상위(Gateway·VM)를 믿지 않고, 명령마다 붙은 수명과 시각 lease로 스스로 출력을 끊습니다.
+- 복구는 증거가 있을 때만 합니다. 생존 신호 손실은 같은 채널의 다른 VM 신호가 살아 있을 때만 장애로 보고, 함께 조용하면 판정을 보류합니다.
+- 실차에서 본 값으로 고칩니다. 조향 부호·유격, 속도 환산, 조향 한계(앞바퀴 각 ±490 mrad)는 모두 바닥과 바퀴를 띄운 시험에서 잰 값입니다.
+
+**알려진 한계**
+- 9.5 m 실차 주행은 Jetson → RPi4 중계 → ESP32로 이어지는 직결 경로에서 했습니다. 같은 조향을 Zephyr 주행 VM을 거쳐 보내는 경로는 바퀴를 띄운 시험(전진·좌우·VM 교대)까지 확인했고, 바닥 주행은 하지 못했습니다.
+
+## 7. 트러블슈팅 (요약)
+
+1. **VM은 멀쩡한데 제어권이 넘어간다** — 주행 명령을 VM이 만들어도 입출력은 모두 dom0의 Gateway를 지납니다. dom0 코어 2개 중 Gateway(Python)가 한 코어의 약 70 %를 써서 명령이 100 ms 기한보다 100–260 ms 늦게 나갔고, 그때마다 정상 VM이 장애로 처리됐습니다. 스레드별 CPU를 재 원인을 찾았고, Gateway 우선순위를 올리자 AUTO 유지 시간이 10–20초에서 5분 40초로 늘었습니다.
+2. **차선이 갑자기 안 보인다** — 카메라가 약 1.75° 숙여져 바닥 그림에서 점선 조각이 0.12–0.16 m로 늘어났고, 점선 판정 기준(0.11 m 이하)을 넘어 차로를 잃었습니다. 한 장을 찍어 피치를 0.25° 단위로 바꿔 가며 점선 길이와 두 선의 평행을 비교해 보정값을 다시 정했습니다.
+3. **렌즈 왜곡으로 흰 선이 0개** — 왜곡 계수가 있는 RGB를 무왜곡 모델로 처리하고 있었습니다. 영상을 먼저 펴도록 바꿔 실차 영상의 흰 선 조각을 0개에서 6개로 늘렸습니다.
+4. **조향이 반대로 간다** — ESP32 조향 부호가 좌우 반대였습니다. 조향 확인 도구를 만들어 부호를 고치고, 서보 유격과 가운데 치우침(30 mrad)을 실측해 보정했습니다.
+5. **보드가 젯슨 명령을 못 받는다** — RPi4 Wi-Fi 절전 때문에 UDP가 닿지 않았습니다. 주행 중 SSH 세션을 하나 열어 두는 것으로 피했습니다.
+
+## 8. 팀 구성과 기여
+
+| 파트 | 범위 |
+|---|---|
+| 플랫폼 | Xen 브링업, Yocto dom0 이미지, Platform Manager, Zephyr 주행 VM, Gateway, Jetson 인지 |
+| CTRL·차량 (필자) | dom0-manager, Recovery Worker, VM Agent, ESP32 펌웨어, 실차 주행 도구, RC카 조립 |
+| 백엔드 | Spring Boot 관리 서버, 배포·CI, 장애 시연 화면 |
+| 프론트엔드 | React 웹 관리 콘솔 |
+| 디스플레이 | 차량 화면(계기판·인포테인먼트), 화면 라우터·키오스크 |
+| 프론트엔드·QA | 관리 콘솔 화면, QA 점검 |
