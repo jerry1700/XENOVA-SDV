@@ -1,6 +1,6 @@
 <div align="center">
 
-# Xenova
+# XENOVA
 
 ### Xen 기반 차량용 멀티 OS 관리·장애 대응 플랫폼
 
@@ -17,7 +17,7 @@
 
 ---
 
-Xenova는 Raspberry Pi 4 한 대에 Xen 하이퍼바이저를 올리고, Linux와 Zephyr RTOS를 서로 격리된 VM으로 돌리며
+XENOVA는 Raspberry Pi 4 한 대에 Xen 하이퍼바이저를 올리고, Linux와 Zephyr RTOS를 서로 격리된 VM으로 돌리며
 관리하는 임베디드 가상화 플랫폼이다. 자율주행 RC카를 응용 사례로 삼아 **주행 VM 하나가 죽어도 대기 VM이 제어권을
 이어받고, 죽은 VM은 스스로 복구되는** 구조를 실제 차량에서 검증했다.
 
@@ -29,6 +29,8 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 - 실차 자율주행: Jetson 차선 인식과 깊이 기반 장애물 회피로 303 × 194 cm 2차로 트랙을 한 바퀴 넘게(9.5 m) 주행
 - 주행 VM 이중화: 활성 Zephyr VM이 멈추면 대기 VM이 약 0.3초 만에 제어권을 넘겨받음 (바퀴를 띄운 실보드 시험)
 - 하위 안전 장치: ESP32가 명령마다 80 ms 수명을 걸어 상위가 멈춰도 스스로 출력을 끊고, 15 cm 앞 물체에서 제동
+
+![관리 콘솔 VM Dashboard — 주행 제어권을 가진 VM과 VM별 상태](docs/images/readme/XENOVA_overview.png)
 
 ## 프로젝트 한눈에 보기
 
@@ -42,7 +44,9 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ## 무엇을 풀었나
 
-자동차는 계기판, 인포테인먼트, 주행 제어처럼 성격이 다른 소프트웨어를 여러 ECU에 나눠 싣는다. Xenova는 이것을
+![시스템 구성 — 웹 관리 콘솔과 RC카(Jetson · Raspberry Pi 4 · ESP32)](docs/images/readme/overview.png)
+
+자동차는 계기판, 인포테인먼트, 주행 제어처럼 성격이 다른 소프트웨어를 여러 ECU에 나눠 싣는다. XENOVA는 이것을
 보드 한 대 위의 VM으로 나누되, **주행 제어만큼은 VM이 죽어도 끊기지 않아야 한다**는 조건을 걸었다. 그래서 같은
 주행 펌웨어를 Zephyr VM 두 개(A·B)에 올려 하나는 활성, 하나는 대기로 두고, dom0의 Gateway가 지금 제어권을 가진 VM의
 명령만 ESP32로 보낸다.
@@ -52,7 +56,7 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ## 아키텍처
 
-![Xenova 아키텍처](docs/images/readme/architecture.png)
+![XENOVA 아키텍처](docs/images/readme/architecture.png)
 
 | 계층 | 구성 | 하는 일 |
 |---|---|---|
@@ -65,11 +69,30 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 주행 명령 한 번은 Jetson 인지 → (MQTT) → Zephyr VM → (MQTT) → Gateway → (USB 시리얼) → ESP32 를 지난다.
 굵게 쓴 것이 필자가 만든 부분이다.
 
+## 주요 화면
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/readme/XENOVA_vmcreate.png" alt="VM 생성"><br><sub>템플릿으로 VM 생성</sub></td>
+<td width="50%"><img src="docs/images/readme/XENOVA_vmcontrol.png" alt="VM 제어"><br><sub>VM 시작·정지·재부팅</sub></td>
+</tr>
+<tr>
+<td><img src="docs/images/readme/XENOVA_vmdetail1.png" alt="자원 설정"><br><sub>VM 상세: 생명주기 제어, vCPU·메모리·핀닝 (dom0-manager API)</sub></td>
+<td><img src="docs/images/readme/XENOVA_console.png" alt="웹 콘솔"><br><sub>게스트 웹 콘솔</sub></td>
+</tr>
+<tr>
+<td><img src="docs/images/readme/XENOVA-instrument.png" alt="계기판"><br><sub>차량 계기판 (Debian 인터랙션 VM)</sub></td>
+<td><img src="docs/images/readme/XENOVA_infotainment.png" alt="인포테인먼트"><br><sub>차량 인포테인먼트</sub></td>
+</tr>
+</table>
+
 ## 핵심 설계와 근거
 
 - **판정은 증거가 있을 때만** — Recovery Worker는 Xen 실행 상태, 게스트의 생존 신호, 사용자가 원한 상태(의도)를
   함께 본다. 생존 신호가 끊겨도 같은 채널의 다른 VM 신호가 살아 있을 때만 장애로 보고, 함께 조용하면 브로커 쪽 문제로 보고
   판정을 보류한다. 의도를 못 읽으면 아무것도 하지 않는다. → [dom0-manager README](platform/services/dom0-manager/README.md)
+
+  ![이벤트 타임라인 — Zephyr 주행 B 강제 종료 뒤 재시작과 실행 확인](docs/images/readme/XENOVA_timeline2.png)
 - **주행 VM은 보호부터 확보하고 재시작** — 주행 VM을 강제 재시작하기 전에 Gateway에서 그 VM의 제어권을 먼저 거둬들이고,
   새 실행이 합류한 것을 확인한 뒤 보호를 푼다. 재시작 중에 옛 실행의 명령이 바퀴에 닿지 않게 하기 위해서다.
 - **안전은 가장 아래에서 한 번 더** — ESP32는 상위를 믿지 않는다. 명령마다 발행 시각과 80 ms 수명이 붙고, Gateway와 맞춘
