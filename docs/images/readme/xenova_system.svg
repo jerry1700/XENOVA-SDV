@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="760" viewBox="0 0 1600 760" font-family="'Malgun Gothic', 'Noto Sans KR', 'Apple SD Gothic Neo', sans-serif">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+<path d="M0,0 L10,5 L0,10 z" fill="#98A2B3"/></marker></defs>
+<rect width="1600" height="760" fill="#FFFFFF"/>
+<text x="40" y="52" text-anchor="start" font-size="26" fill="#1D2939" font-weight="700">XENOVA 시스템 구성</text>
+<text x="40" y="76" text-anchor="start" font-size="13" fill="#667085">웹 관리 서비스는 EC2 에서, 멀티 OS 플랫폼과 차량 장치는 RC카 위에서 돈다</text>
+<text x="185" y="128" text-anchor="middle" font-size="20" fill="#7A4ED1" font-weight="700">클라이언트</text>
+<rect x="40" y="150" width="290" height="420" rx="14" fill="#FFFFFF" stroke="#7A4ED1" stroke-width="1.5"/>
+<rect x="135" y="190" width="100" height="70" rx="8" fill="none" stroke="#7A4ED1" stroke-width="2.5"/>
+<line x1="135" y1="206" x2="235" y2="206" stroke="#7A4ED1" stroke-width="2"/>
+<rect x="165" y="260" width="40" height="10" fill="#7A4ED1"/>
+<text x="185" y="312" text-anchor="middle" font-size="22" fill="#7A4ED1" font-weight="700">웹 관리 콘솔</text>
+<text x="185" y="338" text-anchor="middle" font-size="13" fill="#667085">React · TypeScript</text>
+<rect x="70" y="380" width="230" height="150" rx="8" fill="#F4F0FF" stroke="#C9B8F2" stroke-width="1.2"/>
+<text x="185.0" y="460.0" text-anchor="middle" font-size="14" font-weight="700" fill="#1D2939"></text>
+<text x="185" y="420" text-anchor="middle" font-size="13" fill="#1D2939">VM 생성 · 시작 · 정지</text>
+<text x="185" y="446" text-anchor="middle" font-size="13" fill="#1D2939">자원 · CPU 배치 · 웹 콘솔</text>
+<text x="185" y="472" text-anchor="middle" font-size="13" fill="#1D2939">장애 시연 · 부하 테스트</text>
+<text x="185" y="498" text-anchor="middle" font-size="13" fill="#1D2939">이벤트 타임라인</text>
+<text x="660" y="128" text-anchor="middle" font-size="20" fill="#2E7DD7" font-weight="700">AWS EC2 · Docker Compose</text>
+<rect x="460" y="150" width="400" height="540" rx="14" fill="#FFFFFF" stroke="#2E7DD7" stroke-width="1.5" stroke-dasharray="7 5"/>
+<rect x="500" y="180" width="320" height="76" rx="8" fill="#FFFFFF" stroke="#2E7DD7" stroke-width="1.2"/>
+<text x="660.0" y="215.0" text-anchor="middle" font-size="16" font-weight="700" fill="#1D2939">Nginx</text>
+<text x="660.0" y="234.0" text-anchor="middle" font-size="12" fill="#667085">리버스 프록시 · 정적 웹 · TLS</text>
+<rect x="500" y="300" width="320" height="76" rx="8" fill="#FFFFFF" stroke="#2E7DD7" stroke-width="1.2"/>
+<text x="660.0" y="335.0" text-anchor="middle" font-size="16" font-weight="700" fill="#1D2939">Spring Boot</text>
+<text x="660.0" y="354.0" text-anchor="middle" font-size="12" fill="#667085">관리 서버 · REST · WebSocket</text>
+<rect x="500" y="430" width="150" height="76" rx="8" fill="#FFFFFF" stroke="#2E7DD7" stroke-width="1.2"/>
+<text x="575.0" y="465.0" text-anchor="middle" font-size="15" font-weight="700" fill="#1D2939">MySQL</text>
+<text x="575.0" y="484.0" text-anchor="middle" font-size="12" fill="#667085">VM · 이벤트 이력</text>
+<rect x="670" y="430" width="150" height="76" rx="8" fill="#FFFFFF" stroke="#2E7DD7" stroke-width="1.2"/>
+<text x="745.0" y="465.0" text-anchor="middle" font-size="15" font-weight="700" fill="#1D2939">Redis</text>
+<text x="745.0" y="484.0" text-anchor="middle" font-size="12" fill="#667085">세션 · 캐시</text>
+<rect x="500" y="570" width="320" height="76" rx="8" fill="#FFFFFF" stroke="#2E7DD7" stroke-width="1.2"/>
+<text x="660.0" y="605.0" text-anchor="middle" font-size="15" font-weight="700" fill="#1D2939">Jenkins</text>
+<text x="660.0" y="624.0" text-anchor="middle" font-size="12" fill="#667085">MR 검사 · master 배포</text>
+<path d="M332,218 L498,218" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="345" y="210" text-anchor="start" font-size="11" fill="#667085">HTTPS · WebSocket</text>
+<path d="M660,256 L660,298" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-end="url(#arr)"/>
+<path d="M600,376 L575,428" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-end="url(#arr)"/>
+<path d="M720,376 L745,428" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="1225" y="128" text-anchor="middle" font-size="20" fill="#2E9E5B" font-weight="700">RC카 · 엣지 장치</text>
+<rect x="950" y="150" width="550" height="160" rx="12" fill="#FFFFFF" stroke="#2E9E5B" stroke-width="2"/>
+<text x="975" y="184" text-anchor="start" font-size="17" fill="#1F6F3F" font-weight="700">Raspberry Pi 4 · Xen 하이퍼바이저</text>
+<rect x="975" y="202" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1055" y="227" text-anchor="middle" font-size="13" fill="#1F6F3F">dom0-manager</text>
+<circle cx="1127" cy="204" r="9" fill="#E8590C"/>
+<text x="1127" y="208" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<rect x="1147" y="202" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1227" y="227" text-anchor="middle" font-size="13" fill="#1F6F3F">Recovery Worker</text>
+<circle cx="1299" cy="204" r="9" fill="#E8590C"/>
+<text x="1299" y="208" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<rect x="1319" y="202" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1399" y="227" text-anchor="middle" font-size="13" fill="#1F6F3F">Gateway</text>
+<rect x="975" y="252" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1055" y="277" text-anchor="middle" font-size="13" fill="#1F6F3F">Zephyr 주행 A</text>
+<rect x="1147" y="252" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1227" y="277" text-anchor="middle" font-size="13" fill="#1F6F3F">Zephyr 주행 B</text>
+<rect x="1319" y="252" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1399" y="277" text-anchor="middle" font-size="13" fill="#1F6F3F">Debian 인터랙션</text>
+<rect x="950" y="350" width="550" height="110" rx="12" fill="#FFFFFF" stroke="#2E9E5B" stroke-width="2"/>
+<text x="975" y="384" text-anchor="start" font-size="17" fill="#1F6F3F" font-weight="700">Jetson Nano · OAK-D-Lite</text>
+<rect x="975" y="402" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1055" y="427" text-anchor="middle" font-size="13" fill="#1F6F3F">RGB · Depth</text>
+<rect x="1147" y="402" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1227" y="427" text-anchor="middle" font-size="13" fill="#1F6F3F">차선 · 장애물 인지</text>
+<rect x="1319" y="402" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1399" y="427" text-anchor="middle" font-size="13" fill="#1F6F3F">실차 주행 도구</text>
+<circle cx="1471" cy="404" r="9" fill="#E8590C"/>
+<text x="1471" y="408" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<rect x="950" y="500" width="550" height="110" rx="12" fill="#FFFFFF" stroke="#2E9E5B" stroke-width="2"/>
+<text x="975" y="534" text-anchor="start" font-size="17" fill="#1F6F3F" font-weight="700">ESP32 · 구동계</text>
+<rect x="975" y="552" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1055" y="577" text-anchor="middle" font-size="13" fill="#1F6F3F">모터 · 엔코더</text>
+<circle cx="1127" cy="554" r="9" fill="#E8590C"/>
+<text x="1127" y="558" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<rect x="1147" y="552" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1227" y="577" text-anchor="middle" font-size="13" fill="#1F6F3F">조향 서보</text>
+<circle cx="1299" cy="554" r="9" fill="#E8590C"/>
+<text x="1299" y="558" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<rect x="1319" y="552" width="160" height="40" rx="8" fill="#EEF6F1" stroke="#9FD0B0" stroke-width="1"/>
+<text x="1399" y="577" text-anchor="middle" font-size="13" fill="#1F6F3F">ToF 근거리 제동</text>
+<circle cx="1471" cy="554" r="9" fill="#E8590C"/>
+<text x="1471" y="558" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<path d="M822,338 L935,338 L935,230 L948,230" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-start="url(#arr)" marker-end="url(#arr)"/>
+<text x="868" y="358" text-anchor="start" font-size="11" fill="#667085">REST · WS</text>
+<text x="868" y="374" text-anchor="start" font-size="11" fill="#667085">MQTT</text>
+<text x="868" y="390" text-anchor="start" font-size="11" fill="#667085">(Tailscale)</text>
+<path d="M1225,348 L1225,312" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-end="url(#arr)"/>
+<text x="1235" y="335" text-anchor="start" font-size="11" fill="#667085">MQTT (Wi-Fi)</text>
+<path d="M1490,310 L1530,310 L1530,555 L1502,555" fill="none" stroke="#98A2B3" stroke-width="1.5" marker-start="url(#arr)" marker-end="url(#arr)"/>
+<text x="1536" y="440" text-anchor="start" font-size="11" fill="#667085">USB Serial</text>
+<circle cx="48" cy="728" r="9" fill="#E8590C"/>
+<text x="48" y="732" text-anchor="middle" font-size="11" font-weight="700" fill="#FFFFFF">C</text>
+<text x="66" y="732" text-anchor="start" font-size="12" fill="#344054">CTRL·차량 파트(필자) 구현</text>
+<text x="1560" y="732" text-anchor="end" font-size="11" fill="#98A2B3">S15P31E110 XENOVA · 2026-11</text>
+</svg>

@@ -44,7 +44,7 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ## 무엇을 풀었나
 
-![시스템 구성 — 웹 관리 콘솔과 RC카(Jetson · Raspberry Pi 4 · ESP32)](docs/images/readme/overview.png)
+![XENOVA 시스템 구성](docs/images/readme/xenova_system.svg)
 
 자동차는 계기판, 인포테인먼트, 주행 제어처럼 성격이 다른 소프트웨어를 여러 ECU에 나눠 싣는다. XENOVA는 이것을
 보드 한 대 위의 VM으로 나누되, **주행 제어만큼은 VM이 죽어도 끊기지 않아야 한다**는 조건을 걸었다. 그래서 같은
@@ -56,7 +56,7 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ## 아키텍처
 
-![XENOVA 아키텍처](docs/images/readme/architecture.png)
+![XENOVA 차량 플랫폼 아키텍처](docs/images/readme/xenova_architecture.svg)
 
 | 계층 | 구성 | 하는 일 |
 |---|---|---|
