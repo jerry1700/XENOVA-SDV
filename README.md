@@ -34,13 +34,13 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ## 프로젝트 한눈에 보기
 
-| 구분 | 내용 |
+| 구⁠분 | 내⁠용 |
 |---|---|
-| 해결하려는 문제 | 한 보드에서 여러 OS를 돌릴 때 한 VM의 장애가 차량 주행 전체를 멈추지 않게 하기 |
-| 하드웨어 | Raspberry Pi 4 (8GB) · Jetson Nano + OAK-D-Lite · ESP32 DevKitC · RC카 구동계 · VL53L0X ToF |
-| 소프트웨어 | Xen (ARM64) · Yocto dom0 · Zephyr 주행 VM A/B · Debian 인터랙션 VM · FastAPI · Spring Boot · React |
-| 통신 | MQTT (Mosquitto) · REST · WebSocket · USB 시리얼 460800 bps (자체 규약 feedback-3) |
-| 필자 범위 | dom0-manager · Recovery Worker · VM Agent · ESP32 펌웨어 · Gateway 수정 · 실차 주행 도구 · RC카 조립 |
+| 해⁠결⁠하⁠려⁠는 문⁠제 | 한 보⁠드⁠에⁠서 여⁠러 OS⁠를 돌⁠릴 때 한 VM⁠의 장⁠애⁠가 차⁠량 주⁠행 전⁠체⁠를 멈⁠추⁠지 않⁠게 하⁠기 |
+| 하⁠드⁠웨⁠어 | Raspberry Pi 4 (8GB) · Jetson Nano + OAK-D-Lite · ESP32 DevKitC · RC⁠카 구⁠동⁠계 · VL53L0X ToF |
+| 소⁠프⁠트⁠웨⁠어 | Xen (ARM64) · Yocto dom0 · Zephyr 주⁠행 VM A/B · Debian 인⁠터⁠랙⁠션 VM · FastAPI · Spring Boot · React |
+| 통⁠신 | MQTT (Mosquitto) · REST · WebSocket · USB 시⁠리⁠얼 460800 bps (자⁠체 규⁠약 feedback-3) |
+| 필⁠자 범⁠위 | dom0-manager · Recovery Worker · VM Agent · ESP32 펌⁠웨⁠어 · Gateway 수⁠정 · 실⁠차 주⁠행 도⁠구 · RC⁠카 조⁠립 |
 
 ## 무엇을 풀었나
 
@@ -58,13 +58,13 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ![XENOVA 차량 플랫폼 아키텍처](docs/images/readme/xenova_architecture.svg)
 
-| 계층 | 구성 | 하는 일 |
+| 계⁠층 | 구⁠성 | 하⁠는 일 |
 |---|---|---|
-| 외부 관리 | React 관리 콘솔 · Spring Boot (EC2) | VM 생성·제어, 자원·장애·복구 이력 시각화 |
-| dom0 관리 | Platform Manager · **dom0-manager** · **Recovery Worker** | VM 생명주기·자원 관리 API, 장애 판정과 재시작 |
-| dom0 제어 | Gateway | 활성 주행 VM 선택, 명령 검증, ESP32 시리얼 단독 소유 |
-| 게스트 | Zephyr 주행 VM A/B · Debian 인터랙션 VM (**VM Agent**) | 주행 명령 생성 · 차량 화면 · 상태 보고 |
-| 차량 | Jetson Nano · **ESP32** | 영상 인지 · 모터·조향 구동과 센서 피드백 |
+| 외⁠부 관⁠리 | React 관⁠리 콘⁠솔 · Spring Boot (EC2) | VM 생⁠성·제⁠어, 자⁠원·장⁠애·복⁠구 이⁠력 시⁠각⁠화 |
+| d⁠o⁠m⁠0 관⁠리 | Platform Manager · **dom0-manager** · **Recovery Worker** | VM 생⁠명⁠주⁠기·자⁠원 관⁠리 API, 장⁠애 판⁠정⁠과 재⁠시⁠작 |
+| d⁠o⁠m⁠0 제⁠어 | Gateway | 활⁠성 주⁠행 VM 선⁠택, 명⁠령 검⁠증, ESP32 시⁠리⁠얼 단⁠독 소⁠유 |
+| 게⁠스⁠트 | Zephyr 주⁠행 VM A/B · Debian 인⁠터⁠랙⁠션 VM (**VM Agent**) | 주⁠행 명⁠령 생⁠성 · 차⁠량 화⁠면 · 상⁠태 보⁠고 |
+| 차⁠량 | Jetson Nano · **ESP32** | 영⁠상 인⁠지 · 모⁠터·조⁠향 구⁠동⁠과 센⁠서 피⁠드⁠백 |
 
 주행 명령 한 번은 Jetson 인지 → (MQTT) → Zephyr VM → (MQTT) → Gateway → (USB 시리얼) → ESP32 를 지난다.
 굵게 쓴 것이 필자가 만든 부분이다.
@@ -105,15 +105,15 @@ Gateway 연동·실차 주행)를 만들었다. 이 README 는 필자의 범위�
 
 ## 정량 결과
 
-| 항목 | 수치 | 출처 |
+| 항⁠목 | 수⁠치 | 출⁠처 |
 |---|---|---|
-| 실차 차선 주행 (장애물 회피 포함) | 9.5 m, 트랙 한 바퀴 넘게 | [lane_drive README](vehicle/Jetson/tools/lane_drive/README.md) (11/15) |
-| 주행 VM 교대 (A → B) | 약 0.3초 | 바퀴를 띄운 실보드 시험 (11/17) |
-| Gateway 우선순위 조정 뒤 AUTO 유지 | 10–20초 → 5분 40초 | 실보드 측정 (11/17) |
-| ESP32 센서 표본 | 50 Hz, 20 ms 간격 고정 | [ESP32 README](vehicle/ESP32/README.md) |
-| ESP32 명령 수명 · 근거리 제동 | 80 ms · 15 cm | [ESP32 README](vehicle/ESP32/README.md) |
-| 렌즈 왜곡 보정 뒤 실차 영상의 흰 선 조각 | 0개 → 6개 | 실차 영상 (11/15) |
-| dom0-manager 테스트 | 테스트 함수 713개 | `platform/services/dom0-manager/tests` |
+| 실⁠차 차⁠선 주⁠행 (장⁠애⁠물 회⁠피 포⁠함) | 9.5 m, 트⁠랙 한 바⁠퀴 넘⁠게 | [lane_drive README](vehicle/Jetson/tools/lane_drive/README.md) (11/15) |
+| 주⁠행 VM 교⁠대 (A → B) | 약 0.3⁠초 | 바⁠퀴⁠를 띄⁠운 실⁠보⁠드 시⁠험 (11/17) |
+| Gateway 우⁠선⁠순⁠위 조⁠정 뒤 AUTO 유⁠지 | 10–20⁠초 → 5⁠분 40⁠초 | 실⁠보⁠드 측⁠정 (11/17) |
+| ESP32 센⁠서 표⁠본 | 50 Hz, 20 ms 간⁠격 고⁠정 | [ESP32 README](vehicle/ESP32/README.md) |
+| ESP32 명⁠령 수⁠명 · 근⁠거⁠리 제⁠동 | 80 ms · 15 cm | [ESP32 README](vehicle/ESP32/README.md) |
+| 렌⁠즈 왜⁠곡 보⁠정 뒤 실⁠차 영⁠상⁠의 흰 선 조⁠각 | 0⁠개 → 6⁠개 | 실⁠차 영⁠상 (11/15) |
+| dom0-manager 테⁠스⁠트 | 테⁠스⁠트 함⁠수 713⁠개 | `platform/services/dom0-manager/tests` |
 
 ## 트러블슈팅 (요약)
 
@@ -195,14 +195,14 @@ docs/
 
 ## 기여
 
-| 파트 | 범위 |
+| 파⁠트 | 범⁠위 |
 |---|---|
-| CTRL·차량 (필자) | dom0-manager, Recovery Worker, VM Agent, ESP32 펌웨어, Gateway 연동 수정, 실차 주행 도구, RC카 조립, VM API·MQTT 계약 일부 |
-| 플랫폼 | Xen 브링업, Yocto dom0 이미지, Platform Manager, Zephyr 주행 VM, Gateway, Jetson 인지 |
-| 백엔드 | Spring Boot 관리 서버, 배포·CI, 장애 시연 화면 |
-| 프론트엔드 | React 관리 콘솔 |
-| 디스플레이 | 차량 계기판·인포테인먼트 화면, 화면 라우터·키오스크 |
-| 프론트엔드·QA | 관리 콘솔 화면, QA 점검 |
+| C⁠T⁠R⁠L⁠·⁠차⁠량 (⁠필⁠자⁠) | dom0-manager, Recovery Worker, VM Agent, ESP32 펌⁠웨⁠어, Gateway 연⁠동 수⁠정, 실⁠차 주⁠행 도⁠구, RC⁠카 조⁠립, VM API·MQTT 계⁠약 일⁠부 |
+| 플⁠랫⁠폼 | Xen 브⁠링⁠업, Yocto dom0 이⁠미⁠지, Platform Manager, Zephyr 주⁠행 VM, Gateway, Jetson 인⁠지 |
+| 백⁠엔⁠드 | Spring Boot 관⁠리 서⁠버, 배⁠포·CI, 장⁠애 시⁠연 화⁠면 |
+| 프⁠론⁠트⁠엔⁠드 | React 관⁠리 콘⁠솔 |
+| 디⁠스⁠플⁠레⁠이 | 차⁠량 계⁠기⁠판·인⁠포⁠테⁠인⁠먼⁠트 화⁠면, 화⁠면 라⁠우⁠터·키⁠오⁠스⁠크 |
+| 프⁠론⁠트⁠엔⁠드⁠·⁠Q⁠A | 관⁠리 콘⁠솔 화⁠면, QA 점⁠검 |
 
 팀 전체의 기능 설명과 장애 대응 시나리오 7가지는 [docs/platform/README.md](docs/platform/README.md)와
 [아키텍처 설계서](docs/architecture.md)에 있다.
